@@ -90,12 +90,21 @@ impl<'a, D: Domain> Tx<'a, D> {
         self.state
     }
 
-    pub fn rules(&self) -> &D::Rules {
+    /// The rules outlive the transaction, so a decide can keep hold of them
+    /// while it goes on emitting.
+    pub fn rules(&self) -> &'a D::Rules {
         self.rules
     }
 
     pub fn ctx(&mut self) -> &mut D::Ctx {
         self.ctx
+    }
+
+    /// State, rules and context at once — for a decide that must read the
+    /// state while it consults the context (rolling against a target the
+    /// state sets, say).
+    pub fn parts(&mut self) -> (&D::State, &D::Rules, &mut D::Ctx) {
+        (self.state, self.rules, self.ctx)
     }
 
     /// Apply the event and append it to the log, caused by whatever caused
