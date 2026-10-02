@@ -6,8 +6,8 @@
 //! - **Typed ids** ([`id!`]), so an id from one graph can never index another.
 //! - **Nodes and edges carry the caller's data.** The graph knows nothing about
 //!   what they mean.
-//! - **Tags** ([`TagRegistry`], [`TagSet`]): open, interned, each with an
-//!   optional small value, kept sorted.
+//! - **Semantic tags** ([`TagRegistry`], [`TagSet`]): `namespace:name=value`,
+//!   open and interned, each value a flag, an integer or a symbol, kept sorted.
 //! - **Queries** ([`Where`], [`Score`], [`best`]): filter and rank nodes. The
 //!   same machinery asks "an elevated spot in range of the target" on a map and
 //!   "a run offered by a friendly faction" on a campaign.
@@ -22,5 +22,5 @@ mod query;
 mod tags;
 
 pub use graph::{Edge, EdgeId, Graph, Id, Path};
-pub use query::{best, rank, All, Any, HasTag, Not, Score, TagAtLeast, Where};
-pub use tags::{TagId, TagRegistry, TagSet, Tagged};
+pub use query::{best, rank, All, Any, HasTag, InNamespace, Not, Score, TagAtLeast, TagIs, Where};
+pub use tags::{BadTag, NamespaceId, SymbolId, TagId, TagRegistry, TagSet, TagValue, Tagged};

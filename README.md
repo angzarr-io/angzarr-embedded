@@ -12,11 +12,14 @@ scenes in a run, runs in a campaign.
   they mean. Edges are undirected (`add_edge`) or one-way (`add_arc`).
 - **Ids are only appended,** so nodes can be added mid-game (a spot minted in
   a crowd) and every earlier id keeps its meaning.
-- **Tags.** `TagRegistry` interns open, content-defined names. `TagSet` keeps a
-  node's tags sorted, each with a small value (a grade, a count), and they can
+- **Semantic tags,** written `namespace:name=value` (namespace optional but
+  discouraged; value a flag, an integer or a symbol). `TagRegistry` interns
+  open, content-defined keys and symbols. `TagSet` keeps a
+  node's tags sorted, each with a typed value, and they can
   change.
 - **Queries.** `Where` filters and `Score` ranks, generic over the node type and
-  a context the caller chooses. `HasTag`, `TagAtLeast`, `Not`, `All` and `Any`
+  a context the caller chooses. `HasTag`, `TagAtLeast`, `TagIs`, `InNamespace`,
+  `Not`, `All` and `Any`
   come built in. Anything the tags can't answer ("in range of the target") is
   the caller's own `Where`. `best` and `rank` break ties on id.
 - **Search.** `shortest_path` and `costs_from` (Dijkstra) take a cost function,

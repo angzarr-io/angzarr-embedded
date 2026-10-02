@@ -7,7 +7,7 @@
 //! answer — "in range of the target", "out of their sight" — is the caller's
 //! own `Where`, implemented once next to the mechanic that needs it.
 
-use crate::tags::{TagId, Tagged};
+use crate::tags::{NamespaceId, TagId, TagRegistry, TagValue, Tagged};
 
 /// A filter: does this node qualify?
 pub trait Where<I, N, C: ?Sized> {
@@ -29,13 +29,50 @@ impl<I, N: Tagged, C: ?Sized> Where<I, N, C> for HasTag {
     }
 }
 
-/// The node carries this tag at this value or more — cover at least Low.
+/// The node carries this tag with a number at least this — elevation of 3 m
+/// or more, cover at least Low.
 #[derive(Copy, Clone, Debug)]
 pub struct TagAtLeast(pub TagId, pub i32);
 
 impl<I, N: Tagged, C: ?Sized> Where<I, N, C> for TagAtLeast {
     fn holds(&self, _: I, node: &N, _: &C) -> bool {
-        node.tags().value(self.0).map(|v| v >= self.1).unwrap_or(false)
+        node.tags()
+            .value(self.0)
+            .and_then(TagValue::int)
+            .map(|v| v >= self.1)
+            .unwrap_or(false)
+    }
+}
+
+/// The node carries this tag with exactly this value — `faction:owner=crimson`.
+#[derive(Copy, Clone, Debug)]
+pub struct TagIs(pub TagId, pub TagValue);
+
+impl<I, N: Tagged, C: ?Sized> Where<I, N, C> for TagIs {
+    fn holds(&self, _: I, node: &N, _: &C) -> bool {
+        node.tags().value(self.0) == Some(self.1)
+    }
+}
+
+/// The node carries any tag in this namespace — anything `hazard:`.
+#[derive(Clone, Debug)]
+pub struct InNamespace(Vec<TagId>);
+
+impl InNamespace {
+    /// Every key the registry has in `ns`, as of now.
+    pub fn new(registry: &TagRegistry, ns: NamespaceId) -> InNamespace {
+        InNamespace(
+            (0..registry.len())
+                .map(|i| TagId(i as u16))
+                .filter(|t| registry.namespace_of(*t) == ns)
+                .collect(),
+        )
+    }
+}
+
+impl<I, N: Tagged, C: ?Sized> Where<I, N, C> for InNamespace {
+    fn holds(&self, _: I, node: &N, _: &C) -> bool {
+        self.0.iter().any(|t| node.tags().has(*t))
     }
 }
 
@@ -141,18 +178,19 @@ mod tests {
     #[test]
     fn find_a_perch() {
         let mut tags = TagRegistry::new();
-        let high = tags.intern("Elevated");
-        let cover = tags.intern("Cover");
+        let (high, flag) = tags.parse("terrain:elevated").unwrap();
+        let (cover, _) = tags.parse("cover:grade=1").unwrap();
+        let grade = TagValue::Int;
         let mut g: Graph<Spot, Place, ()> = Graph::new();
         let place = |t: TagSet, m| Place {
             tags: t,
             metres_to_target: m,
         };
         g.add_node(place(TagSet::new(), 30));
-        g.add_node(place(TagSet::new().with(high, 0), 900)); // too far
-        g.add_node(place(TagSet::new().with(high, 0).with(cover, 1), 400));
-        g.add_node(place(TagSet::new().with(high, 0), 400)); // a tie on score
-        g.add_node(place(TagSet::new().with(cover, 2), 600));
+        g.add_node(place(TagSet::new().with(high, flag), 900)); // too far
+        g.add_node(place(TagSet::new().with(high, flag).with(cover, grade(1)), 400));
+        g.add_node(place(TagSet::new().with(high, flag), 400)); // a tie on score
+        g.add_node(place(TagSet::new().with(cover, grade(2)), 600));
 
         let perch = All(vec![Box::new(HasTag(high)), Box::new(InReach)]);
         let reach = 500i64;
@@ -164,5 +202,28 @@ mod tests {
             rank(g.nodes(), &anywhere, &Farthest, &10_000),
             vec![Spot(4), Spot(2), Spot(0)]
         );
+      }
+
+    #[test]
+    fn exact_values_and_namespaces() {
+        let mut tags = TagRegistry::new();
+        let (owner, crimson) = tags.parse("faction:owner=crimson").unwrap();
+        let (_, azure) = tags.parse("faction:owner=azure").unwrap();
+        let (smoke, thick) = tags.parse("hazard:smoke=3").unwrap();
+        let (fire, flag) = tags.parse("hazard:fire").unwrap();
+        let mut g: Graph<Spot, Place, ()> = Graph::new();
+        let place = |t: TagSet| Place {
+            tags: t,
+            metres_to_target: 0,
+        };
+        g.add_node(place(TagSet::new().with(owner, crimson)));
+        g.add_node(place(TagSet::new().with(owner, azure).with(smoke, thick)));
+        g.add_node(place(TagSet::new().with(fire, flag)));
+
+        let ours = TagIs(owner, crimson);
+        assert_eq!(rank(g.nodes(), &ours, &Farthest, &0), vec![Spot(0)]);
+        let hazard = tags.namespace("hazard").unwrap();
+        let danger = InNamespace::new(&tags, hazard);
+        assert_eq!(rank(g.nodes(), &danger, &Farthest, &0), vec![Spot(1), Spot(2)]);
     }
 }
