@@ -3,7 +3,8 @@
 //! - [`rng`]: per-entity SplitMix64 streams, re-derivable from
 //!   `(seed, owner, use index)`, so no generator position lives in a context.
 //! - [`schedule`]: a tick [`Scheduler`] held in folded state, keyed
-//!   `(tick, phase, side, seq)`, and [`advance`], the clock a decide calls.
+//!   `(tick, phase, side, seq)`, [`advance`], the clock a decide calls, and
+//!   [`Ticked`], an event wrapper that carries its tick.
 //! - [`job`]: scheduled work as data — `(kind, Value)` — run through a
 //!   [`Registry`] each mechanic registers into.
 //! - [`record`]: the self-describing [`Value`] a job's payload is written as.
@@ -24,4 +25,4 @@ pub use job::{Job, JobContext, JobRecord, Registry};
 pub use parallel::parallel;
 pub use record::{Rec, Value};
 pub use rng::{derive, fnv1a, mix, Rng};
-pub use schedule::{advance, Advance, Clock, Key, Scheduler, Tick};
+pub use schedule::{advance, Advance, Clock, Key, Scheduler, Tick, Ticked};

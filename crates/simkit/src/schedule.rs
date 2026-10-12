@@ -118,6 +118,26 @@ pub trait Clock: Domain {
     fn run(tx: &mut Tx<Self>, tick: Tick, due: Self::Due);
 }
 
+/// An event and the tick it happened at: use it as a domain's event type
+/// (`type Event = Ticked<FightEvent>`) so `apply` sees when each event
+/// happened, and every event carries its time without each kind repeating
+/// it. Ticks never decrease along a log.
+///
+/// Stored as protobuf (eslog), a ticked domain's event message puts the tick
+/// first — `uint64 tick = 1` — so readers can check and seek by tick without
+/// the domain's schema.
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub struct Ticked<K> {
+    pub tick: Tick,
+    pub kind: K,
+}
+
+impl<K> Ticked<K> {
+    pub fn new(tick: Tick, kind: K) -> Ticked<K> {
+        Ticked { tick, kind }
+    }
+}
+
 /// What one [`advance`] did.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Advance {

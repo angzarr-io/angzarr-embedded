@@ -34,6 +34,10 @@ visited — and runs everything due at it, including work scheduled for the
 same tick while it runs, then returns `Ran { tick, taken }`, `Idle` or
 `Beyond(tick)` so the domain can check its end condition once per instant.
 
+`Ticked<K> { tick, kind }` wraps a domain's events — `type Event =
+Ticked<FightEvent>` — so `apply` sees when each happened. Stored with eslog,
+a ticked event message puts `uint64 tick = 1` first (see eslog's README).
+
 ## Jobs: `job` and `record`
 
 Scheduled work is data: a `JobRecord { kind, data: Value }` inside an event.
