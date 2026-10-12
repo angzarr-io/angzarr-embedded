@@ -1,0 +1,4 @@
+# No MSVC linker on this machine; the GNU toolchain bundles its own.
+# Scoped to this repo so the global default is untouched.
+[toolchain]
+channel = "stable-x86_64-pc-windows-gnu"
