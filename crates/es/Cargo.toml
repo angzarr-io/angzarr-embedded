@@ -1,0 +1,10 @@
+[package]
+name = "es"
+version = "0.1.0"
+description = "A small, deterministic event-sourcing engine: decide, emit, apply, replay."
+edition.workspace = true
+rust-version.workspace = true
+
+# Deliberately zero dependencies, and nothing from the game that hosts it.
+# This crate is meant to be lifted into its own repository and reused.
+[dependencies]
