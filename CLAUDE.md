@@ -14,6 +14,7 @@ changes, rewrite the text in place to say what is true now.
 
 ## Zero dependencies, no domain
 
-Every crate here has zero dependencies and knows nothing about any particular
-game. They are shared by card-game and tdautobattle, so anything specific to
+Every crate here has zero third-party dependencies (a crate may depend on
+another crate in this workspace, as simkit does on es) and knows nothing about
+any particular game. They are shared by card-game and tdautobattle, so anything specific to
 one of them belongs in that repository, not here.
