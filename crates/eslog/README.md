@@ -34,20 +34,62 @@ typed. `tests/format.rs` proves it with the toy counter in
 `proto/gamekit/eslog/toy/v1/toy.proto`. An event that encodes to no bytes is
 left off the wire either way and reads back as the event type's default.
 
+## Checked as it streams
+
+A `Reader` checks each envelope before handing it out: seqs run 0, 1, 2…
+with no gap, duplicate or reordering, and every cause is an earlier seq —
+what `es::Stream::replay` checks. A violation is `Error::Sequence` at the
+offending envelope. The check reads the envelope's own fields only; it never
+decodes the event.
+
+## Ticked domains
+
+A domain whose events happen on a clock (simkit's `Ticked<K>`) puts the tick
+first in its event message:
+
+```proto
+message MyEvent {
+  uint64 tick = 1;
+  ...
+}
+```
+
+The envelope stays `seq = 1, cause = 2, event = 3`. Because the tick is
+always field 1 of the event, eslog reads it straight from the event's bytes
+with a wire-format varint parse (`event_tick`), knowing nothing of the
+domain's schema:
+
+- `Reader::ticked()` also checks that ticks never decrease along seq:
+  `Error::TickWentBack { seq, tick, previous }`.
+- `Reader::index()` scans a log once into an `Index`: each envelope's byte
+  offset and, when ticked, its tick. `Index::seq_at_or_after(tick)` binary
+  searches for the first seq at or after a tick; `Reader::seek_to(seq, &index)`
+  and `Reader::seek_tick(tick, &index)` jump there on seekable input and carry
+  on reading, still checking. `Reader::skip_to(seq)` reads forward to a seq on
+  input that cannot seek. None of these decode a domain event.
+- `testing::assert_tick_is_field_1(&sample, tick)` is for a domain's own
+  tests: it encodes a sample event with a non-zero tick and reads field 1
+  back, failing if the message breaks the convention.
+
+A domain that is not ticked uses field 1 as it likes and never calls these.
+
 ## API
 
 | Item | What it is |
 |---|---|
 | `Writer::new(out, &es::Header)` | writes the header; then `append(&es::Envelope<E>)`, `append_raw(&Envelope)`, `write_message(&M)` |
-| `Reader::new(input)` | reads the header (`header()`); then `next_event::<E>()`, `next_raw()`, `next_message::<M>()`, `events::<E>()` |
+| `Reader::new(input)` | reads the header (`header()`); then `next_event::<E>()`, `next_raw()`, `next_message::<M>()`, `events::<E>()`; `ticked()`, `skip_to`, `seek_to`, `seek_tick`, `index()`, `position()` |
+| `Index` | `offset(seq)`, `tick(seq)`, `seq_at_or_after(tick)`, `end_seq()` |
 | `write_log`, `read_log` | a whole log at once |
 | `encode_envelope`, `decode_envelope` | `es::Envelope<E>` to and from the generic `Envelope`, for any `E: prost::Message` |
+| `event_tick` | field 1 of an encoded event, without its schema |
 | `From` impls | `es::Header` to and from `LogHeader` |
-| `Error` | `Io`, `Empty`, `Truncated`, `BadLength`, `TooLong`, `Decode` |
+| `Error` | `Io`, `Empty`, `Truncated`, `BadLength`, `TooLong`, `Decode`, `Wire`, `Sequence`, `TickWentBack`, `NotInLog`, `Behind`, `NotTicked` |
 
 Truncated or garbage input gives an `Error`, never a panic. A length over
 `MAX_MESSAGE_LEN` (64 MiB) is refused before anything is allocated for it.
-Length prefixes are read a byte at a time: wrap files in a `BufReader`.
+Length prefixes are read a byte at a time: wrap files in a `BufReader`, which
+also seeks.
 
 ## Generated code
 

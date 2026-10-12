@@ -1,9 +1,9 @@
-// A toy domain for eslog's own tests: a counter. Nothing here is a game.
+// Toy domains for eslog's own tests. Nothing here is a game.
 syntax = "proto3";
 
 package gamekit.eslog.toy.v1;
 
-// One counter event.
+// A counter: a domain that is not ticked.
 message CounterEvent {
   oneof kind {
     // The counter went up by this much.
@@ -22,4 +22,12 @@ message CounterEnvelope {
   optional uint64 cause = 2;
   // The event itself.
   CounterEvent event = 3;
+}
+
+// A ticked domain's event: the tick is field 1.
+message TimedEvent {
+  // When it happened.
+  uint64 tick = 1;
+  // What happened.
+  string what = 2;
 }

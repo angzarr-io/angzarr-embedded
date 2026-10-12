@@ -6,7 +6,7 @@ use es::{Domain, Header, Stream, StreamId, Tx};
 use eslog::{read_log, write_log, Envelope, Error, LogHeader, Reader, Writer, MAX_MESSAGE_LEN};
 use prost::Message;
 
-#[allow(clippy::all)]
+#[allow(clippy::all, dead_code)]
 mod toy {
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),

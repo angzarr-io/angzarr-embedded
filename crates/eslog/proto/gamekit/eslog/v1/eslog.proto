@@ -16,6 +16,19 @@
 //
 // and read or write the same bytes as this generic one. Tools that know no
 // domain read every log through Envelope; a domain reads it typed.
+//
+// Ticked domains. A domain whose events happen on a clock declares the tick
+// as the first field of its event message:
+//
+//   message MyEvent {
+//     uint64 tick = 1;
+//     ...
+//   }
+//
+// Readers can then check that ticks never decrease along seq, and seek by
+// tick, by reading field 1 straight from the event bytes without knowing the
+// domain's schema. A domain that is not ticked leaves field 1 to its own use
+// and does not ask for either.
 syntax = "proto3";
 
 package gamekit.eslog.v1;
@@ -33,6 +46,9 @@ message LogHeader {
 }
 
 // One stored event.
+//
+// A reader checks, as it streams, that `seq` runs 0, 1, 2… with no gap and
+// that every `cause` is an earlier seq: what es::Stream::replay checks.
 message Envelope {
   // The event's position in its stream, from 0.
   uint64 seq = 1;
