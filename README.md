@@ -12,11 +12,14 @@ eslog have zero third-party dependencies.
 | [`eslog`](crates/eslog) | a binary event-log format for `es` streams: length-delimited protobuf (prost) |
 
 ```
-just test       # generate eslog's protobuf types, then cargo test --release
+just test       # cargo test --release, plus eslog's codegen cross-check
 just lint       # buf lint + clippy
 just breaking   # buf breaking against main
 ```
 
-Needs [`just`](https://just.systems), [`buf`](https://buf.build) and
+Plain `cargo build` and `cargo test` need nothing beyond Rust, so every crate
+works as a git dependency. The `just` recipes also need
+[`just`](https://just.systems), [`buf`](https://buf.build) and
 `protoc-gen-prost` 0.5.0 (`cargo install protoc-gen-prost --version 0.5.0 --locked`)
-on `PATH`.
+on `PATH`: they generate eslog's protobuf types to check its hand-written
+ones against.

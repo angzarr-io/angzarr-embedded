@@ -6,13 +6,8 @@ use es::{Domain, Header, Stream, StreamId, Tx};
 use eslog::{read_log, write_log, Envelope, Error, LogHeader, Reader, Writer, MAX_MESSAGE_LEN};
 use prost::Message;
 
-#[allow(clippy::all, dead_code)]
-mod toy {
-    include!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/gen/gamekit.eslog.toy.v1.rs"
-    ));
-}
+#[allow(dead_code)]
+mod toy;
 
 use toy::counter_event::Kind;
 use toy::{CounterEnvelope, CounterEvent};

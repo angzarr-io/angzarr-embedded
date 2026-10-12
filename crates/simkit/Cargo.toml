@@ -3,6 +3,8 @@ name = "simkit"
 version = "0.1.0"
 description = "Deterministic simulation parts: per-entity dice, a tick scheduler held in folded state, jobs as data, a parallel map and a small Gherkin runner."
 edition.workspace = true
+license.workspace = true
+publish.workspace = true
 rust-version.workspace = true
 
 # Zero dependencies beyond es, and nothing from any game that uses it.

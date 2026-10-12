@@ -8,13 +8,8 @@ use eslog::testing::assert_tick_is_field_1;
 use eslog::{event_tick, Envelope, Error, Reader, Writer};
 use prost::Message;
 
-#[allow(clippy::all, dead_code)]
-mod toy {
-    include!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/gen/gamekit.eslog.toy.v1.rs"
-    ));
-}
+#[allow(dead_code)]
+mod toy;
 
 use toy::TimedEvent;
 
