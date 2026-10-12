@@ -1,7 +1,7 @@
 # graph
 
-A small, deterministic graph. Zero dependencies, nothing specific to any game,
-meant to be reused, like `es`.
+A small, deterministic graph. Zero dependencies and nothing specific to any
+game, like `es`.
 
 One shape for every graph a game has: positions on a map, stages in a scene,
 scenes in a run, runs in a campaign.

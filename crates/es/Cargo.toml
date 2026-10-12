@@ -5,6 +5,5 @@ description = "A small, deterministic event-sourcing engine: decide, emit, apply
 edition.workspace = true
 rust-version.workspace = true
 
-# Deliberately zero dependencies, and nothing from the game that hosts it.
-# This crate is meant to be lifted into its own repository and reused.
+# Deliberately zero dependencies, and nothing from any game that uses it.
 [dependencies]

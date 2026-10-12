@@ -1,7 +1,9 @@
 [package]
 name = "yaml"
 version = "0.1.0"
+description = "A strict subset of YAML, read and written, with no type coercion."
 edition.workspace = true
 rust-version.workspace = true
 
+# Deliberately zero dependencies, and nothing from any game that uses it.
 [dependencies]

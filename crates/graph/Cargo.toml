@@ -5,5 +5,5 @@ description = "A small, deterministic graph: typed ids, tags, queries and search
 edition.workspace = true
 rust-version.workspace = true
 
-# Deliberately zero dependencies, and nothing from the game that hosts it.
+# Deliberately zero dependencies, and nothing from any game that uses it.
 [dependencies]

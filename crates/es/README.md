@@ -1,8 +1,7 @@
 # es
 
 A small, deterministic event-sourcing engine. Zero dependencies, no I/O, no
-clock, and nothing specific to any game. It is meant to be reused: it lives in
-this workspace until it is stable, then moves to its own repository.
+clock, and nothing specific to any game, so any game can build on it.
 
 ## The model
 
