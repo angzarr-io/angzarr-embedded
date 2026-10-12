@@ -1,0 +1,10 @@
+# `just gen`: Rust types for eslog, from the locally installed plugin
+# (cargo install protoc-gen-prost --version 0.5.0 --locked). The output
+# directory is gitignored and rebuilt from scratch each time.
+version: v2
+clean: true
+plugins:
+  - local: protoc-gen-prost
+    out: crates/eslog/gen
+    opt:
+      - flat_output_dir

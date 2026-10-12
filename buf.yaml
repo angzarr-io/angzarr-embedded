@@ -1,0 +1,11 @@
+# The protobuf module: eslog's schema. `just lint` and `just breaking` run
+# buf against it.
+version: v2
+modules:
+  - path: crates/eslog/proto
+lint:
+  use:
+    - STANDARD
+breaking:
+  use:
+    - FILE
