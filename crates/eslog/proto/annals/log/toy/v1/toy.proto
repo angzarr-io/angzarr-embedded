@@ -1,7 +1,7 @@
 // Toy domains for eslog's own tests. Nothing here is a game.
 syntax = "proto3";
 
-package gamekit.eslog.toy.v1;
+package annals.log.toy.v1;
 
 // A counter: a domain that is not ticked.
 message CounterEvent {
@@ -14,7 +14,7 @@ message CounterEvent {
 }
 
 // The counter's typed envelope: field for field the generic
-// gamekit.eslog.v1.Envelope, with the event as a message.
+// annals.log.v1.Envelope, with the event as a message.
 message CounterEnvelope {
   // The event's position in its stream.
   uint64 seq = 1;

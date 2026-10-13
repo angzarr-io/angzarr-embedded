@@ -31,7 +31,7 @@
 // and does not ask for either.
 syntax = "proto3";
 
-package gamekit.eslog.v1;
+package annals.log.v1;
 
 // What a stream is, stamped once at the head of its log.
 message LogHeader {

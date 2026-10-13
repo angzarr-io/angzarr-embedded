@@ -18,13 +18,13 @@ mod generated {
     pub mod v1 {
         include!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/gen/gamekit.eslog.v1.rs"
+            "/gen/annals.log.v1.rs"
         ));
     }
     pub mod toy {
         include!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/gen/gamekit.eslog.toy.v1.rs"
+            "/gen/annals.log.toy.v1.rs"
         ));
     }
 }

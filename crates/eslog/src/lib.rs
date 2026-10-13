@@ -3,7 +3,7 @@
 //! A log is a stream of length-delimited protobuf messages — each a varint
 //! byte length, then the message: one [`LogHeader`], then one [`Envelope`]
 //! per event, in sequence order. The schema is
-//! `proto/gamekit/eslog/v1/eslog.proto`, package `gamekit.eslog.v1`.
+//! `proto/annals/log/v1/log.proto`, package `annals.log.v1`.
 //!
 //! # One envelope for every domain
 //!
@@ -66,8 +66,8 @@ use std::marker::PhantomData;
 
 use prost::Message;
 
-/// The `gamekit.eslog.v1` messages, written by hand to match
-/// `proto/gamekit/eslog/v1/eslog.proto` field for field.
+/// The `annals.log.v1` messages, written by hand to match
+/// `proto/annals/log/v1/log.proto` field for field.
 pub mod pb {
     /// What a stream is, stamped once at the head of its log.
     #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]

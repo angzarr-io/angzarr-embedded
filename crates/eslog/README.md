@@ -6,8 +6,8 @@ protobuf, written and read as a stream.
 ## The format
 
 A log is a sequence of length-delimited messages (a varint byte length, then
-the message), defined in `proto/gamekit/eslog/v1/eslog.proto`, package
-`gamekit.eslog.v1`:
+the message), defined in `proto/annals/log/v1/log.proto`, package
+`annals.log.v1`:
 
 1. one `LogHeader`: `stream_id`, `domain`, `schema_version`, `rules_version`
    — everything `es::Header` holds;
@@ -31,7 +31,7 @@ message MyEnvelope {
 and it is byte-for-byte the generic `Envelope` with `event` set to
 `MyEvent`'s encoding. Generic tools read any log; a domain reads its own
 typed. `tests/format.rs` proves it with the toy counter in
-`proto/gamekit/eslog/toy/v1/toy.proto`. An event that encodes to no bytes is
+`proto/annals/log/toy/v1/toy.proto`. An event that encodes to no bytes is
 left off the wire either way and reads back as the event type's default.
 
 ## Checked as it streams
@@ -107,7 +107,7 @@ with the `codegen-check` feature (which `just test` turns on), encodes varied
 values with both the hand-written and the generated types — absent and
 present `cause`, `u64::MAX`, empty and large payloads — and checks the bytes
 are equal and that each side decodes the other's. Plain `cargo test` skips
-it. The toy test domains in `proto/gamekit/eslog/toy/v1/toy.proto` are
+it. The toy test domains in `proto/annals/log/toy/v1/toy.proto` are
 hand-written the same way, in `tests/toy/mod.rs`, and checked by the same
 test.
 

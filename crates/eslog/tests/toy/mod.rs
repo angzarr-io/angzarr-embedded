@@ -1,4 +1,4 @@
-//! The toy test domains of `proto/gamekit/eslog/toy/v1/toy.proto`, written by
+//! The toy test domains of `proto/annals/log/toy/v1/toy.proto`, written by
 //! hand to match it field for field. `tests/codegen.rs` checks them against
 //! the generated types.
 
@@ -23,7 +23,7 @@ pub mod counter_event {
 }
 
 /// The counter's typed envelope: field for field the generic
-/// `gamekit.eslog.v1.Envelope`, with the event as a message.
+/// `annals.log.v1.Envelope`, with the event as a message.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CounterEnvelope {
     #[prost(uint64, tag = "1")]
