@@ -17,6 +17,18 @@
 //! a lone `\r` is refused, not read as a line break. One leading byte-order
 //! mark is skipped.
 //!
+//! Double-quoted scalars take the escapes `\\` `\"` `\n` `\t` `\r` `\0`,
+//! `\uXXXX` and `\UXXXXXXXX`; any other escape is an error. A `\u` or `\U`
+//! must name a Unicode scalar value: UTF-16 surrogates, paired or not, are
+//! refused, because YAML's `\u` is one character, not a UTF-16 unit (an
+//! astral character is `\U0001F5E1`, or just the character). Single quotes
+//! take `''` for a quote.
+//!
+//! The writer writes a scalar plain only when the reader reads it back
+//! unchanged, and otherwise double-quotes it, escaping the control characters
+//! (C0, DEL, C1), U+2028, U+2029 and U+FEFF. Every written document parses
+//! back to the value written.
+//!
 //! Every scalar is kept as its text: there is no type coercion, so `no`
 //! stays `"no"` and `1.10` stays `"1.10"`. The reader of a value decides what
 //! it means. Mappings keep their order.
@@ -493,7 +505,27 @@ impl<'a> Flow<'a> {
                         match chars.next() {
                             Some((_, 'n')) => out.push('\n'),
                             Some((_, 't')) => out.push('\t'),
+                            Some((_, 'r')) => out.push('\r'),
+                            Some((_, '0')) => out.push('\0'),
                             Some((_, e @ ('"' | '\\'))) => out.push(e),
+                            Some((_, u @ ('u' | 'U'))) => {
+                                let n = if u == 'u' { 4 } else { 8 };
+                                let digits: String =
+                                    (0..n).map_while(|_| chars.next_if(|(_, c)| c.is_ascii_hexdigit()).map(|(_, c)| c)).collect();
+                                let c = u32::from_str_radix(&digits, 16).ok().filter(|_| digits.len() == n).and_then(char::from_u32);
+                                match c {
+                                    Some(c) => out.push(c),
+                                    None => {
+                                        return err(
+                                            self.no,
+                                            format!(
+                                                "bad escape \\{u}{digits}: \\u takes 4 hex digits and \\U 8, naming a Unicode \
+                                                 scalar value; surrogates are refused (write \\U0001F5E1, not \\uD83D\\uDDE1)"
+                                            ),
+                                        )
+                                    }
+                                }
+                            }
                             _ => return err(self.no, "unknown escape"),
                         }
                         continue;
@@ -525,27 +557,68 @@ impl<'a> Flow<'a> {
 
 // ---------------------------------------------------------------- writing
 
-/// Whether a scalar can be written plain and read back the same.
-fn plain_ok(s: &str, in_flow: bool) -> bool {
-    if s.is_empty() || s == "~" || s == "null" || s != s.trim() {
+/// Where a scalar is written.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum At {
+    Key,
+    Value,
+    FlowKey,
+    FlowValue,
+}
+
+/// A character written as an escape: the control characters (C0, DEL, C1,
+/// tab and line feed included), the Unicode line and paragraph separators,
+/// and the byte-order mark.
+fn escaped(c: char) -> bool {
+    c.is_control() || matches!(c, '\u{2028}' | '\u{2029}' | '\u{feff}')
+}
+
+/// Whether a scalar can be written plain at `at` and read back the same.
+fn plain_ok(s: &str, at: At) -> bool {
+    let (Some(first), Some(last)) = (s.chars().next(), s.chars().next_back()) else {
+        return false;
+    };
+    if matches!(s, "~" | "null" | "---" | "...") || first.is_whitespace() || last.is_whitespace() || s.chars().any(escaped) {
         return false;
     }
-    let first = s.chars().next().unwrap();
     if "-?:,[]{}#&*!|>'\"%@`".contains(first) && !(first == '-' && s.len() > 1 && !s.starts_with("- ")) {
         return false;
     }
-    if s.contains(": ") || s.ends_with(':') || s.contains(" #") || s.contains('\n') {
+    // `: ` would end a key, ` #` start a comment, and a quote after a space
+    // or `[` `{` `,` open a quoted scalar.
+    if s.contains(": ") || s.ends_with(':') || s.contains(" #") {
         return false;
     }
-    !(in_flow && s.contains([',', '[', ']', '{', '}']))
+    if s.as_bytes().windows(2).any(|w| matches!(w[0], b' ' | b'[' | b'{' | b',') && matches!(w[1], b'"' | b'\'')) {
+        return false;
+    }
+    match at {
+        At::Value => true,
+        At::Key => !s.contains(['[', ']', '{', '}']),
+        At::FlowValue => !s.contains([',', '[', ']', '{', '}']),
+        At::FlowKey => !s.contains([',', '[', ']', '{', '}', ':']),
+    }
 }
 
-fn scalar_text(s: &str, in_flow: bool) -> String {
-    if plain_ok(s, in_flow) {
-        s.to_string()
-    } else {
-        format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n"))
+fn scalar_text(s: &str, at: At) -> String {
+    if plain_ok(s, at) {
+        return s.to_string();
     }
+    let mut out = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            '\0' => out.push_str("\\0"),
+            c if escaped(c) => out.push_str(&format!("\\u{:04X}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// A value on one line, if it is small enough: scalars, and collections of
@@ -553,12 +626,12 @@ fn scalar_text(s: &str, in_flow: bool) -> String {
 fn flow(v: &Value) -> Option<String> {
     match v {
         Value::Null => Some(String::new()),
-        Value::Scalar(s) => Some(scalar_text(s, false)),
+        Value::Scalar(s) => Some(scalar_text(s, At::Value)),
         Value::Seq(items) => {
             let parts: Option<Vec<String>> = items
                 .iter()
                 .map(|i| match i {
-                    Value::Scalar(s) => Some(scalar_text(s, true)),
+                    Value::Scalar(s) => Some(scalar_text(s, At::FlowValue)),
                     _ => None,
                 })
                 .collect();
@@ -568,7 +641,7 @@ fn flow(v: &Value) -> Option<String> {
             let parts: Option<Vec<String>> = entries
                 .iter()
                 .map(|(k, v)| match v {
-                    Value::Scalar(s) => Some(format!("{}: {}", scalar_text(k, true), scalar_text(s, true))),
+                    Value::Scalar(s) => Some(format!("{}: {}", scalar_text(k, At::FlowKey), scalar_text(s, At::FlowValue))),
                     _ => None,
                 })
                 .collect();
@@ -590,7 +663,7 @@ fn block(v: &Value, indent: usize, depth: usize, flow_depth: usize, out: &mut St
     match v {
         Value::Map(entries) => {
             for (k, val) in entries {
-                let key = scalar_text(k, false);
+                let key = scalar_text(k, At::Key);
                 match val {
                     Value::Map(m) if !(depth + 1 >= flow_depth && flow(val).is_some()) && !m.is_empty() => {
                         out.push_str(&format!("{pad}{key}:\n"));
@@ -755,6 +828,49 @@ mod tests {
             let e = parse(src).unwrap_err();
             assert_eq!(e.line, line, "{src:?}");
             assert!(e.message.contains("carriage return"), "{src:?}: {e}");
+        }
+    }
+
+    /// `^` stands for a backslash, so the escapes under test stay readable.
+    fn bs(s: &str) -> String {
+        s.replace('^', "\\")
+    }
+
+    #[test]
+    fn double_quotes_take_unicode_cr_and_nul_escapes() {
+        let v = parse(&bs(r#"a: "^u00e9^r^0^t^n^^^"^U0001F5E1""#)).unwrap();
+        assert_eq!(v.get("a"), Some(&s("é\r\0\t\n\\\"🗡")));
+        assert_eq!(parse(&bs(r#"a: "^u00E9""#)).unwrap().get("a"), Some(&s("é")));
+        for bad in ["^uD83D^uDDE1", "^uDDE1", "^u00e", "^U00110000", "^x41", "^q", "^u+0e9"] {
+            let e = parse(&bs(&format!("a: \"{bad}\"\n"))).unwrap_err();
+            assert!(e.message.contains("escape"), "{bad}: {e}");
+        }
+    }
+
+    fn round_trips(v: &Value) {
+        for depth in 0..4 {
+            let written = write(v, depth);
+            assert_eq!(parse(&written).as_ref(), Ok(v), "flow depth {depth}:\n{written}");
+        }
+    }
+
+    #[test]
+    fn keys_with_brackets_or_colons_are_quoted() {
+        for key in ["a[1", "a{1", "a]b", "a}b", "x:y", "x:", "a,b", "a\t#b", "a #b", "a\u{a0}#b"] {
+            let flat = Value::Map(vec![(key.to_string(), s("v"))]);
+            round_trips(&flat);
+            round_trips(&Value::Map(vec![("k".into(), flat.clone())]));
+            round_trips(&Value::Seq(vec![flat]));
+        }
+    }
+
+    #[test]
+    fn control_characters_are_escaped() {
+        for text in ["a\u{0}b", "\u{1b}[31m", "a\rb", "a\u{85}b", "a\u{2028}b", "\u{feff}bom", "tab\there", "a\u{7f}", "a\u{9c}"] {
+            let v = Value::Map(vec![(text.to_string(), s(text)), ("seq".into(), Value::Seq(vec![s(text)]))]);
+            round_trips(&v);
+            let written = write(&v, 0);
+            assert!(!written.chars().any(|c| c.is_control() && c != '\n'), "{written:?}");
         }
     }
 
