@@ -44,8 +44,8 @@ pub struct Step {
     /// `Given`, `When` or `Then`.
     pub keyword: String,
     pub text: String,
-    /// The data table under the step, row by row, cells trimmed. The header
-    /// row, if any, is the first.
+    /// The data table under the step, row by row, cells trimmed and with
+    /// `\|`, `\\` and `\n` resolved. The header row, if any, is the first.
     pub table: Vec<Vec<String>>,
 }
 
@@ -80,8 +80,10 @@ pub struct Feature {
 }
 
 /// Parse one feature file. Comments (`#`) and blank lines are skipped, and so
-/// is description prose under `Feature:`.
+/// is description prose under `Feature:`. A leading byte-order mark is
+/// skipped.
 pub fn parse_feature(src: &str) -> Feature {
+    let src = src.strip_prefix('\u{feff}').unwrap_or(src);
     let mut feature = String::new();
     let mut background: Vec<Step> = Vec::new();
     let mut scenarios: Vec<Scenario> = Vec::new();
@@ -116,11 +118,7 @@ pub fn parse_feature(src: &str) -> Feature {
         }
 
         if line.starts_with('|') {
-            let cells: Vec<String> = line
-                .trim_matches('|')
-                .split('|')
-                .map(|c| c.trim().to_string())
-                .collect();
+            let cells = table_row(line);
             let target = if in_background {
                 background.last_mut()
             } else {
@@ -155,6 +153,55 @@ pub fn parse_feature(src: &str) -> Feature {
         name: feature,
         scenarios,
     }
+}
+
+/// The cells of a table row `| a | b |`, trimmed. As in Gherkin, `\|` is a
+/// pipe inside a cell, `\\` a backslash and `\n` a line break; any other
+/// backslash is kept.
+fn table_row(line: &str) -> Vec<String> {
+    let row = line.trim();
+    let row = row.strip_prefix('|').unwrap_or(row);
+    // Split at the pipes no backslash escapes, then trim, then unescape, so
+    // an escaped character at a cell's edge stays.
+    let mut raw = Vec::new();
+    let (mut start, mut escaped) = (0, false);
+    for (i, c) in row.char_indices() {
+        match c {
+            _ if escaped => escaped = false,
+            '\\' => escaped = true,
+            '|' => {
+                raw.push(&row[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    if !row[start..].trim().is_empty() {
+        raw.push(&row[start..]);
+    }
+    raw.into_iter().map(|cell| unescape_cell(cell.trim())).collect()
+}
+
+fn unescape_cell(cell: &str) -> String {
+    let mut out = String::with_capacity(cell.len());
+    let mut chars = cell.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('|') => out.push('|'),
+            Some('\\') => out.push('\\'),
+            Some('n') => out.push('\n'),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
 }
 
 fn split_keyword(line: &str, last: &mut String) -> (String, String) {
@@ -326,6 +373,20 @@ Feature: Counting
         assert_eq!(adding.steps[2].quoted(), ["4"]);
         let table = &f.scenarios[1].steps[1].table;
         assert_eq!(table, &[vec!["name", "n"], vec!["a", "1"]]);
+    }
+
+    #[test]
+    fn a_leading_bom_does_not_hide_the_feature() {
+        let f = parse_feature("\u{feff}Feature: Épées\r\n  Scenario: 剣\r\n    Given a blade\r\n");
+        assert_eq!(f.name, "Épées");
+        assert_eq!(f.scenarios[0].name, "剣");
+        assert_eq!(f.scenarios[0].steps[0].text, "a blade");
+    }
+
+    #[test]
+    fn table_cells_take_escapes() {
+        let f = parse_feature("Feature: F\n  Scenario: S\n    Given rows\n      | a \\| b | c\\\\d | e\\nf | \\x |\n");
+        assert_eq!(f.scenarios[0].steps[0].table, [vec!["a | b", "c\\d", "e\nf", "\\x"]]);
     }
 
     #[test]
