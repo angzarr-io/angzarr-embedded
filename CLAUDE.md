@@ -19,8 +19,13 @@ nothing about any particular game. They are shared by card-game and
 tdautobattle, so anything specific to one of them belongs in that
 repository, not here.
 
-Every crate has zero third-party dependencies, except annals-log. A crate may
-depend on another crate in this workspace, as annals-sim does on annals.
+Every crate has zero third-party dependencies, except annals-log and
+annals-catalog-check. A crate may depend on another crate in this
+workspace, as annals-sim does on annals.
+
+annals-catalog-check is test-only: its one dev-dependency, `fluent-syntax`
+(Apache-2.0 OR MIT), parses the Fluent catalogs for the parity test.
+Nothing depends on it and it has no library to speak of.
 
 annals-log depends on `prost` because it is a protobuf format: the wire
 encoding needs a protobuf runtime, and hand-rolling the encoding would be a

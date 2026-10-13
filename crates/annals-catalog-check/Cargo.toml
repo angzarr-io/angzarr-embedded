@@ -1,0 +1,22 @@
+[package]
+name = "annals-catalog-check"
+version = "0.1.0"
+description = "Test-only: every error code in Annals has a message, using exactly its args, in every shipped Fluent catalog."
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+# It reads annals-log's samples, so it needs what annals-log needs.
+rust-version = "1.85"
+
+# No library to speak of and no dependencies: the check is tests/parity.rs.
+[dependencies]
+
+# fluent-syntax (Apache-2.0 OR MIT) parses the catalogs. Test-only: nothing
+# in Annals renders Fluent; the game client does.
+[dev-dependencies]
+annals = { path = "../annals" }
+annals-diagnostic = { path = "../annals-diagnostic" }
+annals-graph = { path = "../annals-graph" }
+annals-log = { path = "../annals-log" }
+annals-yaml = { path = "../annals-yaml" }
+fluent-syntax = "0.12"

@@ -1,8 +1,11 @@
 # Annals
 
 Annals is an event-sourced, deterministic game engine: small Rust crates
-shared by card-game and tdautobattle. All but annals-log have zero
-third-party dependencies.
+shared by card-game and tdautobattle. All but annals-log (and the
+test-only annals-catalog-check) have zero third-party dependencies.
+Every error is localizable: a stable code and named args (see
+`annals-diagnostic`), with an en-US Fluent catalog per crate under
+`crates/<crate>/locales/`.
 
 | Crate | What it is |
 |---|---|
@@ -12,6 +15,7 @@ third-party dependencies.
 | [`annals-yaml`](crates/annals-yaml) | a strict YAML subset, read and written; versioned documents with registered migrations |
 | [`annals-sim`](crates/annals-sim) | simulation parts on `annals`: per-entity dice, a folded tick scheduler, jobs as data, a parallel map, a Gherkin runner |
 | [`annals-log`](crates/annals-log) | a binary event-log format for `annals` streams: length-delimited protobuf (prost) |
+| [`annals-catalog-check`](crates/annals-catalog-check) | test-only: every error code has a message, with exactly its args, in every shipped Fluent catalog |
 
 ```
 just test       # cargo test --release, plus annals-log's codegen cross-check
