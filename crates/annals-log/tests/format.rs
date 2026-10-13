@@ -1,8 +1,10 @@
 //! The log format, proven on a toy counter domain.
 
+use std::fmt;
 use std::io::{self, Read};
 
 use annals::{Domain, Header, Stream, StreamId, Tx};
+use annals_diagnostic::{Arg, Diagnostic};
 use annals_log::{read_log, write_log, Envelope, Error, LogHeader, Reader, Writer, MAX_MESSAGE_LEN};
 use prost::Message;
 
@@ -16,17 +18,36 @@ use toy::{CounterEnvelope, CounterEvent};
 
 struct Counter;
 
+#[derive(Debug)]
+struct NothingToAdd;
+
+impl fmt::Display for NothingToAdd {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("nothing to add")
+    }
+}
+
+impl Diagnostic for NothingToAdd {
+    fn code(&self) -> &'static str {
+        "toy-counter-nothing-to-add"
+    }
+
+    fn args(&self) -> Vec<(&'static str, Arg)> {
+        vec![]
+    }
+}
+
 impl Domain for Counter {
     type State = i64;
     type Command = i64;
     type Event = CounterEvent;
-    type Rejection = &'static str;
+    type Rejection = NothingToAdd;
     type Rules = ();
     type Ctx = ();
 
-    fn decide(add: &i64, tx: &mut Tx<Self>) -> Result<(), &'static str> {
+    fn decide(add: &i64, tx: &mut Tx<Self>) -> Result<(), NothingToAdd> {
         if *add == 0 {
-            return Err("nothing to add");
+            return Err(NothingToAdd);
         }
         if *tx.state() + add < 0 {
             tx.emit(CounterEvent {

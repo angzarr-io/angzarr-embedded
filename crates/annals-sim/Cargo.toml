@@ -14,3 +14,7 @@ annals = { path = "../annals" }
 [[test]]
 name = "gherkin"
 harness = false
+
+# Test-only: the toy domain's rejections are Diagnostics.
+[dev-dependencies]
+annals-diagnostic = { path = "../annals-diagnostic" }

@@ -5,7 +5,10 @@
 
 #![allow(dead_code)]
 
+use std::fmt;
+
 use annals::{Domain, Header, Stream, StreamId, Tx};
+use annals_diagnostic::{Arg, Diagnostic};
 use annals_sim::{
     advance, Advance, Clock, Job, JobContext, JobRecord, Rec, Registry, Rng, Scheduler, Tick, Value,
 };
@@ -15,6 +18,35 @@ pub const PHASE_IMPACT: u8 = 0;
 pub const PHASE_SWING: u8 = 1;
 
 pub struct Brawl;
+
+/// Why the brawl refused a command.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Refused {
+    Over,
+    AlreadyOpen,
+}
+
+impl fmt::Display for Refused {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Refused::Over => "the brawl is over",
+            Refused::AlreadyOpen => "the brawl is already open",
+        })
+    }
+}
+
+impl Diagnostic for Refused {
+    fn code(&self) -> &'static str {
+        match self {
+            Refused::Over => "toy-brawl-over",
+            Refused::AlreadyOpen => "toy-brawl-already-open",
+        }
+    }
+
+    fn args(&self) -> Vec<(&'static str, Arg)> {
+        vec![]
+    }
+}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct At {
@@ -86,18 +118,18 @@ impl Domain for Brawl {
     type State = Arena;
     type Command = Cmd;
     type Event = Ev;
-    type Rejection = &'static str;
+    type Rejection = Refused;
     type Rules = Registry<Brawl>;
     type Ctx = ();
 
-    fn decide(cmd: &Cmd, tx: &mut Tx<Self>) -> Result<(), &'static str> {
+    fn decide(cmd: &Cmd, tx: &mut Tx<Self>) -> Result<(), Refused> {
         if tx.state().ended.is_some() {
-            return Err("over");
+            return Err(Refused::Over);
         }
         match cmd {
             Cmd::Open { seed, fighters } => {
                 if !tx.state().fighters.is_empty() {
-                    return Err("already open");
+                    return Err(Refused::AlreadyOpen);
                 }
                 let fighters: Vec<Fighter> = fighters
                     .iter()

@@ -1,9 +1,13 @@
 //! The engine, proven on domains that have nothing to do with any game.
 
+use std::convert::Infallible;
+use std::fmt;
+
 use annals::{
     project, Conflict, Domain, Envelope, EventStore, Header, InMemoryStore, Projection,
     ReplayError, Stream, StreamId, Tx,
 };
+use annals_diagnostic::{Arg, Diagnostic};
 
 fn header(id: u64, domain: &str) -> Header {
     Header {
@@ -43,6 +47,35 @@ enum Refused {
     NotOpen,
     NotPositive,
     Overdrawn { short: i64 },
+}
+
+impl fmt::Display for Refused {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Refused::AlreadyOpen => f.write_str("the account is already open"),
+            Refused::NotOpen => f.write_str("the account is not open"),
+            Refused::NotPositive => f.write_str("the amount must be positive"),
+            Refused::Overdrawn { short } => write!(f, "{short} cents short"),
+        }
+    }
+}
+
+impl Diagnostic for Refused {
+    fn code(&self) -> &'static str {
+        match self {
+            Refused::AlreadyOpen => "toy-account-already-open",
+            Refused::NotOpen => "toy-account-not-open",
+            Refused::NotPositive => "toy-account-not-positive",
+            Refused::Overdrawn { .. } => "toy-account-overdrawn",
+        }
+    }
+
+    fn args(&self) -> Vec<(&'static str, Arg)> {
+        match *self {
+            Refused::Overdrawn { short } => vec![("short", short.into())],
+            _ => vec![],
+        }
+    }
 }
 
 impl Domain for Account {
@@ -113,6 +146,8 @@ fn a_rejected_command_leaves_no_trace() {
     let mut s = run(&[AccountCmd::Open, AccountCmd::Deposit(100)]);
     let refused = s.execute(&AccountCmd::Withdraw(250), &(), &mut ()).unwrap_err();
     assert_eq!(refused, Refused::Overdrawn { short: 150 });
+    assert_eq!(refused.code(), "toy-account-overdrawn");
+    assert_eq!(refused.to_string(), "150 cents short");
     assert_eq!(s.len(), 2);
     assert_eq!(s.state().cents, 100);
 }
@@ -168,11 +203,11 @@ impl Domain for Jug {
     type State = Cups;
     type Command = JugCmd;
     type Event = JugEvent;
-    type Rejection = ();
+    type Rejection = Infallible;
     type Rules = ();
     type Ctx = ();
 
-    fn decide(cmd: &JugCmd, tx: &mut Tx<Self>) -> Result<(), ()> {
+    fn decide(cmd: &JugCmd, tx: &mut Tx<Self>) -> Result<(), Infallible> {
         match *cmd {
             JugCmd::Fill(jug, cups) => {
                 tx.emit(JugEvent::Filled { jug, cups });
@@ -247,11 +282,11 @@ impl Domain for Dice {
     type State = Total;
     type Command = ();
     type Event = Rolled;
-    type Rejection = ();
+    type Rejection = Infallible;
     type Rules = ();
     type Ctx = Die;
 
-    fn decide(_: &(), tx: &mut Tx<Self>) -> Result<(), ()> {
+    fn decide(_: &(), tx: &mut Tx<Self>) -> Result<(), Infallible> {
         let face = tx.ctx().roll();
         tx.emit(Rolled { face });
         Ok(())
@@ -327,13 +362,13 @@ impl Domain for Sloppy {
     type State = u32;
     type Command = ();
     type Event = ();
-    type Rejection = ();
+    type Rejection = Refused;
     type Rules = ();
     type Ctx = ();
 
-    fn decide(_: &(), tx: &mut Tx<Self>) -> Result<(), ()> {
+    fn decide(_: &(), tx: &mut Tx<Self>) -> Result<(), Refused> {
         tx.emit(());
-        Err(())
+        Err(Refused::NotOpen)
     }
 
     fn apply(n: &mut u32, _: &(), _: &()) {

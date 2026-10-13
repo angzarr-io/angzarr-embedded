@@ -1,28 +1,53 @@
 //! The two halves of a domain: deciding and applying.
 
+use annals_diagnostic::Diagnostic;
+
 use crate::stream::{Envelope, Seq};
 
 /// One kind of event stream: its state, its commands, its events and its
 /// rules for each.
 ///
-/// Implement it on a marker type:
+/// Implement it on a marker type. A rejection is a
+/// [`Diagnostic`](annals_diagnostic::Diagnostic), so a player can read it in
+/// their own language:
 ///
 /// ```
+/// use std::fmt;
+///
 /// use annals::{Domain, Tx};
+/// use annals_diagnostic::{Arg, Diagnostic};
 ///
 /// struct Counter;
+///
+/// #[derive(Debug)]
+/// struct NothingToAdd;
+///
+/// impl fmt::Display for NothingToAdd {
+///     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+///         f.write_str("nothing to add")
+///     }
+/// }
+///
+/// impl Diagnostic for NothingToAdd {
+///     fn code(&self) -> &'static str {
+///         "counter-nothing-to-add"
+///     }
+///     fn args(&self) -> Vec<(&'static str, Arg)> {
+///         vec![]
+///     }
+/// }
 ///
 /// impl Domain for Counter {
 ///     type State = i64;
 ///     type Command = i64;
 ///     type Event = i64;
-///     type Rejection = &'static str;
+///     type Rejection = NothingToAdd;
 ///     type Rules = ();
 ///     type Ctx = ();
 ///
-///     fn decide(add: &i64, tx: &mut Tx<Self>) -> Result<(), &'static str> {
+///     fn decide(add: &i64, tx: &mut Tx<Self>) -> Result<(), NothingToAdd> {
 ///         if *add == 0 {
-///             return Err("nothing to add");
+///             return Err(NothingToAdd);
 ///         }
 ///         tx.emit(*add);
 ///         Ok(())
@@ -40,8 +65,10 @@ pub trait Domain: Sized {
     type Command;
     /// A fact. The only thing a stream stores.
     type Event: Clone;
-    /// Why a command was refused.
-    type Rejection;
+    /// Why a command was refused: a [`Diagnostic`], with a code and args a
+    /// game client renders in the player's language. A domain that never
+    /// rejects uses [`std::convert::Infallible`].
+    type Rejection: Diagnostic;
     /// Immutable reference data both halves may read: content, tables.
     type Rules;
     /// What a decide may use beyond the state: dice, a clock. Apply never

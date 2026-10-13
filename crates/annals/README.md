@@ -7,7 +7,10 @@ specific to any game, so any game can build on it.
 ## The model
 
 - A **domain** declares its state, commands, events, rejections, rules and
-  context, plus two functions: **decide** and **apply**.
+  context, plus two functions: **decide** and **apply**. A rejection is an
+  `annals_diagnostic::Diagnostic`, a stable code and named args, so the game
+  client can show it in the player's language (`Infallible` for a domain
+  that never rejects).
 - A **stream** is a domain's append-only event log, plus the state folded
   from it. **No state is ever stored.** Every state is a fold of a log.
 - A **projection** is a read model: another fold over one or more streams.
@@ -19,17 +22,20 @@ use annals::{Domain, Stream, Tx};
 
 struct Counter;
 
+#[derive(Debug)]
+struct NothingToAdd; // with Display, and Diagnostic code "counter-nothing-to-add"
+
 impl Domain for Counter {
     type State = i64;          // folded, never stored
     type Command = i64;        // decided, never stored
     type Event = i64;          // the only thing stored
-    type Rejection = &'static str;
+    type Rejection = NothingToAdd; // a Diagnostic
     type Rules = ();           // immutable reference data, read by both halves
     type Ctx = ();             // what decide may use beyond state: dice, a clock
 
-    fn decide(add: &i64, tx: &mut Tx<Self>) -> Result<(), &'static str> {
+    fn decide(add: &i64, tx: &mut Tx<Self>) -> Result<(), NothingToAdd> {
         if *add == 0 {
-            return Err("nothing to add");
+            return Err(NothingToAdd);
         }
         tx.emit(*add);
         Ok(())

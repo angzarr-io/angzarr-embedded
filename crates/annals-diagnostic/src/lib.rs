@@ -41,6 +41,18 @@ pub trait Diagnostic: fmt::Debug + fmt::Display {
     fn args(&self) -> Vec<(&'static str, Arg)>;
 }
 
+/// What cannot fail has nothing to say: for a domain that never rejects,
+/// say.
+impl Diagnostic for std::convert::Infallible {
+    fn code(&self) -> &'static str {
+        match *self {}
+    }
+
+    fn args(&self) -> Vec<(&'static str, Arg)> {
+        match *self {}
+    }
+}
+
 /// One argument to a message.
 #[derive(Debug)]
 pub enum Arg {

@@ -70,6 +70,9 @@ it without depending on the event-sourcing kernel.
 - A game's error that an Annals error carries (a migration step's, a content
   decoder's) is held as an `annals_diagnostic::Report`, keeping the game's
   own code.
+- Where a game's error crosses into the engine, the trait demands it:
+  `Domain::Rejection: Diagnostic`, so a domain whose rejections are not
+  localizable does not compile.
 
 ## Use `just`
 

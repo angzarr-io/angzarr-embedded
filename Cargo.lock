@@ -34,6 +34,7 @@ name = "annals-sim"
 version = "0.1.0"
 dependencies = [
  "annals",
+ "annals-diagnostic",
 ]
 
 [[package]]
