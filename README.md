@@ -24,3 +24,8 @@ works as a git dependency. The `just` recipes also need
 `protoc-gen-prost` 0.5.0 (`cargo install protoc-gen-prost --version 0.5.0 --locked`)
 on `PATH`: they generate annals-log's protobuf types to check its
 hand-written ones against.
+
+## Licence
+
+Annals is licensed under the [European Union Public Licence v. 1.2](LICENSE)
+(EUPL-1.2).

@@ -5,6 +5,6 @@ members = ["crates/*"]
 [workspace.package]
 edition = "2021"
 rust-version = "1.77"
+license = "EUPL-1.2"
 # Not published to crates.io; shared by git only.
-license = "LicenseRef-Proprietary"
 publish = false

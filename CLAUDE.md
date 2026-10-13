@@ -41,11 +41,12 @@ Codegen is only a test-time cross-check: `buf generate` writes into
 hand-written and generated types are wire-identical. Never edit or include
 `gen/` from library code.
 
-## Not published
+## Licence: EUPL-1.2; not published
 
-Every crate has `publish = false` and `license = "LicenseRef-Proprietary"`,
-both inherited from `[workspace.package]`. A new crate sets
-`license.workspace = true` and `publish.workspace = true`.
+Annals is licensed under the EUPL-1.2 (`LICENSE`, the official English text).
+Every crate has `license = "EUPL-1.2"` and `publish = false`, both inherited
+from `[workspace.package]`. A new crate sets `license.workspace = true` and
+`publish.workspace = true`.
 
 ## Use `just`
 
