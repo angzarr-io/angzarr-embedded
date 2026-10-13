@@ -8,7 +8,7 @@ third-party dependencies.
 |---|---|
 | [`annals`](crates/annals) | event-sourcing kernel: decide, emit, apply, replay |
 | [`annals-graph`](crates/annals-graph) | typed-id graph with tags, queries and Dijkstra search |
-| [`annals-yaml`](crates/annals-yaml) | a strict YAML subset, read and written |
+| [`annals-yaml`](crates/annals-yaml) | a strict YAML subset, read and written; versioned documents with registered migrations |
 | [`annals-sim`](crates/annals-sim) | simulation parts on `annals`: per-entity dice, a folded tick scheduler, jobs as data, a parallel map, a Gherkin runner |
 | [`annals-log`](crates/annals-log) | a binary event-log format for `annals` streams: length-delimited protobuf (prost) |
 

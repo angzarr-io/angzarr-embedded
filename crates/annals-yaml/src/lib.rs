@@ -11,8 +11,13 @@
 //! Every scalar is kept as its text: there is no type coercion, so `no`
 //! stays `"no"` and `1.10` stays `"1.10"`. The reader of a value decides what
 //! it means. Mappings keep their order.
+//!
+//! [`versioned`] loads documents stamped with a root `version`, running
+//! registered migrations up to the version the code reads.
 
 use std::fmt;
+
+pub mod versioned;
 
 /// A YAML value.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -74,6 +79,22 @@ impl Value {
     /// The value at `key`, if this is a mapping that has it.
     pub fn get(&self, key: &str) -> Option<&Value> {
         self.as_map()?.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+    }
+
+    /// The value at `key`, mutably, if this is a mapping that has it.
+    pub fn get_mut(&mut self, key: &str) -> Option<&mut Value> {
+        match self {
+            Value::Map(m) => m.iter_mut().find(|(k, _)| k == key).map(|(_, v)| v),
+            _ => None,
+        }
+    }
+
+    /// Take `key` out of this mapping, keeping the rest in order. None if
+    /// this is not a mapping or has no such key.
+    pub fn remove(&mut self, key: &str) -> Option<Value> {
+        let Value::Map(m) = self else { return None };
+        let i = m.iter().position(|(k, _)| k == key)?;
+        Some(m.remove(i).1)
     }
 
     /// The value at `key`, inserted as null if missing. Panics on a

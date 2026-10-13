@@ -55,3 +55,23 @@ codegen check. `just test`, `just lint` and `just build` run `just gen` first
 and turn on `annals-log/codegen-check`, so they need `buf` and
 `protoc-gen-prost`.
 `just breaking` checks the schema against main for wire-breaking changes.
+
+## Versioned documents: bump, register a step, keep an old fixture
+
+`annals_yaml::versioned` loads content stamped with a root `version: N` (a
+non-negative integer; a missing `version` is an error, never version 0). It
+is a module of annals-yaml rather than its own crate because it works only on
+`annals_yaml::Value` and every user of it already depends on annals-yaml.
+
+- `Migrations::new(kind, current).step(from, fn).build()` checks the chain
+  (no gaps, no duplicates, no step at or past `current`) and returns a
+  `ChainError` rather than panicking, so a test can name what is wrong.
+- A step edits version `from` into `from + 1`; the loader stamps the new
+  version. Use the helpers (`rename_key`, `move_key`, `set_default`,
+  `remove_key`, `map_seq`).
+- Loading is string in, tree out, and never rewrites a file.
+  `Loader::upgrade` gives the upgraded text for a tool that rewrites on
+  purpose (the written text has no comments).
+- Changing a document's schema means: bump `current`, register the step from
+  the old version, and keep a fixture at the old version with its expected
+  current-version output (`Loader::assert_fixtures`).
