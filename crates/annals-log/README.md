@@ -85,8 +85,11 @@ A domain that is not ticked uses field 1 as it likes and never calls these.
 | `event_tick` | field 1 of an encoded event, without its schema |
 | `From` impls | `annals::Header` to and from `LogHeader` |
 | `Error` | `Io`, `Empty`, `Truncated`, `BadLength`, `TooLong`, `Decode`, `Wire`, `Sequence`, `TickWentBack`, `NotInLog`, `Behind`, `NotTicked` |
+| `WireProblem` | how bytes break the wire format, in `Error::Wire` |
+| `diagnostic_samples` | one value of every error, for catalog tests |
 
-Truncated or garbage input gives an `Error`, never a panic. A length over
+`Error` is an `annals_diagnostic::Diagnostic`, with en-US messages in
+`locales/en-US/annals-log.ftl`. Truncated or garbage input gives an `Error`, never a panic. A length over
 `MAX_MESSAGE_LEN` (64 MiB) is refused before anything is allocated for it.
 Length prefixes are read a byte at a time: wrap files in a `BufReader`, which
 also seeks.

@@ -5,7 +5,7 @@ use std::io::Cursor;
 
 use annals::{Header, StreamId};
 use annals_log::testing::assert_tick_is_field_1;
-use annals_log::{event_tick, Envelope, Error, Reader, Writer};
+use annals_log::{event_tick, Envelope, Error, Reader, WireProblem, Writer};
 use prost::Message;
 
 #[allow(dead_code)]
@@ -77,6 +77,10 @@ fn a_well_formed_log_reads_through() {
 fn a_gap_is_refused_at_the_envelope_after_it() {
     let (seqs, err) = read(&log(&[(0, None, 0), (1, None, 0), (3, None, 0)]), false);
     assert_eq!(seqs, [0, 1]);
+    assert_eq!(
+        err.as_ref().map(ToString::to_string).as_deref(),
+        Some("the log is out of sequence: event 2 claims sequence number 3, not 2")
+    );
     assert_eq!(out_of_sequence(err), (2, 3));
 }
 
@@ -190,7 +194,8 @@ fn a_ticked_reader_refuses_a_field_1_that_is_not_a_varint() {
     })
     .unwrap();
     let (_, err) = read(&w.into_inner(), true);
-    assert!(matches!(err, Some(Error::Wire(_))), "{err:?}");
+    assert!(matches!(err, Some(Error::Wire(WireProblem::TickNotVarint))), "{err:?}");
+    assert_eq!(err.unwrap().to_string(), "bad wire format: tick (field 1) is not a varint");
 }
 
 /// Ticks 2, 2, 2, 5, 5, 9 — several events at a tick, and empty ticks

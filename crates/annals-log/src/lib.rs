@@ -64,6 +64,7 @@ use std::fmt;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::marker::PhantomData;
 
+use annals_diagnostic::{Arg, Diagnostic};
 use prost::Message;
 
 /// The `annals.log.v1` messages, written by hand to match
@@ -126,7 +127,7 @@ pub enum Error {
     Decode(prost::DecodeError),
     /// A message's bytes are not valid protobuf wire format, or a field the
     /// format fixes has the wrong wire type.
-    Wire(&'static str),
+    Wire(WireProblem),
     /// An envelope's seq is out of order, or its cause is not earlier.
     Sequence(annals::ReplayError),
     /// A ticked log's event at `seq` is at `tick`, before the `previous`
@@ -159,8 +160,8 @@ impl fmt::Display for Error {
                 "a message claims {n} bytes, over the {MAX_MESSAGE_LEN} limit"
             ),
             Error::Decode(e) => write!(f, "a message does not decode: {e}"),
-            Error::Wire(why) => write!(f, "bad wire format: {why}"),
-            Error::Sequence(e) => write!(f, "the log is out of sequence: {e:?}"),
+            Error::Wire(problem) => write!(f, "bad wire format: {problem}"),
+            Error::Sequence(e) => write!(f, "the log is out of sequence: {e}"),
             Error::TickWentBack {
                 seq,
                 tick,
@@ -183,9 +184,166 @@ impl std::error::Error for Error {
         match self {
             Error::Io(e) => Some(e),
             Error::Decode(e) => Some(e),
+            Error::Sequence(e) => Some(e),
             _ => None,
         }
     }
+}
+
+/// How a message's bytes break the protobuf wire format, or a field the
+/// format fixes has the wrong wire type.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum WireProblem {
+    /// A field key with field number 0.
+    FieldZero,
+    /// A length-delimited field longer than this machine can address.
+    LengthTooLarge,
+    /// A wire type protobuf does not use here (groups, or 6 and 7).
+    UnsupportedWireType { wire_type: u64 },
+    /// A field longer than what is left of the message.
+    FieldPastEnd,
+    /// A varint cut off by the end of the message.
+    VarintPastEnd,
+    /// A ten-byte varint whose last byte sets bits past 64.
+    VarintOver64Bits,
+    /// A varint with no last byte in ten.
+    VarintOverTenBytes,
+    /// An envelope's seq, cause or event (`field` 1, 2 or 3) with the wrong
+    /// wire type.
+    EnvelopeWrongType { field: u64 },
+    /// A ticked event's field 1 that is not a varint.
+    TickNotVarint,
+}
+
+impl fmt::Display for WireProblem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            WireProblem::FieldZero => f.write_str("field number 0"),
+            WireProblem::LengthTooLarge => f.write_str("length too large"),
+            WireProblem::UnsupportedWireType { wire_type } => {
+                write!(f, "unsupported wire type {wire_type}")
+            }
+            WireProblem::FieldPastEnd => f.write_str("field runs past the message"),
+            WireProblem::VarintPastEnd => f.write_str("varint runs past the message"),
+            WireProblem::VarintOver64Bits => f.write_str("varint over 64 bits"),
+            WireProblem::VarintOverTenBytes => f.write_str("varint over ten bytes"),
+            WireProblem::EnvelopeWrongType { field } => {
+                write!(f, "envelope field {field} has the wrong wire type")
+            }
+            WireProblem::TickNotVarint => f.write_str("tick (field 1) is not a varint"),
+        }
+    }
+}
+
+impl Diagnostic for Error {
+    fn code(&self) -> &'static str {
+        match self {
+            Error::Io(_) => "annals-log-io",
+            Error::Empty => "annals-log-empty",
+            Error::Truncated => "annals-log-truncated",
+            Error::BadLength => "annals-log-bad-length",
+            Error::TooLong(_) => "annals-log-too-long",
+            Error::Decode(_) => "annals-log-decode",
+            Error::Wire(problem) => match problem {
+                WireProblem::FieldZero => "annals-log-wire-field-zero",
+                WireProblem::LengthTooLarge => "annals-log-wire-length-too-large",
+                WireProblem::UnsupportedWireType { .. } => "annals-log-wire-unsupported-type",
+                WireProblem::FieldPastEnd => "annals-log-wire-field-past-end",
+                WireProblem::VarintPastEnd => "annals-log-wire-varint-past-end",
+                WireProblem::VarintOver64Bits => "annals-log-wire-varint-over-64-bits",
+                WireProblem::VarintOverTenBytes => "annals-log-wire-varint-over-ten-bytes",
+                WireProblem::EnvelopeWrongType { .. } => "annals-log-wire-envelope-wrong-type",
+                WireProblem::TickNotVarint => "annals-log-wire-tick-not-varint",
+            },
+            Error::Sequence(_) => "annals-log-sequence",
+            Error::TickWentBack { .. } => "annals-log-tick-went-back",
+            Error::NotInLog(_) => "annals-log-not-in-log",
+            Error::Behind { .. } => "annals-log-behind",
+            Error::NotTicked => "annals-log-not-ticked",
+        }
+    }
+
+    fn args(&self) -> Vec<(&'static str, Arg)> {
+        match self {
+            // The kind's name (`NotFound`, `UnexpectedEof`): an id a catalog
+            // can select on. The OS's own text stays in the English.
+            Error::Io(e) => vec![("kind", format!("{:?}", e.kind()).into())],
+            Error::TooLong(n) => vec![("bytes", (*n).into()), ("limit", MAX_MESSAGE_LEN.into())],
+            Error::Wire(WireProblem::UnsupportedWireType { wire_type }) => {
+                vec![("wire_type", (*wire_type).into())]
+            }
+            Error::Wire(WireProblem::EnvelopeWrongType { field }) => vec![("field", (*field).into())],
+            Error::Sequence(e) => vec![("cause", Arg::nested(e))],
+            Error::TickWentBack {
+                seq,
+                tick,
+                previous,
+            } => vec![
+                ("seq", (*seq).into()),
+                ("tick", (*tick).into()),
+                ("previous", (*previous).into()),
+            ],
+            Error::NotInLog(seq) => vec![("seq", (*seq).into())],
+            Error::Behind { wanted, next } => {
+                vec![("wanted", (*wanted).into()), ("next", (*next).into())]
+            }
+            Error::Empty
+            | Error::Truncated
+            | Error::BadLength
+            | Error::Decode(_)
+            | Error::Wire(
+                WireProblem::FieldZero
+                | WireProblem::LengthTooLarge
+                | WireProblem::FieldPastEnd
+                | WireProblem::VarintPastEnd
+                | WireProblem::VarintOver64Bits
+                | WireProblem::VarintOverTenBytes
+                | WireProblem::TickNotVarint,
+            )
+            | Error::NotTicked => vec![],
+        }
+    }
+}
+
+/// One value of every error this crate defines, each variant once, for the
+/// catalog parity test: each one's code must have a message in every locale,
+/// using exactly its args. Its messages are in
+/// `crates/annals-log/locales/en-US/annals-log.ftl`.
+pub fn diagnostic_samples() -> Vec<Box<dyn Diagnostic>> {
+    let decode = LogHeader::decode(&[0xff][..]).expect_err("one byte is no message");
+    let wire = [
+        WireProblem::FieldZero,
+        WireProblem::LengthTooLarge,
+        WireProblem::UnsupportedWireType { wire_type: 3 },
+        WireProblem::FieldPastEnd,
+        WireProblem::VarintPastEnd,
+        WireProblem::VarintOver64Bits,
+        WireProblem::VarintOverTenBytes,
+        WireProblem::EnvelopeWrongType { field: 2 },
+        WireProblem::TickNotVarint,
+    ];
+    let mut out: Vec<Box<dyn Diagnostic>> = vec![
+        Box::new(Error::Io(io::ErrorKind::UnexpectedEof.into())),
+        Box::new(Error::Empty),
+        Box::new(Error::Truncated),
+        Box::new(Error::BadLength),
+        Box::new(Error::TooLong(MAX_MESSAGE_LEN + 1)),
+        Box::new(Error::Decode(decode)),
+        Box::new(Error::Sequence(annals::ReplayError::OutOfSequence {
+            index: 1,
+            found: 2,
+        })),
+        Box::new(Error::TickWentBack {
+            seq: 4,
+            tick: 10,
+            previous: 12,
+        }),
+        Box::new(Error::NotInLog(7)),
+        Box::new(Error::Behind { wanted: 2, next: 5 }),
+        Box::new(Error::NotTicked),
+    ];
+    out.extend(wire.into_iter().map(|w| Box::new(Error::Wire(w)) as _));
+    out
 }
 
 impl From<io::Error> for Error {
@@ -262,7 +420,7 @@ fn walk<'a>(
         let key = slice_varint(&mut buf)?;
         let field = key >> 3;
         if field == 0 {
-            return Err(Error::Wire("field number 0"));
+            return Err(Error::Wire(WireProblem::FieldZero));
         }
         let value = match key & 7 {
             0 => Wire::Varint(slice_varint(&mut buf)?),
@@ -272,14 +430,14 @@ fn walk<'a>(
             }
             2 => {
                 let len = slice_varint(&mut buf)?;
-                let len = usize::try_from(len).map_err(|_| Error::Wire("length too large"))?;
+                let len = usize::try_from(len).map_err(|_| Error::Wire(WireProblem::LengthTooLarge))?;
                 Wire::Bytes(take(&mut buf, len)?)
             }
             5 => {
                 take(&mut buf, 4)?;
                 Wire::Fixed
             }
-            _ => return Err(Error::Wire("unsupported wire type")),
+            wire_type => return Err(Error::Wire(WireProblem::UnsupportedWireType { wire_type })),
         };
         visit(field, value)?;
     }
@@ -288,7 +446,7 @@ fn walk<'a>(
 
 fn take<'a>(buf: &mut &'a [u8], n: usize) -> Result<&'a [u8], Error> {
     if buf.len() < n {
-        return Err(Error::Wire("field runs past the message"));
+        return Err(Error::Wire(WireProblem::FieldPastEnd));
     }
     let (head, rest) = buf.split_at(n);
     *buf = rest;
@@ -299,18 +457,18 @@ fn slice_varint(buf: &mut &[u8]) -> Result<u64, Error> {
     let mut value: u64 = 0;
     for i in 0..10 {
         let Some((&byte, rest)) = buf.split_first() else {
-            return Err(Error::Wire("varint runs past the message"));
+            return Err(Error::Wire(WireProblem::VarintPastEnd));
         };
         *buf = rest;
         if i == 9 && byte > 1 {
-            return Err(Error::Wire("varint over 64 bits"));
+            return Err(Error::Wire(WireProblem::VarintOver64Bits));
         }
         value |= u64::from(byte & 0x7f) << (7 * i);
         if byte & 0x80 == 0 {
             return Ok(value);
         }
     }
-    Err(Error::Wire("varint over ten bytes"))
+    Err(Error::Wire(WireProblem::VarintOverTenBytes))
 }
 
 /// An envelope's seq, cause and event bytes, read without copying the event.
@@ -331,7 +489,7 @@ fn head(envelope: &[u8]) -> Result<Head<'_>, Error> {
             (1, Wire::Varint(v)) => h.seq = v,
             (2, Wire::Varint(v)) => h.cause = Some(v),
             (3, Wire::Bytes(b)) => h.event = b,
-            (1..=3, _) => return Err(Error::Wire("envelope field has the wrong wire type")),
+            (field @ 1..=3, _) => return Err(Error::Wire(WireProblem::EnvelopeWrongType { field })),
             _ => {}
         }
         Ok(())
@@ -346,7 +504,7 @@ pub fn event_tick(event: &[u8]) -> Result<u64, Error> {
     walk(event, |field, value| {
         match (field, value) {
             (1, Wire::Varint(v)) => tick = v,
-            (1, _) => return Err(Error::Wire("tick (field 1) is not a varint")),
+            (1, _) => return Err(Error::Wire(WireProblem::TickNotVarint)),
             _ => {}
         }
         Ok(())
