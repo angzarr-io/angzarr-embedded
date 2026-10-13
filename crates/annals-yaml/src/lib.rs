@@ -8,6 +8,15 @@
 //! refused rather than misread: anchors and aliases, tags, multi-line
 //! strings, multiple documents, tabs for indentation.
 //!
+//! Text: whitespace in the grammar is ASCII space and tab, as YAML defines
+//! it. Indentation is spaces; a `#` starts a comment at the start of a line
+//! or after a space or tab, outside quotes; a quote opens a quoted scalar
+//! only where a scalar starts, so `l'épée` is plain. Any other space
+//! character (U+00A0, U+3000, ...) is content, and one at the start of a line
+//! is refused rather than taken as indentation. Lines end in `\n` or `\r\n`;
+//! a lone `\r` is refused, not read as a line break. One leading byte-order
+//! mark is skipped.
+//!
 //! Every scalar is kept as its text: there is no type coercion, so `no`
 //! stays `"no"` and `1.10` stays `"1.10"`. The reader of a value decides what
 //! it means. Mappings keep their order.
@@ -141,37 +150,84 @@ struct Line<'a> {
     text: &'a str,
 }
 
-/// Cut a `#` comment off, unless it is inside quotes or not preceded by
-/// space.
+/// Whitespace as the grammar means it: ASCII space and tab, as in YAML. Any
+/// other space character (U+00A0, U+3000, ...) is content.
+const SPACE: [char; 2] = [' ', '\t'];
+
+fn trim(s: &str) -> &str {
+    s.trim_matches(SPACE)
+}
+
+/// Cut a `#` comment off: a `#` at the start or after a space or tab, outside
+/// quotes. A quote opens a quoted scalar only where a scalar starts: at the
+/// start, after a space or tab, or after `[` `{` `,` inside a flow
+/// collection. Elsewhere (`l'épée`) it is a plain character.
 fn strip_comment(s: &str) -> &str {
-    let mut quote: Option<char> = None;
-    let mut prev = ' ';
-    for (i, c) in s.char_indices() {
-        match quote {
-            Some(q) if c == q => quote = None,
-            Some(_) => {}
-            None if c == '"' || c == '\'' => quote = Some(c),
-            None if c == '#' && prev.is_whitespace() => return &s[..i],
-            None => {}
+    let b = s.as_bytes();
+    let (mut i, mut prev, mut depth) = (0, b' ', 0u32);
+    let starts = |prev: u8, depth: u32| matches!(prev, b' ' | b'\t') || depth > 0 && matches!(prev, b'[' | b'{' | b',');
+    while i < b.len() {
+        let c = b[i];
+        match c {
+            b'"' | b'\'' if starts(prev, depth) => i = closing_quote(b, i),
+            b'#' if matches!(prev, b' ' | b'\t') => return &s[..i],
+            b'[' | b'{' if starts(prev, depth) => depth += 1,
+            b']' | b'}' => depth = depth.saturating_sub(1),
+            _ => {}
         }
         prev = c;
+        i += 1;
     }
     s
 }
 
+/// The index of the quote closing the quoted scalar that opens at `b[open]`,
+/// or the length if it never closes. Inside `"`, a backslash escapes the
+/// next character; inside `'`, `''` is a quote.
+fn closing_quote(b: &[u8], open: usize) -> usize {
+    let q = b[open];
+    let mut i = open + 1;
+    while i < b.len() {
+        match b[i] {
+            b'\\' if q == b'"' => i += 2,
+            b'\'' if q == b'\'' && b.get(i + 1) == Some(&b'\'') => i += 2,
+            c if c == q => return i,
+            _ => i += 1,
+        }
+    }
+    b.len()
+}
+
+/// The lines of `src`, split at `\n`, each without a `\r` before its `\n`. A
+/// carriage return anywhere else is refused, not read as a line break: no
+/// editor still writes CR-only files, and inside a value it is written `\r`.
+fn raw_lines(src: &str) -> impl Iterator<Item = Result<(usize, &str), Error>> {
+    let last = src.split('\n').count() - 1;
+    src.split('\n').enumerate().map(move |(i, raw)| {
+        let line = if i < last { raw.strip_suffix('\r').unwrap_or(raw) } else { raw };
+        if line.contains('\r') {
+            return err(i + 1, "a carriage return without a line feed: lines end in \\n or \\r\\n");
+        }
+        Ok((i + 1, line))
+    })
+}
+
 fn lines(src: &str) -> Result<Vec<Line<'_>>, Error> {
     let mut out = Vec::new();
-    for (i, raw) in src.lines().enumerate() {
-        let no = i + 1;
-        let body = strip_comment(raw).trim_end();
-        if body.trim().is_empty() {
+    for raw in raw_lines(src) {
+        let (no, raw) = raw?;
+        let body = strip_comment(raw).trim_end_matches(SPACE);
+        if trim(body).is_empty() {
             continue;
         }
         let indent = body.len() - body.trim_start_matches(' ').len();
-        if body[indent..].starts_with('\t') {
+        let text = &body[indent..];
+        if text.starts_with('\t') {
             return err(no, "tabs can't indent");
         }
-        let text = &body[indent..];
+        if let Some(c) = text.chars().next().filter(|c| c.is_whitespace()) {
+            return err(no, format!("indentation is ASCII spaces only, not U+{:04X}", c as u32));
+        }
         if text == "---" || text == "..." {
             return err(no, "one document per file: no --- or ...");
         }
@@ -205,28 +261,24 @@ struct Parser<'a> {
     at: usize,
 }
 
-/// Split `key: rest` at the first `: ` (or a trailing `:`) outside quotes
-/// and brackets.
+/// Split `key: rest` at the first `:` followed by a space, a tab or the end
+/// of the line. A quoted key is the whole quoted scalar, then the `:`. A line
+/// starting `[` or `{` is a flow collection, never a key.
 fn split_key(s: &str) -> Option<(&str, &str)> {
-    let mut quote: Option<char> = None;
-    let mut depth = 0i32;
     let b = s.as_bytes();
-    for (i, c) in s.char_indices() {
-        match quote {
-            Some(q) if c == q => quote = None,
-            Some(_) => {}
-            None => match c {
-                '"' | '\'' if i == 0 => quote = Some(c),
-                '[' | '{' => depth += 1,
-                ']' | '}' => depth -= 1,
-                ':' if depth == 0 && (i + 1 == b.len() || b[i + 1] == b' ') => {
-                    return Some((s[..i].trim_end(), s[i + 1..].trim_start()));
-                }
-                _ => {}
-            },
+    let separator = |i: usize| b[i] == b':' && (i + 1 == b.len() || matches!(b[i + 1], b' ' | b'\t'));
+    let split = |i: usize| Some((s[..i].trim_end_matches(SPACE), s[i + 1..].trim_start_matches(SPACE)));
+    match b.first()? {
+        b'[' | b'{' => None,
+        b'"' | b'\'' => {
+            let mut i = closing_quote(b, 0) + 1;
+            while i < b.len() && matches!(b[i], b' ' | b'\t') {
+                i += 1;
+            }
+            (i < b.len() && separator(i)).then(|| split(i)).flatten()
         }
+        _ => (0..b.len()).find(|&i| separator(i)).and_then(split),
     }
-    None
 }
 
 impl<'a> Parser<'a> {
@@ -261,7 +313,7 @@ impl<'a> Parser<'a> {
             if !is_item(l.text) {
                 break;
             }
-            let (no, rest) = (l.no, l.text[1..].trim_start());
+            let (no, rest) = (l.no, l.text[1..].trim_start_matches(SPACE));
             let inner = indent + (l.text.len() - rest.len());
             self.at += 1;
             if rest.is_empty() {
@@ -358,7 +410,7 @@ impl<'a> Flow<'a> {
     }
 
     fn space(&mut self) {
-        self.at += self.rest().len() - self.rest().trim_start().len();
+        self.at += self.rest().len() - self.rest().trim_start_matches(SPACE).len();
     }
 
     fn eat(&mut self, c: char) -> bool {
@@ -457,7 +509,7 @@ impl<'a> Flow<'a> {
                 } else {
                     rest.len()
                 };
-                let text = rest[..end].trim_end();
+                let text = rest[..end].trim_end_matches(SPACE);
                 self.at += end;
                 if text.is_empty() {
                     return Ok(Value::Null);
@@ -657,6 +709,53 @@ mod tests {
         // Only one: a second mark is content.
         let two = parse("\u{feff}\u{feff}x: 1\n").unwrap();
         assert_eq!(two.as_map().unwrap()[0].0, "\u{feff}x");
+    }
+
+    #[test]
+    fn only_a_space_or_tab_before_hash_starts_a_comment() {
+        assert_eq!(parse("name: a\u{a0}#b\n").unwrap().get("name"), Some(&s("a\u{a0}#b")));
+        assert_eq!(parse("name: a\u{3000}#b\n").unwrap().get("name"), Some(&s("a\u{3000}#b")));
+        assert_eq!(parse("name: a\t#b\n").unwrap().get("name"), Some(&s("a")));
+        assert_eq!(parse("name: a #b\n").unwrap().get("name"), Some(&s("a")));
+    }
+
+    #[test]
+    fn a_quote_opens_only_at_the_start_of_a_scalar() {
+        assert_eq!(parse("name: l'épée # the sword\n").unwrap().get("name"), Some(&s("l'épée")));
+        assert_eq!(parse("name: 5\"2 # tall\n").unwrap().get("name"), Some(&s("5\"2")));
+        assert_eq!(parse("name: 'it''s # in' # out\n").unwrap().get("name"), Some(&s("it's # in")));
+        assert_eq!(parse("name: \"a\\\" # in\" # out\n").unwrap().get("name"), Some(&s("a\" # in")));
+        assert_eq!(parse("v: [l'a, 'b # c'] # d\n").unwrap().get("v"), Some(&Value::Seq(vec![s("l'a"), s("b # c")])));
+        // A quoted key ends at its closing quote, escapes and all.
+        let keys = parse("\"a\\\": b\": 1\n'it''s: x' : 2\na]b: 3\n").unwrap();
+        assert_eq!(keys.get("a\": b"), Some(&s("1")));
+        assert_eq!(keys.get("it's: x"), Some(&s("2")));
+        assert_eq!(keys.get("a]b"), Some(&s("3")));
+    }
+
+    #[test]
+    fn indentation_is_ascii_spaces_only() {
+        for src in ["a:\n\u{a0}\u{a0}b: 1\n", "a:\n\u{3000}b: 1\n", "a:\n  \u{a0}b: 1\n", "\u{a0}\n"] {
+            let e = parse(src).unwrap_err();
+            assert!(e.message.contains("ASCII spaces"), "{src:?}: {e}");
+            assert_eq!(e.line, if src.starts_with('\u{a0}') { 1 } else { 2 }, "{src:?}");
+        }
+        // Not whitespace to the grammar: content, kept.
+        assert_eq!(parse("a: \u{a0}x\u{a0}\n").unwrap().get("a"), Some(&s("\u{a0}x\u{a0}")));
+        assert_eq!(parse("a: {k: \u{3000}x}\n").unwrap().get("a").unwrap().get("k"), Some(&s("\u{3000}x")));
+        assert_eq!(parse("a:\u{a0}b: 1\n").unwrap().get("a:\u{a0}b"), Some(&s("1")));
+        assert_eq!(parse("a:\tb\n").unwrap().get("a"), Some(&s("b")));
+    }
+
+    #[test]
+    fn line_breaks_are_lf_or_crlf_and_a_lone_cr_is_refused() {
+        let crlf = parse("a: 1\r\nb:\r\n  - x\r\n  - \"y\"\r\n").unwrap();
+        assert_eq!(crlf, parse("a: 1\nb:\n  - x\n  - \"y\"\n").unwrap());
+        for (src, line) in [("a: 1\rb: 2\r", 1), ("a: 1\nb: x\ry\n", 2), ("a: \"x\ry\"", 1), ("a: 1\r", 1)] {
+            let e = parse(src).unwrap_err();
+            assert_eq!(e.line, line, "{src:?}");
+            assert!(e.message.contains("carriage return"), "{src:?}: {e}");
+        }
     }
 
     #[test]
