@@ -48,6 +48,29 @@ Every crate has `license = "EUPL-1.2"` and `publish = false`, both inherited
 from `[workspace.package]`. A new crate sets `license.workspace = true` and
 `publish.workspace = true`.
 
+## Errors are localizable: a code, args, and an en-US message
+
+Every public error type implements `annals_diagnostic::Diagnostic` and keeps
+an English `Display` as the fallback. The game client renders the localized
+text from Fluent catalogs; Annals renders nothing. The trait lives in its own
+crate, annals-diagnostic, not in annals, so annals-yaml and annals-graph get
+it without depending on the event-sourcing kernel.
+
+- **Codes are stable and never reused.** Kebab-case, starting with the
+  crate's name (`annals-yaml-too-new`), and a valid Fluent message id. A code
+  whose meaning changes gets a new code; a retired code is not given to
+  anything else.
+- **Args carry data, never pre-formatted English.** Numbers, ids, paths and
+  the text that was read are args; any phrase a player reads belongs in the
+  catalog. A wrapped cause is `Arg::Nested`. An error does not hold a
+  `String` of prose: a new failure is a new variant with data fields.
+- **A new variant needs a code and an en-US message** in
+  `crates/<crate>/locales/en-US/<crate>.ftl`, using exactly the variant's
+  args, with a Fluent selector wherever a count is shown.
+- A game's error that an Annals error carries (a migration step's, a content
+  decoder's) is held as an `annals_diagnostic::Report`, keeping the game's
+  own code.
+
 ## Use `just`
 
 Plain `cargo build` and `cargo test` work from a clean checkout and skip the

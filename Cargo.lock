@@ -7,6 +7,10 @@ name = "annals"
 version = "0.1.0"
 
 [[package]]
+name = "annals-diagnostic"
+version = "0.1.0"
+
+[[package]]
 name = "annals-graph"
 version = "0.1.0"
 

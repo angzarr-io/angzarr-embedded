@@ -7,6 +7,7 @@ third-party dependencies.
 | Crate | What it is |
 |---|---|
 | [`annals`](crates/annals) | event-sourcing kernel: decide, emit, apply, replay |
+| [`annals-diagnostic`](crates/annals-diagnostic) | localizable errors: every error has a stable code and named args for a Fluent catalog |
 | [`annals-graph`](crates/annals-graph) | typed-id graph with tags, queries and Dijkstra search |
 | [`annals-yaml`](crates/annals-yaml) | a strict YAML subset, read and written; versioned documents with registered migrations |
 | [`annals-sim`](crates/annals-sim) | simulation parts on `annals`: per-entity dice, a folded tick scheduler, jobs as data, a parallel map, a Gherkin runner |
