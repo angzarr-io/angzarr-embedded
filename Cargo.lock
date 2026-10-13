@@ -28,6 +28,9 @@ dependencies = [
 [[package]]
 name = "annals-yaml"
 version = "0.1.0"
+dependencies = [
+ "annals-sim",
+]
 
 [[package]]
 name = "anyhow"

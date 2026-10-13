@@ -9,3 +9,7 @@ rust-version.workspace = true
 
 # Deliberately zero dependencies, and nothing from any game that uses it.
 [dependencies]
+
+# Test-only: annals-sim's seeded Rng drives the round-trip property test.
+[dev-dependencies]
+annals-sim = { path = "../annals-sim" }

@@ -653,9 +653,16 @@ fn flow(v: &Value) -> Option<String> {
 /// Write a value as a document: block style, with small collections of
 /// scalars on one line once they are nested (`flow_depth` levels deep).
 pub fn write(v: &Value, flow_depth: usize) -> String {
-    let mut out = String::new();
-    block(v, 0, 0, flow_depth, &mut out);
-    out
+    match v {
+        // Nothing in block style would read back as null.
+        Value::Map(m) if m.is_empty() => "{}\n".to_string(),
+        Value::Seq(s) if s.is_empty() => "[]\n".to_string(),
+        _ => {
+            let mut out = String::new();
+            block(v, 0, 0, flow_depth, &mut out);
+            out
+        }
+    }
 }
 
 fn block(v: &Value, indent: usize, depth: usize, flow_depth: usize, out: &mut String) {
