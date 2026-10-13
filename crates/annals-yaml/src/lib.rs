@@ -183,8 +183,10 @@ fn lines(src: &str) -> Result<Vec<Line<'_>>, Error> {
     Ok(out)
 }
 
-/// Parse a document.
+/// Parse a document. One leading byte-order mark is skipped: editors add it,
+/// and it is never part of the first key.
 pub fn parse(src: &str) -> Result<Value, Error> {
+    let src = src.strip_prefix('\u{feff}').unwrap_or(src);
     let lines = lines(src)?;
     if lines.is_empty() {
         return Ok(Value::Null);
@@ -644,6 +646,17 @@ mod tests {
             let written = write(&v, depth);
             assert_eq!(parse(&written).unwrap(), v, "flow depth {depth}:\n{written}");
         }
+    }
+
+    #[test]
+    fn a_leading_bom_is_not_part_of_the_first_key() {
+        let v = parse("\u{feff}version: 3\nname: x\n").unwrap();
+        assert_eq!(v.get("version"), Some(&s("3")));
+        let seq = parse("\u{feff}- a\n- b\n").unwrap();
+        assert_eq!(seq, Value::Seq(vec![s("a"), s("b")]));
+        // Only one: a second mark is content.
+        let two = parse("\u{feff}\u{feff}x: 1\n").unwrap();
+        assert_eq!(two.as_map().unwrap()[0].0, "\u{feff}x");
     }
 
     #[test]

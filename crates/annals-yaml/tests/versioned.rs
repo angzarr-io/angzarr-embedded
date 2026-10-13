@@ -247,3 +247,13 @@ fn a_document_without_a_version_is_version_0() {
         LoadProblem::TooOld { found: 0, oldest: 1 }
     );
 }
+
+#[test]
+fn a_leading_bom_does_not_hide_the_version() {
+    // Editors on Windows save a byte-order mark; a current file must still
+    // read as current, not as version 0 with every step re-run.
+    let with_bom = format!("\u{feff}{V3}");
+    assert_eq!(version_of(&parse(&with_bom).unwrap()), Ok(3));
+    assert_eq!(toy().load(None, &with_bom).unwrap(), parse(V3).unwrap());
+    assert_eq!(toy().upgrade(None, &with_bom, 2).unwrap(), None);
+}
