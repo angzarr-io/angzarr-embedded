@@ -7,8 +7,10 @@ license.workspace = true
 publish.workspace = true
 rust-version.workspace = true
 
-# Deliberately zero dependencies, and nothing from any game that uses it.
+# Zero dependencies beyond annals-diagnostic, and nothing from any game that
+# uses it.
 [dependencies]
+annals-diagnostic = { path = "../annals-diagnostic" }
 
 # Test-only: annals-sim's seeded Rng drives the round-trip property test.
 [dev-dependencies]

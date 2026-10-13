@@ -40,12 +40,17 @@
 //! [`is_ascii_id`] checks, as annals-graph's tags already are; display text
 //! in values can be any Unicode.
 //!
+//! A document that does not parse gives an [`Error`]: the line and a
+//! [`ParseProblem`]. Every error here is an [`annals_diagnostic::Diagnostic`],
+//! with its en-US messages in `locales/en-US/annals-yaml.ftl`.
+//!
 //! [`versioned`] loads documents stamped with a root `version`, running
 //! registered migrations up to the version the code reads.
 
-use std::fmt;
-
+mod error;
 pub mod versioned;
+
+pub use error::{Error, ParseProblem};
 
 /// A YAML value.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,21 +61,6 @@ pub enum Value {
     Map(Vec<(String, Value)>),
 }
 
-/// What went wrong, and on which line (1-based; 0 for the end of input).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Error {
-    pub line: usize,
-    pub message: String,
-}
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "line {}: {}", self.line, self.message)
-    }
-}
-
-impl std::error::Error for Error {}
-
 /// Whether `s` is an ASCII id: non-empty, and only ASCII letters, digits,
 /// `_`, `-` and `.`. Such ids have one spelling, so they compare as the
 /// reader expects without Unicode normalization.
@@ -78,11 +68,8 @@ pub fn is_ascii_id(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
 }
 
-fn err<T>(line: usize, message: impl Into<String>) -> Result<T, Error> {
-    Err(Error {
-        line,
-        message: message.into(),
-    })
+fn err<T>(line: usize, problem: ParseProblem) -> Result<T, Error> {
+    Err(Error { line, problem })
 }
 
 impl Value {
@@ -232,7 +219,7 @@ fn raw_lines(src: &str) -> impl Iterator<Item = Result<(usize, &str), Error>> {
     src.split('\n').enumerate().map(move |(i, raw)| {
         let line = if i < last { raw.strip_suffix('\r').unwrap_or(raw) } else { raw };
         if line.contains('\r') {
-            return err(i + 1, "a carriage return without a line feed: lines end in \\n or \\r\\n");
+            return err(i + 1, ParseProblem::LoneCarriageReturn);
         }
         Ok((i + 1, line))
     })
@@ -249,16 +236,16 @@ fn lines(src: &str) -> Result<Vec<Line<'_>>, Error> {
         let indent = body.len() - body.trim_start_matches(' ').len();
         let text = &body[indent..];
         if text.starts_with('\t') {
-            return err(no, "tabs can't indent");
+            return err(no, ParseProblem::TabIndent);
         }
-        if let Some(c) = text.chars().next().filter(|c| c.is_whitespace()) {
-            return err(no, format!("indentation is ASCII spaces only, not U+{:04X}", c as u32));
+        if let Some(character) = text.chars().next().filter(|c| c.is_whitespace()) {
+            return err(no, ParseProblem::NonAsciiIndent { character });
         }
         if text == "---" || text == "..." {
-            return err(no, "one document per file: no --- or ...");
+            return err(no, ParseProblem::DocumentMarker { marker: text.to_string() });
         }
-        if text.starts_with('&') || text.starts_with('*') || text.starts_with('!') || text.starts_with('|') || text.starts_with('>') {
-            return err(no, "anchors, aliases, tags and block scalars aren't supported");
+        if let Some(problem) = unsupported(text) {
+            return err(no, problem);
         }
         out.push(Line { no, indent, text });
     }
@@ -277,7 +264,7 @@ pub fn parse(src: &str) -> Result<Value, Error> {
     let indent = p.lines[0].indent;
     let v = p.block(indent)?;
     if let Some(l) = p.lines.get(p.at) {
-        return err(l.no, "unexpected indentation");
+        return err(l.no, ParseProblem::UnexpectedIndent);
     }
     Ok(v)
 }
@@ -334,7 +321,7 @@ impl<'a> Parser<'a> {
                 break;
             }
             if l.indent > indent {
-                return err(l.no, "unexpected indentation");
+                return err(l.no, ParseProblem::UnexpectedIndent);
             }
             if !is_item(l.text) {
                 break;
@@ -363,21 +350,21 @@ impl<'a> Parser<'a> {
                 break;
             }
             if l.indent > indent {
-                return err(l.no, "unexpected indentation");
+                return err(l.no, ParseProblem::UnexpectedIndent);
             }
             if is_item(l.text) {
                 break;
             }
             let no = l.no;
             let Some((key, rest)) = split_key(l.text) else {
-                return err(no, format!("expected `key: value`, found {:?}", l.text));
+                return err(no, ParseProblem::ExpectedKeyValue { found: l.text.to_string() });
             };
             let key = match inline(key, no)? {
                 Value::Scalar(k) => k,
-                _ => return err(no, "keys must be scalars"),
+                _ => return err(no, ParseProblem::KeyNotScalar),
             };
             if entries.iter().any(|(k, _)| *k == key) {
-                return err(no, format!("{key:?} twice"));
+                return err(no, ParseProblem::DuplicateKey { key });
             }
             self.at += 1;
             let value = if rest.is_empty() {
@@ -410,16 +397,27 @@ fn is_item(text: &str) -> bool {
     text == "-" || text.starts_with("- ")
 }
 
+/// The feature a line or value starts with that this reader refuses.
+fn unsupported(text: &str) -> Option<ParseProblem> {
+    match text.as_bytes().first()? {
+        b'&' => Some(ParseProblem::Anchor),
+        b'*' => Some(ParseProblem::Alias),
+        b'!' => Some(ParseProblem::Tag),
+        b'|' | b'>' => Some(ParseProblem::BlockScalar),
+        _ => None,
+    }
+}
+
 /// A value written on one line: a flow collection or a scalar.
 fn inline(text: &str, no: usize) -> Result<Value, Error> {
-    if text.starts_with(['&', '*', '!', '|', '>']) {
-        return err(no, "anchors, aliases, tags and block scalars aren't supported");
+    if let Some(problem) = unsupported(text) {
+        return err(no, problem);
     }
     let mut f = Flow { s: text, at: 0, no };
     let v = f.value()?;
     f.space();
     if f.at != f.s.len() {
-        return err(no, format!("unexpected {:?}", &f.s[f.at..]));
+        return err(no, ParseProblem::Unexpected { found: f.s[f.at..].to_string() });
     }
     Ok(v)
 }
@@ -462,7 +460,7 @@ impl<'a> Flow<'a> {
                     return Ok(Value::Seq(items));
                 }
                 if !self.eat(',') {
-                    return err(self.no, "expected , or ] in a flow sequence");
+                    return err(self.no, ParseProblem::ExpectedSeqSeparator);
                 }
             }
         }
@@ -474,21 +472,21 @@ impl<'a> Flow<'a> {
             loop {
                 let key = match self.scalar(true)? {
                     Value::Scalar(k) => k,
-                    _ => return err(self.no, "keys must be scalars"),
+                    _ => return err(self.no, ParseProblem::KeyNotScalar),
                 };
                 if !self.eat(':') {
-                    return err(self.no, "expected : in a flow mapping");
+                    return err(self.no, ParseProblem::ExpectedColon);
                 }
                 let v = self.value()?;
                 if entries.iter().any(|(k, _)| *k == key) {
-                    return err(self.no, format!("{key:?} twice"));
+                    return err(self.no, ParseProblem::DuplicateKey { key });
                 }
                 entries.push((key, v));
                 if self.eat('}') {
                     return Ok(Value::Map(entries));
                 }
                 if !self.eat(',') {
-                    return err(self.no, "expected , or } in a flow mapping");
+                    return err(self.no, ParseProblem::ExpectedMapSeparator);
                 }
             }
         }
@@ -530,23 +528,20 @@ impl<'a> Flow<'a> {
                                 match c {
                                     Some(c) => out.push(c),
                                     None => {
-                                        return err(
-                                            self.no,
-                                            format!(
-                                                "bad escape \\{u}{digits}: \\u takes 4 hex digits and \\U 8, naming a Unicode \
-                                                 scalar value; surrogates are refused (write \\U0001F5E1, not \\uD83D\\uDDE1)"
-                                            ),
-                                        )
+                                        return err(self.no, ParseProblem::BadUnicodeEscape { escape: format!("\\{u}{digits}") })
                                     }
                                 }
                             }
-                            _ => return err(self.no, "unknown escape"),
+                            other => {
+                                let escape = other.map_or(String::from("\\"), |(_, c)| format!("\\{c}"));
+                                return err(self.no, ParseProblem::UnknownEscape { escape });
+                            }
                         }
                         continue;
                     }
                     out.push(c);
                 }
-                err(self.no, "unterminated quote")
+                err(self.no, ParseProblem::UnterminatedQuote)
             }
             None => Ok(Value::Null),
             Some(_) => {
@@ -730,6 +725,38 @@ fn block(v: &Value, indent: usize, depth: usize, flow_depth: usize, out: &mut St
     }
 }
 
+/// One value of every error this crate defines, each variant once, for the
+/// catalog parity test: each one's code must have a message in every locale,
+/// using exactly its args. Its messages are in
+/// `crates/annals-yaml/locales/en-US/annals-yaml.ftl`.
+pub fn diagnostic_samples() -> Vec<Box<dyn annals_diagnostic::Diagnostic>> {
+    let text = |s: &str| s.to_string();
+    let parse = [
+        ParseProblem::LoneCarriageReturn,
+        ParseProblem::TabIndent,
+        ParseProblem::NonAsciiIndent { character: '\u{a0}' },
+        ParseProblem::DocumentMarker { marker: text("---") },
+        ParseProblem::Anchor,
+        ParseProblem::Alias,
+        ParseProblem::Tag,
+        ParseProblem::BlockScalar,
+        ParseProblem::UnexpectedIndent,
+        ParseProblem::ExpectedKeyValue { found: text("b") },
+        ParseProblem::KeyNotScalar,
+        ParseProblem::DuplicateKey { key: text("a") },
+        ParseProblem::Unexpected { found: text("x") },
+        ParseProblem::ExpectedSeqSeparator,
+        ParseProblem::ExpectedColon,
+        ParseProblem::ExpectedMapSeparator,
+        ParseProblem::BadUnicodeEscape { escape: text(r"\uD83D") },
+        ParseProblem::UnknownEscape { escape: text(r"\x") },
+        ParseProblem::UnterminatedQuote,
+    ];
+    let mut samples: Vec<Box<dyn annals_diagnostic::Diagnostic>> = Vec::new();
+    samples.extend(parse.into_iter().map(|problem| Box::new(Error { line: 3, problem }) as _));
+    samples
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -773,15 +800,29 @@ mod tests {
 
     #[test]
     fn refuses_what_it_does_not_support() {
-        assert!(parse("a: &x 1\n").is_err());
-        assert!(parse("a: *x\n").is_err());
-        assert!(parse("- !tag x\n").is_err());
-        assert!(parse("a: |\n  text\n").is_err());
-        assert!(parse("a:\n\t- x\n").is_err());
-        assert!(parse("---\na: 1\n").is_err());
-        assert!(parse("a: 1\na: 2\n").is_err());
-        assert!(parse("a: [1, 2\n").is_err());
-        assert!(parse("a: 1\n   b: 2\n").is_err());
+        let found = |s: &str| s.to_string();
+        for (src, line, problem) in [
+            ("a: &x 1\n", 1, ParseProblem::Anchor),
+            ("a: *x\n", 1, ParseProblem::Alias),
+            ("- !tag x\n", 1, ParseProblem::Tag),
+            ("a: |\n  text\n", 1, ParseProblem::BlockScalar),
+            ("a:\n\t- x\n", 2, ParseProblem::TabIndent),
+            ("---\na: 1\n", 1, ParseProblem::DocumentMarker { marker: found("---") }),
+            ("a: 1\na: 2\n", 2, ParseProblem::DuplicateKey { key: found("a") }),
+            ("a: {b: 1, b: 2}\n", 1, ParseProblem::DuplicateKey { key: found("b") }),
+            ("a: [1, 2\n", 1, ParseProblem::ExpectedSeqSeparator),
+            ("a: {b 1}\n", 1, ParseProblem::ExpectedColon),
+            ("a: {b: 1\n", 1, ParseProblem::ExpectedMapSeparator),
+            ("a: {: 1}\n", 1, ParseProblem::KeyNotScalar),
+            ("a: 1\n   b: 2\n", 2, ParseProblem::UnexpectedIndent),
+            ("a: 1\nb\n", 2, ParseProblem::ExpectedKeyValue { found: found("b") }),
+            ("a: [1] x\n", 1, ParseProblem::Unexpected { found: found("x") }),
+            ("a: \"x\n", 1, ParseProblem::UnterminatedQuote),
+        ] {
+            assert_eq!(parse(src), Err(Error { line, problem }), "{src:?}");
+        }
+        assert_eq!(parse("a: 1\na: 2\n").unwrap_err().to_string(), "line 2: \"a\" twice");
+        assert_eq!(parse("a: &x 1\n").unwrap_err().to_string(), "line 1: anchors (&) aren't supported");
     }
 
     #[test]
@@ -831,7 +872,7 @@ mod tests {
     fn indentation_is_ascii_spaces_only() {
         for src in ["a:\n\u{a0}\u{a0}b: 1\n", "a:\n\u{3000}b: 1\n", "a:\n  \u{a0}b: 1\n", "\u{a0}\n"] {
             let e = parse(src).unwrap_err();
-            assert!(e.message.contains("ASCII spaces"), "{src:?}: {e}");
+            assert!(matches!(e.problem, ParseProblem::NonAsciiIndent { .. }), "{src:?}: {e}");
             assert_eq!(e.line, if src.starts_with('\u{a0}') { 1 } else { 2 }, "{src:?}");
         }
         // Not whitespace to the grammar: content, kept.
@@ -848,7 +889,7 @@ mod tests {
         for (src, line) in [("a: 1\rb: 2\r", 1), ("a: 1\nb: x\ry\n", 2), ("a: \"x\ry\"", 1), ("a: 1\r", 1)] {
             let e = parse(src).unwrap_err();
             assert_eq!(e.line, line, "{src:?}");
-            assert!(e.message.contains("carriage return"), "{src:?}: {e}");
+            assert_eq!(e.problem, ParseProblem::LoneCarriageReturn, "{src:?}: {e}");
         }
     }
 
@@ -864,8 +905,13 @@ mod tests {
         assert_eq!(parse(&bs(r#"a: "^u00E9""#)).unwrap().get("a"), Some(&s("é")));
         for bad in ["^uD83D^uDDE1", "^uDDE1", "^u00e", "^U00110000", "^x41", "^q", "^u+0e9"] {
             let e = parse(&bs(&format!("a: \"{bad}\"\n"))).unwrap_err();
-            assert!(e.message.contains("escape"), "{bad}: {e}");
+            assert!(matches!(e.problem, ParseProblem::BadUnicodeEscape { .. } | ParseProblem::UnknownEscape { .. }), "{bad}: {e}");
         }
+        let e = parse(&bs(r#"a: "^q""#)).unwrap_err();
+        assert_eq!(e.problem, ParseProblem::UnknownEscape { escape: bs("^q") });
+        assert_eq!(e.to_string(), bs("line 1: unknown escape ^q"));
+        let e = parse(&bs(r#"a: "^uDDE1""#)).unwrap_err();
+        assert_eq!(e.problem, ParseProblem::BadUnicodeEscape { escape: bs("^uDDE1") });
     }
 
     fn round_trips(v: &Value) {
