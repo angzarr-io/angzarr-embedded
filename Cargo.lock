@@ -16,6 +16,9 @@ version = "0.1.0"
 [[package]]
 name = "annals-graph"
 version = "0.1.0"
+dependencies = [
+ "annals-diagnostic",
+]
 
 [[package]]
 name = "annals-log"

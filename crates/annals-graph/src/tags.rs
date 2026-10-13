@@ -16,6 +16,8 @@
 
 use std::fmt;
 
+use annals_diagnostic::{Arg, Diagnostic};
+
 /// An interned `namespace:name`.
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct TagId(pub u16);
@@ -46,16 +48,57 @@ impl TagValue {
     }
 }
 
-/// Why a tag could not be read.
+/// Why a tag could not be read: the text, and what is wrong with it.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct BadTag {
     pub text: String,
-    pub why: &'static str,
+    pub problem: TagProblem,
+}
+
+/// What is wrong with a tag.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum TagProblem {
+    /// The namespace is not lowercase letters, digits, `_` and `-`.
+    BadNamespace,
+    /// The name is not lowercase letters, digits, `_` and `-`.
+    BadName,
+    /// The symbol value is not lowercase letters, digits, `_` and `-`.
+    BadSymbol,
+    /// `:name`: a colon with nothing before it.
+    EmptyNamespace,
+}
+
+impl fmt::Display for TagProblem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            TagProblem::BadNamespace => "a namespace is lowercase letters, digits, _ and -",
+            TagProblem::BadName => "a name is lowercase letters, digits, _ and -",
+            TagProblem::BadSymbol => "a symbol is lowercase letters, digits, _ and -",
+            TagProblem::EmptyNamespace => "an empty namespace: leave out the colon, or name it",
+        })
+    }
 }
 
 impl fmt::Display for BadTag {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "bad tag {:?}: {}", self.text, self.why)
+        write!(f, "bad tag {:?}: {}", self.text, self.problem)
+    }
+}
+
+impl std::error::Error for BadTag {}
+
+impl Diagnostic for BadTag {
+    fn code(&self) -> &'static str {
+        match self.problem {
+            TagProblem::BadNamespace => "annals-graph-bad-namespace",
+            TagProblem::BadName => "annals-graph-bad-name",
+            TagProblem::BadSymbol => "annals-graph-bad-symbol",
+            TagProblem::EmptyNamespace => "annals-graph-empty-namespace",
+        }
+    }
+
+    fn args(&self) -> Vec<(&'static str, Arg)> {
+        vec![("text", self.text.as_str().into())]
     }
 }
 
@@ -94,15 +137,15 @@ impl TagRegistry {
     /// The id for `namespace:name`, adding it if it is new. An empty
     /// namespace is the default one.
     pub fn key(&mut self, namespace: &str, name: &str) -> Result<TagId, BadTag> {
-        let bad = |why| BadTag {
+        let bad = |problem| BadTag {
             text: format!("{namespace}:{name}"),
-            why,
+            problem,
         };
         if !namespace.is_empty() && !word_ok(namespace) {
-            return Err(bad("a namespace is lowercase letters, digits, _ and -"));
+            return Err(bad(TagProblem::BadNamespace));
         }
         if !word_ok(name) {
-            return Err(bad("a name is lowercase letters, digits, _ and -"));
+            return Err(bad(TagProblem::BadName));
         }
         let ns = intern(&mut self.namespaces, namespace, NamespaceId);
         if let Some(i) = self.keys.iter().position(|(n, k)| *n == ns && k == name) {
@@ -116,7 +159,7 @@ impl TagRegistry {
         if !word_ok(value) {
             return Err(BadTag {
                 text: value.to_string(),
-                why: "a symbol is lowercase letters, digits, _ and -",
+                problem: TagProblem::BadSymbol,
             });
         }
         Ok(intern(&mut self.symbols, value, SymbolId))
@@ -124,24 +167,24 @@ impl TagRegistry {
 
     /// Read `[namespace:]name[=value]`, interning as needed.
     pub fn parse(&mut self, text: &str) -> Result<(TagId, TagValue), BadTag> {
-        let bad = |why| BadTag {
+        let bad = |problem| BadTag {
             text: text.to_string(),
-            why,
+            problem,
         };
         let (key, value) = match text.split_once('=') {
             Some((k, v)) => (k, Some(v)),
             None => (text, None),
         };
         let (ns, name) = match key.split_once(':') {
-            Some(("", _)) => return Err(bad("an empty namespace: leave out the colon, or name it")),
+            Some(("", _)) => return Err(bad(TagProblem::EmptyNamespace)),
             Some((ns, name)) => (ns, name),
             None => ("", key),
         };
-        let id = self.key(ns, name).map_err(|e| bad(e.why))?;
+        let id = self.key(ns, name).map_err(|e| bad(e.problem))?;
         let value = match value {
             None => TagValue::Flag,
             Some(v) if v.parse::<i32>().is_ok() => TagValue::Int(v.parse().unwrap()),
-            Some(v) => TagValue::Symbol(self.symbol(v).map_err(|e| bad(e.why))?),
+            Some(v) => TagValue::Symbol(self.symbol(v).map_err(|e| bad(e.problem))?),
         };
         Ok((id, value))
     }
@@ -312,10 +355,21 @@ mod tests {
     #[test]
     fn malformed_tags_are_refused_with_the_text() {
         let mut r = TagRegistry::new();
-        for bad in [":rooftop", "terrain:", "Terrain:roof", "terrain:roof top", "faction:owner=Crimson", ""] {
+        for (bad, problem) in [
+            (":rooftop", TagProblem::EmptyNamespace),
+            ("terrain:", TagProblem::BadName),
+            ("Terrain:roof", TagProblem::BadNamespace),
+            ("terrain:roof top", TagProblem::BadName),
+            ("faction:owner=Crimson", TagProblem::BadSymbol),
+            ("", TagProblem::BadName),
+        ] {
             let e = r.parse(bad).unwrap_err();
-            assert_eq!(e.text, bad);
+            assert_eq!(e, BadTag { text: bad.to_string(), problem }, "{bad:?}");
         }
+        assert_eq!(
+            r.parse("Terrain:roof").unwrap_err().to_string(),
+            "bad tag \"Terrain:roof\": a namespace is lowercase letters, digits, _ and -"
+        );
     }
 
     #[test]

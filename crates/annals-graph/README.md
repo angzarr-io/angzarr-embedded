@@ -1,7 +1,8 @@
 # annals-graph
 
-A small, deterministic graph. Zero dependencies and nothing specific to any
-game, like `annals`.
+A small, deterministic graph. No third-party dependencies (only
+annals-diagnostic, for its errors) and nothing specific to any game, like
+`annals`.
 
 One shape for every graph a game has: positions on a map, stages in a scene,
 scenes in a run, runs in a campaign.
@@ -17,6 +18,9 @@ scenes in a run, runs in a campaign.
   open, content-defined keys and symbols. `TagSet` keeps a
   node's tags sorted, each with a typed value, and they can
   change.
+- **Errors.** A tag that does not read is a `BadTag`: its text and a
+  `TagProblem`. It is a `Diagnostic`, with messages in
+  `locales/en-US/annals-graph.ftl`; `diagnostic_samples` gives one of each.
 - **Queries.** `Where` filters and `Score` ranks, generic over the node type and
   a context the caller chooses. `HasTag`, `TagAtLeast`, `TagIs`, `InNamespace`,
   `Not`, `All` and `Any`
