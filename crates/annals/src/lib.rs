@@ -30,3 +30,15 @@ pub use domain::{Domain, Tx};
 pub use projection::{project, Projection};
 pub use store::{Conflict, EventStore, InMemoryStore};
 pub use stream::{Envelope, Header, ReplayError, Seq, Stream, StreamId};
+
+/// One value of every error this crate defines, each variant once, for the
+/// catalog parity test: each one's code must have a message in every locale,
+/// using exactly its args. Its messages are in
+/// `crates/annals/locales/en-US/annals.ftl`.
+pub fn diagnostic_samples() -> Vec<Box<dyn annals_diagnostic::Diagnostic>> {
+    vec![
+        Box::new(ReplayError::OutOfSequence { index: 1, found: 2 }),
+        Box::new(ReplayError::CauseNotEarlier { seq: 1, cause: 1 }),
+        Box::new(Conflict { id: StreamId(7), expected: 1, actual: 3 }),
+    ]
+}

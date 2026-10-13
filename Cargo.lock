@@ -5,6 +5,9 @@ version = 3
 [[package]]
 name = "annals"
 version = "0.1.0"
+dependencies = [
+ "annals-diagnostic",
+]
 
 [[package]]
 name = "annals-diagnostic"

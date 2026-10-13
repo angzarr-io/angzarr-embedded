@@ -1,5 +1,9 @@
 //! A stream: an append-only log of events and the state folded from it.
 
+use std::fmt;
+
+use annals_diagnostic::{Arg, Diagnostic};
+
 use crate::domain::{Domain, Tx};
 
 /// An event's position in its stream, from 0.
@@ -37,6 +41,37 @@ pub enum ReplayError {
     OutOfSequence { index: usize, found: Seq },
     /// Event `seq` names a cause at or after itself.
     CauseNotEarlier { seq: Seq, cause: Seq },
+}
+
+impl fmt::Display for ReplayError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ReplayError::OutOfSequence { index, found } => {
+                write!(f, "event {index} claims sequence number {found}, not {index}")
+            }
+            ReplayError::CauseNotEarlier { seq, cause } => {
+                write!(f, "event {seq} names event {cause} as its cause, which is not earlier")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ReplayError {}
+
+impl Diagnostic for ReplayError {
+    fn code(&self) -> &'static str {
+        match self {
+            ReplayError::OutOfSequence { .. } => "annals-replay-out-of-sequence",
+            ReplayError::CauseNotEarlier { .. } => "annals-replay-cause-not-earlier",
+        }
+    }
+
+    fn args(&self) -> Vec<(&'static str, Arg)> {
+        match *self {
+            ReplayError::OutOfSequence { index, found } => vec![("index", index.into()), ("found", found.into())],
+            ReplayError::CauseNotEarlier { seq, cause } => vec![("seq", seq.into()), ("cause", cause.into())],
+        }
+    }
 }
 
 /// A domain's event log and the state folded from it.

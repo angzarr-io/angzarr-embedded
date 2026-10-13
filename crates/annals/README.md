@@ -1,7 +1,8 @@
 # annals
 
-A small, deterministic event-sourcing engine. Zero dependencies, no I/O, no
-clock, and nothing specific to any game, so any game can build on it.
+A small, deterministic event-sourcing engine. No third-party dependencies
+(only annals-diagnostic, for its errors), no I/O, no clock, and nothing
+specific to any game, so any game can build on it.
 
 ## The model
 
@@ -67,6 +68,8 @@ impl Domain for Counter {
 | `Envelope<E>` | `seq`, `cause` (the earlier event it follows from), `event` |
 | `Projection<E>`, `project` | read models |
 | `EventStore<E>`, `InMemoryStore<E>` | the storage port; appends use an expected length for optimistic concurrency |
+| `ReplayError`, `Conflict` | why a log does not replay; why an append was refused. Both are `Diagnostic`s, with messages in `locales/en-US/annals.ftl` |
+| `diagnostic_samples` | one value of every error, for catalog tests |
 
 ## Not yet
 

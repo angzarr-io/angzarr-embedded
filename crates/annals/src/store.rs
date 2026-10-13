@@ -1,6 +1,9 @@
 //! The storage port. A store holds event streams and nothing else.
 
 use std::collections::BTreeMap;
+use std::fmt;
+
+use annals_diagnostic::{Arg, Diagnostic};
 
 use crate::stream::{Envelope, Header, Seq, StreamId};
 
@@ -10,6 +13,31 @@ pub struct Conflict {
     pub id: StreamId,
     pub expected: Seq,
     pub actual: Seq,
+}
+
+impl fmt::Display for Conflict {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "stream {} holds {} {}, not the {} expected: someone else appended first",
+            self.id.0,
+            self.actual,
+            if self.actual == 1 { "event" } else { "events" },
+            self.expected
+        )
+    }
+}
+
+impl std::error::Error for Conflict {}
+
+impl Diagnostic for Conflict {
+    fn code(&self) -> &'static str {
+        "annals-store-conflict"
+    }
+
+    fn args(&self) -> Vec<(&'static str, Arg)> {
+        vec![("stream", self.id.0.into()), ("expected", self.expected.into()), ("actual", self.actual.into())]
+    }
 }
 
 /// Where streams are kept. Games implement this for real storage; the engine

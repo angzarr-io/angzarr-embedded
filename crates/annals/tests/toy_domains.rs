@@ -300,6 +300,10 @@ fn replay_refuses_a_malformed_log() {
         Stream::<Account>::replay(h.clone(), gap, &()).err(),
         Some(ReplayError::OutOfSequence { index: 1, found: 2 })
     );
+    assert_eq!(
+        ReplayError::OutOfSequence { index: 1, found: 2 }.to_string(),
+        "event 1 claims sequence number 2, not 1"
+    );
     let forward = vec![
         Envelope { seq: 0, cause: None, event: AccountEvent::Opened },
         Envelope { seq: 1, cause: Some(1), event: AccountEvent::Deposited(1) },
@@ -307,6 +311,10 @@ fn replay_refuses_a_malformed_log() {
     assert_eq!(
         Stream::<Account>::replay(h, forward, &()).err(),
         Some(ReplayError::CauseNotEarlier { seq: 1, cause: 1 })
+    );
+    assert_eq!(
+        ReplayError::CauseNotEarlier { seq: 1, cause: 1 }.to_string(),
+        "event 1 names event 1 as its cause, which is not earlier"
     );
 }
 
@@ -361,6 +369,10 @@ fn the_store_holds_streams_and_refuses_stale_appends() {
     assert_eq!(
         store.append(s.header(), 0, s.events()),
         Err(Conflict { id: StreamId(1), expected: 0, actual: 2 })
+    );
+    assert_eq!(
+        store.append(s.header(), 0, s.events()).unwrap_err().to_string(),
+        "stream 1 holds 2 events, not the 0 expected: someone else appended first"
     );
     let (h, events) = store.read(StreamId(1)).unwrap();
     let replayed = Stream::<Account>::replay(h, events, &()).unwrap();
