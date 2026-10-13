@@ -754,6 +754,7 @@ pub fn diagnostic_samples() -> Vec<Box<dyn annals_diagnostic::Diagnostic>> {
     ];
     let mut samples: Vec<Box<dyn annals_diagnostic::Diagnostic>> = Vec::new();
     samples.extend(parse.into_iter().map(|problem| Box::new(Error { line: 3, problem }) as _));
+    samples.extend(versioned::diagnostic_samples());
     samples
 }
 

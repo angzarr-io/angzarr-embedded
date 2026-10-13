@@ -24,8 +24,15 @@
 //! - **Fixtures.** [`Loader::check_fixtures`] proves old files still load:
 //!   each fixture, at any supported version, must migrate to its expected
 //!   current-version tree.
+//! - **Errors** are data: [`LoadError`], [`ChainError`] and [`MigrationError`]
+//!   are [`Diagnostic`]s. A step or decoder that fails for the game's own
+//!   reason returns the game's own diagnostic, kept with its code as a
+//!   [`Report`]: [`MigrationError::game`] (or `Report::new(..).into()`) in a
+//!   step, and any `E: Diagnostic` from [`Loader::load_as`]'s decoder.
 
 use std::fmt;
+
+use annals_diagnostic::{Arg, Diagnostic, Report};
 
 use crate::{parse, write, Error, Value};
 
@@ -33,33 +40,121 @@ use crate::{parse, write, Error, Value};
 /// The loader stamps the new version; the step need not.
 pub type Step = fn(&mut Value) -> Result<(), MigrationError>;
 
-/// Why a migration step could not migrate a document.
+/// Why a migration step could not migrate a document: one of the helpers'
+/// failures, or the game's own error. Key paths (`from`, `to`) are written
+/// dotted, `stats.hp`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MigrationError(pub String);
+pub enum MigrationError {
+    /// [`rename_key`] on a value that is not a mapping.
+    RenameNotAMapping { from: String },
+    /// [`rename_key`] to a key the mapping already has.
+    RenameTargetExists { from: String, to: String },
+    /// [`move_key`] with an empty key path.
+    MoveEmptyPath { from: String, to: String },
+    /// [`move_key`] from or into a value that is not a mapping.
+    MoveNotAMapping { from: String, to: String },
+    /// [`move_key`] through `key`, which is not a mapping.
+    MoveThroughNotAMapping { from: String, to: String, key: String },
+    /// [`move_key`] onto `key`, which is already there.
+    MoveTargetExists { from: String, to: String, key: String },
+    /// [`set_default`] on a value that is not a mapping.
+    DefaultNotAMapping { key: String },
+    /// [`remove_key`] on a value that is not a mapping.
+    RemoveNotAMapping { key: String },
+    /// [`map_seq`] on a value that is not a mapping.
+    MapNotAMapping { key: String },
+    /// [`map_seq`] over `key`, which is not a sequence.
+    MapNotASequence { key: String },
+    /// [`map_seq`]'s function failed on item `index` of `key`.
+    Item { key: String, index: usize, error: Box<MigrationError> },
+    /// The step left the root something other than a mapping.
+    RootNotAMapping,
+    /// The game's own error, with the game's own code: see
+    /// [`MigrationError::game`].
+    Game(Report),
+}
 
 impl MigrationError {
-    pub fn new(message: impl Into<String>) -> MigrationError {
-        MigrationError(message.into())
+    /// A game's own error, keeping its code and args.
+    pub fn game(error: &dyn Diagnostic) -> MigrationError {
+        MigrationError::Game(Report::of(error))
+    }
+}
+
+impl From<Report> for MigrationError {
+    fn from(report: Report) -> MigrationError {
+        MigrationError::Game(report)
     }
 }
 
 impl fmt::Display for MigrationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        match self {
+            MigrationError::RenameNotAMapping { from } => write!(f, "rename {from:?}: not a mapping"),
+            MigrationError::RenameTargetExists { from, to } => {
+                write!(f, "rename {from:?} to {to:?}: {to:?} is already there")
+            }
+            MigrationError::MoveEmptyPath { from, to } => write!(f, "move {from} to {to}: empty key path"),
+            MigrationError::MoveNotAMapping { from, to } => write!(f, "move {from} to {to}: not a mapping"),
+            MigrationError::MoveThroughNotAMapping { from, to, key } => {
+                write!(f, "move {from} to {to}: {key:?}: not a mapping")
+            }
+            MigrationError::MoveTargetExists { from, to, key } => {
+                write!(f, "move {from} to {to}: {key:?} is already there")
+            }
+            MigrationError::DefaultNotAMapping { key } => write!(f, "default {key:?}: not a mapping"),
+            MigrationError::RemoveNotAMapping { key } => write!(f, "remove {key:?}: not a mapping"),
+            MigrationError::MapNotAMapping { key } => write!(f, "map over {key:?}: not a mapping"),
+            MigrationError::MapNotASequence { key } => write!(f, "map over {key:?}: not a sequence"),
+            MigrationError::Item { key, index, error } => write!(f, "{key}[{index}]: {error}"),
+            MigrationError::RootNotAMapping => f.write_str("the step left the root not a mapping"),
+            MigrationError::Game(report) => write!(f, "{report}"),
+        }
     }
 }
 
 impl std::error::Error for MigrationError {}
 
-impl From<String> for MigrationError {
-    fn from(s: String) -> MigrationError {
-        MigrationError(s)
+impl Diagnostic for MigrationError {
+    fn code(&self) -> &'static str {
+        match self {
+            MigrationError::RenameNotAMapping { .. } => "annals-yaml-rename-not-a-mapping",
+            MigrationError::RenameTargetExists { .. } => "annals-yaml-rename-target-exists",
+            MigrationError::MoveEmptyPath { .. } => "annals-yaml-move-empty-path",
+            MigrationError::MoveNotAMapping { .. } => "annals-yaml-move-not-a-mapping",
+            MigrationError::MoveThroughNotAMapping { .. } => "annals-yaml-move-through-not-a-mapping",
+            MigrationError::MoveTargetExists { .. } => "annals-yaml-move-target-exists",
+            MigrationError::DefaultNotAMapping { .. } => "annals-yaml-default-not-a-mapping",
+            MigrationError::RemoveNotAMapping { .. } => "annals-yaml-remove-not-a-mapping",
+            MigrationError::MapNotAMapping { .. } => "annals-yaml-map-not-a-mapping",
+            MigrationError::MapNotASequence { .. } => "annals-yaml-map-not-a-sequence",
+            MigrationError::Item { .. } => "annals-yaml-map-item",
+            MigrationError::RootNotAMapping => "annals-yaml-step-root-not-a-mapping",
+            MigrationError::Game(report) => report.code(),
+        }
     }
-}
 
-impl From<&str> for MigrationError {
-    fn from(s: &str) -> MigrationError {
-        MigrationError(s.to_string())
+    fn args(&self) -> Vec<(&'static str, Arg)> {
+        let s = |s: &String| Arg::from(s.as_str());
+        match self {
+            MigrationError::RenameNotAMapping { from } => vec![("from", s(from))],
+            MigrationError::RenameTargetExists { from, to } => vec![("from", s(from)), ("to", s(to))],
+            MigrationError::MoveEmptyPath { from, to } | MigrationError::MoveNotAMapping { from, to } => {
+                vec![("from", s(from)), ("to", s(to))]
+            }
+            MigrationError::MoveThroughNotAMapping { from, to, key } | MigrationError::MoveTargetExists { from, to, key } => {
+                vec![("from", s(from)), ("to", s(to)), ("key", s(key))]
+            }
+            MigrationError::DefaultNotAMapping { key }
+            | MigrationError::RemoveNotAMapping { key }
+            | MigrationError::MapNotAMapping { key }
+            | MigrationError::MapNotASequence { key } => vec![("key", s(key))],
+            MigrationError::Item { key, index, error } => {
+                vec![("key", s(key)), ("index", (*index).into()), ("error", Arg::nested(&**error))]
+            }
+            MigrationError::RootNotAMapping => vec![],
+            MigrationError::Game(report) => report.args(),
+        }
     }
 }
 
@@ -100,12 +195,31 @@ impl fmt::Display for ChainError {
             ChainProblem::BeyondCurrent { from, current } => {
                 write!(f, "a step from version {from}, but the current version is {current}")
             }
-            ChainProblem::Gap { from } => write!(f, "no step from version {from} to {}", from + 1),
+            ChainProblem::Gap { from } => write!(f, "no step from version {from} to {}", u64::from(from) + 1),
         }
     }
 }
 
 impl std::error::Error for ChainError {}
+
+impl Diagnostic for ChainError {
+    fn code(&self) -> &'static str {
+        match self.problem {
+            ChainProblem::Duplicate { .. } => "annals-yaml-chain-duplicate",
+            ChainProblem::BeyondCurrent { .. } => "annals-yaml-chain-beyond-current",
+            ChainProblem::Gap { .. } => "annals-yaml-chain-gap",
+        }
+    }
+
+    fn args(&self) -> Vec<(&'static str, Arg)> {
+        let kind = ("kind", Arg::from(self.kind.as_str()));
+        match self.problem {
+            ChainProblem::Duplicate { from } => vec![kind, ("from", from.into())],
+            ChainProblem::BeyondCurrent { from, current } => vec![kind, ("from", from.into()), ("current", current.into())],
+            ChainProblem::Gap { from } => vec![kind, ("from", from.into()), ("to", (u64::from(from) + 1).into())],
+        }
+    }
+}
 
 impl Migrations {
     /// No steps yet, for documents of `kind` (named in every error) whose
@@ -174,37 +288,58 @@ pub struct LoadError {
     pub problem: LoadProblem,
 }
 
+/// Why a document does not load.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LoadProblem {
     /// Not YAML this crate reads.
     Yaml(Error),
     /// The root is not a mapping.
     NotAMapping,
-    /// `version` is not a non-negative integer; what it is instead.
-    BadVersion(String),
+    /// `version` is not a non-negative integer.
+    BadVersion(BadVersion),
     /// Written by a newer build than this one.
     TooNew { found: u32, current: u32 },
     /// Older than the oldest version this build migrates.
     TooOld { found: u32, oldest: u32 },
     /// The step from `from` to `from + 1` failed.
-    Step { from: u32, error: MigrationError },
-    /// The current-version tree did not decode.
-    Decode(String),
+    Step { from: u32, error: Box<MigrationError> },
+    /// The current-version tree did not decode: the decoder's own error,
+    /// with the game's own code. See [`Loader::load_as`].
+    Decode(Report),
 }
 
-impl fmt::Display for LoadError {
+/// What a `version` that is not a non-negative integer is instead.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BadVersion {
+    /// `version:` with no value.
+    Empty,
+    Sequence,
+    Mapping,
+    /// A scalar that is not decimal digits, as read.
+    NotAnInteger { text: String },
+    /// Decimal digits too large for a version, as read.
+    TooLarge { text: String },
+}
+
+impl fmt::Display for BadVersion {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} document", self.kind)?;
-        if let Some(source) = &self.source {
-            write!(f, " {source}")?;
+        f.write_str("`version` must be a non-negative integer, not ")?;
+        match self {
+            BadVersion::Empty => f.write_str("an empty value"),
+            BadVersion::Sequence => f.write_str("a sequence"),
+            BadVersion::Mapping => f.write_str("a mapping"),
+            BadVersion::NotAnInteger { text } => write!(f, "{text:?}"),
+            BadVersion::TooLarge { text } => write!(f, "{text:?} (too large)"),
         }
-        f.write_str(": ")?;
-        match &self.problem {
+    }
+}
+
+impl fmt::Display for LoadProblem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
             LoadProblem::Yaml(e) => write!(f, "{e}"),
             LoadProblem::NotAMapping => f.write_str("the root must be a mapping with a `version`"),
-            LoadProblem::BadVersion(found) => {
-                write!(f, "`version` must be a non-negative integer, not {found}")
-            }
+            LoadProblem::BadVersion(bad) => write!(f, "{bad}"),
             LoadProblem::TooNew { found, current } => write!(
                 f,
                 "version {found} was written by a newer build; this build reads up to version {current}"
@@ -214,10 +349,57 @@ impl fmt::Display for LoadError {
                 "version {found} is older than this build migrates; the oldest it reads is version {oldest}"
             ),
             LoadProblem::Step { from, error } => {
-                write!(f, "migrating version {from} to {}: {error}", from + 1)
+                write!(f, "migrating version {from} to {}: {error}", u64::from(*from) + 1)
             }
             LoadProblem::Decode(e) => write!(f, "{e}"),
         }
+    }
+}
+
+impl Diagnostic for LoadProblem {
+    fn code(&self) -> &'static str {
+        match self {
+            LoadProblem::Yaml(e) => e.code(),
+            LoadProblem::NotAMapping => "annals-yaml-root-not-a-mapping",
+            LoadProblem::BadVersion(BadVersion::Empty) => "annals-yaml-version-empty",
+            LoadProblem::BadVersion(BadVersion::Sequence) => "annals-yaml-version-sequence",
+            LoadProblem::BadVersion(BadVersion::Mapping) => "annals-yaml-version-mapping",
+            LoadProblem::BadVersion(BadVersion::NotAnInteger { .. }) => "annals-yaml-version-not-an-integer",
+            LoadProblem::BadVersion(BadVersion::TooLarge { .. }) => "annals-yaml-version-too-large",
+            LoadProblem::TooNew { .. } => "annals-yaml-too-new",
+            LoadProblem::TooOld { .. } => "annals-yaml-too-old",
+            LoadProblem::Step { .. } => "annals-yaml-step-failed",
+            LoadProblem::Decode(e) => e.code(),
+        }
+    }
+
+    fn args(&self) -> Vec<(&'static str, Arg)> {
+        match self {
+            LoadProblem::Yaml(e) => e.args(),
+            LoadProblem::NotAMapping
+            | LoadProblem::BadVersion(BadVersion::Empty | BadVersion::Sequence | BadVersion::Mapping) => vec![],
+            LoadProblem::BadVersion(BadVersion::NotAnInteger { text } | BadVersion::TooLarge { text }) => {
+                vec![("text", text.as_str().into())]
+            }
+            LoadProblem::TooNew { found, current } => vec![("found", (*found).into()), ("current", (*current).into())],
+            LoadProblem::TooOld { found, oldest } => vec![("found", (*found).into()), ("oldest", (*oldest).into())],
+            LoadProblem::Step { from, error } => vec![
+                ("from", (*from).into()),
+                ("to", (u64::from(*from) + 1).into()),
+                ("error", Arg::nested(&**error)),
+            ],
+            LoadProblem::Decode(e) => e.args(),
+        }
+    }
+}
+
+impl fmt::Display for LoadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} document", self.kind)?;
+        if let Some(source) = &self.source {
+            write!(f, " {source}")?;
+        }
+        write!(f, ": {}", self.problem)
     }
 }
 
@@ -225,9 +407,28 @@ impl std::error::Error for LoadError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match &self.problem {
             LoadProblem::Yaml(e) => Some(e),
-            LoadProblem::Step { error, .. } => Some(error),
+            LoadProblem::Step { error, .. } => Some(&**error),
+            LoadProblem::Decode(e) => Some(e),
             _ => None,
         }
+    }
+}
+
+impl Diagnostic for LoadError {
+    fn code(&self) -> &'static str {
+        match self.source {
+            None => "annals-yaml-load-failed",
+            Some(_) => "annals-yaml-load-failed-at",
+        }
+    }
+
+    fn args(&self) -> Vec<(&'static str, Arg)> {
+        let mut args = vec![("kind", Arg::from(self.kind.as_str()))];
+        if let Some(source) = &self.source {
+            args.push(("source", source.as_str().into()));
+        }
+        args.push(("problem", Arg::nested(&self.problem)));
+        args
     }
 }
 
@@ -236,17 +437,18 @@ pub fn version_of(doc: &Value) -> Result<u32, LoadProblem> {
     if doc.as_map().is_none() {
         return Err(LoadProblem::NotAMapping);
     }
+    let bad = |b| Err(LoadProblem::BadVersion(b));
     let found = match doc.get("version") {
         None => return Ok(0),
         Some(Value::Scalar(s)) => s,
-        Some(Value::Null) => return Err(LoadProblem::BadVersion("an empty value".into())),
-        Some(Value::Seq(_)) => return Err(LoadProblem::BadVersion("a sequence".into())),
-        Some(Value::Map(_)) => return Err(LoadProblem::BadVersion("a mapping".into())),
+        Some(Value::Null) => return bad(BadVersion::Empty),
+        Some(Value::Seq(_)) => return bad(BadVersion::Sequence),
+        Some(Value::Map(_)) => return bad(BadVersion::Mapping),
     };
     if found.is_empty() || !found.bytes().all(|b| b.is_ascii_digit()) {
-        return Err(LoadProblem::BadVersion(format!("{found:?}")));
+        return bad(BadVersion::NotAnInteger { text: found.clone() });
     }
-    found.parse().map_err(|_| LoadProblem::BadVersion(format!("{found:?} (too large)")))
+    found.parse().or_else(|_| bad(BadVersion::TooLarge { text: found.clone() }))
 }
 
 impl Loader {
@@ -298,28 +500,29 @@ impl Loader {
         }
         for from in found..self.current {
             let step = self.steps[(from - self.oldest) as usize];
-            let outcome = step(&mut doc).and_then(|()| match doc {
-                Value::Map(_) => Ok(()),
-                _ => Err(MigrationError::new("the step left the root not a mapping")),
-            });
+            let outcome = match step(&mut doc) {
+                Ok(()) if doc.as_map().is_none() => Err(MigrationError::RootNotAMapping),
+                outcome => outcome,
+            };
             if let Err(error) = outcome {
-                return self.fail(source, LoadProblem::Step { from, error });
+                return self.fail(source, LoadProblem::Step { from, error: Box::new(error) });
             }
             *doc.entry("version") = Value::Scalar((from + 1).to_string());
         }
         Ok(doc)
     }
 
-    /// Load `text` and decode the current-version tree with `decode`, whose
-    /// error is reported as [`LoadProblem::Decode`].
-    pub fn load_as<T, E: fmt::Display>(
+    /// Load `text` and decode the current-version tree with `decode`. Its
+    /// error, a game's [`Diagnostic`] with the game's own code, is reported as
+    /// [`LoadProblem::Decode`].
+    pub fn load_as<T, E: Diagnostic>(
         &self,
         source: Option<&str>,
         text: &str,
         decode: impl FnOnce(&Value) -> Result<T, E>,
     ) -> Result<T, LoadError> {
         let doc = self.load(source, text)?;
-        decode(&doc).or_else(|e| self.fail(source, LoadProblem::Decode(e.to_string())))
+        decode(&doc).or_else(|e| self.fail(source, LoadProblem::Decode(Report::of(&e))))
     }
 
     /// The text of `text` migrated to the current version, written with
@@ -420,21 +623,17 @@ pub struct Fixture<'a> {
 
 // ---------------------------------------------------------------- helpers
 
-fn not_a_mapping(what: &str) -> MigrationError {
-    MigrationError(format!("{what}: not a mapping"))
-}
-
 /// Rename `from` to `to` in `map`, keeping its place. Nothing to do if `from`
 /// is missing; an error if `to` is already there.
 pub fn rename_key(map: &mut Value, from: &str, to: &str) -> Result<(), MigrationError> {
     let Value::Map(entries) = map else {
-        return Err(not_a_mapping(&format!("rename {from:?}")));
+        return Err(MigrationError::RenameNotAMapping { from: from.to_string() });
     };
     if from == to || !entries.iter().any(|(k, _)| k == from) {
         return Ok(());
     }
     if entries.iter().any(|(k, _)| k == to) {
-        return Err(MigrationError(format!("rename {from:?} to {to:?}: {to:?} is already there")));
+        return Err(MigrationError::RenameTargetExists { from: from.to_string(), to: to.to_string() });
     }
     for (k, _) in entries.iter_mut() {
         if k == from {
@@ -459,20 +658,29 @@ pub fn move_key(root: &mut Value, from: &[&str], to: &[&str]) -> Result<(), Migr
 }
 
 fn try_move(root: &mut Value, from: &[&str], to: &[&str]) -> Result<(), MigrationError> {
-    let what = || format!("move {} to {}", from.join("."), to.join("."));
+    let paths = || (from.join("."), to.join("."));
+    let not_a_mapping = || {
+        let (from, to) = paths();
+        MigrationError::MoveNotAMapping { from, to }
+    };
+    let through = |key: &str| {
+        let (from, to) = paths();
+        MigrationError::MoveThroughNotAMapping { from, to, key: key.to_string() }
+    };
     let (Some((from_key, from_parents)), Some((to_key, to_parents))) = (from.split_last(), to.split_last()) else {
-        return Err(MigrationError(format!("{}: empty key path", what())));
+        let (from, to) = paths();
+        return Err(MigrationError::MoveEmptyPath { from, to });
     };
     let mut parent = &mut *root;
     for key in from_parents {
         match parent.get_mut(key) {
             Some(next @ Value::Map(_)) => parent = next,
             Some(Value::Null) | None => return Ok(()),
-            Some(_) => return Err(not_a_mapping(&format!("{}: {key:?}", what()))),
+            Some(_) => return Err(through(key)),
         }
     }
     if parent.as_map().is_none() {
-        return Err(not_a_mapping(&what()));
+        return Err(not_a_mapping());
     }
     let Some(value) = parent.remove(from_key) else {
         return Ok(());
@@ -480,7 +688,7 @@ fn try_move(root: &mut Value, from: &[&str], to: &[&str]) -> Result<(), Migratio
     let mut parent = &mut *root;
     for key in to_parents {
         if parent.as_map().is_none() {
-            return Err(not_a_mapping(&format!("{}: {key:?}", what())));
+            return Err(through(key));
         }
         let next = parent.entry(key);
         if *next == Value::Null {
@@ -489,10 +697,11 @@ fn try_move(root: &mut Value, from: &[&str], to: &[&str]) -> Result<(), Migratio
         parent = next;
     }
     if parent.as_map().is_none() {
-        return Err(not_a_mapping(&what()));
+        return Err(not_a_mapping());
     }
     if parent.get(to_key).is_some() {
-        return Err(MigrationError(format!("{}: {to_key:?} is already there", what())));
+        let (from, to) = paths();
+        return Err(MigrationError::MoveTargetExists { from, to, key: to_key.to_string() });
     }
     *parent.entry(to_key) = value;
     Ok(())
@@ -501,7 +710,7 @@ fn try_move(root: &mut Value, from: &[&str], to: &[&str]) -> Result<(), Migratio
 /// Set `key` in `map` to `value` if it is missing or null.
 pub fn set_default(map: &mut Value, key: &str, value: Value) -> Result<(), MigrationError> {
     if map.as_map().is_none() {
-        return Err(not_a_mapping(&format!("default {key:?}")));
+        return Err(MigrationError::DefaultNotAMapping { key: key.to_string() });
     }
     let slot = map.entry(key);
     if *slot == Value::Null {
@@ -513,7 +722,7 @@ pub fn set_default(map: &mut Value, key: &str, value: Value) -> Result<(), Migra
 /// Take `key` out of `map`, giving its value if it was there.
 pub fn remove_key(map: &mut Value, key: &str) -> Result<Option<Value>, MigrationError> {
     if map.as_map().is_none() {
-        return Err(not_a_mapping(&format!("remove {key:?}")));
+        return Err(MigrationError::RemoveNotAMapping { key: key.to_string() });
     }
     Ok(map.remove(key))
 }
@@ -526,16 +735,60 @@ pub fn map_seq(
     mut f: impl FnMut(&mut Value) -> Result<(), MigrationError>,
 ) -> Result<(), MigrationError> {
     if map.as_map().is_none() {
-        return Err(not_a_mapping(&format!("map over {key:?}")));
+        return Err(MigrationError::MapNotAMapping { key: key.to_string() });
     }
     match map.get_mut(key) {
         None | Some(Value::Null) => Ok(()),
         Some(Value::Seq(items)) => {
-            for (i, item) in items.iter_mut().enumerate() {
-                f(item).map_err(|e| MigrationError(format!("{key}[{i}]: {e}")))?;
+            for (index, item) in items.iter_mut().enumerate() {
+                f(item).map_err(|e| MigrationError::Item { key: key.to_string(), index, error: Box::new(e) })?;
             }
             Ok(())
         }
-        Some(_) => Err(MigrationError(format!("map over {key:?}: not a sequence"))),
+        Some(_) => Err(MigrationError::MapNotASequence { key: key.to_string() }),
     }
+}
+
+/// One value of every error this module defines, each variant once; see
+/// [`crate::diagnostic_samples`]. A game's own code ([`MigrationError::Game`],
+/// [`LoadProblem::Decode`]) is the game's to sample.
+pub(crate) fn diagnostic_samples() -> Vec<Box<dyn Diagnostic>> {
+    let s = |s: &str| s.to_string();
+    let migration = vec![
+        MigrationError::RenameNotAMapping { from: s("hp") },
+        MigrationError::RenameTargetExists { from: s("hp"), to: s("health") },
+        MigrationError::MoveEmptyPath { from: s(""), to: s("stats.hp") },
+        MigrationError::MoveNotAMapping { from: s("hp"), to: s("stats.hp") },
+        MigrationError::MoveThroughNotAMapping { from: s("hp"), to: s("stats.hp"), key: s("stats") },
+        MigrationError::MoveTargetExists { from: s("hp"), to: s("stats.hp"), key: s("hp") },
+        MigrationError::DefaultNotAMapping { key: s("speed") },
+        MigrationError::RemoveNotAMapping { key: s("legacy") },
+        MigrationError::MapNotAMapping { key: s("units") },
+        MigrationError::MapNotASequence { key: s("units") },
+        MigrationError::Item { key: s("units"), index: 2, error: Box::new(MigrationError::DefaultNotAMapping { key: s("hp") }) },
+        MigrationError::RootNotAMapping,
+    ];
+    let yaml = Error { line: 2, problem: crate::ParseProblem::TabIndent };
+    let problems = vec![
+        LoadProblem::NotAMapping,
+        LoadProblem::BadVersion(BadVersion::Empty),
+        LoadProblem::BadVersion(BadVersion::Sequence),
+        LoadProblem::BadVersion(BadVersion::Mapping),
+        LoadProblem::BadVersion(BadVersion::NotAnInteger { text: s("two") }),
+        LoadProblem::BadVersion(BadVersion::TooLarge { text: s("99999999999") }),
+        LoadProblem::TooNew { found: 4, current: 3 },
+        LoadProblem::TooOld { found: 0, oldest: 1 },
+        LoadProblem::Step { from: 1, error: Box::new(MigrationError::RootNotAMapping) },
+    ];
+    let load = |source: Option<&str>, problem| LoadError { kind: s("unit"), source: source.map(s), problem };
+    let chain = |problem| ChainError { kind: s("unit"), problem };
+    let mut out: Vec<Box<dyn Diagnostic>> = Vec::new();
+    out.extend(migration.into_iter().map(|e| Box::new(e) as _));
+    out.extend(problems.into_iter().map(|e| Box::new(e) as _));
+    out.push(Box::new(load(None, LoadProblem::Yaml(yaml.clone()))));
+    out.push(Box::new(load(Some("content/units.yaml"), LoadProblem::Yaml(yaml))));
+    out.push(Box::new(chain(ChainProblem::Duplicate { from: 1 })));
+    out.push(Box::new(chain(ChainProblem::BeyondCurrent { from: 3, current: 3 })));
+    out.push(Box::new(chain(ChainProblem::Gap { from: 1 })));
+    out
 }

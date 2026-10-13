@@ -91,7 +91,9 @@ is a module of annals-yaml rather than its own crate because it works only on
   `ChainError` rather than panicking, so a test can name what is wrong.
 - A step edits version `from` into `from + 1`; the loader stamps the new
   version. Use the helpers (`rename_key`, `move_key`, `set_default`,
-  `remove_key`, `map_seq`).
+  `remove_key`, `map_seq`). A step that fails for the game's own reason
+  returns the game's diagnostic: `MigrationError::game(&e)`, or
+  `Report::new(code, english).arg(..).into()`.
 - Loading is string in, tree out, and never rewrites a file.
   `Loader::upgrade` gives the upgraded text for a tool that rewrites on
   purpose (the written text has no comments).
