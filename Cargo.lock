@@ -3,6 +3,33 @@
 version = 3
 
 [[package]]
+name = "annals"
+version = "0.1.0"
+
+[[package]]
+name = "annals-graph"
+version = "0.1.0"
+
+[[package]]
+name = "annals-log"
+version = "0.1.0"
+dependencies = [
+ "annals",
+ "prost",
+]
+
+[[package]]
+name = "annals-sim"
+version = "0.1.0"
+dependencies = [
+ "annals",
+]
+
+[[package]]
+name = "annals-yaml"
+version = "0.1.0"
+
+[[package]]
 name = "anyhow"
 version = "1.0.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -19,22 +46,6 @@ name = "either"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
-
-[[package]]
-name = "es"
-version = "0.1.0"
-
-[[package]]
-name = "eslog"
-version = "0.1.0"
-dependencies = [
- "es",
- "prost",
-]
-
-[[package]]
-name = "graph"
-version = "0.1.0"
 
 [[package]]
 name = "itertools"
@@ -87,13 +98,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "simkit"
-version = "0.1.0"
-dependencies = [
- "es",
-]
-
-[[package]]
 name = "syn"
 version = "2.0.119"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -109,7 +113,3 @@ name = "unicode-ident"
 version = "1.0.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
-
-[[package]]
-name = "yaml"
-version = "0.1.0"

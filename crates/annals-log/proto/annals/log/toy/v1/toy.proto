@@ -1,0 +1,33 @@
+// Toy domains for annals-log's own tests. Nothing here is a game.
+syntax = "proto3";
+
+package annals.log.toy.v1;
+
+// A counter: a domain that is not ticked.
+message CounterEvent {
+  oneof kind {
+    // The counter went up by this much.
+    int64 added = 1;
+    // The counter was reset, with a reason.
+    string reset = 2;
+  }
+}
+
+// The counter's typed envelope: field for field the generic
+// annals.log.v1.Envelope, with the event as a message.
+message CounterEnvelope {
+  // The event's position in its stream.
+  uint64 seq = 1;
+  // The earlier event this one follows from, if any.
+  optional uint64 cause = 2;
+  // The event itself.
+  CounterEvent event = 3;
+}
+
+// A ticked domain's event: the tick is field 1.
+message TimedEvent {
+  // When it happened.
+  uint64 tick = 1;
+  // What happened.
+  string what = 2;
+}

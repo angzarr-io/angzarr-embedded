@@ -14,29 +14,30 @@ changes, rewrite the text in place to say what is true now.
 
 ## Zero dependencies, no domain
 
-Every crate here knows nothing about any particular game. They are shared by
-card-game and tdautobattle, so anything specific to one of them belongs in
-that repository, not here.
+Annals is an event-sourced, deterministic game engine. Every crate here knows
+nothing about any particular game. They are shared by card-game and
+tdautobattle, so anything specific to one of them belongs in that
+repository, not here.
 
-Every crate has zero third-party dependencies, except eslog. A crate may
-depend on another crate in this workspace, as simkit does on es.
+Every crate has zero third-party dependencies, except annals-log. A crate may
+depend on another crate in this workspace, as annals-sim does on annals.
 
-eslog depends on `prost` because it is a protobuf format: the wire encoding
-needs a protobuf runtime, and hand-rolling the encoding would be a second,
-unchecked implementation of a published format. All protobuf code stays in
-eslog, so es and everything else stay dependency-free.
+annals-log depends on `prost` because it is a protobuf format: the wire
+encoding needs a protobuf runtime, and hand-rolling the encoding would be a
+second, unchecked implementation of a published format. All protobuf code
+stays in annals-log, so annals and everything else stay dependency-free.
 
-## eslog's wire types are hand-written; the `.proto` is the schema of record
+## annals-log's wire types are hand-written; the `.proto` is the schema of record
 
-eslog's messages are `#[derive(prost::Message)]` structs written by hand,
-matching `crates/eslog/proto/` field for field, so eslog builds with plain `cargo`
-and works as a git dependency with no codegen step. Change the `.proto`
-first, then the Rust to match. `buf lint` and `buf breaking` guard the
-`.proto`.
+annals-log's messages are `#[derive(prost::Message)]` structs written by
+hand, matching `crates/annals-log/proto/` field for field, so annals-log
+builds with plain `cargo` and works as a git dependency with no codegen step.
+Change the `.proto` first, then the Rust to match. `buf lint` and `buf
+breaking` guard the `.proto`.
 
 Codegen is only a test-time cross-check: `buf generate` writes into
-`crates/eslog/gen/`, which is gitignored and never committed, and
-`crates/eslog/tests/codegen.rs` (the `codegen-check` feature) proves the
+`crates/annals-log/gen/`, which is gitignored and never committed, and
+`crates/annals-log/tests/codegen.rs` (the `codegen-check` feature) proves the
 hand-written and generated types are wire-identical. Never edit or include
 `gen/` from library code.
 
@@ -50,5 +51,6 @@ both inherited from `[workspace.package]`. A new crate sets
 
 Plain `cargo build` and `cargo test` work from a clean checkout and skip the
 codegen check. `just test`, `just lint` and `just build` run `just gen` first
-and turn on `eslog/codegen-check`, so they need `buf` and `protoc-gen-prost`.
+and turn on `annals-log/codegen-check`, so they need `buf` and
+`protoc-gen-prost`.
 `just breaking` checks the schema against main for wire-breaking changes.
