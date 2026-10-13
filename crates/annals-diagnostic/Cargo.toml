@@ -9,3 +9,6 @@ rust-version.workspace = true
 
 # Deliberately zero dependencies, and nothing from any game that uses it.
 [dependencies]
+
+[lints]
+workspace = true

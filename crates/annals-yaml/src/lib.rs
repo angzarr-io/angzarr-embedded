@@ -857,7 +857,7 @@ mod tests {
 
     #[test]
     fn a_quote_opens_only_at_the_start_of_a_scalar() {
-        assert_eq!(parse("name: l'épée # the sword\n").unwrap().get("name"), Some(&s("l'épée")));
+        assert_eq!(parse("name: l'\u{e9}p\u{e9}e # the sword\n").unwrap().get("name"), Some(&s("l'\u{e9}p\u{e9}e")));
         assert_eq!(parse("name: 5\"2 # tall\n").unwrap().get("name"), Some(&s("5\"2")));
         assert_eq!(parse("name: 'it''s # in' # out\n").unwrap().get("name"), Some(&s("it's # in")));
         assert_eq!(parse("name: \"a\\\" # in\" # out\n").unwrap().get("name"), Some(&s("a\" # in")));
@@ -902,8 +902,8 @@ mod tests {
     #[test]
     fn double_quotes_take_unicode_cr_and_nul_escapes() {
         let v = parse(&bs(r#"a: "^u00e9^r^0^t^n^^^"^U0001F5E1""#)).unwrap();
-        assert_eq!(v.get("a"), Some(&s("é\r\0\t\n\\\"🗡")));
-        assert_eq!(parse(&bs(r#"a: "^u00E9""#)).unwrap().get("a"), Some(&s("é")));
+        assert_eq!(v.get("a"), Some(&s("\u{e9}\r\0\t\n\\\"\u{1f5e1}")));
+        assert_eq!(parse(&bs(r#"a: "^u00E9""#)).unwrap().get("a"), Some(&s("\u{e9}")));
         for bad in ["^uD83D^uDDE1", "^uDDE1", "^u00e", "^U00110000", "^x41", "^q", "^u+0e9"] {
             let e = parse(&bs(&format!("a: \"{bad}\"\n"))).unwrap_err();
             assert!(matches!(e.problem, ParseProblem::BadUnicodeEscape { .. } | ParseProblem::UnknownEscape { .. }), "{bad}: {e}");
@@ -950,7 +950,7 @@ mod tests {
         for id in ["sword", "Iron_Sword-2", "units.club", "a"] {
             assert!(is_ascii_id(id), "{id}");
         }
-        for id in ["", "\u{e9}", "e\u{301}", "épée", "a b", "a:b", "ｓword", "a\u{200b}"] {
+        for id in ["", "\u{e9}", "e\u{301}", "\u{e9}p\u{e9}e", "a b", "a:b", "\u{ff53}word", "a\u{200b}"] {
             assert!(!is_ascii_id(id), "{id:?}");
         }
     }

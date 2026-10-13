@@ -20,3 +20,6 @@ annals-graph = { path = "../annals-graph" }
 annals-log = { path = "../annals-log" }
 annals-yaml = { path = "../annals-yaml" }
 fluent-syntax = "0.12"
+
+[lints]
+workspace = true

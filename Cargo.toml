@@ -8,3 +8,14 @@ rust-version = "1.77"
 license = "EUPL-1.2"
 # Not published to crates.io; shared by git only.
 publish = false
+
+# Every crate opts in with `[lints] workspace = true`.
+[workspace.lints.clippy]
+# Zero-width and other invisible characters in source: never intended.
+invisible_characters = "deny"
+# A literal in another normalization form than NFC reads the same as its NFC
+# twin and compares unequal.
+unicode_not_nfc = "deny"
+# Non-ASCII in a literal is written as an escape, so what the code holds is
+# visible. Allowed, with a comment, only where a test's corpus is the point.
+non_ascii_literal = "deny"

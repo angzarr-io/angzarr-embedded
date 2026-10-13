@@ -15,3 +15,6 @@ annals-diagnostic = { path = "../annals-diagnostic" }
 # Test-only: annals-sim's seeded Rng drives the round-trip property test.
 [dev-dependencies]
 annals-sim = { path = "../annals-sim" }
+
+[lints]
+workspace = true

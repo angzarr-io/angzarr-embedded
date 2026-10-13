@@ -79,6 +79,15 @@ it without depending on the event-sourcing kernel.
   `Domain::Rejection: Diagnostic`, so a domain whose rejections are not
   localizable does not compile.
 
+## Unicode in source is visible
+
+The workspace denies three clippy lints, and every crate opts in with
+`[lints] workspace = true`: `invisible_characters`, `unicode_not_nfc` and
+`non_ascii_literal`. A non-ASCII character in a literal is written as an
+escape (`"\u{e9}"`), so what the code holds is plain. The one allow is
+`crates/annals-yaml/tests/roundtrip.rs`, whose corpus is readable text by
+design; a new allow needs a comment saying why.
+
 ## Use `just`
 
 Plain `cargo build` and `cargo test` work from a clean checkout and skip the

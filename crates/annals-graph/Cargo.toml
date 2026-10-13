@@ -11,3 +11,6 @@ rust-version.workspace = true
 # uses it.
 [dependencies]
 annals-diagnostic = { path = "../annals-diagnostic" }
+
+[lints]
+workspace = true

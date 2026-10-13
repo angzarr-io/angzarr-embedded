@@ -4,6 +4,12 @@
 //! control characters, YAML indicators); seeded random strings over a mixed
 //! alphabet cover their combinations.
 
+// The corpus is written as the characters themselves, not escapes: what
+// each string tests should be visible at a glance. Characters that do not
+// show (controls, odd spaces, combining marks) stay escaped, and
+// invisible_characters and unicode_not_nfc stay denied here.
+#![allow(clippy::non_ascii_literal)]
+
 use annals_sim::Rng;
 use annals_yaml::{parse, write, Value};
 

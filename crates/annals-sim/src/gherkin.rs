@@ -377,9 +377,9 @@ Feature: Counting
 
     #[test]
     fn a_leading_bom_does_not_hide_the_feature() {
-        let f = parse_feature("\u{feff}Feature: Épées\r\n  Scenario: 剣\r\n    Given a blade\r\n");
-        assert_eq!(f.name, "Épées");
-        assert_eq!(f.scenarios[0].name, "剣");
+        let f = parse_feature("\u{feff}Feature: \u{c9}p\u{e9}es\r\n  Scenario: \u{5263}\r\n    Given a blade\r\n");
+        assert_eq!(f.name, "\u{c9}p\u{e9}es");
+        assert_eq!(f.scenarios[0].name, "\u{5263}");
         assert_eq!(f.scenarios[0].steps[0].text, "a blade");
     }
 

@@ -22,3 +22,6 @@ prost = "0.14"
 # `buf generate` writes into gen/. Needs `just gen` first; `just test` turns
 # it on.
 codegen-check = []
+
+[lints]
+workspace = true
