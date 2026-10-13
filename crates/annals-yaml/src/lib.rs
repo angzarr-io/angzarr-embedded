@@ -33,6 +33,13 @@
 //! stays `"no"` and `1.10` stays `"1.10"`. The reader of a value decides what
 //! it means. Mappings keep their order.
 //!
+//! Keys compare by bytes, with no Unicode normalization: `é` (U+00E9) and
+//! `e` + U+0301 look the same and are two different keys. Normalizing would
+//! need Unicode's tables, a dependency this crate does not take. Games should
+//! keep ids (keys and the names other content refers to) ASCII, which
+//! [`is_ascii_id`] checks, as annals-graph's tags already are; display text
+//! in values can be any Unicode.
+//!
 //! [`versioned`] loads documents stamped with a root `version`, running
 //! registered migrations up to the version the code reads.
 
@@ -63,6 +70,13 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+/// Whether `s` is an ASCII id: non-empty, and only ASCII letters, digits,
+/// `_`, `-` and `.`. Such ids have one spelling, so they compare as the
+/// reader expects without Unicode normalization.
+pub fn is_ascii_id(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+}
 
 fn err<T>(line: usize, message: impl Into<String>) -> Result<T, Error> {
     Err(Error {
@@ -878,6 +892,19 @@ mod tests {
             round_trips(&v);
             let written = write(&v, 0);
             assert!(!written.chars().any(|c| c.is_control() && c != '\n'), "{written:?}");
+        }
+    }
+
+    #[test]
+    fn keys_compare_by_bytes_and_ascii_ids_have_one_spelling() {
+        let v = parse("\u{e9}: 1\ne\u{301}: 2\n").unwrap();
+        assert_eq!(v.get("\u{e9}"), Some(&s("1")));
+        assert_eq!(v.get("e\u{301}"), Some(&s("2")));
+        for id in ["sword", "Iron_Sword-2", "units.club", "a"] {
+            assert!(is_ascii_id(id), "{id}");
+        }
+        for id in ["", "\u{e9}", "e\u{301}", "épée", "a b", "a:b", "ｓword", "a\u{200b}"] {
+            assert!(!is_ascii_id(id), "{id:?}");
         }
     }
 
