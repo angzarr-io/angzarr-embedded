@@ -2,7 +2,7 @@
 //! with the helpers, pass-through, write-back and determinism.
 
 use annals_yaml::versioned::{
-    map_seq, move_key, remove_key, rename_key, set_default, ChainError, ChainProblem, Fixture, LoadProblem, Loader,
+    map_seq, move_key, remove_key, rename_key, set_default, version_of, ChainError, ChainProblem, Fixture, LoadProblem, Loader,
     MigrationError, Migrations,
 };
 use annals_yaml::{parse, write, Value};
@@ -123,7 +123,6 @@ fn every_failure_is_a_typed_error() {
     assert!(matches!(problem("version: 3\na: [1, 2\n"), LoadProblem::Yaml(_)));
     assert_eq!(problem("- version: 3\n"), LoadProblem::NotAMapping);
     assert_eq!(problem(""), LoadProblem::NotAMapping);
-    assert_eq!(problem("name: Ogre\n"), LoadProblem::MissingVersion);
     assert_eq!(problem("version: two\n"), LoadProblem::BadVersion("\"two\"".into()));
     assert_eq!(problem("version: -1\n"), LoadProblem::BadVersion("\"-1\"".into()));
     assert_eq!(problem("version: 1.0\n"), LoadProblem::BadVersion("\"1.0\"".into()));
@@ -235,4 +234,16 @@ fn fixtures_must_migrate_to_their_expected_trees() {
 #[should_panic(expected = "toy fixtures do not migrate")]
 fn assert_fixtures_panics_on_failure() {
     toy().assert_fixtures(&[Fixture { name: "v0.yaml", input: V0, expected: None }]);
+}
+
+#[test]
+fn a_document_without_a_version_is_version_0() {
+    let unstamped = V0.replace("version: 0\n", "");
+    assert_eq!(version_of(&annals_yaml::parse(&unstamped).unwrap()), Ok(0));
+    assert_eq!(toy().load(None, &unstamped).unwrap(), toy().load(None, V0).unwrap());
+    let from_1 = Migrations::new("toy", 3).step(1, v1_to_v2).step(2, v2_to_v3).build().unwrap();
+    assert_eq!(
+        from_1.load(None, "name: Ogre\n").unwrap_err().problem,
+        LoadProblem::TooOld { found: 0, oldest: 1 }
+    );
 }

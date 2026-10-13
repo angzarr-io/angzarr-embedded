@@ -59,7 +59,7 @@ and turn on `annals-log/codegen-check`, so they need `buf` and
 ## Versioned documents: bump, register a step, keep an old fixture
 
 `annals_yaml::versioned` loads content stamped with a root `version: N` (a
-non-negative integer; a missing `version` is an error, never version 0). It
+non-negative integer; a mapping with no `version` is version 0). It
 is a module of annals-yaml rather than its own crate because it works only on
 `annals_yaml::Value` and every user of it already depends on annals-yaml.
 

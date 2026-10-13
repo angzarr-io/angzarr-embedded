@@ -3,9 +3,8 @@
 //!
 //! - **The stamp.** Every versioned document is a mapping with a root
 //!   `version` whose value is a non-negative integer (decimal digits). A
-//!   missing `version` is an error, not version 0: an unstamped file is more
-//!   likely the wrong file than an ancient one, and guessing would migrate it
-//!   silently.
+//!   mapping with no `version` is version 0, so files written before
+//!   versioning load through the whole chain.
 //! - **The chain.** [`Migrations::new`] names the document kind and the
 //!   current version; [`Migrations::step`] registers the step from `N` to
 //!   `N + 1`. [`Migrations::build`] checks the chain and gives a [`Loader`]:
@@ -181,8 +180,6 @@ pub enum LoadProblem {
     Yaml(Error),
     /// The root is not a mapping.
     NotAMapping,
-    /// The root mapping has no `version`.
-    MissingVersion,
     /// `version` is not a non-negative integer; what it is instead.
     BadVersion(String),
     /// Written by a newer build than this one.
@@ -205,7 +202,6 @@ impl fmt::Display for LoadError {
         match &self.problem {
             LoadProblem::Yaml(e) => write!(f, "{e}"),
             LoadProblem::NotAMapping => f.write_str("the root must be a mapping with a `version`"),
-            LoadProblem::MissingVersion => f.write_str("no root `version`"),
             LoadProblem::BadVersion(found) => {
                 write!(f, "`version` must be a non-negative integer, not {found}")
             }
@@ -235,13 +231,13 @@ impl std::error::Error for LoadError {
     }
 }
 
-/// A document's root `version`.
+/// A document's root `version`; a mapping without one is version 0.
 pub fn version_of(doc: &Value) -> Result<u32, LoadProblem> {
     if doc.as_map().is_none() {
         return Err(LoadProblem::NotAMapping);
     }
     let found = match doc.get("version") {
-        None => return Err(LoadProblem::MissingVersion),
+        None => return Ok(0),
         Some(Value::Scalar(s)) => s,
         Some(Value::Null) => return Err(LoadProblem::BadVersion("an empty value".into())),
         Some(Value::Seq(_)) => return Err(LoadProblem::BadVersion("a sequence".into())),
@@ -294,6 +290,11 @@ impl Loader {
         }
         if found < self.oldest {
             return self.fail(source, LoadProblem::TooOld { found, oldest: self.oldest });
+        }
+        if let Value::Map(entries) = &mut doc {
+            if found < self.current && !entries.iter().any(|(k, _)| k == "version") {
+                entries.insert(0, ("version".to_string(), Value::Scalar("0".to_string())));
+            }
         }
         for from in found..self.current {
             let step = self.steps[(from - self.oldest) as usize];
