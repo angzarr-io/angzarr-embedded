@@ -119,6 +119,5 @@ The check needs:
   prost-build 0.14.1) and which the hand-written types derive from. prost
   0.14 needs Rust 1.85.
 
-On the `windows-gnu` toolchain the plugin's dependencies need `dlltool` with
-an assembler beside it; the toolchain's bundled `dlltool.exe` has none. Point
-`-Cdlltool=` at a copy of `dlltool.exe` sitting next to a MinGW `as.exe`.
+The plugin builds with the repo toolchain (`stable-x86_64-pc-windows-msvc`,
+which needs the Visual Studio Build Tools).

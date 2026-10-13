@@ -1,4 +1,5 @@
-# No MSVC linker on this machine; the GNU toolchain bundles its own.
-# Scoped to this repo so the global default is untouched.
+# Scoped to this repo so the global default is untouched. Needs the Visual
+# Studio Build Tools (C++ workload); `just setup` in tdautobattle installs them.
 [toolchain]
-channel = "stable-x86_64-pc-windows-gnu"
+channel = "stable-x86_64-pc-windows-msvc"
+components = ["clippy", "rustfmt"]
