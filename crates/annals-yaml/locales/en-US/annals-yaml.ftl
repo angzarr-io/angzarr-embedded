@@ -69,6 +69,7 @@ annals-yaml-edit-not-found = { $path }: not found
 annals-yaml-edit-not-a-mapping = { $path }: not a mapping
 annals-yaml-edit-not-a-sequence = { $path }: not a sequence
 annals-yaml-edit-inside-flow = { $path }: inside a flow collection, which is edited only as a whole
+annals-yaml-edit-item-first-key = { $path }: the key on a sequence item's dash line, which is edited only with the whole item
 annals-yaml-edit-no-such-item = { $path }: no item { $index }: the sequence has { $len ->
     [one] { $len } item
    *[other] { $len } items

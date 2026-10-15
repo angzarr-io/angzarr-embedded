@@ -13,6 +13,12 @@
 //! removes one blank line where two would otherwise meet, or where one would
 //! be left between a key and its first item.
 //!
+//! A mapping entry is edited the same way: [`Document::set`] and
+//! [`Document::remove_key`] find the mapping by a path of keys and sequence
+//! items ([`Seg`]) and change only that entry's lines, and
+//! [`Document::update_to`] brings the whole document to a target value
+//! through such edits, so only what differs is rewritten.
+//!
 //! A new item is written with [`crate::write`]'s layout at the sequence's own
 //! indent, `flow_depth` levels counted from the item. A flow sequence
 //! (`[a, b]`) stays on its line while every item is a scalar, and becomes a
@@ -62,9 +68,20 @@ pub enum EditProblem {
     InsideFlow,
     /// The sequence has no item at `index`.
     NoSuchItem { index: usize, len: usize },
+    /// The key on a sequence item's dash line (`- name: x`), which is edited
+    /// only with the whole item.
+    ItemFirstKey,
     /// The edited text would not read back as the value intended. A bug in
     /// this module, refused rather than written.
     Unfaithful,
+}
+
+/// One step of a path into a document: a mapping key, or a sequence item by
+/// index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Seg<'a> {
+    Key(&'a str),
+    Item(usize),
 }
 
 impl Document {
@@ -114,6 +131,165 @@ impl Document {
     /// comment lines above it.
     pub fn replace(&mut self, path: &[&str], index: usize, item: &Value, flow_depth: usize) -> Result<(), EditError> {
         self.edit(path, Op::Replace(index, item, flow_depth))
+    }
+
+    /// Set `key` in the mapping at `path` to `value`: an existing entry is
+    /// rewritten in place, keeping its key as spelled and any comment on its
+    /// line; a missing one goes at the end of the mapping. `value` is written
+    /// with [`crate::write`]'s layout, `flow_depth` levels counted from the
+    /// entry. Only the entry's lines change.
+    pub fn set(&mut self, path: &[Seg<'_>], key: &str, value: &Value, flow_depth: usize) -> Result<(), EditError> {
+        self.map_edit(path, key, MapOp::Set(value, flow_depth))
+    }
+
+    /// Take `key` out of the mapping at `path`, with the comment lines directly
+    /// above it and the deeper ones directly below it.
+    pub fn remove_key(&mut self, path: &[Seg<'_>], key: &str) -> Result<(), EditError> {
+        self.map_edit(path, key, MapOp::Remove)
+    }
+
+    /// Edit the document until it reads as `target` (up to the order of
+    /// mapping keys: a key `target` adds goes at the end of its mapping),
+    /// changing only the entries and items whose values differ, at the
+    /// deepest level an edit can be made. Everything else stays as written.
+    /// `flow_depth` counts from the root, as for [`crate::write`]. On an error
+    /// the document is left as it was.
+    pub fn update_to(&mut self, target: &Value, flow_depth: usize) -> Result<(), EditError> {
+        let before = self.clone();
+        let current = self.value.clone();
+        let reached = self.reach(&mut Vec::new(), &current, target, flow_depth);
+        match reached {
+            Ok(()) if same(&self.value, target) => Ok(()),
+            Ok(()) => {
+                *self = before;
+                Err(EditError { path: Vec::new(), problem: EditProblem::Unfaithful })
+            }
+            Err(e) => {
+                *self = before;
+                Err(e)
+            }
+        }
+    }
+
+    /// Bring the value at `path` from `old` to `new`; an error means the
+    /// caller must replace it whole.
+    fn reach<'v>(&mut self, path: &mut Vec<Seg<'v>>, old: &'v Value, new: &'v Value, flow_depth: usize) -> Result<(), EditError> {
+        if old == new {
+            return Ok(());
+        }
+        let depth = flow_depth.saturating_sub(path.len());
+        match (old, new) {
+            (Value::Map(was), Value::Map(now)) => {
+                for (k, _) in was {
+                    if !now.iter().any(|(n, _)| n == k) {
+                        self.remove_key(path, k)?;
+                    }
+                }
+                for (k, v) in now {
+                    match was.iter().find(|(o, _)| o == k) {
+                        Some((_, ov)) if ov == v => {}
+                        Some((_, ov)) => {
+                            path.push(Seg::Key(k));
+                            let deeper = self.reach(path, ov, v, flow_depth);
+                            path.pop();
+                            if deeper.is_err() {
+                                self.set(path, k, v, depth)?;
+                            }
+                        }
+                        None => self.set(path, k, v, depth)?,
+                    }
+                }
+                Ok(())
+            }
+            (Value::Seq(was), Value::Seq(now)) if was.len() == now.len() => {
+                for (i, (ov, nv)) in was.iter().zip(now).enumerate() {
+                    if ov == nv {
+                        continue;
+                    }
+                    path.push(Seg::Item(i));
+                    let deeper = self.reach(path, ov, nv, flow_depth);
+                    path.pop();
+                    if let Err(e) = deeper {
+                        let keys: Option<Vec<&str>> = path
+                            .iter()
+                            .map(|seg| match seg {
+                                Seg::Key(k) => Some(*k),
+                                Seg::Item(_) => None,
+                            })
+                            .collect();
+                        match keys {
+                            Some(keys) => self.replace(&keys, i, nv, depth)?,
+                            None => return Err(e),
+                        }
+                    }
+                }
+                Ok(())
+            }
+            _ => Err(EditError { path: seg_path(path), problem: EditProblem::NotAMapping }),
+        }
+    }
+
+    fn map_edit(&mut self, path: &[Seg<'_>], key: &str, op: MapOp) -> Result<(), EditError> {
+        let mut full = path.to_vec();
+        full.push(Seg::Key(key));
+        let fail = |problem| EditError { path: seg_path(&full), problem };
+        let body = self.body();
+        let meaningful = Meaningful::of(&body);
+        let view = View::descend(&meaningful, path).map_err(|p| EditError { path: seg_path(path), problem: p })?;
+
+        let mut expected = self.value.clone();
+        let parent = value_at(&mut expected, path).ok_or_else(|| fail(EditProblem::NotAMapping))?;
+        let found = view.entry(key).map_err(fail)?;
+        if found.is_some_and(|(at, _)| at == 0 && view.dash_first) {
+            return Err(fail(EditProblem::ItemFirstKey));
+        }
+        let Value::Map(entries) = parent else {
+            return Err(fail(EditProblem::NotAMapping));
+        };
+        match op {
+            MapOp::Set(value, _) => match entries.iter_mut().find(|(k, _)| k == key) {
+                Some((_, v)) => *v = value.clone(),
+                None => entries.push((key.to_string(), value.clone())),
+            },
+            MapOp::Remove => {
+                let i = entries.iter().position(|(k, _)| k == key).ok_or_else(|| fail(EditProblem::NotFound))?;
+                entries.remove(i);
+            }
+        }
+
+        let mut lines = self.lines.clone();
+        match (op, found) {
+            (MapOp::Set(value, flow_depth), Some((at, end))) => {
+                let mut new = entry_lines(key, value, view.indent, flow_depth);
+                let first = &self.lines[view.raw(at)].text;
+                let value_text = new[0].text.trim_start_matches(' ')[scalar_text(key, At::Key).len() + 1..].trim_start().to_string();
+                new[0].text = rekey(first, &value_text);
+                lines.splice(view.raw(at)..=end, new);
+            }
+            (MapOp::Set(value, flow_depth), None) => {
+                let after = view.append_after(&self.lines);
+                lines.splice(after + 1..after + 1, entry_lines(key, value, view.indent, flow_depth));
+            }
+            (MapOp::Remove, Some((at, end))) => {
+                let mut start = view.raw(at);
+                while start > 0 && comment_only(&lines[start - 1].text).is_some_and(|i| i <= view.indent) {
+                    start -= 1;
+                }
+                lines.drain(start..=end);
+                if start > 0 && start < lines.len() && blank(&lines[start - 1].text) && blank(&lines[start].text) {
+                    lines.remove(start);
+                }
+            }
+            (MapOp::Remove, None) => return Err(fail(EditProblem::NotFound)),
+        }
+        let edited = Document { bom: self.bom, lines: normalize_eol(lines, &self.lines), value: expected };
+        match parse(&edited.body()) {
+            Ok(back) if back == edited.value => {
+                *self = edited;
+                Ok(())
+            }
+            _ => Err(fail(EditProblem::Unfaithful)),
+        }
     }
 
     fn edit(&mut self, path: &[&str], op: Op) -> Result<(), EditError> {
@@ -439,6 +615,182 @@ fn depth_of(op: &Op) -> usize {
     }
 }
 
+#[derive(Clone, Copy)]
+enum MapOp<'a> {
+    Set(&'a Value, usize),
+    Remove,
+}
+
+fn seg_path(path: &[Seg<'_>]) -> Vec<String> {
+    path.iter()
+        .map(|seg| match seg {
+            Seg::Key(k) => k.to_string(),
+            Seg::Item(i) => i.to_string(),
+        })
+        .collect()
+}
+
+/// The value at `path` in `v`, if the path is there.
+fn value_at<'v>(v: &'v mut Value, path: &[Seg<'_>]) -> Option<&'v mut Value> {
+    let mut at = v;
+    for seg in path {
+        at = match seg {
+            Seg::Key(k) => at.get_mut(k)?,
+            Seg::Item(i) => match at {
+                Value::Seq(items) => items.get_mut(*i)?,
+                _ => return None,
+            },
+        };
+    }
+    Some(at)
+}
+
+/// Equal, up to the order of mapping keys.
+fn same(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Map(x), Value::Map(y)) => {
+            x.len() == y.len() && x.iter().all(|(k, v)| y.iter().find(|(n, _)| n == k).is_some_and(|(_, w)| same(v, w)))
+        }
+        (Value::Seq(x), Value::Seq(y)) => x.len() == y.len() && x.iter().zip(y).all(|(v, w)| same(v, w)),
+        _ => a == b,
+    }
+}
+
+/// `key: value` written as a mapping entry at `indent`.
+fn entry_lines(key: &str, value: &Value, indent: usize, flow_depth: usize) -> Vec<Raw> {
+    let pad = " ".repeat(indent);
+    write(&Value::Map(vec![(key.to_string(), value.clone())]), flow_depth)
+        .lines()
+        .map(|l| Raw { text: format!("{pad}{l}"), eol: String::new() })
+        .collect()
+}
+
+/// The meaningful lines of one mapping (or sequence) a path leads to. An
+/// item's first line is seen without its dash, at its content's indent;
+/// `dash_first` says the first line is such a line.
+struct View {
+    lines: Vec<(usize, usize, String)>,
+    dash_first: bool,
+    /// The indent new keys go at.
+    indent: usize,
+    /// The raw line new keys go after when the view is empty.
+    after: usize,
+}
+
+impl View {
+    fn descend(m: &Meaningful, path: &[Seg<'_>]) -> Result<View, EditProblem> {
+        let mut view = View {
+            lines: m.lines.clone(),
+            dash_first: false,
+            indent: m.lines.first().map_or(0, |l| l.1),
+            after: m.lines.last().map_or(0, |l| l.0),
+        };
+        for seg in path {
+            view = match seg {
+                Seg::Key(k) => view.value_of(k)?,
+                Seg::Item(i) => view.item(*i)?,
+            };
+        }
+        Ok(view)
+    }
+
+    fn raw(&self, i: usize) -> usize {
+        self.lines[i].0
+    }
+
+    fn is_mapping(&self) -> bool {
+        self.lines.first().is_some_and(|(_, _, t)| !is_item(t) && split_key(t).is_some())
+    }
+
+    /// `key`'s line in this mapping and the last raw line of its entry (its
+    /// value's lines and the deeper comments directly below them). `None`
+    /// when the key isn't there.
+    fn entry(&self, key: &str) -> Result<Option<(usize, usize)>, EditProblem> {
+        if self.lines.is_empty() {
+            return Ok(None);
+        }
+        if !self.is_mapping() {
+            return Err(EditProblem::NotAMapping);
+        }
+        let indent = self.lines[0].1;
+        let Some(at) = (0..self.lines.len()).find(|&i| {
+            let (_, ind, text) = &self.lines[i];
+            *ind == indent && !is_item(text) && split_key(text).is_some_and(|(k, _)| inline(k, 0).ok().as_ref().and_then(Value::as_str) == Some(key))
+        }) else {
+            return Ok(None);
+        };
+        let end = self.value_end(at);
+        let last = if end > at + 1 { self.raw(end - 1) } else { self.raw(at) };
+        Ok(Some((at, last)))
+    }
+
+    /// One past the last line of the value of the key at `at`.
+    fn value_end(&self, at: usize) -> usize {
+        let indent = self.lines[at].1;
+        let mut end = at + 1;
+        let same_indent_seq = end < self.lines.len() && self.lines[end].1 == indent && is_item(&self.lines[end].2);
+        while end < self.lines.len() && (self.lines[end].1 > indent || same_indent_seq && self.lines[end].1 == indent && is_item(&self.lines[end].2)) {
+            end += 1;
+        }
+        end
+    }
+
+    fn value_of(&self, key: &str) -> Result<View, EditProblem> {
+        if !self.is_mapping() {
+            return Err(EditProblem::NotAMapping);
+        }
+        let (at, _) = self.entry(key)?.ok_or(EditProblem::NotFound)?;
+        let (_, rest) = split_key(&self.lines[at].2).expect("a key line");
+        if !rest.is_empty() {
+            return Err(if rest.starts_with('{') || rest.starts_with('[') { EditProblem::InsideFlow } else { EditProblem::NotAMapping });
+        }
+        let end = self.value_end(at);
+        let lines: Vec<_> = self.lines[at + 1..end].to_vec();
+        Ok(View {
+            indent: lines.first().map_or(self.lines[at].1 + 2, |l| l.1),
+            after: lines.last().map_or(self.raw(at), |l| l.0),
+            lines,
+            dash_first: false,
+        })
+    }
+
+    fn item(&self, index: usize) -> Result<View, EditProblem> {
+        if !self.lines.first().is_some_and(|(_, _, t)| is_item(t)) {
+            return Err(EditProblem::NotASequence);
+        }
+        let indent = self.lines[0].1;
+        let starts: Vec<usize> = (0..self.lines.len()).filter(|&i| self.lines[i].1 == indent && is_item(&self.lines[i].2)).collect();
+        let Some(&start) = starts.get(index) else {
+            return Err(EditProblem::NoSuchItem { index, len: starts.len() });
+        };
+        let end = starts.get(index + 1).copied().unwrap_or(self.lines.len());
+        let (raw, _, text) = &self.lines[start];
+        let rest = text[1..].trim_start_matches(' ');
+        let mut lines = Vec::new();
+        let dash_first = !rest.is_empty();
+        if dash_first {
+            lines.push((*raw, indent + (text.len() - rest.len()), rest.to_string()));
+        }
+        lines.extend(self.lines[start + 1..end].iter().cloned());
+        Ok(View {
+            indent: lines.first().map_or(indent + 2, |l| l.1),
+            after: lines.last().map_or(*raw, |l| l.0),
+            lines,
+            dash_first,
+        })
+    }
+
+    /// The raw line a new key goes after: the view's last line and the
+    /// deeper comment lines directly below it.
+    fn append_after(&self, lines: &[Raw]) -> usize {
+        let mut after = self.after;
+        while after + 1 < lines.len() && comment_only(&lines[after + 1].text).is_some_and(|i| i > self.indent) {
+            after += 1;
+        }
+        after
+    }
+}
+
 // ------------------------------------------------------------------ errors
 
 impl fmt::Display for EditProblem {
@@ -449,6 +801,7 @@ impl fmt::Display for EditProblem {
             EditProblem::NotASequence => f.write_str("not a sequence"),
             EditProblem::InsideFlow => f.write_str("inside a flow collection, which is edited only as a whole"),
             EditProblem::NoSuchItem { index, len } => write!(f, "no item {index}: the sequence has {len}"),
+            EditProblem::ItemFirstKey => f.write_str("the key on a sequence item's dash line, which is edited only with the whole item"),
             EditProblem::Unfaithful => f.write_str("the edit would not read back as written; nothing was changed"),
         }
     }
@@ -478,6 +831,7 @@ impl Diagnostic for EditError {
             EditProblem::NotASequence => "annals-yaml-edit-not-a-sequence",
             EditProblem::InsideFlow => "annals-yaml-edit-inside-flow",
             EditProblem::NoSuchItem { .. } => "annals-yaml-edit-no-such-item",
+            EditProblem::ItemFirstKey => "annals-yaml-edit-item-first-key",
             EditProblem::Unfaithful => "annals-yaml-edit-unfaithful",
         }
     }
@@ -501,6 +855,7 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn Diagnostic>> {
         EditProblem::NotASequence,
         EditProblem::InsideFlow,
         EditProblem::NoSuchItem { index: 3, len: 2 },
+        EditProblem::ItemFirstKey,
         EditProblem::Unfaithful,
     ]
     .into_iter()

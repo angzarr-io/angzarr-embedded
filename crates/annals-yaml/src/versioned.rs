@@ -540,6 +540,27 @@ impl Loader {
         Ok(Some(write(&self.migrate(source, doc)?, flow_depth)))
     }
 
+    /// [`Loader::upgrade`], keeping the text: the migration is written back
+    /// through [`crate::edit::Document::update_to`], so only the entries it
+    /// changed are rewritten and comments elsewhere stay. When an edit can't
+    /// be made in place, the whole tree is written as [`Loader::upgrade`]
+    /// would, and [`Upgraded::comments_kept`] is false. None if `text` is
+    /// already current.
+    pub fn upgrade_keeping(&self, source: Option<&str>, text: &str, flow_depth: usize) -> Result<Option<Upgraded>, LoadError> {
+        let mut doc = match crate::edit::Document::parse(text) {
+            Ok(doc) => doc,
+            Err(e) => return self.fail(source, LoadProblem::Yaml(e)),
+        };
+        if version_of(doc.value()) == Ok(self.current) {
+            return Ok(None);
+        }
+        let migrated = self.migrate(source, doc.value().clone())?;
+        Ok(Some(match doc.update_to(&migrated, flow_depth) {
+            Ok(()) => Upgraded { text: doc.into_string(), comments_kept: true },
+            Err(_) => Upgraded { text: write(&migrated, flow_depth), comments_kept: false },
+        }))
+    }
+
     /// Check that every fixture loads to its expected tree. Every failure is
     /// listed, one line each.
     pub fn check_fixtures(&self, fixtures: &[Fixture<'_>]) -> Result<(), Vec<String>> {
@@ -605,6 +626,17 @@ impl Loader {
             panic!("{} fixtures do not migrate:\n{}", self.kind, failures.join("\n"));
         }
     }
+}
+
+/// A document's text migrated to the current version, from
+/// [`Loader::upgrade_keeping`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Upgraded {
+    /// The migrated text.
+    pub text: String,
+    /// Whether it was edited in place, keeping every comment outside the
+    /// entries the migration changed; false when it was written whole.
+    pub comments_kept: bool,
 }
 
 /// A document at some supported version, and what it must migrate to.

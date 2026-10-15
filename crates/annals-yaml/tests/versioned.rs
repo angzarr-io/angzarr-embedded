@@ -301,3 +301,55 @@ fn a_game_step_raises_its_own_code() {
     assert_eq!(e.problem.code(), "annals-yaml-step-failed");
     assert!(matches!(&e.problem.args()[..], [("from", Arg::Uint(0)), ("to", Arg::Uint(1)), ("error", Arg::Nested(_))]));
 }
+
+// ------------------------------------------------------- upgrade, keeping
+
+fn rename_hp(doc: &mut Value) -> Result<(), MigrationError> {
+    rename_key(doc.get_mut("stats").expect("stats"), "hp", "health")
+}
+
+fn hp_loader() -> Loader {
+    Migrations::new("toy", 2).step(1, rename_hp).build().unwrap()
+}
+
+#[test]
+fn upgrade_keeping_rewrites_only_what_the_migration_changed() {
+    let old = "\
+# A toy.
+version: 1   # the format
+name: imp    # its name
+stats:
+  # Hit points.
+  hp: 3
+  speed: 2   # tiles per turn
+";
+    let up = hp_loader().upgrade_keeping(Some("toy.yaml"), old, 2).unwrap().unwrap();
+    assert!(up.comments_kept);
+    assert_eq!(
+        up.text,
+        "\
+# A toy.
+version: 2   # the format
+name: imp    # its name
+stats:
+  speed: 2   # tiles per turn
+  health: 3
+"
+    );
+    // A renamed key moves to the end of its mapping; the tree is otherwise
+    // the migration's.
+    let back = parse(&up.text).unwrap();
+    assert_eq!(back.get("stats").and_then(|st| st.get("health")), Some(&Value::scalar("3")));
+    assert_eq!(back.get("stats").and_then(|st| st.get("hp")), None);
+}
+
+#[test]
+fn upgrade_keeping_a_current_document_is_none() {
+    assert!(hp_loader().upgrade_keeping(None, "version: 2\nstats: {health: 1}\n", 2).unwrap().is_none());
+}
+
+#[test]
+fn upgrade_keeping_reports_a_bad_document_like_load() {
+    assert!(hp_loader().upgrade_keeping(None, "version: 9\n", 2).is_err());
+    assert!(hp_loader().upgrade_keeping(None, "a: &x 1\n", 2).is_err());
+}
