@@ -61,3 +61,16 @@ annals-yaml-step-root-not-a-mapping = the step left the root not a mapping
 annals-yaml-chain-duplicate = { $kind } migrations: two steps from version { $from }
 annals-yaml-chain-beyond-current = { $kind } migrations: a step from version { $from }, but the current version is { $current }
 annals-yaml-chain-gap = { $kind } migrations: no step from version { $from } to { $to }
+
+## Editing a document in place. $path is the key path, written dotted, or
+## "the root".
+
+annals-yaml-edit-not-found = { $path }: not found
+annals-yaml-edit-not-a-mapping = { $path }: not a mapping
+annals-yaml-edit-not-a-sequence = { $path }: not a sequence
+annals-yaml-edit-inside-flow = { $path }: inside a flow collection, which is edited only as a whole
+annals-yaml-edit-no-such-item = { $path }: no item { $index }: the sequence has { $len ->
+    [one] { $len } item
+   *[other] { $len } items
+}
+annals-yaml-edit-unfaithful = { $path }: the edit would not read back as written; nothing was changed

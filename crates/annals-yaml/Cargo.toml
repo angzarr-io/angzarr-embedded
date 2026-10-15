@@ -12,7 +12,8 @@ rust-version.workspace = true
 [dependencies]
 annals-diagnostic = { path = "../annals-diagnostic" }
 
-# Test-only: annals-sim's seeded Rng drives the round-trip property test.
+# Test-only: annals-sim's seeded Rng drives the round-trip and edit property
+# tests.
 [dev-dependencies]
 annals-sim = { path = "../annals-sim" }
 

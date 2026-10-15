@@ -45,8 +45,11 @@
 //! with its en-US messages in `locales/en-US/annals-yaml.ftl`.
 //!
 //! [`versioned`] loads documents stamped with a root `version`, running
-//! registered migrations up to the version the code reads.
+//! registered migrations up to the version the code reads. [`edit`] changes
+//! one sequence item of a document in place and leaves every other byte,
+//! comments included, as written.
 
+pub mod edit;
 mod error;
 pub mod versioned;
 
@@ -755,6 +758,7 @@ pub fn diagnostic_samples() -> Vec<Box<dyn annals_diagnostic::Diagnostic>> {
     let mut samples: Vec<Box<dyn annals_diagnostic::Diagnostic>> = Vec::new();
     samples.extend(parse.into_iter().map(|problem| Box::new(Error { line: 3, problem }) as _));
     samples.extend(versioned::diagnostic_samples());
+    samples.extend(edit::diagnostic_samples());
     samples
 }
 
