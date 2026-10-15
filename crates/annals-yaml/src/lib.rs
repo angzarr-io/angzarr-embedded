@@ -677,6 +677,18 @@ pub fn write(v: &Value, flow_depth: usize) -> String {
     }
 }
 
+/// Whether `v`, a value at `depth`, is written as an indented block: it is a
+/// non-empty collection, and it is above `flow_depth` or has no flow form.
+fn as_block(v: &Value, depth: usize, flow_depth: usize) -> bool {
+    let empty = match v {
+        Value::Map(m) => m.is_empty(),
+        Value::Seq(s) => s.is_empty(),
+        _ => true,
+    };
+    let inline = depth + 1 >= flow_depth && flow(v).is_some();
+    !empty && !inline
+}
+
 fn block(v: &Value, indent: usize, depth: usize, flow_depth: usize, out: &mut String) {
     let pad = " ".repeat(indent);
     match v {
@@ -684,11 +696,7 @@ fn block(v: &Value, indent: usize, depth: usize, flow_depth: usize, out: &mut St
             for (k, val) in entries {
                 let key = scalar_text(k, At::Key);
                 match val {
-                    Value::Map(m) if !(depth + 1 >= flow_depth && flow(val).is_some()) && !m.is_empty() => {
-                        out.push_str(&format!("{pad}{key}:\n"));
-                        block(val, indent + 2, depth + 1, flow_depth, out);
-                    }
-                    Value::Seq(s) if !(depth + 1 >= flow_depth && flow(val).is_some()) && !s.is_empty() => {
+                    _ if as_block(val, depth, flow_depth) => {
                         out.push_str(&format!("{pad}{key}:\n"));
                         block(val, indent + 2, depth + 1, flow_depth, out);
                     }
@@ -706,14 +714,14 @@ fn block(v: &Value, indent: usize, depth: usize, flow_depth: usize, out: &mut St
         Value::Seq(items) => {
             for item in items {
                 match item {
-                    Value::Map(m) if !m.is_empty() && !(depth + 1 >= flow_depth && flow(item).is_some()) => {
+                    Value::Map(_) if as_block(item, depth, flow_depth) => {
                         let mut inner = String::new();
                         block(item, indent + 2, depth + 1, flow_depth, &mut inner);
                         // The first line moves up beside the dash.
                         let first = inner.trim_start_matches(' ');
                         out.push_str(&format!("{pad}- {first}"));
                     }
-                    Value::Seq(s) if !s.is_empty() && !(depth + 1 >= flow_depth && flow(item).is_some()) => {
+                    Value::Seq(_) if as_block(item, depth, flow_depth) => {
                         out.push_str(&format!("{pad}-\n"));
                         block(item, indent + 2, depth + 1, flow_depth, out);
                     }
