@@ -23,7 +23,9 @@ mod tags;
 
 pub use graph::{Edge, EdgeId, Graph, Id, Path};
 pub use query::{best, rank, All, Any, HasTag, InNamespace, Not, Score, TagAtLeast, TagIs, Where};
-pub use tags::{BadTag, NamespaceId, SymbolId, TagId, TagProblem, TagRegistry, TagSet, TagValue, Tagged};
+pub use tags::{
+    BadTag, NamespaceId, SymbolId, TagId, TagProblem, TagRegistry, TagSet, TagValue, Tagged,
+};
 
 /// One value of every error this crate defines, each variant once, for the
 /// catalog parity test: each one's code must have a message in every locale,
@@ -31,7 +33,10 @@ pub use tags::{BadTag, NamespaceId, SymbolId, TagId, TagProblem, TagRegistry, Ta
 /// `crates/annals-graph/locales/en-US/annals-graph.ftl`.
 pub fn diagnostic_samples() -> Vec<Box<dyn annals_diagnostic::Diagnostic>> {
     let bad = |text: &str, problem| -> Box<dyn annals_diagnostic::Diagnostic> {
-        Box::new(BadTag { text: text.to_string(), problem })
+        Box::new(BadTag {
+            text: text.to_string(),
+            problem,
+        })
     };
     vec![
         bad("Terrain:roof", TagProblem::BadNamespace),

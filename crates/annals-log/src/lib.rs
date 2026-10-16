@@ -272,7 +272,9 @@ impl Diagnostic for Error {
             Error::Wire(WireProblem::UnsupportedWireType { wire_type }) => {
                 vec![("wire_type", (*wire_type).into())]
             }
-            Error::Wire(WireProblem::EnvelopeWrongType { field }) => vec![("field", (*field).into())],
+            Error::Wire(WireProblem::EnvelopeWrongType { field }) => {
+                vec![("field", (*field).into())]
+            }
             Error::Sequence(e) => vec![("cause", Arg::nested(e))],
             Error::TickWentBack {
                 seq,
@@ -430,7 +432,8 @@ fn walk<'a>(
             }
             2 => {
                 let len = slice_varint(&mut buf)?;
-                let len = usize::try_from(len).map_err(|_| Error::Wire(WireProblem::LengthTooLarge))?;
+                let len =
+                    usize::try_from(len).map_err(|_| Error::Wire(WireProblem::LengthTooLarge))?;
                 Wire::Bytes(take(&mut buf, len)?)
             }
             5 => {
@@ -489,7 +492,9 @@ fn head(envelope: &[u8]) -> Result<Head<'_>, Error> {
             (1, Wire::Varint(v)) => h.seq = v,
             (2, Wire::Varint(v)) => h.cause = Some(v),
             (3, Wire::Bytes(b)) => h.event = b,
-            (field @ 1..=3, _) => return Err(Error::Wire(WireProblem::EnvelopeWrongType { field })),
+            (field @ 1..=3, _) => {
+                return Err(Error::Wire(WireProblem::EnvelopeWrongType { field }))
+            }
             _ => {}
         }
         Ok(())
@@ -691,7 +696,9 @@ impl<R: Read> Reader<R> {
     }
 
     /// The next event, its message decoded.
-    pub fn next_event<E: Message + Default>(&mut self) -> Result<Option<annals::Envelope<E>>, Error> {
+    pub fn next_event<E: Message + Default>(
+        &mut self,
+    ) -> Result<Option<annals::Envelope<E>>, Error> {
         match self.next_raw()? {
             Some(raw) => Ok(Some(decode_envelope(&raw)?)),
             None => Ok(None),

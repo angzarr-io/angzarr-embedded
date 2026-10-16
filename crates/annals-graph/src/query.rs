@@ -188,21 +188,30 @@ mod tests {
         };
         g.add_node(place(TagSet::new(), 30));
         g.add_node(place(TagSet::new().with(high, flag), 900)); // too far
-        g.add_node(place(TagSet::new().with(high, flag).with(cover, grade(1)), 400));
+        g.add_node(place(
+            TagSet::new().with(high, flag).with(cover, grade(1)),
+            400,
+        ));
         g.add_node(place(TagSet::new().with(high, flag), 400)); // a tie on score
         g.add_node(place(TagSet::new().with(cover, grade(2)), 600));
 
         let perch = All(vec![Box::new(HasTag(high)), Box::new(InReach)]);
         let reach = 500i64;
         assert_eq!(best(g.nodes(), &perch, &Farthest, &reach), Some(Spot(2)));
-        assert_eq!(rank(g.nodes(), &perch, &Farthest, &reach), vec![Spot(2), Spot(3)]);
+        assert_eq!(
+            rank(g.nodes(), &perch, &Farthest, &reach),
+            vec![Spot(2), Spot(3)]
+        );
 
-        let anywhere = Any(vec![Box::new(TagAtLeast(cover, 1)), Box::new(Not(HasTag(high)))]);
+        let anywhere = Any(vec![
+            Box::new(TagAtLeast(cover, 1)),
+            Box::new(Not(HasTag(high))),
+        ]);
         assert_eq!(
             rank(g.nodes(), &anywhere, &Farthest, &10_000),
             vec![Spot(4), Spot(2), Spot(0)]
         );
-      }
+    }
 
     #[test]
     fn exact_values_and_namespaces() {
@@ -224,6 +233,9 @@ mod tests {
         assert_eq!(rank(g.nodes(), &ours, &Farthest, &0), vec![Spot(0)]);
         let hazard = tags.namespace("hazard").unwrap();
         let danger = InNamespace::new(&tags, hazard);
-        assert_eq!(rank(g.nodes(), &danger, &Farthest, &0), vec![Spot(1), Spot(2)]);
+        assert_eq!(
+            rank(g.nodes(), &danger, &Farthest, &0),
+            vec![Spot(1), Spot(2)]
+        );
     }
 }

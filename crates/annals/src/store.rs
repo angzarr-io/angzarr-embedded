@@ -36,7 +36,11 @@ impl Diagnostic for Conflict {
     }
 
     fn args(&self) -> Vec<(&'static str, Arg)> {
-        vec![("stream", self.id.0.into()), ("expected", self.expected.into()), ("actual", self.actual.into())]
+        vec![
+            ("stream", self.id.0.into()),
+            ("expected", self.expected.into()),
+            ("actual", self.actual.into()),
+        ]
     }
 }
 

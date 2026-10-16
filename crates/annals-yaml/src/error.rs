@@ -130,8 +130,12 @@ impl Diagnostic for Error {
     fn args(&self) -> Vec<(&'static str, Arg)> {
         let mut args = vec![("line", Arg::from(self.line))];
         match &self.problem {
-            ParseProblem::NonAsciiIndent { character } => args.push(("character", code_point(*character).into())),
-            ParseProblem::DocumentMarker { marker } => args.push(("marker", marker.as_str().into())),
+            ParseProblem::NonAsciiIndent { character } => {
+                args.push(("character", code_point(*character).into()))
+            }
+            ParseProblem::DocumentMarker { marker } => {
+                args.push(("marker", marker.as_str().into()))
+            }
             ParseProblem::ExpectedKeyValue { found } | ParseProblem::Unexpected { found } => {
                 args.push(("found", found.as_str().into()))
             }

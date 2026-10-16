@@ -179,7 +179,9 @@ fn table_row(line: &str) -> Vec<String> {
     if !row[start..].trim().is_empty() {
         raw.push(&row[start..]);
     }
-    raw.into_iter().map(|cell| unescape_cell(cell.trim())).collect()
+    raw.into_iter()
+        .map(|cell| unescape_cell(cell.trim()))
+        .collect()
 }
 
 fn unescape_cell(cell: &str) -> String {
@@ -377,7 +379,9 @@ Feature: Counting
 
     #[test]
     fn a_leading_bom_does_not_hide_the_feature() {
-        let f = parse_feature("\u{feff}Feature: \u{c9}p\u{e9}es\r\n  Scenario: \u{5263}\r\n    Given a blade\r\n");
+        let f = parse_feature(
+            "\u{feff}Feature: \u{c9}p\u{e9}es\r\n  Scenario: \u{5263}\r\n    Given a blade\r\n",
+        );
         assert_eq!(f.name, "\u{c9}p\u{e9}es");
         assert_eq!(f.scenarios[0].name, "\u{5263}");
         assert_eq!(f.scenarios[0].steps[0].text, "a blade");
@@ -385,8 +389,13 @@ Feature: Counting
 
     #[test]
     fn table_cells_take_escapes() {
-        let f = parse_feature("Feature: F\n  Scenario: S\n    Given rows\n      | a \\| b | c\\\\d | e\\nf | \\x |\n");
-        assert_eq!(f.scenarios[0].steps[0].table, [vec!["a | b", "c\\d", "e\nf", "\\x"]]);
+        let f = parse_feature(
+            "Feature: F\n  Scenario: S\n    Given rows\n      | a \\| b | c\\\\d | e\\nf | \\x |\n",
+        );
+        assert_eq!(
+            f.scenarios[0].steps[0].table,
+            [vec!["a | b", "c\\d", "e\nf", "\\x"]]
+        );
     }
 
     #[test]

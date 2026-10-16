@@ -2,9 +2,9 @@
 
 mod common;
 
-use common::*;
 use annals::Stream;
 use annals_sim::{parallel, JobRecord, Key, Value};
+use common::*;
 
 fn line_up(seed: u64) -> Vec<(i64, u8)> {
     let n = 2 + (seed % 4) as u8;

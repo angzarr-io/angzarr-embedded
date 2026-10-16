@@ -136,7 +136,11 @@ fn run(cmds: &[AccountCmd]) -> Stream<Account> {
 
 #[test]
 fn a_command_emits_events_that_fold_into_state() {
-    let s = run(&[AccountCmd::Open, AccountCmd::Deposit(500), AccountCmd::Withdraw(200)]);
+    let s = run(&[
+        AccountCmd::Open,
+        AccountCmd::Deposit(500),
+        AccountCmd::Withdraw(200),
+    ]);
     assert_eq!(s.state().cents, 300);
     assert_eq!(s.len(), 3);
 }
@@ -144,7 +148,9 @@ fn a_command_emits_events_that_fold_into_state() {
 #[test]
 fn a_rejected_command_leaves_no_trace() {
     let mut s = run(&[AccountCmd::Open, AccountCmd::Deposit(100)]);
-    let refused = s.execute(&AccountCmd::Withdraw(250), &(), &mut ()).unwrap_err();
+    let refused = s
+        .execute(&AccountCmd::Withdraw(250), &(), &mut ())
+        .unwrap_err();
     assert_eq!(refused, Refused::Overdrawn { short: 150 });
     assert_eq!(refused.code(), "toy-account-overdrawn");
     assert_eq!(refused.to_string(), "150 cents short");
@@ -167,7 +173,11 @@ fn replay_rebuilds_the_same_state() {
 
 #[test]
 fn state_at_is_the_state_before_that_event() {
-    let s = run(&[AccountCmd::Open, AccountCmd::Deposit(500), AccountCmd::Withdraw(200)]);
+    let s = run(&[
+        AccountCmd::Open,
+        AccountCmd::Deposit(500),
+        AccountCmd::Withdraw(200),
+    ]);
     assert_eq!(s.state_at(0, &()), Balance::default());
     assert_eq!(s.state_at(2, &()).cents, 500);
     assert_eq!(s.state_at(3, &()), *s.state());
@@ -328,8 +338,16 @@ fn events_carry_their_cause() {
 fn replay_refuses_a_malformed_log() {
     let h = header(5, "account");
     let gap = vec![
-        Envelope { seq: 0, cause: None, event: AccountEvent::Opened },
-        Envelope { seq: 2, cause: None, event: AccountEvent::Deposited(1) },
+        Envelope {
+            seq: 0,
+            cause: None,
+            event: AccountEvent::Opened,
+        },
+        Envelope {
+            seq: 2,
+            cause: None,
+            event: AccountEvent::Deposited(1),
+        },
     ];
     assert_eq!(
         Stream::<Account>::replay(h.clone(), gap, &()).err(),
@@ -340,8 +358,16 @@ fn replay_refuses_a_malformed_log() {
         "event 1 claims sequence number 2, not 1"
     );
     let forward = vec![
-        Envelope { seq: 0, cause: None, event: AccountEvent::Opened },
-        Envelope { seq: 1, cause: Some(1), event: AccountEvent::Deposited(1) },
+        Envelope {
+            seq: 0,
+            cause: None,
+            event: AccountEvent::Opened,
+        },
+        Envelope {
+            seq: 1,
+            cause: Some(1),
+            event: AccountEvent::Deposited(1),
+        },
     ];
     assert_eq!(
         Stream::<Account>::replay(h, forward, &()).err(),
@@ -403,10 +429,17 @@ fn the_store_holds_streams_and_refuses_stale_appends() {
     store.append(s.header(), 0, s.events()).unwrap();
     assert_eq!(
         store.append(s.header(), 0, s.events()),
-        Err(Conflict { id: StreamId(1), expected: 0, actual: 2 })
+        Err(Conflict {
+            id: StreamId(1),
+            expected: 0,
+            actual: 2
+        })
     );
     assert_eq!(
-        store.append(s.header(), 0, s.events()).unwrap_err().to_string(),
+        store
+            .append(s.header(), 0, s.events())
+            .unwrap_err()
+            .to_string(),
         "stream 1 holds 2 events, not the 0 expected: someone else appended first"
     );
     let (h, events) = store.read(StreamId(1)).unwrap();
@@ -431,7 +464,11 @@ impl Projection<AccountEvent> for Turnover {
 
 #[test]
 fn a_projection_is_a_fold_of_its_own() {
-    let s = run(&[AccountCmd::Open, AccountCmd::Deposit(500), AccountCmd::Withdraw(200)]);
+    let s = run(&[
+        AccountCmd::Open,
+        AccountCmd::Deposit(500),
+        AccountCmd::Withdraw(200),
+    ]);
     let mut t = Turnover::default();
     project(&mut t, s.events());
     assert_eq!(t.moved, 700);

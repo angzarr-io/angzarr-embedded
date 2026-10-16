@@ -29,7 +29,10 @@ use std::fmt;
 
 use annals_diagnostic::{Arg, Diagnostic};
 
-use crate::{flow, inline, is_item, lines, parse, scalar_text, split_key, strip_comment, write, At, Error, Value};
+use crate::{
+    flow, inline, is_item, lines, parse, scalar_text, split_key, strip_comment, write, At, Error,
+    Value,
+};
 
 /// A document's text and the value it reads as.
 #[derive(Clone, Debug)]
@@ -93,7 +96,11 @@ impl Document {
             Some(body) => (true, body),
             None => (false, src),
         };
-        Ok(Document { bom, lines: split(body), value })
+        Ok(Document {
+            bom,
+            lines: split(body),
+            value,
+        })
     }
 
     /// The value the text reads as.
@@ -118,7 +125,12 @@ impl Document {
 
     /// Append `item` to the sequence at `path`. A missing last key is added,
     /// at the end of its mapping; a key with no value gets a sequence.
-    pub fn push(&mut self, path: &[&str], item: &Value, flow_depth: usize) -> Result<(), EditError> {
+    pub fn push(
+        &mut self,
+        path: &[&str],
+        item: &Value,
+        flow_depth: usize,
+    ) -> Result<(), EditError> {
         self.edit(path, Op::Push(item, flow_depth))
     }
 
@@ -129,7 +141,13 @@ impl Document {
 
     /// Replace item `index` of the sequence at `path` with `item`, keeping the
     /// comment lines above it.
-    pub fn replace(&mut self, path: &[&str], index: usize, item: &Value, flow_depth: usize) -> Result<(), EditError> {
+    pub fn replace(
+        &mut self,
+        path: &[&str],
+        index: usize,
+        item: &Value,
+        flow_depth: usize,
+    ) -> Result<(), EditError> {
         self.edit(path, Op::Replace(index, item, flow_depth))
     }
 
@@ -138,7 +156,13 @@ impl Document {
     /// line; a missing one goes at the end of the mapping. `value` is written
     /// with [`crate::write`]'s layout, `flow_depth` levels counted from the
     /// entry. Only the entry's lines change.
-    pub fn set(&mut self, path: &[Seg<'_>], key: &str, value: &Value, flow_depth: usize) -> Result<(), EditError> {
+    pub fn set(
+        &mut self,
+        path: &[Seg<'_>],
+        key: &str,
+        value: &Value,
+        flow_depth: usize,
+    ) -> Result<(), EditError> {
         self.map_edit(path, key, MapOp::Set(value, flow_depth))
     }
 
@@ -162,7 +186,10 @@ impl Document {
             Ok(()) if same(&self.value, target) => Ok(()),
             Ok(()) => {
                 *self = before;
-                Err(EditError { path: Vec::new(), problem: EditProblem::Unfaithful })
+                Err(EditError {
+                    path: Vec::new(),
+                    problem: EditProblem::Unfaithful,
+                })
             }
             Err(e) => {
                 *self = before;
@@ -173,7 +200,13 @@ impl Document {
 
     /// Bring the value at `path` from `old` to `new`; an error means the
     /// caller must replace it whole.
-    fn reach<'v>(&mut self, path: &mut Vec<Seg<'v>>, old: &'v Value, new: &'v Value, flow_depth: usize) -> Result<(), EditError> {
+    fn reach<'v>(
+        &mut self,
+        path: &mut Vec<Seg<'v>>,
+        old: &'v Value,
+        new: &'v Value,
+        flow_depth: usize,
+    ) -> Result<(), EditError> {
         if old == new {
             return Ok(());
         }
@@ -225,17 +258,26 @@ impl Document {
                 }
                 Ok(())
             }
-            _ => Err(EditError { path: seg_path(path), problem: EditProblem::NotAMapping }),
+            _ => Err(EditError {
+                path: seg_path(path),
+                problem: EditProblem::NotAMapping,
+            }),
         }
     }
 
     fn map_edit(&mut self, path: &[Seg<'_>], key: &str, op: MapOp) -> Result<(), EditError> {
         let mut full = path.to_vec();
         full.push(Seg::Key(key));
-        let fail = |problem| EditError { path: seg_path(&full), problem };
+        let fail = |problem| EditError {
+            path: seg_path(&full),
+            problem,
+        };
         let body = self.body();
         let meaningful = Meaningful::of(&body);
-        let view = View::descend(&meaningful, path).map_err(|p| EditError { path: seg_path(path), problem: p })?;
+        let view = View::descend(&meaningful, path).map_err(|p| EditError {
+            path: seg_path(path),
+            problem: p,
+        })?;
 
         let mut expected = self.value.clone();
         let parent = value_at(&mut expected, path).ok_or_else(|| fail(EditProblem::NotAMapping))?;
@@ -252,7 +294,10 @@ impl Document {
                 None => entries.push((key.to_string(), value.clone())),
             },
             MapOp::Remove => {
-                let i = entries.iter().position(|(k, _)| k == key).ok_or_else(|| fail(EditProblem::NotFound))?;
+                let i = entries
+                    .iter()
+                    .position(|(k, _)| k == key)
+                    .ok_or_else(|| fail(EditProblem::NotFound))?;
                 entries.remove(i);
             }
         }
@@ -262,17 +307,25 @@ impl Document {
             (MapOp::Set(value, flow_depth), Some((at, end))) => {
                 let mut new = entry_lines(key, value, view.indent, flow_depth);
                 let first = &self.lines[view.raw(at)].text;
-                let value_text = new[0].text.trim_start_matches(' ')[scalar_text(key, At::Key).len() + 1..].trim_start().to_string();
+                let value_text = new[0].text.trim_start_matches(' ')
+                    [scalar_text(key, At::Key).len() + 1..]
+                    .trim_start()
+                    .to_string();
                 new[0].text = rekey(first, &value_text);
                 lines.splice(view.raw(at)..=end, new);
             }
             (MapOp::Set(value, flow_depth), None) => {
                 let after = view.append_after(&self.lines);
-                lines.splice(after + 1..after + 1, entry_lines(key, value, view.indent, flow_depth));
+                lines.splice(
+                    after + 1..after + 1,
+                    entry_lines(key, value, view.indent, flow_depth),
+                );
             }
             (MapOp::Remove, Some((at, end))) => {
                 let mut start = view.raw(at);
-                while start > 0 && comment_only(&lines[start - 1].text).is_some_and(|i| i <= view.indent) {
+                while start > 0
+                    && comment_only(&lines[start - 1].text).is_some_and(|i| i <= view.indent)
+                {
                     start -= 1;
                 }
                 lines.drain(start..=end);
@@ -284,7 +337,11 @@ impl Document {
             }
             (MapOp::Remove, None) => return Err(fail(EditProblem::NotFound)),
         }
-        let edited = Document { bom: self.bom, lines: normalize_eol(lines, &self.lines), value: expected };
+        let edited = Document {
+            bom: self.bom,
+            lines: normalize_eol(lines, &self.lines),
+            value: expected,
+        };
         match parse(&edited.body()) {
             Ok(back) if back == edited.value => {
                 *self = edited;
@@ -295,17 +352,24 @@ impl Document {
     }
 
     fn edit(&mut self, path: &[&str], op: Op) -> Result<(), EditError> {
-        let fail = |problem| EditError { path: path.iter().map(|k| k.to_string()).collect(), problem };
+        let fail = |problem| EditError {
+            path: path.iter().map(|k| k.to_string()).collect(),
+            problem,
+        };
         let body = self.body();
         let meaningful = Meaningful::of(&body);
-        let place = meaningful.locate(path, matches!(op, Op::Push(..))).map_err(fail)?;
+        let place = meaningful
+            .locate(path, matches!(op, Op::Push(..)))
+            .map_err(fail)?;
 
         let mut expected = self.value.clone();
         let seq = expected_seq(&mut expected, path);
         let len = seq.len();
         match op {
             Op::Push(item, _) => seq.push(item.clone()),
-            Op::Remove(index) | Op::Replace(index, ..) if index >= len => return Err(fail(EditProblem::NoSuchItem { index, len })),
+            Op::Remove(index) | Op::Replace(index, ..) if index >= len => {
+                return Err(fail(EditProblem::NoSuchItem { index, len }))
+            }
             Op::Remove(index) => {
                 seq.remove(index);
             }
@@ -315,7 +379,11 @@ impl Document {
 
         let mut lines = self.lines.clone();
         splice(&mut lines, &meaningful, &place, &op, &items);
-        let edited = Document { bom: self.bom, lines: normalize_eol(lines, &self.lines), value: expected };
+        let edited = Document {
+            bom: self.bom,
+            lines: normalize_eol(lines, &self.lines),
+            value: expected,
+        };
         match parse(&edited.body()) {
             Ok(back) if back == edited.value => {
                 *self = edited;
@@ -326,7 +394,10 @@ impl Document {
     }
 
     fn body(&self) -> String {
-        self.lines.iter().map(|l| format!("{}{}", l.text, l.eol)).collect()
+        self.lines
+            .iter()
+            .map(|l| format!("{}{}", l.text, l.eol))
+            .collect()
     }
 }
 
@@ -360,11 +431,20 @@ fn split(body: &str) -> Vec<Raw> {
     for (i, piece) in pieces.iter().enumerate() {
         if i < last {
             match piece.strip_suffix('\r') {
-                Some(text) => out.push(Raw { text: text.to_string(), eol: "\r\n".to_string() }),
-                None => out.push(Raw { text: piece.to_string(), eol: "\n".to_string() }),
+                Some(text) => out.push(Raw {
+                    text: text.to_string(),
+                    eol: "\r\n".to_string(),
+                }),
+                None => out.push(Raw {
+                    text: piece.to_string(),
+                    eol: "\n".to_string(),
+                }),
             }
         } else if !piece.is_empty() {
-            out.push(Raw { text: piece.to_string(), eol: String::new() });
+            out.push(Raw {
+                text: piece.to_string(),
+                eol: String::new(),
+            });
         }
     }
     out
@@ -373,7 +453,11 @@ fn split(body: &str) -> Vec<Raw> {
 /// Give every line but the last an ending, the one `old` mostly uses, and the
 /// last one an ending only if `old`'s last line had one.
 fn normalize_eol(mut lines: Vec<Raw>, old: &[Raw]) -> Vec<Raw> {
-    let eol = old.iter().find(|l| !l.eol.is_empty()).map_or("\n", |l| l.eol.as_str()).to_string();
+    let eol = old
+        .iter()
+        .find(|l| !l.eol.is_empty())
+        .map_or("\n", |l| l.eol.as_str())
+        .to_string();
     let final_newline = old.last().map_or(true, |l| !l.eol.is_empty());
     let n = lines.len();
     for (i, l) in lines.iter_mut().enumerate() {
@@ -400,7 +484,9 @@ fn indent_of(text: &str) -> usize {
 
 /// A line holding only a comment, and its indent.
 fn comment_only(text: &str) -> Option<usize> {
-    text.trim_start_matches(' ').starts_with('#').then(|| indent_of(text))
+    text.trim_start_matches(' ')
+        .starts_with('#')
+        .then(|| indent_of(text))
 }
 
 /// The lines that carry content (not blank, not comment-only): where each is
@@ -413,19 +499,32 @@ struct Meaningful {
 enum Place {
     /// A block sequence: its items' indent, and each item's first and last
     /// meaningful line. `key` is the line of the key it is the value of.
-    Block { key: Option<usize>, indent: usize, items: Vec<(usize, usize)> },
+    Block {
+        key: Option<usize>,
+        indent: usize,
+        items: Vec<(usize, usize)>,
+    },
     /// A value on the key's own line (a flow sequence, or null written `~`).
     Inline { key: usize },
     /// A key with nothing under it.
     Empty { key: usize, indent: usize },
     /// A key that is not there yet: it goes after line `after`, at `indent`.
-    Missing { key: String, after: usize, indent: usize },
+    Missing {
+        key: String,
+        after: usize,
+        indent: usize,
+    },
 }
 
 impl Meaningful {
     fn of(body: &str) -> Meaningful {
         let lines = lines(body).expect("the document parsed when it was read");
-        Meaningful { lines: lines.into_iter().map(|l| (l.no - 1, l.indent, l.text.to_string())).collect() }
+        Meaningful {
+            lines: lines
+                .into_iter()
+                .map(|l| (l.no - 1, l.indent, l.text.to_string()))
+                .collect(),
+        }
     }
 
     fn raw(&self, m: usize) -> usize {
@@ -448,11 +547,16 @@ impl Meaningful {
         let at = (lo..hi).find(|&i| {
             self.indent(i) == indent
                 && !is_item(self.text(i))
-                && split_key(self.text(i)).is_some_and(|(k, _)| inline(k, 0).ok().as_ref().and_then(Value::as_str) == Some(key))
+                && split_key(self.text(i)).is_some_and(|(k, _)| {
+                    inline(k, 0).ok().as_ref().and_then(Value::as_str) == Some(key)
+                })
         })?;
         let mut end = at + 1;
         let same_indent_seq = end < hi && self.indent(end) == indent && is_item(self.text(end));
-        while end < hi && (self.indent(end) > indent || same_indent_seq && self.indent(end) == indent && is_item(self.text(end))) {
+        while end < hi
+            && (self.indent(end) > indent
+                || same_indent_seq && self.indent(end) == indent && is_item(self.text(end)))
+        {
             end += 1;
         }
         Some((at, at + 1, end))
@@ -464,7 +568,11 @@ impl Meaningful {
             if let Some(at) = key {
                 let (_, rest) = split_key(self.text(at)).expect("a key line");
                 if !rest.is_empty() {
-                    return Err(if rest.starts_with('{') { EditProblem::InsideFlow } else { EditProblem::NotAMapping });
+                    return Err(if rest.starts_with('{') {
+                        EditProblem::InsideFlow
+                    } else {
+                        EditProblem::NotAMapping
+                    });
                 }
             }
             if lo == hi {
@@ -476,7 +584,11 @@ impl Meaningful {
             match self.entry(lo, hi, k) {
                 Some((at, vlo, vhi)) => (key, lo, hi) = (Some(at), vlo, vhi),
                 None if push && depth + 1 == path.len() => {
-                    return Ok(Place::Missing { key: k.to_string(), after: self.raw(hi - 1), indent: self.indent(lo) })
+                    return Ok(Place::Missing {
+                        key: k.to_string(),
+                        after: self.raw(hi - 1),
+                        indent: self.indent(lo),
+                    })
                 }
                 None => return Err(EditProblem::NotFound),
             }
@@ -490,22 +602,36 @@ impl Meaningful {
                 };
             }
             if lo == hi {
-                return Ok(Place::Empty { key: at, indent: self.indent(at) });
+                return Ok(Place::Empty {
+                    key: at,
+                    indent: self.indent(at),
+                });
             }
         }
         if lo == hi || !is_item(self.text(lo)) {
             return Err(EditProblem::NotASequence);
         }
         let indent = self.indent(lo);
-        let starts: Vec<usize> = (lo..hi).filter(|&i| self.indent(i) == indent && is_item(self.text(i))).collect();
-        let items = starts.iter().enumerate().map(|(n, &s)| (s, starts.get(n + 1).map_or(hi, |&e| e) - 1)).collect();
+        let starts: Vec<usize> = (lo..hi)
+            .filter(|&i| self.indent(i) == indent && is_item(self.text(i)))
+            .collect();
+        let items = starts
+            .iter()
+            .enumerate()
+            .map(|(n, &s)| (s, starts.get(n + 1).map_or(hi, |&e| e) - 1))
+            .collect();
         Ok(Place::Block { key, indent, items })
     }
 }
 
 /// The first line of item `(first, last)` with the comments above it, and its
 /// last line with the deeper comments below it.
-fn item_span(lines: &[Raw], m: &Meaningful, (first, last): (usize, usize), indent: usize) -> (usize, usize) {
+fn item_span(
+    lines: &[Raw],
+    m: &Meaningful,
+    (first, last): (usize, usize),
+    indent: usize,
+) -> (usize, usize) {
     let mut start = m.raw(first);
     while start > 0 && comment_only(&lines[start - 1].text).is_some_and(|i| i <= indent) {
         start -= 1;
@@ -522,7 +648,10 @@ fn item_lines(item: &Value, indent: usize, flow_depth: usize) -> Vec<Raw> {
     let pad = " ".repeat(indent);
     write(&Value::Seq(vec![item.clone()]), flow_depth)
         .lines()
-        .map(|l| Raw { text: format!("{pad}{l}"), eol: String::new() })
+        .map(|l| Raw {
+            text: format!("{pad}{l}"),
+            eol: String::new(),
+        })
         .collect()
 }
 
@@ -542,14 +671,26 @@ fn rekey(text: &str, value: &str) -> String {
 }
 
 fn line(text: String) -> Raw {
-    Raw { text, eol: String::new() }
+    Raw {
+        text,
+        eol: String::new(),
+    }
 }
 
 fn splice(lines: &mut Vec<Raw>, m: &Meaningful, place: &Place, op: &Op, items: &[Value]) {
     match place {
-        Place::Block { key, indent, items: spans } => match *op {
+        Place::Block {
+            key,
+            indent,
+            items: spans,
+        } => match *op {
             Op::Push(item, flow_depth) => {
-                let (_, end) = item_span(lines, m, *spans.last().expect("a block sequence has an item"), *indent);
+                let (_, end) = item_span(
+                    lines,
+                    m,
+                    *spans.last().expect("a block sequence has an item"),
+                    *indent,
+                );
                 let mut new = Vec::new();
                 if spans.len() >= 2 {
                     let (_, prev_end) = item_span(lines, m, spans[spans.len() - 2], *indent);
@@ -592,19 +733,33 @@ fn splice(lines: &mut Vec<Raw>, m: &Meaningful, place: &Place, op: &Op, items: &
                 Some(text) => lines[k].text = rekey(&lines[k].text, &text),
                 None => {
                     lines[k].text = rekey(&lines[k].text, "");
-                    let new: Vec<Raw> = items.iter().flat_map(|i| item_lines(i, indent + 2, depth_of(op))).collect();
+                    let new: Vec<Raw> = items
+                        .iter()
+                        .flat_map(|i| item_lines(i, indent + 2, depth_of(op)))
+                        .collect();
                     lines.splice(k + 1..k + 1, new);
                 }
             }
         }
         Place::Empty { key, indent } => {
             let k = m.raw(*key);
-            let new: Vec<Raw> = items.iter().flat_map(|i| item_lines(i, indent + 2, depth_of(op))).collect();
+            let new: Vec<Raw> = items
+                .iter()
+                .flat_map(|i| item_lines(i, indent + 2, depth_of(op)))
+                .collect();
             lines.splice(k + 1..k + 1, new);
         }
         Place::Missing { key, after, indent } => {
-            let mut new = vec![line(format!("{}{}:", " ".repeat(*indent), scalar_text(key, At::Key)))];
-            new.extend(items.iter().flat_map(|i| item_lines(i, indent + 2, depth_of(op))));
+            let mut new = vec![line(format!(
+                "{}{}:",
+                " ".repeat(*indent),
+                scalar_text(key, At::Key)
+            ))];
+            new.extend(
+                items
+                    .iter()
+                    .flat_map(|i| item_lines(i, indent + 2, depth_of(op))),
+            );
             lines.splice(after + 1..after + 1, new);
         }
     }
@@ -651,9 +806,16 @@ fn value_at<'v>(v: &'v mut Value, path: &[Seg<'_>]) -> Option<&'v mut Value> {
 fn same(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Map(x), Value::Map(y)) => {
-            x.len() == y.len() && x.iter().all(|(k, v)| y.iter().find(|(n, _)| n == k).is_some_and(|(_, w)| same(v, w)))
+            x.len() == y.len()
+                && x.iter().all(|(k, v)| {
+                    y.iter()
+                        .find(|(n, _)| n == k)
+                        .is_some_and(|(_, w)| same(v, w))
+                })
         }
-        (Value::Seq(x), Value::Seq(y)) => x.len() == y.len() && x.iter().zip(y).all(|(v, w)| same(v, w)),
+        (Value::Seq(x), Value::Seq(y)) => {
+            x.len() == y.len() && x.iter().zip(y).all(|(v, w)| same(v, w))
+        }
         _ => a == b,
     }
 }
@@ -661,10 +823,16 @@ fn same(a: &Value, b: &Value) -> bool {
 /// `key: value` written as a mapping entry at `indent`.
 fn entry_lines(key: &str, value: &Value, indent: usize, flow_depth: usize) -> Vec<Raw> {
     let pad = " ".repeat(indent);
-    write(&Value::Map(vec![(key.to_string(), value.clone())]), flow_depth)
-        .lines()
-        .map(|l| Raw { text: format!("{pad}{l}"), eol: String::new() })
-        .collect()
+    write(
+        &Value::Map(vec![(key.to_string(), value.clone())]),
+        flow_depth,
+    )
+    .lines()
+    .map(|l| Raw {
+        text: format!("{pad}{l}"),
+        eol: String::new(),
+    })
+    .collect()
 }
 
 /// The meaningful lines of one mapping (or sequence) a path leads to. An
@@ -701,7 +869,9 @@ impl View {
     }
 
     fn is_mapping(&self) -> bool {
-        self.lines.first().is_some_and(|(_, _, t)| !is_item(t) && split_key(t).is_some())
+        self.lines
+            .first()
+            .is_some_and(|(_, _, t)| !is_item(t) && split_key(t).is_some())
     }
 
     /// `key`'s line in this mapping and the last raw line of its entry (its
@@ -714,12 +884,20 @@ impl View {
         let indent = self.lines[0].1;
         let Some(at) = (0..self.lines.len()).find(|&i| {
             let (_, ind, text) = &self.lines[i];
-            *ind == indent && !is_item(text) && split_key(text).is_some_and(|(k, _)| inline(k, 0).ok().as_ref().and_then(Value::as_str) == Some(key))
+            *ind == indent
+                && !is_item(text)
+                && split_key(text).is_some_and(|(k, _)| {
+                    inline(k, 0).ok().as_ref().and_then(Value::as_str) == Some(key)
+                })
         }) else {
             return Ok(None);
         };
         let end = self.value_end(at);
-        let last = if end > at + 1 { self.raw(end - 1) } else { self.raw(at) };
+        let last = if end > at + 1 {
+            self.raw(end - 1)
+        } else {
+            self.raw(at)
+        };
         Ok(Some((at, last)))
     }
 
@@ -727,8 +905,12 @@ impl View {
     fn value_end(&self, at: usize) -> usize {
         let indent = self.lines[at].1;
         let mut end = at + 1;
-        let same_indent_seq = end < self.lines.len() && self.lines[end].1 == indent && is_item(&self.lines[end].2);
-        while end < self.lines.len() && (self.lines[end].1 > indent || same_indent_seq && self.lines[end].1 == indent && is_item(&self.lines[end].2)) {
+        let same_indent_seq =
+            end < self.lines.len() && self.lines[end].1 == indent && is_item(&self.lines[end].2);
+        while end < self.lines.len()
+            && (self.lines[end].1 > indent
+                || same_indent_seq && self.lines[end].1 == indent && is_item(&self.lines[end].2))
+        {
             end += 1;
         }
         end
@@ -741,7 +923,11 @@ impl View {
         let (at, _) = self.entry(key)?.ok_or(EditProblem::NotFound)?;
         let (_, rest) = split_key(&self.lines[at].2).expect("a key line");
         if !rest.is_empty() {
-            return Err(if rest.starts_with('{') || rest.starts_with('[') { EditProblem::InsideFlow } else { EditProblem::NotAMapping });
+            return Err(if rest.starts_with('{') || rest.starts_with('[') {
+                EditProblem::InsideFlow
+            } else {
+                EditProblem::NotAMapping
+            });
         }
         let end = self.value_end(at);
         // A key with no value is null, not a mapping to edit in.
@@ -753,7 +939,12 @@ impl View {
         let (Some(first), Some(last)) = (lines.first(), lines.last()) else {
             return Err(EditProblem::NotAMapping);
         };
-        Ok(View { indent: first.1, after: last.0, dash_first, lines })
+        Ok(View {
+            indent: first.1,
+            after: last.0,
+            dash_first,
+            lines,
+        })
     }
 
     fn item(&self, index: usize) -> Result<View, EditProblem> {
@@ -761,9 +952,14 @@ impl View {
             return Err(EditProblem::NotASequence);
         }
         let indent = self.lines[0].1;
-        let starts: Vec<usize> = (0..self.lines.len()).filter(|&i| self.lines[i].1 == indent && is_item(&self.lines[i].2)).collect();
+        let starts: Vec<usize> = (0..self.lines.len())
+            .filter(|&i| self.lines[i].1 == indent && is_item(&self.lines[i].2))
+            .collect();
         let Some(&start) = starts.get(index) else {
-            return Err(EditProblem::NoSuchItem { index, len: starts.len() });
+            return Err(EditProblem::NoSuchItem {
+                index,
+                len: starts.len(),
+            });
         };
         let end = starts.get(index + 1).copied().unwrap_or(self.lines.len());
         let (raw, _, text) = &self.lines[start];
@@ -781,7 +977,9 @@ impl View {
     /// deeper comment lines directly below it.
     fn append_after(&self, lines: &[Raw]) -> usize {
         let mut after = self.after;
-        while after + 1 < lines.len() && comment_only(&lines[after + 1].text).is_some_and(|i| i > self.indent) {
+        while after + 1 < lines.len()
+            && comment_only(&lines[after + 1].text).is_some_and(|i| i > self.indent)
+        {
             after += 1;
         }
         after
@@ -796,10 +994,18 @@ impl fmt::Display for EditProblem {
             EditProblem::NotFound => f.write_str("not found"),
             EditProblem::NotAMapping => f.write_str("not a mapping"),
             EditProblem::NotASequence => f.write_str("not a sequence"),
-            EditProblem::InsideFlow => f.write_str("inside a flow collection, which is edited only as a whole"),
-            EditProblem::NoSuchItem { index, len } => write!(f, "no item {index}: the sequence has {len}"),
-            EditProblem::ItemFirstKey => f.write_str("the key on a sequence item's dash line, which is edited only with the whole item"),
-            EditProblem::Unfaithful => f.write_str("the edit would not read back as written; nothing was changed"),
+            EditProblem::InsideFlow => {
+                f.write_str("inside a flow collection, which is edited only as a whole")
+            }
+            EditProblem::NoSuchItem { index, len } => {
+                write!(f, "no item {index}: the sequence has {len}")
+            }
+            EditProblem::ItemFirstKey => f.write_str(
+                "the key on a sequence item's dash line, which is edited only with the whole item",
+            ),
+            EditProblem::Unfaithful => {
+                f.write_str("the edit would not read back as written; nothing was changed")
+            }
         }
     }
 }
@@ -856,6 +1062,11 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn Diagnostic>> {
         EditProblem::Unfaithful,
     ]
     .into_iter()
-    .map(|problem| Box::new(EditError { path: path.clone(), problem }) as Box<dyn Diagnostic>)
+    .map(|problem| {
+        Box::new(EditError {
+            path: path.clone(),
+            problem,
+        }) as Box<dyn Diagnostic>
+    })
     .collect()
 }

@@ -5,7 +5,9 @@ use std::io::{self, Read};
 
 use annals::{Domain, Header, Stream, StreamId, Tx};
 use annals_diagnostic::{Arg, Diagnostic};
-use annals_log::{read_log, write_log, Envelope, Error, LogHeader, Reader, Writer, MAX_MESSAGE_LEN};
+use annals_log::{
+    read_log, write_log, Envelope, Error, LogHeader, Reader, Writer, MAX_MESSAGE_LEN,
+};
 use prost::Message;
 
 #[allow(dead_code)]

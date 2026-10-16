@@ -152,7 +152,9 @@ impl TagRegistry {
             return Ok(TagId(i as u16));
         }
         self.keys.push((ns, name.to_string()));
-        Ok(TagId(u16::try_from(self.keys.len() - 1).expect("too many tags")))
+        Ok(TagId(
+            u16::try_from(self.keys.len() - 1).expect("too many tags"),
+        ))
     }
 
     pub fn symbol(&mut self, value: &str) -> Result<SymbolId, BadTag> {
@@ -364,7 +366,14 @@ mod tests {
             ("", TagProblem::BadName),
         ] {
             let e = r.parse(bad).unwrap_err();
-            assert_eq!(e, BadTag { text: bad.to_string(), problem }, "{bad:?}");
+            assert_eq!(
+                e,
+                BadTag {
+                    text: bad.to_string(),
+                    problem
+                },
+                "{bad:?}"
+            );
         }
         assert_eq!(
             r.parse("Terrain:roof").unwrap_err().to_string(),
@@ -393,8 +402,12 @@ mod tests {
 
     #[test]
     fn a_set_stays_sorted_and_changes() {
-        let a = TagSet::new().with(TagId(5), TagValue::Flag).with(TagId(1), TagValue::Int(2));
-        let b = TagSet::new().with(TagId(1), TagValue::Int(2)).with(TagId(5), TagValue::Flag);
+        let a = TagSet::new()
+            .with(TagId(5), TagValue::Flag)
+            .with(TagId(1), TagValue::Int(2));
+        let b = TagSet::new()
+            .with(TagId(1), TagValue::Int(2))
+            .with(TagId(5), TagValue::Flag);
         assert_eq!(a, b);
         let mut s = TagSet::new().with(TagId(3), TagValue::Int(1));
         s.set(TagId(3), TagValue::Int(4)); // the smoke thickens

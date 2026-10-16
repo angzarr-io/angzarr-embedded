@@ -29,12 +29,20 @@ fn samples() -> Vec<(&'static str, Vec<Box<dyn Diagnostic>>)> {
 const NO_CODES: &[&str] = &["annals-catalog-check", "annals-diagnostic", "annals-sim"];
 
 fn crates_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .to_path_buf()
 }
 
 /// A message's variables, by name. Message references are refused: a
 /// message must name its own args.
-fn variables(pattern: &Pattern<String>, out: &mut BTreeSet<String>, problems: &mut Vec<String>, id: &str) {
+fn variables(
+    pattern: &Pattern<String>,
+    out: &mut BTreeSet<String>,
+    problems: &mut Vec<String>,
+    id: &str,
+) {
     for element in &pattern.elements {
         if let PatternElement::Placeable { expression } = element {
             expression_variables(expression, out, problems, id);
@@ -42,7 +50,12 @@ fn variables(pattern: &Pattern<String>, out: &mut BTreeSet<String>, problems: &m
     }
 }
 
-fn expression_variables(e: &Expression<String>, out: &mut BTreeSet<String>, problems: &mut Vec<String>, id: &str) {
+fn expression_variables(
+    e: &Expression<String>,
+    out: &mut BTreeSet<String>,
+    problems: &mut Vec<String>,
+    id: &str,
+) {
     match e {
         Expression::Select { selector, variants } => {
             inline_variables(selector, out, problems, id);
@@ -54,7 +67,12 @@ fn expression_variables(e: &Expression<String>, out: &mut BTreeSet<String>, prob
     }
 }
 
-fn inline_variables(e: &InlineExpression<String>, out: &mut BTreeSet<String>, problems: &mut Vec<String>, id: &str) {
+fn inline_variables(
+    e: &InlineExpression<String>,
+    out: &mut BTreeSet<String>,
+    problems: &mut Vec<String>,
+    id: &str,
+) {
     match e {
         InlineExpression::VariableReference { id: var } => {
             out.insert(var.name.clone());
@@ -78,9 +96,14 @@ fn inline_variables(e: &InlineExpression<String>, out: &mut BTreeSet<String>, pr
             }
         }
         InlineExpression::MessageReference { id: other, .. } => {
-            problems.push(format!("{id}: references message {}; name the args instead", other.name));
+            problems.push(format!(
+                "{id}: references message {}; name the args instead",
+                other.name
+            ));
         }
-        InlineExpression::Placeable { expression } => expression_variables(expression, out, problems, id),
+        InlineExpression::Placeable { expression } => {
+            expression_variables(expression, out, problems, id)
+        }
         InlineExpression::StringLiteral { .. } | InlineExpression::NumberLiteral { .. } => {}
     }
 }
@@ -93,7 +116,11 @@ fn read_catalog(path: &Path, problems: &mut Vec<String>) -> Catalog {
     let resource = match fluent_syntax::parser::parse(text) {
         Ok(r) => r,
         Err((r, errors)) => {
-            problems.push(format!("{}: {} syntax error(s): {errors:?}", path.display(), errors.len()));
+            problems.push(format!(
+                "{}: {} syntax error(s): {errors:?}",
+                path.display(),
+                errors.len()
+            ));
             r
         }
     };
@@ -114,8 +141,13 @@ fn read_catalog(path: &Path, problems: &mut Vec<String>) -> Catalog {
                     problems.push(format!("{}: {id} twice", path.display()));
                 }
             }
-            Entry::Junk { content } => problems.push(format!("{}: junk {content:?}", path.display())),
-            Entry::Term(_) | Entry::Comment(_) | Entry::GroupComment(_) | Entry::ResourceComment(_) => {}
+            Entry::Junk { content } => {
+                problems.push(format!("{}: junk {content:?}", path.display()))
+            }
+            Entry::Term(_)
+            | Entry::Comment(_)
+            | Entry::GroupComment(_)
+            | Entry::ResourceComment(_) => {}
         }
     }
     catalog
@@ -154,14 +186,23 @@ fn catalogs(problems: &mut Vec<String>) -> BTreeMap<String, BTreeMap<String, Cat
 
 /// kebab-case, starting with the crate's name and a dash; a valid Fluent id.
 fn code_ok(code: &str, krate: &str) -> bool {
-    code.strip_prefix(krate).and_then(|rest| rest.strip_prefix('-')).is_some_and(|rest| {
-        !rest.is_empty() && rest.split('-').all(|w| !w.is_empty() && w.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()))
-    })
+    code.strip_prefix(krate)
+        .and_then(|rest| rest.strip_prefix('-'))
+        .is_some_and(|rest| {
+            !rest.is_empty()
+                && rest.split('-').all(|w| {
+                    !w.is_empty()
+                        && w.bytes()
+                            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+                })
+        })
 }
 
 /// The crate a code belongs to: the longest crate name it starts with.
 fn owner<'a>(code: &str, crates: impl Iterator<Item = &'a str>) -> Option<&'a str> {
-    crates.filter(|k| code.starts_with(&format!("{k}-"))).max_by_key(|k| k.len())
+    crates
+        .filter(|k| code.starts_with(&format!("{k}-")))
+        .max_by_key(|k| k.len())
 }
 
 /// Check one diagnostic and, recursively, its nested causes. Returns every
@@ -180,7 +221,9 @@ fn check(
         problems.push(format!("{code}: empty English Display"));
     }
     if !code_ok(code, krate) || owner(code, catalogs.keys().map(String::as_str)) != Some(krate) {
-        problems.push(format!("{code}: not kebab-case starting `{krate}-` (and no longer crate name)"));
+        problems.push(format!(
+            "{code}: not kebab-case starting `{krate}-` (and no longer crate name)"
+        ));
     }
     if let Some(previous) = seen.insert(code.to_string(), krate.to_string()) {
         if previous != krate {
@@ -195,7 +238,11 @@ fn check(
         }
     }
     for locale in locales {
-        match catalogs.get(krate).and_then(|c| c.get(locale)).and_then(|c| c.get(code)) {
+        match catalogs
+            .get(krate)
+            .and_then(|c| c.get(locale))
+            .and_then(|c| c.get(code))
+        {
             None => problems.push(format!("{code}: no message in {locale}")),
             Some(vars) if *vars != names => problems.push(format!(
                 "{code} ({locale}): the message uses {vars:?}, the error gives {names:?}"
@@ -207,7 +254,10 @@ fn check(
         if let Arg::Nested(inner) = arg {
             match owner(inner.code(), catalogs.keys().map(String::as_str)) {
                 Some(k) => check(&**inner, k, catalogs, locales, problems, seen),
-                None => problems.push(format!("{code}: nested {} belongs to no crate", inner.code())),
+                None => problems.push(format!(
+                    "{code}: nested {} belongs to no crate",
+                    inner.code()
+                )),
             }
         }
     }
@@ -238,7 +288,10 @@ fn code_literals(krate: &str) -> BTreeSet<String> {
                 let body = &rest[at + 1..];
                 let end = body.find('"').unwrap_or(body.len());
                 let lit = &body[..end];
-                if lit.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') {
+                if lit
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+                {
                     codes.insert(lit.to_string());
                 }
                 rest = &body[end..];
@@ -253,7 +306,11 @@ fn every_code_has_a_message_with_exactly_its_args_in_every_locale() {
     let mut problems = Vec::new();
     let catalogs = catalogs(&mut problems);
     let locales: BTreeSet<String> = catalogs.values().flat_map(|c| c.keys().cloned()).collect();
-    assert!(locales.contains("en-US"), "no en-US catalogs under {}", crates_dir().display());
+    assert!(
+        locales.contains("en-US"),
+        "no en-US catalogs under {}",
+        crates_dir().display()
+    );
 
     let samples = samples();
     let mut seen = BTreeMap::new();
@@ -272,10 +329,15 @@ fn every_code_has_a_message_with_exactly_its_args_in_every_locale() {
     }
 
     // Every crate is either checked or known to have no codes.
-    let crates = fs::read_dir(crates_dir()).unwrap().map(|e| e.unwrap()).filter(|e| e.path().join("Cargo.toml").exists());
+    let crates = fs::read_dir(crates_dir())
+        .unwrap()
+        .map(|e| e.unwrap())
+        .filter(|e| e.path().join("Cargo.toml").exists());
     for name in crates.map(|e| e.file_name().to_string_lossy().into_owned()) {
         if !samples.iter().any(|(k, _)| *k == name) && !NO_CODES.contains(&name.as_str()) {
-            problems.push(format!("{name}: a crate with neither samples nor a place in NO_CODES"));
+            problems.push(format!(
+                "{name}: a crate with neither samples nor a place in NO_CODES"
+            ));
         }
     }
 
@@ -306,7 +368,12 @@ fn every_code_has_a_message_with_exactly_its_args_in_every_locale() {
 
     problems.sort();
     problems.dedup();
-    assert!(problems.is_empty(), "{} problem(s):\n{}", problems.len(), problems.join("\n"));
+    assert!(
+        problems.is_empty(),
+        "{} problem(s):\n{}",
+        problems.len(),
+        problems.join("\n")
+    );
 }
 
 #[test]
@@ -315,8 +382,17 @@ fn the_checks_catch_what_they_should() {
     assert!(!code_ok("annals-yaml-Too-new", "annals-yaml"));
     assert!(!code_ok("annals-yaml--new", "annals-yaml"));
     assert!(!code_ok("annals-yaml-", "annals-yaml"));
-    assert_eq!(owner("annals-yaml-tab-indent", ["annals", "annals-yaml"].into_iter()), Some("annals-yaml"));
-    assert_eq!(owner("annals-replay-x", ["annals", "annals-yaml"].into_iter()), Some("annals"));
+    assert_eq!(
+        owner(
+            "annals-yaml-tab-indent",
+            ["annals", "annals-yaml"].into_iter()
+        ),
+        Some("annals-yaml")
+    );
+    assert_eq!(
+        owner("annals-replay-x", ["annals", "annals-yaml"].into_iter()),
+        Some("annals")
+    );
 
     let mut problems = Vec::new();
     let resource = "a = { $x ->\n    [one] one { $y }\n   *[other] { NUMBER($z) } { -t($w) }\n }\n    .tip = { $v }\nb = { c }\n";
@@ -324,7 +400,12 @@ fn the_checks_catch_what_they_should() {
     let mut vars = BTreeSet::new();
     for entry in &parsed.body {
         if let Entry::Message(m) = entry {
-            variables(m.value.as_ref().unwrap(), &mut vars, &mut problems, &m.id.name);
+            variables(
+                m.value.as_ref().unwrap(),
+                &mut vars,
+                &mut problems,
+                &m.id.name,
+            );
             for a in &m.attributes {
                 variables(&a.value, &mut vars, &mut problems, &m.id.name);
             }

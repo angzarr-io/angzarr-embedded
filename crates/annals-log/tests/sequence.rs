@@ -58,7 +58,9 @@ fn read(bytes: &[u8], ticked: bool) -> (Vec<u64>, Option<Error>) {
 
 fn out_of_sequence(err: Option<Error>) -> (usize, u64) {
     match err {
-        Some(Error::Sequence(annals::ReplayError::OutOfSequence { index, found })) => (index, found),
+        Some(Error::Sequence(annals::ReplayError::OutOfSequence { index, found })) => {
+            (index, found)
+        }
         other => panic!("expected out of sequence, got {other:?}"),
     }
 }
@@ -194,8 +196,14 @@ fn a_ticked_reader_refuses_a_field_1_that_is_not_a_varint() {
     })
     .unwrap();
     let (_, err) = read(&w.into_inner(), true);
-    assert!(matches!(err, Some(Error::Wire(WireProblem::TickNotVarint))), "{err:?}");
-    assert_eq!(err.unwrap().to_string(), "bad wire format: tick (field 1) is not a varint");
+    assert!(
+        matches!(err, Some(Error::Wire(WireProblem::TickNotVarint))),
+        "{err:?}"
+    );
+    assert_eq!(
+        err.unwrap().to_string(),
+        "bad wire format: tick (field 1) is not a varint"
+    );
 }
 
 /// Ticks 2, 2, 2, 5, 5, 9 — several events at a tick, and empty ticks

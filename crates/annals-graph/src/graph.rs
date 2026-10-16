@@ -102,7 +102,10 @@ impl<I: Id, N, E> Graph<I, N, E> {
     }
 
     fn push_edge(&mut self, from: I, to: I, directed: bool, data: E) -> EdgeId {
-        assert!(from.index() < self.nodes.len(), "edge from unknown node {from:?}");
+        assert!(
+            from.index() < self.nodes.len(),
+            "edge from unknown node {from:?}"
+        );
         assert!(to.index() < self.nodes.len(), "edge to unknown node {to:?}");
         let id = EdgeId(u32::try_from(self.edges.len()).expect("too many edges"));
         self.edges.push(Edge {
@@ -138,7 +141,10 @@ impl<I: Id, N, E> Graph<I, N, E> {
 
     /// Every node, in id order.
     pub fn nodes(&self) -> impl Iterator<Item = (I, &N)> {
-        self.nodes.iter().enumerate().map(|(i, n)| (I::from_index(i), n))
+        self.nodes
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (I::from_index(i), n))
     }
 
     pub fn ids(&self) -> impl Iterator<Item = I> {
@@ -155,7 +161,10 @@ impl<I: Id, N, E> Graph<I, N, E> {
 
     /// Every edge, in id order.
     pub fn edges(&self) -> impl Iterator<Item = (EdgeId, &Edge<I, E>)> {
-        self.edges.iter().enumerate().map(|(i, e)| (EdgeId(i as u32), e))
+        self.edges
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (EdgeId(i as u32), e))
     }
 
     /// Edges that can be walked out of `from`, with where each leads, in the

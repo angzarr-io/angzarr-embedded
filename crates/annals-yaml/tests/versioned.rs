@@ -1,12 +1,12 @@
 //! Versioned loading: chain checks, every load error, a v0 to v3 migration
 //! with the helpers, pass-through, write-back and determinism.
 
+use annals_diagnostic::{Arg, Diagnostic, Report};
 use annals_yaml::versioned::{
-    map_seq, move_key, remove_key, rename_key, set_default, version_of, ChainError, ChainProblem, Fixture, LoadProblem, Loader,
-    MigrationError, Migrations, BadVersion,
+    map_seq, move_key, remove_key, rename_key, set_default, version_of, BadVersion, ChainError,
+    ChainProblem, Fixture, LoadProblem, Loader, MigrationError, Migrations,
 };
 use annals_yaml::{parse, write, Value};
-use annals_diagnostic::{Arg, Diagnostic, Report};
 
 fn ok(_: &mut Value) -> Result<(), MigrationError> {
     Ok(())
@@ -26,20 +26,47 @@ fn chain_problem(m: Migrations) -> ChainProblem {
 fn chains_must_be_whole() {
     assert!(Migrations::new("toy", 0).build().is_ok());
     assert!(Migrations::new("toy", 3).build().is_ok());
-    assert!(Migrations::new("toy", 3).step(1, ok).step(2, ok).build().is_ok());
-    assert!(Migrations::new("toy", 3).step(2, ok).step(0, ok).step(1, ok).build().is_ok());
+    assert!(Migrations::new("toy", 3)
+        .step(1, ok)
+        .step(2, ok)
+        .build()
+        .is_ok());
+    assert!(Migrations::new("toy", 3)
+        .step(2, ok)
+        .step(0, ok)
+        .step(1, ok)
+        .build()
+        .is_ok());
 
-    assert_eq!(chain_problem(Migrations::new("toy", 3).step(0, ok).step(2, ok)), ChainProblem::Gap { from: 1 });
-    assert_eq!(chain_problem(Migrations::new("toy", 3).step(0, ok).step(1, ok)), ChainProblem::Gap { from: 2 });
     assert_eq!(
-        chain_problem(Migrations::new("toy", 3).step(1, ok).step(1, ok).step(2, ok)),
+        chain_problem(Migrations::new("toy", 3).step(0, ok).step(2, ok)),
+        ChainProblem::Gap { from: 1 }
+    );
+    assert_eq!(
+        chain_problem(Migrations::new("toy", 3).step(0, ok).step(1, ok)),
+        ChainProblem::Gap { from: 2 }
+    );
+    assert_eq!(
+        chain_problem(
+            Migrations::new("toy", 3)
+                .step(1, ok)
+                .step(1, ok)
+                .step(2, ok)
+        ),
         ChainProblem::Duplicate { from: 1 }
     );
     assert_eq!(
         chain_problem(Migrations::new("toy", 2).step(1, ok).step(2, ok)),
-        ChainProblem::BeyondCurrent { from: 2, current: 2 }
+        ChainProblem::BeyondCurrent {
+            from: 2,
+            current: 2
+        }
     );
-    let e = Migrations::new("toy", 3).step(0, ok).step(2, ok).build().unwrap_err();
+    let e = Migrations::new("toy", 3)
+        .step(0, ok)
+        .step(2, ok)
+        .build()
+        .unwrap_err();
     assert_eq!(e.to_string(), "toy migrations: no step from version 1 to 2");
 }
 
@@ -65,7 +92,12 @@ fn v2_to_v3(doc: &mut Value) -> Result<(), MigrationError> {
 }
 
 fn toy() -> Loader {
-    Migrations::new("toy", 3).step(2, v2_to_v3).step(0, v0_to_v1).step(1, v1_to_v2).build().unwrap()
+    Migrations::new("toy", 3)
+        .step(2, v2_to_v3)
+        .step(0, v0_to_v1)
+        .step(1, v1_to_v2)
+        .build()
+        .unwrap()
 }
 
 const V0: &str = "# an old file\nversion: 0\nname: Ogre\nhp: 12\nlegacy: yes\nunits:\n  - {kind: club, hp: 3}\n  - {kind: rock, hp: 1}\n";
@@ -76,7 +108,12 @@ fn migrates_v0_to_v3_with_the_helpers() {
     let got = toy().load(Some("ogre.yaml"), V0).unwrap();
     assert_eq!(got, parse(V3).unwrap());
     // Keys keep their places; new ones go last.
-    let keys: Vec<&str> = got.as_map().unwrap().iter().map(|(k, _)| k.as_str()).collect();
+    let keys: Vec<&str> = got
+        .as_map()
+        .unwrap()
+        .iter()
+        .map(|(k, _)| k.as_str())
+        .collect();
     assert_eq!(keys, ["version", "health", "units", "speed", "meta"]);
     // Each intermediate version migrates from where it is.
     let v2 = "version: 2\nname: Ogre\nhealth: 12\nunits:\n  - {kind: club, health: 3}\n  - {kind: rock, health: 1}\nspeed: 1\n";
@@ -96,7 +133,10 @@ fn a_current_document_passes_through_untouched() {
 
 #[test]
 fn writes_back_the_migrated_tree() {
-    let written = toy().upgrade(Some("ogre.yaml"), V0, 1).unwrap().expect("an old file upgrades");
+    let written = toy()
+        .upgrade(Some("ogre.yaml"), V0, 1)
+        .unwrap()
+        .expect("an old file upgrades");
     assert_eq!(written, write(&parse(V3).unwrap(), 1));
     // The written file reads back as the current version, and is current.
     assert_eq!(parse(&written).unwrap(), parse(V3).unwrap());
@@ -108,7 +148,10 @@ fn writes_back_the_migrated_tree() {
 fn the_same_input_gives_the_same_bytes() {
     let first = toy().upgrade(None, V0, 2).unwrap().unwrap();
     for _ in 0..10 {
-        assert_eq!(toy().upgrade(None, V0, 2).unwrap().unwrap().as_bytes(), first.as_bytes());
+        assert_eq!(
+            toy().upgrade(None, V0, 2).unwrap().unwrap().as_bytes(),
+            first.as_bytes()
+        );
     }
 }
 
@@ -126,32 +169,79 @@ fn missing() -> Report {
 
 #[test]
 fn every_failure_is_a_typed_error() {
-    assert!(matches!(problem("version: 3\na: [1, 2\n"), LoadProblem::Yaml(_)));
+    assert!(matches!(
+        problem("version: 3\na: [1, 2\n"),
+        LoadProblem::Yaml(_)
+    ));
     assert_eq!(problem("- version: 3\n"), LoadProblem::NotAMapping);
     assert_eq!(problem(""), LoadProblem::NotAMapping);
-    assert_eq!(problem("version: two\n"), LoadProblem::BadVersion(BadVersion::NotAnInteger { text: "two".into() }));
-    assert_eq!(problem("version: -1\n"), LoadProblem::BadVersion(BadVersion::NotAnInteger { text: "-1".into() }));
-    assert_eq!(problem("version: 1.0\n"), LoadProblem::BadVersion(BadVersion::NotAnInteger { text: "1.0".into() }));
-    assert_eq!(problem("version:\n"), LoadProblem::BadVersion(BadVersion::Empty));
-    assert_eq!(problem("version: [1]\n"), LoadProblem::BadVersion(BadVersion::Sequence));
-    assert!(matches!(problem("version: 99999999999\n"), LoadProblem::BadVersion(_)));
-    assert_eq!(problem("version: 4\n"), LoadProblem::TooNew { found: 4, current: 3 });
+    assert_eq!(
+        problem("version: two\n"),
+        LoadProblem::BadVersion(BadVersion::NotAnInteger { text: "two".into() })
+    );
+    assert_eq!(
+        problem("version: -1\n"),
+        LoadProblem::BadVersion(BadVersion::NotAnInteger { text: "-1".into() })
+    );
+    assert_eq!(
+        problem("version: 1.0\n"),
+        LoadProblem::BadVersion(BadVersion::NotAnInteger { text: "1.0".into() })
+    );
+    assert_eq!(
+        problem("version:\n"),
+        LoadProblem::BadVersion(BadVersion::Empty)
+    );
+    assert_eq!(
+        problem("version: [1]\n"),
+        LoadProblem::BadVersion(BadVersion::Sequence)
+    );
+    assert!(matches!(
+        problem("version: 99999999999\n"),
+        LoadProblem::BadVersion(_)
+    ));
+    assert_eq!(
+        problem("version: 4\n"),
+        LoadProblem::TooNew {
+            found: 4,
+            current: 3
+        }
+    );
 
-    let trimmed = Migrations::new("toy", 3).step(1, v1_to_v2).step(2, v2_to_v3).build().unwrap();
+    let trimmed = Migrations::new("toy", 3)
+        .step(1, v1_to_v2)
+        .step(2, v2_to_v3)
+        .build()
+        .unwrap();
     let e = trimmed.load(Some("ancient.yaml"), V0).unwrap_err();
-    assert_eq!(e.problem, LoadProblem::TooOld { found: 0, oldest: 1 });
-
-    // A step that fails: which step, and what went wrong.
-    let e = toy().load(Some("bad.yaml"), "version: 0\nhp: 1\nhealth: 2\n").unwrap_err();
     assert_eq!(
         e.problem,
-        LoadProblem::Step { from: 0, error: Box::new(MigrationError::RenameTargetExists { from: "hp".into(), to: "health".into() }) }
+        LoadProblem::TooOld {
+            found: 0,
+            oldest: 1
+        }
+    );
+
+    // A step that fails: which step, and what went wrong.
+    let e = toy()
+        .load(Some("bad.yaml"), "version: 0\nhp: 1\nhealth: 2\n")
+        .unwrap_err();
+    assert_eq!(
+        e.problem,
+        LoadProblem::Step {
+            from: 0,
+            error: Box::new(MigrationError::RenameTargetExists {
+                from: "hp".into(),
+                to: "health".into()
+            })
+        }
     );
     assert_eq!(
         e.to_string(),
         "toy document bad.yaml: migrating version 0 to 1: rename \"hp\" to \"health\": \"health\" is already there"
     );
-    let e = toy().load(None, "version: 0\nunits: [{hp: 1}, {hp: 2, health: 2}]\n").unwrap_err();
+    let e = toy()
+        .load(None, "version: 0\nunits: [{hp: 1}, {hp: 2, health: 2}]\n")
+        .unwrap_err();
     assert_eq!(e.to_string(), "toy document: migrating version 0 to 1: units[1]: rename \"hp\" to \"health\": \"health\" is already there");
 
     // A step that breaks the root.
@@ -160,23 +250,32 @@ fn every_failure_is_a_typed_error() {
         Ok(())
     }
     let broken = Migrations::new("toy", 1).step(0, clobber).build().unwrap();
-    assert!(matches!(broken.load(None, "version: 0\n").unwrap_err().problem, LoadProblem::Step { from: 0, .. }));
+    assert!(matches!(
+        broken.load(None, "version: 0\n").unwrap_err().problem,
+        LoadProblem::Step { from: 0, .. }
+    ));
 
     // The decoder's error.
     let e = toy()
-        .load_as(Some("ogre.yaml"), V0, |doc| doc.get("missing").cloned().ok_or_else(missing))
+        .load_as(Some("ogre.yaml"), V0, |doc| {
+            doc.get("missing").cloned().ok_or_else(missing)
+        })
         .unwrap_err();
     assert_eq!(e.problem, LoadProblem::Decode(missing()));
     assert_eq!(e.code(), "annals-yaml-load-failed-at");
     match &e.args()[..] {
-        [("kind", Arg::Str(kind)), ("source", Arg::Str(source)), ("problem", Arg::Nested(problem))] => {
+        [("kind", Arg::Str(kind)), ("source", Arg::Str(source)), ("problem", Arg::Nested(problem))] =>
+        {
             assert_eq!((kind.as_str(), source.as_str()), ("toy", "ogre.yaml"));
             assert_eq!(problem.code(), "toy-missing-key");
             assert!(matches!(&problem.args()[..], [("key", Arg::Str(k))] if k == "missing"));
         }
         other => panic!("{other:?}"),
     }
-    assert_eq!(e.to_string(), "toy document ogre.yaml: `missing` is missing");
+    assert_eq!(
+        e.to_string(),
+        "toy document ogre.yaml: `missing` is missing"
+    );
 
     // The error messages name the problem.
     assert_eq!(
@@ -187,8 +286,15 @@ fn every_failure_is_a_typed_error() {
 
 #[test]
 fn load_as_decodes_the_current_tree() {
-    let health: u32 =
-        toy().load_as(None, V0, |doc| doc.get("health").and_then(Value::as_str).unwrap().parse::<u32>().map_err(|_| missing())).unwrap();
+    let health: u32 = toy()
+        .load_as(None, V0, |doc| {
+            doc.get("health")
+                .and_then(Value::as_str)
+                .unwrap()
+                .parse::<u32>()
+                .map_err(|_| missing())
+        })
+        .unwrap();
     assert_eq!(health, 12);
 }
 
@@ -197,7 +303,10 @@ fn helpers_handle_the_edges() {
     let mut doc = parse("a: 1\nb: 2\nn:\n").unwrap();
     rename_key(&mut doc, "missing", "c").unwrap();
     rename_key(&mut doc, "a", "a").unwrap();
-    assert_eq!(rename_key(&mut Value::scalar("x"), "a", "b"), Err(MigrationError::RenameNotAMapping { from: "a".into() }));
+    assert_eq!(
+        rename_key(&mut Value::scalar("x"), "a", "b"),
+        Err(MigrationError::RenameNotAMapping { from: "a".into() })
+    );
     set_default(&mut doc, "a", Value::scalar("9")).unwrap();
     set_default(&mut doc, "n", Value::scalar("0")).unwrap();
     assert_eq!(doc, parse("a: 1\nb: 2\nn: 0\n").unwrap());
@@ -210,66 +319,133 @@ fn helpers_handle_the_edges() {
     move_key(&mut doc, &["nowhere", "deep"], &["a"]).unwrap();
     assert_eq!(
         move_key(&mut doc, &["n"], &["a"]),
-        Err(MigrationError::MoveTargetExists { from: "n".into(), to: "a".into(), key: "a".into() })
+        Err(MigrationError::MoveTargetExists {
+            from: "n".into(),
+            to: "a".into(),
+            key: "a".into()
+        })
     );
     let before = doc.clone();
     assert_eq!(
         move_key(&mut doc, &["n"], &["a", "b"]),
-        Err(MigrationError::MoveNotAMapping { from: "n".into(), to: "a.b".into() })
+        Err(MigrationError::MoveNotAMapping {
+            from: "n".into(),
+            to: "a.b".into()
+        })
     );
     assert_eq!(doc, before, "a failed move changes nothing");
     assert_eq!(
         move_key(&mut doc, &["a", "x"], &["c"]),
-        Err(MigrationError::MoveThroughNotAMapping { from: "a.x".into(), to: "c".into(), key: "a".into() })
+        Err(MigrationError::MoveThroughNotAMapping {
+            from: "a.x".into(),
+            to: "c".into(),
+            key: "a".into()
+        })
     );
-    assert_eq!(move_key(&mut doc, &[], &["a"]), Err(MigrationError::MoveEmptyPath { from: "".into(), to: "a".into() }));
-    assert_eq!(map_seq(&mut doc, "n", |_| Ok(())), Err(MigrationError::MapNotASequence { key: "n".into() }));
-    map_seq(&mut doc, "missing", |_| Err(MigrationError::RootNotAMapping)).unwrap();
+    assert_eq!(
+        move_key(&mut doc, &[], &["a"]),
+        Err(MigrationError::MoveEmptyPath {
+            from: "".into(),
+            to: "a".into()
+        })
+    );
+    assert_eq!(
+        map_seq(&mut doc, "n", |_| Ok(())),
+        Err(MigrationError::MapNotASequence { key: "n".into() })
+    );
+    map_seq(&mut doc, "missing", |_| {
+        Err(MigrationError::RootNotAMapping)
+    })
+    .unwrap();
 }
 
 #[test]
 fn fixtures_must_migrate_to_their_expected_trees() {
     let loader = toy();
     loader.assert_fixtures(&[
-        Fixture { name: "v0.yaml", input: V0, expected: Some(V3) },
-        Fixture { name: "v3.yaml", input: V3, expected: None },
+        Fixture {
+            name: "v0.yaml",
+            input: V0,
+            expected: Some(V3),
+        },
+        Fixture {
+            name: "v3.yaml",
+            input: V3,
+            expected: None,
+        },
     ]);
 
     let failures = loader
         .check_fixtures(&[
             // At an old version with no expected output: stale.
-            Fixture { name: "stale.yaml", input: V0, expected: None },
+            Fixture {
+                name: "stale.yaml",
+                input: V0,
+                expected: None,
+            },
             // Migrates, but not to what it should.
-            Fixture { name: "wrong.yaml", input: V0, expected: Some("version: 3\n") },
+            Fixture {
+                name: "wrong.yaml",
+                input: V0,
+                expected: Some("version: 3\n"),
+            },
             // Expected output not at the current version.
-            Fixture { name: "old-expected.yaml", input: V0, expected: Some(V0) },
+            Fixture {
+                name: "old-expected.yaml",
+                input: V0,
+                expected: Some(V0),
+            },
             // Does not load.
-            Fixture { name: "broken.yaml", input: "version: 9\n", expected: None },
+            Fixture {
+                name: "broken.yaml",
+                input: "version: 9\n",
+                expected: None,
+            },
         ])
         .unwrap_err();
     let named = |n: &str| failures.iter().any(|f| f.contains(n));
     assert!(named("stale.yaml: at version 0"), "{failures:?}");
     assert!(named("wrong.yaml: migrated to"), "{failures:?}");
-    assert!(named("old-expected.yaml: the expected output must be at the current version"), "{failures:?}");
-    assert!(named("broken.yaml: version 9 was written by a newer build"), "{failures:?}");
+    assert!(
+        named("old-expected.yaml: the expected output must be at the current version"),
+        "{failures:?}"
+    );
+    assert!(
+        named("broken.yaml: version 9 was written by a newer build"),
+        "{failures:?}"
+    );
     assert!(loader.check_fixtures(&[]).is_err());
 }
 
 #[test]
 #[should_panic(expected = "toy fixtures do not migrate")]
 fn assert_fixtures_panics_on_failure() {
-    toy().assert_fixtures(&[Fixture { name: "v0.yaml", input: V0, expected: None }]);
+    toy().assert_fixtures(&[Fixture {
+        name: "v0.yaml",
+        input: V0,
+        expected: None,
+    }]);
 }
 
 #[test]
 fn a_document_without_a_version_is_version_0() {
     let unstamped = V0.replace("version: 0\n", "");
     assert_eq!(version_of(&annals_yaml::parse(&unstamped).unwrap()), Ok(0));
-    assert_eq!(toy().load(None, &unstamped).unwrap(), toy().load(None, V0).unwrap());
-    let from_1 = Migrations::new("toy", 3).step(1, v1_to_v2).step(2, v2_to_v3).build().unwrap();
+    assert_eq!(
+        toy().load(None, &unstamped).unwrap(),
+        toy().load(None, V0).unwrap()
+    );
+    let from_1 = Migrations::new("toy", 3)
+        .step(1, v1_to_v2)
+        .step(2, v2_to_v3)
+        .build()
+        .unwrap();
     assert_eq!(
         from_1.load(None, "name: Ogre\n").unwrap_err().problem,
-        LoadProblem::TooOld { found: 0, oldest: 1 }
+        LoadProblem::TooOld {
+            found: 0,
+            oldest: 1
+        }
     );
 }
 
@@ -288,18 +464,35 @@ fn a_game_step_raises_its_own_code() {
     fn needs_a_number(doc: &mut Value) -> Result<(), MigrationError> {
         match doc.get("hp").and_then(Value::as_str) {
             Some(hp) if hp.parse::<u32>().is_ok() => Ok(()),
-            hp => Err(Report::new("toy-hp-not-a-number", "hp is not a number").arg("hp", hp.unwrap_or("")).into()),
+            hp => Err(Report::new("toy-hp-not-a-number", "hp is not a number")
+                .arg("hp", hp.unwrap_or(""))
+                .into()),
         }
     }
-    let loader = Migrations::new("toy", 1).step(0, needs_a_number).build().unwrap();
+    let loader = Migrations::new("toy", 1)
+        .step(0, needs_a_number)
+        .build()
+        .unwrap();
     let e = loader.load(None, "version: 0\nhp: lots\n").unwrap_err();
-    let LoadProblem::Step { from: 0, error } = &e.problem else { panic!("{e:?}") };
+    let LoadProblem::Step { from: 0, error } = &e.problem else {
+        panic!("{e:?}")
+    };
     assert_eq!(error.code(), "toy-hp-not-a-number");
     assert!(matches!(&error.args()[..], [("hp", Arg::Str(hp))] if hp == "lots"));
-    assert_eq!(e.to_string(), "toy document: migrating version 0 to 1: hp is not a number");
+    assert_eq!(
+        e.to_string(),
+        "toy document: migrating version 0 to 1: hp is not a number"
+    );
     assert_eq!(e.code(), "annals-yaml-load-failed");
     assert_eq!(e.problem.code(), "annals-yaml-step-failed");
-    assert!(matches!(&e.problem.args()[..], [("from", Arg::Uint(0)), ("to", Arg::Uint(1)), ("error", Arg::Nested(_))]));
+    assert!(matches!(
+        &e.problem.args()[..],
+        [
+            ("from", Arg::Uint(0)),
+            ("to", Arg::Uint(1)),
+            ("error", Arg::Nested(_))
+        ]
+    ));
 }
 
 // ------------------------------------------------------- upgrade, keeping
@@ -309,7 +502,10 @@ fn rename_hp(doc: &mut Value) -> Result<(), MigrationError> {
 }
 
 fn hp_loader() -> Loader {
-    Migrations::new("toy", 2).step(1, rename_hp).build().unwrap()
+    Migrations::new("toy", 2)
+        .step(1, rename_hp)
+        .build()
+        .unwrap()
 }
 
 #[test]
@@ -323,7 +519,10 @@ stats:
   hp: 3
   speed: 2   # tiles per turn
 ";
-    let up = hp_loader().upgrade_keeping(Some("toy.yaml"), old, 2).unwrap().unwrap();
+    let up = hp_loader()
+        .upgrade_keeping(Some("toy.yaml"), old, 2)
+        .unwrap()
+        .unwrap();
     assert!(up.comments_kept);
     assert_eq!(
         up.text,
@@ -339,17 +538,25 @@ stats:
     // A renamed key moves to the end of its mapping; the tree is otherwise
     // the migration's.
     let back = parse(&up.text).unwrap();
-    assert_eq!(back.get("stats").and_then(|st| st.get("health")), Some(&Value::scalar("3")));
+    assert_eq!(
+        back.get("stats").and_then(|st| st.get("health")),
+        Some(&Value::scalar("3"))
+    );
     assert_eq!(back.get("stats").and_then(|st| st.get("hp")), None);
 }
 
 #[test]
 fn upgrade_keeping_a_current_document_is_none() {
-    assert!(hp_loader().upgrade_keeping(None, "version: 2\nstats: {health: 1}\n", 2).unwrap().is_none());
+    assert!(hp_loader()
+        .upgrade_keeping(None, "version: 2\nstats: {health: 1}\n", 2)
+        .unwrap()
+        .is_none());
 }
 
 #[test]
 fn upgrade_keeping_reports_a_bad_document_like_load() {
-    assert!(hp_loader().upgrade_keeping(None, "version: 9\n", 2).is_err());
+    assert!(hp_loader()
+        .upgrade_keeping(None, "version: 9\n", 2)
+        .is_err());
     assert!(hp_loader().upgrade_keeping(None, "a: &x 1\n", 2).is_err());
 }

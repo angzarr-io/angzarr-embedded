@@ -68,7 +68,9 @@ pub enum Value {
 /// `_`, `-` and `.`. Such ids have one spelling, so they compare as the
 /// reader expects without Unicode normalization.
 pub fn is_ascii_id(s: &str) -> bool {
-    !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
 }
 
 fn err<T>(line: usize, problem: ParseProblem) -> Result<T, Error> {
@@ -103,7 +105,10 @@ impl Value {
 
     /// The value at `key`, if this is a mapping that has it.
     pub fn get(&self, key: &str) -> Option<&Value> {
-        self.as_map()?.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+        self.as_map()?
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v)
     }
 
     /// The value at `key`, mutably, if this is a mapping that has it.
@@ -181,7 +186,9 @@ fn trim(s: &str) -> &str {
 fn strip_comment(s: &str) -> &str {
     let b = s.as_bytes();
     let (mut i, mut prev, mut depth) = (0, b' ', 0u32);
-    let starts = |prev: u8, depth: u32| matches!(prev, b' ' | b'\t') || depth > 0 && matches!(prev, b'[' | b'{' | b',');
+    let starts = |prev: u8, depth: u32| {
+        matches!(prev, b' ' | b'\t') || depth > 0 && matches!(prev, b'[' | b'{' | b',')
+    };
     while i < b.len() {
         let c = b[i];
         match c {
@@ -220,7 +227,11 @@ fn closing_quote(b: &[u8], open: usize) -> usize {
 fn raw_lines(src: &str) -> impl Iterator<Item = Result<(usize, &str), Error>> {
     let last = src.split('\n').count() - 1;
     src.split('\n').enumerate().map(move |(i, raw)| {
-        let line = if i < last { raw.strip_suffix('\r').unwrap_or(raw) } else { raw };
+        let line = if i < last {
+            raw.strip_suffix('\r').unwrap_or(raw)
+        } else {
+            raw
+        };
         if line.contains('\r') {
             return err(i + 1, ParseProblem::LoneCarriageReturn);
         }
@@ -245,7 +256,12 @@ fn lines(src: &str) -> Result<Vec<Line<'_>>, Error> {
             return err(no, ParseProblem::NonAsciiIndent { character });
         }
         if text == "---" || text == "..." {
-            return err(no, ParseProblem::DocumentMarker { marker: text.to_string() });
+            return err(
+                no,
+                ParseProblem::DocumentMarker {
+                    marker: text.to_string(),
+                },
+            );
         }
         if let Some(problem) = unsupported(text) {
             return err(no, problem);
@@ -282,8 +298,14 @@ struct Parser<'a> {
 /// starting `[` or `{` is a flow collection, never a key.
 fn split_key(s: &str) -> Option<(&str, &str)> {
     let b = s.as_bytes();
-    let separator = |i: usize| b[i] == b':' && (i + 1 == b.len() || matches!(b[i + 1], b' ' | b'\t'));
-    let split = |i: usize| Some((s[..i].trim_end_matches(SPACE), s[i + 1..].trim_start_matches(SPACE)));
+    let separator =
+        |i: usize| b[i] == b':' && (i + 1 == b.len() || matches!(b[i + 1], b' ' | b'\t'));
+    let split = |i: usize| {
+        Some((
+            s[..i].trim_end_matches(SPACE),
+            s[i + 1..].trim_start_matches(SPACE),
+        ))
+    };
     match b.first()? {
         b'[' | b'{' => None,
         b'"' | b'\'' => {
@@ -334,10 +356,19 @@ impl<'a> Parser<'a> {
             self.at += 1;
             if rest.is_empty() {
                 items.push(self.nested(indent, no)?);
-            } else if is_item(rest) || split_key(rest).is_some() && !rest.starts_with('{') && !rest.starts_with('[') {
+            } else if is_item(rest)
+                || split_key(rest).is_some() && !rest.starts_with('{') && !rest.starts_with('[')
+            {
                 // `- key: value` starts a mapping (or `- - x` a sequence)
                 // whose further lines sit at the item's own indent.
-                self.lines.insert(self.at, Line { no, indent: inner, text: rest });
+                self.lines.insert(
+                    self.at,
+                    Line {
+                        no,
+                        indent: inner,
+                        text: rest,
+                    },
+                );
                 items.push(self.block(inner)?);
             } else {
                 items.push(inline(rest, no)?);
@@ -360,7 +391,12 @@ impl<'a> Parser<'a> {
             }
             let no = l.no;
             let Some((key, rest)) = split_key(l.text) else {
-                return err(no, ParseProblem::ExpectedKeyValue { found: l.text.to_string() });
+                return err(
+                    no,
+                    ParseProblem::ExpectedKeyValue {
+                        found: l.text.to_string(),
+                    },
+                );
             };
             let key = match inline(key, no)? {
                 Value::Scalar(k) => k,
@@ -420,7 +456,12 @@ fn inline(text: &str, no: usize) -> Result<Value, Error> {
     let v = f.value()?;
     f.space();
     if f.at != f.s.len() {
-        return err(no, ParseProblem::Unexpected { found: f.s[f.at..].to_string() });
+        return err(
+            no,
+            ParseProblem::Unexpected {
+                found: f.s[f.at..].to_string(),
+            },
+        );
     }
     Ok(v)
 }
@@ -525,18 +566,32 @@ impl<'a> Flow<'a> {
                             Some((_, e @ ('"' | '\\'))) => out.push(e),
                             Some((_, u @ ('u' | 'U'))) => {
                                 let n = if u == 'u' { 4 } else { 8 };
-                                let digits: String =
-                                    (0..n).map_while(|_| chars.next_if(|(_, c)| c.is_ascii_hexdigit()).map(|(_, c)| c)).collect();
-                                let c = u32::from_str_radix(&digits, 16).ok().filter(|_| digits.len() == n).and_then(char::from_u32);
+                                let digits: String = (0..n)
+                                    .map_while(|_| {
+                                        chars
+                                            .next_if(|(_, c)| c.is_ascii_hexdigit())
+                                            .map(|(_, c)| c)
+                                    })
+                                    .collect();
+                                let c = u32::from_str_radix(&digits, 16)
+                                    .ok()
+                                    .filter(|_| digits.len() == n)
+                                    .and_then(char::from_u32);
                                 match c {
                                     Some(c) => out.push(c),
                                     None => {
-                                        return err(self.no, ParseProblem::BadUnicodeEscape { escape: format!("\\{u}{digits}") })
+                                        return err(
+                                            self.no,
+                                            ParseProblem::BadUnicodeEscape {
+                                                escape: format!("\\{u}{digits}"),
+                                            },
+                                        )
                                     }
                                 }
                             }
                             other => {
-                                let escape = other.map_or(String::from("\\"), |(_, c)| format!("\\{c}"));
+                                let escape =
+                                    other.map_or(String::from("\\"), |(_, c)| format!("\\{c}"));
                                 return err(self.no, ParseProblem::UnknownEscape { escape });
                             }
                         }
@@ -549,7 +604,8 @@ impl<'a> Flow<'a> {
             None => Ok(Value::Null),
             Some(_) => {
                 let end = if nested {
-                    rest.find(|c| c == ',' || c == ']' || c == '}' || (key && c == ':')).unwrap_or(rest.len())
+                    rest.find(|c| c == ',' || c == ']' || c == '}' || (key && c == ':'))
+                        .unwrap_or(rest.len())
                 } else {
                     rest.len()
                 };
@@ -590,10 +646,16 @@ fn plain_ok(s: &str, at: At) -> bool {
     let (Some(first), Some(last)) = (s.chars().next(), s.chars().next_back()) else {
         return false;
     };
-    if matches!(s, "~" | "null" | "---" | "...") || first.is_whitespace() || last.is_whitespace() || s.chars().any(escaped) {
+    if matches!(s, "~" | "null" | "---" | "...")
+        || first.is_whitespace()
+        || last.is_whitespace()
+        || s.chars().any(escaped)
+    {
         return false;
     }
-    if "-?:,[]{}#&*!|>'\"%@`".contains(first) && !(first == '-' && s.len() > 1 && !s.starts_with("- ")) {
+    if "-?:,[]{}#&*!|>'\"%@`".contains(first)
+        && !(first == '-' && s.len() > 1 && !s.starts_with("- "))
+    {
         return false;
     }
     // `: ` would end a key, ` #` start a comment, and a quote after a space
@@ -601,7 +663,10 @@ fn plain_ok(s: &str, at: At) -> bool {
     if s.contains(": ") || s.ends_with(':') || s.contains(" #") {
         return false;
     }
-    if s.as_bytes().windows(2).any(|w| matches!(w[0], b' ' | b'[' | b'{' | b',') && matches!(w[1], b'"' | b'\'')) {
+    if s.as_bytes()
+        .windows(2)
+        .any(|w| matches!(w[0], b' ' | b'[' | b'{' | b',') && matches!(w[1], b'"' | b'\''))
+    {
         return false;
     }
     match at {
@@ -653,7 +718,11 @@ fn flow(v: &Value) -> Option<String> {
             let parts: Option<Vec<String>> = entries
                 .iter()
                 .map(|(k, v)| match v {
-                    Value::Scalar(s) => Some(format!("{}: {}", scalar_text(k, At::FlowKey), scalar_text(s, At::FlowValue))),
+                    Value::Scalar(s) => Some(format!(
+                        "{}: {}",
+                        scalar_text(k, At::FlowKey),
+                        scalar_text(s, At::FlowValue)
+                    )),
                     _ => None,
                 })
                 .collect();
@@ -745,8 +814,12 @@ pub fn diagnostic_samples() -> Vec<Box<dyn annals_diagnostic::Diagnostic>> {
     let parse = [
         ParseProblem::LoneCarriageReturn,
         ParseProblem::TabIndent,
-        ParseProblem::NonAsciiIndent { character: '\u{a0}' },
-        ParseProblem::DocumentMarker { marker: text("---") },
+        ParseProblem::NonAsciiIndent {
+            character: '\u{a0}',
+        },
+        ParseProblem::DocumentMarker {
+            marker: text("---"),
+        },
         ParseProblem::Anchor,
         ParseProblem::Alias,
         ParseProblem::Tag,
@@ -759,12 +832,20 @@ pub fn diagnostic_samples() -> Vec<Box<dyn annals_diagnostic::Diagnostic>> {
         ParseProblem::ExpectedSeqSeparator,
         ParseProblem::ExpectedColon,
         ParseProblem::ExpectedMapSeparator,
-        ParseProblem::BadUnicodeEscape { escape: text(r"\uD83D") },
-        ParseProblem::UnknownEscape { escape: text(r"\x") },
+        ParseProblem::BadUnicodeEscape {
+            escape: text(r"\uD83D"),
+        },
+        ParseProblem::UnknownEscape {
+            escape: text(r"\x"),
+        },
         ParseProblem::UnterminatedQuote,
     ];
     let mut samples: Vec<Box<dyn annals_diagnostic::Diagnostic>> = Vec::new();
-    samples.extend(parse.into_iter().map(|problem| Box::new(Error { line: 3, problem }) as _));
+    samples.extend(
+        parse
+            .into_iter()
+            .map(|problem| Box::new(Error { line: 3, problem }) as _),
+    );
     samples.extend(versioned::diagnostic_samples());
     samples.extend(edit::diagnostic_samples());
     samples
@@ -785,7 +866,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(v.get("name"), Some(&s("helmet")));
-        assert_eq!(v.get("wards"), Some(&Value::Seq(vec![s("Concussion"), s("Cracked: Rib")])));
+        assert_eq!(
+            v.get("wards"),
+            Some(&Value::Seq(vec![s("Concussion"), s("Cracked: Rib")]))
+        );
         let wounds = v.get("wounds").unwrap().as_seq().unwrap();
         assert_eq!(wounds.len(), 2);
         assert_eq!(wounds[0].get("depth"), Some(&s("250")));
@@ -795,8 +879,13 @@ mod tests {
 
     #[test]
     fn reads_flow_collections() {
-        let v = parse("modes: [Attack (Snap), Attack (Aimed)]\nstat: {reflex: 3, will: 1}\nnone: []\n").unwrap();
-        assert_eq!(v.get("modes"), Some(&Value::Seq(vec![s("Attack (Snap)"), s("Attack (Aimed)")])));
+        let v =
+            parse("modes: [Attack (Snap), Attack (Aimed)]\nstat: {reflex: 3, will: 1}\nnone: []\n")
+                .unwrap();
+        assert_eq!(
+            v.get("modes"),
+            Some(&Value::Seq(vec![s("Attack (Snap)"), s("Attack (Aimed)")]))
+        );
         assert_eq!(v.get("stat").unwrap().get("will"), Some(&s("1")));
         assert_eq!(v.get("none"), Some(&Value::Seq(vec![])));
     }
@@ -820,22 +909,50 @@ mod tests {
             ("- !tag x\n", 1, ParseProblem::Tag),
             ("a: |\n  text\n", 1, ParseProblem::BlockScalar),
             ("a:\n\t- x\n", 2, ParseProblem::TabIndent),
-            ("---\na: 1\n", 1, ParseProblem::DocumentMarker { marker: found("---") }),
-            ("a: 1\na: 2\n", 2, ParseProblem::DuplicateKey { key: found("a") }),
-            ("a: {b: 1, b: 2}\n", 1, ParseProblem::DuplicateKey { key: found("b") }),
+            (
+                "---\na: 1\n",
+                1,
+                ParseProblem::DocumentMarker {
+                    marker: found("---"),
+                },
+            ),
+            (
+                "a: 1\na: 2\n",
+                2,
+                ParseProblem::DuplicateKey { key: found("a") },
+            ),
+            (
+                "a: {b: 1, b: 2}\n",
+                1,
+                ParseProblem::DuplicateKey { key: found("b") },
+            ),
             ("a: [1, 2\n", 1, ParseProblem::ExpectedSeqSeparator),
             ("a: {b 1}\n", 1, ParseProblem::ExpectedColon),
             ("a: {b: 1\n", 1, ParseProblem::ExpectedMapSeparator),
             ("a: {: 1}\n", 1, ParseProblem::KeyNotScalar),
             ("a: 1\n   b: 2\n", 2, ParseProblem::UnexpectedIndent),
-            ("a: 1\nb\n", 2, ParseProblem::ExpectedKeyValue { found: found("b") }),
-            ("a: [1] x\n", 1, ParseProblem::Unexpected { found: found("x") }),
+            (
+                "a: 1\nb\n",
+                2,
+                ParseProblem::ExpectedKeyValue { found: found("b") },
+            ),
+            (
+                "a: [1] x\n",
+                1,
+                ParseProblem::Unexpected { found: found("x") },
+            ),
             ("a: \"x\n", 1, ParseProblem::UnterminatedQuote),
         ] {
             assert_eq!(parse(src), Err(Error { line, problem }), "{src:?}");
         }
-        assert_eq!(parse("a: 1\na: 2\n").unwrap_err().to_string(), "line 2: \"a\" twice");
-        assert_eq!(parse("a: &x 1\n").unwrap_err().to_string(), "line 1: anchors (&) aren't supported");
+        assert_eq!(
+            parse("a: 1\na: 2\n").unwrap_err().to_string(),
+            "line 2: \"a\" twice"
+        );
+        assert_eq!(
+            parse("a: &x 1\n").unwrap_err().to_string(),
+            "line 1: anchors (&) aren't supported"
+        );
     }
 
     #[test]
@@ -844,7 +961,11 @@ mod tests {
         let v = parse(src).unwrap();
         for depth in 0..5 {
             let written = write(&v, depth);
-            assert_eq!(parse(&written).unwrap(), v, "flow depth {depth}:\n{written}");
+            assert_eq!(
+                parse(&written).unwrap(),
+                v,
+                "flow depth {depth}:\n{written}"
+            );
         }
     }
 
@@ -861,19 +982,42 @@ mod tests {
 
     #[test]
     fn only_a_space_or_tab_before_hash_starts_a_comment() {
-        assert_eq!(parse("name: a\u{a0}#b\n").unwrap().get("name"), Some(&s("a\u{a0}#b")));
-        assert_eq!(parse("name: a\u{3000}#b\n").unwrap().get("name"), Some(&s("a\u{3000}#b")));
+        assert_eq!(
+            parse("name: a\u{a0}#b\n").unwrap().get("name"),
+            Some(&s("a\u{a0}#b"))
+        );
+        assert_eq!(
+            parse("name: a\u{3000}#b\n").unwrap().get("name"),
+            Some(&s("a\u{3000}#b"))
+        );
         assert_eq!(parse("name: a\t#b\n").unwrap().get("name"), Some(&s("a")));
         assert_eq!(parse("name: a #b\n").unwrap().get("name"), Some(&s("a")));
     }
 
     #[test]
     fn a_quote_opens_only_at_the_start_of_a_scalar() {
-        assert_eq!(parse("name: l'\u{e9}p\u{e9}e # the sword\n").unwrap().get("name"), Some(&s("l'\u{e9}p\u{e9}e")));
-        assert_eq!(parse("name: 5\"2 # tall\n").unwrap().get("name"), Some(&s("5\"2")));
-        assert_eq!(parse("name: 'it''s # in' # out\n").unwrap().get("name"), Some(&s("it's # in")));
-        assert_eq!(parse("name: \"a\\\" # in\" # out\n").unwrap().get("name"), Some(&s("a\" # in")));
-        assert_eq!(parse("v: [l'a, 'b # c'] # d\n").unwrap().get("v"), Some(&Value::Seq(vec![s("l'a"), s("b # c")])));
+        assert_eq!(
+            parse("name: l'\u{e9}p\u{e9}e # the sword\n")
+                .unwrap()
+                .get("name"),
+            Some(&s("l'\u{e9}p\u{e9}e"))
+        );
+        assert_eq!(
+            parse("name: 5\"2 # tall\n").unwrap().get("name"),
+            Some(&s("5\"2"))
+        );
+        assert_eq!(
+            parse("name: 'it''s # in' # out\n").unwrap().get("name"),
+            Some(&s("it's # in"))
+        );
+        assert_eq!(
+            parse("name: \"a\\\" # in\" # out\n").unwrap().get("name"),
+            Some(&s("a\" # in"))
+        );
+        assert_eq!(
+            parse("v: [l'a, 'b # c'] # d\n").unwrap().get("v"),
+            Some(&Value::Seq(vec![s("l'a"), s("b # c")]))
+        );
         // A quoted key ends at its closing quote, escapes and all.
         let keys = parse("\"a\\\": b\": 1\n'it''s: x' : 2\na]b: 3\n").unwrap();
         assert_eq!(keys.get("a\": b"), Some(&s("1")));
@@ -883,15 +1027,40 @@ mod tests {
 
     #[test]
     fn indentation_is_ascii_spaces_only() {
-        for src in ["a:\n\u{a0}\u{a0}b: 1\n", "a:\n\u{3000}b: 1\n", "a:\n  \u{a0}b: 1\n", "\u{a0}\n"] {
+        for src in [
+            "a:\n\u{a0}\u{a0}b: 1\n",
+            "a:\n\u{3000}b: 1\n",
+            "a:\n  \u{a0}b: 1\n",
+            "\u{a0}\n",
+        ] {
             let e = parse(src).unwrap_err();
-            assert!(matches!(e.problem, ParseProblem::NonAsciiIndent { .. }), "{src:?}: {e}");
-            assert_eq!(e.line, if src.starts_with('\u{a0}') { 1 } else { 2 }, "{src:?}");
+            assert!(
+                matches!(e.problem, ParseProblem::NonAsciiIndent { .. }),
+                "{src:?}: {e}"
+            );
+            assert_eq!(
+                e.line,
+                if src.starts_with('\u{a0}') { 1 } else { 2 },
+                "{src:?}"
+            );
         }
         // Not whitespace to the grammar: content, kept.
-        assert_eq!(parse("a: \u{a0}x\u{a0}\n").unwrap().get("a"), Some(&s("\u{a0}x\u{a0}")));
-        assert_eq!(parse("a: {k: \u{3000}x}\n").unwrap().get("a").unwrap().get("k"), Some(&s("\u{3000}x")));
-        assert_eq!(parse("a:\u{a0}b: 1\n").unwrap().get("a:\u{a0}b"), Some(&s("1")));
+        assert_eq!(
+            parse("a: \u{a0}x\u{a0}\n").unwrap().get("a"),
+            Some(&s("\u{a0}x\u{a0}"))
+        );
+        assert_eq!(
+            parse("a: {k: \u{3000}x}\n")
+                .unwrap()
+                .get("a")
+                .unwrap()
+                .get("k"),
+            Some(&s("\u{3000}x"))
+        );
+        assert_eq!(
+            parse("a:\u{a0}b: 1\n").unwrap().get("a:\u{a0}b"),
+            Some(&s("1"))
+        );
         assert_eq!(parse("a:\tb\n").unwrap().get("a"), Some(&s("b")));
     }
 
@@ -899,7 +1068,12 @@ mod tests {
     fn line_breaks_are_lf_or_crlf_and_a_lone_cr_is_refused() {
         let crlf = parse("a: 1\r\nb:\r\n  - x\r\n  - \"y\"\r\n").unwrap();
         assert_eq!(crlf, parse("a: 1\nb:\n  - x\n  - \"y\"\n").unwrap());
-        for (src, line) in [("a: 1\rb: 2\r", 1), ("a: 1\nb: x\ry\n", 2), ("a: \"x\ry\"", 1), ("a: 1\r", 1)] {
+        for (src, line) in [
+            ("a: 1\rb: 2\r", 1),
+            ("a: 1\nb: x\ry\n", 2),
+            ("a: \"x\ry\"", 1),
+            ("a: 1\r", 1),
+        ] {
             let e = parse(src).unwrap_err();
             assert_eq!(e.line, line, "{src:?}");
             assert_eq!(e.problem, ParseProblem::LoneCarriageReturn, "{src:?}: {e}");
@@ -915,28 +1089,65 @@ mod tests {
     fn double_quotes_take_unicode_cr_and_nul_escapes() {
         let v = parse(&bs(r#"a: "^u00e9^r^0^t^n^^^"^U0001F5E1""#)).unwrap();
         assert_eq!(v.get("a"), Some(&s("\u{e9}\r\0\t\n\\\"\u{1f5e1}")));
-        assert_eq!(parse(&bs(r#"a: "^u00E9""#)).unwrap().get("a"), Some(&s("\u{e9}")));
-        for bad in ["^uD83D^uDDE1", "^uDDE1", "^u00e", "^U00110000", "^x41", "^q", "^u+0e9"] {
+        assert_eq!(
+            parse(&bs(r#"a: "^u00E9""#)).unwrap().get("a"),
+            Some(&s("\u{e9}"))
+        );
+        for bad in [
+            "^uD83D^uDDE1",
+            "^uDDE1",
+            "^u00e",
+            "^U00110000",
+            "^x41",
+            "^q",
+            "^u+0e9",
+        ] {
             let e = parse(&bs(&format!("a: \"{bad}\"\n"))).unwrap_err();
-            assert!(matches!(e.problem, ParseProblem::BadUnicodeEscape { .. } | ParseProblem::UnknownEscape { .. }), "{bad}: {e}");
+            assert!(
+                matches!(
+                    e.problem,
+                    ParseProblem::BadUnicodeEscape { .. } | ParseProblem::UnknownEscape { .. }
+                ),
+                "{bad}: {e}"
+            );
         }
         let e = parse(&bs(r#"a: "^q""#)).unwrap_err();
         assert_eq!(e.problem, ParseProblem::UnknownEscape { escape: bs("^q") });
         assert_eq!(e.to_string(), bs("line 1: unknown escape ^q"));
         let e = parse(&bs(r#"a: "^uDDE1""#)).unwrap_err();
-        assert_eq!(e.problem, ParseProblem::BadUnicodeEscape { escape: bs("^uDDE1") });
+        assert_eq!(
+            e.problem,
+            ParseProblem::BadUnicodeEscape {
+                escape: bs("^uDDE1")
+            }
+        );
     }
 
     fn round_trips(v: &Value) {
         for depth in 0..4 {
             let written = write(v, depth);
-            assert_eq!(parse(&written).as_ref(), Ok(v), "flow depth {depth}:\n{written}");
+            assert_eq!(
+                parse(&written).as_ref(),
+                Ok(v),
+                "flow depth {depth}:\n{written}"
+            );
         }
     }
 
     #[test]
     fn keys_with_brackets_or_colons_are_quoted() {
-        for key in ["a[1", "a{1", "a]b", "a}b", "x:y", "x:", "a,b", "a\t#b", "a #b", "a\u{a0}#b"] {
+        for key in [
+            "a[1",
+            "a{1",
+            "a]b",
+            "a}b",
+            "x:y",
+            "x:",
+            "a,b",
+            "a\t#b",
+            "a #b",
+            "a\u{a0}#b",
+        ] {
             let flat = Value::Map(vec![(key.to_string(), s("v"))]);
             round_trips(&flat);
             round_trips(&Value::Map(vec![("k".into(), flat.clone())]));
@@ -946,11 +1157,27 @@ mod tests {
 
     #[test]
     fn control_characters_are_escaped() {
-        for text in ["a\u{0}b", "\u{1b}[31m", "a\rb", "a\u{85}b", "a\u{2028}b", "\u{feff}bom", "tab\there", "a\u{7f}", "a\u{9c}"] {
-            let v = Value::Map(vec![(text.to_string(), s(text)), ("seq".into(), Value::Seq(vec![s(text)]))]);
+        for text in [
+            "a\u{0}b",
+            "\u{1b}[31m",
+            "a\rb",
+            "a\u{85}b",
+            "a\u{2028}b",
+            "\u{feff}bom",
+            "tab\there",
+            "a\u{7f}",
+            "a\u{9c}",
+        ] {
+            let v = Value::Map(vec![
+                (text.to_string(), s(text)),
+                ("seq".into(), Value::Seq(vec![s(text)])),
+            ]);
             round_trips(&v);
             let written = write(&v, 0);
-            assert!(!written.chars().any(|c| c.is_control() && c != '\n'), "{written:?}");
+            assert!(
+                !written.chars().any(|c| c.is_control() && c != '\n'),
+                "{written:?}"
+            );
         }
     }
 
@@ -962,7 +1189,16 @@ mod tests {
         for id in ["sword", "Iron_Sword-2", "units.club", "a"] {
             assert!(is_ascii_id(id), "{id}");
         }
-        for id in ["", "\u{e9}", "e\u{301}", "\u{e9}p\u{e9}e", "a b", "a:b", "\u{ff53}word", "a\u{200b}"] {
+        for id in [
+            "",
+            "\u{e9}",
+            "e\u{301}",
+            "\u{e9}p\u{e9}e",
+            "a b",
+            "a:b",
+            "\u{ff53}word",
+            "a\u{200b}",
+        ] {
             assert!(!is_ascii_id(id), "{id:?}");
         }
     }

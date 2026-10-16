@@ -42,7 +42,14 @@ pub fn diagnostic_samples() -> Vec<Box<dyn annals_diagnostic::Diagnostic>> {
     vec![
         Box::new(ReplayError::OutOfSequence { index: 1, found: 2 }),
         Box::new(ReplayError::CauseNotEarlier { seq: 1, cause: 1 }),
-        Box::new(Conflict { id: StreamId(7), expected: 1, actual: 3 }),
-        Box::new(saga::Gap { expected: 5, found: 7 }),
+        Box::new(Conflict {
+            id: StreamId(7),
+            expected: 1,
+            actual: 3,
+        }),
+        Box::new(saga::Gap {
+            expected: 5,
+            found: 7,
+        }),
     ]
 }

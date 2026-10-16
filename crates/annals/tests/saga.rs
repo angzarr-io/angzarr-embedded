@@ -80,13 +80,21 @@ struct MemberState {
 
 #[derive(Clone, PartialEq, Debug)]
 enum MemberCmd {
-    Enrol { name: String, source_seq: Seq, club: ClubState },
+    Enrol {
+        name: String,
+        source_seq: Seq,
+        club: ClubState,
+    },
     Inject(Injected<ClubEvent>),
 }
 
 #[derive(Clone, PartialEq, Debug)]
 enum MemberEvent {
-    Enrolled { name: String, source_seq: Seq, club: ClubState },
+    Enrolled {
+        name: String,
+        source_seq: Seq,
+        club: ClubState,
+    },
     FromClub(Injected<ClubEvent>),
 }
 
@@ -138,7 +146,11 @@ impl Domain for Member {
     fn decide(cmd: &MemberCmd, tx: &mut Tx<Self>) -> Result<(), MemberRefused> {
         let s = tx.state();
         match cmd {
-            MemberCmd::Enrol { name, source_seq, club } => {
+            MemberCmd::Enrol {
+                name,
+                source_seq,
+                club,
+            } => {
                 if s.checkpoint.is_some() {
                     return Err(MemberRefused::AlreadyEnrolled);
                 }
@@ -166,7 +178,11 @@ impl Domain for Member {
 
     fn apply(s: &mut MemberState, e: &MemberEvent, rules: &()) {
         match e {
-            MemberEvent::Enrolled { name, source_seq, club } => {
+            MemberEvent::Enrolled {
+                name,
+                source_seq,
+                club,
+            } => {
                 s.name = Some(name.clone());
                 s.checkpoint = Some(*source_seq);
                 s.club = club.clone();
@@ -257,7 +273,13 @@ fn deliver(source: &Stream<Club>, name: &str, copy: &mut Stream<Member>) -> usiz
 
 /// Seqs: 0 paid 5, 1 ann joined, 2 paid 3, 3 bob joined, 4 paid 2.
 fn ann_and_bob() -> Stream<Club> {
-    club(&[ClubEvent::Paid(5), joined("ann"), ClubEvent::Paid(3), joined("bob"), ClubEvent::Paid(2)])
+    club(&[
+        ClubEvent::Paid(5),
+        joined("ann"),
+        ClubEvent::Paid(3),
+        joined("bob"),
+        ClubEvent::Paid(2),
+    ])
 }
 
 // ---------------------------------------------------------------- tests
@@ -267,7 +289,11 @@ fn the_targets_are_a_fold_of_the_source() {
     let mut s = ann_and_bob();
     assert_eq!(ClubToMembers::targets(s.state()), ["ann", "bob"]);
     s.execute(&left("ann"), &(), &mut ()).unwrap();
-    assert_eq!(ClubToMembers::targets(s.state()), ["ann", "bob"], "ann is owed her own departure");
+    assert_eq!(
+        ClubToMembers::targets(s.state()),
+        ["ann", "bob"],
+        "ann is owed her own departure"
+    );
     s.execute(&ClubEvent::Paid(1), &(), &mut ()).unwrap();
     assert_eq!(ClubToMembers::targets(s.state()), ["bob"]);
 }
@@ -314,7 +340,11 @@ fn a_backlog_from_a_mid_stream_checkpoint_holds_only_what_follows_it() {
     );
 
     assert_eq!(deliver(&s, "ann", &mut ann), 2);
-    assert_eq!(ann.state().club, *s.state(), "the source's own apply folds the copy");
+    assert_eq!(
+        ann.state().club,
+        *s.state(),
+        "the source's own apply folds the copy"
+    );
     assert!(
         backlog::<ClubToMembers>(&s, &(), &"ann".to_string(), Some(6)).is_empty(),
         "up to date: checkpoint + 1 is the source's length"
@@ -336,10 +366,16 @@ fn a_retired_target_receives_its_retirement_and_nothing_after() {
     );
     deliver(&s, "ann", &mut ann);
     assert!(ann.state().departed);
-    assert!(backlog::<ClubToMembers>(&s, &(), &"ann".to_string(), ann.state().checkpoint).is_empty());
+    assert!(
+        backlog::<ClubToMembers>(&s, &(), &"ann".to_string(), ann.state().checkpoint).is_empty()
+    );
 
     let stray = ann.execute(&inject(&s, 6), &(), &mut ());
-    assert_eq!(stray.unwrap_err(), MemberRefused::Departed, "a stray delivery is refused");
+    assert_eq!(
+        stray.unwrap_err(),
+        MemberRefused::Departed,
+        "a stray delivery is refused"
+    );
 }
 
 #[test]
@@ -364,9 +400,19 @@ fn redelivery_emits_nothing_and_a_gap_is_refused() {
     s.execute(&ClubEvent::Paid(1), &(), &mut ()).unwrap();
     s.execute(&ClubEvent::Paid(1), &(), &mut ()).unwrap();
     let gapped = ann.execute(&inject(&s, 6), &(), &mut ());
-    assert_eq!(gapped.unwrap_err(), MemberRefused::Gap(Gap { expected: 5, found: 6 }));
+    assert_eq!(
+        gapped.unwrap_err(),
+        MemberRefused::Gap(Gap {
+            expected: 5,
+            found: 6
+        })
+    );
     assert_eq!(*ann.state(), before, "a refused gap changes nothing");
-    assert_eq!(deliver(&s, "ann", &mut ann), 2, "the backlog fills the gap in order");
+    assert_eq!(
+        deliver(&s, "ann", &mut ann),
+        2,
+        "the backlog fills the gap in order"
+    );
 }
 
 #[test]
@@ -374,23 +420,49 @@ fn admit_places_a_source_seq_against_a_checkpoint() {
     assert_eq!(admit(4, 5), Ok(Admit::Next));
     assert_eq!(admit(4, 4), Ok(Admit::Redelivery));
     assert_eq!(admit(4, 0), Ok(Admit::Redelivery));
-    assert_eq!(admit(4, 6), Err(Gap { expected: 5, found: 6 }));
+    assert_eq!(
+        admit(4, 6),
+        Err(Gap {
+            expected: 5,
+            found: 6
+        })
+    );
 }
 
 #[test]
 fn a_gap_is_a_diagnostic() {
-    let gap = Gap { expected: 5, found: 7 };
+    let gap = Gap {
+        expected: 5,
+        found: 7,
+    };
     assert_eq!(gap.code(), "annals-saga-gap");
-    let args: Vec<_> = gap.args().into_iter().map(|(name, arg)| (name, format!("{arg:?}"))).collect();
-    assert_eq!(args, [("expected", "Uint(5)".to_string()), ("found", "Uint(7)".to_string())]);
-    assert_eq!(gap.to_string(), "source event 7 skips ahead of event 5, the next expected");
+    let args: Vec<_> = gap
+        .args()
+        .into_iter()
+        .map(|(name, arg)| (name, format!("{arg:?}")))
+        .collect();
+    assert_eq!(
+        args,
+        [
+            ("expected", "Uint(5)".to_string()),
+            ("found", "Uint(7)".to_string())
+        ]
+    );
+    assert_eq!(
+        gap.to_string(),
+        "source event 7 skips ahead of event 5, the next expected"
+    );
 }
 
 #[test]
 fn visiting_states_sees_each_event_with_the_state_just_after_it() {
     let s = ann_and_bob();
     let mut seen = Vec::new();
-    s.visit_states(&(), |envelope, state| seen.push((envelope.seq, state.clone())));
-    let expected: Vec<_> = (0..s.len()).map(|seq| (seq, s.state_at(seq + 1, &()))).collect();
+    s.visit_states(&(), |envelope, state| {
+        seen.push((envelope.seq, state.clone()))
+    });
+    let expected: Vec<_> = (0..s.len())
+        .map(|seq| (seq, s.state_at(seq + 1, &())))
+        .collect();
     assert_eq!(seen, expected);
 }

@@ -16,10 +16,7 @@ mod toy;
 #[allow(clippy::all, dead_code)]
 mod generated {
     pub mod v1 {
-        include!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/gen/annals.log.v1.rs"
-        ));
+        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/gen/annals.log.v1.rs"));
     }
     pub mod toy {
         include!(concat!(
@@ -59,7 +56,13 @@ fn payloads() -> Vec<Vec<u8>> {
 
 #[test]
 fn log_header() {
-    let strings = ["", "d", "toy 1.0", "\u{fc}n\u{ef}c\u{f6}d\u{e9} \u{2694}", &"x".repeat(100_000)];
+    let strings = [
+        "",
+        "d",
+        "toy 1.0",
+        "\u{fc}n\u{ef}c\u{f6}d\u{e9} \u{2694}",
+        &"x".repeat(100_000),
+    ];
     for stream_id in [0, 1, 127, 128, u64::MAX] {
         for schema_version in [0, 1, 300, u32::MAX] {
             for (i, s) in strings.iter().enumerate() {

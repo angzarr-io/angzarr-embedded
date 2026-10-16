@@ -4,8 +4,8 @@ mod common;
 
 use std::path::Path;
 
-use common::*;
 use annals_sim::gherkin::{self, Step};
+use common::*;
 
 #[derive(Default)]
 struct World {

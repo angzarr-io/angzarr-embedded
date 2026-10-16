@@ -13,7 +13,12 @@ fn s(x: &str) -> Value {
 }
 
 fn map(entries: &[(&str, Value)]) -> Value {
-    Value::Map(entries.iter().map(|(k, v)| (k.to_string(), v.clone())).collect())
+    Value::Map(
+        entries
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect(),
+    )
 }
 
 fn tool(name: &str) -> Value {
@@ -72,7 +77,10 @@ packages:
 fn push_without_blank_lines_between_items_adds_none() {
     let mut d = doc("packages:\n  - name: a\n  - name: b\nafter: x\n");
     d.push(&["packages"], &map(&[("name", s("c"))]), 2).unwrap();
-    assert_eq!(d.text(), "packages:\n  - name: a\n  - name: b\n  - name: c\nafter: x\n");
+    assert_eq!(
+        d.text(),
+        "packages:\n  - name: a\n  - name: b\n  - name: c\nafter: x\n"
+    );
 }
 
 #[test]
@@ -102,7 +110,16 @@ fn a_root_sequence_is_edited_with_an_empty_path() {
 
 #[test]
 fn push_writes_nested_values_at_the_flow_depth_asked_for() {
-    let item = map(&[("name", s("fd")), ("install", map(&[("linux", map(&[("backend", s("apt")), ("package", s("fd-find"))]))]))]);
+    let item = map(&[
+        ("name", s("fd")),
+        (
+            "install",
+            map(&[(
+                "linux",
+                map(&[("backend", s("apt")), ("package", s("fd-find"))]),
+            )]),
+        ),
+    ]);
     let mut d = doc("packages:\n  - name: a\n");
     d.push(&["packages"], &item, 3).unwrap();
     assert_eq!(d.text(), "packages:\n  - name: a\n  - name: fd\n    install:\n      linux: {backend: apt, package: fd-find}\n");
@@ -127,14 +144,20 @@ fn push_to_a_key_with_no_value_starts_a_block_sequence() {
 fn a_flow_sequence_stays_on_its_line_when_it_still_fits() {
     let mut d = doc("targets: [linux/amd64]   # more later\n");
     d.push(&["targets"], &s("linux/arm64"), 2).unwrap();
-    assert_eq!(d.text(), "targets: [linux/amd64, linux/arm64]   # more later\n");
+    assert_eq!(
+        d.text(),
+        "targets: [linux/amd64, linux/arm64]   # more later\n"
+    );
 }
 
 #[test]
 fn an_empty_flow_sequence_becomes_a_block_for_a_mapping_item() {
     let mut d = doc("packages: []   # none yet\n");
     d.push(&["packages"], &tool("a"), 2).unwrap();
-    assert_eq!(d.text(), "packages:   # none yet\n  - name: a\n    spec: 1.0\n");
+    assert_eq!(
+        d.text(),
+        "packages:   # none yet\n  - name: a\n    spec: 1.0\n"
+    );
 }
 
 #[test]
@@ -246,7 +269,12 @@ packages:
 
 #[test]
 fn push_then_remove_restores_the_text() {
-    for src in [TOOLS, "packages:\n- a\n", "packages:\n  - name: a\n  - name: b\nafter: x\n", "packages: [a]\n"] {
+    for src in [
+        TOOLS,
+        "packages:\n- a\n",
+        "packages:\n  - name: a\n  - name: b\nafter: x\n",
+        "packages: [a]\n",
+    ] {
         let mut d = doc(src);
         let n = d.value().get("packages").unwrap().as_seq().unwrap().len();
         d.push(&["packages"], &s("new"), 2).unwrap();
@@ -292,14 +320,32 @@ fn a_document_that_does_not_parse_is_refused() {
 fn edit_errors_name_the_path() {
     let mut d = doc("a: 1\nb:\n  c: [x]\nd: {e: [y]}\n");
     assert_eq!(problem(d.remove(&["z"], 0)), EditProblem::NotFound);
-    assert_eq!(problem(d.push(&["z", "q"], &s("v"), 2)), EditProblem::NotFound);
-    assert_eq!(problem(d.push(&["a"], &s("v"), 2)), EditProblem::NotASequence);
-    assert_eq!(problem(d.push(&["a", "q"], &s("v"), 2)), EditProblem::NotAMapping);
-    assert_eq!(problem(d.remove(&["b", "c"], 1)), EditProblem::NoSuchItem { index: 1, len: 1 });
-    assert_eq!(problem(d.push(&["d", "e"], &s("v"), 2)), EditProblem::InsideFlow);
+    assert_eq!(
+        problem(d.push(&["z", "q"], &s("v"), 2)),
+        EditProblem::NotFound
+    );
+    assert_eq!(
+        problem(d.push(&["a"], &s("v"), 2)),
+        EditProblem::NotASequence
+    );
+    assert_eq!(
+        problem(d.push(&["a", "q"], &s("v"), 2)),
+        EditProblem::NotAMapping
+    );
+    assert_eq!(
+        problem(d.remove(&["b", "c"], 1)),
+        EditProblem::NoSuchItem { index: 1, len: 1 }
+    );
+    assert_eq!(
+        problem(d.push(&["d", "e"], &s("v"), 2)),
+        EditProblem::InsideFlow
+    );
     assert_eq!(problem(d.push(&[], &s("v"), 2)), EditProblem::NotASequence);
     let mut seq = doc("packages:\n  - name: a\n");
-    assert_eq!(problem(seq.push(&["packages", "name"], &s("v"), 2)), EditProblem::NotAMapping);
+    assert_eq!(
+        problem(seq.push(&["packages", "name"], &s("v"), 2)),
+        EditProblem::NotAMapping
+    );
     let e = d.remove(&["b", "x"], 0).unwrap_err();
     assert_eq!(e.path, vec!["b".to_string(), "x".to_string()]);
     assert_eq!(e.to_string(), "b.x: not found");
@@ -323,7 +369,19 @@ fn edit_errors_are_diagnostics() {
 
 // ------------------------------------------------------------------ property
 
-const NAMES: &[&str] = &["a", "fd", "just", "a b", "x: y", "#c", "- d", "\u{65e5}\u{672c}", "", "null", "[e]"];
+const NAMES: &[&str] = &[
+    "a",
+    "fd",
+    "just",
+    "a b",
+    "x: y",
+    "#c",
+    "- d",
+    "\u{65e5}\u{672c}",
+    "",
+    "null",
+    "[e]",
+];
 
 fn random_item(rng: &mut Rng) -> Value {
     let name = s(NAMES[rng.below(NAMES.len() as u32) as usize]);
@@ -331,14 +389,21 @@ fn random_item(rng: &mut Rng) -> Value {
         0 => name,
         1 => map(&[("name", name)]),
         2 => map(&[("name", name), ("tags", Value::Seq(vec![s("t"), s("u")]))]),
-        _ => map(&[("name", name), ("install", map(&[("linux", map(&[("backend", s("apt"))]))]))]),
+        _ => map(&[
+            ("name", name),
+            ("install", map(&[("linux", map(&[("backend", s("apt"))]))])),
+        ]),
     }
 }
 
 /// A document holding `items` under `packages`, written at a random flow
 /// depth, with comments and blank lines dropped between its lines.
 fn random_document(rng: &mut Rng, items: &[Value]) -> String {
-    let v = map(&[("version", s("1")), ("packages", Value::Seq(items.to_vec())), ("after", s("x"))]);
+    let v = map(&[
+        ("version", s("1")),
+        ("packages", Value::Seq(items.to_vec())),
+        ("after", s("x")),
+    ]);
     let written = write(&v, 2 + rng.below(3) as usize);
     let mut out = String::new();
     for line in written.lines() {
@@ -390,16 +455,33 @@ fn random_edits_read_back_as_the_value_expected() {
             // rewritten when a flow sequence changes or becomes a block.
             if !was_empty && !items.is_empty() {
                 let key_line = |l: &&str| !l.starts_with("packages:");
-                let (old, new) = (before.lines().filter(key_line).collect::<Vec<_>>(), d.text());
+                let (old, new) = (
+                    before.lines().filter(key_line).collect::<Vec<_>>(),
+                    d.text(),
+                );
                 let new = new.lines().filter(key_line).collect::<Vec<_>>();
                 match op {
-                    0 => assert!(subsequence(&old, &new), "seed {seed}: push changed a line:\n{before}\n---\n{}", d.text()),
-                    1 => assert!(subsequence(&new, &old), "seed {seed}: remove changed a line:\n{before}\n---\n{}", d.text()),
+                    0 => assert!(
+                        subsequence(&old, &new),
+                        "seed {seed}: push changed a line:\n{before}\n---\n{}",
+                        d.text()
+                    ),
+                    1 => assert!(
+                        subsequence(&new, &old),
+                        "seed {seed}: remove changed a line:\n{before}\n---\n{}",
+                        d.text()
+                    ),
                     _ => {}
                 }
             }
-            let back = parse(&d.text()).unwrap_or_else(|e| panic!("seed {seed}: {e}\n{}", d.text()));
-            assert_eq!(back.get("packages"), Some(&Value::Seq(items.clone())), "seed {seed}:\n{}", d.text());
+            let back =
+                parse(&d.text()).unwrap_or_else(|e| panic!("seed {seed}: {e}\n{}", d.text()));
+            assert_eq!(
+                back.get("packages"),
+                Some(&Value::Seq(items.clone())),
+                "seed {seed}:\n{}",
+                d.text()
+            );
             assert_eq!(back.get("after"), Some(&s("x")), "seed {seed}");
             assert_eq!(&back, d.value(), "seed {seed}");
         }

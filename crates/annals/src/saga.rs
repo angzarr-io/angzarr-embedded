@@ -105,7 +105,10 @@ pub fn admit(checkpoint: Seq, source_seq: Seq) -> Result<Admit, Gap> {
     } else if source_seq == expected {
         Ok(Admit::Next)
     } else {
-        Err(Gap { expected, found: source_seq })
+        Err(Gap {
+            expected,
+            found: source_seq,
+        })
     }
 }
 
@@ -119,7 +122,11 @@ pub struct Gap {
 
 impl fmt::Display for Gap {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "source event {} skips ahead of event {}, the next expected", self.found, self.expected)
+        write!(
+            f,
+            "source event {} skips ahead of event {}, the next expected",
+            self.found, self.expected
+        )
     }
 }
 
@@ -131,6 +138,9 @@ impl Diagnostic for Gap {
     }
 
     fn args(&self) -> Vec<(&'static str, Arg)> {
-        vec![("expected", self.expected.into()), ("found", self.found.into())]
+        vec![
+            ("expected", self.expected.into()),
+            ("found", self.found.into()),
+        ]
     }
 }

@@ -11,7 +11,12 @@ fn s(x: &str) -> Value {
 }
 
 fn map(entries: &[(&str, Value)]) -> Value {
-    Value::Map(entries.iter().map(|(k, v)| (k.to_string(), v.clone())).collect())
+    Value::Map(
+        entries
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect(),
+    )
 }
 
 fn doc(src: &str) -> Document {
@@ -43,7 +48,10 @@ packages:
 fn set_replaces_a_scalar_keeping_the_lines_comment() {
     let mut d = doc(MANIFEST);
     d.set(&[], "version", &s("2"), 2).unwrap();
-    assert_eq!(d.text(), MANIFEST.replace("version: 1   # format", "version: 2   # format"));
+    assert_eq!(
+        d.text(),
+        MANIFEST.replace("version: 1   # format", "version: 2   # format")
+    );
     assert_eq!(d.value(), &parse(&d.text()).unwrap());
 }
 
@@ -57,8 +65,17 @@ fn set_adds_a_missing_key_at_the_end_of_its_mapping() {
 #[test]
 fn set_inside_a_sequence_item_changes_only_that_entry() {
     let mut d = doc(MANIFEST);
-    d.set(&[Seg::Key("packages"), Seg::Item(1)], "spec", &s("10.3.0"), 2).unwrap();
-    assert_eq!(d.text(), MANIFEST.replace("    spec: 10.2.0", "    spec: 10.3.0"));
+    d.set(
+        &[Seg::Key("packages"), Seg::Item(1)],
+        "spec",
+        &s("10.3.0"),
+        2,
+    )
+    .unwrap();
+    assert_eq!(
+        d.text(),
+        MANIFEST.replace("    spec: 10.2.0", "    spec: 10.3.0")
+    );
 }
 
 #[test]
@@ -66,9 +83,18 @@ fn set_writes_a_collection_value_at_the_entrys_indent() {
     let mut d = doc(MANIFEST);
     let block = map(&[(
         "backends",
-        map(&[("apt", map(&[("package", s("fd-find"))])), ("cargo", map(&[("package", s("fd-find"))]))]),
+        map(&[
+            ("apt", map(&[("package", s("fd-find"))])),
+            ("cargo", map(&[("package", s("fd-find"))])),
+        ]),
     )]);
-    d.set(&[Seg::Key("packages"), Seg::Item(1), Seg::Key("install")], "linux", &block, 2).unwrap();
+    d.set(
+        &[Seg::Key("packages"), Seg::Item(1), Seg::Key("install")],
+        "linux",
+        &block,
+        2,
+    )
+    .unwrap();
     assert_eq!(
         d.text(),
         MANIFEST.replace(
@@ -89,8 +115,12 @@ fn remove_key_takes_its_lines_and_the_comment_directly_above() {
 #[test]
 fn remove_key_inside_a_sequence_item() {
     let mut d = doc(MANIFEST);
-    d.remove_key(&[Seg::Key("packages"), Seg::Item(1)], "spec").unwrap();
-    assert_eq!(d.text(), MANIFEST.replace("    # Debian calls it fd-find.\n    spec: 10.2.0\n", ""));
+    d.remove_key(&[Seg::Key("packages"), Seg::Item(1)], "spec")
+        .unwrap();
+    assert_eq!(
+        d.text(),
+        MANIFEST.replace("    # Debian calls it fd-find.\n    spec: 10.2.0\n", "")
+    );
 }
 
 #[test]
@@ -104,7 +134,14 @@ fn removing_a_missing_key_is_not_found() {
 #[test]
 fn the_key_on_an_items_dash_line_is_edited_with_the_item() {
     let mut d = doc(MANIFEST);
-    let err = d.set(&[Seg::Key("packages"), Seg::Item(0)], "name", &s("just2"), 2).unwrap_err();
+    let err = d
+        .set(
+            &[Seg::Key("packages"), Seg::Item(0)],
+            "name",
+            &s("just2"),
+            2,
+        )
+        .unwrap_err();
     assert_eq!(err.problem, EditProblem::ItemFirstKey);
     assert_eq!(d.text(), MANIFEST);
 }
@@ -112,7 +149,9 @@ fn the_key_on_an_items_dash_line_is_edited_with_the_item() {
 #[test]
 fn an_item_index_past_the_end_is_no_such_item() {
     let mut d = doc(MANIFEST);
-    let err = d.set(&[Seg::Key("packages"), Seg::Item(5)], "spec", &s("1"), 2).unwrap_err();
+    let err = d
+        .set(&[Seg::Key("packages"), Seg::Item(5)], "spec", &s("1"), 2)
+        .unwrap_err();
     assert_eq!(err.problem, EditProblem::NoSuchItem { index: 5, len: 2 });
 }
 
@@ -127,7 +166,10 @@ fn update_to_edits_only_what_differs_and_keeps_the_comments() {
     };
     *fd.get_mut("install").unwrap().entry("linux") = map(&[(
         "backends",
-        map(&[("apt", map(&[("package", s("fd-find"))])), ("cargo", map(&[("package", s("fd-find"))]))]),
+        map(&[
+            ("apt", map(&[("package", s("fd-find"))])),
+            ("cargo", map(&[("package", s("fd-find"))])),
+        ]),
     )]);
 
     let mut d = doc(MANIFEST);
@@ -163,10 +205,19 @@ packages:
 #[test]
 fn update_to_rewrites_an_item_whose_first_key_changes() {
     let mut d = doc("items:\n  # first\n  - name: a\n    n: 1\n  - name: b\n");
-    let target = map(&[("items", Value::Seq(vec![map(&[("name", s("z")), ("n", s("1"))]), map(&[("name", s("b"))])]))]);
+    let target = map(&[(
+        "items",
+        Value::Seq(vec![
+            map(&[("name", s("z")), ("n", s("1"))]),
+            map(&[("name", s("b"))]),
+        ]),
+    )]);
     // flow_depth counts from the root, as for `write`: 3 keeps items as blocks.
     d.update_to(&target, 3).unwrap();
-    assert_eq!(d.text(), "items:\n  # first\n  - name: z\n    n: 1\n  - name: b\n");
+    assert_eq!(
+        d.text(),
+        "items:\n  # first\n  - name: z\n    n: 1\n  - name: b\n"
+    );
 }
 
 #[test]
@@ -189,10 +240,17 @@ fn update_to_a_root_that_is_no_longer_a_mapping_is_refused() {
 #[test]
 fn errors_name_the_full_path() {
     let mut d = doc(MANIFEST);
-    let err = d.set(&[Seg::Key("packages"), Seg::Item(5)], "spec", &s("1"), 2).unwrap_err();
+    let err = d
+        .set(&[Seg::Key("packages"), Seg::Item(5)], "spec", &s("1"), 2)
+        .unwrap_err();
     assert_eq!(err.path, vec!["packages".to_string(), "5".to_string()]);
-    let err = d.remove_key(&[Seg::Key("packages"), Seg::Item(1)], "nope").unwrap_err();
-    assert_eq!(err.path, vec!["packages".to_string(), "1".to_string(), "nope".to_string()]);
+    let err = d
+        .remove_key(&[Seg::Key("packages"), Seg::Item(1)], "nope")
+        .unwrap_err();
+    assert_eq!(
+        err.path,
+        vec!["packages".to_string(), "1".to_string(), "nope".to_string()]
+    );
 }
 
 #[test]
@@ -247,22 +305,28 @@ fn a_key_whose_sequence_sits_at_its_own_indent_goes_whole() {
 #[test]
 fn an_item_at_the_left_margin_is_edited_at_its_contents_indent() {
     let mut d = doc("items:\n- name: a\n  n: 1\n");
-    d.set(&[Seg::Key("items"), Seg::Item(0)], "m", &s("2"), 2).unwrap();
+    d.set(&[Seg::Key("items"), Seg::Item(0)], "m", &s("2"), 2)
+        .unwrap();
     assert_eq!(d.text(), "items:\n- name: a\n  n: 1\n  m: 2\n");
 }
 
 #[test]
 fn an_item_with_spaces_after_its_dash_is_edited_at_its_contents_indent() {
     let mut d = doc("items:\n  -   name: a\n      n: 1\n");
-    d.set(&[Seg::Key("items"), Seg::Item(0)], "n", &s("2"), 2).unwrap();
+    d.set(&[Seg::Key("items"), Seg::Item(0)], "n", &s("2"), 2)
+        .unwrap();
     assert_eq!(d.text(), "items:\n  -   name: a\n      n: 2\n");
 }
 
 #[test]
 fn an_item_of_a_nested_sequence_is_found_by_its_own_indent() {
     let mut d = doc("items:\n  - name: a\n    subs:\n      - k: 1\n  - name: b\n    n: 1\n");
-    d.set(&[Seg::Key("items"), Seg::Item(1)], "n", &s("2"), 2).unwrap();
-    assert_eq!(d.text(), "items:\n  - name: a\n    subs:\n      - k: 1\n  - name: b\n    n: 2\n");
+    d.set(&[Seg::Key("items"), Seg::Item(1)], "n", &s("2"), 2)
+        .unwrap();
+    assert_eq!(
+        d.text(),
+        "items:\n  - name: a\n    subs:\n      - k: 1\n  - name: b\n    n: 2\n"
+    );
 }
 
 #[test]
@@ -311,7 +375,9 @@ fn removing_the_last_key_after_a_blank_leaves_no_trailing_blank() {
 #[test]
 fn a_key_path_through_a_sequence_is_not_a_mapping() {
     let mut d = doc(MANIFEST);
-    let err = d.set(&[Seg::Key("packages"), Seg::Key("x")], "y", &s("1"), 2).unwrap_err();
+    let err = d
+        .set(&[Seg::Key("packages"), Seg::Key("x")], "y", &s("1"), 2)
+        .unwrap_err();
     assert_eq!(err.problem, EditProblem::NotAMapping);
 }
 
@@ -326,7 +392,8 @@ fn a_comment_at_the_mappings_own_indent_stays_after_a_new_key() {
 #[test]
 fn an_item_with_its_dash_alone_on_a_line_is_edited_below_it() {
     let mut d = doc("items:\n  -\n    name: a\n    n: 1\n");
-    d.set(&[Seg::Key("items"), Seg::Item(0)], "n", &s("2"), 2).unwrap();
+    d.set(&[Seg::Key("items"), Seg::Item(0)], "n", &s("2"), 2)
+        .unwrap();
     assert_eq!(d.text(), "items:\n  -\n    name: a\n    n: 2\n");
 }
 
@@ -335,7 +402,19 @@ fn an_item_with_its_dash_alone_on_a_line_is_edited_below_it() {
 use annals_sim::Rng;
 use annals_yaml::write;
 
-const NAMES: &[&str] = &["a", "fd", "just", "a b", "x: y", "#c", "- d", "\u{65e5}\u{672c}", "", "null", "[e]"];
+const NAMES: &[&str] = &[
+    "a",
+    "fd",
+    "just",
+    "a b",
+    "x: y",
+    "#c",
+    "- d",
+    "\u{65e5}\u{672c}",
+    "",
+    "null",
+    "[e]",
+];
 
 fn name(rng: &mut Rng) -> Value {
     s(NAMES[rng.below(NAMES.len() as u32) as usize])
@@ -347,7 +426,10 @@ fn random_item(rng: &mut Rng) -> Value {
         0 => n,
         1 => map(&[("name", n)]),
         2 => map(&[("name", n), ("tags", Value::Seq(vec![s("t"), s("u")]))]),
-        _ => map(&[("name", n), ("install", map(&[("linux", map(&[("backend", s("apt"))]))]))]),
+        _ => map(&[
+            ("name", n),
+            ("install", map(&[("linux", map(&[("backend", s("apt"))]))])),
+        ]),
     }
 }
 
@@ -389,8 +471,14 @@ fn mutate(rng: &mut Rng, v: &mut Value) {
 fn update_to_reaches_any_nearby_target_and_keeps_unchanged_lines() {
     for seed in 0..2_000 {
         let mut rng = Rng::new(seed, 1);
-        let items: Vec<Value> = (0..1 + rng.below(3)).map(|_| random_item(&mut rng)).collect();
-        let v = map(&[("version", s("1")), ("packages", Value::Seq(items)), ("after", s("x"))]);
+        let items: Vec<Value> = (0..1 + rng.below(3))
+            .map(|_| random_item(&mut rng))
+            .collect();
+        let v = map(&[
+            ("version", s("1")),
+            ("packages", Value::Seq(items)),
+            ("after", s("x")),
+        ]);
         let depth = 2 + rng.below(3) as usize;
         let mut src = String::new();
         for line in write(&v, depth).lines() {
@@ -405,13 +493,19 @@ fn update_to_reaches_any_nearby_target_and_keeps_unchanged_lines() {
             mutate(&mut rng, &mut target);
         }
         let mut d = Document::parse(&src).unwrap();
-        d.update_to(&target, depth).unwrap_or_else(|e| panic!("seed {seed}: {e}\n{src}\n--- to\n{}", write(&target, depth)));
+        d.update_to(&target, depth).unwrap_or_else(|e| {
+            panic!("seed {seed}: {e}\n{src}\n--- to\n{}", write(&target, depth))
+        });
         let back = parse(&d.text()).unwrap_or_else(|e| panic!("seed {seed}: {e}\n{}", d.text()));
         assert_eq!(&back, d.value(), "seed {seed}");
         // `after` never changes unless the mutation touched it; when it
         // didn't, its line is still there as written.
         if target.get("after") == Some(&s("x")) {
-            assert!(d.text().lines().any(|l| l == "after: x"), "seed {seed}:\n{}", d.text());
+            assert!(
+                d.text().lines().any(|l| l == "after: x"),
+                "seed {seed}:\n{}",
+                d.text()
+            );
         }
     }
 }

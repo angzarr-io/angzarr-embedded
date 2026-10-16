@@ -47,10 +47,16 @@ impl fmt::Display for ReplayError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ReplayError::OutOfSequence { index, found } => {
-                write!(f, "event {index} claims sequence number {found}, not {index}")
+                write!(
+                    f,
+                    "event {index} claims sequence number {found}, not {index}"
+                )
             }
             ReplayError::CauseNotEarlier { seq, cause } => {
-                write!(f, "event {seq} names event {cause} as its cause, which is not earlier")
+                write!(
+                    f,
+                    "event {seq} names event {cause} as its cause, which is not earlier"
+                )
             }
         }
     }
@@ -68,8 +74,12 @@ impl Diagnostic for ReplayError {
 
     fn args(&self) -> Vec<(&'static str, Arg)> {
         match *self {
-            ReplayError::OutOfSequence { index, found } => vec![("index", index.into()), ("found", found.into())],
-            ReplayError::CauseNotEarlier { seq, cause } => vec![("seq", seq.into()), ("cause", cause.into())],
+            ReplayError::OutOfSequence { index, found } => {
+                vec![("index", index.into()), ("found", found.into())]
+            }
+            ReplayError::CauseNotEarlier { seq, cause } => {
+                vec![("seq", seq.into()), ("cause", cause.into())]
+            }
         }
     }
 }
@@ -160,7 +170,11 @@ impl<D: Domain> Stream<D> {
     /// Fold the log from the start, handing `visit` each event with the
     /// state just after it: every [`state_at`](Stream::state_at) in one
     /// pass.
-    pub fn visit_states(&self, rules: &D::Rules, mut visit: impl FnMut(&Envelope<D::Event>, &D::State)) {
+    pub fn visit_states(
+        &self,
+        rules: &D::Rules,
+        mut visit: impl FnMut(&Envelope<D::Event>, &D::State),
+    ) {
         let mut state = D::State::default();
         for e in &self.events {
             D::apply(&mut state, &e.event, rules);
@@ -199,7 +213,10 @@ impl<D: Domain> Stream<D> {
 fn check<E>(events: &[Envelope<E>]) -> Result<(), ReplayError> {
     for (index, e) in events.iter().enumerate() {
         if e.seq != index as Seq {
-            return Err(ReplayError::OutOfSequence { index, found: e.seq });
+            return Err(ReplayError::OutOfSequence {
+                index,
+                found: e.seq,
+            });
         }
         if let Some(cause) = e.cause {
             if cause >= e.seq {

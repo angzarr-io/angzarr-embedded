@@ -162,7 +162,11 @@ impl Held {
 impl Report {
     /// A diagnostic with no args yet, and its English.
     pub fn new(code: &'static str, english: impl Into<String>) -> Report {
-        Report { code, args: Vec::new(), english: english.into() }
+        Report {
+            code,
+            args: Vec::new(),
+            english: english.into(),
+        }
     }
 
     /// Add an arg.
@@ -175,7 +179,11 @@ impl Report {
     pub fn of(d: &dyn Diagnostic) -> Report {
         Report {
             code: d.code(),
-            args: d.args().into_iter().map(|(name, arg)| (name, Held::of(arg))).collect(),
+            args: d
+                .args()
+                .into_iter()
+                .map(|(name, arg)| (name, Held::of(arg)))
+                .collect(),
             english: d.to_string(),
         }
     }
@@ -195,7 +203,10 @@ impl Diagnostic for Report {
     }
 
     fn args(&self) -> Vec<(&'static str, Arg)> {
-        self.args.iter().map(|(name, held)| (*name, held.arg())).collect()
+        self.args
+            .iter()
+            .map(|(name, held)| (*name, held.arg()))
+            .collect()
     }
 }
 
@@ -223,7 +234,9 @@ mod tests {
 
     #[test]
     fn a_report_captures_code_args_english_and_nested_causes() {
-        let r = Report::new("test-outer", "outer: inner").arg("path", "a/b.yaml").arg("cause", Arg::nested(&Inner));
+        let r = Report::new("test-outer", "outer: inner")
+            .arg("path", "a/b.yaml")
+            .arg("cause", Arg::nested(&Inner));
         let again = Report::of(&r);
         assert_eq!(again, r);
         assert_eq!(again.code(), "test-outer");

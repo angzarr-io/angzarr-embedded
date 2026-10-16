@@ -16,40 +16,155 @@ use annals_yaml::{parse, write, Value};
 /// Hand-picked text: every kind of character the writer must get right.
 const CORPUS: &[&str] = &[
     // Plain words, accents, scripts, emoji.
-    "helmet", "épée", "naïve café", "Ærøskøbing", "日本語", "剣: 鋼", "剣：鋼", "한국어", "Привет", "Ελληνικά",
-    "🗡️ sword", "👨\u{200d}👩\u{200d}👧", "🏳️\u{200d}🌈", "👍🏽", "🇫🇷",
+    "helmet",
+    "épée",
+    "naïve café",
+    "Ærøskøbing",
+    "日本語",
+    "剣: 鋼",
+    "剣：鋼",
+    "한국어",
+    "Привет",
+    "Ελληνικά",
+    "🗡️ sword",
+    "👨\u{200d}👩\u{200d}👧",
+    "🏳️\u{200d}🌈",
+    "👍🏽",
+    "🇫🇷",
     // Right to left, and bidi controls.
-    "سيف", "חרב", "שלום עולם", "مرحبا: عالم", "\u{200f}rtl-mark", "a\u{202e}b", "\u{200e}",
+    "سيف",
+    "חרב",
+    "שלום עולם",
+    "مرحبا: عالم",
+    "\u{200f}rtl-mark",
+    "a\u{202e}b",
+    "\u{200e}",
     // Combining marks, NFC against NFD.
-    "\u{e9}", "e\u{301}", "\u{301}lead", "a\u{301}\u{302}\u{303}",
+    "\u{e9}",
+    "e\u{301}",
+    "\u{301}lead",
+    "a\u{301}\u{302}\u{303}",
     // Spaces that are not grammar whitespace, and ones that are.
-    "a\u{a0}#b", "a\u{3000}#b", "\u{a0}lead", "trail\u{a0}", "\u{3000}ideo", "\u{a0}", "\u{3000}",
-    "a\u{2009}b", " lead", "trail ", " ", "  ", "a  b", "a\t#b", "tab\there", "\t", "a\u{200b}b",
+    "a\u{a0}#b",
+    "a\u{3000}#b",
+    "\u{a0}lead",
+    "trail\u{a0}",
+    "\u{3000}ideo",
+    "\u{a0}",
+    "\u{3000}",
+    "a\u{2009}b",
+    " lead",
+    "trail ",
+    " ",
+    "  ",
+    "a  b",
+    "a\t#b",
+    "tab\there",
+    "\t",
+    "a\u{200b}b",
     // Line breaks and control characters.
-    "a\nb", "\n", "a\r\nb", "a\rb", "a\r", "a\u{2028}b", "a\u{2029}b", "a\u{85}b", "a\u{0}b", "\u{0}",
-    "\u{1b}[31m", "a\u{7f}", "a\u{9c}", "\u{feff}bom", "a\u{feff}", "\u{b}\u{c}",
+    "a\nb",
+    "\n",
+    "a\r\nb",
+    "a\rb",
+    "a\r",
+    "a\u{2028}b",
+    "a\u{2029}b",
+    "a\u{85}b",
+    "a\u{0}b",
+    "\u{0}",
+    "\u{1b}[31m",
+    "a\u{7f}",
+    "a\u{9c}",
+    "\u{feff}bom",
+    "a\u{feff}",
+    "\u{b}\u{c}",
     // Quotes and backslashes.
-    "l'épée", "it's", "'", "''", "\"", "\"quoted\"", "'single'", "a \"b\" c", "a 'b", "5'2\"", "\\", "a\\nb",
-    "\\u00e9", "a,'b", "[\"x", "{'y",
-    "x' #y", "x\" #y", "a [b, 'c", "a [b,'c # d",
+    "l'épée",
+    "it's",
+    "'",
+    "''",
+    "\"",
+    "\"quoted\"",
+    "'single'",
+    "a \"b\" c",
+    "a 'b",
+    "5'2\"",
+    "\\",
+    "a\\nb",
+    "\\u00e9",
+    "a,'b",
+    "[\"x",
+    "{'y",
+    "x' #y",
+    "x\" #y",
+    "a [b, 'c",
+    "a [b,'c # d",
     // Indicators, anywhere.
-    "#", "#é", "é #x", "a#b", ":", "x:", "x:y", ":x", "a: b", "a:\u{a0}b", "a:\tb", "?", "?é", "-", "- é", "-é",
-    "--", "---", "...", "- ", "-1/4", ",", "a,b", "[", "]", "a[1", "a]b", "{", "}", "a{1", "a}b", "[a, b]",
-    "{a: 1}", "&a", "*a", "!tag", "|", ">", "%é", "@x", "`x`", "~", "null", "Null", "no", "1.10", ".45 ACP",
+    "#",
+    "#é",
+    "é #x",
+    "a#b",
+    ":",
+    "x:",
+    "x:y",
+    ":x",
+    "a: b",
+    "a:\u{a0}b",
+    "a:\tb",
+    "?",
+    "?é",
+    "-",
+    "- é",
+    "-é",
+    "--",
+    "---",
+    "...",
+    "- ",
+    "-1/4",
+    ",",
+    "a,b",
+    "[",
+    "]",
+    "a[1",
+    "a]b",
+    "{",
+    "}",
+    "a{1",
+    "a}b",
+    "[a, b]",
+    "{a: 1}",
+    "&a",
+    "*a",
+    "!tag",
+    "|",
+    ">",
+    "%é",
+    "@x",
+    "`x`",
+    "~",
+    "null",
+    "Null",
+    "no",
+    "1.10",
+    ".45 ACP",
     // Empty.
     "",
 ];
 
 /// Characters the random strings draw from: mostly hazards.
 const ALPHABET: &[char] = &[
-    'a', 'b', 'z', 'A', '0', '9', ' ', ' ', ' ', '\t', '\n', '\r', '\0', '\u{1b}', '\u{7f}', '\u{85}', '\u{9c}',
-    '#', ':', ',', '[', ']', '{', '}', '-', '?', '&', '*', '!', '|', '>', '%', '@', '`', '~', '\'', '"', '\\', '.',
-    '\u{a0}', '\u{2009}', '\u{3000}', '\u{2028}', '\u{2029}', '\u{feff}', '\u{200b}', '\u{200d}', '\u{200e}',
-    '\u{200f}', '\u{202e}', '\u{301}', '\u{fe0f}', 'é', 'ß', '日', '剣', '：', 'س', 'ח', '🗡', '👨', '🇫',
+    'a', 'b', 'z', 'A', '0', '9', ' ', ' ', ' ', '\t', '\n', '\r', '\0', '\u{1b}', '\u{7f}',
+    '\u{85}', '\u{9c}', '#', ':', ',', '[', ']', '{', '}', '-', '?', '&', '*', '!', '|', '>', '%',
+    '@', '`', '~', '\'', '"', '\\', '.', '\u{a0}', '\u{2009}', '\u{3000}', '\u{2028}', '\u{2029}',
+    '\u{feff}', '\u{200b}', '\u{200d}', '\u{200e}', '\u{200f}', '\u{202e}', '\u{301}', '\u{fe0f}',
+    'é', 'ß', '日', '剣', '：', 'س', 'ח', '🗡', '👨', '🇫',
 ];
 
 /// Words that mean something to the grammar on their own.
-const WORDS: &[&str] = &["", "null", "~", "-", "- x", "---", "...", "#", ":", "[]", "{}", "'", "\""];
+const WORDS: &[&str] = &[
+    "", "null", "~", "-", "- x", "---", "...", "#", ":", "[]", "{}", "'", "\"",
+];
 
 /// Random documents per run: seeds `0..SEEDS`.
 const SEEDS: u64 = 5_000;
@@ -69,7 +184,12 @@ fn s(x: &str) -> Value {
 }
 
 fn map(entries: &[(&str, Value)]) -> Value {
-    Value::Map(entries.iter().map(|(k, v)| (k.to_string(), v.clone())).collect())
+    Value::Map(
+        entries
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect(),
+    )
 }
 
 /// Every place a scalar can sit: block and flow, key and value, root, nested.
@@ -102,12 +222,25 @@ fn every_corpus_string_round_trips_in_every_place() {
 fn every_corpus_pair_round_trips_as_key_and_value() {
     for a in CORPUS {
         let keys = |skip: Option<&str>| {
-            CORPUS.iter().filter(|b| Some(**b) != skip).map(|b| (b.to_string(), s(a))).collect::<Vec<_>>()
+            CORPUS
+                .iter()
+                .filter(|b| Some(**b) != skip)
+                .map(|b| (b.to_string(), s(a)))
+                .collect::<Vec<_>>()
         };
-        round_trip(&Value::Map(keys(None)), &format!("block keys with value {a:?}"));
-        round_trip(&map(&[("k", Value::Map(keys(None)))]), &format!("flow keys with value {a:?}"));
+        round_trip(
+            &Value::Map(keys(None)),
+            &format!("block keys with value {a:?}"),
+        );
+        round_trip(
+            &map(&[("k", Value::Map(keys(None)))]),
+            &format!("flow keys with value {a:?}"),
+        );
         let items = Value::Seq(CORPUS.iter().map(|b| s(b)).collect());
-        round_trip(&map(&[(a, items)]), &format!("every string in a sequence under {a:?}"));
+        round_trip(
+            &map(&[(a, items)]),
+            &format!("every string in a sequence under {a:?}"),
+        );
     }
 }
 
@@ -127,7 +260,11 @@ fn random_value(rng: &mut Rng, depth: u32) -> Value {
     match rng.below(if depth == 0 { 2 } else { 4 }) {
         0 => Value::Null,
         1 => Value::Scalar(random_text(rng)),
-        2 => Value::Seq((0..rng.below(4)).map(|_| random_value(rng, depth - 1)).collect()),
+        2 => Value::Seq(
+            (0..rng.below(4))
+                .map(|_| random_value(rng, depth - 1))
+                .collect(),
+        ),
         _ => {
             let mut entries: Vec<(String, Value)> = Vec::new();
             for _ in 0..rng.below(5) {
