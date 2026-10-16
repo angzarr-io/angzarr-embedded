@@ -1,11 +1,11 @@
-//! Sagas, proven on a toy club and the members' copies of it: targets from
+//! Policies, proven on a toy club and the members' copies of it: targets from
 //! the source's fold, backlogs from any checkpoint, retirement, and
 //! idempotent delivery.
 
 use std::collections::BTreeSet;
 use std::fmt;
 
-use annals::saga::{admit, backlog, Admit, Gap, Injected, Saga};
+use annals::policy::{admit, backlog, Admit, Gap, Injected, Policy};
 use annals::{Domain, Envelope, Header, Seq, Stream, StreamId, Tx};
 use annals_diagnostic::{Arg, Diagnostic};
 
@@ -200,11 +200,11 @@ impl Domain for Member {
     }
 }
 
-// ---------------------------------------------------------------- the saga
+// ---------------------------------------------------------------- the policy
 
 struct ClubToMembers;
 
-impl Saga for ClubToMembers {
+impl Policy for ClubToMembers {
     type Source = Club;
     type Target = Member;
     type TargetId = String;
@@ -435,7 +435,7 @@ fn a_gap_is_a_diagnostic() {
         expected: 5,
         found: 7,
     };
-    assert_eq!(gap.code(), "annals-saga-gap");
+    assert_eq!(gap.code(), "annals-policy-gap");
     let args: Vec<_> = gap
         .args()
         .into_iter()

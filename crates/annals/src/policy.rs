@@ -1,11 +1,13 @@
-//! Sagas: one domain's events, carried as commands into another's streams.
+//! Policies: one domain's events, carried as commands into another's streams.
 //!
-//! A [`Saga`] is the write-side counterpart of a
-//! [`Projection`](crate::Projection). It reacts to a **source** stream's
-//! events by commanding **target** streams of another domain. It stores
+//! A [`Policy`] is the write-side counterpart of a
+//! [`Projection`](crate::Projection): "whenever this happens in a source
+//! stream, command these target streams". It reacts to a **source** stream's
+//! events by commanding **target** streams of another domain. It is
+//! stateless, so it is a policy and not a saga or process manager: it stores
 //! nothing of its own:
 //!
-//! - **Which targets are live is a fold of the source.** [`Saga::targets`]
+//! - **Which targets are live is a fold of the source.** [`Policy::targets`]
 //!   reads them off the source's state after each event. A target owed the
 //!   event that retires it is still a target for that one event, and never
 //!   again after it.
@@ -19,7 +21,7 @@
 //!   and is refused. Delivering a backlog again is always safe.
 //!
 //! The caller reads the source, executes the backlog on each target and
-//! appends what that emits, in one transaction: a saga has no compensation,
+//! appends what that emits, in one transaction: a policy has no compensation,
 //! because delivery and the source's own append commit or roll back
 //! together.
 
@@ -39,8 +41,8 @@ pub struct Injected<E> {
     pub event: E,
 }
 
-/// A process manager from one source domain to one target domain.
-pub trait Saga {
+/// A stateless policy from one source domain to one target domain.
+pub trait Policy {
     type Source: Domain;
     type Target: Domain;
     /// Names one target stream.
@@ -63,24 +65,24 @@ pub trait Saga {
 
 /// The commands that bring `target` up to date with `source`, in order:
 /// one for each event after `checkpoint` (every event, for `None`) whose
-/// state names `target` among [`Saga::targets`]. Empty when the target is up
+/// state names `target` among [`Policy::targets`]. Empty when the target is up
 /// to date, which it is when `checkpoint + 1` is the source's length.
 ///
 /// One replay of the source, however long the backlog.
 #[must_use]
-pub fn backlog<S: Saga>(
-    source: &Stream<S::Source>,
-    rules: &<S::Source as Domain>::Rules,
-    target: &S::TargetId,
+pub fn backlog<P: Policy>(
+    source: &Stream<P::Source>,
+    rules: &<P::Source as Domain>::Rules,
+    target: &P::TargetId,
     checkpoint: Option<Seq>,
-) -> Vec<<S::Target as Domain>::Command> {
+) -> Vec<<P::Target as Domain>::Command> {
     let mut commands = Vec::new();
     source.visit_states(rules, |envelope, state| {
         if checkpoint.is_some_and(|c| envelope.seq <= c) {
             return;
         }
-        if S::targets(state).contains(target) {
-            commands.push(S::command(target, state, envelope));
+        if P::targets(state).contains(target) {
+            commands.push(P::command(target, state, envelope));
         }
     });
     commands
@@ -134,7 +136,7 @@ impl std::error::Error for Gap {}
 
 impl Diagnostic for Gap {
     fn code(&self) -> &'static str {
-        "annals-saga-gap"
+        "annals-policy-gap"
     }
 
     fn args(&self) -> Vec<(&'static str, Arg)> {

@@ -4,7 +4,7 @@
 //! **decided** and how an event is **applied**. A [`Stream`] holds a domain's
 //! event log and the state folded from it. Nothing else holds state: every
 //! state is rebuilt by folding a log. A [`Projection`] folds streams into a
-//! read model; a [`saga::Saga`] carries one stream's events into another
+//! read model; a [`policy::Policy`] carries one stream's events into another
 //! domain's streams as commands.
 //!
 //! The rules the engine keeps:
@@ -24,8 +24,8 @@
 //! The crate knows nothing about any particular game.
 
 mod domain;
+pub mod policy;
 mod projection;
-pub mod saga;
 mod store;
 mod stream;
 
@@ -47,7 +47,7 @@ pub fn diagnostic_samples() -> Vec<Box<dyn annals_diagnostic::Diagnostic>> {
             expected: 1,
             actual: 3,
         }),
-        Box::new(saga::Gap {
+        Box::new(policy::Gap {
             expected: 5,
             found: 7,
         }),
