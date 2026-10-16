@@ -1,0 +1,166 @@
+// PROPOSAL (docs/design/audit.md): the wire form of annals::next, for logs
+// and for a distributed runtime (angzarr) that wraps the in-process kernel.
+// Not yet read or written by any code; buf lints it.
+//
+// A new package beside annals.log.v1, not a change to it: versions move
+// from the stream header onto every event, the stream id widens to 16
+// bytes, and the metadata is new. That is a deliberate break, made as a
+// new package so annals.log.v1 logs stay readable as they are.
+//
+// Conventions:
+// - A stream id, request id or correlation id is 16 bytes, big-endian (a
+//   UUID as written).
+// - A seq is uint64, from 0.
+// - Event payloads are `bytes`, the domain's own encoding, named by the
+//   stream's domain and the event's schema version. Whether to use
+//   google.protobuf.Any instead is an open question in the design.
+syntax = "proto3";
+
+package annals.event.v1;
+
+// One event, anywhere: its stream and its seq. Also the event's id.
+message EventRef {
+  bytes stream = 1;
+  uint64 seq = 2;
+}
+
+// Names one command deterministically: the idempotency key.
+message CommandId {
+  // A command the application issued: the index-th of its request.
+  message Origin {
+    bytes request = 1;
+    uint32 index = 2;
+  }
+  // The index-th output of the reaction named component for source.
+  message Reaction {
+    EventRef source = 1;
+    string component = 2;
+    uint32 index = 3;
+  }
+  oneof kind {
+    Origin origin = 1;
+    Reaction reaction = 2;
+  }
+}
+
+// What the application says about one command, or what a reaction carries
+// to its target.
+message CommandMeta {
+  // Microseconds since the Unix epoch, UTC.
+  int64 recorded_at_unix_micros = 1;
+  // A pseudonymous id; absent for the system itself.
+  optional string actor = 2;
+  CommandId command = 3;
+  bytes correlation = 4;
+  // The event this command reacts to, in any stream.
+  EventRef cause = 5;
+}
+
+// One stored event's metadata: the command's, plus the versions.
+message Meta {
+  int64 recorded_at_unix_micros = 1;
+  optional string actor = 2;
+  CommandId command = 3;
+  bytes correlation = 4;
+  EventRef cause = 5;
+  // The schema the payload was written at: what an upcaster reads.
+  uint32 schema_version = 6;
+  // The rules the event was decided under, and that apply folds it with.
+  string rules_version = 7;
+}
+
+// What a stream is, stamped once at the head of its log.
+message StreamHeader {
+  bytes stream = 1;
+  string domain = 2;
+}
+
+// One stored event. A log is one StreamHeader, then one Envelope per event
+// in seq order, each length-delimited, as in annals.log.v1.
+message Envelope {
+  uint64 seq = 1;
+  Meta meta = 2;
+  bytes event = 3;
+}
+
+// How far a reader of one stream has got.
+message Position {
+  // The last seq handled; absent at the start, when seq 0 is next.
+  optional uint64 last = 1;
+}
+
+// A translation's fact for one target, as a wrapping runtime carries it
+// across a process boundary.
+message Fact {
+  // The target stream.
+  bytes target = 1;
+  // The target's domain.
+  string domain = 2;
+  // The source event.
+  EventRef source = 3;
+  CommandMeta meta = 4;
+  // The target domain's event, encoded.
+  bytes payload = 5;
+}
+
+// The same for a policy's command.
+message Order {
+  bytes target = 1;
+  string domain = 2;
+  EventRef source = 3;
+  CommandMeta meta = 4;
+  // The target domain's command, encoded.
+  bytes command = 5;
+}
+
+// An annals_diagnostic::Diagnostic: a stable code, named args, and the
+// English rendering.
+message Diagnostic {
+  // One named argument.
+  message Arg {
+    string name = 1;
+    oneof value {
+      sint64 int = 2;
+      uint64 uint = 3;
+      string str = 4;
+      Diagnostic nested = 5;
+    }
+  }
+  string code = 1;
+  repeated Arg args = 2;
+  string english = 3;
+}
+
+// What kind of delivery a chain step was.
+enum StepKind {
+  STEP_KIND_UNSPECIFIED = 0;
+  STEP_KIND_COMMAND = 1;
+  STEP_KIND_FACT = 2;
+}
+
+// One step of a command chain.
+message Step {
+  bytes stream = 1;
+  string domain = 2;
+  StepKind kind = 3;
+  EventRef cause = 4;
+}
+
+// What a wrapping runtime should do about a failure.
+enum Recovery {
+  RECOVERY_UNSPECIFIED = 0;
+  RECOVERY_RETRY = 1;
+  RECOVERY_DONE = 2;
+  RECOVERY_BUSINESS = 3;
+  RECOVERY_INTEGRITY = 4;
+  RECOVERY_BUG = 5;
+}
+
+// Why a command chain failed: the diagnostic, the path from the first
+// reaction to the step that failed (empty when the originating command
+// itself failed), and the recovery class.
+message Failure {
+  Diagnostic diagnostic = 1;
+  repeated Step path = 2;
+  Recovery recovery = 3;
+}

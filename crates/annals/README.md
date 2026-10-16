@@ -87,6 +87,10 @@ impl Domain for Counter {
 
 ## Not yet
 
+- **The audited kernel** (`annals::next`, a proposal): event metadata,
+  pure decide, atomic command chains of policies and translations, store
+  ports with a unit of work, upcasting. See `docs/design/audit.md`.
+
 - **Upcasting.** `Header::schema` is reserved. The upcast hook works on the
   stored form, so it arrives with serialisation, behind a `serde` feature.
 - **Snapshots** are deliberately absent. Folding is cheap at the sizes this

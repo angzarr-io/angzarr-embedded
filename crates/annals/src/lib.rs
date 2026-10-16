@@ -22,8 +22,12 @@
 //!   order of the log.
 //!
 //! The crate knows nothing about any particular game.
+//!
+//! [`next`] is a **proposal** for the kernel that replaces this one, for
+//! auditability: see `docs/design/audit.md`. Its bodies are `todo!()`.
 
 mod domain;
+pub mod next;
 pub mod policy;
 mod projection;
 mod store;
