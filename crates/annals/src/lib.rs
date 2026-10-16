@@ -3,7 +3,9 @@
 //! A [`Domain`] says what its state, commands and events are, how a command is
 //! **decided** and how an event is **applied**. A [`Stream`] holds a domain's
 //! event log and the state folded from it. Nothing else holds state: every
-//! state is rebuilt by folding a log.
+//! state is rebuilt by folding a log. A [`Projection`] folds streams into a
+//! read model; a [`saga::Saga`] carries one stream's events into another
+//! domain's streams as commands.
 //!
 //! The rules the engine keeps:
 //!
@@ -23,6 +25,7 @@
 
 mod domain;
 mod projection;
+pub mod saga;
 mod store;
 mod stream;
 
@@ -40,5 +43,6 @@ pub fn diagnostic_samples() -> Vec<Box<dyn annals_diagnostic::Diagnostic>> {
         Box::new(ReplayError::OutOfSequence { index: 1, found: 2 }),
         Box::new(ReplayError::CauseNotEarlier { seq: 1, cause: 1 }),
         Box::new(Conflict { id: StreamId(7), expected: 1, actual: 3 }),
+        Box::new(saga::Gap { expected: 5, found: 7 }),
     ]
 }

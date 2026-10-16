@@ -14,6 +14,12 @@ specific to any game, so any game can build on it.
 - A **stream** is a domain's append-only event log, plus the state folded
   from it. **No state is ever stored.** Every state is a fold of a log.
 - A **projection** is a read model: another fold over one or more streams.
+- A **saga** is the write-side counterpart: it reacts to a source stream's
+  events by commanding target streams of another domain. It stores
+  nothing. Its live targets are a fold of the source; each target's
+  checkpoint is in the target's own stream, as the source seqs of the
+  events injected into it. Delivery is idempotent: a seq the target holds
+  emits nothing, and a skipped seq is refused as a gap.
 - An **event store** keeps streams and nothing else. You implement it;
   `InMemoryStore` is included for tests.
 
@@ -69,12 +75,14 @@ impl Domain for Counter {
 |---|---|
 | `Domain` | the trait a domain implements |
 | `Tx` | a decide in progress: `state`, `rules`, `ctx`, `emit`, `emit_caused` |
-| `Stream<D>` | `new`, `execute`, `execute_caused`, `replay`, `state_at`, `events`, `state` |
+| `Stream<D>` | `new`, `execute`, `execute_caused`, `replay`, `state_at`, `visit_states`, `events`, `state` |
 | `Header` | stream id, domain name, schema version, rules version |
 | `Envelope<E>` | `seq`, `cause` (the earlier event it follows from), `event` |
 | `Projection<E>`, `project` | read models |
+| `saga::Saga`, `saga::backlog` | a process manager from a source domain to a target domain; the commands a target has not yet received, from its checkpoint |
+| `saga::Injected<E>`, `saga::admit`, `saga::Gap` | a source event carried into a target with its source seq; placing it against the target's checkpoint (next, redelivery, or a gap) |
 | `EventStore<E>`, `InMemoryStore<E>` | the storage port; appends use an expected length for optimistic concurrency |
-| `ReplayError`, `Conflict` | why a log does not replay; why an append was refused. Both are `Diagnostic`s, with messages in `locales/en-US/annals.ftl` |
+| `ReplayError`, `Conflict`, `saga::Gap` | why a log does not replay; why an append was refused; why a delivery was refused. All are `Diagnostic`s, with messages in `locales/en-US/annals.ftl` |
 | `diagnostic_samples` | one value of every error, for catalog tests |
 
 ## Not yet

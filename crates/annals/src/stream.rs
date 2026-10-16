@@ -157,6 +157,17 @@ impl<D: Domain> Stream<D> {
         state
     }
 
+    /// Fold the log from the start, handing `visit` each event with the
+    /// state just after it: every [`state_at`](Stream::state_at) in one
+    /// pass.
+    pub fn visit_states(&self, rules: &D::Rules, mut visit: impl FnMut(&Envelope<D::Event>, &D::State)) {
+        let mut state = D::State::default();
+        for e in &self.events {
+            D::apply(&mut state, &e.event, rules);
+            visit(e, &state);
+        }
+    }
+
     pub fn header(&self) -> &Header {
         &self.header
     }

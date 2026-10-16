@@ -10,3 +10,5 @@ annals-store-conflict =
         [one] one event
        *[other] { $actual } events
     }, not the { $expected } expected: someone else appended first
+
+annals-saga-gap = source event { $found } skips ahead of event { $expected }, the next expected
