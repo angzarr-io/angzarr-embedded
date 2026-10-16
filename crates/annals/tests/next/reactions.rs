@@ -9,12 +9,12 @@ use std::fmt;
 
 use annals::next::{
     deliver, facts_owed, inject, orders_owed, policy, projection, translation, CommandId,
-    Committed, CorrelationId, Delivered, Domain, EventId, Fact, Failure, Gap, Header, KernelError,
-    Order, Policy, Position, Projection, Reaction, Rulebook, Seq, Stream, StreamId, Tx,
+    Committed, Delivered, Domain, Edition, EventId, Fact, Failure, Gap, KernelError, Order, Policy,
+    Position, Projection, Reaction, Root, Rulebook, Seq, Stream, StreamKey, Tx,
 };
 use annals_diagnostic::{Arg, Diagnostic, Report};
 
-use crate::toys::{header, meta, meta_in};
+use crate::toys::{correlation, meta, meta_in, stream};
 
 // ---------------------------------------------------------------- the source: a club
 
@@ -42,7 +42,6 @@ impl Domain for Club {
     type Rules = ();
 
     const NAME: &'static str = "club";
-    const SCHEMA: u32 = 1;
 
     fn decide(cmd: &ClubEvent, tx: &mut Tx<'_, Self>) -> Result<(), Infallible> {
         tx.emit(cmd.clone());
@@ -101,7 +100,6 @@ impl Domain for Member {
     type Rules = ();
 
     const NAME: &'static str = "member";
-    const SCHEMA: u32 = 1;
 
     fn decide(cmd: &MemberCmd, _: &mut Tx<'_, Self>) -> Result<(), Infallible> {
         match *cmd {}
@@ -143,12 +141,17 @@ impl Domain for Member {
     }
 }
 
-pub(crate) fn member_stream(name: &str) -> StreamId {
-    StreamId::from(match name {
+pub(crate) fn member_root(name: &str) -> Root {
+    Root::from(match name {
         "ann" => 2u64,
         "bob" => 3,
         _ => 9,
     })
+}
+
+/// A member's copy, on the main timeline.
+pub(crate) fn member_stream(name: &str) -> StreamKey {
+    StreamKey::main("member", member_root(name))
 }
 
 pub(crate) struct ClubToMembers;
@@ -167,8 +170,8 @@ impl Reaction for ClubToMembers {
         targets
     }
 
-    fn stream(name: &String) -> StreamId {
-        member_stream(name)
+    fn root(name: &String) -> Root {
+        member_root(name)
     }
 
     fn position(member: &MemberState) -> Position {
@@ -238,7 +241,6 @@ impl Domain for Ledger {
     type Rules = ();
 
     const NAME: &'static str = "ledger";
-    const SCHEMA: u32 = 1;
 
     fn decide(cmd: &Record, tx: &mut Tx<'_, Self>) -> Result<(), NotARefund> {
         if cmd.cents < 0 {
@@ -254,7 +256,12 @@ impl Domain for Ledger {
     }
 }
 
-pub(crate) const TREASURY: StreamId = StreamId(100);
+pub(crate) const TREASURY_ROOT: Root = Root(100);
+
+/// The treasury's ledger, on the main timeline.
+pub(crate) fn treasury() -> StreamKey {
+    StreamKey::main("ledger", TREASURY_ROOT)
+}
 
 /// Every payment, commanded into the treasury's ledger. The ledger is a
 /// target from the club's first event on, so its position covers them all.
@@ -271,8 +278,8 @@ impl Reaction for Dues {
         vec![()]
     }
 
-    fn stream((): &()) -> StreamId {
-        TREASURY
+    fn root((): &()) -> Root {
+        TREASURY_ROOT
     }
 
     fn position(ledger: &LedgerState) -> Position {
@@ -318,7 +325,7 @@ pub(crate) fn joined(name: &str) -> ClubEvent {
 
 /// Seqs: 0 paid 5, 1 ann joined, 2 paid 3, 3 bob joined, 4 paid 2.
 pub(crate) fn ann_and_bob() -> Stream<Club> {
-    let mut s = Stream::new(header(1, "club"));
+    let mut s = stream::<Club>(1);
     for (i, e) in [
         ClubEvent::Paid(5),
         joined("ann"),
@@ -336,10 +343,7 @@ pub(crate) fn ann_and_bob() -> Stream<Club> {
 }
 
 pub(crate) fn copy_of(name: &str) -> Stream<Member> {
-    Stream::new(Header {
-        id: member_stream(name),
-        domain: "member".to_string(),
-    })
+    Stream::new(Edition::MAIN, member_root(name))
 }
 
 // ---------------------------------------------------------------- tests
@@ -386,7 +390,7 @@ fn one_dispatch_serves_all_three_kinds() {
 #[test]
 #[ignore = "proposal: metadata propagates through a reaction (A1, A2)"]
 fn reactions_keep_correlation_and_point_their_cause_at_the_source_event() {
-    let mut club = Stream::<Club>::new(header(1, "club"));
+    let mut club = stream::<Club>(1);
     let mut ann = copy_of("ann");
     let mut facts = Vec::new();
     let mut orders = Vec::new();
@@ -402,12 +406,17 @@ fn reactions_keep_correlation_and_point_their_cause_at_the_source_event() {
         .unwrap();
     }
     let source = EventId {
-        stream: club.id(),
+        stream: club.key().clone(),
         seq: 0,
     };
     for meta in [&facts[0].meta, &orders[0].meta] {
-        assert_eq!(meta.cause, Some(source));
-        assert_eq!(meta.correlation, CorrelationId(555));
+        assert_eq!(meta.cause, Some(source.clone()));
+        assert_eq!(meta.correlation, Some(correlation(555)));
+        assert_eq!(
+            meta.request,
+            club.events()[0].meta.request,
+            "the origin's request"
+        );
         assert!(matches!(
             &meta.command,
             CommandId::Reaction { source: s, index: 0, .. } if *s == source
@@ -418,7 +427,7 @@ fn reactions_keep_correlation_and_point_their_cause_at_the_source_event() {
     assert_eq!(
         facts[0].meta.command,
         CommandId::Reaction {
-            source,
+            source: source.clone(),
             component: "club-to-members".to_string(),
             index: 0
         }
@@ -426,7 +435,7 @@ fn reactions_keep_correlation_and_point_their_cause_at_the_source_event() {
     assert_eq!(
         orders[0].meta.command,
         CommandId::Reaction {
-            source,
+            source: source.clone(),
             component: "dues".to_string(),
             index: 0
         }
@@ -436,7 +445,7 @@ fn reactions_keep_correlation_and_point_their_cause_at_the_source_event() {
         panic!("the first fact is recorded")
     };
     assert_eq!(events[0].meta.cause, Some(source), "on the target's event");
-    assert_eq!(events[0].meta.correlation, CorrelationId(555));
+    assert_eq!(events[0].meta.correlation, correlation(555));
 }
 
 #[test]
@@ -476,7 +485,7 @@ fn a_fact_is_refused_only_for_integrity() {
     assert_eq!(
         inject(&mut bob, bobs_next, &rules(), &mut []).unwrap_err(),
         KernelError::FactRefused {
-            stream: bob.id(),
+            stream: bob.key().clone(),
             reason: Report::new("toy-member-unknown", "not enrolled"),
         },
         "a copy never created has no position to place against: its admit_fact decides"
@@ -485,12 +494,12 @@ fn a_fact_is_refused_only_for_integrity() {
     inject(&mut ann, departure, &rules(), &mut []).unwrap();
     assert!(ann.state().departed);
     let source = EventId {
-        stream: club.id(),
+        stream: club.key().clone(),
         seq: 7,
     };
     let stray: Fact<ClubToMembers> = annals::next::Owed {
         target: "ann".to_string(),
-        source,
+        source: source.clone(),
         meta: annals::next::CommandMeta::reacting_to(
             &club.events()[6].meta,
             source,
@@ -505,7 +514,7 @@ fn a_fact_is_refused_only_for_integrity() {
     assert_eq!(
         inject(&mut ann, &stray, &rules(), &mut []).unwrap_err(),
         KernelError::Gap {
-            stream: ann.id(),
+            stream: ann.key().clone(),
             gap: Gap {
                 expected: 6,
                 found: 7
@@ -518,11 +527,8 @@ fn a_fact_is_refused_only_for_integrity() {
 #[test]
 #[ignore = "proposal: a policy's command goes through the target's decide"]
 fn a_policys_command_may_be_rejected_by_its_target() {
-    let mut club = Stream::<Club>::new(header(1, "club"));
-    let mut ledger = Stream::<Ledger>::new(Header {
-        id: TREASURY,
-        domain: "ledger".to_string(),
-    });
+    let mut club = stream::<Club>(1);
+    let mut ledger = Stream::<Ledger>::new(Edition::MAIN, TREASURY_ROOT);
     let mut orders = Vec::new();
     for (i, n) in [4, -1].iter().enumerate() {
         let mut d = policy::<Dues, _>(|o| orders.push(o));
@@ -583,8 +589,8 @@ impl Reaction for Fickle {
         }
     }
 
-    fn stream(name: &String) -> StreamId {
-        member_stream(name)
+    fn root(name: &String) -> Root {
+        member_root(name)
     }
 
     fn position(member: &MemberState) -> Position {
@@ -604,7 +610,7 @@ impl annals::next::Translation for Fickle {
 #[test]
 #[ignore = "proposal: a backlog checks the contiguity invariant (B1)"]
 fn a_backlog_refuses_a_target_that_comes_back() {
-    let mut club = Stream::<Club>::new(header(1, "club"));
+    let mut club = stream::<Club>(1);
     for (i, n) in [2, 1, 1].iter().enumerate() {
         club.execute(&ClubEvent::Paid(*n), &meta(i as u128, 0), &rules(), &mut [])
             .unwrap();
@@ -615,5 +621,31 @@ fn a_backlog_refuses_a_target_that_comes_back() {
             left: 1,
             returned: 2
         })
+    );
+}
+
+#[test]
+#[ignore = "proposal: a reaction's target is in its source's edition"]
+fn a_reaction_never_crosses_timelines() {
+    let v2 = Edition::new("v2");
+    let source = StreamKey::new("club", v2.clone(), Root::from(1));
+    assert_eq!(
+        annals::next::target_key::<ClubToMembers>(&source, &"ann".to_string()),
+        StreamKey::new("member", v2.clone(), member_root("ann")),
+        "the target's domain, the source's edition, the target's root"
+    );
+
+    let mut club = Stream::<Club>::new(v2.clone(), Root::from(1));
+    let mut facts = Vec::new();
+    {
+        let mut t = translation::<ClubToMembers, _>(|f| facts.push(f));
+        club.execute(&joined("ann"), &meta(1, 0), &rules(), &mut [&mut t])
+            .unwrap();
+    }
+    assert_eq!(facts[0].source.stream, source);
+    assert_eq!(
+        facts[0].meta.cause.as_ref().map(|c| &c.stream),
+        Some(&source),
+        "the cause names the source in its edition"
     );
 }

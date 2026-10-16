@@ -1,8 +1,9 @@
-# Build, test and lint the workspace. Plain cargo needs nothing here; these
+# Build, test and lint the workspace. Plain cargo needs only protoc here; these
 # recipes also run `gen` so the annals-log codegen check (the `codegen-check`
 # feature) can compare the hand-written wire types with buf's output.
 #
-# Needs: buf (~/go/bin/buf) and protoc-gen-prost 0.5.0 on PATH
+# Needs: buf (~/go/bin/buf) and protoc-gen-prost 0.5.0 on PATH, and protoc
+# (angzarr-proto, under annals-angzarr, runs it in its build script)
 #   cargo install protoc-gen-prost --version 0.5.0 --locked
 
 set windows-shell := ["bash", "-cu"]
@@ -32,6 +33,11 @@ lint: gen
 # Check the schema for wire-breaking changes against main.
 breaking:
     buf breaking --against '.git#branch=main'
+
+# Build the crates that must run in a browser for wasm32-unknown-unknown.
+#   rustup target add wasm32-unknown-unknown
+wasm:
+    cargo build --release --target wasm32-unknown-unknown --package annals --package annals-angzarr
 
 # Format the Rust.
 fmt:

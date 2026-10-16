@@ -2,7 +2,7 @@
 
 use annals_diagnostic::{Diagnostic, Report};
 
-use super::id::{EventId, Seq, StreamId};
+use super::id::{EventId, Seq, StreamKey};
 use super::meta::CommandMeta;
 use super::stream::Envelope;
 
@@ -17,8 +17,6 @@ use super::stream::Envelope;
 ///   by the caller into the command, and a decide copies whatever it uses
 ///   into the event's payload, which is all `apply` sees.
 /// - `State: Clone`, so a decide can fold its staged events into a copy;
-/// - [`Domain::SCHEMA`], the event schema version this code writes and
-///   `apply` reads, stamped on every event;
 /// - a decide may reject at any point, emitted or not: nothing it staged is
 ///   kept;
 /// - everything `'static` and `Send`, so a command chain can stage streams
@@ -41,12 +39,9 @@ pub trait Domain: Sized + 'static {
     /// [`Rulebook`](super::Rulebook).
     type Rules: Send + Sync + 'static;
 
-    /// The domain's name, written in every stream header.
+    /// The domain's name: the domain of every stream key of this domain
+    /// ([`StreamKey::domain`]). Stable across releases.
     const NAME: &'static str;
-
-    /// The event schema version this code writes and `apply` reads. Older
-    /// events reach `apply` only through an [`Upcaster`](super::Upcaster).
-    const SCHEMA: u32;
 
     /// Decide a command against the current state. Pure: its only output is
     /// the events it emits through `tx`, and they are kept only if it
@@ -76,7 +71,7 @@ pub struct Tx<'a, D: Domain> {
     staged: Option<D::State>,
     rules: &'a D::Rules,
     meta: &'a CommandMeta,
-    stream: StreamId,
+    stream: StreamKey,
     base: Seq,
     events: Vec<(D::Event, Option<EventId>)>,
 }
@@ -101,8 +96,8 @@ impl<'a, D: Domain> Tx<'a, D> {
     }
 
     /// The stream being decided.
-    pub fn stream(&self) -> StreamId {
-        self.stream
+    pub fn stream(&self) -> &StreamKey {
+        &self.stream
     }
 
     /// Stage an event, caused by whatever caused the command, and fold it
@@ -134,15 +129,15 @@ impl<'a, D: Domain> Tx<'a, D> {
 /// against. Dropping it discards them.
 #[must_use = "a decision changes nothing until it is committed"]
 pub struct Decision<D: Domain> {
-    pub(crate) stream: StreamId,
+    pub(crate) stream: StreamKey,
     /// The stream's length the decide read: the store's expected length.
     pub(crate) base: Seq,
     pub(crate) events: Vec<Envelope<D::Event>>,
 }
 
 impl<D: Domain> Decision<D> {
-    pub fn stream(&self) -> StreamId {
-        self.stream
+    pub fn stream(&self) -> &StreamKey {
+        &self.stream
     }
 
     /// The stream's length when it was decided: what an append expects.

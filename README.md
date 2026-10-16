@@ -1,8 +1,9 @@
 # Annals
 
 Annals is an event-sourced, deterministic game engine: small Rust crates
-shared by card-game and tdautobattle. All but annals-log (and the
-test-only annals-catalog-check) have zero third-party dependencies.
+shared by card-game and tdautobattle. All but annals-log, annals-angzarr
+(and the test-only annals-catalog-check) have zero third-party
+dependencies.
 Every error is localizable: a stable code and named args (see
 `annals-diagnostic`), with an en-US Fluent catalog per crate under
 `crates/<crate>/locales/`.
@@ -15,6 +16,7 @@ Every error is localizable: a stable code and named args (see
 | [`annals-yaml`](crates/annals-yaml) | a strict YAML subset, read and written; versioned documents with registered migrations |
 | [`annals-sim`](crates/annals-sim) | simulation parts on `annals`: per-entity dice, a folded tick scheduler, jobs as data, a parallel map, a Gherkin runner |
 | [`annals-log`](crates/annals-log) | a binary event-log format for `annals` streams: length-delimited protobuf (prost) |
+| [`annals-angzarr`](crates/annals-angzarr) | `annals` on angzarr's wire contract (angzarr-proto): books, provenance, `Any` payloads, type-URL upcasting, opaque storage rows (a proposal) |
 | [`annals-catalog-check`](crates/annals-catalog-check) | test-only: every error code has a message, with exactly its args, in every shipped Fluent catalog |
 
 ```
@@ -23,10 +25,14 @@ just lint       # buf lint + clippy
 just breaking   # buf breaking against main
 just fmt        # cargo fmt --all (just fmt-check changes nothing)
 just mutants    # cargo-mutants over the workspace; `just mutants annals` for one crate
+just wasm       # build annals and annals-angzarr for wasm32-unknown-unknown
 ```
 
-Plain `cargo build` and `cargo test` need nothing beyond Rust, so every crate
-works as a git dependency. The `just` recipes also need
+Every crate but annals-angzarr needs nothing beyond Rust to build, so it
+works as a git dependency with plain `cargo`. annals-angzarr depends on
+angzarr-proto, a git dependency whose build runs `protoc`, so building it
+(and so `cargo build --workspace`) also needs `protoc` on `PATH` and
+access to github.com. The `just` recipes also need
 [`just`](https://just.systems), [`buf`](https://buf.build) and
 `protoc-gen-prost` 0.5.0 (`cargo install protoc-gen-prost --version 0.5.0 --locked`)
 on `PATH`: they generate annals-log's protobuf types to check its

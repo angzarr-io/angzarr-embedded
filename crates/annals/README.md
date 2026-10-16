@@ -87,11 +87,13 @@ impl Domain for Counter {
 
 ## Not yet
 
-- **The audited kernel** (`annals::next`, a proposal): event metadata,
+- **The audited kernel** (`annals::next`, a proposal): streams keyed by
+  (domain, edition, root), event metadata with an always-set correlation,
   pure decide, atomic command chains of policies and translations, store
-  ports with a unit of work, upcasting. See `docs/design/audit.md`.
+  ports with a unit of work. Its wire form is angzarr's, mapped by
+  `annals-angzarr`. See `docs/design/audit.md`.
 
-- **Upcasting.** `Header::schema` is reserved. The upcast hook works on the
-  stored form, so it arrives with serialisation, behind a `serde` feature.
+- **Upcasting.** `Header::schema` is reserved and never read. Upcasting
+  arrives with `annals::next`, by payload type URL, in `annals-angzarr`.
 - **Snapshots** are deliberately absent. Folding is cheap at the sizes this
   is built for.

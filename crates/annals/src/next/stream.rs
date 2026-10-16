@@ -4,19 +4,9 @@
 use super::domain::{Decision, Domain};
 use super::error::{Failure, KernelError, ReplayError};
 use super::handler::Handler;
-use super::id::{Seq, StreamId};
+use super::id::{Edition, Root, Seq, StreamKey};
 use super::meta::{CommandMeta, Meta};
 use super::version::Rulebook;
-
-/// What a stream is, stamped on it once and never changed: a store refuses
-/// an append under a different header. Versions are per event now, in
-/// [`Meta`], so a stream may outlive a schema or rules change.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Header {
-    pub id: StreamId,
-    /// Which domain the events belong to.
-    pub domain: String,
-}
 
 /// One stored event: its position, its metadata and its payload.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -27,17 +17,19 @@ pub struct Envelope<E> {
 }
 
 /// A domain's event log and the state folded from it. Its state changes
-/// only in [`Stream::commit`].
+/// only in [`Stream::commit`]. Its key is fixed when it is made, and its
+/// domain is always `D::NAME`.
 pub struct Stream<D: Domain> {
-    header: Header,
+    key: StreamKey,
     events: Vec<Envelope<D::Event>>,
     state: D::State,
 }
 
 impl<D: Domain> Stream<D> {
-    pub fn new(header: Header) -> Stream<D> {
+    /// An empty `D` stream: `root` in `edition`.
+    pub fn new(edition: Edition, root: Root) -> Stream<D> {
         Stream {
-            header,
+            key: StreamKey::of::<D>(edition, root),
             events: Vec::new(),
             state: D::State::default(),
         }
@@ -45,8 +37,8 @@ impl<D: Domain> Stream<D> {
 
     /// Decide `cmd` under the rulebook's current rules. Pure: the stream is
     /// untouched whatever the outcome, so a rejection leaves nothing behind.
-    /// Every staged event is stamped from `meta`, with [`Domain::SCHEMA`]
-    /// and the current rules version.
+    /// Every staged event is stamped from `meta` (its correlation generated
+    /// if the command has none) with the current rules version.
     pub fn decide(
         &self,
         cmd: &D::Command,
@@ -101,20 +93,22 @@ impl<D: Domain> Stream<D> {
 
     /// Rebuild a stream from its log. Each event is folded with the rules
     /// its own metadata names, found in `rules`; the caller does not choose
-    /// them. Refuses an event not at [`Domain::SCHEMA`] (upcast it first),
-    /// a rules version the rulebook lacks, a seq out of order and an
-    /// in-stream cause that is not earlier.
+    /// them. Refuses a key of another domain, a rules version the rulebook
+    /// lacks, a seq out of order and an in-stream cause that is not earlier.
+    /// The events are already decoded at their current type: decoding and
+    /// upcasting a stored form is the store adapter's (`annals-angzarr`).
     pub fn replay(
-        header: Header,
+        key: StreamKey,
         events: Vec<Envelope<D::Event>>,
         rules: &Rulebook<D::Rules>,
     ) -> Result<Stream<D>, ReplayError> {
-        todo!("proposal: check each envelope, resolve its rules, fold")
+        todo!("proposal: check the domain, check each envelope, resolve its rules, fold")
     }
 
     /// Fold the log from the start and hand every event from seq `from` on
     /// to the handlers, with the state just after it: rebuilding a
-    /// projection, or a policy's catch-up. One pass, however many handlers.
+    /// projection, or a reaction's catch-up. One pass, however many
+    /// handlers.
     pub fn dispatch(
         &self,
         from: Seq,
@@ -124,12 +118,8 @@ impl<D: Domain> Stream<D> {
         todo!("proposal: fold from 0, call the handlers from `from`")
     }
 
-    pub fn header(&self) -> &Header {
-        &self.header
-    }
-
-    pub fn id(&self) -> StreamId {
-        self.header.id
+    pub fn key(&self) -> &StreamKey {
+        &self.key
     }
 
     pub fn events(&self) -> &[Envelope<D::Event>] {
@@ -149,7 +139,7 @@ impl<D: Domain> Stream<D> {
         self.events.is_empty()
     }
 
-    pub fn into_parts(self) -> (Header, Vec<Envelope<D::Event>>, D::State) {
-        (self.header, self.events, self.state)
+    pub fn into_parts(self) -> (StreamKey, Vec<Envelope<D::Event>>, D::State) {
+        (self.key, self.events, self.state)
     }
 }

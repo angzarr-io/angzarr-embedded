@@ -8,4 +8,3 @@ mod kernel;
 mod reactions;
 mod store;
 mod toys;
-mod versioning;

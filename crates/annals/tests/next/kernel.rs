@@ -1,22 +1,76 @@
-//! Decide is pure, commit stamps, replay resolves rules by version.
+//! Decide is pure, commit stamps, replay resolves rules by version; streams
+//! are keyed by (domain, edition, root); correlation is always set.
+
+use std::collections::BTreeSet;
 
 use annals::next::{
-    Actor, CommandId, CorrelationId, EventId, Failure, KernelError, Meta, ReplayError, RequestId,
-    RulesVersion, Stream, StreamId, Timestamp,
+    Actor, CommandId, CommandMeta, Correlation, Edition, EventId, Failure, KernelError, Meta,
+    ReplayError, Root, RulesVersion, Stream, StreamKey, Timestamp,
 };
 
 use crate::toys::{
-    fees, header, meta, meta_in, no_rules, Account, AccountCmd, Fees, Jug, JugCmd, Refused,
+    correlation, fees, key, meta, meta_in, no_rules, request, stream, Account, AccountCmd, Fees,
+    Jug, JugCmd, Refused,
 };
 
 fn opened_with(cents: i64) -> Stream<Account> {
-    let mut s = Stream::<Account>::new(header(1, "account"));
+    let mut s = stream::<Account>(1);
     let rules = fees("fees-1", 0);
     s.execute(&AccountCmd::Open, &meta(1, 10), &rules, &mut [])
         .unwrap();
     s.execute(&AccountCmd::Deposit(cents), &meta(2, 20), &rules, &mut [])
         .unwrap();
     s
+}
+
+#[test]
+#[ignore = "proposal: a stream key is (domain, edition, root), the main timeline normalised"]
+fn a_stream_key_is_domain_edition_and_root_with_the_main_timeline_normalised() {
+    let root = Root::from(7);
+    let main = StreamKey::main("list", root);
+    for spelling in [
+        Edition::new(""),
+        Edition::new("angzarr"),
+        Edition::from(None),
+        Edition::from(Some("")),
+        Edition::MAIN,
+    ] {
+        assert!(spelling.is_main(), "{spelling:?}");
+        assert_eq!(spelling.name(), "angzarr", "the canonical name");
+        assert_eq!(StreamKey::new("list", spelling, root), main);
+    }
+
+    let v2 = Edition::new("v2");
+    assert!(!v2.is_main());
+    assert_eq!(v2.name(), "v2");
+    assert_ne!(
+        Edition::new("Angzarr"),
+        Edition::MAIN,
+        "names are exact, case included"
+    );
+
+    let keys: BTreeSet<StreamKey> = [
+        main.clone(),
+        StreamKey::new("list", Edition::new(""), root),
+        StreamKey::new("list", v2.clone(), root),
+        StreamKey::main("draw-system", root),
+        StreamKey::main("list", Root::from(8)),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        keys.len(),
+        4,
+        "the same root in another edition or domain is another stream"
+    );
+
+    let s = Stream::<Account>::new(v2.clone(), root);
+    assert_eq!(*s.key(), StreamKey::new("account", v2, root));
+    assert_eq!(
+        StreamKey::of::<Account>(Edition::new("angzarr"), root),
+        StreamKey::main("account", root),
+        "a stream's domain is its type's name"
+    );
 }
 
 #[test]
@@ -54,7 +108,7 @@ fn a_rejection_leaves_nothing_behind() {
 #[test]
 #[ignore = "proposal: decide stages, commit applies"]
 fn a_decide_sees_its_own_staged_events_and_the_stream_does_not() {
-    let mut s = Stream::<Jug>::new(header(2, "jug"));
+    let mut s = stream::<Jug>(2);
     let rules = no_rules();
     s.execute(&JugCmd::Fill(7, 3), &meta(1, 1), &rules, &mut [])
         .unwrap();
@@ -89,7 +143,7 @@ fn commit_refuses_a_stale_decision() {
     assert_eq!(
         s.commit(second, &rules, &mut []),
         Err(KernelError::Stale {
-            stream: StreamId::from(1),
+            stream: key(1, "account"),
             expected: 2,
             actual: 3
         })
@@ -100,11 +154,17 @@ fn commit_refuses_a_stale_decision() {
 #[test]
 #[ignore = "proposal: metadata stamped on every event (A1)"]
 fn metadata_is_stamped_on_every_event() {
-    let mut s = Stream::<Jug>::new(header(2, "jug"));
+    let mut s = stream::<Jug>(2);
     let rules = no_rules();
     s.execute(&JugCmd::Fill(7, 3), &meta(1, 1), &rules, &mut [])
         .unwrap();
-    let cmd = meta_in(42, 1_700_000_000_000_000, 9);
+    let cmd = CommandMeta::nth(
+        Timestamp(1_700_000_000_000_000),
+        Some(Actor("pseudonym-ann".to_string())),
+        request(42),
+        2,
+    )
+    .correlated(correlation(9));
     let poured = s.execute(&JugCmd::Pour, &cmd, &rules, &mut []).unwrap();
     assert_eq!(poured.len(), 3);
     for e in poured {
@@ -113,23 +173,46 @@ fn metadata_is_stamped_on_every_event() {
             Meta {
                 recorded_at: Timestamp(1_700_000_000_000_000),
                 actor: Some(Actor("pseudonym-ann".to_string())),
-                command: CommandId::Origin {
-                    request: RequestId(42),
-                    index: 0,
-                },
-                correlation: CorrelationId(9),
+                request: request(42),
+                command: CommandId::Origin { index: 2 },
+                correlation: correlation(9),
                 cause: None,
-                schema: 1,
                 rules: RulesVersion::from("none"),
             },
             "event {}",
             e.seq
         );
     }
+}
+
+#[test]
+#[ignore = "proposal: correlation is always set, generated from the request when absent"]
+fn a_command_without_a_correlation_gets_one_generated_from_its_request() {
+    assert_eq!(
+        Correlation::generated(&request(1)),
+        Correlation("req-1".to_string()),
+        "the request id's text: the same request, the same correlation"
+    );
+    let mut s = stream::<Jug>(2);
+    let rules = no_rules();
+    let without = meta(1, 1);
+    assert_eq!(without.correlation, None);
+    assert_eq!(without.correlation(), Correlation::generated(&request(1)));
+    s.execute(&JugCmd::Fill(7, 3), &without, &rules, &mut [])
+        .unwrap();
     assert_eq!(
         s.events()[0].meta.correlation,
-        CorrelationId(1),
-        "a fresh command starts its own correlation"
+        Correlation::generated(&request(1)),
+        "stamped, never empty"
+    );
+
+    let given = meta_in(2, 2, 77);
+    s.execute(&JugCmd::Pour, &given, &rules, &mut []).unwrap();
+    assert!(
+        s.events()[1..]
+            .iter()
+            .all(|e| e.meta.correlation == correlation(77)),
+        "a given correlation is kept"
     );
 }
 
@@ -139,11 +222,11 @@ fn a_cause_names_its_stream() {
     let mut s = opened_with(100);
     let rules = fees("fees-1", 0);
     let elsewhere = EventId {
-        stream: StreamId::from(77),
+        stream: StreamKey::new("ledger", Edition::new("v2"), Root::from(77)),
         seq: 12,
     };
-    let cmd = annals::next::CommandMeta {
-        cause: Some(elsewhere),
+    let cmd = CommandMeta {
+        cause: Some(elsewhere.clone()),
         ..meta(3, 30)
     };
     let e = s
@@ -174,13 +257,13 @@ fn replay_resolves_rules_by_each_events_version() {
     assert_eq!(s.events()[2].meta.rules, RulesVersion::from("fees-1"));
     assert_eq!(s.events()[3].meta.rules, RulesVersion::from("fees-2"));
 
-    let (h, events, state) = s.into_parts();
-    let replayed = Stream::<Account>::replay(h.clone(), events.clone(), &both).unwrap();
+    let (k, events, state) = s.into_parts();
+    let replayed = Stream::<Account>::replay(k.clone(), events.clone(), &both).unwrap();
     assert_eq!(*replayed.state(), state);
 
     let only_new = fees("fees-2", 5);
     assert_eq!(
-        Stream::<Account>::replay(h, events, &only_new).err(),
+        Stream::<Account>::replay(k, events, &only_new).err(),
         Some(ReplayError::UnknownRules {
             seq: 0,
             version: RulesVersion::from("fees-1")
@@ -190,17 +273,14 @@ fn replay_resolves_rules_by_each_events_version() {
 }
 
 #[test]
-#[ignore = "proposal: replay takes only current-schema events (A5)"]
-fn replay_refuses_an_event_not_at_the_current_schema() {
-    let s = opened_with(100);
-    let (h, mut events, _) = s.into_parts();
-    events[1].meta.schema = 2;
+#[ignore = "proposal: replay refuses a log keyed to another domain"]
+fn replay_refuses_a_log_of_another_domain() {
+    let (_, events, _) = opened_with(100).into_parts();
     assert_eq!(
-        Stream::<Account>::replay(h, events, &fees("fees-1", 0)).err(),
-        Some(ReplayError::SchemaNotCurrent {
-            seq: 1,
-            found: 2,
-            current: 3
+        Stream::<Account>::replay(key(1, "jug"), events, &fees("fees-1", 0)).err(),
+        Some(ReplayError::WrongDomain {
+            found: "jug".to_string(),
+            expected: "account"
         })
     );
 }
@@ -209,35 +289,40 @@ fn replay_refuses_an_event_not_at_the_current_schema() {
 #[ignore = "proposal: replay checks in-stream causes"]
 fn replay_refuses_an_in_stream_cause_that_is_not_earlier() {
     let s = opened_with(100);
-    let (h, mut events, _) = s.into_parts();
+    let (k, mut events, _) = s.into_parts();
     events[1].meta.cause = Some(EventId {
-        stream: StreamId::from(1),
+        stream: k.clone(),
         seq: 1,
     });
     assert_eq!(
-        Stream::<Account>::replay(h.clone(), events.clone(), &fees("fees-1", 0)).err(),
+        Stream::<Account>::replay(k.clone(), events.clone(), &fees("fees-1", 0)).err(),
         Some(ReplayError::CauseNotEarlier { seq: 1, cause: 1 })
     );
-    events[1].meta.cause = Some(EventId {
-        stream: StreamId::from(2),
-        seq: 9,
-    });
-    assert!(
-        Stream::<Account>::replay(h, events, &fees("fees-1", 0)).is_ok(),
-        "another stream's seq is not ordered against this one's"
-    );
+    for other in [
+        key(2, "account"),
+        StreamKey::new("account", Edition::new("v2"), k.root),
+    ] {
+        events[1].meta.cause = Some(EventId {
+            stream: other,
+            seq: 9,
+        });
+        assert!(
+            Stream::<Account>::replay(k.clone(), events.clone(), &fees("fees-1", 0)).is_ok(),
+            "another root's or another edition's seq is not ordered against this one's"
+        );
+    }
 }
 
 #[test]
-fn a_uuid_is_a_stream_id() {
+fn a_uuid_is_a_root() {
     let uuid = [
         0x67, 0xe5, 0x50, 0x44, 0x10, 0xb1, 0x42, 0x6f, 0x92, 0x47, 0xbb, 0x68, 0x0e, 0x5f, 0xe0,
         0xc8,
     ];
-    let id = StreamId::from_bytes(uuid);
-    assert_eq!(id.to_bytes(), uuid);
-    assert_eq!(id.0 >> 120, 0x67, "big-endian, as a UUID is written");
-    assert_eq!(StreamId::from(7u64), StreamId(7));
+    let root = Root::from_bytes(uuid);
+    assert_eq!(root.to_bytes(), uuid);
+    assert_eq!(root.0 >> 120, 0x67, "big-endian, as a UUID is written");
+    assert_eq!(Root::from(7u64), Root(7));
 }
 
 #[test]

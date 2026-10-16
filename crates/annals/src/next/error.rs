@@ -10,9 +10,7 @@
 use annals_diagnostic::Report;
 
 use super::handler::Gap;
-use super::id::{CommandId, EventId, RulesVersion, Seq, StreamId};
-
-use super::version::UpcastError;
+use super::id::{CommandId, EventId, RequestId, RulesVersion, Seq, StreamKey};
 
 /// Why a command did not commit.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -35,9 +33,9 @@ pub enum Failure<R> {
 /// the reaction's output for that cause, recomputable from the log.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Step {
-    pub stream: StreamId,
-    /// The target domain's [`Domain::NAME`](super::Domain::NAME).
-    pub domain: &'static str,
+    /// The target stream; its domain is the target's
+    /// [`Domain::NAME`](super::Domain::NAME).
+    pub stream: StreamKey,
     pub kind: StepKind,
     pub cause: EventId,
 }
@@ -67,13 +65,13 @@ pub enum KernelError {
     /// A decision committed to a stream that is not the one, or not at the
     /// length, it was decided against.
     Stale {
-        stream: StreamId,
+        stream: StreamKey,
         expected: Seq,
         actual: Seq,
     },
     /// A delivery to `stream` skipped ahead of its position.
     Gap {
-        stream: StreamId,
+        stream: StreamKey,
         gap: Gap,
     },
     /// A reaction's target left the source's targets and came back: the
@@ -86,8 +84,16 @@ pub enum KernelError {
     /// `stream` refused a fact for integrity: retired, or never created.
     /// The domain's own reason, as a report.
     FactRefused {
-        stream: StreamId,
+        stream: StreamKey,
         reason: Report,
+    },
+    /// A command or a log for `stream` was given to a `expected` stream: a
+    /// key of another domain. Caught at the origin of a chain and at
+    /// replay; a reaction builds its target's key from the target's domain,
+    /// so it cannot happen there.
+    WrongDomain {
+        stream: StreamKey,
+        expected: &'static str,
     },
     /// A command chain went deeper than its limit: a reaction cycle, or a
     /// cascade longer than allowed.
@@ -100,7 +106,6 @@ pub enum KernelError {
         version: RulesVersion,
     },
     Replay(ReplayError),
-    Upcast(UpcastError),
     Store(StoreError),
 }
 
@@ -112,9 +117,11 @@ pub enum ReplayError {
     /// Event `seq` names an event of its own stream at or after itself as
     /// its cause.
     CauseNotEarlier { seq: Seq, cause: Seq },
-    /// Event `seq` is at schema `found`, not the code's `current`: it needs
-    /// upcasting (or the code is older than the log).
-    SchemaNotCurrent { seq: Seq, found: u32, current: u32 },
+    /// The log is `found`'s, given to a `expected` stream.
+    WrongDomain {
+        found: String,
+        expected: &'static str,
+    },
     /// Event `seq` was decided under rules the rulebook does not hold.
     UnknownRules { seq: Seq, version: RulesVersion },
 }
@@ -127,26 +134,24 @@ pub enum StoreError {
     /// Someone else appended first: the stream is at `actual`, not
     /// `expected`. Nothing was appended.
     Conflict {
-        stream: StreamId,
+        stream: StreamKey,
         expected: Seq,
         actual: Seq,
     },
     /// The events do not continue the stream: event `found` where `expected`
     /// was due. A caller bug; nothing was appended.
     Discontinuous {
-        stream: StreamId,
+        stream: StreamKey,
         expected: Seq,
         found: Seq,
     },
-    /// The append's header is not the stream's. A caller bug; nothing was
-    /// appended.
-    HeaderChanged { stream: StreamId },
-    /// The command that recorded `events` was already recorded in `stream`,
-    /// as seqs `from..to` (see the idempotency note on
+    /// Command `command` of request `request` was already recorded in
+    /// `stream`, as seqs `from..to` (see the idempotency note on
     /// [`EventStore::append`](super::EventStore::append)). Nothing was
     /// appended; the earlier result stands.
     Duplicate {
-        stream: StreamId,
+        stream: StreamKey,
+        request: RequestId,
         command: CommandId,
         from: Seq,
         to: Seq,
@@ -154,6 +159,15 @@ pub enum StoreError {
     /// The store failed: I/O, a timeout, a dropped connection. The adapter's
     /// own error, as a report. An append may or may not have landed.
     Unavailable(Report),
+    /// The store holds event `seq` of `stream` but cannot give it back as
+    /// an event: a payload type nothing decodes or upcasts (strict replay),
+    /// bytes that do not decode. The adapter's error, as a report naming
+    /// what it could not read (the type URL, for `annals-angzarr`).
+    Unreadable {
+        stream: StreamKey,
+        seq: Seq,
+        reason: Report,
+    },
 }
 
 /// What a wrapping runtime (angzarr) should do about a failure: retry,
@@ -176,8 +190,8 @@ pub enum Recovery {
     /// A fact was refused for integrity: a retired or unknown target.
     Integrity,
     /// A bug or a misconfiguration: a stale decision, a discontinuous
-    /// append, a changed header, a chain too deep, unknown rules, a log
-    /// that does not replay or upcast. Retrying will not help; an operator
+    /// append, a key of the wrong domain, a chain too deep, unknown rules, a
+    /// log that does not replay, an event the store cannot read back. Retrying will not help; an operator
     /// must.
     Bug,
 }

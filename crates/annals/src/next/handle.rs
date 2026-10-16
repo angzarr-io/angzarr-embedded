@@ -48,11 +48,11 @@ use std::collections::BTreeMap;
 use super::domain::Domain;
 use super::error::{Failure, KernelError, Step, StepError};
 use super::handler::Handler;
-use super::id::{Seq, StreamId};
+use super::id::{Seq, StreamKey};
 use super::meta::CommandMeta;
 use super::reaction::{Policy, Projection, Translation};
 use super::store::{AsyncEventStore, AsyncUnitOfWork, EventStore, UnitOfWork};
-use super::stream::{Envelope, Header};
+use super::stream::Envelope;
 use super::version::Rulebook;
 
 /// How deep a chain may go before it is a [`KernelError::ChainTooDeep`],
@@ -62,7 +62,7 @@ pub const DEFAULT_DEPTH_LIMIT: usize = 8;
 /// One reaction, its types erased so a [`Routes`] table can hold reactions
 /// of any domains: run it on what `source` staged from `from` on.
 type Route<'r, U> = Box<
-    dyn Fn(&mut Chain<'_, 'r, U>, StreamId, Seq) -> Result<(), (Vec<Step>, StepError)>
+    dyn Fn(&mut Chain<'_, 'r, U>, &StreamKey, Seq) -> Result<(), (Vec<Step>, StepError)>
         + Send
         + Sync
         + 'r,
@@ -170,10 +170,10 @@ pub struct Chain<'u, 'r, U> {
     /// Each touched stream: the length it was loaded at, and the stream
     /// (a `Stream<D>`, boxed with how to append it) with the chain's events
     /// committed to it in memory.
-    staged: BTreeMap<StreamId, (Seq, Box<dyn Any + Send>)>,
+    staged: BTreeMap<StreamKey, (Seq, Box<dyn Any + Send>)>,
     /// The order streams were first touched in: the order they are
     /// appended in.
-    order: Vec<StreamId>,
+    order: Vec<StreamKey>,
     path: Vec<Step>,
     limit: usize,
 }
@@ -200,7 +200,7 @@ impl<'u, 'r, U> Chain<'u, 'r, U> {
 
     /// `stream`'s state as the chain has it, staged events folded in, if
     /// the chain has touched it and it is a `D` stream.
-    pub fn state<D: Domain>(&self, stream: StreamId) -> Option<&D::State> {
+    pub fn state<D: Domain>(&self, stream: &StreamKey) -> Option<&D::State> {
         todo!("proposal: downcast the staged Stream<D>")
     }
 
@@ -209,13 +209,14 @@ impl<'u, 'r, U> Chain<'u, 'r, U> {
         &self.path
     }
 
-    /// Decide `cmd` in the stream `header` names (loaded from the store the
+    /// Decide `cmd` in the stream `key` names (loaded from the store the
     /// first time the chain touches it, staged after), stage its events,
     /// then run the routes for `D` on them, depth first. A chain's first
     /// `execute` is the originating command; a policy route's are the rest.
+    /// A key of another domain than `D` is a [`KernelError::WrongDomain`].
     pub fn execute<D>(
         &mut self,
-        header: &Header,
+        key: &StreamKey,
         cmd: &D::Command,
         meta: &CommandMeta,
         rules: &Rulebook<D::Rules>,
@@ -227,12 +228,12 @@ impl<'u, 'r, U> Chain<'u, 'r, U> {
         todo!("proposal: load or find, decide, stage, react")
     }
 
-    /// Admit `fact` into the stream `header` names after placing its source
+    /// Admit `fact` into the stream `key` names after placing its source
     /// seq against the target's staged position (a translation route reads
     /// that off the target's staged state), then run the routes for `D`.
     pub fn inject<D>(
         &mut self,
-        header: &Header,
+        key: &StreamKey,
         fact: D::Event,
         meta: &CommandMeta,
         rules: &Rulebook<D::Rules>,
@@ -258,19 +259,19 @@ impl<'u, 'r, U> Chain<'u, 'r, U> {
 pub struct Recorded {
     /// Each stream touched, in the order first touched: the length it was
     /// loaded at, and the stream (a `Stream<D>`, boxed) after the chain.
-    streams: Vec<(StreamId, Seq, Box<dyn Any + Send>)>,
+    streams: Vec<(StreamKey, Seq, Box<dyn Any + Send>)>,
 }
 
 impl Recorded {
     /// Every stream the chain appended to, in order, with the seqs it
     /// appended: `from..to`.
-    pub fn streams(&self) -> Vec<(StreamId, Seq, Seq)> {
+    pub fn streams(&self) -> Vec<(StreamKey, Seq, Seq)> {
         todo!("proposal: (id, loaded length, new length)")
     }
 
     /// The events the chain recorded in `stream`, if it is a `D` stream the
     /// chain touched.
-    pub fn events<D: Domain>(&self, stream: StreamId) -> Option<&[Envelope<D::Event>]> {
+    pub fn events<D: Domain>(&self, stream: &StreamKey) -> Option<&[Envelope<D::Event>]> {
         todo!("proposal: downcast, slice from the loaded length")
     }
 
@@ -278,7 +279,7 @@ impl Recorded {
     /// state just after it.
     pub fn dispatch<D: Domain>(
         &self,
-        stream: StreamId,
+        stream: &StreamKey,
         rules: &Rulebook<D::Rules>,
         handlers: &mut [&mut dyn Handler<D>],
     ) -> Result<(), KernelError> {
@@ -326,7 +327,7 @@ impl<D: Domain, P: Projection<D>> Project for ProjectionRoute<'_, D, P> {
 pub fn handle<D, U, Ps>(
     unit: U,
     routes: &Routes<'_, U>,
-    header: &Header,
+    key: &StreamKey,
     cmd: &D::Command,
     meta: &CommandMeta,
     rules: &Rulebook<D::Rules>,
@@ -345,7 +346,7 @@ where
 pub async fn handle_async<D, U, Ps>(
     unit: U,
     routes: &AsyncRoutes<'_, U>,
-    header: &Header,
+    key: &StreamKey,
     cmd: &D::Command,
     meta: &CommandMeta,
     rules: &Rulebook<D::Rules>,

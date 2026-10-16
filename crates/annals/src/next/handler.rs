@@ -5,14 +5,14 @@
 use std::collections::BTreeMap;
 
 use super::domain::Domain;
-use super::id::{EventId, Seq, StreamId};
+use super::id::{EventId, Seq, StreamKey};
 use super::meta::Meta;
-use super::stream::{Envelope, Header};
+use super::stream::Envelope;
 
 /// One committed event as a handler sees it: which stream, where in it,
 /// its metadata, its payload, and the stream's state just after it.
 pub struct Committed<'a, D: Domain> {
-    pub header: &'a Header,
+    pub key: &'a StreamKey,
     pub envelope: &'a Envelope<D::Event>,
     pub state: &'a D::State,
 }
@@ -21,13 +21,13 @@ impl<'a, D: Domain> Committed<'a, D> {
     /// The event's id: its stream and seq.
     pub fn id(&self) -> EventId {
         EventId {
-            stream: self.header.id,
+            stream: self.key.clone(),
             seq: self.envelope.seq,
         }
     }
 
-    pub fn stream(&self) -> StreamId {
-        self.header.id
+    pub fn stream(&self) -> &'a StreamKey {
+        self.key
     }
 
     pub fn seq(&self) -> Seq {
@@ -125,8 +125,8 @@ pub struct Gap {
 /// dropped, for the application to catch up from the store.
 pub struct Tracked<H> {
     inner: H,
-    positions: BTreeMap<StreamId, Position>,
-    gaps: BTreeMap<StreamId, Gap>,
+    positions: BTreeMap<StreamKey, Position>,
+    gaps: BTreeMap<StreamKey, Gap>,
 }
 
 impl<H> Tracked<H> {
@@ -140,18 +140,18 @@ impl<H> Tracked<H> {
     }
 
     /// Resume `stream` from a saved position.
-    pub fn resume(mut self, stream: StreamId, position: Position) -> Tracked<H> {
+    pub fn resume(mut self, stream: StreamKey, position: Position) -> Tracked<H> {
         self.positions.insert(stream, position);
         self
     }
 
-    pub fn position(&self, stream: StreamId) -> Position {
-        self.positions.get(&stream).copied().unwrap_or_default()
+    pub fn position(&self, stream: &StreamKey) -> Position {
+        self.positions.get(stream).copied().unwrap_or_default()
     }
 
     /// The first gap seen on `stream` since it last advanced, if any.
-    pub fn gap(&self, stream: StreamId) -> Option<&Gap> {
-        self.gaps.get(&stream)
+    pub fn gap(&self, stream: &StreamKey) -> Option<&Gap> {
+        self.gaps.get(stream)
     }
 
     pub fn inner(&self) -> &H {

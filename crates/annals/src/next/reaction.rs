@@ -17,8 +17,9 @@
 //! - [`Projection`]: event → a read model's fold. It produces nothing.
 //!
 //! Policies and translations share [`Reaction`]: which targets a source
-//! event is owed to, which stream each target is, and how far each target
-//! has got.
+//! event is owed to, which root each target is, and how far each target has
+//! got. A target's stream key is the target domain's, in **the source's
+//! edition**: a reaction never crosses timelines.
 //!
 //! **The contiguity invariant.** Once a target appears in
 //! [`Reaction::targets`], it stays there for every source event until the
@@ -34,7 +35,7 @@ use std::marker::PhantomData;
 use super::domain::Domain;
 use super::error::{Failure, KernelError};
 use super::handler::{Committed, Handler, Position};
-use super::id::{EventId, StreamId};
+use super::id::{EventId, Root, StreamKey};
 use super::meta::CommandMeta;
 use super::stream::{Envelope, Stream};
 use super::version::Rulebook;
@@ -59,8 +60,9 @@ pub trait Reaction {
     /// contiguity invariant (see the module docs).
     fn targets(source: &<Self::Source as Domain>::State) -> Vec<Self::TargetId>;
 
-    /// The stream `target` is.
-    fn stream(target: &Self::TargetId) -> StreamId;
+    /// The root of `target`'s stream. Its key is
+    /// `(Target::NAME, the source's edition, root)`: see [`target_key`].
+    fn root(target: &Self::TargetId) -> Root;
 
     /// The last source seq `target` holds, read off its fold. The source seq
     /// travels in the delivered payload for this, since `apply` never sees
@@ -189,6 +191,12 @@ impl<D: Domain, P: Projection<D>> Handler<D> for Projector<'_, P> {
     fn handle(&mut self, committed: &Committed<'_, D>) {
         self.0.project(committed)
     }
+}
+
+/// The stream `target` is, for a source event in `source`: the target
+/// domain's, in the source's edition.
+pub fn target_key<R: Reaction>(source: &StreamKey, target: &R::TargetId) -> StreamKey {
+    todo!("proposal: StreamKey::of::<R::Target>(source.edition.clone(), R::root(target))")
 }
 
 /// The one mechanism under both reactors and both backlogs: what `R` owes

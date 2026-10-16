@@ -5,32 +5,44 @@ use std::convert::Infallible;
 use std::fmt;
 
 use annals::next::{
-    Actor, CommandMeta, CorrelationId, Domain, Header, RequestId, Rulebook, StreamId, Timestamp, Tx,
+    Actor, CommandMeta, Correlation, Domain, Edition, RequestId, Root, Rulebook, Stream, StreamKey,
+    Timestamp, Tx,
 };
 use annals_diagnostic::{Arg, Diagnostic};
 
-pub fn header(id: u64, domain: &str) -> Header {
-    Header {
-        id: StreamId::from(id),
-        domain: domain.to_string(),
-    }
+/// `domain`'s stream `id`, on the main timeline.
+pub fn key(id: u64, domain: &str) -> StreamKey {
+    StreamKey::main(domain, Root::from(id))
 }
 
-/// Command `command`, from ann, at `at` microseconds.
-pub fn meta(command: u128, at: i64) -> CommandMeta {
+/// An empty `D` stream `id`, on the main timeline.
+pub fn stream<D: Domain>(id: u64) -> Stream<D> {
+    Stream::new(Edition::MAIN, Root::from(id))
+}
+
+/// The request `n`'s id.
+pub fn request(n: u128) -> RequestId {
+    RequestId(format!("req-{n}"))
+}
+
+/// The correlation `n`.
+pub fn correlation(n: u128) -> Correlation {
+    Correlation(format!("corr-{n}"))
+}
+
+/// The first command of request `n`, from ann, at `at` microseconds, with
+/// no correlation given.
+pub fn meta(n: u128, at: i64) -> CommandMeta {
     CommandMeta::new(
         Timestamp(at),
         Some(Actor("pseudonym-ann".to_string())),
-        RequestId(command),
+        request(n),
     )
 }
 
-/// A command continuing an existing correlation.
-pub fn meta_in(command: u128, at: i64, correlation: u128) -> CommandMeta {
-    CommandMeta {
-        correlation: CorrelationId(correlation),
-        ..meta(command, at)
-    }
+/// A command continuing the correlation `correlation`.
+pub fn meta_in(n: u128, at: i64, correlation_n: u128) -> CommandMeta {
+    meta(n, at).correlated(correlation(correlation_n))
 }
 
 // ---------------------------------------------------------------- an account
@@ -117,7 +129,6 @@ impl Domain for Account {
     type Rules = Fees;
 
     const NAME: &'static str = "account";
-    const SCHEMA: u32 = 3;
 
     fn decide(cmd: &AccountCmd, tx: &mut Tx<'_, Self>) -> Result<(), Refused> {
         let s = tx.state();
@@ -197,7 +208,6 @@ impl Domain for Jug {
     type Rules = ();
 
     const NAME: &'static str = "jug";
-    const SCHEMA: u32 = 1;
 
     fn decide(cmd: &JugCmd, tx: &mut Tx<'_, Self>) -> Result<(), Infallible> {
         match *cmd {
@@ -299,7 +309,6 @@ impl Domain for Hat {
     type Rules = ();
 
     const NAME: &'static str = "hat";
-    const SCHEMA: u32 = 1;
 
     fn decide(cmd: &HatCmd, tx: &mut Tx<'_, Self>) -> Result<(), Empty> {
         match cmd {

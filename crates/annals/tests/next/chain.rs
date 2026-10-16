@@ -7,17 +7,21 @@
 use std::fmt;
 
 use annals::next::{
-    handle, Committed, CorrelationId, Domain, EventId, EventStore, Failure, Header, InMemoryStore,
-    InMemoryTx, KernelError, Policy, Position, ProjectionRoute, Reaction, Recovery, Routes,
-    Rulebook, Seq, Slice, Step, StepError, StepKind, StoreError, StreamId, Tx, UnitOfWork,
+    handle, Committed, Domain, Edition, EventId, EventStore, Failure, InMemoryStore, InMemoryTx,
+    KernelError, Policy, Position, ProjectionRoute, Reaction, Recovery, Root, Routes, Rulebook,
+    Seq, Slice, Step, StepError, StepKind, StoreError, StreamKey, Tx, UnitOfWork,
 };
 use annals_diagnostic::{Arg, Diagnostic, Report};
 
 use crate::reactions::{
     joined, member_stream, rules, Club, ClubEvent, ClubToMembers, Dues, Ledger, LedgerState,
-    MemberEvent, Pot, Recorded, TREASURY,
+    MemberEvent, Pot, Recorded, TREASURY_ROOT,
 };
-use crate::toys::{header, meta, meta_in};
+use crate::toys::{correlation, key, meta, meta_in};
+
+fn treasury() -> StreamKey {
+    crate::reactions::treasury()
+}
 
 // ---------------------------------------------------------------- level three: an auditor
 
@@ -65,7 +69,6 @@ impl Domain for Auditor {
     type Rules = ();
 
     const NAME: &'static str = "auditor";
-    const SCHEMA: u32 = 1;
 
     fn decide(cmd: &Approve, tx: &mut Tx<'_, Self>) -> Result<(), TooLarge> {
         if cmd.cents > 100 {
@@ -81,7 +84,11 @@ impl Domain for Auditor {
     }
 }
 
-const AUDITOR: StreamId = StreamId(200);
+const AUDITOR_ROOT: Root = Root(200);
+
+fn auditor() -> StreamKey {
+    StreamKey::main("auditor", AUDITOR_ROOT)
+}
 
 /// Every ledger record, sent to the auditor for approval.
 struct Audit;
@@ -97,8 +104,8 @@ impl Reaction for Audit {
         vec![()]
     }
 
-    fn stream((): &()) -> StreamId {
-        AUDITOR
+    fn root((): &()) -> Root {
+        AUDITOR_ROOT
     }
 
     fn position(auditor: &Audited) -> Position {
@@ -145,8 +152,8 @@ impl Db {
         }
     }
 
-    fn len<E: Clone>(store: &mut InMemoryStore<E>, id: StreamId) -> Seq {
-        store.read(id).unwrap().map_or(0, |s| s.len)
+    fn len<E: Clone>(store: &mut InMemoryStore<E>, key: &StreamKey) -> Seq {
+        store.read(key).unwrap().map_or(0, |s| s.len)
     }
 }
 
@@ -164,19 +171,19 @@ macro_rules! table {
         impl EventStore<$event> for DbTx<'_> {
             fn append(
                 &mut self,
-                header: &Header,
+                key: &StreamKey,
                 expected: Seq,
                 events: &[annals::next::Envelope<$event>],
             ) -> Result<Seq, StoreError> {
-                self.$field.append(header, expected, events)
+                self.$field.append(key, expected, events)
             }
 
             fn read_from(
                 &mut self,
-                stream: StreamId,
+                key: &StreamKey,
                 from: Seq,
             ) -> Result<Option<Slice<$event>>, StoreError> {
-                self.$field.read_from(stream, from)
+                self.$field.read_from(key, from)
             }
         }
     };
@@ -187,8 +194,8 @@ table!(MemberEvent, members);
 table!(Recorded, ledgers);
 table!(Approved, auditors);
 
-fn club() -> Header {
-    header(1, "club")
+fn club() -> StreamKey {
+    key(1, "club")
 }
 
 /// The whole club: members' copies, the treasury and its auditor.
@@ -230,36 +237,36 @@ fn a_successful_chain_commits_every_stream_with_causation_and_correlation() {
     assert_eq!(
         recorded.streams(),
         [
-            (StreamId::from(1), 1, 2),
+            (club(), 1, 2),
             (member_stream("ann"), 1, 2),
-            (TREASURY, 1, 2),
-            (AUDITOR, 1, 2),
+            (treasury(), 1, 2),
+            (auditor(), 1, 2),
         ],
         "every stream touched, in the order first touched, depth first"
     );
     let paid = EventId {
-        stream: StreamId::from(1),
+        stream: club(),
         seq: 1,
     };
-    let record = &recorded.events::<Ledger>(TREASURY).unwrap()[0];
+    let record = &recorded.events::<Ledger>(&treasury()).unwrap()[0];
     assert_eq!(record.meta.cause, Some(paid));
-    let approval = &recorded.events::<Auditor>(AUDITOR).unwrap()[0];
+    let approval = &recorded.events::<Auditor>(&auditor()).unwrap()[0];
     assert_eq!(
         approval.meta.cause,
         Some(EventId {
-            stream: TREASURY,
+            stream: treasury(),
             seq: 1
         }),
         "caused by the ledger's event, not the club's"
     );
     for meta in [&record.meta, &approval.meta] {
-        assert_eq!(meta.correlation, CorrelationId(77));
+        assert_eq!(meta.correlation, correlation(77));
     }
     assert_eq!(
         approval.meta.command,
         annals::next::CommandId::Reaction {
             source: EventId {
-                stream: TREASURY,
+                stream: treasury(),
                 seq: 1
             },
             component: "audit".to_string(),
@@ -268,7 +275,7 @@ fn a_successful_chain_commits_every_stream_with_causation_and_correlation() {
         "an idempotency key recomputable from the log"
     );
     assert_eq!(
-        Db::len(&mut db.auditors, AUDITOR),
+        Db::len(&mut db.auditors, &auditor()),
         2,
         "committed, not just returned"
     );
@@ -305,20 +312,18 @@ fn a_rejection_three_levels_deep_leaves_every_stream_untouched_and_returns_the_p
         Failure::Downstream {
             path: vec![
                 Step {
-                    stream: TREASURY,
-                    domain: "ledger",
+                    stream: treasury(),
                     kind: StepKind::Command,
                     cause: EventId {
-                        stream: StreamId::from(1),
+                        stream: club(),
                         seq: 1
                     },
                 },
                 Step {
-                    stream: AUDITOR,
-                    domain: "auditor",
+                    stream: auditor(),
                     kind: StepKind::Command,
                     cause: EventId {
-                        stream: TREASURY,
+                        stream: treasury(),
                         seq: 1
                     },
                 },
@@ -327,14 +332,10 @@ fn a_rejection_three_levels_deep_leaves_every_stream_untouched_and_returns_the_p
         }
     );
     assert_eq!(failure.recovery(), Recovery::Business);
-    assert_eq!(
-        Db::len(&mut db.clubs, StreamId::from(1)),
-        1,
-        "not even the club's"
-    );
-    assert_eq!(Db::len(&mut db.members, member_stream("ann")), 1);
-    assert_eq!(Db::len(&mut db.ledgers, TREASURY), 1);
-    assert_eq!(Db::len(&mut db.auditors, AUDITOR), 1);
+    assert_eq!(Db::len(&mut db.clubs, &club()), 1, "not even the club's");
+    assert_eq!(Db::len(&mut db.members, &member_stream("ann")), 1);
+    assert_eq!(Db::len(&mut db.ledgers, &treasury()), 1);
+    assert_eq!(Db::len(&mut db.auditors, &auditor()), 1);
 }
 
 #[test]
@@ -371,37 +372,37 @@ struct Contended {
 impl EventStore<ClubEvent> for Contended {
     fn append(
         &mut self,
-        header: &Header,
+        key: &StreamKey,
         expected: Seq,
         events: &[annals::next::Envelope<ClubEvent>],
     ) -> Result<Seq, StoreError> {
-        self.clubs.append(header, expected, events)
+        self.clubs.append(key, expected, events)
     }
 
     fn read_from(
         &mut self,
-        stream: StreamId,
+        key: &StreamKey,
         from: Seq,
     ) -> Result<Option<Slice<ClubEvent>>, StoreError> {
-        self.clubs.read_from(stream, from)
+        self.clubs.read_from(key, from)
     }
 }
 
 impl EventStore<Recorded> for Contended {
     fn append(
         &mut self,
-        _: &Header,
+        _: &StreamKey,
         expected: Seq,
         _: &[annals::next::Envelope<Recorded>],
     ) -> Result<Seq, StoreError> {
         Err(StoreError::Conflict {
-            stream: TREASURY,
+            stream: treasury(),
             expected,
             actual: expected + 1,
         })
     }
 
-    fn read_from(&mut self, _: StreamId, _: Seq) -> Result<Option<Slice<Recorded>>, StoreError> {
+    fn read_from(&mut self, _: &StreamKey, _: Seq) -> Result<Option<Slice<Recorded>>, StoreError> {
         Ok(None)
     }
 }
@@ -419,15 +420,15 @@ where
 {
     fn append(
         &mut self,
-        header: &Header,
+        key: &StreamKey,
         expected: Seq,
         events: &[annals::next::Envelope<E>],
     ) -> Result<Seq, StoreError> {
-        (**self).append(header, expected, events)
+        (**self).append(key, expected, events)
     }
 
-    fn read_from(&mut self, stream: StreamId, from: Seq) -> Result<Option<Slice<E>>, StoreError> {
-        (**self).read_from(stream, from)
+    fn read_from(&mut self, key: &StreamKey, from: Seq) -> Result<Option<Slice<E>>, StoreError> {
+        (**self).read_from(key, from)
     }
 }
 
@@ -452,7 +453,7 @@ fn a_conflict_on_any_stream_touched_fails_the_whole_chain() {
     assert_eq!(
         failure,
         Failure::Kernel(KernelError::Store(StoreError::Conflict {
-            stream: TREASURY,
+            stream: treasury(),
             expected: 0,
             actual: 1
         }))
@@ -468,13 +469,18 @@ fn a_conflict_on_any_stream_touched_fails_the_whole_chain() {
 /// the stream's own staged state has it.
 struct Ball;
 
-const A: StreamId = StreamId(10);
-const B: StreamId = StreamId(11);
+const A: Root = Root(10);
+const B: Root = Root(11);
+
+/// Ball `root`'s stream, on the main timeline.
+fn ball(root: Root) -> StreamKey {
+    StreamKey::main("ball", root)
+}
 const TO: u32 = 4;
 
 #[derive(Default, Clone, PartialEq, Debug)]
 struct Rally {
-    me: Option<StreamId>,
+    me: Option<Root>,
     /// The last rally number this ball hit.
     last: u32,
     /// The other ball's last seq this ball took a hit from.
@@ -483,7 +489,7 @@ struct Rally {
 
 #[derive(Clone, PartialEq, Debug)]
 struct Hit {
-    me: StreamId,
+    me: Root,
     rally: u32,
     source_seq: Option<Seq>,
 }
@@ -515,7 +521,6 @@ impl Domain for Ball {
     type Rules = ();
 
     const NAME: &'static str = "ball";
-    const SCHEMA: u32 = 1;
 
     /// A ball hits every other rally number: A 1, 3; B 2, 4. Its second
     /// hit is decided against its own staged first.
@@ -542,18 +547,18 @@ struct Return;
 impl Reaction for Return {
     type Source = Ball;
     type Target = Ball;
-    type TargetId = StreamId;
+    type TargetId = Root;
 
     const NAME: &'static str = "return";
 
-    fn targets(ball: &Rally) -> Vec<StreamId> {
+    fn targets(ball: &Rally) -> Vec<Root> {
         match ball.me {
             Some(me) if ball.last < TO => vec![if me == A { B } else { A }],
             _ => vec![],
         }
     }
 
-    fn stream(id: &StreamId) -> StreamId {
+    fn root(id: &Root) -> Root {
         *id
     }
 
@@ -563,7 +568,7 @@ impl Reaction for Return {
 }
 
 impl Policy for Return {
-    fn command(target: &StreamId, c: &Committed<'_, Ball>) -> Hit {
+    fn command(target: &Root, c: &Committed<'_, Ball>) -> Hit {
         Hit {
             me: *target,
             rally: c.event().rally + 1,
@@ -584,10 +589,7 @@ fn a_chain_that_comes_back_sees_its_own_staged_state() {
     let recorded = handle::<Ball, _, _>(
         balls.0.begin(),
         &routes,
-        &Header {
-            id: A,
-            domain: "ball".to_string(),
-        },
+        &ball(A),
         &Hit {
             me: A,
             rally: 1,
@@ -600,7 +602,7 @@ fn a_chain_that_comes_back_sees_its_own_staged_state() {
     .unwrap();
     let rallies = |id| -> Vec<u32> {
         recorded
-            .events::<Ball>(id)
+            .events::<Ball>(&ball(id))
             .unwrap()
             .iter()
             .map(|e| e.event.rally)
@@ -620,10 +622,7 @@ fn a_chain_deeper_than_its_limit_is_refused() {
         let mut unit = balls.0.begin();
         let mut chain = annals::next::Chain::new(&mut unit, &routes).limit(2);
         chain.execute::<Ball>(
-            &Header {
-                id: A,
-                domain: "ball".to_string(),
-            },
+            &ball(A),
             &Hit {
                 me: A,
                 rally: 1,
@@ -642,14 +641,17 @@ fn a_chain_deeper_than_its_limit_is_refused() {
         StepError::Kernel(KernelError::ChainTooDeep { limit: 2 })
     );
     assert_eq!(error.recovery(), Recovery::Bug);
-    assert!(balls.0.read(A).unwrap().is_none(), "nothing appended");
+    assert!(
+        balls.0.read(&ball(A)).unwrap().is_none(),
+        "nothing appended"
+    );
 }
 
 #[test]
 #[ignore = "proposal: failures are classified retryable or terminal for a wrapping runtime"]
 fn failures_are_classified_for_a_wrapping_runtime() {
     let conflict = StoreError::Conflict {
-        stream: A,
+        stream: ball(A),
         expected: 0,
         actual: 1,
     };
@@ -661,11 +663,9 @@ fn failures_are_classified_for_a_wrapping_runtime() {
     );
     assert_eq!(
         StoreError::Duplicate {
-            stream: A,
-            command: annals::next::CommandId::Origin {
-                request: annals::next::RequestId(1),
-                index: 0
-            },
+            stream: ball(A),
+            request: annals::next::RequestId::from("req-1"),
+            command: annals::next::CommandId::Origin { index: 0 },
             from: 3,
             to: 5
         }
@@ -673,12 +673,25 @@ fn failures_are_classified_for_a_wrapping_runtime() {
         Recovery::Done
     );
     assert_eq!(
-        StoreError::HeaderChanged { stream: A }.recovery(),
+        StoreError::Unreadable {
+            stream: ball(A),
+            seq: 3,
+            reason: Report::new("toy-unknown-type", "no decoder for /toy.v9.Hit"),
+        }
+        .recovery(),
+        Recovery::Bug,
+        "strict replay: an unreadable event is a bug, never retried"
+    );
+    assert_eq!(
+        kernel(KernelError::WrongDomain {
+            stream: key(1, "club"),
+            expected: "ball"
+        }),
         Recovery::Bug
     );
     assert_eq!(
         StoreError::Discontinuous {
-            stream: A,
+            stream: ball(A),
             expected: 1,
             found: 2
         }
@@ -688,7 +701,7 @@ fn failures_are_classified_for_a_wrapping_runtime() {
     assert_eq!(kernel(KernelError::Store(conflict)), Recovery::Retry);
     assert_eq!(
         kernel(KernelError::Gap {
-            stream: A,
+            stream: ball(A),
             gap: annals::next::Gap {
                 expected: 1,
                 found: 2
@@ -699,7 +712,7 @@ fn failures_are_classified_for_a_wrapping_runtime() {
     );
     assert_eq!(
         kernel(KernelError::Stale {
-            stream: A,
+            stream: ball(A),
             expected: 1,
             actual: 2
         }),
@@ -720,7 +733,7 @@ fn failures_are_classified_for_a_wrapping_runtime() {
     );
     assert_eq!(
         StepError::Kernel(KernelError::FactRefused {
-            stream: A,
+            stream: ball(A),
             reason: Report::new("toy-member-retired", "the member has left"),
         })
         .recovery(),
@@ -734,7 +747,7 @@ fn the_command_handler_returns_what_the_command_recorded() {
     use crate::toys::{Drawn, Hat, HatCmd, HatEvent};
 
     let mut store = InMemoryStore::<HatEvent>::new();
-    let hat = header(8, "hat");
+    let hat = key(8, "hat");
     let r = rules();
     for (i, slip) in ["a", "b", "c"].iter().enumerate() {
         handle::<Hat, _, _>(
@@ -758,8 +771,8 @@ fn the_command_handler_returns_what_the_command_recorded() {
         &mut (),
     )
     .unwrap();
-    assert_eq!(recorded.streams(), [(hat.id, 3, 4)]);
-    let drawn = &recorded.events::<Hat>(hat.id).unwrap()[0];
+    assert_eq!(recorded.streams(), [(hat.clone(), 3, 4)]);
+    let drawn = &recorded.events::<Hat>(&hat).unwrap()[0];
     assert_eq!(
         drawn.event,
         HatEvent::Drawn(Drawn {
@@ -770,4 +783,67 @@ fn the_command_handler_returns_what_the_command_recorded() {
         "the caller's random value and the handler's clock, in the payload"
     );
     assert_eq!(drawn.meta.recorded_at.0, 1_234);
+}
+
+#[test]
+#[ignore = "proposal: a chain stays in its origin's edition"]
+fn a_chain_in_an_edition_touches_only_that_edition() {
+    let mut db = Db::default();
+    let r = rules();
+    let v2 = Edition::new("v2");
+    let club_v2 = StreamKey::new("club", v2.clone(), Root::from(1));
+    for (i, cmd) in [joined("ann"), ClubEvent::Paid(30)].iter().enumerate() {
+        let recorded = handle::<Club, _, _>(
+            db.begin(),
+            &routes(&r),
+            &club_v2,
+            cmd,
+            &meta(i as u128, 0),
+            &r,
+            &mut (),
+        )
+        .unwrap();
+        assert!(
+            recorded.streams().iter().all(|(k, _, _)| k.edition == v2),
+            "every stream the chain touched is in v2: {:?}",
+            recorded.streams()
+        );
+    }
+    assert_eq!(
+        Db::len(
+            &mut db.ledgers,
+            &StreamKey::new("ledger", v2, TREASURY_ROOT)
+        ),
+        2
+    );
+    assert_eq!(
+        Db::len(&mut db.ledgers, &treasury()),
+        0,
+        "the main timeline's ledger is another stream"
+    );
+}
+
+#[test]
+#[ignore = "proposal: the origin's key must be the command's domain"]
+fn a_command_for_a_key_of_another_domain_is_refused() {
+    let mut db = Db::default();
+    let r = rules();
+    let failed = handle::<Club, _, _>(
+        db.begin(),
+        &routes(&r),
+        &treasury(),
+        &ClubEvent::Paid(1),
+        &meta(1, 0),
+        &r,
+        &mut (),
+    );
+    let failure = failed.err().unwrap();
+    assert_eq!(
+        failure,
+        Failure::Kernel(KernelError::WrongDomain {
+            stream: treasury(),
+            expected: "club"
+        })
+    );
+    assert_eq!(failure.recovery(), Recovery::Bug);
 }

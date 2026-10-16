@@ -19,9 +19,9 @@ nothing about any particular game. They are shared by card-game and
 tdautobattle, so anything specific to one of them belongs in that
 repository, not here.
 
-Every crate has zero third-party dependencies, except annals-log and
-annals-catalog-check. A crate may depend on another crate in this
-workspace, as annals-sim does on annals.
+Every crate has zero third-party dependencies, except annals-log,
+annals-angzarr and annals-catalog-check. A crate may depend on another
+crate in this workspace, as annals-sim does on annals.
 
 annals-catalog-check is test-only: its one dev-dependency, `fluent-syntax`
 (Apache-2.0 OR MIT), parses the Fluent catalogs for the parity test.
@@ -29,8 +29,16 @@ Nothing depends on it and it has no library to speak of.
 
 annals-log depends on `prost` because it is a protobuf format: the wire
 encoding needs a protobuf runtime, and hand-rolling the encoding would be a
-second, unchecked implementation of a published format. All protobuf code
-stays in annals-log, so annals and everything else stay dependency-free.
+second, unchecked implementation of a published format.
+
+annals-angzarr depends on `angzarr-proto` (a git dependency pinned by rev:
+angzarr's own prost types for `io.angzarr.v1`, whose build needs `protoc`),
+`prost` and `prost-types`, because it maps annals onto angzarr's wire
+contract, which angzarr owns. It is the only crate that knows angzarr.
+
+All protobuf code stays in annals-log (annals' own log format) and
+annals-angzarr (angzarr's), so annals and everything else stay
+dependency-free.
 
 ## annals-log's wire types are hand-written; the `.proto` is the schema of record
 
@@ -91,10 +99,13 @@ design; a new allow needs a comment saying why.
 ## Use `just`
 
 Plain `cargo build` and `cargo test` work from a clean checkout and skip the
-codegen check. `just test`, `just lint` and `just build` run `just gen` first
+codegen check; annals-angzarr's build also needs `protoc` and github.com
+(for angzarr-proto). `just test`, `just lint` and `just build` run `just gen` first
 and turn on `annals-log/codegen-check`, so they need `buf` and
 `protoc-gen-prost`.
 `just breaking` checks the schema against main for wire-breaking changes.
+`just wasm` builds annals and annals-angzarr for `wasm32-unknown-unknown`;
+both must keep building there.
 
 ## Versioned documents: bump, register a step, keep an old fixture
 

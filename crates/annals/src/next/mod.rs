@@ -6,11 +6,14 @@
 //! tests that pin their behaviour are in `tests/next/` and are ignored until
 //! they are implemented.
 //!
-//! annals is the in-process core; distributed runtimes (angzarr) wrap it.
-//! It does no I/O and keeps no infrastructure, but its failures say whether
-//! to retry ([`Recovery`]), its command ids are idempotency keys
-//! ([`CommandId`]), and its metadata, facts and positions have a wire form
-//! (`annals.event.v1`).
+//! annals is the in-process runtime: it does no I/O and keeps no
+//! infrastructure, and has no dependencies. Its wire contract is angzarr's
+//! (`io.angzarr.v1`), and the `annals-angzarr` crate maps it there: a
+//! stream is a `Cover`'s (domain, edition, root) ([`StreamKey`]), an event
+//! id is an `EventRef` ([`EventId`]), [`Meta`] is an `EventMeta`, a command
+//! a one-page `CommandBook`, and what a chain recorded a set of
+//! `EventBook`s. Its failures say whether to retry ([`Recovery`]), and its
+//! command ids are idempotency keys ([`CommandId`]).
 //!
 //! One command, end to end ([`handle`]):
 //!
@@ -31,7 +34,10 @@
 //!    path to the failing [`Step`]).
 //! 4. **Project**: [`Projection`]s run on the committed events only.
 //!
-//! Every event is stamped with [`Meta`]; `apply` never sees it. Every
+//! Every event is stamped with [`Meta`], its correlation always set
+//! ([`Correlation::generated`] when a command arrives without one); `apply`
+//! never sees it. Payload versions are payload types, not a kernel field:
+//! upcasting is the store adapter's, at read time. Every
 //! reaction takes the same input, a [`Committed`] event (stream identity,
 //! position, metadata, payload, state just after), under one [`Position`]
 //! contract, through one dispatch ([`Handler`]).
@@ -65,20 +71,18 @@ pub use handle::{
 };
 pub use handler::{Admit, Committed, Gap, Handler, Position, Tracked};
 pub use id::{
-    Actor, CommandId, CorrelationId, EventId, RequestId, RulesVersion, Seq, StreamId, Timestamp,
+    Actor, CommandId, Correlation, Edition, EventId, RequestId, Root, RulesVersion, Seq, StreamKey,
+    Timestamp,
 };
 pub use meta::{CommandMeta, Meta};
 pub use reaction::{
-    deliver, facts_owed, inject, orders_owed, policy, projection, translation, Backlog, Delivered,
-    Fact, FactDelivery, Order, OrderDelivery, Owed, Policy, Projection, Projector, Reaction,
-    Reactor, Translation, Translator,
+    deliver, facts_owed, inject, orders_owed, policy, projection, target_key, translation, Backlog,
+    Delivered, Fact, FactDelivery, Order, OrderDelivery, Owed, Policy, Projection, Projector,
+    Reaction, Reactor, Translation, Translator,
 };
 pub use store::{
     AsyncEventStore, AsyncUnitOfWork, EventStore, InMemoryStore, InMemoryTx, Ready, Slice,
     UnitOfWork,
 };
-pub use stream::{Envelope, Header, Stream};
-pub use version::{
-    assert_replay_fixtures, check_replay_fixtures, replay_stored, ChainError, ChainProblem,
-    ReplayFixture, Rulebook, UpcastError, UpcastStep, Upcaster, Upcasts,
-};
+pub use stream::{Envelope, Stream};
+pub use version::Rulebook;

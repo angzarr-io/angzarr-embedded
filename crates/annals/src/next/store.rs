@@ -13,59 +13,66 @@
 //! type implements [`EventStore`] once per event type it stores (a list
 //! table, a draw-system table) and [`UnitOfWork`] once.
 //!
-//! A store holds streams and nothing else. It answers three ways: the
-//! stream (or `None`: no such stream), a refusal it is sure of
-//! ([`StoreError::Conflict`], a caller bug), or [`StoreError::Unavailable`]:
-//! it could not say. An I/O failure is never "no such stream".
+//! A store holds streams and nothing else, each under its full
+//! [`StreamKey`] (domain, edition, root). It answers three ways: the stream
+//! (or `None`: no such stream), a refusal it is sure of
+//! ([`StoreError::Conflict`], a caller bug), or a failure:
+//! [`StoreError::Unavailable`] (it could not say) or
+//! [`StoreError::Unreadable`] (it holds an event it cannot give back). An
+//! I/O failure is never "no such stream".
+//!
+//! `E` is whatever the store hands the kernel. A typed store holds a
+//! domain's events; an opaque one (`annals-angzarr`'s, over a database's
+//! rows of type URL, page bytes and metadata columns) decodes and upcasts on
+//! read and encodes on append, so the kernel only ever sees current events.
 
 use std::collections::BTreeMap;
 use std::future::Future;
 
 use super::error::StoreError;
-use super::id::{Seq, StreamId};
-use super::stream::{Envelope, Header};
+use super::id::{Seq, StreamKey};
+use super::stream::Envelope;
 
 /// Part of a stream, from a seq on.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Slice<E> {
-    pub header: Header,
+    pub key: StreamKey,
     /// The stream's length when read: `events` ends there.
     pub len: Seq,
     pub events: Vec<Envelope<E>>,
 }
 
-/// Where streams are kept, synchronously. `E` is whatever the store holds:
-/// a domain's events, or their stored form (bytes) for an
-/// [`Upcaster`](super::Upcaster) to read.
+/// Where streams are kept, synchronously. `E` is what the store hands the
+/// kernel: a domain's current events (see the module docs).
 pub trait EventStore<E> {
-    /// Append `events` to the stream `header` names, creating it if
-    /// `expected` is 0 and it does not exist. Refuses (appending nothing) a
-    /// stream not at `expected` ([`StoreError::Conflict`]), events whose
-    /// seqs do not run on from `expected` ([`StoreError::Discontinuous`]),
-    /// and a header that is not the stream's
-    /// ([`StoreError::HeaderChanged`]). Returns the new length.
+    /// Append `events` to the stream `key` names, creating it if `expected`
+    /// is 0 and it does not exist. Refuses (appending nothing) a stream not
+    /// at `expected` ([`StoreError::Conflict`]) and events whose seqs do not
+    /// run on from `expected` ([`StoreError::Discontinuous`]). Returns the
+    /// new length.
     ///
     /// **Idempotency (optional).** Every event's
     /// [`Meta::command`](super::Meta::command) names the command that
     /// recorded it. An adapter that indexes it (a unique index on the
     /// originating command id, say) may refuse an append whose originating
-    /// command it already holds, as [`StoreError::Duplicate`] with the range
-    /// recorded then, so a wrapping runtime's retry becomes a read. annals
-    /// neither requires nor builds this.
+    /// command it already holds (the request and the command id), as
+    /// [`StoreError::Duplicate`] with the range recorded then, so a wrapping
+    /// runtime's retry becomes a read. annals neither requires nor builds
+    /// this.
     fn append(
         &mut self,
-        header: &Header,
+        key: &StreamKey,
         expected: Seq,
         events: &[Envelope<E>],
     ) -> Result<Seq, StoreError>;
 
-    /// The stream's header and its events from seq `from` on: none when
+    /// The stream's events from seq `from` on: none when
     /// `from` is at or past its end. `None` when there is no such stream.
-    fn read_from(&mut self, stream: StreamId, from: Seq) -> Result<Option<Slice<E>>, StoreError>;
+    fn read_from(&mut self, key: &StreamKey, from: Seq) -> Result<Option<Slice<E>>, StoreError>;
 
     /// The whole stream.
-    fn read(&mut self, stream: StreamId) -> Result<Option<Slice<E>>, StoreError> {
-        self.read_from(stream, 0)
+    fn read(&mut self, key: &StreamKey) -> Result<Option<Slice<E>>, StoreError> {
+        self.read_from(key, 0)
     }
 }
 
@@ -94,7 +101,7 @@ pub trait AsyncEventStore<E> {
     /// As [`EventStore::append`].
     fn append(
         &mut self,
-        header: &Header,
+        key: &StreamKey,
         expected: Seq,
         events: &[Envelope<E>],
     ) -> impl Future<Output = Result<Seq, StoreError>> + Send;
@@ -102,16 +109,16 @@ pub trait AsyncEventStore<E> {
     /// As [`EventStore::read_from`].
     fn read_from(
         &mut self,
-        stream: StreamId,
+        key: &StreamKey,
         from: Seq,
     ) -> impl Future<Output = Result<Option<Slice<E>>, StoreError>> + Send;
 
     /// As [`EventStore::read`].
     fn read(
         &mut self,
-        stream: StreamId,
+        key: &StreamKey,
     ) -> impl Future<Output = Result<Option<Slice<E>>, StoreError>> + Send {
-        self.read_from(stream, 0)
+        self.read_from(key, 0)
     }
 }
 
@@ -122,24 +129,24 @@ pub struct Ready<S>(pub S);
 impl<E: Sync, S: EventStore<E> + Send> AsyncEventStore<E> for Ready<S> {
     async fn append(
         &mut self,
-        header: &Header,
+        key: &StreamKey,
         expected: Seq,
         events: &[Envelope<E>],
     ) -> Result<Seq, StoreError> {
-        self.0.append(header, expected, events)
+        self.0.append(key, expected, events)
     }
 
     async fn read_from(
         &mut self,
-        stream: StreamId,
+        key: &StreamKey,
         from: Seq,
     ) -> Result<Option<Slice<E>>, StoreError> {
-        self.0.read_from(stream, from)
+        self.0.read_from(key, from)
     }
 }
 
 /// One stream as [`InMemoryStore`] holds it.
-type Held<E> = (Header, Vec<Envelope<E>>);
+type Held<E> = Vec<Envelope<E>>;
 
 impl<S: UnitOfWork + Send> AsyncUnitOfWork for Ready<S> {
     async fn commit(self) -> Result<(), StoreError> {
@@ -147,10 +154,10 @@ impl<S: UnitOfWork + Send> AsyncUnitOfWork for Ready<S> {
     }
 }
 
-/// Streams held in memory, in id order. Checks everything a real store
+/// Streams held in memory, in key order. Checks everything a real store
 /// must, so tests catch what production would.
 pub struct InMemoryStore<E> {
-    streams: BTreeMap<StreamId, Held<E>>,
+    streams: BTreeMap<StreamKey, Held<E>>,
 }
 
 impl<E> Default for InMemoryStore<E> {
@@ -166,23 +173,23 @@ impl<E> InMemoryStore<E> {
         Self::default()
     }
 
-    /// Every stream id, in order.
-    pub fn ids(&self) -> Vec<StreamId> {
-        self.streams.keys().copied().collect()
+    /// Every stream key, in order.
+    pub fn keys(&self) -> Vec<StreamKey> {
+        self.streams.keys().cloned().collect()
     }
 }
 
 impl<E: Clone> EventStore<E> for InMemoryStore<E> {
     fn append(
         &mut self,
-        header: &Header,
+        key: &StreamKey,
         expected: Seq,
         events: &[Envelope<E>],
     ) -> Result<Seq, StoreError> {
-        todo!("proposal: check length, header and continuity, then extend")
+        todo!("proposal: check length and continuity, then extend")
     }
 
-    fn read_from(&mut self, stream: StreamId, from: Seq) -> Result<Option<Slice<E>>, StoreError> {
+    fn read_from(&mut self, key: &StreamKey, from: Seq) -> Result<Option<Slice<E>>, StoreError> {
         todo!("proposal: clone the tail")
     }
 }
@@ -201,20 +208,20 @@ impl<E: Clone> InMemoryStore<E> {
 /// A unit of work over an [`InMemoryStore`]. See [`InMemoryStore::begin`].
 pub struct InMemoryTx<'s, E> {
     store: &'s mut InMemoryStore<E>,
-    pending: BTreeMap<StreamId, Held<E>>,
+    pending: BTreeMap<StreamKey, Held<E>>,
 }
 
 impl<E: Clone> EventStore<E> for InMemoryTx<'_, E> {
     fn append(
         &mut self,
-        header: &Header,
+        key: &StreamKey,
         expected: Seq,
         events: &[Envelope<E>],
     ) -> Result<Seq, StoreError> {
         todo!("proposal: check against store + pending, hold in pending")
     }
 
-    fn read_from(&mut self, stream: StreamId, from: Seq) -> Result<Option<Slice<E>>, StoreError> {
+    fn read_from(&mut self, key: &StreamKey, from: Seq) -> Result<Option<Slice<E>>, StoreError> {
         todo!("proposal: the store's stream with pending appends after it")
     }
 }
