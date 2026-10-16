@@ -40,3 +40,13 @@ fmt:
 # Check the Rust is formatted, changing nothing.
 fmt-check:
     cargo fmt --all -- --check
+
+# Mutation-test with cargo-mutants (config in .cargo/mutants.toml): the whole
+# workspace, or only the named crates' code (`just mutants annals`). Each
+# mutant runs every crate's tests, annals-log's codegen check included
+# whenever annals-log is mutated. Results land in mutants.out/.
+#   cargo install cargo-mutants --locked
+mutants *crates: gen
+    cargo mutants \
+        {{ if crates == "" { "--workspace" } else { "--package " + replace(crates, " ", " --package ") } }} \
+        {{ if crates == "" { "--features annals-log/codegen-check" } else if crates =~ '(^| )annals-log( |$)' { "--features annals-log/codegen-check" } else { "" } }}

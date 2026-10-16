@@ -1,0 +1,21 @@
+# cargo-mutants (https://mutants.rs): `just mutants` runs it after `just gen`.
+#
+# Nothing is excluded. What might have been:
+# - annals-log's generated protobuf (crates/annals-log/gen) is reached only by
+#   `include!` from tests/codegen.rs, a test target, so cargo-mutants never
+#   walks it.
+# - annals-catalog-check's src/lib.rs holds no code; its check is a test.
+# - Display impls are not noise: annals-catalog-check fails an empty English
+#   Display, so with test_workspace those mutants are caught.
+
+# Run every crate's tests against each mutant: annals-catalog-check tests the
+# other crates' Diagnostic codes, args and Display, from outside them.
+test_workspace = true
+
+# The codegen-check feature is not set here but by `just mutants`: cargo
+# refuses `--features annals-log/codegen-check` when the unmutated baseline
+# builds only a crate that does not depend on annals-log.
+
+# Copy gitignored files into the scratch tree: the codegen check reads
+# crates/annals-log/gen, which `just gen` writes and git ignores.
+gitignore = false

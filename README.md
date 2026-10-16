@@ -21,6 +21,8 @@ Every error is localizable: a stable code and named args (see
 just test       # cargo test --release, plus annals-log's codegen cross-check
 just lint       # buf lint + clippy
 just breaking   # buf breaking against main
+just fmt        # cargo fmt --all (just fmt-check changes nothing)
+just mutants    # cargo-mutants over the workspace; `just mutants annals` for one crate
 ```
 
 Plain `cargo build` and `cargo test` need nothing beyond Rust, so every crate
@@ -29,6 +31,9 @@ works as a git dependency. The `just` recipes also need
 `protoc-gen-prost` 0.5.0 (`cargo install protoc-gen-prost --version 0.5.0 --locked`)
 on `PATH`: they generate annals-log's protobuf types to check its
 hand-written ones against.
+`just mutants` also needs
+[`cargo-mutants`](https://mutants.rs) (`cargo install cargo-mutants --locked`);
+its config is `.cargo/mutants.toml`.
 
 ## Licence
 
