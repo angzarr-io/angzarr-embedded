@@ -32,3 +32,11 @@ lint: gen
 # Check the schema for wire-breaking changes against main.
 breaking:
     buf breaking --against '.git#branch=main'
+
+# Format the Rust.
+fmt:
+    cargo fmt --all
+
+# Check the Rust is formatted, changing nothing.
+fmt-check:
+    cargo fmt --all -- --check
