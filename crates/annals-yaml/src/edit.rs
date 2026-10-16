@@ -276,8 +276,10 @@ impl Document {
                     start -= 1;
                 }
                 lines.drain(start..=end);
-                if start > 0 && start < lines.len() && blank(&lines[start - 1].text) && blank(&lines[start].text) {
-                    lines.remove(start);
+                // One blank line where two would meet, and none left trailing.
+                let blank_before = start > 0 && blank(&lines[start - 1].text);
+                if blank_before && lines.get(start).map_or(true, |l| blank(&l.text)) {
+                    lines.remove(start - 1);
                 }
             }
             (MapOp::Remove, None) => return Err(fail(EditProblem::NotFound)),
@@ -673,7 +675,7 @@ struct View {
     dash_first: bool,
     /// The indent new keys go at.
     indent: usize,
-    /// The raw line new keys go after when the view is empty.
+    /// The raw line of the view's last line, which new keys go after.
     after: usize,
 }
 
@@ -706,9 +708,6 @@ impl View {
     /// value's lines and the deeper comments directly below them). `None`
     /// when the key isn't there.
     fn entry(&self, key: &str) -> Result<Option<(usize, usize)>, EditProblem> {
-        if self.lines.is_empty() {
-            return Ok(None);
-        }
         if !self.is_mapping() {
             return Err(EditProblem::NotAMapping);
         }
@@ -745,13 +744,16 @@ impl View {
             return Err(if rest.starts_with('{') || rest.starts_with('[') { EditProblem::InsideFlow } else { EditProblem::NotAMapping });
         }
         let end = self.value_end(at);
-        let lines: Vec<_> = self.lines[at + 1..end].to_vec();
-        Ok(View {
-            indent: lines.first().map_or(self.lines[at].1 + 2, |l| l.1),
-            after: lines.last().map_or(self.raw(at), |l| l.0),
-            lines,
-            dash_first: false,
-        })
+        // A key with no value is null, not a mapping to edit in.
+        View::of(self.lines[at + 1..end].to_vec(), false)
+    }
+
+    /// A view of `lines`, which must hold something to edit.
+    fn of(lines: Vec<(usize, usize, String)>, dash_first: bool) -> Result<View, EditProblem> {
+        let (Some(first), Some(last)) = (lines.first(), lines.last()) else {
+            return Err(EditProblem::NotAMapping);
+        };
+        Ok(View { indent: first.1, after: last.0, dash_first, lines })
     }
 
     fn item(&self, index: usize) -> Result<View, EditProblem> {
@@ -772,12 +774,7 @@ impl View {
             lines.push((*raw, indent + (text.len() - rest.len()), rest.to_string()));
         }
         lines.extend(self.lines[start + 1..end].iter().cloned());
-        Ok(View {
-            indent: lines.first().map_or(indent + 2, |l| l.1),
-            after: lines.last().map_or(*raw, |l| l.0),
-            lines,
-            dash_first,
-        })
+        View::of(lines, dash_first)
     }
 
     /// The raw line a new key goes after: the view's last line and the

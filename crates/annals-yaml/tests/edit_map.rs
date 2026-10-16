@@ -184,6 +184,152 @@ fn update_to_a_root_that_is_no_longer_a_mapping_is_refused() {
     assert_eq!(d.text(), "a: 1\n");
 }
 
+// ------------------------------------------------------------------ shapes
+
+#[test]
+fn errors_name_the_full_path() {
+    let mut d = doc(MANIFEST);
+    let err = d.set(&[Seg::Key("packages"), Seg::Item(5)], "spec", &s("1"), 2).unwrap_err();
+    assert_eq!(err.path, vec!["packages".to_string(), "5".to_string()]);
+    let err = d.remove_key(&[Seg::Key("packages"), Seg::Item(1)], "nope").unwrap_err();
+    assert_eq!(err.path, vec!["packages".to_string(), "1".to_string(), "nope".to_string()]);
+}
+
+#[test]
+fn a_sequence_is_not_a_mapping_to_set_in() {
+    let mut d = doc(MANIFEST);
+    let err = d.set(&[Seg::Key("packages")], "x", &s("1"), 2).unwrap_err();
+    assert_eq!(err.problem, EditProblem::NotAMapping);
+    let err = d.set(&[Seg::Key("version")], "x", &s("1"), 2).unwrap_err();
+    assert_eq!(err.problem, EditProblem::NotAMapping);
+}
+
+#[test]
+fn a_flow_value_is_edited_only_whole() {
+    let mut d = doc("tags: [a, b]\nopts: {x: 1}\n");
+    for key in ["tags", "opts"] {
+        let err = d.set(&[Seg::Key(key)], "y", &s("1"), 2).unwrap_err();
+        assert_eq!(err.problem, EditProblem::InsideFlow, "{key}");
+    }
+}
+
+#[test]
+fn a_key_with_no_value_has_nothing_to_edit_in() {
+    let mut d = doc("a:\nb: 1\n");
+    let err = d.set(&[Seg::Key("a")], "c", &s("1"), 2).unwrap_err();
+    assert_eq!(err.problem, EditProblem::NotAMapping);
+}
+
+#[test]
+fn removing_a_key_between_blank_lines_leaves_one() {
+    let mut d = doc("a: 1\n\nb: 2\n\nc: 3\n");
+    d.remove_key(&[], "b").unwrap();
+    assert_eq!(d.text(), "a: 1\n\nc: 3\n");
+}
+
+#[test]
+fn removing_the_first_key_after_a_blank_keeps_the_blank() {
+    let mut d = doc("a: 1\n\nb: 2\nc: 3\n");
+    d.remove_key(&[], "b").unwrap();
+    assert_eq!(d.text(), "a: 1\n\nc: 3\n");
+}
+
+#[test]
+fn a_key_whose_sequence_sits_at_its_own_indent_goes_whole() {
+    let mut d = doc("a:\n- x\n- y\nb: 1\n");
+    d.remove_key(&[], "a").unwrap();
+    assert_eq!(d.text(), "b: 1\n");
+    let mut d = doc("a:\n- x\n- y\nb: 1\n");
+    d.set(&[], "a", &s("z"), 2).unwrap();
+    assert_eq!(d.text(), "a: z\nb: 1\n");
+}
+
+#[test]
+fn an_item_at_the_left_margin_is_edited_at_its_contents_indent() {
+    let mut d = doc("items:\n- name: a\n  n: 1\n");
+    d.set(&[Seg::Key("items"), Seg::Item(0)], "m", &s("2"), 2).unwrap();
+    assert_eq!(d.text(), "items:\n- name: a\n  n: 1\n  m: 2\n");
+}
+
+#[test]
+fn an_item_with_spaces_after_its_dash_is_edited_at_its_contents_indent() {
+    let mut d = doc("items:\n  -   name: a\n      n: 1\n");
+    d.set(&[Seg::Key("items"), Seg::Item(0)], "n", &s("2"), 2).unwrap();
+    assert_eq!(d.text(), "items:\n  -   name: a\n      n: 2\n");
+}
+
+#[test]
+fn an_item_of_a_nested_sequence_is_found_by_its_own_indent() {
+    let mut d = doc("items:\n  - name: a\n    subs:\n      - k: 1\n  - name: b\n    n: 1\n");
+    d.set(&[Seg::Key("items"), Seg::Item(1)], "n", &s("2"), 2).unwrap();
+    assert_eq!(d.text(), "items:\n  - name: a\n    subs:\n      - k: 1\n  - name: b\n    n: 2\n");
+}
+
+#[test]
+fn a_new_key_goes_after_the_last_entrys_deeper_comments() {
+    let mut d = doc("a:\n  b: 1\n    # about b\nc: 2\n");
+    d.set(&[Seg::Key("a")], "d", &s("3"), 2).unwrap();
+    assert_eq!(d.text(), "a:\n  b: 1\n    # about b\n  d: 3\nc: 2\n");
+}
+
+#[test]
+fn update_to_a_longer_sequence_replaces_it() {
+    let mut d = doc("# top\nitems: [a]\nn: 1\n");
+    let target = map(&[("items", Value::Seq(vec![s("a"), s("b")])), ("n", s("1"))]);
+    // flow_depth 1: a top-level value goes on its key's line.
+    d.update_to(&target, 1).unwrap();
+    assert_eq!(d.text(), "# top\nitems: [a, b]\nn: 1\n");
+}
+
+#[test]
+fn update_to_matches_keys_in_any_order_inside_sequence_items() {
+    // `m` is added to an item but sits before `n` in the target: the edit
+    // appends it, and the document still counts as reaching the target.
+    let mut d = doc("items:\n  - name: a\n    n: 1\n");
+    let item = map(&[("name", s("a")), ("m", s("2")), ("n", s("1"))]);
+    let target = map(&[("items", Value::Seq(vec![item]))]);
+    d.update_to(&target, 3).unwrap();
+    assert_eq!(d.text(), "items:\n  - name: a\n    n: 1\n    m: 2\n");
+}
+
+#[test]
+fn update_to_refuses_a_target_it_cannot_reach_and_leaves_the_text() {
+    // A scalar where the root mapping was: no edit can get there.
+    let mut d = doc("a: 1\n");
+    let err = d.update_to(&s("x"), 2).unwrap_err();
+    assert_eq!(err.problem, EditProblem::NotAMapping);
+    assert_eq!(d.text(), "a: 1\n");
+}
+
+#[test]
+fn removing_the_last_key_after_a_blank_leaves_no_trailing_blank() {
+    let mut d = doc("a: 1\n\nb: 2\n");
+    d.remove_key(&[], "b").unwrap();
+    assert_eq!(d.text(), "a: 1\n");
+}
+
+#[test]
+fn a_key_path_through_a_sequence_is_not_a_mapping() {
+    let mut d = doc(MANIFEST);
+    let err = d.set(&[Seg::Key("packages"), Seg::Key("x")], "y", &s("1"), 2).unwrap_err();
+    assert_eq!(err.problem, EditProblem::NotAMapping);
+}
+
+#[test]
+fn a_comment_at_the_mappings_own_indent_stays_after_a_new_key() {
+    // Indented like the keys, it is about what follows, not the last entry.
+    let mut d = doc("a:\n  b: 1\n  # next\nc: 2\n");
+    d.set(&[Seg::Key("a")], "d", &s("3"), 2).unwrap();
+    assert_eq!(d.text(), "a:\n  b: 1\n  d: 3\n  # next\nc: 2\n");
+}
+
+#[test]
+fn an_item_with_its_dash_alone_on_a_line_is_edited_below_it() {
+    let mut d = doc("items:\n  -\n    name: a\n    n: 1\n");
+    d.set(&[Seg::Key("items"), Seg::Item(0)], "n", &s("2"), 2).unwrap();
+    assert_eq!(d.text(), "items:\n  -\n    name: a\n    n: 2\n");
+}
+
 // ------------------------------------------------------------------ property
 
 use annals_sim::Rng;
