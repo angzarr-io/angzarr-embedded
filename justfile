@@ -50,3 +50,21 @@ mutants *crates: gen
     cargo mutants \
         {{ if crates == "" { "--workspace" } else { "--package " + replace(crates, " ", " --package ") } }} \
         {{ if crates == "" { "--features annals-log/codegen-check" } else if crates =~ '(^| )annals-log( |$)' { "--features annals-log/codegen-check" } else { "" } }}
+
+# Mutation-test only the lines changed since `base` (default main): the
+# working tree, uncommitted and untracked files included, against the merge
+# base, so it matches the source cargo-mutants mutates. Same package
+# selection as `just mutants` (the workspace, with the codegen check).
+mutants-diff base="main": gen
+    #!/usr/bin/env bash
+    set -euo pipefail
+    patch=target/mutants-diff.patch
+    mkdir -p target
+    git diff "$(git merge-base '{{base}}' HEAD)" -- '*.rs' > "$patch"
+    git ls-files --others --exclude-standard -z -- '*.rs' \
+        | xargs -0 -r -n1 git diff --no-index -- /dev/null >> "$patch" || true
+    if [ ! -s "$patch" ]; then
+        echo "mutants-diff: no Rust changes since '{{base}}'; nothing to mutate."
+        exit 0
+    fi
+    cargo mutants --workspace --features annals-log/codegen-check --in-diff "$patch"
