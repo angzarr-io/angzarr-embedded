@@ -1,125 +1,144 @@
-//! Snapshots: used only under the rules version they were folded with;
-//! otherwise discarded and the stream replayed (angzarr's D8).
+//! Snapshots: a framework optimisation, never business data. Used only
+//! under the current rules version and state type, and never one that
+//! hides part of a conflict window.
 
+use annals::next::v1::{ConflictResolution, Snapshot};
 use annals::next::{
-    load, EventStore, InMemoryStore, Seq, Slice, Snapshot, SnapshotStore, StoreError, StreamKey,
+    check, pack, Coordinator, Deduplicated, EventStore, InMemoryStore, Payload, Stream,
 };
 
-use crate::toys::{at, book, fees, stream, Account, AccountCmd, AccountEvent, Balance, Fees};
+use crate::toys::{
+    account, at, command, cover, opened, registry, root, set, shelf, Account, AccountCmd, Edit,
+    Shelf,
+};
 
-/// One stream's events and its newest snapshot.
-#[derive(Default)]
-struct Snapshotted {
-    events: InMemoryStore<AccountEvent>,
-    snapshot: Option<Snapshot<Balance>>,
-}
-
-impl EventStore<AccountEvent> for Snapshotted {
-    fn append(
-        &mut self,
-        key: &StreamKey,
-        expected: Seq,
-        events: &[annals::next::Envelope<AccountEvent>],
-    ) -> Result<Seq, StoreError> {
-        self.events.append(key, expected, events)
-    }
-
-    fn read_from(
-        &mut self,
-        key: &StreamKey,
-        from: Seq,
-    ) -> Result<Option<Slice<AccountEvent>>, StoreError> {
-        self.events.read_from(key, from)
-    }
-}
-
-impl SnapshotStore<Balance> for Snapshotted {
-    fn read_snapshot(&mut self, _: &StreamKey) -> Result<Option<Snapshot<Balance>>, StoreError> {
-        Ok(self.snapshot.clone())
-    }
-
-    fn write_snapshot(
-        &mut self,
-        _: &StreamKey,
-        snapshot: &Snapshot<Balance>,
-    ) -> Result<(), StoreError> {
-        self.snapshot = Some(snapshot.clone());
-        Ok(())
-    }
-}
-
-#[test]
-#[ignore = "proposal: a snapshot under another rules version is discarded, and the stream replayed"]
-fn a_snapshot_under_another_rules_version_is_discarded() {
-    let fees_1 = fees("fees-1", 0);
-    let mut s = stream::<Account>(1);
-    for (i, cmd) in [
-        AccountCmd::Open,
-        AccountCmd::Deposit(40),
-        AccountCmd::Deposit(2),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let b = book(&s, cmd, i as u128);
-        s.execute(&b, &at(i as i64), &fees_1, &mut []).unwrap();
-    }
-    let mut store = Snapshotted::default();
-    store.append(s.key(), 0, s.events()).unwrap();
-
-    // A snapshot after seq 1, poisoned, so using it shows in the state.
-    let mut snapshot = Snapshot {
+/// A snapshot of an account at sequence 1 claiming `cents`: a poisoned one
+/// shows when it is used.
+fn poisoned(rules: &str, cents: i64) -> Snapshot {
+    Snapshot {
         sequence: 1,
-        state: Balance {
+        state: Some(pack(&account::AccountState {
             open: true,
-            cents: 999_000,
-        },
-        rules_version: "fees-1".into(),
-        recorded_at: s.events()[1].meta.recorded_at,
+            cents,
+            ..Default::default()
+        })),
+        rules_version: rules.to_string(),
+    }
+}
+
+/// Load (steps 2 to 5) a deposit for account 1, expecting `expected` under
+/// `resolution` if given.
+fn load(
+    store: &mut InMemoryStore,
+    expected: Option<(u64, ConflictResolution)>,
+) -> (Option<u64>, i64) {
+    let registry = registry();
+    let mut book = command(cover("account", 1), AccountCmd::Deposit(1).to_any()).id(9);
+    if let Some((sequence, resolution)) = expected {
+        book = book.expecting(sequence, resolution);
+    }
+    let mut unit = store.begin();
+    let mut coordinator = Coordinator::new(&mut unit, &registry);
+    let identified = check(book, &registry).unwrap().identify(&at(30));
+    let Deduplicated::Novel(novel) = coordinator.deduplicate(identified).unwrap() else {
+        panic!("never applied");
     };
-    assert!(snapshot.usable(&fees_1));
-    store.write_snapshot(s.key(), &snapshot).unwrap();
-
-    let loaded = load::<Account, _>(&mut store, s.key(), &fees_1)
-        .unwrap()
-        .unwrap();
-    assert_eq!(loaded.from_snapshot, Some(1), "same version: used");
-    assert_eq!(
-        loaded.stream.state().cents,
-        999_002,
-        "only seq 2 was folded"
-    );
-    assert_eq!(loaded.stream.first(), 2);
-    assert_eq!(loaded.stream.len(), 3);
-
-    let fees_2 = fees("fees-2", 5).with("fees-1", Fees { withdrawal: 0 });
-    assert!(!snapshot.usable(&fees_2));
-    let loaded = load::<Account, _>(&mut store, s.key(), &fees_2)
-        .unwrap()
-        .unwrap();
-    assert_eq!(loaded.from_snapshot, None, "another version: discarded");
-    assert_eq!(*loaded.stream.state(), *s.state(), "replayed from seq 0");
-    assert_eq!(loaded.stream.first(), 0);
-
-    snapshot.rules_version = "fees-2".into();
-    assert!(snapshot.usable(&fees_2), "a snapshot taken under fees-2 is");
+    let contextual = coordinator.load(novel).unwrap();
+    let used = contextual.snapshot().map(|s| s.sequence);
+    let prepared = contextual.decode::<Account>(&registry).unwrap();
+    (used, prepared.stream().state().cents)
 }
 
 #[test]
-#[ignore = "proposal: a stream snapshots under the current rules version"]
-fn a_stream_snapshots_under_the_current_rules_version() {
-    let fees_2 = fees("fees-2", 5).with("fees-1", Fees { withdrawal: 0 });
-    let mut s = stream::<Account>(1);
-    assert_eq!(s.snapshot(&fees_2), None, "nothing to snapshot");
-    let b = book(&s, AccountCmd::Open, 1);
-    s.execute(&b, &at(7), &fees_2, &mut []).unwrap();
+#[ignore = "proposal: a snapshot folded under another rules version is discarded and the stream replayed"]
+fn a_snapshot_under_another_rules_version_is_discarded() {
+    let registry = registry();
+    let mut store = InMemoryStore::new();
+    opened(&mut store, &registry, 1, 100);
+
+    store
+        .write_snapshot(&cover("account", 1), &poisoned("v1", 999))
+        .unwrap();
     assert_eq!(
-        s.snapshot(&fees_2),
-        Some(Snapshot {
-            sequence: 0,
-            state: s.state().clone(),
-            rules_version: "fees-2".into(),
-            recorded_at: annals::next::Timestamp(7),
-        })
+        load(&mut store, None),
+        (None, 100),
+        "folded under v1, the current rules are v2: replayed from 0"
     );
+
+    store
+        .write_snapshot(&cover("account", 1), &poisoned("v2", 999))
+        .unwrap();
+    assert_eq!(
+        load(&mut store, None),
+        (Some(1), 999),
+        "a current one is used (and here shows its poison)"
+    );
+}
+
+#[test]
+#[ignore = "proposal: a snapshot of another state type is discarded"]
+fn a_snapshot_of_another_state_type_is_discarded() {
+    let registry = registry();
+    let mut store = InMemoryStore::new();
+    opened(&mut store, &registry, 1, 100);
+    let foreign = Snapshot {
+        sequence: 1,
+        state: Some(pack(&shelf::ShelfState::default())),
+        rules_version: "v2".to_string(),
+    };
+    store
+        .write_snapshot(&cover("account", 1), &foreign)
+        .unwrap();
+    assert_eq!(load(&mut store, None), (None, 100));
+}
+
+#[test]
+#[ignore = "proposal: under AGGREGATE_HANDLES the snapshot used is at or below expected-1"]
+fn a_snapshot_never_hides_part_of_the_window() {
+    let registry = registry();
+    let mut store = InMemoryStore::new();
+    opened(&mut store, &registry, 1, 100);
+    store
+        .write_snapshot(&cover("account", 1), &poisoned("v2", 999))
+        .unwrap();
+
+    assert_eq!(
+        load(&mut store, Some((1, ConflictResolution::AggregateHandles))),
+        (None, 100),
+        "the snapshot (at 1) would fold the window (from 1): not used"
+    );
+    assert_eq!(
+        load(&mut store, Some((2, ConflictResolution::AggregateHandles))),
+        (Some(1), 999),
+        "at or below expected-1, it is"
+    );
+}
+
+#[test]
+#[ignore = "proposal: a stream snapshots under the current rules version and its state type"]
+fn a_stream_snapshots_under_the_current_rules_version() {
+    let registry = registry();
+    let mut stream = Stream::<Shelf>::new(root(3), None).unwrap();
+    let log = annals::next::MemoryDeadLetters::new();
+    stream
+        .execute(
+            command(cover("shelf", 3), set("a", 1)),
+            &registry,
+            &at(1),
+            &log,
+            &mut [],
+        )
+        .unwrap();
+    let snapshot = stream.snapshot(&registry).unwrap();
+    assert_eq!(snapshot.sequence, 0);
+    assert_eq!(snapshot.rules_version, "v1");
+    assert_eq!(
+        snapshot.state.as_ref().unwrap().type_url,
+        "/toy.shelf.v1.ShelfState"
+    );
+    assert!(registry.snapshot_usable("shelf", &snapshot));
+    assert!(Stream::<Shelf>::new(root(4), None)
+        .unwrap()
+        .snapshot(&registry)
+        .is_none());
 }

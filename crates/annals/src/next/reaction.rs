@@ -1,24 +1,31 @@
 //! Reactions to committed events: policies and projections, over one base.
 //!
-//! Every kind takes the same input, a [`Committed`] event (stream identity,
-//! position, metadata, payload, the state just after it), under the same
-//! [`Position`] contract (next, redelivery, gap), and runs through the same
-//! dispatch: each becomes a [`Handler`] of its source.
+//! Every kind takes the same input, a [`Committed`] event (the stream, the
+//! sequence, the metadata, the payload, the state just after it), under the
+//! same [`Position`] contract (next, redelivery, gap), and runs through the
+//! same dispatch: each becomes a [`Handler`] of its source.
 //!
 //! - [`Policy`] (Event Storming's term; an *automation* in Event
 //!   Modeling): event → **commands** to target streams. A command goes
-//!   through the target's decide and may be rejected. **A reaction's only
-//!   output is commands**: there are no reaction-injected facts (facts come
-//!   from outside the system only, angzarr's decision), so the crate's
-//!   earlier `Translation` is gone. Propagating one aggregate's changes into
-//!   another (hatpick's list into its draw systems) is a policy whose
-//!   target records the change in its own events.
-//! - [`Projection`]: event → a read model's fold. It produces nothing.
+//!   through the target's five steps and may be rejected. **A reaction's
+//!   only output is commands**: facts come from outside the system only, so
+//!   there is no reaction-injected fact (and no `Translation`).
+//!   Propagating one aggregate's changes into another (hatpick's list into
+//!   its draw systems) is a policy whose target records the change in its
+//!   own events.
+//! - [`Projection`]: event → a read model's fold. It produces nothing. Read
+//!   models are replayed from the stream on every read.
 //!
-//! A policy names which targets a source event is owed to, which root each
-//! target is, and how far each target has got. A target's stream key is
-//! the target domain's, in **the source's edition**: a reaction never
-//! crosses timelines.
+//! A policy's command is a `CommandBook` the kernel builds: the target's
+//! cover, a `Command` page whose payload is the policy's command packed as
+//! `Any`, and **no ids and no handling**. The kernel checks it like any
+//! book, then identifies it from its trigger: command id
+//! [`ids::reaction_command_id`](super::ids::reaction_command_id)(trigger,
+//! [`Reaction::NAME`], index), the trigger's correlation, and the trigger as
+//! its `causation_id`. Nothing outside the kernel can build one.
+//!
+//! A target's cover is the target domain's, in **the source's edition**: a
+//! reaction never crosses timelines.
 //!
 //! **The contiguity invariant.** Once a target appears in
 //! [`Reaction::targets`], it stays there for every source event until the
@@ -30,13 +37,14 @@
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
 
-use super::book::{BookOf, Sampled};
+use angzarr_proto::v1::{Cover, EventRef, Uuid};
+
+use super::check::{Checked, Malformed};
 use super::domain::Domain;
-use super::error::{Failure, KernelError};
+use super::error::KernelError;
 use super::handler::{Committed, Handler, Position};
-use super::id::{Root, StreamKey};
-use super::stream::{Envelope, Stream};
-use super::version::Rulebook;
+use super::registry::Registry;
+use super::stream::Stream;
 
 // ---------------------------------------------------------------- the base
 
@@ -49,36 +57,50 @@ pub trait Reaction {
     /// Names one target.
     type TargetId: Ord + Clone;
 
-    /// The reaction's name, stable across releases: the `component` of
-    /// every [`Causation`](super::Causation) it issues.
+    /// The reaction's name, stable across releases and never empty: the
+    /// `component` its commands' ids are derived from. Changing it changes
+    /// every derived command id.
     const NAME: &'static str;
+
+    /// The re-run switch (angzarr's per-reactor configuration, in the proto
+    /// pass after eec6676). `None`, the default: off. The reactor's command
+    /// ids are a function of (trigger, component, index) only, so
+    /// re-delivering a trigger finds the same ids and deduplicates; to
+    /// reprocess, the developer issues new commands. `Some(version)`: on,
+    /// with the reactor's own rules version (a short label, bumped when
+    /// the policy's logic changes). The derivation then also names the
+    /// version, so a re-run after a bump yields new ids, and the targets
+    /// append new events. Nothing is overwritten; history stays.
+    ///
+    /// In annals this matters only on the catch-up and redelivery paths
+    /// ([`orders_owed`] then [`Kernel::deliver`](super::Kernel::deliver)):
+    /// inside a chain a reaction runs exactly once per trigger, atomically
+    /// with it, so it is never re-run.
+    const RERUN_VERSION: Option<&'static str> = None;
 
     /// The targets owed the event that led to `source`, the source's state
     /// just after it, including a target that event retires. Must keep the
     /// contiguity invariant (see the module docs).
     fn targets(source: &<Self::Source as Domain>::State) -> Vec<Self::TargetId>;
 
-    /// The root of `target`'s stream. Its key is
-    /// `(Target::NAME, the source's edition, root)`: see [`target_key`].
-    fn root(target: &Self::TargetId) -> Root;
+    /// The root of `target`'s stream: a stored UUID, or
+    /// [`ids::compute_root`](super::ids::compute_root) of a business key.
+    /// Its cover is `(Target::NAME, the source's edition, root)`: see
+    /// [`target_cover`].
+    fn root(target: &Self::TargetId) -> Uuid;
 
-    /// The last source seq `target` holds, read off its fold. The source seq
-    /// travels in the command's payload for this, since `apply` never sees
-    /// metadata. [`Position::START`] means the target has not been created:
-    /// there is nothing to place against, so every delivery goes to its
-    /// decide, which creates it or refuses.
+    /// The last source sequence `target` holds, read off its fold. The
+    /// source sequence travels in the command's payload for this, since
+    /// `apply` never sees metadata. [`Position::START`] means the target has
+    /// not been created: every delivery goes to its decide, which creates
+    /// it or refuses.
     fn position(target: &<Self::Target as Domain>::State) -> Position;
 }
 
 /// Event → commands. Each command is decided by its target and may be
 /// rejected; in the command handler a rejection fails the whole chain, the
-/// originating command included, as [`Failure::Downstream`] with
-/// [`StepError::Rejected`](super::StepError).
-///
-/// Its commands carry no handling (the target is stamped at its head), and
-/// their provenance is the trigger's: the kernel stamps the source event's
-/// actor and correlation, and the origin [`Causation`](super::Causation)
-/// `{ event, component: NAME, index }`.
+/// originating command included, as [`Failure::Downstream`](super::Failure::Downstream)
+/// with [`StepError::Rejected`](super::StepError::Rejected).
 pub trait Policy: Reaction {
     /// The command `target` is owed for `committed`. For the event that
     /// first makes `target` a target, whatever creates it.
@@ -98,11 +120,56 @@ pub trait Projection<D: Domain> {
 
 // ---------------------------------------------------------------- dispatch
 
-/// One command a policy owes one target: a book with a causation origin,
-/// the trigger's provenance and no handling.
+/// One command a policy owes one target, before the kernel books it.
+/// Built only by the kernel, from a committed event.
 pub struct Order<P: Policy> {
-    pub target: P::TargetId,
-    pub book: BookOf<P::Target>,
+    pub(crate) target: P::TargetId,
+    pub(crate) cover: Cover,
+    pub(crate) command: <P::Target as Domain>::Command,
+    pub(crate) trigger: EventRef,
+    pub(crate) index: u32,
+    pub(crate) correlation_id: Uuid,
+}
+
+impl<P: Policy> Order<P> {
+    pub fn target(&self) -> &P::TargetId {
+        &self.target
+    }
+
+    /// The target's stream.
+    pub fn cover(&self) -> &Cover {
+        &self.cover
+    }
+
+    pub fn command(&self) -> &<P::Target as Domain>::Command {
+        &self.command
+    }
+
+    /// The source event: the command's causation.
+    pub fn trigger(&self) -> &EventRef {
+        &self.trigger
+    }
+
+    /// The command's index among those the trigger set off for this
+    /// policy, in target order.
+    pub fn index(&self) -> u32 {
+        self.index
+    }
+
+    /// The trigger's correlation, which the command keeps.
+    pub fn correlation_id(&self) -> &Uuid {
+        &self.correlation_id
+    }
+
+    /// The order as a book, checked through the kernel's reaction entry:
+    /// the target's cover, the command packed as `Any`, no ids, no
+    /// handling. Malformed only by a bug (a policy or kernel one).
+    pub(crate) fn check(&self, registry: &Registry) -> Result<Checked, Malformed> {
+        todo!(
+            "proposal: build the CommandBook, then \
+             check_reaction(trigger, P::NAME, index, P::RERUN_VERSION, correlation)"
+        )
+    }
 }
 
 /// Everything owed, by target, each target's in source order.
@@ -145,48 +212,19 @@ impl<D: Domain, P: Projection<D>> Handler<D> for Projector<'_, P> {
 
 /// The stream `target` is, for a source event in `source`: the target
 /// domain's, in the source's edition.
-pub fn target_key<R: Reaction>(source: &StreamKey, target: &R::TargetId) -> StreamKey {
-    todo!("proposal: StreamKey::of::<R::Target>(source.edition.clone(), R::root(target))")
+pub fn target_cover<R: Reaction>(source: &Cover, target: &R::TargetId) -> Cover {
+    Cover {
+        domain: <R::Target as Domain>::NAME.to_string(),
+        root: Some(R::root(target)),
+        edition: source.edition.clone(),
+    }
 }
 
 /// The one mechanism under the reactor, the chain and the backlog: what `P`
 /// owes for `committed`, one order per target, the `index`th target's
-/// causation index `index`.
+/// order index `index`.
 fn owe<P: Policy>(committed: &Committed<'_, P::Source>) -> Vec<Order<P>> {
-    todo!("proposal: targets(state), each a book: target_key, command, causation, trigger's provenance")
-}
-
-// ---------------------------------------------------------------- delivery
-
-/// What a delivery did.
-#[derive(Debug, PartialEq)]
-pub enum Delivered<'a, E> {
-    /// The source event was the target's next: these are the events the
-    /// target committed.
-    Next(&'a [Envelope<E>]),
-    /// The target already held the source event. Nothing ran.
-    Redelivery,
-}
-
-/// What [`deliver`] returns.
-pub type OrderDelivery<'a, P> = Result<
-    Delivered<'a, <<P as Reaction>::Target as Domain>::Event>,
-    Failure<<<P as Reaction>::Target as Domain>::Rejection>,
->;
-
-/// Deliver a policy's order to `target`, in memory, outside a chain (a
-/// catch-up). The target's [`Reaction::position`] places the source event
-/// first: a redelivery runs nothing and a gap is a [`KernelError::Gap`].
-/// Only the next one is decided ([`Stream::decide`], so it may be
-/// [`Failure::Rejected`]) and committed.
-pub fn deliver<'a, P: Policy>(
-    target: &'a mut Stream<P::Target>,
-    order: &Order<P>,
-    sampled: &Sampled,
-    rules: &Rulebook<<P::Target as Domain>::Rules>,
-    handlers: &mut [&mut dyn Handler<P::Target>],
-) -> OrderDelivery<'a, P> {
-    todo!("proposal: place, decide, commit")
+    todo!("proposal: targets(state), each: target_cover, command, trigger, index, correlation")
 }
 
 /// Every order a policy owes every target, from each target's position (a
@@ -196,7 +234,7 @@ pub fn deliver<'a, P: Policy>(
 /// invariant.
 pub fn orders_owed<P: Policy>(
     source: &Stream<P::Source>,
-    rules: &Rulebook<<P::Source as Domain>::Rules>,
+    registry: &Registry,
     positions: &BTreeMap<P::TargetId, Position>,
 ) -> Result<Backlog<P>, KernelError> {
     todo!(

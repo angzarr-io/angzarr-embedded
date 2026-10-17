@@ -1,212 +1,273 @@
 //! The command handler: a command and every reaction it sets off, as one
 //! atomic chain, in process.
 //!
-//! [`handle`] handles the book (deciding a command, or ingesting a fact),
+//! [`Kernel::handle`] runs the book through the five steps (validate,
+//! identify, deduplicate, load and resolve, decode and decide or ingest),
 //! then synchronously runs the policies reacting to its events, whose
-//! commands are decided in their targets, whose events set off their own
-//! policies, and so on down the chain. Every event stays **staged in
-//! memory**, in a [`Chain`], across every stream involved; a later step sees
-//! the staged state of any stream an earlier step touched, the originating
-//! stream included. Nothing is appended until the whole chain has
-//! succeeded.
+//! commands take the same five steps in their targets, whose events set off
+//! their own policies, and so on down the chain. Every event stays **staged
+//! in memory**, in a [`Chain`], across every stream involved; a later step
+//! sees the staged state (and command ids) of any stream an earlier step
+//! touched, the originating stream included. Nothing is appended until the
+//! whole chain has succeeded.
 //!
-//! - **Any failure fails it all.** A policy's command rejected, a gap, the
-//!   depth limit: the failure goes back to the caller with the path to the
-//!   step that failed ([`Failure::Downstream`]), and nothing is appended
-//!   anywhere, the originating command's events included.
+//! - **A duplicate ends it at once.** If step 3 finds the originating
+//!   command's events on its stream, the answer is [`Handled::Duplicate`]
+//!   with them; nothing runs, nothing is written.
+//! - **Any failure fails it all.** A policy's command rejected, a malformed
+//!   policy book, a panicking ingest, a gap, the depth limit: the failure
+//!   goes back to the caller with the path to the step that failed
+//!   ([`Failure::Downstream`]), and nothing is appended anywhere, the
+//!   originating command's events included. What angzarr would dead-letter
+//!   is also written to the [`DeadLetterLog`].
 //! - **On success** every staged stream is appended through the unit of
 //!   work, each checked against the length it was loaded at (optimistic
-//!   concurrency on every stream touched), the originating book's claim is
-//!   recorded if its origin is keyed ([`UnitOfWork::record_command`]: a
-//!   client-supplied request id or a fact, with the payload's
-//!   fingerprint), and the unit of work committed: one transaction.
+//!   concurrency on every stream touched), and the unit committed: one
+//!   transaction. The command ids are written with the events, so
+//!   deduplication needs nothing else.
 //! - **Then projections run**, on committed events only. A failed chain is
 //!   never seen by one, and a failing projection never undoes the commit:
 //!   it is reported in [`Recorded::projector_failures`].
 //!
 //! **This is a deliberate divergence from angzarr** (see
 //! `docs/design/audit.md`, *Divergences*): angzarr appends one stream per
-//! write and runs reactions asynchronously, each its own command. annals
-//! keeps policies inside the write side's consistency boundary because it
-//! is the in-process runtime: one process, one transaction, no bus, no
-//! outbox and no retry loop. A reaction that must cross a process or a
-//! service boundary is not one of these; it reads the committed log (a
-//! [`Position`] per stream, [`orders_owed`]) instead.
+//! write and runs reactions asynchronously, each its own command, so a
+//! reaction's rejection never fails its trigger there. annals keeps policies
+//! inside the write side's consistency boundary because it is the in-process
+//! runtime: one process, one transaction, no bus, no outbox and no retry
+//! loop. A reaction that must cross a process or a service boundary is not
+//! one of these; it reads the committed log (a [`Position`](super::Position)
+//! per stream, [`orders_owed`](super::orders_owed)) instead.
 //!
 //! Which policies run is a [`Routes`] table, keyed by source domain, so a
 //! chain can come back to a stream it already touched (A → B → A); a
-//! cascade deeper than the chain's limit is a
-//! [`KernelError::ChainTooDeep`], which is how a reaction cycle that never
-//! settles ends.
-//!
-//! [`handle`] is request/response: it returns every event the chain
-//! recorded ([`Recorded`]), so an API handler can answer with them (a draw
-//! command answers with its `Drawn` event).
-//!
-//! [`Position`]: super::Position
-//! [`orders_owed`]: super::orders_owed
+//! cascade deeper than the chain's limit is a [`KernelError::ChainTooDeep`],
+//! which is how a reaction cycle that never settles ends.
 
-use std::any::{Any, TypeId};
-use std::collections::BTreeMap;
+use std::any::Any as AnyType;
+use std::collections::{BTreeMap, HashMap};
 
-use super::book::{BookOf, Sampled};
-use super::domain::{Domain, FactMismatch};
+use angzarr_proto::v1::{CommandBook, Cover, EventBook, Outcome};
+
+use super::check::{Checked, Sampled};
+use super::dead_letter::DeadLetterLog;
+use super::domain::Domain;
 use super::error::{Failure, KernelError, Step, StepError};
 use super::handler::Handler;
-use super::id::{Fingerprint, Seq, StreamKey};
-use super::meta::Origin;
-use super::reaction::{Policy, Projection};
-use super::store::{AsyncEventStore, AsyncUnitOfWork, EventStore, UnitOfWork};
+use super::reaction::{Order, Policy, Projection};
+use super::registry::Registry;
+use super::store::{AsyncUnitOfWork, EventStore, UnitOfWork};
 use super::stream::Envelope;
-use super::version::Rulebook;
 
 /// How deep a chain may go before it is a [`KernelError::ChainTooDeep`],
-/// unless the caller says otherwise ([`Chain::limit`]).
+/// unless the kernel says otherwise ([`Kernel::limit`]).
 pub const DEFAULT_DEPTH_LIMIT: usize = 8;
 
-/// One reaction, its types erased so a [`Routes`] table can hold reactions
-/// of any domains: run it on what `source` staged from `from` on.
-type Route<'r, U> = Box<
-    dyn Fn(&mut Chain<'_, 'r, U>, &StreamKey, Seq) -> Result<(), (Vec<Step>, StepError)>
-        + Send
-        + Sync
-        + 'r,
->;
-
-/// Which policies react to which source domain, in the
-/// order registered, with the rules of both ends. Built once; shared by
-/// every command. The async command handler takes an [`AsyncRoutes`].
-pub struct Routes<'r, U> {
-    by_source: BTreeMap<TypeId, Vec<Route<'r, U>>>,
+/// What the application builds once and handles every command through: the
+/// registry, where dead letters go, and the chain's depth limit.
+pub struct Kernel<'k> {
+    registry: &'k Registry,
+    dead_letters: &'k dyn DeadLetterLog,
+    limit: usize,
 }
 
-impl<'r, U> Default for Routes<'r, U> {
-    fn default() -> Self {
-        Routes {
-            by_source: BTreeMap::new(),
-        }
+/// What a handled command came to (angzarr's `Outcome.delivery`).
+pub enum Handled {
+    /// Business code ran, and the chain committed: everything it recorded
+    /// (possibly nothing: a decision with no events).
+    Applied(Recorded),
+    /// Step 3 found the command's events already on its stream: these, in
+    /// sequence order. Nothing ran and nothing was written.
+    Duplicate(EventBook),
+}
+
+impl Handled {
+    /// As angzarr's `Outcome`: APPLIED, with each projector failure as a
+    /// `ProjectorFailure` (code INTERNAL), or DUPLICATE. annals never
+    /// answers PARKED: in process, a panicking ingest fails the call.
+    pub fn outcome(&self) -> Outcome {
+        todo!("proposal: APPLIED with projector failures, or DUPLICATE")
+    }
+
+    /// The events to answer with: every stream the chain appended to, or
+    /// the duplicate's.
+    pub fn books(&self) -> Vec<EventBook> {
+        todo!("proposal: Recorded::books, or the duplicate's book")
     }
 }
 
-impl<'r, U: 'r> Routes<'r, U> {
+impl<'k> Kernel<'k> {
+    /// With [`DEFAULT_DEPTH_LIMIT`].
+    pub fn new(registry: &'k Registry, dead_letters: &'k dyn DeadLetterLog) -> Kernel<'k> {
+        Kernel {
+            registry,
+            dead_letters,
+            limit: DEFAULT_DEPTH_LIMIT,
+        }
+    }
+
+    /// Chains at most `limit` reaction steps deep.
+    pub fn limit(mut self, limit: usize) -> Kernel<'k> {
+        self.limit = limit;
+        self
+    }
+
+    pub fn registry(&self) -> &'k Registry {
+        self.registry
+    }
+
+    /// Handle one book for the `D` stream it names, with every reaction it
+    /// sets off, as one atomic chain: [`check`](super::check) it,
+    /// [`Chain::execute`] it, [`Chain::append`] everything staged,
+    /// [`UnitOfWork::commit`], then run `projections`. Returns what the
+    /// chain recorded, or the duplicate's events. On any failure nothing is
+    /// committed and no projection runs. A cover of another domain than
+    /// `D` is [`KernelError::WrongDomain`].
+    pub fn handle<D, U, Ps>(
+        &self,
+        unit: U,
+        routes: &Routes,
+        book: CommandBook,
+        sampled: &Sampled,
+        projections: &mut Ps,
+    ) -> Result<Handled, Failure<D::Rejection>>
+    where
+        D: Domain,
+        U: UnitOfWork,
+        Ps: Project,
+    {
+        todo!("proposal: check, Chain::new(..).execute, append, commit, project")
+    }
+
+    /// [`Kernel::handle`], over the async ports: the store's reads, appends
+    /// and commit are awaited; deciding stays synchronous and pure.
+    pub async fn handle_async<D, U, Ps>(
+        &self,
+        unit: U,
+        routes: &Routes,
+        book: CommandBook,
+        sampled: &Sampled,
+        projections: &mut Ps,
+    ) -> Result<Handled, Failure<D::Rejection>>
+    where
+        D: Domain,
+        U: AsyncUnitOfWork,
+        Ps: Project,
+    {
+        todo!("proposal: as handle, awaiting the store")
+    }
+
+    /// Deliver one owed order outside a chain (a catch-up from
+    /// [`orders_owed`](super::orders_owed)): the target's
+    /// [`Reaction::position`](super::Reaction::position) places the source
+    /// event first (a redelivery runs nothing and answers
+    /// [`Handled::Applied`] with nothing recorded; a gap is
+    /// [`KernelError::Gap`]); then the order runs as a chain of its own,
+    /// with the derived command id, so a delivery that already landed is
+    /// answered DUPLICATE.
+    pub fn deliver<P, U, Ps>(
+        &self,
+        unit: U,
+        routes: &Routes,
+        order: &Order<P>,
+        sampled: &Sampled,
+        projections: &mut Ps,
+    ) -> Result<Handled, Failure<<P::Target as Domain>::Rejection>>
+    where
+        P: Policy,
+        U: UnitOfWork,
+        Ps: Project,
+    {
+        todo!("proposal: place by position, then order.check and a chain")
+    }
+}
+
+/// One policy, its types erased so a [`Routes`] table can hold policies of
+/// any domains, and so the table names no store: what the policy owes for
+/// the events a source stream (a `Stream<Source>`, boxed) staged from
+/// `from` on, each order booked and checked through the kernel's reaction
+/// entry, with the step it is. Pure: the chain loads, deduplicates and
+/// decides the orders' targets itself, the typed step reached through the
+/// [`Registry`] by the target's domain name.
+type Route = Box<
+    dyn Fn(&dyn AnyType, u64, &Registry) -> Result<Vec<(Step, Checked)>, (Vec<Step>, StepError)>
+        + Send
+        + Sync,
+>;
+
+/// Which policies react to which source domain, in the order registered.
+/// Built once at start-up, independent of any store, and shared by every
+/// command, sync or async.
+#[derive(Default)]
+pub struct Routes {
+    by_source: BTreeMap<&'static str, Vec<Route>>,
+}
+
+impl Routes {
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Run `P` after any `P::Source` stream stages events: each command it
-    /// owes is executed in its target, in the same chain.
-    pub fn policy<P: Policy>(
-        self,
-        source: &'r Rulebook<<P::Source as Domain>::Rules>,
-        target: &'r Rulebook<<P::Target as Domain>::Rules>,
-    ) -> Self
-    where
-        U: EventStore<<P::Source as Domain>::Event> + EventStore<<P::Target as Domain>::Event>,
-    {
-        todo!("proposal: box a closure dispatching through policy() and chain.execute")
+    /// Run `P` after any `P::Source` stream stages events: each order it
+    /// owes is checked, identified and executed in its target, in the same
+    /// chain. Both domains must be registered.
+    pub fn policy<P: Policy>(self) -> Self {
+        todo!("proposal: box a closure that owes P's orders and checks each")
     }
 }
 
-/// [`Routes`] for the async command handler: the same table, its entries
-/// loading through [`AsyncEventStore`] (boxed futures inside, std only).
-pub struct AsyncRoutes<'r, U> {
-    by_source: BTreeMap<TypeId, Vec<Route<'r, U>>>,
-}
-
-impl<'r, U: 'r> AsyncRoutes<'r, U> {
-    pub fn new() -> Self {
-        AsyncRoutes {
-            by_source: BTreeMap::new(),
-        }
-    }
-
-    /// As [`Routes::policy`].
-    pub fn policy<P: Policy>(
-        self,
-        source: &'r Rulebook<<P::Source as Domain>::Rules>,
-        target: &'r Rulebook<<P::Target as Domain>::Rules>,
-    ) -> Self
-    where
-        U: AsyncEventStore<<P::Source as Domain>::Event>
-            + AsyncEventStore<<P::Target as Domain>::Event>,
-    {
-        todo!("proposal: as Routes::policy, async")
-    }
-}
-
-impl<'r, U: 'r> Default for AsyncRoutes<'r, U> {
-    fn default() -> Self {
-        Self::new()
-    }
+/// One staged stream: the sequence it was loaded at, and the stream (a
+/// `Stream<D>`, boxed) with the chain's events committed to it in memory.
+struct Staged {
+    loaded_at: u64,
+    stream: Box<dyn AnyType + Send>,
 }
 
 /// A command chain in progress: every stream it has touched, loaded once
 /// from the unit of work and staged since, the path from the originating
 /// command to the step running now, and what the application sampled for
-/// the whole chain (one instant; the minted request id and the
-/// derivations, for the originating book).
-pub struct Chain<'u, 'r, U> {
-    store: &'u mut U,
-    routes: &'u Routes<'r, U>,
+/// the whole chain (one instant; one minted command id, for the
+/// originating command only).
+pub struct Chain<'u, U> {
+    unit: &'u mut U,
+    registry: &'u Registry,
+    routes: &'u Routes,
     sampled: &'u Sampled,
-    /// Each touched stream: the length it was loaded at, and the stream
-    /// (a `Stream<D>`, boxed with how to append it) with the chain's events
-    /// committed to it in memory.
-    staged: BTreeMap<StreamKey, (Seq, Box<dyn Any + Send>)>,
-    /// The order streams were first touched in: the order they are
-    /// appended in.
-    order: Vec<StreamKey>,
-    /// The originating book's claim, recorded at append when its origin is
-    /// keyed ([`UnitOfWork::record_command`]).
-    origin: Option<Keyed>,
+    dead_letters: &'u dyn DeadLetterLog,
+    /// Looked up only; the order streams are appended in is `order`.
+    staged: HashMap<Cover, Staged>,
+    order: Vec<Cover>,
     path: Vec<Step>,
     limit: usize,
-    /// Mints each delivery's [`Nonce`](super::Nonce): a counter, so the
-    /// kernel needs no randomness.
+    /// Mints each delivery's [`Nonce`](super::Nonce).
     nonces: u64,
 }
 
-/// The originating book, as its claim will be recorded: its stream,
-/// resolved origin and fingerprint, and, for a fact, what its domain
-/// answers a payload mismatch with ([`Domain::fact_mismatch`], read in
-/// [`Chain::execute`], where the domain is known).
-struct Keyed {
-    stream: StreamKey,
-    origin: Origin,
-    fingerprint: Option<Fingerprint>,
-    fact_mismatch: FactMismatch,
-}
-
-impl<'u, 'r, U> Chain<'u, 'r, U> {
-    /// An empty chain over `store`, reacting by `routes`, with
-    /// [`DEFAULT_DEPTH_LIMIT`].
+impl<'u, U> Chain<'u, U> {
+    /// An empty chain over `unit`.
     pub fn new(
-        store: &'u mut U,
-        routes: &'u Routes<'r, U>,
+        kernel: &Kernel<'u>,
+        unit: &'u mut U,
+        routes: &'u Routes,
         sampled: &'u Sampled,
-    ) -> Chain<'u, 'r, U> {
+    ) -> Chain<'u, U> {
         Chain {
-            store,
+            unit,
+            registry: kernel.registry,
             routes,
             sampled,
-            staged: BTreeMap::new(),
+            dead_letters: kernel.dead_letters,
+            staged: HashMap::new(),
             order: Vec::new(),
-            origin: None,
             path: Vec::new(),
-            limit: DEFAULT_DEPTH_LIMIT,
+            limit: kernel.limit,
             nonces: 0,
         }
     }
 
-    /// At most `limit` reaction steps deep.
-    pub fn limit(mut self, limit: usize) -> Chain<'u, 'r, U> {
-        self.limit = limit;
-        self
-    }
-
     /// `stream`'s state as the chain has it, staged events folded in, if
     /// the chain has touched it and it is a `D` stream.
-    pub fn state<D: Domain>(&self, stream: &StreamKey) -> Option<&D::State> {
+    pub fn state<D: Domain>(&self, stream: &Cover) -> Option<&D::State> {
         todo!("proposal: downcast the staged Stream<D>")
     }
 
@@ -215,71 +276,64 @@ impl<'u, 'r, U> Chain<'u, 'r, U> {
         &self.path
     }
 
-    /// Handle `book` in the stream it names (loaded from the store the
-    /// first time the chain touches it, staged after), as
-    /// [`Stream::decide`](super::Stream::decide) does, stage its events,
-    /// then run the routes for `D` on them, depth first. A chain's first
-    /// `execute` is the originating book (a command or a fact); a policy
-    /// route's are the rest, always commands. A key of another domain than
-    /// `D` is a [`KernelError::WrongDomain`].
+    /// Run a checked command through steps 2 to 5 in the stream it names
+    /// (deduplicating against the store and the chain's staged events;
+    /// loading from the store the first time the chain touches the stream,
+    /// from the staged copy after), stage its events, then run the routes
+    /// for `D` on them, depth first. The chain's first `execute` is the
+    /// originating command (a client's command or fact); a route's are the
+    /// rest, always policy commands. `Some`: step 3 found the command's
+    /// events, which are the answer, and nothing was staged.
     pub fn execute<D>(
         &mut self,
-        book: &BookOf<D>,
-        rules: &Rulebook<D::Rules>,
-    ) -> Result<(), Failure<D::Rejection>>
+        command: Checked,
+    ) -> Result<Option<EventBook>, Failure<D::Rejection>>
     where
         D: Domain,
-        U: EventStore<D::Event>,
+        U: EventStore,
     {
-        todo!("proposal: load or find, decide or ingest, stage, react")
+        todo!(
+            "proposal: identify, deduplicate, load or find, decode, decide or ingest, stage, react"
+        )
     }
 
     /// The whole chain succeeded: append every staged stream through the
     /// unit of work, in the order first touched, each expecting the length
-    /// it was loaded at, then record the originating book's claim if its
-    /// origin is keyed (its key, fingerprint and applied range). A conflict
-    /// on any stream is a
-    /// [`StoreError::Conflict`](super::StoreError::Conflict) naming it, a
-    /// recorded key a [`StoreError::Duplicate`](super::StoreError::Duplicate)
-    /// or, reused for another payload, a
-    /// [`StoreError::KeyReused`](super::StoreError::KeyReused), except a
-    /// fact whose domain answers a mismatch [`FactMismatch::Duplicate`]: its
-    /// `KeyReused` becomes a
-    /// [`StoreError::DivergentDuplicate`](super::StoreError::DivergentDuplicate)
-    /// with the same range. The caller then drops the unit of work
-    /// uncommitted.
+    /// it was loaded at. A conflict on any stream is a
+    /// [`StoreError::Conflict`](super::StoreError::Conflict) naming it; the
+    /// caller then drops the unit of work uncommitted.
     pub fn append(self) -> Result<Recorded, KernelError>
     where
         U: UnitOfWork,
     {
-        todo!(
-            "proposal: append each staged stream's new events, then record_command(Claim); \
-             a fact's KeyReused under FactMismatch::Duplicate becomes DivergentDuplicate"
-        )
+        todo!("proposal: append each staged stream's new pages")
     }
 }
 
 /// Everything a chain recorded, every stream, after commit: angzarr's
-/// `CommandResponse.events` (one book per stream here, since a chain
-/// touches several), its delivery APPLIED.
+/// `CommandResponse.events`, one `EventBook` per stream here, since a chain
+/// touches several.
 pub struct Recorded {
-    /// Each stream touched, in the order first touched: the length it was
-    /// loaded at, and the stream (a `Stream<D>`, boxed) after the chain.
-    streams: Vec<(StreamKey, Seq, Box<dyn Any + Send>)>,
+    /// One book per stream touched, in the order first touched: the pages
+    /// appended, `next_sequence` the new length.
+    books: Vec<EventBook>,
+    /// The streams after the chain (each a `Stream<D>`, boxed), with the
+    /// length each was loaded at.
+    streams: Vec<(Cover, u64, Box<dyn AnyType + Send>)>,
     /// Projections that failed after the commit.
     projector_failures: Vec<ProjectorFailure>,
 }
 
 impl Recorded {
-    /// Every stream the chain appended to, in order, with the seqs it
-    /// appended: `from..to`.
-    pub fn streams(&self) -> Vec<(StreamKey, Seq, Seq)> {
-        todo!("proposal: (id, loaded length, new length)")
+    /// What the chain appended, as `EventBook`s: every page with its
+    /// `EventMeta`.
+    pub fn books(&self) -> &[EventBook] {
+        &self.books
     }
 
     /// The events the chain recorded in `stream`, if it is a `D` stream the
     /// chain touched.
-    pub fn events<D: Domain>(&self, stream: &StreamKey) -> Option<&[Envelope<D::Event>]> {
+    pub fn events<D: Domain>(&self, stream: &Cover) -> Option<&[Envelope<D::Event>]> {
         todo!("proposal: downcast, slice from the loaded length")
     }
 
@@ -287,8 +341,8 @@ impl Recorded {
     /// state just after it.
     pub fn dispatch<D: Domain>(
         &self,
-        stream: &StreamKey,
-        rules: &Rulebook<D::Rules>,
+        stream: &Cover,
+        registry: &Registry,
         handlers: &mut [&mut dyn Handler<D>],
     ) -> Result<(), KernelError> {
         todo!("proposal: Stream::dispatch from the loaded length")
@@ -302,7 +356,7 @@ impl Recorded {
 }
 
 /// One projection that failed after the commit.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct ProjectorFailure {
     /// The [`ProjectionRoute::name`].
     pub projector: &'static str,
@@ -313,7 +367,7 @@ pub struct ProjectorFailure {
 /// recorded: [`ProjectionRoute`]s; `()` is none, a pair is both. Each
 /// returns the projections that failed; a failure never stops the others.
 pub trait Project {
-    fn project(&mut self, recorded: &Recorded) -> Vec<ProjectorFailure>;
+    fn project(&mut self, recorded: &Recorded, registry: &Registry) -> Vec<ProjectorFailure>;
 }
 
 /// A projection of one domain's streams, run after commit over every
@@ -322,64 +376,25 @@ pub struct ProjectionRoute<'p, D: Domain, P: Projection<D>> {
     /// Named in a [`ProjectorFailure`].
     pub name: &'static str,
     pub projection: &'p mut P,
-    pub rules: &'p Rulebook<D::Rules>,
+    pub domain: std::marker::PhantomData<fn() -> D>,
 }
 
 impl Project for () {
-    fn project(&mut self, recorded: &Recorded) -> Vec<ProjectorFailure> {
+    fn project(&mut self, recorded: &Recorded, registry: &Registry) -> Vec<ProjectorFailure> {
         Vec::new()
     }
 }
 
 impl<A: Project, B: Project> Project for (A, B) {
-    fn project(&mut self, recorded: &Recorded) -> Vec<ProjectorFailure> {
-        let mut failures = self.0.project(recorded);
-        failures.extend(self.1.project(recorded));
+    fn project(&mut self, recorded: &Recorded, registry: &Registry) -> Vec<ProjectorFailure> {
+        let mut failures = self.0.project(recorded, registry);
+        failures.extend(self.1.project(recorded, registry));
         failures
     }
 }
 
 impl<D: Domain, P: Projection<D>> Project for ProjectionRoute<'_, D, P> {
-    fn project(&mut self, recorded: &Recorded) -> Vec<ProjectorFailure> {
+    fn project(&mut self, recorded: &Recorded, registry: &Registry) -> Vec<ProjectorFailure> {
         todo!("proposal: dispatch each D stream recorded through projection()")
     }
-}
-
-/// Handle one book, with every reaction it sets off, as one atomic chain:
-/// [`Chain::execute`] the book, [`Chain::append`] everything staged (and
-/// record its key), [`UnitOfWork::commit`], then run `projections`.
-/// Returns every event the chain recorded. On any failure nothing is
-/// committed and no projection runs.
-pub fn handle<D, U, Ps>(
-    unit: U,
-    routes: &Routes<'_, U>,
-    book: &BookOf<D>,
-    sampled: &Sampled,
-    rules: &Rulebook<D::Rules>,
-    projections: &mut Ps,
-) -> Result<Recorded, Failure<D::Rejection>>
-where
-    D: Domain,
-    U: UnitOfWork + EventStore<D::Event>,
-    Ps: Project,
-{
-    todo!("proposal: Chain::new(&mut unit, routes, sampled).execute, append, commit, project")
-}
-
-/// [`handle`], over the async ports: the store's reads, appends and commit
-/// are awaited; deciding stays synchronous and pure.
-pub async fn handle_async<D, U, Ps>(
-    unit: U,
-    routes: &AsyncRoutes<'_, U>,
-    book: &BookOf<D>,
-    sampled: &Sampled,
-    rules: &Rulebook<D::Rules>,
-    projections: &mut Ps,
-) -> Result<Recorded, Failure<D::Rejection>>
-where
-    D: Domain,
-    U: AsyncUnitOfWork + AsyncEventStore<D::Event>,
-    Ps: Project,
-{
-    todo!("proposal: as handle, awaiting the store")
 }

@@ -1,12 +1,37 @@
 //! Deciding, ingesting and applying, with deciding made pure.
 
+use angzarr_proto::v1::{ConflictResolution, Cover, EventRef, FactOrigin, StateDescriptor, Uuid};
 use annals_diagnostic::Diagnostic;
+use prost_types::Timestamp;
 
-use super::book::ConflictResolution;
-use super::conflict::Changed;
-use super::id::{Actor, Correlation, Seq, StreamKey, Timestamp};
-use super::meta::Origin;
+use super::conflict::Units;
+use super::coordinator::Nonce;
+use super::payload::Payload;
 use super::stream::Envelope;
+
+/// A domain's state: a prost message, so it can be snapshotted as `Any`,
+/// with the impl angzarr's generator emits from its `(io.angzarr.v1.state)`
+/// option and `(io.angzarr.v1.conflict)` field markers (`angzarr_build::compile`,
+/// backlog CR-1). Never hand-written for a real domain: until the generator
+/// exists, a hand-written impl is a test fixture standing in for it.
+pub trait State: prost::Message + prost::Name + Default + Clone + Send + 'static {
+    /// The state's type URL and the conflict resolutions it supports, the
+    /// full resolved list (`[COMMUTATIVE, STRICT, AGGREGATE_HANDLES]` for a
+    /// state that lists COMMUTATIVE and marks its units; `[STRICT,
+    /// AGGREGATE_HANDLES]`, the implicit base, for one with no option). What
+    /// [`Registry::register`](super::Registry::register) records, as
+    /// angzarr's `ComponentDescriptor.state`.
+    fn descriptor() -> StateDescriptor;
+
+    /// The conflict units whose values differ between `before` and
+    /// `after` (angzarr's `conflict_units` table, field kind by field kind,
+    /// with the fail-safe wildcard for every unmarked field that differs).
+    /// Pure. Called only under COMMUTATIVE, so only for a state that lists
+    /// it; the default, for a state with no units, says "everything".
+    fn changed(before: &Self, after: &Self) -> Units {
+        Units::everything()
+    }
+}
 
 /// One kind of event stream: its state, its commands and facts, its events
 /// and its rules for each. As the crate root's [`Domain`](crate::Domain),
@@ -14,135 +39,131 @@ use super::stream::Envelope;
 ///
 /// - **No `Ctx`.** Decide is a function of its explicit inputs only: the
 ///   state, the command and the rules, plus what the kernel stamps (the
-///   recorded instant, the actor, the origin), readable through [`Tx`].
-///   Random values are sampled by the caller into the command; a decide
-///   copies whatever it uses into the event's payload, which is all `apply`
-///   sees.
-/// - **Two inputs, two pipelines**, picked by the book's body arm
-///   ([`Body`](super::Body)): a command goes to the fallible
-///   [`Domain::decide`]; a fact to the infallible [`Domain::ingest`], which
-///   has no error to return.
+///   recorded instant, the ids), readable through [`Tx`]. Random values
+///   are sampled by the caller into the command.
+/// - **Two inputs, two pipelines**, picked by the command page's body arm:
+///   a command goes to the fallible [`Domain::decide`]; a fact to the
+///   infallible [`Domain::ingest`], which has no error to return.
+/// - **Payloads are prost messages.** Commands, facts and events are
+///   [`Payload`]s, packed as `Any` by type URL; the state is a [`State`].
 /// - **Business output is payloads only.** decide emits events; the kernel
-///   builds the pages: their seqs and their [`Meta`](super::Meta).
-/// - `State: Clone`, so a decide can fold its staged events into a copy;
+///   builds the pages: their sequences and their `EventMeta`.
 /// - a decide may reject at any point, emitted or not: nothing it staged is
 ///   kept;
 /// - everything `'static` and `Send`, so a chain can stage streams of
 ///   several domains side by side and the async command handler's future is
-///   `Send` (tokio's multi-threaded runtime, tonic).
+///   `Send`.
 pub trait Domain: Sized + 'static {
     /// Folded from the events. Never stored, except as a snapshot.
-    type State: Default + Clone + Send + 'static;
+    type State: State;
     /// A request to change the stream. Decided, never stored.
-    type Command: Send + 'static;
+    type Command: Payload + Send + 'static;
     /// Something that already happened outside the system (a webhook, an
     /// integration). Ingested, never refused, never stored as such.
     /// [`std::convert::Infallible`] for a domain that takes none.
-    type Fact: Send + 'static;
+    type Fact: Payload + Send + 'static;
     /// What a stream stores.
-    type Event: Clone + Send + Sync + 'static;
+    type Event: Payload + Clone + Send + Sync + 'static;
     /// Why a command was refused, for the person who gave it. Kernel faults
     /// are never folded into it: see [`Failure`](super::Failure).
     type Rejection: Diagnostic + Send + 'static;
-    /// Immutable reference data both halves read, one value per
-    /// [`RulesVersion`](super::RulesVersion), found through a
-    /// [`Rulebook`](super::Rulebook).
+    /// Immutable reference data both halves read, one value per rules
+    /// version, found through a [`Rulebook`](super::Rulebook).
     type Rules: Send + Sync + 'static;
 
-    /// The domain's name: the domain of every stream key of this domain
-    /// ([`StreamKey::domain`]). Stable across releases.
+    /// The domain's name: the `Cover.domain` of every stream of this
+    /// domain, and its key in the [`Registry`](super::Registry). Stable
+    /// across releases; never contains `':'`.
     const NAME: &'static str;
+
+    /// The domain's configured conflict resolution (angzarr's component
+    /// configuration). `None`: the built-in default, COMMUTATIVE where the
+    /// state supports it, otherwise STRICT. Refused at registration if the
+    /// state does not support it.
+    const CONFLICT_RESOLUTION: Option<ConflictResolution> = None;
+
+    /// Configured resolutions per command type, by the command message's
+    /// full name (`"hatpick.list.v1.Draw"`): above the domain's own, below a
+    /// book's request. Refused at registration if the state does not
+    /// support one.
+    const CONFLICT_RESOLUTION_BY_COMMAND: &'static [(&'static str, ConflictResolution)] = &[];
 
     /// Decide a command against the current state. Pure: its only output is
     /// the events it emits through `tx`, and they are kept only if it
     /// returns `Ok`.
     fn decide(cmd: &Self::Command, tx: &mut Tx<'_, Self>) -> Result<(), Self::Rejection>;
 
-    /// Record a fact: the events it becomes, given the state. **Infallible
-    /// by type**: a fact already happened, so an awkward one is recorded
-    /// (a payment for an unknown order becomes an event that says so),
-    /// never refused. A panic here is a bug; in process it aborts the whole
-    /// chain, and nothing is written.
-    fn ingest(state: &Self::State, fact: &Self::Fact, rules: &Self::Rules) -> Vec<Self::Event>;
+    /// Record a fact: the events it becomes, given the state and a
+    /// read-only context ([`IngestCtx`]: when it is recorded, its ids, its
+    /// source, the rules). **Infallible by type**: a fact already happened,
+    /// so an awkward one is recorded (a payment for an unknown order
+    /// becomes an event that says so), never refused. A panic here is a
+    /// bug: in process it aborts the whole chain, nothing is written, and
+    /// the dead-letter log says so.
+    fn ingest(
+        state: &Self::State,
+        fact: &Self::Fact,
+        ctx: &IngestCtx<'_, Self>,
+    ) -> Vec<Self::Event>;
 
     /// Fold one event into the state. Pure: the same state, event and rules
     /// always give the same result. Never sees the event's metadata.
     fn apply(state: &mut Self::State, event: &Self::Event, rules: &Self::Rules);
-
-    /// The conflict resolution for `cmd` when its book does not choose one:
-    /// the domain's configuration, per command type. STRICT by default.
-    fn conflict_resolution(cmd: &Self::Command) -> ConflictResolution {
-        ConflictResolution::Strict
-    }
-
-    /// What a fact re-sent under a recorded `external_id` with **another
-    /// payload** (another [`Fingerprint`](super::Fingerprint)) is answered
-    /// with: the domain's configuration, per fact type, as
-    /// [`Domain::conflict_resolution`] is per command type. angzarr's
-    /// coordinator setting (per command type, then component, then the
-    /// built-in default), with the domain standing in for the component.
-    ///
-    /// [`FactMismatch::Refuse`] by default: the source reused an id for a
-    /// different payload (a source bug, or a correction the domain never
-    /// saw), refused as [`StoreError::KeyReused`](super::StoreError::KeyReused),
-    /// nothing recorded. A domain whose source's redeliveries vary in bytes
-    /// for one fact (a re-signed webhook, a timestamp field) opts that fact
-    /// type into [`FactMismatch::Duplicate`]. The same payload again is
-    /// always a duplicate, whatever this says.
-    fn fact_mismatch(fact: &Self::Fact) -> FactMismatch {
-        FactMismatch::default()
-    }
-
-    /// The state's generated conflict-unit diff, when the state is a
-    /// `commutative_state` message: `commutative::<Self::State>()`
-    /// ([`commutative`](super::commutative)), naming the generated
-    /// [`CommutativeState`](super::CommutativeState) impl. `None`, the
-    /// default: COMMUTATIVE is refused for this domain, before decide
-    /// ([`Malformed::CommutativeUnsupported`](super::Malformed::CommutativeUnsupported)),
-    /// as angzarr refuses it for a state without `commutative_state`.
-    ///
-    /// Under COMMUTATIVE the kernel follows angzarr's resolver
-    /// (`options.proto`, *The resolver*): fold to `expected_sequence` and to
-    /// the head; `window = changed(expected, head)`; decide runs on the head,
-    /// so its invariants see the window's effects; `mine = changed(head,
-    /// head with the command's events)`; keep the events iff the two
-    /// [do not overlap](super::Units::overlaps), else the command is stale.
-    const COMMUTATIVE: Option<Changed<Self::State>> = None;
 }
 
-/// How a fact whose `external_id` is already recorded in its stream, but
-/// with another payload fingerprint, is answered ([`Domain::fact_mismatch`]).
-/// Kernel configuration, never on the wire, as angzarr's is coordinator
-/// configuration.
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default)]
-pub enum FactMismatch {
-    /// Refuse it: [`StoreError::KeyReused`](super::StoreError::KeyReused)
-    /// (angzarr's FAILED_PRECONDITION, [`Recovery::Bug`](super::Recovery::Bug)),
-    /// nothing committed and nothing claimed. The default.
-    #[default]
-    Refuse,
-    /// Answer it as the duplicate it claims to be, with the range recorded
-    /// the first time, and flag it for an alert:
-    /// [`StoreError::DivergentDuplicate`](super::StoreError::DivergentDuplicate)
-    /// ([`Recovery::Done`](super::Recovery::Done)). annals has no metrics
-    /// or alerting of its own; the variant is distinct from
-    /// [`StoreError::Duplicate`](super::StoreError::Duplicate) so the
-    /// application raises the alert and the metric.
-    Duplicate,
+/// What an ingest may read besides the state and the fact, all read-only:
+/// the instant the events will be recorded at, the fact's ids, where it
+/// came from, and the rules it is ingested under.
+pub struct IngestCtx<'a, D: Domain> {
+    pub(crate) stream: &'a Cover,
+    pub(crate) recorded_at: Timestamp,
+    pub(crate) command_id: &'a Uuid,
+    pub(crate) correlation_id: &'a Uuid,
+    pub(crate) source: &'a FactOrigin,
+    pub(crate) rules: &'a D::Rules,
+    pub(crate) rules_version: &'a str,
 }
 
-/// The in-process conflict nonce (angzarr's `ContextualCommand.conflict_nonce`):
-/// minted by the kernel per delivery under AGGREGATE_HANDLES, handed to
-/// decide with the window, and given back through
-/// [`Tx::resolve_conflicts`] as decide's declaration that it examined the
-/// window. Not constructible, clonable or copyable outside the kernel, so
-/// a decide cannot satisfy the check without having received it.
-#[derive(PartialEq, Eq, Debug)]
-pub struct Nonce(pub(crate) u64);
+impl<'a, D: Domain> IngestCtx<'a, D> {
+    /// The stream the fact is recorded in.
+    pub fn stream(&self) -> &'a Cover {
+        self.stream
+    }
+
+    /// When the events will be recorded (non-decreasing within the stream).
+    pub fn recorded_at(&self) -> Timestamp {
+        self.recorded_at
+    }
+
+    /// The fact's command id: UUIDv5 of its external id.
+    pub fn command_id(&self) -> &'a Uuid {
+        self.command_id
+    }
+
+    /// The fact's correlation: as sent, else its command id.
+    pub fn correlation_id(&self) -> &'a Uuid {
+        self.correlation_id
+    }
+
+    /// Where the fact came from: its external id and description.
+    pub fn source(&self) -> &'a FactOrigin {
+        self.source
+    }
+
+    /// The current rules.
+    pub fn rules(&self) -> &'a D::Rules {
+        self.rules
+    }
+
+    /// The current rules' version, which the events are stamped with.
+    pub fn rules_version(&self) -> &'a str {
+        self.rules_version
+    }
+}
 
 /// What decide is handed under AGGREGATE_HANDLES: the window it did not see
-/// (the committed events from the book's `expected_sequence` to the head)
-/// and the nonce. An empty window is delivered too, so the path is uniform.
+/// (the events from the book's `expected_sequence` to the head) and the
+/// nonce. An empty window is delivered too, so the path is uniform.
 #[derive(Debug)]
 pub struct Conflicts<'a, E> {
     pub window: &'a [Envelope<E>],
@@ -153,21 +174,22 @@ pub struct Conflicts<'a, E> {
 /// it and folded into a copy of the state, made at the first emit, so the
 /// decide sees their effects and the stream sees nothing.
 pub struct Tx<'a, D: Domain> {
-    committed: &'a D::State,
-    staged: Option<D::State>,
-    rules: &'a D::Rules,
-    stream: &'a StreamKey,
-    /// The head: the length decide sees, and every event's base_sequence.
-    base: Seq,
-    recorded_at: Timestamp,
-    actor: Option<&'a Actor>,
-    correlation: &'a Correlation,
-    origin: &'a Origin,
+    pub(crate) committed: &'a D::State,
+    pub(crate) staged: Option<D::State>,
+    pub(crate) rules: &'a D::Rules,
+    pub(crate) rules_version: &'a str,
+    pub(crate) stream: &'a Cover,
+    /// The head: the sequence decide sees.
+    pub(crate) head: u64,
+    pub(crate) recorded_at: Timestamp,
+    pub(crate) command_id: &'a Uuid,
+    pub(crate) correlation_id: &'a Uuid,
+    pub(crate) causation_id: Option<&'a EventRef>,
     /// Taken by [`Tx::conflicts`].
-    conflicts: Option<Conflicts<'a, D::Event>>,
+    pub(crate) conflicts: Option<Conflicts<'a, D::Event>>,
     /// The nonce decide gave back, if it did.
-    resolved: Option<Nonce>,
-    events: Vec<D::Event>,
+    pub(crate) resolved: Option<Nonce>,
+    pub(crate) events: Vec<D::Event>,
 }
 
 impl<'a, D: Domain> Tx<'a, D> {
@@ -181,8 +203,13 @@ impl<'a, D: Domain> Tx<'a, D> {
         self.rules
     }
 
+    /// The current rules' version, which the events are stamped with.
+    pub fn rules_version(&self) -> &'a str {
+        self.rules_version
+    }
+
     /// The stream being decided.
-    pub fn stream(&self) -> &'a StreamKey {
+    pub fn stream(&self) -> &'a Cover {
         self.stream
     }
 
@@ -193,19 +220,19 @@ impl<'a, D: Domain> Tx<'a, D> {
         self.recorded_at
     }
 
-    /// Who gave the command (the trigger's actor, for a policy's).
-    pub fn actor(&self) -> Option<&'a Actor> {
-        self.actor
+    /// The command's id.
+    pub fn command_id(&self) -> &'a Uuid {
+        self.command_id
     }
 
-    /// The command's correlation, resolved: never empty.
-    pub fn correlation(&self) -> &'a Correlation {
-        self.correlation
+    /// The command's correlation: never absent.
+    pub fn correlation_id(&self) -> &'a Uuid {
+        self.correlation_id
     }
 
-    /// Why the command exists.
-    pub fn origin(&self) -> &'a Origin {
-        self.origin
+    /// The triggering event, for a policy's command.
+    pub fn causation_id(&self) -> Option<&'a EventRef> {
+        self.causation_id
     }
 
     /// Under AGGREGATE_HANDLES, the window and the nonce, once; `None`
@@ -222,15 +249,15 @@ impl<'a, D: Domain> Tx<'a, D> {
         todo!("proposal: keep the nonce; the kernel compares it after decide returns")
     }
 
-    /// Stage an event and fold it into the staged state. Returns the seq it
-    /// will have if committed. The kernel stamps its meta.
-    pub fn emit(&mut self, event: D::Event) -> Seq {
+    /// Stage an event and fold it into the staged state. Returns the
+    /// sequence it will have if committed. The kernel stamps its meta.
+    pub fn emit(&mut self, event: D::Event) -> u64 {
         todo!("proposal: clone the state at the first emit, apply, stage")
     }
 
-    /// The seq the next emitted event will take.
-    pub fn next_seq(&self) -> Seq {
-        self.base + self.events.len() as Seq
+    /// The sequence the next emitted event will take.
+    pub fn next_sequence(&self) -> u64 {
+        self.head + self.events.len() as u64
     }
 
     /// Events emitted so far by this decide.
@@ -239,33 +266,40 @@ impl<'a, D: Domain> Tx<'a, D> {
     }
 }
 
-/// What a decide (or an ingest) staged: events stamped with their seqs and
-/// one shared meta, ready to append to the store and then commit to the
-/// stream it was decided against. Dropping it discards them.
+/// What a decide (or an ingest) staged: events stamped with their
+/// sequences and one shared `EventMeta`, ready to append to the store and
+/// then commit to the stream it was decided against. Dropping it discards
+/// them.
 #[must_use = "a decision changes nothing until it is committed"]
 pub struct Decision<D: Domain> {
-    pub(crate) stream: StreamKey,
-    /// The stream's length the decide read: the store's expected length,
-    /// and every event's base_sequence.
-    pub(crate) base: Seq,
+    pub(crate) stream: Cover,
+    /// The stream's head when decided: the store's expected sequence.
+    pub(crate) head: u64,
+    pub(crate) command_id: Uuid,
     pub(crate) events: Vec<Envelope<D::Event>>,
 }
 
 impl<D: Domain> Decision<D> {
-    pub fn stream(&self) -> &StreamKey {
+    pub fn stream(&self) -> &Cover {
         &self.stream
     }
 
-    /// The stream's length when it was decided: what an append expects.
-    pub fn base(&self) -> Seq {
-        self.base
+    /// The stream's head when it was decided: what an append expects.
+    pub fn head(&self) -> u64 {
+        self.head
+    }
+
+    pub fn command_id(&self) -> &Uuid {
+        &self.command_id
     }
 
     pub fn events(&self) -> &[Envelope<D::Event>] {
         &self.events
     }
 
-    /// Nothing to commit: a redelivery, or a command with nothing to do.
+    /// Nothing to commit. Such a decision leaves nothing to deduplicate by,
+    /// so the same command is decided again if it is redelivered (an
+    /// accepted cost).
     pub fn is_empty(&self) -> bool {
         self.events.is_empty()
     }

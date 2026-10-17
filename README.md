@@ -1,22 +1,22 @@
 # Annals
 
 Annals is an event-sourced, deterministic game engine: small Rust crates
-shared by card-game and tdautobattle. All but annals-log, annals-angzarr
-(and the test-only annals-catalog-check) have zero third-party
-dependencies.
+shared by card-game and tdautobattle. All but annals, annals-log (and the
+test-only annals-catalog-check) have zero third-party dependencies; annals
+depends on angzarr's wire types (angzarr-proto, prost, prost-types), which
+its proposed kernel operates on directly.
 Every error is localizable: a stable code and named args (see
 `annals-diagnostic`), with an en-US Fluent catalog per crate under
 `crates/<crate>/locales/`.
 
 | Crate | What it is |
 |---|---|
-| [`annals`](crates/annals) | event-sourcing kernel: decide, emit, apply, replay |
+| [`annals`](crates/annals) | event-sourcing kernel: decide, emit, apply, replay; `annals::next`, the audited kernel on angzarr's proto types (a proposal) |
 | [`annals-diagnostic`](crates/annals-diagnostic) | localizable errors: every error has a stable code and named args for a Fluent catalog |
 | [`annals-graph`](crates/annals-graph) | typed-id graph with tags, queries and Dijkstra search |
 | [`annals-yaml`](crates/annals-yaml) | a strict YAML subset, read and written; versioned documents with registered migrations |
 | [`annals-sim`](crates/annals-sim) | simulation parts on `annals`: per-entity dice, a folded tick scheduler, jobs as data, a parallel map, a Gherkin runner |
 | [`annals-log`](crates/annals-log) | a binary event-log format for `annals` streams: length-delimited protobuf (prost) |
-| [`annals-angzarr`](crates/annals-angzarr) | `annals` on angzarr's wire contract (angzarr-proto): books, provenance, `Any` payloads, type-URL upcasting, opaque storage rows (a proposal) |
 | [`annals-catalog-check`](crates/annals-catalog-check) | test-only: every error code has a message, with exactly its args, in every shipped Fluent catalog |
 
 ```
@@ -25,14 +25,14 @@ just lint       # buf lint + clippy
 just breaking   # buf breaking against main
 just fmt        # cargo fmt --all (just fmt-check changes nothing)
 just mutants    # cargo-mutants over the workspace; `just mutants annals` for one crate
-just wasm       # build annals and annals-angzarr for wasm32-unknown-unknown
+just wasm       # build annals for wasm32-unknown-unknown
 ```
 
-Every crate but annals-angzarr needs nothing beyond Rust to build, so it
-works as a git dependency with plain `cargo`. annals-angzarr depends on
-angzarr-proto, a git dependency whose build runs `protoc`, so building it
-(and so `cargo build --workspace`) also needs `protoc` on `PATH` and
-access to github.com. The `just` recipes also need
+annals depends on angzarr-proto, a git dependency whose build runs
+`protoc`, so building annals (and every crate that depends on it, and so
+`cargo build --workspace`) needs `protoc` on `PATH` and access to
+github.com. The crates that do not depend on annals need nothing beyond
+Rust. The `just` recipes also need
 [`just`](https://just.systems), [`buf`](https://buf.build) and
 `protoc-gen-prost` 0.5.0 (`cargo install protoc-gen-prost --version 0.5.0 --locked`)
 on `PATH`: they generate annals-log's protobuf types to check its

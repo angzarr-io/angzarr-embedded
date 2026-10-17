@@ -1,8 +1,11 @@
 # annals
 
-A small, deterministic event-sourcing engine. No third-party dependencies
-(only annals-diagnostic, for its errors), no I/O, no clock, and nothing
-specific to any game, so any game can build on it.
+A small, deterministic event-sourcing engine. No I/O, no clock, and nothing
+specific to any game, so any game can build on it. Its dependencies are
+annals-diagnostic (for its errors) and angzarr's wire types (angzarr-proto,
+with prost and prost-types), which the proposed kernel, `annals::next`,
+operates on directly; angzarr-proto is a git dependency whose build runs
+`protoc`.
 
 ## The model
 
@@ -87,16 +90,24 @@ impl Domain for Counter {
 
 ## Not yet
 
-- **The audited kernel** (`annals::next`, a proposal): streams keyed by
-  (domain, edition, root) with main as no edition, event metadata with an
-  always-set correlation and request id (16-byte UUIDs), pure decide
-  beside an infallible ingest for facts, conflict resolution (COMMUTATIVE
-  by generated conflict units), atomic command chains of policies, store
-  ports with a unit of work and fingerprinted claims, and snapshots
-  discarded on a rules-version mismatch. Its wire form is angzarr's, mapped by `annals-angzarr`. See
-  `docs/design/audit.md`.
+- **The audited kernel** (`annals::next`, a proposal) operates on
+  angzarr's proto types directly: a stream is a `Cover` (domain, edition,
+  root; main is the unset edition), a command a `CommandBook`, an event an
+  `EventPage` with its `EventMeta` (command id, causation, fact source,
+  correlation, recorded-at, rules version; no actor), every id a 16-byte
+  `UUID`. One domain-blind parse (`check`) checks a book and yields a
+  `Checked` with non-optional accessors; `identify` assigns its command id
+  and correlation; the in-process `Coordinator` deduplicates by command id
+  on the stream's events, loads the snapshot and events and resolves the
+  conflict resolution (COMMUTATIVE by default where the state declares
+  conflict units, else STRICT); then the command or fact is decoded
+  (upcast by type URL) and decided, or ingested with a read-only context.
+  Policies run in the same atomic chain, and the dead-letter queue is a
+  logger. The parse, identification, registry and payload packing are
+  implemented; the rest is `todo!()`. See `docs/design/audit.md`.
 
 - **Upcasting.** `Header::schema` is reserved and never read. Upcasting
-  arrives with `annals::next`, by payload type URL, in `annals-angzarr`.
+  arrives with `annals::next`, by payload type URL, for events and
+  (discouraged) commands.
 - **Snapshots** are deliberately absent from the root API. Folding is cheap
   at the sizes this is built for; `annals::next` specifies them.

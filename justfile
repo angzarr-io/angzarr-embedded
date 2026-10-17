@@ -3,7 +3,7 @@
 # feature) can compare the hand-written wire types with buf's output.
 #
 # Needs: buf (~/go/bin/buf) and protoc-gen-prost 0.5.0 on PATH, and protoc
-# (angzarr-proto, under annals-angzarr, runs it in its build script)
+# (angzarr-proto, under annals, runs it in its build script)
 #   cargo install protoc-gen-prost --version 0.5.0 --locked
 
 set windows-shell := ["bash", "-cu"]
@@ -37,7 +37,7 @@ breaking:
 # Build the crates that must run in a browser for wasm32-unknown-unknown.
 #   rustup target add wasm32-unknown-unknown
 wasm:
-    cargo build --release --target wasm32-unknown-unknown --package annals --package annals-angzarr
+    cargo build --release --target wasm32-unknown-unknown --package annals
 
 # Format the Rust.
 fmt:

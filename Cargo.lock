@@ -14,8 +14,9 @@ dependencies = [
 [[package]]
 name = "angzarr-proto"
 version = "0.1.0"
-source = "git+https://github.com/angzarr-io/angzarr-project?rev=7956dc8f665bc5a674167024c67293e90c830d08#7956dc8f665bc5a674167024c67293e90c830d08"
+source = "git+https://github.com/angzarr-io/angzarr-project?rev=eec66762023dcc4ba1ca213a3295d6b5014b8ed5#eec66762023dcc4ba1ca213a3295d6b5014b8ed5"
 dependencies = [
+ "bytes",
  "prost",
  "prost-build",
  "prost-types",
@@ -26,15 +27,7 @@ dependencies = [
 name = "annals"
 version = "0.1.0"
 dependencies = [
- "annals-diagnostic",
-]
-
-[[package]]
-name = "annals-angzarr"
-version = "0.1.0"
-dependencies = [
  "angzarr-proto",
- "annals",
  "annals-diagnostic",
  "prost",
  "prost-types",

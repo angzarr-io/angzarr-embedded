@@ -1,30 +1,34 @@
 //! Conflict units: what COMMUTATIVE compares, exactly as angzarr defines
 //! them (`options.proto`, the `conflict_units` region).
 //!
-//! A state message opts in with `option (io.angzarr.v1.commutative_state)
-//! = true` and marks each field with `(io.angzarr.v1.conflict)`. From those
-//! markers a generator (angzarr's `protoc-gen-angzarr-conflict`, one plugin
-//! for every language, backlog CR-1) emits, per marked state message, the
-//! pure function
+//! A state message lists COMMUTATIVE in its `(io.angzarr.v1.state)` option
+//! and marks its fields with `(io.angzarr.v1.conflict)`. From those markers
+//! angzarr's generator (`angzarr_build::compile` for Rust, backlog CR-1)
+//! emits, per state message, a [`State`](super::State) impl: the
+//! `StateDescriptor` it registers with, and the pure function
 //!
 //! ```text
 //! changed(before, after) -> the unit paths whose values differ
 //! ```
 //!
-//! For Rust, and so for annals, that function is an
-//! `impl CommutativeState for State` ([`CommutativeState::changed`]), and a
-//! domain whose state has one names it in [`Domain::COMMUTATIVE`]. Business
-//! code never writes it: the generated code shares angzarr's semantics
-//! table and is held to the same golden parity suite as every client
-//! library, so a state resolves identically under both runtimes. The only
-//! hand-written implementations are test fixtures standing in for
-//! generated code.
+//! Business code never writes it: the generated code shares angzarr's
+//! semantics table and is held to the same golden parity suite as every
+//! client library, so a state resolves identically under both runtimes.
+//! The only hand-written implementations are test fixtures standing in for
+//! generated code, until the generator exists.
 //!
 //! This module is the generated code's interface: the path type it builds
 //! ([`UnitPath`], with [`Key`]), the set it returns ([`Units`]), and the
 //! overlap rule the kernel applies to two sets.
 //!
-//! [`Domain::COMMUTATIVE`]: super::Domain::COMMUTATIVE
+//! **The risk.** decide runs on the head, so the invariants it checks still
+//! hold; what no structural comparison sees is a value derived from, or
+//! meaningful only together with, another unit (a total over items, two
+//! fields that must change together). That is a modelling failure, fixed
+//! by putting dependent data in one unit (mark the containing message
+//! without `descend`), deriving the value in decide or a projection rather
+//! than storing it, or sending that command STRICT. angzarr's
+//! `docs/guide/state-and-conflicts.md` shows the failures and the fixes.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -115,7 +119,7 @@ impl fmt::Display for UnitPath {
     }
 }
 
-/// The units one change touched: what [`CommutativeState::changed`]
+/// The units one change touched: what [`State::changed`](super::State::changed)
 /// returns. Ordered, so the kernel stays deterministic.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Units(BTreeSet<UnitPath>);
@@ -147,30 +151,17 @@ impl Units {
     }
 }
 
+impl Units {
+    /// The set a state with no conflict units changes on any change: the
+    /// top-level wildcard alone, which overlaps every non-empty set. The
+    /// default [`State::changed`](super::State::changed).
+    pub fn everything() -> Units {
+        Units::from_iter([UnitPath::unknown()])
+    }
+}
+
 impl FromIterator<UnitPath> for Units {
     fn from_iter<I: IntoIterator<Item = UnitPath>>(iter: I) -> Units {
         Units(iter.into_iter().collect())
     }
-}
-
-/// A state message marked `(commutative_state)`: implemented by generated
-/// code only, from the `(conflict)` markers (see the module docs).
-pub trait CommutativeState {
-    /// The units whose values differ between `before` and `after`, by the
-    /// `conflict_units` table: per field kind (a scalar, an optional with
-    /// presence, a whole or descended message, a map per key, a keyed list
-    /// per element plus `[#order]` if ordered, a list or a oneof whole),
-    /// floats compared bitwise, the non-unique-key fallback to the whole
-    /// list, the descend depth bound of 32, and the **fail-safe wildcard**
-    /// for every unmarked or unknown field that differs. Pure.
-    fn changed(before: &Self, after: &Self) -> Units;
-}
-
-/// The diff a domain names in [`Domain::COMMUTATIVE`](super::Domain::COMMUTATIVE).
-pub type Changed<S> = fn(&S, &S) -> Units;
-
-/// `S`'s generated diff, for [`Domain::COMMUTATIVE`](super::Domain::COMMUTATIVE):
-/// `const COMMUTATIVE: Option<Changed<ListState>> = commutative::<ListState>();`.
-pub const fn commutative<S: CommutativeState>() -> Option<Changed<S>> {
-    Some(S::changed)
 }

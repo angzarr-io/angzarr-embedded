@@ -25,14 +25,8 @@ fn samples() -> Vec<(&'static str, Vec<Box<dyn Diagnostic>>)> {
     ]
 }
 
-/// Crates that define no codes of their own. annals-angzarr is a proposal
-/// whose errors gain codes and samples with its implementation.
-const NO_CODES: &[&str] = &[
-    "annals-angzarr",
-    "annals-catalog-check",
-    "annals-diagnostic",
-    "annals-sim",
-];
+/// Crates that define no codes of their own.
+const NO_CODES: &[&str] = &["annals-catalog-check", "annals-diagnostic", "annals-sim"];
 
 fn crates_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

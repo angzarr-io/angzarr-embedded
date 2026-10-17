@@ -3,312 +3,338 @@
 //! The event store is the application's database (Postgres, for hatpick)
 //! behind this port; there is no other event-store infrastructure.
 //!
-//! A command chain touches several streams and commits them all or none,
-//! so the port is a **unit of work**: a database transaction. The
-//! application opens one and hands it to the command handler
-//! ([`handle`](super::handle)), which reads through it, appends every
-//! staged stream through it once the whole chain has succeeded, and then
-//! [`UnitOfWork::commit`]s it. Dropping it uncommitted rolls everything
-//! back. The methods take `&mut self`, as a transaction does. One adapter
-//! type implements [`EventStore`] once per event type it stores (a list
-//! table, a draw-system table) and [`UnitOfWork`] once.
+//! **Opaque.** A store holds angzarr's own pages: per event, the
+//! [`EventPage`] as written (its payload `Any`, its `EventMeta`, its
+//! sequence), under its stream's [`Cover`]. It never decodes a payload, and
+//! nothing stored is ever rewritten: upcasting happens on every read, in
+//! the kernel. A database keeps the page bytes and copies the metadata into
+//! typed columns:
 //!
-//! A store holds streams and nothing else, each under its full
-//! [`StreamKey`] (domain, edition, root). It answers three ways: the stream
-//! (or `None`: no such stream), a refusal it is sure of
-//! ([`StoreError::Conflict`], a caller bug), or a failure:
-//! [`StoreError::Unavailable`] (it could not say) or
-//! [`StoreError::Unreadable`] (it holds an event it cannot give back). An
-//! I/O failure is never "no such stream".
+//! | column | from |
+//! |---|---|
+//! | `domain`, `edition`, `root` | the cover; `edition` NULL for main; `root` a `uuid` |
+//! | `sequence` | `EventPage.sequence` (64-bit) |
+//! | `type_url` | the payload's type URL as written, before any upcast |
+//! | `page` | the `EventPage` bytes as written |
+//! | `command_id`, `correlation_id` | `EventMeta`'s, Postgres `uuid` |
+//! | `cause_domain`, `cause_edition`, `cause_root`, `cause_sequence` | `EventMeta.causation_id`, NULL unless a policy's command produced it |
+//! | `external_id` | `EventMeta.fact.external_id`, NULL unless a fact produced it |
+//! | `recorded_at`, `rules_version` | the rest of `EventMeta` |
 //!
-//! `E` is whatever the store hands the kernel. A typed store holds a
-//! domain's events; an opaque one (`annals-angzarr`'s, over a database's
-//! rows of type URL, page bytes and metadata columns) decodes and upcasts on
-//! read and encodes on append, so the kernel only ever sees current events.
+//! with a unique key on (`domain`, `edition`, `root`, `sequence`) and a
+//! **non-unique index on (`domain`, `edition`, `root`, `command_id`)**: the
+//! deduplication lookup ([`EventStore::find_command`]). Not unique, because
+//! one command may produce several events. There is no commands table and
+//! no claim: "already applied?" is "does the stream hold events with this
+//! command id?", atomic with the append because the id is written with the
+//! events. The accepted costs: a decision that emitted nothing leaves
+//! nothing to find, so it is decided again on redelivery; a command id
+//! reused for a different command goes undetected (it is answered with the
+//! first command's events); deduplication is forever.
+//!
+//! A command chain touches several streams and commits them all or none, so
+//! the port is a **unit of work**: a database transaction. The application
+//! opens one and hands it to the [`Kernel`](super::Kernel), which reads
+//! through it, appends every staged stream once the whole chain has
+//! succeeded, and then [`UnitOfWork::commit`]s it. Dropping it uncommitted
+//! rolls everything back.
+//!
+//! A store answers three ways: the stream (or `None`: no such stream), a
+//! refusal it is sure of ([`StoreError::Conflict`], a caller bug), or a
+//! failure: [`StoreError::Unavailable`] (it could not say). An I/O failure
+//! is never "no such stream". Snapshots live beside the events; a store
+//! keeps the newest per stream.
 
 use std::collections::BTreeMap;
 use std::future::Future;
 
-use super::error::StoreError;
-use super::id::{Fingerprint, Seq, StreamKey};
-use super::meta::Origin;
-use super::stream::Envelope;
+use angzarr_proto::v1::{Cover, EventPage, EventRef, Snapshot, Uuid};
+use prost_types::Timestamp;
 
-/// Part of a stream, from a seq on.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Slice<E> {
-    pub key: StreamKey,
-    /// The stream's length when read: `events` ends there.
-    pub len: Seq,
-    pub events: Vec<Envelope<E>>,
+use super::error::StoreError;
+
+/// Part of a stream, from a sequence on.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Slice {
+    pub stream: Cover,
+    /// The stream's next sequence when read: `pages` ends there.
+    pub next_sequence: u64,
+    /// The `recorded_at` of the stream's last event, whatever `from` was:
+    /// the floor for the next event's.
+    pub last_recorded_at: Option<Timestamp>,
+    pub pages: Vec<EventPage>,
 }
 
-/// Where streams are kept, synchronously. `E` is what the store hands the
-/// kernel: a domain's current events (see the module docs).
-pub trait EventStore<E> {
-    /// Append `events` to the stream `key` names, creating it if `expected`
-    /// is 0 and it does not exist. Refuses (appending nothing) a stream not
-    /// at `expected` ([`StoreError::Conflict`]) and events whose seqs do not
-    /// run on from `expected` ([`StoreError::Discontinuous`]). Returns the
-    /// new length.
+/// Where streams are kept, synchronously.
+pub trait EventStore {
+    /// Append `pages` to `stream`, creating it if `expected` is 0 and it does
+    /// not exist. Refuses (appending nothing) a stream not at `expected`
+    /// ([`StoreError::Conflict`]) and pages whose sequences do not run on
+    /// from `expected` ([`StoreError::Discontinuous`]). Returns the new
+    /// length.
     fn append(
         &mut self,
-        key: &StreamKey,
-        expected: Seq,
-        events: &[Envelope<E>],
-    ) -> Result<Seq, StoreError>;
+        stream: &Cover,
+        expected: u64,
+        pages: &[EventPage],
+    ) -> Result<u64, StoreError>;
 
-    /// The stream's events from seq `from` on: none when
-    /// `from` is at or past its end. `None` when there is no such stream.
-    fn read_from(&mut self, key: &StreamKey, from: Seq) -> Result<Option<Slice<E>>, StoreError>;
+    /// The stream's pages from sequence `from` on: none when `from` is at or
+    /// past its end. `None` when there is no such stream.
+    fn read_from(&mut self, stream: &Cover, from: u64) -> Result<Option<Slice>, StoreError>;
 
     /// The whole stream.
-    fn read(&mut self, key: &StreamKey) -> Result<Option<Slice<E>>, StoreError> {
-        self.read_from(key, 0)
+    fn read(&mut self, stream: &Cover) -> Result<Option<Slice>, StoreError> {
+        self.read_from(stream, 0)
     }
-}
 
-/// One applied command, recorded under its key: angzarr's
-/// `IdempotencyClaim`, scoped to the addressed stream.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Claim {
-    /// The key: a client-supplied request's id alone, or a fact's
-    /// external id. Only the key fields are compared; a fact's description
-    /// is not part of it.
-    pub origin: Origin,
-    /// The payload's fingerprint as received (a UUIDv5, 16 bytes).
-    pub fingerprint: Fingerprint,
-    /// The applied range, `from..to` in the stream (possibly empty: a
-    /// command with nothing to do is applied too).
-    pub from: Seq,
-    pub to: Seq,
-}
+    /// The pages of `stream` whose `EventMeta.command_id` is `command_id`,
+    /// in sequence order: the deduplication lookup, over the index on
+    /// (stream, command_id). Empty when the command never applied there, or
+    /// applied and produced nothing.
+    fn find_command(
+        &mut self,
+        stream: &Cover,
+        command_id: &Uuid,
+    ) -> Result<Vec<EventPage>, StoreError>;
 
-/// A transaction over one or more [`EventStore`]s: what it appended lands
-/// at [`UnitOfWork::commit`], all at once, or (dropped) not at all.
-///
-/// **Idempotency, optional.** annals keeps no idempotency key store: a
-/// chain is in process and atomic, with no at-least-once bus inside it, so
-/// nothing in it is redelivered. Two edges remain, and both are answered
-/// here, by the command handler calling [`UnitOfWork::record_command`] for
-/// the originating book when its origin is keyed ([`Origin::is_keyed`]),
-/// in the same unit of work as its events:
-///
-/// - a **webhook fact** redelivered by its source: unique on (stream,
-///   `external_id`);
-/// - an **HTTP retry** of a request with a client-supplied id: unique on
-///   (stream, request id), for a server that wants retry safety. A request
-///   id names one command; there is no index.
-///
-/// A minted request id is never recorded, and neither is a causation (a
-/// chain's reactions commit with it, so nothing redelivers them). Each
-/// claim records the payload's [`Fingerprint`], as angzarr's does. A key
-/// already recorded is refused, the same way for every kind of key:
-///
-/// - with the same fingerprint: [`StoreError::Duplicate`] with the range
-///   recorded then (angzarr's DUPLICATE: the retry becomes a read);
-/// - with another fingerprint: [`StoreError::KeyReused`], with that range
-///   too. The store does not judge it: the kernel refuses it for a request
-///   (angzarr's FAILED_PRECONDITION: the key was reused for a different
-///   command) and, by default, for a fact; a fact whose domain configures
-///   [`FactMismatch::Duplicate`](super::FactMismatch::Duplicate) it
-///   answers [`StoreError::DivergentDuplicate`] instead.
-///
-/// Either way the unit of work is dropped. Only applied commands are
-/// recorded; a rejection writes nothing, so it may be retried. The default
-/// records nothing.
-pub trait UnitOfWork {
-    fn commit(self) -> Result<(), StoreError>;
+    /// The pages of `stream` that a process manager wrote in reaction to
+    /// `trigger` (`EventMeta.produced_by.triggering_event`), in sequence
+    /// order: a process manager's deduplication lookup within its own
+    /// stream, over an index on (stream, triggering event). annals has no
+    /// process manager yet, and at eec6676 the page has no field to find
+    /// it by, so nothing is found by default; implemented with the re-pin.
+    fn find_triggered(
+        &mut self,
+        stream: &Cover,
+        trigger: &EventRef,
+    ) -> Result<Vec<EventPage>, StoreError> {
+        Ok(Vec::new())
+    }
 
-    /// Record `claim` against `stream`, or refuse a key already recorded
-    /// there ([`StoreError::Duplicate`], [`StoreError::KeyReused`]).
-    /// Records nothing by default.
-    fn record_command(&mut self, stream: &StreamKey, claim: &Claim) -> Result<(), StoreError> {
+    /// The newest snapshot of `stream`, if any. None kept by default. The
+    /// kernel checks it is usable ([`Registry::snapshot_usable`](super::Registry::snapshot_usable)).
+    fn read_snapshot(&mut self, stream: &Cover) -> Result<Option<Snapshot>, StoreError> {
+        Ok(None)
+    }
+
+    /// Keep `snapshot` as `stream`'s newest, replacing the one before.
+    /// Discarded by default.
+    fn write_snapshot(&mut self, stream: &Cover, snapshot: &Snapshot) -> Result<(), StoreError> {
         Ok(())
     }
 }
 
-/// [`UnitOfWork`], async. Its future is `Send`, like the async store's.
-pub trait AsyncUnitOfWork {
-    fn commit(self) -> impl Future<Output = Result<(), StoreError>> + Send;
+/// A transaction over an [`EventStore`]: what it appended lands at
+/// [`UnitOfWork::commit`], all at once, or (dropped) not at all. Reads
+/// through it see its own appends.
+pub trait UnitOfWork: EventStore {
+    fn commit(self) -> Result<(), StoreError>;
+}
 
-    /// As [`UnitOfWork::record_command`].
-    fn record_command(
+/// [`EventStore`], async: for a database driver. Native return-position
+/// `impl Future` in a trait, no runtime; an adapter writes its methods as
+/// plain `async fn`.
+///
+/// The futures are required to be **`Send`**, so the command handler's
+/// future is too, and a server on tokio's multi-threaded runtime can spawn
+/// it. A single-threaded adapter whose futures are not `Send` (a browser's
+/// IndexedDB) implements the synchronous [`EventStore`] instead.
+pub trait AsyncEventStore {
+    /// As [`EventStore::append`].
+    fn append(
         &mut self,
-        stream: &StreamKey,
-        claim: &Claim,
+        stream: &Cover,
+        expected: u64,
+        pages: &[EventPage],
+    ) -> impl Future<Output = Result<u64, StoreError>> + Send;
+
+    /// As [`EventStore::read_from`].
+    fn read_from(
+        &mut self,
+        stream: &Cover,
+        from: u64,
+    ) -> impl Future<Output = Result<Option<Slice>, StoreError>> + Send;
+
+    /// As [`EventStore::find_command`].
+    fn find_command(
+        &mut self,
+        stream: &Cover,
+        command_id: &Uuid,
+    ) -> impl Future<Output = Result<Vec<EventPage>, StoreError>> + Send;
+
+    /// As [`EventStore::read_snapshot`].
+    fn read_snapshot(
+        &mut self,
+        stream: &Cover,
+    ) -> impl Future<Output = Result<Option<Snapshot>, StoreError>> + Send {
+        async { Ok(None) }
+    }
+
+    /// As [`EventStore::write_snapshot`].
+    fn write_snapshot(
+        &mut self,
+        stream: &Cover,
+        snapshot: &Snapshot,
     ) -> impl Future<Output = Result<(), StoreError>> + Send {
         async { Ok(()) }
     }
 }
 
-/// [`EventStore`], async: for a database driver. Native return-position
-/// `impl Future` in a trait (Rust 1.75), no runtime and no dependency;
-/// an adapter writes its methods as plain `async fn`.
-///
-/// The futures are required to be **`Send`**, so the command handler's
-/// future is too, and a server on tokio's multi-threaded runtime (or
-/// tonic) can spawn it. A single-threaded adapter whose futures are not
-/// `Send` (a browser's IndexedDB) cannot implement this; it implements the
-/// synchronous [`EventStore`] instead, or a `!Send` twin of this trait
-/// added beside it if one is ever needed.
-pub trait AsyncEventStore<E> {
-    /// As [`EventStore::append`].
-    fn append(
-        &mut self,
-        key: &StreamKey,
-        expected: Seq,
-        events: &[Envelope<E>],
-    ) -> impl Future<Output = Result<Seq, StoreError>> + Send;
-
-    /// As [`EventStore::read_from`].
-    fn read_from(
-        &mut self,
-        key: &StreamKey,
-        from: Seq,
-    ) -> impl Future<Output = Result<Option<Slice<E>>, StoreError>> + Send;
-
-    /// As [`EventStore::read`].
-    fn read(
-        &mut self,
-        key: &StreamKey,
-    ) -> impl Future<Output = Result<Option<Slice<E>>, StoreError>> + Send {
-        self.read_from(key, 0)
-    }
+/// [`UnitOfWork`], async. Its future is `Send`, like the async store's.
+pub trait AsyncUnitOfWork: AsyncEventStore {
+    fn commit(self) -> impl Future<Output = Result<(), StoreError>> + Send;
 }
 
 /// A synchronous store served through the async port, every future ready
 /// at once.
 pub struct Ready<S>(pub S);
 
-impl<E: Sync, S: EventStore<E> + Send> AsyncEventStore<E> for Ready<S> {
+impl<S: EventStore + Send> AsyncEventStore for Ready<S> {
     async fn append(
         &mut self,
-        key: &StreamKey,
-        expected: Seq,
-        events: &[Envelope<E>],
-    ) -> Result<Seq, StoreError> {
-        self.0.append(key, expected, events)
+        stream: &Cover,
+        expected: u64,
+        pages: &[EventPage],
+    ) -> Result<u64, StoreError> {
+        self.0.append(stream, expected, pages)
     }
 
-    async fn read_from(
+    async fn read_from(&mut self, stream: &Cover, from: u64) -> Result<Option<Slice>, StoreError> {
+        self.0.read_from(stream, from)
+    }
+
+    async fn find_command(
         &mut self,
-        key: &StreamKey,
-        from: Seq,
-    ) -> Result<Option<Slice<E>>, StoreError> {
-        self.0.read_from(key, from)
+        stream: &Cover,
+        command_id: &Uuid,
+    ) -> Result<Vec<EventPage>, StoreError> {
+        self.0.find_command(stream, command_id)
+    }
+
+    async fn read_snapshot(&mut self, stream: &Cover) -> Result<Option<Snapshot>, StoreError> {
+        self.0.read_snapshot(stream)
+    }
+
+    async fn write_snapshot(
+        &mut self,
+        stream: &Cover,
+        snapshot: &Snapshot,
+    ) -> Result<(), StoreError> {
+        self.0.write_snapshot(stream, snapshot)
     }
 }
-
-/// One stream as [`InMemoryStore`] holds it.
-type Held<E> = Vec<Envelope<E>>;
 
 impl<S: UnitOfWork + Send> AsyncUnitOfWork for Ready<S> {
     async fn commit(self) -> Result<(), StoreError> {
         self.0.commit()
     }
-
-    async fn record_command(
-        &mut self,
-        stream: &StreamKey,
-        claim: &Claim,
-    ) -> Result<(), StoreError> {
-        self.0.record_command(stream, claim)
-    }
 }
 
-/// The recorded claims, by stream and key: the origin with a fact's
-/// description cleared, since it is not part of the key.
-type Claims = BTreeMap<(StreamKey, Origin), Claim>;
+/// A stream's place in an [`InMemoryStore`]: its cover's fields, ordered,
+/// since prost's `Cover` has no ordering of its own.
+type Key = (String, Option<String>, Vec<u8>);
 
-/// Streams held in memory, in key order, and the keys its units of work
-/// recorded. Checks everything a real store must, so tests catch what
-/// production would.
-pub struct InMemoryStore<E> {
-    streams: BTreeMap<StreamKey, Held<E>>,
-    claims: Claims,
+/// One stream as [`InMemoryStore`] holds it.
+struct Held {
+    stream: Cover,
+    pages: Vec<EventPage>,
+    snapshot: Option<Snapshot>,
 }
 
-impl<E> Default for InMemoryStore<E> {
-    fn default() -> Self {
-        InMemoryStore {
-            streams: BTreeMap::new(),
-            claims: BTreeMap::new(),
-        }
-    }
+/// Streams held in memory, in key order. Checks everything a real store
+/// must, so tests catch what production would.
+#[derive(Default)]
+pub struct InMemoryStore {
+    streams: BTreeMap<Key, Held>,
 }
 
-impl<E> InMemoryStore<E> {
+impl InMemoryStore {
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Every stream key, in order.
-    pub fn keys(&self) -> Vec<StreamKey> {
-        self.streams.keys().cloned().collect()
-    }
-}
-
-impl<E: Clone> EventStore<E> for InMemoryStore<E> {
-    fn append(
-        &mut self,
-        key: &StreamKey,
-        expected: Seq,
-        events: &[Envelope<E>],
-    ) -> Result<Seq, StoreError> {
-        todo!("proposal: check length and continuity, then extend")
+    /// Every stream's cover, in key order.
+    pub fn covers(&self) -> Vec<Cover> {
+        self.streams.values().map(|h| h.stream.clone()).collect()
     }
 
-    fn read_from(&mut self, key: &StreamKey, from: Seq) -> Result<Option<Slice<E>>, StoreError> {
-        todo!("proposal: clone the tail")
-    }
-}
-
-impl<E: Clone> InMemoryStore<E> {
     /// A unit of work over this store: appends are held until
     /// [`UnitOfWork::commit`], and reads see them.
-    pub fn begin(&mut self) -> InMemoryTx<'_, E> {
+    pub fn begin(&mut self) -> InMemoryTx<'_> {
         InMemoryTx {
             store: self,
             pending: BTreeMap::new(),
-            claims: BTreeMap::new(),
         }
     }
 }
 
-/// A unit of work over an [`InMemoryStore`]. See [`InMemoryStore::begin`].
-pub struct InMemoryTx<'s, E> {
-    store: &'s mut InMemoryStore<E>,
-    pending: BTreeMap<StreamKey, Held<E>>,
-    claims: Claims,
-}
-
-impl<E: Clone> EventStore<E> for InMemoryTx<'_, E> {
+impl EventStore for InMemoryStore {
     fn append(
         &mut self,
-        key: &StreamKey,
-        expected: Seq,
-        events: &[Envelope<E>],
-    ) -> Result<Seq, StoreError> {
+        stream: &Cover,
+        expected: u64,
+        pages: &[EventPage],
+    ) -> Result<u64, StoreError> {
+        todo!("proposal: check length and continuity, then extend")
+    }
+
+    fn read_from(&mut self, stream: &Cover, from: u64) -> Result<Option<Slice>, StoreError> {
+        todo!("proposal: clone the tail, with the last recorded_at")
+    }
+
+    fn find_command(
+        &mut self,
+        stream: &Cover,
+        command_id: &Uuid,
+    ) -> Result<Vec<EventPage>, StoreError> {
+        todo!("proposal: the pages whose meta's command_id matches")
+    }
+
+    fn read_snapshot(&mut self, stream: &Cover) -> Result<Option<Snapshot>, StoreError> {
+        todo!("proposal: the held snapshot")
+    }
+
+    fn write_snapshot(&mut self, stream: &Cover, snapshot: &Snapshot) -> Result<(), StoreError> {
+        todo!("proposal: replace the held snapshot")
+    }
+}
+
+/// A unit of work over an [`InMemoryStore`]. See [`InMemoryStore::begin`].
+pub struct InMemoryTx<'s> {
+    store: &'s mut InMemoryStore,
+    pending: BTreeMap<Key, Vec<EventPage>>,
+}
+
+impl EventStore for InMemoryTx<'_> {
+    fn append(
+        &mut self,
+        stream: &Cover,
+        expected: u64,
+        pages: &[EventPage],
+    ) -> Result<u64, StoreError> {
         todo!("proposal: check against store + pending, hold in pending")
     }
 
-    fn read_from(&mut self, key: &StreamKey, from: Seq) -> Result<Option<Slice<E>>, StoreError> {
+    fn read_from(&mut self, stream: &Cover, from: u64) -> Result<Option<Slice>, StoreError> {
         todo!("proposal: the store's stream with pending appends after it")
+    }
+
+    fn find_command(
+        &mut self,
+        stream: &Cover,
+        command_id: &Uuid,
+    ) -> Result<Vec<EventPage>, StoreError> {
+        todo!("proposal: the store's and pending pages whose command_id matches")
+    }
+
+    fn read_snapshot(&mut self, stream: &Cover) -> Result<Option<Snapshot>, StoreError> {
+        self.store.read_snapshot(stream)
     }
 }
 
-impl<E: Clone> UnitOfWork for InMemoryTx<'_, E> {
+impl UnitOfWork for InMemoryTx<'_> {
     fn commit(self) -> Result<(), StoreError> {
-        todo!("proposal: move pending and the claims into the store")
-    }
-
-    /// Records every claim: unique on (stream, key), the key being the
-    /// origin's key fields (a request's id alone, a fact's external id
-    /// alone). A repeat is [`StoreError::Duplicate`] with the same
-    /// fingerprint, [`StoreError::KeyReused`] with another, whatever the
-    /// kind of key.
-    fn record_command(&mut self, stream: &StreamKey, claim: &Claim) -> Result<(), StoreError> {
-        todo!("proposal: compare with the store's or this unit's claim for the key, else hold it")
+        todo!("proposal: move pending into the store")
     }
 }
