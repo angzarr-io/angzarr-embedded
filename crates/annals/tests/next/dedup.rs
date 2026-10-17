@@ -14,7 +14,6 @@ fn deposit(n: u128, cents: i64) -> annals::next::v1::CommandBook {
 }
 
 #[test]
-#[ignore = "proposal: a retried command is answered DUPLICATE with its events, and nothing runs"]
 fn a_retried_command_is_a_duplicate_answered_with_its_events() {
     let registry = registry();
     let mut store = InMemoryStore::new();
@@ -45,7 +44,6 @@ fn a_retried_command_is_a_duplicate_answered_with_its_events() {
 }
 
 #[test]
-#[ignore = "proposal: a decision that emitted nothing leaves nothing to find, so it is decided again"]
 fn a_zero_event_decision_is_decided_again() {
     let registry = registry();
     let mut store = InMemoryStore::new();
@@ -78,7 +76,6 @@ fn a_zero_event_decision_is_decided_again() {
 }
 
 #[test]
-#[ignore = "proposal: a command id reused for another command goes undetected"]
 fn a_reused_command_id_with_another_payload_is_answered_with_the_first() {
     let registry = registry();
     let mut store = InMemoryStore::new();
@@ -99,7 +96,6 @@ fn a_reused_command_id_with_another_payload_is_answered_with_the_first() {
 }
 
 #[test]
-#[ignore = "proposal: deduplication is per addressed stream"]
 fn the_same_command_id_to_another_stream_is_another_command() {
     let registry = registry();
     let mut store = InMemoryStore::new();
@@ -113,7 +109,6 @@ fn the_same_command_id_to_another_stream_is_another_command() {
 }
 
 #[test]
-#[ignore = "proposal: a redelivered webhook fact is found by its derived command id"]
 fn a_redelivered_fact_is_a_duplicate() {
     let registry = registry();
     let mut store = InMemoryStore::new();
@@ -140,7 +135,6 @@ fn a_redelivered_fact_is_a_duplicate() {
 }
 
 #[test]
-#[ignore = "proposal: a rejection writes nothing, so a retry runs business code again"]
 fn a_rejection_leaves_nothing_and_a_retry_runs_again() {
     let registry = registry();
     let mut store = InMemoryStore::new();

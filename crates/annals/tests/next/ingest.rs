@@ -18,7 +18,6 @@ fn payment(cents: i64, external_id: &str) -> CommandBook {
 }
 
 #[test]
-#[ignore = "proposal: ingest reads its recorded instant, ids, source and rules from a read-only context"]
 fn ingest_gets_a_read_only_context() {
     let registry = registry();
     let mut store = InMemoryStore::new();
@@ -47,7 +46,6 @@ fn ingest_gets_a_read_only_context() {
 }
 
 #[test]
-#[ignore = "proposal: a fact the domain cannot use is recorded, never refused"]
 fn a_fact_is_never_refused() {
     let registry = registry();
     let mut store = InMemoryStore::new();
@@ -71,7 +69,6 @@ fn a_fact_is_never_refused() {
 }
 
 #[test]
-#[ignore = "proposal: a fact is always stamped at the head, never checked or resolved"]
 fn a_fact_is_stamped_at_the_head() {
     let registry = registry();
     let mut store = InMemoryStore::new();

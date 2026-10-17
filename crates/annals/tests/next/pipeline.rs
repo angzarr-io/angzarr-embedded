@@ -18,7 +18,6 @@ fn deposit(n: u128) -> annals::next::v1::CommandBook {
 }
 
 #[test]
-#[ignore = "proposal: dedup runs before the sequence check: an applied STRICT retry is DUPLICATE, not stale"]
 fn an_applied_strict_retry_is_a_duplicate_never_stale() {
     let registry = registry();
     let mut store = InMemoryStore::new();
@@ -57,7 +56,6 @@ fn an_applied_strict_retry_is_a_duplicate_never_stale() {
 }
 
 #[test]
-#[ignore = "proposal: validation runs before deduplication"]
 fn a_malformed_retry_of_an_applied_command_is_still_malformed() {
     let registry = registry();
     let mut store = InMemoryStore::new();
@@ -80,7 +78,6 @@ fn a_malformed_retry_of_an_applied_command_is_still_malformed() {
 }
 
 #[test]
-#[ignore = "proposal: decoding runs after deduplication and after the sequence check"]
 fn an_unknown_command_type_is_refused_at_decode() {
     let registry = registry();
     let mut store = InMemoryStore::new();
@@ -125,7 +122,6 @@ fn an_unknown_command_type_is_refused_at_decode() {
 }
 
 #[test]
-#[ignore = "proposal: the coordinator's steps take only the previous step's output"]
 fn the_coordinator_runs_dedup_then_load_then_decode() {
     let registry = registry();
     let mut store = InMemoryStore::new();

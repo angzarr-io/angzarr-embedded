@@ -641,12 +641,8 @@ impl Identified {
     /// key), fact source and correlation, the instant it is recorded at and
     /// the rules version it is decided under. No actor: who did it belongs
     /// in a security log. No trigger: a reaction's events name their
-    /// command, not what the command reacted to.
-    //
-    // Trace hook (not yet wired; annals has no tracing dependency): for a
-    // reaction, the edge `causation_id` -> `command_id` is what a span or a
-    // log line records (angzarr backlog PS-6), at the point the chain
-    // dispatches the policy's command.
+    /// command, not what the command reacted to; the chain reports that
+    /// edge to the application's [`TriggerLog`](super::TriggerLog).
     pub fn meta(&self, recorded_at: Timestamp, rules_version: &str) -> EventMeta {
         EventMeta {
             causation: Some(event_meta::Causation::CommandId(self.command_id.clone())),

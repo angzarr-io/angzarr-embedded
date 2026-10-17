@@ -40,12 +40,14 @@
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
 
-use angzarr_proto::v1::{Cover, EventRef, Uuid};
+use angzarr_proto::v1::{command_page, Command, CommandBook, CommandPage, Cover, EventRef, Uuid};
 
-use super::check::{Checked, Malformed};
+use super::check::{check_reaction, Checked, Malformed};
+use super::dead_letter::{write_dead_letter, DeadLetterLog};
 use super::domain::Domain;
 use super::error::KernelError;
 use super::handler::{Committed, Handler, Position};
+use super::payload::Payload;
 use super::registry::Registry;
 use super::stream::Stream;
 
@@ -160,10 +162,41 @@ impl<P: Policy> Order<P> {
     /// the target's cover, the command packed as `Any`, no ids, no
     /// handling. Malformed only by a bug (a policy or kernel one).
     pub(crate) fn check(&self, registry: &Registry) -> Result<Checked, Malformed> {
-        todo!(
-            "proposal: build the CommandBook, then \
-             check_reaction(trigger, P::NAME, index, correlation)"
+        check_reaction(
+            self.book(),
+            registry,
+            self.trigger.clone(),
+            P::NAME,
+            self.index,
+            self.correlation_id.clone(),
         )
+    }
+
+    /// [`Order::check`], writing a dead letter for a malformed book: only a
+    /// bug makes one.
+    pub(crate) fn check_logged(
+        &self,
+        registry: &Registry,
+        dead_letters: &dyn DeadLetterLog,
+    ) -> Result<Checked, Malformed> {
+        self.check(registry).inspect_err(|malformed| {
+            write_dead_letter(dead_letters, self.book(), P::NAME, &malformed.to_string())
+        })
+    }
+
+    /// The order as the kernel books it: the target's cover, the command
+    /// packed as `Any`, no ids, no handling.
+    fn book(&self) -> CommandBook {
+        CommandBook {
+            cover: Some(self.cover.clone()),
+            page: Some(CommandPage {
+                body: Some(command_page::Body::Command(Command {
+                    payload: Some(self.command.to_any()),
+                })),
+                ..CommandPage::default()
+            }),
+            handling: None,
+        }
     }
 }
 
@@ -195,7 +228,9 @@ pub struct Projector<'p, P>(&'p mut P);
 
 impl<P: Policy, F: FnMut(Order<P>)> Handler<P::Source> for Reactor<P, F> {
     fn handle(&mut self, committed: &Committed<'_, P::Source>) {
-        todo!("proposal: owe::<P>(committed) into the sink")
+        for order in owe::<P>(committed) {
+            (self.sink)(order);
+        }
     }
 }
 
@@ -219,7 +254,17 @@ pub fn target_cover<R: Reaction>(source: &Cover, target: &R::TargetId) -> Cover 
 /// owes for `committed`, one order per target, the `index`th target's
 /// order index `index`.
 fn owe<P: Policy>(committed: &Committed<'_, P::Source>) -> Vec<Order<P>> {
-    todo!("proposal: targets(state), each: target_cover, command, trigger, index, correlation")
+    (0..)
+        .zip(P::targets(committed.state))
+        .map(|(index, target)| Order {
+            cover: target_cover::<P>(committed.cover, &target),
+            command: P::command(&target, committed),
+            trigger: committed.event_ref(),
+            index,
+            correlation_id: committed.envelope.correlation_id().clone(),
+            target,
+        })
+        .collect()
 }
 
 /// Every order a policy owes every target, from each target's position (a
@@ -232,7 +277,42 @@ pub fn orders_owed<P: Policy>(
     registry: &Registry,
     positions: &BTreeMap<P::TargetId, Position>,
 ) -> Result<Backlog<P>, KernelError> {
-    todo!(
-        "proposal: one dispatch, one fold, owe each event, keep what each position has not passed"
-    )
+    let mut backlog = Backlog::<P>::new();
+    // Each target seen: `None` while it is a target, else the sequence of
+    // the first source event it was missing from.
+    let mut seen: BTreeMap<P::TargetId, Option<u64>> = BTreeMap::new();
+    let mut returned = None;
+    let mut owing = |committed: &Committed<'_, P::Source>| {
+        if returned.is_some() {
+            return;
+        }
+        let sequence = committed.sequence();
+        let orders = owe::<P>(committed);
+        for (target, left) in &mut seen {
+            if left.is_none() && !orders.iter().any(|o| &o.target == target) {
+                *left = Some(sequence);
+            }
+        }
+        for order in orders {
+            if let Some(&Some(left)) = seen.get(&order.target) {
+                returned = Some(KernelError::TargetReturned {
+                    left,
+                    returned: sequence,
+                });
+                return;
+            }
+            seen.insert(order.target.clone(), None);
+            if positions
+                .get(&order.target)
+                .is_none_or(|p| sequence >= p.next())
+            {
+                backlog.entry(order.target.clone()).or_default().push(order);
+            }
+        }
+    };
+    source.dispatch(source.first(), registry, &mut [&mut owing])?;
+    match returned {
+        Some(error) => Err(error),
+        None => Ok(backlog),
+    }
 }

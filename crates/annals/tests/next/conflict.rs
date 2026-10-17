@@ -43,7 +43,6 @@ fn stale(expected: u64, actual: u64) -> Failure<std::convert::Infallible> {
 }
 
 #[test]
-#[ignore = "proposal: COMMUTATIVE is the default where the state declares conflict units"]
 fn commutative_is_the_default_for_a_state_with_conflict_units() {
     let registry = registry();
     let mut store = InMemoryStore::new();
@@ -77,7 +76,6 @@ fn commutative_is_the_default_for_a_state_with_conflict_units() {
 }
 
 #[test]
-#[ignore = "proposal: without conflict units the default falls back to STRICT"]
 fn strict_is_the_default_for_a_state_without_conflict_units() {
     let registry = registry();
     let mut store = InMemoryStore::new();
@@ -100,7 +98,6 @@ fn strict_is_the_default_for_a_state_without_conflict_units() {
 }
 
 #[test]
-#[ignore = "proposal: a command type configured STRICT on a COMMUTATIVE state is STRICT"]
 fn a_command_type_configured_strict_is_strict() {
     let registry = registry();
     let mut store = InMemoryStore::new();
@@ -121,7 +118,6 @@ fn a_command_type_configured_strict_is_strict() {
 }
 
 #[test]
-#[ignore = "proposal: an unmarked field makes COMMUTATIVE as strict as STRICT"]
 fn an_unmarked_field_conflicts_with_everything() {
     let registry = registry();
     let mut store = InMemoryStore::new();
@@ -147,7 +143,6 @@ fn an_unmarked_field_conflicts_with_everything() {
 }
 
 #[test]
-#[ignore = "proposal: AGGREGATE_HANDLES hands decide the window and a nonce, and demands it back"]
 fn aggregate_handles_demands_the_nonce_back() {
     let registry = registry();
     let mut store = InMemoryStore::new();
@@ -200,7 +195,6 @@ fn aggregate_handles_demands_the_nonce_back() {
 }
 
 #[test]
-#[ignore = "proposal: an expected sequence past the head is stale under every resolution"]
 fn an_expected_sequence_past_the_head_is_stale() {
     let registry = registry();
     let mut store = InMemoryStore::new();

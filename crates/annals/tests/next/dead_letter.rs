@@ -49,7 +49,6 @@ fn a_dead_letter_line_starts_with_the_warning_and_names_the_command() {
 }
 
 #[test]
-#[ignore = "proposal: a panicking ingest aborts the chain, writes nothing and logs a dead letter"]
 fn a_panicking_ingest_aborts_the_chain_and_is_logged() {
     let registry = registry();
     let log = MemoryDeadLetters::new();

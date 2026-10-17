@@ -103,7 +103,6 @@ fn an_unknown_event_type_fails_replay_naming_it() {
 }
 
 #[test]
-#[ignore = "proposal: commands may be upcast, through the same chain, before decode"]
 fn an_old_command_is_upcast_then_decided() {
     let registry = registry_with_upcasters();
     let mut store = InMemoryStore::new();

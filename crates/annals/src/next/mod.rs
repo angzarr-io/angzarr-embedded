@@ -59,11 +59,9 @@
 //! unit of work, each checked against the length it was loaded at, and the
 //! unit committed; any failure anywhere fails it all ([`Failure`], with the
 //! path to the failing [`Step`]). [`Projection`]s run on committed events
-//! only.
+//! only. Each policy command's trigger edge, which no event records, goes
+//! to the application's [`TriggerLog`] as the chain dispatches it.
 
-// Proposal bodies are `todo!()`, so arguments and fields go unread until the
-// implementation lands. Remove this with the last `todo!`.
-#![allow(unused_variables, dead_code)]
 // A failure names the path to the step that failed and carries reports, so
 // it is large; failures are the cold path, and unboxed variants keep them
 // matchable by pattern. Revisit (box `Downstream`) if profiling says so.
@@ -89,7 +87,10 @@ mod version;
 pub use check::{check, Body, Checked, Identified, Malformed, Sampled};
 pub use conflict::{Key, UnitPath, Units};
 pub use coordinator::{Contextual, Coordinator, Deduplicated, Nonce, Novel, Prepared};
-pub use dead_letter::{dead_letter_line, DeadLetterLog, MemoryDeadLetters, DEAD_LETTER_PREFIX};
+pub use dead_letter::{
+    dead_letter_line, DeadLetterLog, MemoryDeadLetters, NoTriggerLog, TriggerLog,
+    DEAD_LETTER_PREFIX,
+};
 pub use domain::{Conflicts, Decision, Domain, IngestCtx, State, Tx};
 pub use error::{
     ChainProblem, Failure, KernelError, PayloadError, Recovery, ReplayError, Step, StepError,

@@ -28,7 +28,6 @@ fn ledger_cover() -> annals::next::v1::Cover {
 }
 
 #[test]
-#[ignore = "proposal: a policy's command is identified from its trigger; its events name the command, not the trigger"]
 fn a_policys_events_carry_the_derived_command_id_as_causation_and_no_trigger() {
     let registry = registry();
     let log = MemoryDeadLetters::new();
@@ -83,7 +82,6 @@ fn a_policys_events_carry_the_derived_command_id_as_causation_and_no_trigger() {
 }
 
 #[test]
-#[ignore = "proposal: a rejection downstream fails the origin and leaves every stream untouched"]
 fn a_rejection_downstream_fails_the_whole_chain() {
     let registry = registry();
     let log = MemoryDeadLetters::new();
@@ -139,7 +137,6 @@ fn a_rejection_downstream_fails_the_whole_chain() {
 }
 
 #[test]
-#[ignore = "proposal: a chain deeper than its limit is refused"]
 fn a_chain_deeper_than_its_limit_is_refused() {
     let registry = registry();
     let log = MemoryDeadLetters::new();
@@ -162,7 +159,6 @@ fn a_chain_deeper_than_its_limit_is_refused() {
 }
 
 #[test]
-#[ignore = "proposal: a chain in an edition touches only that edition"]
 fn a_chain_in_an_edition_stays_in_it() {
     let registry = registry();
     let log = MemoryDeadLetters::new();
@@ -183,7 +179,6 @@ fn a_chain_in_an_edition_stays_in_it() {
 }
 
 #[test]
-#[ignore = "proposal: a book for another domain than the handler's is refused"]
 fn a_book_for_another_domain_is_refused() {
     let registry = registry();
     let log = MemoryDeadLetters::new();

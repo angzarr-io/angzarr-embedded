@@ -50,7 +50,6 @@ fn load(
 }
 
 #[test]
-#[ignore = "proposal: a snapshot folded under another rules version is discarded and the stream replayed"]
 fn a_snapshot_under_another_rules_version_is_discarded() {
     let registry = registry();
     let mut store = InMemoryStore::new();
@@ -76,7 +75,6 @@ fn a_snapshot_under_another_rules_version_is_discarded() {
 }
 
 #[test]
-#[ignore = "proposal: a snapshot of another state type is discarded"]
 fn a_snapshot_of_another_state_type_is_discarded() {
     let registry = registry();
     let mut store = InMemoryStore::new();
@@ -93,7 +91,6 @@ fn a_snapshot_of_another_state_type_is_discarded() {
 }
 
 #[test]
-#[ignore = "proposal: under AGGREGATE_HANDLES the snapshot used is at or below expected-1"]
 fn a_snapshot_never_hides_part_of_the_window() {
     let registry = registry();
     let mut store = InMemoryStore::new();
