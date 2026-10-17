@@ -1,8 +1,5 @@
-//! The proposed audited kernel, `annals::next`, pinned before it is built.
-//! Tests of what is implemented (the parse step, identification, the
-//! registry, payloads, the dead-letter line) run; every other test is
-//! ignored until its behaviour is implemented, each the contract
-//! `docs/design/audit.md` proposes.
+//! The audited kernel, `annals::next`: each test pins a contract
+//! `docs/design/audit.md` states.
 
 // `Failure` is large by design (see `annals::next`); tests hold it in
 // closures' results.
@@ -19,9 +16,11 @@ mod parse;
 mod payload;
 mod pipeline;
 mod registry;
+mod replay;
 mod snapshot;
 mod store;
 mod toys;
+mod tx;
 mod upcast;
 
 use std::future::Future;

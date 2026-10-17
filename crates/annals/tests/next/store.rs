@@ -121,3 +121,97 @@ fn the_async_port_has_the_same_contract() {
     ready(unit.commit()).unwrap();
     assert_eq!(store.read(&stream).unwrap().unwrap().next_sequence, 1);
 }
+
+#[test]
+fn a_unit_of_work_checks_and_reads_its_pending_appends() {
+    let mut store = InMemoryStore::new();
+    let stream = cover("account", 1);
+    store.append(&stream, 0, &[page(0, 1)]).unwrap();
+    let mut unit = store.begin();
+    assert_eq!(unit.read(&cover("account", 2)), Ok(None));
+    assert_eq!(unit.append(&stream, 1, &[page(1, 2)]), Ok(2));
+    assert_eq!(
+        unit.append(&stream, 1, &[page(1, 3)]),
+        Err(StoreError::Conflict {
+            stream: stream.clone(),
+            expected: 1,
+            actual: 2
+        }),
+        "the pending append counts"
+    );
+    assert_eq!(
+        unit.append(&stream, 2, &[page(2, 3), page(4, 3)]),
+        Err(StoreError::Discontinuous {
+            stream: stream.clone(),
+            expected: 3,
+            found: 4
+        })
+    );
+    let other = cover("account", 2);
+    assert_eq!(unit.append(&other, 0, &[page(0, 4)]), Ok(1));
+    let slice = unit.read_from(&stream, 1).unwrap().unwrap();
+    assert_eq!(slice.pages, [page(1, 2)]);
+    assert_eq!(slice.next_sequence, 2);
+    assert_eq!(slice.last_recorded_at, Some(instant(1)));
+    assert_eq!(unit.read(&other).unwrap().unwrap().pages, [page(0, 4)]);
+    assert_eq!(
+        unit.find_command(&stream, &command_id(2)),
+        Ok(vec![page(1, 2)])
+    );
+    unit.commit().unwrap();
+    assert_eq!(store.read(&stream).unwrap().unwrap().next_sequence, 2);
+    assert_eq!(store.covers(), [stream, other]);
+}
+
+#[test]
+fn an_empty_append_checks_and_creates_nothing() {
+    let mut store = InMemoryStore::new();
+    let stream = cover("account", 1);
+    assert_eq!(store.append(&stream, 0, &[]), Ok(0));
+    assert!(store.covers().is_empty());
+    assert!(matches!(
+        store.append(&stream, 1, &[]),
+        Err(StoreError::Conflict { .. })
+    ));
+    let mut unit = store.begin();
+    assert_eq!(unit.append(&stream, 0, &[]), Ok(0));
+    assert_eq!(unit.read(&stream), Ok(None));
+    unit.commit().unwrap();
+    assert!(store.covers().is_empty());
+}
+
+#[test]
+fn a_read_past_the_end_is_empty_but_knows_the_end() {
+    let mut store = InMemoryStore::new();
+    let stream = cover("account", 1);
+    store.append(&stream, 0, &[page(0, 1), page(1, 1)]).unwrap();
+    let slice = store.read_from(&stream, 7).unwrap().unwrap();
+    assert!(slice.pages.is_empty());
+    assert_eq!(slice.next_sequence, 2);
+    assert_eq!(slice.last_recorded_at, Some(instant(1)));
+    assert_eq!(slice.stream, stream);
+}
+
+#[test]
+fn a_store_keeps_the_newest_snapshot_per_stream() {
+    use annals::next::v1::Snapshot;
+    let mut store = InMemoryStore::new();
+    let stream = cover("account", 1);
+    let snapshot = |sequence| Snapshot {
+        sequence,
+        state: None,
+        rules_version: "v2".to_string(),
+    };
+    assert_eq!(store.read_snapshot(&stream), Ok(None));
+    store.write_snapshot(&stream, &snapshot(1)).unwrap();
+    store.write_snapshot(&stream, &snapshot(4)).unwrap();
+    assert_eq!(store.read_snapshot(&stream), Ok(Some(snapshot(4))));
+    assert_eq!(store.read_snapshot(&cover("account", 2)), Ok(None));
+    assert_eq!(store.begin().read_snapshot(&stream), Ok(Some(snapshot(4))));
+    assert_eq!(
+        ready(Ready(store.begin()).read_snapshot(&stream)),
+        Ok(Some(snapshot(4)))
+    );
+    let mut unit = Ready(store.begin());
+    assert_eq!(ready(unit.read_from(&stream, 0)), Ok(None));
+}

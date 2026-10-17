@@ -1,4 +1,4 @@
-//! Toy domains for the proposal tests, their payloads prost messages under
+//! Toy domains for the kernel's tests, their payloads prost messages under
 //! versioned packages, as hatpick's will be:
 //!
 //! - an **account**: no conflict units (STRICT by default), rules with a
@@ -580,6 +580,15 @@ impl Domain for Account {
     ) -> Vec<AccountEvent> {
         let AccountFact::PaymentReceived(cents) = *fact;
         assert!(cents >= 0, "toy ingest bug: a negative payment");
+        // What the rest of the context says, pinned here: a wrong value is a
+        // panic, so the ingest tests fail on it.
+        assert_eq!(ctx.stream().domain, "account");
+        assert_eq!(
+            ctx.command_id(),
+            &ids::fact_command_id(&ctx.source().external_id)
+        );
+        assert!(ctx.correlation_id().is_well_formed());
+        assert_eq!(ctx.rules(), &Fees { withdrawal: 1 }, "the current rules");
         vec![AccountEvent::Received(account::Received {
             cents,
             external_id: ctx.source().external_id.clone(),

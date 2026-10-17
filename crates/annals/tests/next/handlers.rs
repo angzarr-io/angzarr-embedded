@@ -80,3 +80,42 @@ fn a_tracked_handler_drops_redeliveries_and_records_gaps() {
     drop(tracked);
     assert_eq!(count, 2, "sequence 0 was a redelivery");
 }
+
+#[test]
+fn a_tracked_handler_records_the_first_gap_until_it_advances() {
+    let registry = registry();
+    let log = annals::next::MemoryDeadLetters::new();
+    let mut stream = Stream::<Shelf>::new(root(3), None).unwrap();
+    for (n, item) in ["a", "b", "c"].into_iter().enumerate() {
+        stream
+            .execute(
+                command(cover("shelf", 3), set(item, 1)),
+                &registry,
+                &at(n as i64),
+                &log,
+                &mut [],
+            )
+            .unwrap();
+    }
+    let mut seen = Vec::new();
+    let mut tracked = Tracked::new(|c: &Committed<'_, Shelf>| seen.push(c.sequence()));
+    stream.dispatch(1, &registry, &mut [&mut tracked]).unwrap();
+    assert_eq!(
+        tracked.gap(&cover("shelf", 3)),
+        Some(&Gap {
+            expected: 0,
+            found: 1
+        }),
+        "the first gap, kept"
+    );
+    assert_eq!(tracked.position(&cover("shelf", 3)), Position::START);
+    stream.dispatch(0, &registry, &mut [&mut tracked]).unwrap();
+    assert_eq!(
+        tracked.gap(&cover("shelf", 3)),
+        None,
+        "cleared on advancing"
+    );
+    assert_eq!(tracked.position(&cover("shelf", 3)), Position::at(2));
+    drop(tracked);
+    assert_eq!(seen, [0, 1, 2]);
+}

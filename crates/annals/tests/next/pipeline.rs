@@ -151,3 +151,142 @@ fn the_coordinator_runs_dedup_then_load_then_decode() {
     let prepared = contextual.decode::<Account>(&registry).unwrap();
     assert_eq!(prepared.stream().state().cents, 100);
 }
+
+#[test]
+fn the_coordinator_hands_a_windowed_command_its_window_and_a_nonce() {
+    use crate::toys::{set, Shelf};
+    let registry = registry();
+    let mut store = InMemoryStore::new();
+    for (n, item) in ["a", "b", "c"].into_iter().enumerate() {
+        handle::<Shelf>(
+            &mut store,
+            &registry,
+            command(cover("shelf", 3), set(item, 1)).id(n as u128 + 1),
+            &at(n as i64),
+        )
+        .unwrap();
+    }
+    let mut unit = store.begin();
+    let mut coordinator = Coordinator::new(&mut unit, &registry);
+    let book = command(cover("shelf", 3), set("d", 1))
+        .id(9)
+        .expecting(1, ConflictResolution::AggregateHandles);
+    let identified = check(book, &registry).unwrap().identify(&at(30));
+    let Deduplicated::Novel(novel) = coordinator.deduplicate(identified).unwrap() else {
+        panic!("never applied");
+    };
+    assert_eq!(novel.command().command_id(), &crate::toys::command_id(9));
+    let contextual = coordinator.load(novel).unwrap();
+    assert_eq!(
+        contextual.conflict_resolution(),
+        ConflictResolution::AggregateHandles
+    );
+    assert_eq!(contextual.expected_sequence(), 1);
+    assert_eq!(contextual.head(), 3);
+    assert_eq!(contextual.pages().len(), 3);
+    assert_eq!(
+        contextual
+            .window()
+            .iter()
+            .map(|p| p.sequence)
+            .collect::<Vec<_>>(),
+        [1, 2],
+        "from the expected sequence to the head"
+    );
+    assert!(contextual.has_nonce());
+    assert!(contextual.snapshot().is_none());
+    assert_eq!(
+        contextual.command().command_id(),
+        &crate::toys::command_id(9)
+    );
+}
+
+#[test]
+fn the_coordinators_decision_commits_to_its_stream() {
+    let registry = registry();
+    let log = annals::next::MemoryDeadLetters::new();
+    let mut store = InMemoryStore::new();
+    opened(&mut store, &registry, 1, 100);
+    let mut unit = store.begin();
+    let mut coordinator = Coordinator::new(&mut unit, &registry);
+    let identified = check(deposit(3), &registry).unwrap().identify(&at(30));
+    let Deduplicated::Novel(novel) = coordinator.deduplicate(identified).unwrap() else {
+        panic!("never applied");
+    };
+    let mut prepared = coordinator
+        .load(novel)
+        .unwrap()
+        .decode::<Account>(&registry)
+        .unwrap();
+    assert_eq!(prepared.command().command_id(), &crate::toys::command_id(3));
+    let decision = prepared.decide(&at(30), &registry, &log).unwrap();
+    assert_eq!(decision.stream(), &cover("account", 1));
+    assert_eq!(decision.head(), 2);
+    assert_eq!(decision.command_id(), &crate::toys::command_id(3));
+    assert_eq!(decision.events().len(), 1);
+    assert_eq!(decision.events()[0].sequence(), 2);
+    assert!(!decision.is_empty());
+    let mut stream = prepared.into_stream();
+    assert_eq!(stream.commit(decision, &registry, &mut []), Ok(3));
+    assert_eq!(stream.state().cents, 105);
+
+    // A decision against the old head no longer commits.
+    let mut again = Coordinator::new(&mut unit, &registry);
+    let identified = check(deposit(4), &registry).unwrap().identify(&at(31));
+    let Deduplicated::Novel(novel) = again.deduplicate(identified).unwrap() else {
+        panic!("never applied");
+    };
+    let mut prepared = again
+        .load(novel)
+        .unwrap()
+        .decode::<Account>(&registry)
+        .unwrap();
+    let decision = prepared.decide(&at(31), &registry, &log).unwrap();
+    assert_eq!(
+        stream.commit(decision, &registry, &mut []),
+        Err(KernelError::Stale {
+            stream: cover("account", 1),
+            expected: 2,
+            actual: 3
+        })
+    );
+
+    drop(unit);
+    opened(&mut store, &registry, 2, 0);
+    let mut unit = store.begin();
+    let sweep = check(
+        command(cover("account", 2), AccountCmd::Sweep.to_any()).id(5),
+        &registry,
+    )
+    .unwrap()
+    .identify(&at(32));
+    let mut empty = Coordinator::new(&mut unit, &registry);
+    let Deduplicated::Novel(novel) = empty.deduplicate(sweep).unwrap() else {
+        panic!("never applied");
+    };
+    let mut prepared = empty
+        .load(novel)
+        .unwrap()
+        .decode::<Account>(&registry)
+        .unwrap();
+    let decision = prepared.decide(&at(32), &registry, &log).unwrap();
+    assert!(decision.is_empty(), "a sweep of nothing withdraws nothing");
+
+    // A cover of another domain than the one decoded for.
+    let mut wrong = Coordinator::new(&mut unit, &registry);
+    let identified = check(deposit(6), &registry).unwrap().identify(&at(33));
+    let Deduplicated::Novel(novel) = wrong.deduplicate(identified).unwrap() else {
+        panic!("never applied");
+    };
+    assert_eq!(
+        wrong
+            .load(novel)
+            .unwrap()
+            .decode::<crate::toys::Ledger>(&registry)
+            .err(),
+        Some(KernelError::WrongDomain {
+            stream: cover("account", 1),
+            expected: "ledger"
+        })
+    );
+}

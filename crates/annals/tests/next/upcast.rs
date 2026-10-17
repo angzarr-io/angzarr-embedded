@@ -176,3 +176,121 @@ fn an_upcaster_is_checked_whole() {
         }]
     );
 }
+
+#[test]
+fn an_upcaster_is_checked_for_order_and_untyped_rules_are_not_followed() {
+    let problems = |upcaster: Upcaster| -> Vec<ChainProblem> {
+        let mut registry = Registry::new();
+        registry.register::<Account>(fees(), upcaster).unwrap();
+        registry
+            .check()
+            .err()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|e| {
+                assert_eq!(e.domain, "account");
+                e.problem
+            })
+            .collect()
+    };
+    // v1 -> current registered before v0 -> v1: a v0 payload stops at v1.
+    let out_of_order = Upcaster::new("u", "account")
+        .rule::<account::v9::Bonus, account::Deposited>(|b| {
+            Ok(account::Deposited { cents: b.cents })
+        })
+        .rule::<account::v0::Credited, account::v9::Bonus>(|c| {
+            Ok(account::v9::Bonus { cents: c.euros })
+        });
+    assert_eq!(
+        problems(out_of_order),
+        [
+            ChainProblem::OutOfOrder {
+                source: "toy.account.v9.Bonus".to_string(),
+                produced_by: "toy.account.v0.Credited".to_string()
+            },
+            ChainProblem::DeadEnd {
+                source: "toy.account.v0.Credited".to_string(),
+                ends_at: "toy.account.v9.Bonus".to_string()
+            }
+        ]
+    );
+    let chained = Upcaster::new("u", "account")
+        .rule::<account::v0::Credited, account::v9::Bonus>(|c| {
+            Ok(account::v9::Bonus { cents: c.euros })
+        })
+        .rule::<account::v9::Bonus, account::Deposited>(|b| {
+            Ok(account::Deposited { cents: b.cents })
+        });
+    assert_eq!(problems(chained), [], "v0 -> v9 -> current finishes");
+    let untyped = Upcaster::new("u", "account")
+        .rule::<account::v0::Credited, account::v9::Bonus>(|c| {
+            Ok(account::v9::Bonus { cents: c.euros })
+        })
+        .on_event("toy.account.v9.Bonus", |any| Ok(any.clone()));
+    assert_eq!(problems(untyped), [], "an untyped rule cannot be followed");
+}
+
+#[test]
+fn an_upcast_rule_reports_its_own_failure_and_bytes_it_cannot_read() {
+    let refusing =
+        Upcaster::new("u", "account").rule::<account::v0::Credited, account::Deposited>(|_| {
+            Err(annals_diagnostic::Report::new("toy-refused", "refused"))
+        });
+    let old = pack(&account::v0::Credited { euros: 2 });
+    assert_eq!(
+        refusing.upcast_event(&old),
+        Err(annals::next::UpcastError::Rule {
+            source: "toy.account.v0.Credited".to_string(),
+            error: annals_diagnostic::Report::new("toy-refused", "refused")
+        })
+    );
+    let garbled = annals::next::Any {
+        type_url: old.type_url.clone(),
+        value: vec![0x08],
+    };
+    assert!(matches!(
+        account_upcaster().upcast_command(&garbled),
+        Err(annals::next::UpcastError::Payload(
+            annals::next::PayloadError::Decode { .. }
+        ))
+    ));
+
+    let registry = {
+        let mut registry = Registry::new();
+        registry.register::<Account>(fees(), refusing).unwrap();
+        registry
+    };
+    let mut store = InMemoryStore::new();
+    let failure = handle::<Account>(
+        &mut store,
+        &registry,
+        command(cover("account", 1), old.clone()),
+        &at(1),
+    )
+    .err()
+    .unwrap();
+    assert!(matches!(
+        failure,
+        Failure::Kernel(KernelError::Upcast { ref stream, .. }) if *stream == cover("account", 1)
+    ));
+    assert_eq!(failure.recovery(), annals::next::Recovery::Bug);
+
+    let mut request = UpcastRequest {
+        domain: "account".to_string(),
+        events: vec![page(0, old), EventPage::default()],
+    };
+    assert_eq!(
+        account_upcaster().dispatch(&request).unwrap().events,
+        [
+            page(0, pack(&account::Deposited { cents: 200 })),
+            EventPage::default()
+        ],
+        "its own domain's pages upcast; a page with no payload kept"
+    );
+    request.events[1].payload = Some(pack(&account::v0::Credited { euros: 1 }));
+    assert!(registry
+        .upcaster("account")
+        .unwrap()
+        .dispatch(&request)
+        .is_err());
+}

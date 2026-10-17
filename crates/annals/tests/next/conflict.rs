@@ -278,3 +278,35 @@ fn units_overlap_by_angzarrs_rule() {
         "a state without units changes everything"
     );
 }
+
+#[test]
+fn a_state_without_conflict_units_changes_everything() {
+    use annals::next::State;
+    let state = crate::toys::account::AccountState::default();
+    assert_eq!(
+        <crate::toys::account::AccountState as State>::changed(&state, &state),
+        Units::everything(),
+        "the fail-safe default: never a blind merge"
+    );
+}
+
+#[test]
+fn a_fact_keeps_its_sent_correlation() {
+    let registry = registry();
+    let mut store = InMemoryStore::new();
+    let payment = crate::toys::fact(
+        cover("account", 1),
+        crate::toys::AccountFact::PaymentReceived(5).to_any(),
+        "pi_c",
+    )
+    .correlated(4);
+    let handled = handle::<Account>(&mut store, &registry, payment, &at(1)).unwrap();
+    assert_eq!(
+        handled.books()[0].pages[0]
+            .meta
+            .as_ref()
+            .unwrap()
+            .correlation_id,
+        Some(crate::toys::correlation(4))
+    );
+}
