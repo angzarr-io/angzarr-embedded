@@ -65,7 +65,6 @@ fn upcasting_by_type_url_runs_the_chain_as_the_router_does() {
 }
 
 #[test]
-#[ignore = "proposal: old events are upcast on every read and never rewritten"]
 fn old_events_replay_through_the_upcaster() {
     let registry = registry_with_upcasters();
     let log = [
@@ -86,7 +85,6 @@ fn old_events_replay_through_the_upcaster() {
 }
 
 #[test]
-#[ignore = "proposal: an event type nothing upcasts or decodes fails replay, naming it"]
 fn an_unknown_event_type_fails_replay_naming_it() {
     let log = [page(0, pack(&account::v9::Bonus { cents: 1 }))];
     let error = Stream::<Account>::replay(cover("account", 1), &log, &registry())
@@ -141,7 +139,6 @@ fn an_old_command_is_upcast_then_decided() {
 }
 
 #[test]
-#[ignore = "proposal: an upcaster that cannot finish is refused before anything is read"]
 fn an_upcaster_is_checked_whole() {
     let problems = |upcaster: Upcaster| -> Vec<ChainProblem> {
         let mut registry = Registry::new();

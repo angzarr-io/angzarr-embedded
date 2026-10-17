@@ -115,7 +115,6 @@ fn a_snapshot_never_hides_part_of_the_window() {
 }
 
 #[test]
-#[ignore = "proposal: a stream snapshots under the current rules version and its state type"]
 fn a_stream_snapshots_under_the_current_rules_version() {
     let registry = registry();
     let mut stream = Stream::<Shelf>::new(root(3), None).unwrap();

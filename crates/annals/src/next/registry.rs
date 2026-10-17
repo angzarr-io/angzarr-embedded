@@ -14,14 +14,17 @@
 
 use std::any::Any as AnyType;
 use std::collections::BTreeMap;
+use std::fmt;
 
 use angzarr_proto::v1::{ConflictResolution, EventPage, Snapshot, StateDescriptor};
 
+use annals_diagnostic::{Arg, Diagnostic, Report};
+
 use super::check::Sampled;
-use super::coordinator::Contextual;
+use super::coordinator::{run_step, Contextual};
 use super::dead_letter::DeadLetterLog;
 use super::domain::{Domain, State};
-use super::error::{StepError, UpcastChainError};
+use super::error::{Failure, StepError, UpcastChainError};
 use super::payload::{type_name, Payload};
 use super::upcast::Upcaster;
 use super::version::Rulebook;
@@ -69,10 +72,15 @@ fn typed_step<D: Domain>(
     sampled: &Sampled,
     dead_letters: &dyn DeadLetterLog,
 ) -> Result<(Box<dyn AnyType + Send>, Vec<EventPage>), StepError> {
-    todo!(
-        "proposal: decode::<{}> or resume the staged stream, decide, commit in memory, pages",
-        D::NAME
-    )
+    let (stream, pages) =
+        run_step::<D>(command, staged, registry, sampled, dead_letters).map_err(|failure| {
+            match failure {
+                Failure::Rejected(rejection) => StepError::Rejected(Report::of(&rejection)),
+                Failure::Kernel(error) => StepError::Kernel(error),
+                Failure::Downstream { error, .. } => error,
+            }
+        })?;
+    Ok((Box::new(stream), pages))
 }
 
 /// Why a domain could not be registered: angzarr refuses the same
@@ -99,6 +107,97 @@ pub enum Misconfigured {
         command_type: Option<String>,
         resolution: ConflictResolution,
     },
+}
+
+impl fmt::Display for Misconfigured {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Misconfigured::AlreadyRegistered { domain } => {
+                write!(f, "domain \"{domain}\" is registered already")
+            }
+            Misconfigured::UpcasterForAnotherDomain { domain, upcaster } => write!(
+                f,
+                "the upcaster registered for domain \"{domain}\" is for \"{upcaster}\""
+            ),
+            Misconfigured::EmptyRulesVersion { domain } => {
+                write!(f, "domain \"{domain}\"'s current rules version is empty")
+            }
+            Misconfigured::BadStateDescriptor { domain } => write!(
+                f,
+                "domain \"{domain}\"'s state descriptor lists a value that is not a resolution, or lacks STRICT or AGGREGATE_HANDLES"
+            ),
+            Misconfigured::UnsupportedResolution {
+                domain,
+                command_type: None,
+                resolution,
+            } => write!(
+                f,
+                "domain \"{domain}\" is configured {}, which its state does not support",
+                resolution.as_str_name()
+            ),
+            Misconfigured::UnsupportedResolution {
+                domain,
+                command_type: Some(command_type),
+                resolution,
+            } => write!(
+                f,
+                "domain \"{domain}\" configures {command_type} {}, which its state does not support",
+                resolution.as_str_name()
+            ),
+        }
+    }
+}
+
+impl Diagnostic for Misconfigured {
+    fn code(&self) -> &'static str {
+        match self {
+            Misconfigured::AlreadyRegistered { .. } => {
+                "annals-next-misconfigured-already-registered"
+            }
+            Misconfigured::UpcasterForAnotherDomain { .. } => {
+                "annals-next-misconfigured-upcaster-for-another-domain"
+            }
+            Misconfigured::EmptyRulesVersion { .. } => {
+                "annals-next-misconfigured-empty-rules-version"
+            }
+            Misconfigured::BadStateDescriptor { .. } => {
+                "annals-next-misconfigured-bad-state-descriptor"
+            }
+            Misconfigured::UnsupportedResolution {
+                command_type: None, ..
+            } => "annals-next-misconfigured-unsupported-resolution",
+            Misconfigured::UnsupportedResolution {
+                command_type: Some(_),
+                ..
+            } => "annals-next-misconfigured-unsupported-command-resolution",
+        }
+    }
+
+    fn args(&self) -> Vec<(&'static str, Arg)> {
+        match self {
+            Misconfigured::AlreadyRegistered { domain }
+            | Misconfigured::EmptyRulesVersion { domain }
+            | Misconfigured::BadStateDescriptor { domain } => {
+                vec![("domain", domain.as_str().into())]
+            }
+            Misconfigured::UpcasterForAnotherDomain { domain, upcaster } => vec![
+                ("domain", domain.as_str().into()),
+                ("upcaster", upcaster.as_str().into()),
+            ],
+            Misconfigured::UnsupportedResolution {
+                domain,
+                command_type,
+                resolution,
+            } => {
+                let mut args = vec![("domain", domain.as_str().into())];
+                if let Some(command_type) = command_type {
+                    args.push(("command_type", command_type.as_str().into()));
+                }
+                args.push(("resolution", resolution.as_str_name().into()));
+                args
+            }
+        }
+    }
 }
 
 /// Every domain an application runs, by name.
@@ -269,7 +368,17 @@ impl Registry {
     /// ([`Upcaster::check`]). For a test that runs in CI beside the golden
     /// replay fixtures ([`assert_replay_fixtures`](super::assert_replay_fixtures)).
     pub fn check(&self) -> Result<(), Vec<UpcastChainError>> {
-        todo!("proposal: each entry's upcaster.check((entry.current)())")
+        let problems: Vec<UpcastChainError> = self
+            .domains
+            .values()
+            .filter_map(|entry| entry.upcaster.check(&(entry.current)()).err())
+            .flatten()
+            .collect();
+        if problems.is_empty() {
+            Ok(())
+        } else {
+            Err(problems)
+        }
     }
 
     /// `domain`'s typed step 5, erased.

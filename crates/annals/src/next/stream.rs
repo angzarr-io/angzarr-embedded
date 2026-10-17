@@ -5,16 +5,20 @@ use angzarr_proto::v1::event_meta::Causation;
 use angzarr_proto::v1::{
     CommandBook, Cover, EventMeta, EventPage, EventRef, FactOrigin, Snapshot, Uuid,
 };
+use annals_diagnostic::Report;
+use prost::{Message, Name};
 use prost_types::Timestamp;
 
-use super::check::{Malformed, Sampled};
+use super::check::{check, Malformed, Sampled};
+use super::coordinator::{decide_on, decode_input, expect, resolution};
 use super::dead_letter::DeadLetterLog;
 use super::domain::{Decision, Domain};
-use super::error::{Failure, KernelError};
-use super::handler::Handler;
-use super::payload::Payload;
+use super::error::{Failure, KernelError, PayloadError, ReplayError, StoreError};
+use super::handler::{Committed, Handler};
+use super::payload::{pack, type_name, Payload};
 use super::registry::Registry;
 use super::upcast::Upcaster;
+use super::version::Rulebook;
 
 /// One recorded event, checked and decoded: an [`EventPage`] whose
 /// `EventMeta` had every field a recorded event always has (so its
@@ -130,7 +134,65 @@ impl<E> Envelope<E> {
     where
         E: Payload,
     {
-        todo!("proposal: check the meta, upcast_event, E::from_any")
+        let sequence = page.sequence;
+        let meta = Envelope::stamped(sequence, page.meta.clone().unwrap_or_default(), ())
+            .map_err(KernelError::Replay)?;
+        let unreadable = |reason: Report| {
+            KernelError::Store(StoreError::Unreadable {
+                stream: stream.clone(),
+                sequence,
+                reason,
+            })
+        };
+        let payload = upcaster
+            .upcast_event(&page.payload.clone().unwrap_or_default())
+            .map_err(|e| unreadable(Report::of(&e)))?;
+        let event = E::from_any(&payload).map_err(|e| unreadable(Report::of(&e)))?;
+        Ok(meta.with(event))
+    }
+
+    /// Event `sequence` of `event` with `meta`, its required fields checked
+    /// present and well-formed: how the kernel stamps a decision's events
+    /// ([`Identified::meta`](super::Identified::meta)) and reads a stored
+    /// page's.
+    pub(crate) fn stamped(
+        sequence: u64,
+        meta: EventMeta,
+        event: E,
+    ) -> Result<Envelope<E>, ReplayError> {
+        let incomplete = |field| ReplayError::IncompleteMeta { sequence, field };
+        let causation = match meta.causation {
+            Some(Causation::CommandId(id)) if id.is_well_formed() => Causation::CommandId(id),
+            Some(Causation::TriggeringEvent(trigger)) => Causation::TriggeringEvent(trigger),
+            _ => return Err(incomplete("causation")),
+        };
+        let correlation_id = meta
+            .correlation_id
+            .filter(Uuid::is_well_formed)
+            .ok_or_else(|| incomplete("correlation_id"))?;
+        let recorded_at = meta.recorded_at.ok_or_else(|| incomplete("recorded_at"))?;
+        Ok(Envelope {
+            sequence,
+            causation,
+            correlation_id,
+            fact: meta.fact,
+            recorded_at,
+            rules_version: meta.rules_version,
+            event,
+        })
+    }
+
+    /// The same metadata, holding `event`.
+    fn with<F>(self, event: F) -> Envelope<F> {
+        Envelope {
+            sequence: self.sequence,
+            causation: self.causation,
+            correlation_id: self.correlation_id,
+            fact: self.fact,
+            recorded_at: self.recorded_at,
+            rules_version: self.rules_version,
+            event,
+        }
     }
 }
 
@@ -154,6 +216,9 @@ pub struct Stream<D: Domain> {
     cover: Cover,
     /// The sequence of the first held event: 0, or the snapshot's + 1.
     first: u64,
+    /// The state before the first held event: the default, or the
+    /// snapshot's.
+    base: D::State,
     events: Vec<Envelope<D::Event>>,
     state: D::State,
     /// The last event's `recorded_at`: the floor for the next.
@@ -173,17 +238,125 @@ impl<D: Domain> Stream<D> {
         if edition.as_deref() == Some("") {
             return Err(Malformed::EmptyEdition);
         }
-        Ok(Stream {
-            cover: Cover {
-                domain: D::NAME.to_string(),
-                root: Some(root),
-                edition,
-            },
+        Ok(Stream::empty(Cover {
+            domain: D::NAME.to_string(),
+            root: Some(root),
+            edition,
+        }))
+    }
+
+    fn empty(cover: Cover) -> Stream<D> {
+        Stream {
+            cover,
             first: 0,
+            base: D::State::default(),
             events: Vec::new(),
             state: D::State::default(),
             last_recorded_at: None,
+        }
+    }
+
+    /// `D`'s rulebook and upcaster. Without them nothing of `D` decodes.
+    fn typed(registry: &Registry) -> Result<(&Rulebook<D::Rules>, &Upcaster), KernelError> {
+        registry
+            .rules::<D>()
+            .zip(registry.upcaster(D::NAME))
+            .ok_or_else(|| {
+                KernelError::Malformed(Malformed::UnknownDomain {
+                    domain: D::NAME.to_string(),
+                })
+            })
+    }
+
+    /// The rules `envelope` names.
+    fn rules_for<'r>(
+        rulebook: &'r Rulebook<D::Rules>,
+        envelope: &Envelope<D::Event>,
+    ) -> Result<&'r D::Rules, KernelError> {
+        rulebook.get(&envelope.rules_version).ok_or_else(|| {
+            KernelError::Replay(ReplayError::UnknownRules {
+                sequence: envelope.sequence,
+                version: envelope.rules_version.clone(),
+            })
         })
+    }
+
+    fn check_domain(cover: &Cover) -> Result<(), KernelError> {
+        if cover.domain == D::NAME {
+            Ok(())
+        } else {
+            Err(KernelError::Replay(ReplayError::WrongDomain {
+                found: cover.domain.clone(),
+                expected: D::NAME,
+            }))
+        }
+    }
+
+    /// Fold stored `pages` onto the end of the stream, each checked as
+    /// [`Stream::replay`] says.
+    fn fold(&mut self, pages: &[EventPage], registry: &Registry) -> Result<(), KernelError> {
+        let (rulebook, upcaster) = Self::typed(registry)?;
+        for (index, page) in pages.iter().enumerate() {
+            if page.sequence != self.len() {
+                return Err(KernelError::Replay(ReplayError::OutOfSequence {
+                    index,
+                    found: page.sequence,
+                }));
+            }
+            let envelope = Envelope::decode(&self.cover, page, upcaster)?;
+            let sequence = envelope.sequence;
+            if let Some(cause) = envelope.triggering_event() {
+                if cause.stream.as_ref() == Some(&self.cover) && cause.sequence >= sequence {
+                    return Err(KernelError::Replay(ReplayError::CauseNotEarlier {
+                        sequence,
+                        cause: cause.sequence,
+                    }));
+                }
+            }
+            if let Some(last) = self.last_recorded_at {
+                let at = envelope.recorded_at;
+                if (at.seconds, at.nanos) < (last.seconds, last.nanos) {
+                    return Err(KernelError::Replay(ReplayError::RecordedBackwards {
+                        sequence,
+                    }));
+                }
+            }
+            let rules = Self::rules_for(rulebook, &envelope)?;
+            self.push(envelope, rules);
+        }
+        Ok(())
+    }
+
+    /// Fold one event in and hold it.
+    fn push(&mut self, envelope: Envelope<D::Event>, rules: &D::Rules) {
+        D::apply(&mut self.state, &envelope.event, rules);
+        self.last_recorded_at = Some(envelope.recorded_at);
+        self.events.push(envelope);
+    }
+
+    /// The state just before event `sequence` (the state at the head, for
+    /// the head): what COMMUTATIVE compares a window against.
+    pub(crate) fn state_at(
+        &self,
+        sequence: u64,
+        registry: &Registry,
+    ) -> Result<D::State, KernelError> {
+        if sequence < self.first {
+            return Err(KernelError::BeforeSnapshot {
+                stream: self.cover.clone(),
+                first: self.first,
+            });
+        }
+        let (rulebook, _) = Self::typed(registry)?;
+        let mut state = self.base.clone();
+        for envelope in self.events.iter().take_while(|e| e.sequence < sequence) {
+            D::apply(
+                &mut state,
+                &envelope.event,
+                Self::rules_for(rulebook, envelope)?,
+            );
+        }
+        Ok(state)
     }
 
     /// The whole pipeline on this stream, in memory, with no store: for
@@ -201,7 +374,51 @@ impl<D: Domain> Stream<D> {
         dead_letters: &dyn DeadLetterLog,
         handlers: &mut [&mut dyn Handler<D>],
     ) -> Result<Executed<'_, D::Event>, Failure<D::Rejection>> {
-        todo!("proposal: check, identify, find_command, resolve, decode, decide, commit")
+        let kernel = Failure::Kernel;
+        let checked =
+            check(book, registry).map_err(|m| Failure::Kernel(KernelError::Malformed(m)))?;
+        if checked.domain() != D::NAME {
+            return Err(kernel(KernelError::WrongDomain {
+                stream: checked.cover().clone(),
+                expected: D::NAME,
+            }));
+        }
+        let command = checked.identify(sampled);
+        let head = self.len();
+        if command.cover() != &self.cover {
+            return Err(kernel(KernelError::Stale {
+                stream: command.cover().clone(),
+                expected: command.expected_sequence().unwrap_or(head),
+                actual: head,
+            }));
+        }
+        let found = self.find_command(command.command_id()).len();
+        if found > 0 {
+            let start = self
+                .events
+                .iter()
+                .position(|e| e.command_id() == Some(command.command_id()))
+                .unwrap_or_default();
+            return Ok(Executed::Duplicate(&self.events[start..start + found]));
+        }
+        let resolution = resolution(registry, &command).map_err(kernel)?;
+        let mut nonces = head;
+        let (expected, nonce) = expect(&command, resolution, head, &mut nonces).map_err(kernel)?;
+        let input = decode_input::<D>(&command, registry).map_err(kernel)?;
+        let decision = decide_on(
+            self,
+            &command,
+            &input,
+            resolution,
+            expected,
+            nonce,
+            sampled,
+            registry,
+            dead_letters,
+        )?;
+        let from = self.events.len();
+        self.commit(decision, registry, handlers).map_err(kernel)?;
+        Ok(Executed::Applied(&self.events[from..]))
     }
 
     /// Fold a decision into the stream, then hand each of its events to
@@ -214,7 +431,27 @@ impl<D: Domain> Stream<D> {
         registry: &Registry,
         handlers: &mut [&mut dyn Handler<D>],
     ) -> Result<u64, KernelError> {
-        todo!("proposal: check stream and head, apply each event, push it, call the handlers")
+        if decision.stream != self.cover || decision.head != self.len() {
+            return Err(KernelError::Stale {
+                stream: decision.stream,
+                expected: decision.head,
+                actual: self.len(),
+            });
+        }
+        let (rulebook, _) = Self::typed(registry)?;
+        for envelope in decision.events {
+            let rules = Self::rules_for(rulebook, &envelope)?;
+            self.push(envelope, rules);
+            let committed = Committed {
+                cover: &self.cover,
+                envelope: &self.events[self.events.len() - 1],
+                state: &self.state,
+            };
+            for handler in handlers.iter_mut() {
+                handler.handle(&committed);
+            }
+        }
+        Ok(self.len())
     }
 
     /// Rebuild a stream from its whole stored log, each page decoded
@@ -229,7 +466,10 @@ impl<D: Domain> Stream<D> {
         pages: &[EventPage],
         registry: &Registry,
     ) -> Result<Stream<D>, KernelError> {
-        todo!("proposal: check the domain, decode and check each page, resolve its rules, fold")
+        Self::check_domain(&cover)?;
+        let mut stream = Stream::empty(cover);
+        stream.fold(pages, registry)?;
+        Ok(stream)
     }
 
     /// Rebuild a stream from a snapshot and the pages after it, checked as
@@ -243,14 +483,47 @@ impl<D: Domain> Stream<D> {
         pages: &[EventPage],
         registry: &Registry,
     ) -> Result<Stream<D>, KernelError> {
-        todo!("proposal: decode the state, start at its sequence + 1, then as replay")
+        Self::check_domain(&cover)?;
+        let any = snapshot.state.clone().unwrap_or_default();
+        let state = if type_name(&any.type_url) == D::State::full_name() {
+            D::State::decode(&any.value[..]).map_err(|error| PayloadError::Decode {
+                type_url: any.type_url.clone(),
+                error,
+            })
+        } else {
+            Err(PayloadError::UnknownType {
+                type_url: any.type_url.clone(),
+            })
+        }
+        .map_err(|e| {
+            KernelError::Store(StoreError::Unreadable {
+                stream: cover.clone(),
+                sequence: snapshot.sequence,
+                reason: Report::of(&e),
+            })
+        })?;
+        let mut stream = Stream {
+            cover,
+            first: snapshot.sequence + 1,
+            base: state.clone(),
+            events: Vec::new(),
+            state,
+            last_recorded_at,
+        };
+        stream.fold(pages, registry)?;
+        Ok(stream)
     }
 
     /// The stream's state as an angzarr `Snapshot`: the last sequence, the
     /// state packed as `Any` (its type URL is what a load compares), the
     /// current rules version. `None` for an empty stream.
     pub fn snapshot(&self, registry: &Registry) -> Option<Snapshot> {
-        todo!("proposal: the last sequence, pack(state), the current rules version")
+        let sequence = self.len().checked_sub(1)?;
+        Some(Snapshot {
+            sequence,
+            state: Some(pack(&self.state)),
+            rules_version: registry.rules_version(D::NAME)?.to_string(),
+        })
     }
 
     /// Hand every held event from sequence `from` on to the handlers, with
@@ -264,14 +537,50 @@ impl<D: Domain> Stream<D> {
         registry: &Registry,
         handlers: &mut [&mut dyn Handler<D>],
     ) -> Result<(), KernelError> {
-        todo!("proposal: fold from first, call the handlers from `from`")
+        if from < self.first {
+            return Err(KernelError::BeforeSnapshot {
+                stream: self.cover.clone(),
+                first: self.first,
+            });
+        }
+        if from >= self.len() {
+            return Ok(());
+        }
+        let (rulebook, _) = Self::typed(registry)?;
+        let mut state = self.base.clone();
+        for envelope in &self.events {
+            D::apply(
+                &mut state,
+                &envelope.event,
+                Self::rules_for(rulebook, envelope)?,
+            );
+            if envelope.sequence >= from {
+                let committed = Committed {
+                    cover: &self.cover,
+                    envelope,
+                    state: &state,
+                };
+                for handler in handlers.iter_mut() {
+                    handler.handle(&committed);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The held events command `command_id` produced: what deduplication
     /// finds in memory. Empty if none (never applied, or applied with no
     /// events).
     pub fn find_command(&self, command_id: &Uuid) -> &[Envelope<D::Event>] {
-        todo!("proposal: the contiguous run of events with this command id")
+        let produced = |e: &Envelope<D::Event>| e.command_id() == Some(command_id);
+        let Some(start) = self.events.iter().position(produced) else {
+            return &[];
+        };
+        let run = self.events[start..]
+            .iter()
+            .take_while(|e| produced(e))
+            .count();
+        &self.events[start..start + run]
     }
 
     pub fn cover(&self) -> &Cover {

@@ -18,7 +18,7 @@
 
 use std::sync::Mutex;
 
-use angzarr_proto::v1::AngzarrDeadLetter;
+use angzarr_proto::v1::{AngzarrDeadLetter, CommandBook};
 
 /// The start of every dead-letter line.
 pub const DEAD_LETTER_PREFIX: &str = "DEAD LETTER (almost certainly a bug; \
@@ -56,6 +56,22 @@ pub fn dead_letter_line(letter: &AngzarrDeadLetter) -> String {
         }
     }
     line
+}
+
+/// Write the dead letter for `book`, which `component` could not take for
+/// `reason`.
+pub(crate) fn write_dead_letter(
+    log: &dyn DeadLetterLog,
+    book: CommandBook,
+    component: &str,
+    reason: &str,
+) {
+    log.write(&dead_letter_line(&AngzarrDeadLetter {
+        payload: Some(angzarr_proto::v1::angzarr_dead_letter::Payload::RejectedCommand(book)),
+        rejection_reason: reason.to_string(),
+        source_component: component.to_string(),
+        ..AngzarrDeadLetter::default()
+    }));
 }
 
 /// Dead-letter lines kept in memory: for tests.

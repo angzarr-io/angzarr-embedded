@@ -136,3 +136,198 @@ pub fn not_before(floor: Option<&Timestamp>, now: Timestamp) -> Timestamp {
         _ => now,
     }
 }
+
+/// One value of every error `next` defines, each code once, for the
+/// catalog parity test ([`crate::diagnostic_samples`]).
+pub(crate) fn diagnostic_samples() -> Vec<Box<dyn annals_diagnostic::Diagnostic>> {
+    use annals_diagnostic::Report;
+    use v1::ConflictResolution;
+
+    let stream = || v1::Cover {
+        domain: "account".to_string(),
+        root: Some(v1::Uuid::from_bytes([7; 16])),
+        edition: Some("what-if".to_string()),
+    };
+    let gap = Gap {
+        expected: 3,
+        found: 5,
+    };
+    let report = || Report::of(&gap);
+    let domain = || "account".to_string();
+    let malformed = [
+        Malformed::NoCover,
+        Malformed::UnknownDomain { domain: domain() },
+        Malformed::NoRoot,
+        Malformed::BadRoot { len: 15 },
+        Malformed::EmptyEdition,
+        Malformed::NoPage,
+        Malformed::NoBody,
+        Malformed::NoPayload,
+        Malformed::BadCommandId { len: 1 },
+        Malformed::BadCorrelationId { len: 17 },
+        Malformed::CausationFromOutside,
+        Malformed::IdOnReaction,
+        Malformed::FactFromReaction,
+        Malformed::HandlingOnReaction,
+        Malformed::BadTrigger(ids::UuidError::MissingTrigger),
+        Malformed::FactWithoutOrigin,
+        Malformed::EmptyExternalId,
+        Malformed::CommandWithFactOrigin,
+        Malformed::FactCommandIdNotDerived,
+        Malformed::HandlingOnFact,
+        Malformed::UnknownConflictResolution { value: 9 },
+        Malformed::UnsupportedConflictResolution {
+            domain: domain(),
+            requested: ConflictResolution::Commutative,
+        },
+    ];
+    let kernel = [
+        KernelError::Stale {
+            stream: stream(),
+            expected: 2,
+            actual: 4,
+        },
+        KernelError::Unresolved {
+            stream: stream(),
+            expected: 2,
+            actual: 4,
+        },
+        KernelError::UnknownType {
+            stream: stream(),
+            type_url: "/toy.v9.Bonus".to_string(),
+        },
+        KernelError::Upcast {
+            stream: stream(),
+            error: UpcastError::Rule {
+                source: "toy.v0.Credited".to_string(),
+                error: report(),
+            },
+        },
+        KernelError::IngestPanicked {
+            stream: stream(),
+            command_id: v1::Uuid::from_bytes([1; 16]),
+        },
+        KernelError::Gap {
+            stream: stream(),
+            gap: gap.clone(),
+        },
+        KernelError::TargetReturned {
+            left: 3,
+            returned: 5,
+        },
+        KernelError::WrongDomain {
+            stream: stream(),
+            expected: "ledger",
+        },
+        KernelError::ChainTooDeep { limit: 8 },
+        KernelError::BeforeSnapshot {
+            stream: stream(),
+            first: 10,
+        },
+    ];
+    let replay = [
+        ReplayError::OutOfSequence { index: 1, found: 2 },
+        ReplayError::CauseNotEarlier {
+            sequence: 1,
+            cause: 1,
+        },
+        ReplayError::RecordedBackwards { sequence: 4 },
+        ReplayError::IncompleteMeta {
+            sequence: 4,
+            field: "correlation_id",
+        },
+        ReplayError::WrongDomain {
+            found: "ledger".to_string(),
+            expected: "account",
+        },
+        ReplayError::UnknownRules {
+            sequence: 4,
+            version: "v0".to_string(),
+        },
+    ];
+    let store = [
+        StoreError::Conflict {
+            stream: stream(),
+            expected: 1,
+            actual: 2,
+        },
+        StoreError::Discontinuous {
+            stream: stream(),
+            expected: 2,
+            found: 3,
+        },
+        StoreError::Unavailable(report()),
+        StoreError::Unreadable {
+            stream: stream(),
+            sequence: 0,
+            reason: Report::of(&PayloadError::UnknownType {
+                type_url: "/toy.v9.Bonus".to_string(),
+            }),
+        },
+    ];
+    let payload = [
+        PayloadError::UnknownType {
+            type_url: "/toy.v9.Bonus".to_string(),
+        },
+        PayloadError::Decode {
+            type_url: "/toy.v1.Deposited".to_string(),
+            error: <Timestamp as prost::Message>::decode(&[0x08][..])
+                .expect_err("a tag without its value is not a message"),
+        },
+    ];
+    let chain = [
+        ChainProblem::Duplicate {
+            source: "toy.v0.Credited".to_string(),
+        },
+        ChainProblem::OutOfOrder {
+            source: "toy.v1.Credited".to_string(),
+            produced_by: "toy.v0.Credited".to_string(),
+        },
+        ChainProblem::DeadEnd {
+            source: "toy.v0.Credited".to_string(),
+            ends_at: "toy.v9.Bonus".to_string(),
+        },
+    ]
+    .map(|problem| UpcastChainError {
+        domain: domain(),
+        problem,
+    });
+    let misconfigured = [
+        Misconfigured::AlreadyRegistered { domain: domain() },
+        Misconfigured::UpcasterForAnotherDomain {
+            domain: domain(),
+            upcaster: "ledger".to_string(),
+        },
+        Misconfigured::EmptyRulesVersion { domain: domain() },
+        Misconfigured::BadStateDescriptor { domain: domain() },
+        Misconfigured::UnsupportedResolution {
+            domain: domain(),
+            command_type: None,
+            resolution: ConflictResolution::Commutative,
+        },
+        Misconfigured::UnsupportedResolution {
+            domain: domain(),
+            command_type: Some("toy.cmd.v1.Note".to_string()),
+            resolution: ConflictResolution::Commutative,
+        },
+    ];
+
+    let mut samples: Vec<Box<dyn annals_diagnostic::Diagnostic>> = Vec::new();
+    samples.extend(malformed.map(|e| Box::new(e) as Box<_>));
+    samples.extend(kernel.map(|e| Box::new(e) as Box<_>));
+    samples.extend(replay.map(|e| Box::new(e) as Box<_>));
+    samples.extend(store.map(|e| Box::new(e) as Box<_>));
+    samples.extend(payload.map(|e| Box::new(e) as Box<_>));
+    samples.extend(chain.map(|e| Box::new(e) as Box<_>));
+    samples.extend(misconfigured.map(|e| Box::new(e) as Box<_>));
+    samples.push(Box::new(UpcastError::Rule {
+        source: "toy.v0.Credited".to_string(),
+        error: report(),
+    }));
+    samples.push(Box::new(Failure::<Gap>::Downstream {
+        path: Vec::new(),
+        error: StepError::Kernel(KernelError::ChainTooDeep { limit: 8 }),
+    }));
+    samples.push(Box::new(gap));
+    samples
+}

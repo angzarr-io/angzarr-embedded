@@ -5,7 +5,6 @@ use annals::next::{Admit, Committed, Gap, Position, Stream, Tracked};
 use crate::toys::{at, command, cover, registry, root, set, Shelf, ShelfEvent};
 
 #[test]
-#[ignore = "proposal: handlers receive the cover, the sequence, the meta and the state just after"]
 fn handlers_receive_identity_position_metadata_and_state() {
     let registry = registry();
     let log = annals::next::MemoryDeadLetters::new();
@@ -38,7 +37,6 @@ fn handlers_receive_identity_position_metadata_and_state() {
 }
 
 #[test]
-#[ignore = "proposal: a position places next, redelivery and gap"]
 fn a_position_places_next_redelivery_and_gap() {
     assert_eq!(Position::START.next(), 0);
     assert_eq!(Position::START.place(0), Ok(Admit::Next));
@@ -58,7 +56,6 @@ fn a_position_places_next_redelivery_and_gap() {
 }
 
 #[test]
-#[ignore = "proposal: a tracked handler drops redeliveries and records gaps, per cover"]
 fn a_tracked_handler_drops_redeliveries_and_records_gaps() {
     let registry = registry();
     let log = annals::next::MemoryDeadLetters::new();

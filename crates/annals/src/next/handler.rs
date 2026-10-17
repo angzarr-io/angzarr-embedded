@@ -3,6 +3,9 @@
 //! for all of them.
 
 use std::collections::HashMap;
+use std::fmt;
+
+use annals_diagnostic::{Arg, Diagnostic};
 
 use angzarr_proto::v1::{Cover, EventRef};
 
@@ -88,20 +91,32 @@ impl Position {
 
     /// The sequence due next: where a catch-up reads from.
     pub fn next(self) -> u64 {
-        todo!("proposal: 0 at the start, else last + 1")
+        self.0.map_or(0, |last| last + 1)
     }
 
     /// Where `sequence` falls: the next one ([`Admit::Next`]), one already
     /// handled ([`Admit::Redelivery`]: do nothing), or past the next one
     /// (a [`Gap`]: catch up from [`Position::next`] first).
     pub fn place(self, sequence: u64) -> Result<Admit, Gap> {
-        todo!("proposal: compare sequence with next()")
+        let next = self.next();
+        match sequence.cmp(&next) {
+            std::cmp::Ordering::Less => Ok(Admit::Redelivery),
+            std::cmp::Ordering::Equal => Ok(Admit::Next),
+            std::cmp::Ordering::Greater => Err(Gap {
+                expected: next,
+                found: sequence,
+            }),
+        }
     }
 
     /// [`Position::place`], moving on to `sequence` when it is the next
     /// one.
     pub fn advance(&mut self, sequence: u64) -> Result<Admit, Gap> {
-        todo!("proposal: place, and on Next move to sequence")
+        let admit = self.place(sequence)?;
+        if admit == Admit::Next {
+            self.0 = Some(sequence);
+        }
+        Ok(admit)
     }
 }
 
@@ -119,6 +134,29 @@ pub enum Admit {
 pub struct Gap {
     pub expected: u64,
     pub found: u64,
+}
+
+impl fmt::Display for Gap {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "event {} came where {} was due: catch up first",
+            self.found, self.expected
+        )
+    }
+}
+
+impl Diagnostic for Gap {
+    fn code(&self) -> &'static str {
+        "annals-next-position-gap"
+    }
+
+    fn args(&self) -> Vec<(&'static str, Arg)> {
+        vec![
+            ("expected", self.expected.into()),
+            ("found", self.found.into()),
+        ]
+    }
 }
 
 /// A handler that keeps a [`Position`] per stream, so it may be fed from
@@ -168,6 +206,17 @@ impl<H> Tracked<H> {
 
 impl<D: Domain, H: Handler<D>> Handler<D> for Tracked<H> {
     fn handle(&mut self, committed: &Committed<'_, D>) {
-        todo!("proposal: advance the stream's position; Next goes to inner, a gap is recorded")
+        let cover = committed.cover;
+        let position = self.positions.entry(cover.clone()).or_default();
+        match position.advance(committed.sequence()) {
+            Ok(Admit::Next) => {
+                self.gaps.remove(cover);
+                self.inner.handle(committed);
+            }
+            Ok(Admit::Redelivery) => {}
+            Err(gap) => {
+                self.gaps.entry(cover.clone()).or_insert(gap);
+            }
+        }
     }
 }

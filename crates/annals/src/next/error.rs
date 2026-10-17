@@ -3,14 +3,18 @@
 //! [`KernelError`] is a fault in delivery, storage or a log, for the
 //! operator.
 //!
-//! Each becomes a [`Diagnostic`](annals_diagnostic::Diagnostic) when it is
-//! implemented, with the codes `docs/design/audit.md` lists and messages in
-//! `locales/en-US/annals.ftl`. Until then they have none, so the catalog
-//! parity check is not asked to sample a `todo!()`. Every error about a
-//! payload names its type URL.
+//! Each is a [`Diagnostic`], its codes under `annals-next-*` and its
+//! messages in `locales/en-US/annals.ftl`; a wrapper of another error
+//! ([`Failure::Rejected`], [`Failure::Kernel`], [`StepError`],
+//! [`KernelError::Malformed`], [`KernelError::Replay`],
+//! [`KernelError::Store`], [`UpcastError::Payload`]) is that error's
+//! diagnostic. Every error about a payload names its type URL; a stream is
+//! named as `domain/root`, with `@edition` outside the main timeline.
+
+use std::fmt;
 
 use angzarr_proto::v1::{Cover, EventRef, Uuid};
-use annals_diagnostic::Report;
+use annals_diagnostic::{Arg, Diagnostic, Report};
 
 use super::check::Malformed;
 use super::handler::Gap;
@@ -253,27 +257,532 @@ pub enum Recovery {
 
 impl<R> Failure<R> {
     pub fn recovery(&self) -> Recovery {
-        todo!("proposal: Rejected Business; Downstream by StepError; Kernel by KernelError")
+        match self {
+            Failure::Rejected(_) => Recovery::Business,
+            Failure::Downstream { error, .. } => error.recovery(),
+            Failure::Kernel(error) => error.recovery(),
+        }
     }
 }
 
 impl StepError {
     pub fn recovery(&self) -> Recovery {
-        todo!("proposal: Rejected Business; a malformed policy book Bug; else by KernelError")
+        match self {
+            StepError::Rejected(_) => Recovery::Business,
+            StepError::Kernel(KernelError::Malformed(_)) => Recovery::Bug,
+            StepError::Kernel(error) => error.recovery(),
+        }
     }
 }
 
 impl KernelError {
     pub fn recovery(&self) -> Recovery {
-        todo!(
-            "proposal: Malformed and UnknownType Invalid; Stale, Unresolved, Gap Retry; \
-             Store by StoreError; the rest Bug"
-        )
+        match self {
+            KernelError::Malformed(_) | KernelError::UnknownType { .. } => Recovery::Invalid,
+            KernelError::Stale { .. }
+            | KernelError::Unresolved { .. }
+            | KernelError::Gap { .. } => Recovery::Retry,
+            KernelError::Store(error) => error.recovery(),
+            KernelError::Upcast { .. }
+            | KernelError::IngestPanicked { .. }
+            | KernelError::TargetReturned { .. }
+            | KernelError::WrongDomain { .. }
+            | KernelError::ChainTooDeep { .. }
+            | KernelError::BeforeSnapshot { .. }
+            | KernelError::Replay(_) => Recovery::Bug,
+        }
     }
 }
 
 impl StoreError {
     pub fn recovery(&self) -> Recovery {
-        todo!("proposal: Conflict and Unavailable Retry; the rest Bug")
+        match self {
+            StoreError::Conflict { .. } | StoreError::Unavailable(_) => Recovery::Retry,
+            StoreError::Discontinuous { .. } | StoreError::Unreadable { .. } => Recovery::Bug,
+        }
+    }
+}
+
+/// A stream as an error names it: `domain/root`, then `@edition` outside
+/// the main timeline.
+pub(crate) fn cover_text(cover: &Cover) -> String {
+    let root = cover.root.as_ref().map(Uuid::to_string).unwrap_or_default();
+    match &cover.edition {
+        Some(edition) => format!("{}/{root}@{edition}", cover.domain),
+        None => format!("{}/{root}", cover.domain),
+    }
+}
+
+fn stream(cover: &Cover) -> Arg {
+    cover_text(cover).into()
+}
+
+// ---------------------------------------------------------------- Failure
+
+impl<R: fmt::Display> fmt::Display for Failure<R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Failure::Rejected(rejection) => rejection.fmt(f),
+            Failure::Downstream { path, error } => write!(
+                f,
+                "a reaction down the chain failed, at depth {}: {error}",
+                path.len()
+            ),
+            Failure::Kernel(error) => error.fmt(f),
+        }
+    }
+}
+
+impl<R: Diagnostic> Diagnostic for Failure<R> {
+    fn code(&self) -> &'static str {
+        match self {
+            Failure::Rejected(rejection) => rejection.code(),
+            Failure::Downstream { .. } => "annals-next-downstream",
+            Failure::Kernel(error) => error.code(),
+        }
+    }
+
+    fn args(&self) -> Vec<(&'static str, Arg)> {
+        match self {
+            Failure::Rejected(rejection) => rejection.args(),
+            Failure::Downstream { path, error } => {
+                vec![("depth", path.len().into()), ("error", Arg::nested(error))]
+            }
+            Failure::Kernel(error) => error.args(),
+        }
+    }
+}
+
+impl fmt::Display for StepError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StepError::Rejected(rejection) => rejection.fmt(f),
+            StepError::Kernel(error) => error.fmt(f),
+        }
+    }
+}
+
+impl Diagnostic for StepError {
+    fn code(&self) -> &'static str {
+        match self {
+            StepError::Rejected(rejection) => rejection.code(),
+            StepError::Kernel(error) => error.code(),
+        }
+    }
+
+    fn args(&self) -> Vec<(&'static str, Arg)> {
+        match self {
+            StepError::Rejected(rejection) => rejection.args(),
+            StepError::Kernel(error) => error.args(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------- KernelError
+
+impl fmt::Display for KernelError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            KernelError::Malformed(m) => m.fmt(f),
+            KernelError::Stale {
+                stream,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "stream {} is at {actual}, not the {expected} expected: re-read and re-issue",
+                cover_text(stream)
+            ),
+            KernelError::Unresolved {
+                stream,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "decide never acknowledged the window of stream {} from {expected} to {actual}",
+                cover_text(stream)
+            ),
+            KernelError::UnknownType { stream, type_url } => write!(
+                f,
+                "stream {}'s domain does not decode the type {type_url}",
+                cover_text(stream)
+            ),
+            KernelError::Upcast { stream, error } => write!(
+                f,
+                "upcasting a payload for stream {} failed: {error}",
+                cover_text(stream)
+            ),
+            KernelError::IngestPanicked { stream, command_id } => write!(
+                f,
+                "ingesting fact {command_id} into stream {} panicked: a bug",
+                cover_text(stream)
+            ),
+            KernelError::Gap { stream, gap } => write!(
+                f,
+                "a delivery to stream {} skips ahead to {} from {}, the next due",
+                cover_text(stream),
+                gap.found,
+                gap.expected
+            ),
+            KernelError::TargetReturned { left, returned } => write!(
+                f,
+                "a target left the source's targets at event {left} and came back at event {returned}"
+            ),
+            KernelError::WrongDomain { stream, expected } => write!(
+                f,
+                "stream {} was given to the {expected} domain's code",
+                cover_text(stream)
+            ),
+            KernelError::ChainTooDeep { limit } => {
+                write!(f, "the command chain went deeper than its limit of {limit}")
+            }
+            KernelError::BeforeSnapshot { stream, first } => write!(
+                f,
+                "stream {} holds its events from {first} on only, after its snapshot",
+                cover_text(stream)
+            ),
+            KernelError::Replay(error) => error.fmt(f),
+            KernelError::Store(error) => error.fmt(f),
+        }
+    }
+}
+
+impl Diagnostic for KernelError {
+    fn code(&self) -> &'static str {
+        match self {
+            KernelError::Malformed(m) => m.code(),
+            KernelError::Stale { .. } => "annals-next-stale",
+            KernelError::Unresolved { .. } => "annals-next-unresolved",
+            KernelError::UnknownType { .. } => "annals-next-unknown-type",
+            KernelError::Upcast { .. } => "annals-next-upcast",
+            KernelError::IngestPanicked { .. } => "annals-next-ingest-panicked",
+            KernelError::Gap { .. } => "annals-next-gap",
+            KernelError::TargetReturned { .. } => "annals-next-target-returned",
+            KernelError::WrongDomain { .. } => "annals-next-wrong-domain",
+            KernelError::ChainTooDeep { .. } => "annals-next-chain-too-deep",
+            KernelError::BeforeSnapshot { .. } => "annals-next-before-snapshot",
+            KernelError::Replay(error) => error.code(),
+            KernelError::Store(error) => error.code(),
+        }
+    }
+
+    fn args(&self) -> Vec<(&'static str, Arg)> {
+        match self {
+            KernelError::Malformed(m) => m.args(),
+            KernelError::Stale {
+                stream: s,
+                expected,
+                actual,
+            }
+            | KernelError::Unresolved {
+                stream: s,
+                expected,
+                actual,
+            } => vec![
+                ("stream", stream(s)),
+                ("expected", (*expected).into()),
+                ("actual", (*actual).into()),
+            ],
+            KernelError::UnknownType {
+                stream: s,
+                type_url,
+            } => vec![
+                ("stream", stream(s)),
+                ("type_url", type_url.as_str().into()),
+            ],
+            KernelError::Upcast { stream: s, error } => {
+                vec![("stream", stream(s)), ("error", Arg::nested(error))]
+            }
+            KernelError::IngestPanicked {
+                stream: s,
+                command_id,
+            } => vec![
+                ("stream", stream(s)),
+                ("command_id", command_id.to_string().into()),
+            ],
+            KernelError::Gap { stream: s, gap } => vec![
+                ("stream", stream(s)),
+                ("expected", gap.expected.into()),
+                ("found", gap.found.into()),
+            ],
+            KernelError::TargetReturned { left, returned } => {
+                vec![("left", (*left).into()), ("returned", (*returned).into())]
+            }
+            KernelError::WrongDomain {
+                stream: s,
+                expected,
+            } => {
+                vec![("stream", stream(s)), ("expected", (*expected).into())]
+            }
+            KernelError::ChainTooDeep { limit } => vec![("limit", (*limit).into())],
+            KernelError::BeforeSnapshot { stream: s, first } => {
+                vec![("stream", stream(s)), ("first", (*first).into())]
+            }
+            KernelError::Replay(error) => error.args(),
+            KernelError::Store(error) => error.args(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------- ReplayError
+
+impl fmt::Display for ReplayError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ReplayError::OutOfSequence { index, found } => write!(
+                f,
+                "page {index} of the log claims sequence {found}, not the one due"
+            ),
+            ReplayError::CauseNotEarlier { sequence, cause } => write!(
+                f,
+                "event {sequence} names event {cause} of its own stream as its trigger, which is not earlier"
+            ),
+            ReplayError::RecordedBackwards { sequence } => write!(
+                f,
+                "event {sequence} was recorded before the event before it"
+            ),
+            ReplayError::IncompleteMeta { sequence, field } => write!(
+                f,
+                "event {sequence}'s metadata lacks a well-formed {field}"
+            ),
+            ReplayError::WrongDomain { found, expected } => {
+                write!(f, "a {found} log was given to the {expected} domain's code")
+            }
+            ReplayError::UnknownRules { sequence, version } => write!(
+                f,
+                "event {sequence} was decided under rules {version}, which the rulebook does not hold"
+            ),
+        }
+    }
+}
+
+impl Diagnostic for ReplayError {
+    fn code(&self) -> &'static str {
+        match self {
+            ReplayError::OutOfSequence { .. } => "annals-next-replay-out-of-sequence",
+            ReplayError::CauseNotEarlier { .. } => "annals-next-replay-cause-not-earlier",
+            ReplayError::RecordedBackwards { .. } => "annals-next-replay-recorded-backwards",
+            ReplayError::IncompleteMeta { .. } => "annals-next-replay-incomplete-meta",
+            ReplayError::WrongDomain { .. } => "annals-next-replay-wrong-domain",
+            ReplayError::UnknownRules { .. } => "annals-next-replay-unknown-rules",
+        }
+    }
+
+    fn args(&self) -> Vec<(&'static str, Arg)> {
+        match self {
+            ReplayError::OutOfSequence { index, found } => {
+                vec![("index", (*index).into()), ("found", (*found).into())]
+            }
+            ReplayError::CauseNotEarlier { sequence, cause } => {
+                vec![("sequence", (*sequence).into()), ("cause", (*cause).into())]
+            }
+            ReplayError::RecordedBackwards { sequence } => vec![("sequence", (*sequence).into())],
+            ReplayError::IncompleteMeta { sequence, field } => {
+                vec![("sequence", (*sequence).into()), ("field", (*field).into())]
+            }
+            ReplayError::WrongDomain { found, expected } => vec![
+                ("found", found.as_str().into()),
+                ("expected", (*expected).into()),
+            ],
+            ReplayError::UnknownRules { sequence, version } => vec![
+                ("sequence", (*sequence).into()),
+                ("version", version.as_str().into()),
+            ],
+        }
+    }
+}
+
+// ---------------------------------------------------------------- StoreError
+
+impl fmt::Display for StoreError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StoreError::Conflict {
+                stream,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "stream {} holds {actual} events, not the {expected} expected: someone else appended first",
+                cover_text(stream)
+            ),
+            StoreError::Discontinuous {
+                stream,
+                expected,
+                found,
+            } => write!(
+                f,
+                "an append to stream {} gives sequence {found} where {expected} was due",
+                cover_text(stream)
+            ),
+            StoreError::Unavailable(error) => write!(f, "the store is unavailable: {error}"),
+            StoreError::Unreadable {
+                stream,
+                sequence,
+                reason,
+            } => write!(
+                f,
+                "event {sequence} of stream {} cannot be read: {reason}",
+                cover_text(stream)
+            ),
+        }
+    }
+}
+
+impl Diagnostic for StoreError {
+    fn code(&self) -> &'static str {
+        match self {
+            StoreError::Conflict { .. } => "annals-next-store-conflict",
+            StoreError::Discontinuous { .. } => "annals-next-store-discontinuous",
+            StoreError::Unavailable(_) => "annals-next-store-unavailable",
+            StoreError::Unreadable { .. } => "annals-next-store-unreadable",
+        }
+    }
+
+    fn args(&self) -> Vec<(&'static str, Arg)> {
+        match self {
+            StoreError::Conflict {
+                stream: s,
+                expected,
+                actual,
+            } => vec![
+                ("stream", stream(s)),
+                ("expected", (*expected).into()),
+                ("actual", (*actual).into()),
+            ],
+            StoreError::Discontinuous {
+                stream: s,
+                expected,
+                found,
+            } => vec![
+                ("stream", stream(s)),
+                ("expected", (*expected).into()),
+                ("found", (*found).into()),
+            ],
+            StoreError::Unavailable(error) => vec![("error", Arg::nested(error))],
+            StoreError::Unreadable {
+                stream: s,
+                sequence,
+                reason,
+            } => vec![
+                ("stream", stream(s)),
+                ("sequence", (*sequence).into()),
+                ("reason", Arg::nested(reason)),
+            ],
+        }
+    }
+}
+
+// ---------------------------------------------------------------- payloads
+
+impl fmt::Display for PayloadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PayloadError::UnknownType { type_url } => {
+                write!(f, "no decoder for the type {type_url}")
+            }
+            PayloadError::Decode { type_url, error } => {
+                write!(f, "a payload of type {type_url} does not decode: {error}")
+            }
+        }
+    }
+}
+
+impl Diagnostic for PayloadError {
+    fn code(&self) -> &'static str {
+        match self {
+            PayloadError::UnknownType { .. } => "annals-next-payload-unknown-type",
+            PayloadError::Decode { .. } => "annals-next-payload-decode",
+        }
+    }
+
+    fn args(&self) -> Vec<(&'static str, Arg)> {
+        match self {
+            PayloadError::UnknownType { type_url } | PayloadError::Decode { type_url, .. } => {
+                vec![("type_url", type_url.as_str().into())]
+            }
+        }
+    }
+}
+
+impl fmt::Display for UpcastError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            UpcastError::Payload(error) => error.fmt(f),
+            UpcastError::Rule { source, error } => {
+                write!(f, "the upcast rule from {source} failed: {error}")
+            }
+        }
+    }
+}
+
+impl Diagnostic for UpcastError {
+    fn code(&self) -> &'static str {
+        match self {
+            UpcastError::Payload(error) => error.code(),
+            UpcastError::Rule { .. } => "annals-next-upcast-rule",
+        }
+    }
+
+    fn args(&self) -> Vec<(&'static str, Arg)> {
+        match self {
+            UpcastError::Payload(error) => error.args(),
+            UpcastError::Rule { source, error } => vec![
+                ("source", source.as_str().into()),
+                ("error", Arg::nested(error)),
+            ],
+        }
+    }
+}
+
+impl fmt::Display for UpcastChainError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let domain = &self.domain;
+        match &self.problem {
+            ChainProblem::Duplicate { source } => write!(
+                f,
+                "domain {domain}'s upcaster has two typed rules from {source}: the second never runs"
+            ),
+            ChainProblem::OutOfOrder {
+                source,
+                produced_by,
+            } => write!(
+                f,
+                "domain {domain}'s upcaster registers the rule from {source} before the rule from {produced_by}, which produces it"
+            ),
+            ChainProblem::DeadEnd { source, ends_at } => write!(
+                f,
+                "domain {domain}'s upcaster takes {source} to {ends_at}, which the domain does not decode"
+            ),
+        }
+    }
+}
+
+impl Diagnostic for UpcastChainError {
+    fn code(&self) -> &'static str {
+        match self.problem {
+            ChainProblem::Duplicate { .. } => "annals-next-upcaster-duplicate",
+            ChainProblem::OutOfOrder { .. } => "annals-next-upcaster-out-of-order",
+            ChainProblem::DeadEnd { .. } => "annals-next-upcaster-dead-end",
+        }
+    }
+
+    fn args(&self) -> Vec<(&'static str, Arg)> {
+        let mut args = vec![("domain", self.domain.as_str().into())];
+        match &self.problem {
+            ChainProblem::Duplicate { source } => args.push(("source", source.as_str().into())),
+            ChainProblem::OutOfOrder {
+                source,
+                produced_by,
+            } => {
+                args.push(("source", source.as_str().into()));
+                args.push(("produced_by", produced_by.as_str().into()));
+            }
+            ChainProblem::DeadEnd { source, ends_at } => {
+                args.push(("source", source.as_str().into()));
+                args.push(("ends_at", ends_at.as_str().into()));
+            }
+        }
+        args
     }
 }

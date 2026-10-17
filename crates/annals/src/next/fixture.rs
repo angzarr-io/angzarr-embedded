@@ -8,7 +8,9 @@ use std::fmt::Debug;
 use angzarr_proto::v1::{Cover, EventPage};
 
 use super::domain::Domain;
+use super::handler::Committed;
 use super::registry::Registry;
+use super::stream::Stream;
 
 /// An old log, kept as it was stored, and the states it must still replay
 /// to.
@@ -34,7 +36,37 @@ where
     D: Domain,
     D::State: PartialEq + Debug,
 {
-    todo!("proposal: Stream::replay each fixture, dispatch, compare states")
+    let mut failures = Vec::new();
+    for fixture in fixtures {
+        let name = fixture.name;
+        let stream = match Stream::<D>::replay(fixture.stream.clone(), &fixture.log, registry) {
+            Ok(stream) => stream,
+            Err(error) => {
+                failures.push(format!("{name}: {error}"));
+                continue;
+            }
+        };
+        let mut states = Vec::new();
+        let mut collect = |c: &Committed<'_, D>| states.push((c.sequence(), c.state.clone()));
+        if let Err(error) = stream.dispatch(0, registry, &mut [&mut collect]) {
+            failures.push(format!("{name}: {error}"));
+            continue;
+        }
+        for (sequence, expected) in &fixture.states {
+            match states.iter().find(|(s, _)| s == sequence) {
+                None => failures.push(format!("{name}: no event {sequence}")),
+                Some((_, state)) if state != expected => failures.push(format!(
+                    "{name}: after event {sequence}, {state:?}, not {expected:?}"
+                )),
+                Some(_) => {}
+            }
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures)
+    }
 }
 
 /// [`check_replay_fixtures`], panicking with every failure: for tests.

@@ -45,7 +45,7 @@ pub use stream::{Envelope, Header, ReplayError, Seq, Stream, StreamId};
 /// using exactly its args. Its messages are in
 /// `crates/annals/locales/en-US/annals.ftl`.
 pub fn diagnostic_samples() -> Vec<Box<dyn annals_diagnostic::Diagnostic>> {
-    vec![
+    let root: Vec<Box<dyn annals_diagnostic::Diagnostic>> = vec![
         Box::new(ReplayError::OutOfSequence { index: 1, found: 2 }),
         Box::new(ReplayError::CauseNotEarlier { seq: 1, cause: 1 }),
         Box::new(Conflict {
@@ -57,5 +57,6 @@ pub fn diagnostic_samples() -> Vec<Box<dyn annals_diagnostic::Diagnostic>> {
             expected: 5,
             found: 7,
         }),
-    ]
+    ];
+    root.into_iter().chain(next::diagnostic_samples()).collect()
 }
