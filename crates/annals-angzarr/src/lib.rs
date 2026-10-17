@@ -7,7 +7,7 @@
 //! is the in-process runtime, and its kernel stays dependency-free. This
 //! crate is the one place the two meet:
 //!
-//! | annals | angzarr (angzarr-proto e733dd2) |
+//! | annals | angzarr (angzarr-proto 7956dc8) |
 //! |---|---|
 //! | [`StreamKey`](annals::next::StreamKey) (domain, edition, root) | `Cover { domain, root, optional edition }` |
 //! | `edition: None` / `Some(name)` | `Cover.edition` unset / set; a set `""` refused |
@@ -15,11 +15,12 @@
 //! | [`Book`](annals::next::Book) | a one-page `CommandBook { cover, handling, page }` |
 //! | [`Handling`](annals::next::Handling), [`ConflictResolution`](annals::next::ConflictResolution) | `Handling { expected_sequence, conflict_resolution }` |
 //! | [`Provenance`](annals::next::Provenance) | `Provenance { actor, UUID correlation_id }` |
-//! | [`Origin`](annals::next::Origin) | `Origin { request \| causation \| fact }`; `RequestOrigin { UUID request_id, index, minted }` |
+//! | [`Origin`](annals::next::Origin) | `Origin { request \| causation \| fact }`; `RequestOrigin { UUID request_id, minted }` (no index: a request id names one command) |
 //! | a book's `origin: None` | `CommandPage.origin` unset: the request id is minted on receipt |
 //! | [`Uuid`](annals::next::Uuid), [`RequestId`](annals::next::RequestId), [`Correlation`](annals::next::Correlation) | `UUID { bytes value }`, 16 bytes ([`ids`]) |
 //! | [`DeriveIds`](annals::next::DeriveIds), derived roots | `angzarr_proto::ids::{fact_correlation, compute_root}` ([`ids::ANGZARR_IDS`], [`ids::compute_root`]) |
-//! | [`Fingerprint`](annals::next::Fingerprint), [`Claim`](annals::next::Claim) | `IdempotencyClaim { stream, key, fingerprint, first_sequence, event_count }` ([`fingerprint`]) |
+//! | [`Fingerprint`](annals::next::Fingerprint), [`Claim`](annals::next::Claim) | `IdempotencyClaim { stream, key, UUID fingerprint, first_sequence, event_count }` ([`fingerprint`]: `angzarr_proto::ids::fingerprint`, UUIDv5) |
+//! | [`FactMismatch`](annals::next::FactMismatch) ([`Domain::fact_mismatch`](annals::next::Domain::fact_mismatch)) | the coordinator's fact-mismatch setting (configuration, not wire): refuse FAILED_PRECONDITION by default, or DUPLICATE plus an alert |
 //! | [`CommutativeState`](annals::next::CommutativeState) | `changed()` generated from `(commutative_state)` and `(conflict)` (backlog CR-1) |
 //! | [`Body`](annals::next::Body) | `CommandPage.body`: `Command` or `Fact` |
 //! | [`Envelope`](annals::next::Envelope) | `EventPage { sequence, meta, payload }` |

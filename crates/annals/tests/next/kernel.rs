@@ -179,7 +179,7 @@ fn the_kernel_stamps_one_meta_on_every_event_of_a_write() {
     let pour = Book::command(
         s.key().clone(),
         JugCmd::Pour,
-        Origin::request(request(42), 2),
+        Origin::request(request(42)),
         ann_in(9),
     )
     .fingerprinted(fingerprint(42));
@@ -193,7 +193,7 @@ fn the_kernel_stamps_one_meta_on_every_event_of_a_write() {
             Meta {
                 actor: ann().actor,
                 correlation: correlation(9),
-                origin: Origin::request(request(42), 2),
+                origin: Origin::request(request(42)),
                 recorded_at: Timestamp(1_700_000_000_000_000),
                 base_sequence: 1,
                 rules_version: RulesVersion::from("none"),
@@ -208,7 +208,7 @@ fn the_kernel_stamps_one_meta_on_every_event_of_a_write() {
 #[ignore = "proposal: correlation is the caller's, else the request id, else the fact's v5"]
 fn correlation_is_given_else_derived_from_the_origin() {
     assert_eq!(
-        Correlation::derived(&Origin::request(request(1), 0), &ToyIds),
+        Correlation::derived(&Origin::request(request(1)), &ToyIds),
         Some(Correlation(request(1).0)),
         "a request: its id verbatim, so every retry lands in one correlation"
     );
@@ -246,7 +246,7 @@ fn correlation_is_given_else_derived_from_the_origin() {
     let given = Book::command(
         s.key().clone(),
         JugCmd::Fill(1, 1),
-        Origin::request(request(2), 0),
+        Origin::request(request(2)),
         ann_in(77),
     )
     .fingerprinted(fingerprint(2));
@@ -275,7 +275,6 @@ fn a_request_id_is_always_assigned() {
         meta.origin,
         Origin::Request(RequestOrigin {
             request: minted(5),
-            index: 0,
             minted: true
         }),
         "recorded with the application's id, flagged minted, for audit"
@@ -284,13 +283,13 @@ fn a_request_id_is_always_assigned() {
     assert_eq!(meta.correlation, Correlation(minted(5).0));
     assert_eq!(meta.actor, None, "the system");
 
-    assert!(Origin::request(request(1), 0).is_keyed());
+    assert!(Origin::request(request(1)).is_keyed());
     assert!(Origin::fact("pi_1", "Stripe").is_keyed());
 
     let keyed = book(&s, JugCmd::Pour, 1);
     assert_eq!(
         keyed.origin(&at(6)),
-        Origin::request(request(1), 0),
+        Origin::request(request(1)),
         "a client-supplied id is kept; the minted one goes unused"
     );
 }
@@ -348,7 +347,7 @@ fn a_malformed_book_is_refused_before_business_code() {
     let print = fingerprint(3);
     let cases = [
         (
-            Book::fact(k.clone(), paid(), Origin::request(request(3), 0), ann()),
+            Book::fact(k.clone(), paid(), Origin::request(request(3)), ann()),
             Malformed::FactWithoutFactOrigin,
         ),
         (
@@ -379,7 +378,7 @@ fn a_malformed_book_is_refused_before_business_code() {
             Malformed::MintedBySender,
         ),
         (
-            Book::command(k.clone(), deposit(), Origin::request(request(3), 0), ann()),
+            Book::command(k.clone(), deposit(), Origin::request(request(3)), ann()),
             Malformed::Unfingerprinted,
         ),
         (
@@ -841,4 +840,24 @@ fn a_rulebook_finds_each_version_and_knows_the_current() {
         Some(&Fees { withdrawal: 0 })
     );
     assert_eq!(book.get(&RulesVersion::from("fees-0")), None);
+}
+
+#[test]
+fn a_fact_mismatch_is_refused_unless_the_domain_says_otherwise_per_fact_type() {
+    use annals::next::{Domain, FactMismatch};
+    assert_eq!(
+        FactMismatch::default(),
+        FactMismatch::Refuse,
+        "angzarr's built-in default: FAILED_PRECONDITION"
+    );
+    assert_eq!(
+        Account::fact_mismatch(&AccountFact::PaymentReceived(5)),
+        FactMismatch::Refuse,
+        "a payment id reused for another amount is refused"
+    );
+    assert_eq!(
+        Account::fact_mismatch(&AccountFact::Statement(100)),
+        FactMismatch::Duplicate,
+        "per fact type, as angzarr's setting is per command type"
+    );
 }

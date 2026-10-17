@@ -50,7 +50,7 @@ use std::any::{Any, TypeId};
 use std::collections::BTreeMap;
 
 use super::book::{BookOf, Sampled};
-use super::domain::Domain;
+use super::domain::{Domain, FactMismatch};
 use super::error::{Failure, KernelError, Step, StepError};
 use super::handler::Handler;
 use super::id::{Fingerprint, Seq, StreamKey};
@@ -156,15 +156,25 @@ pub struct Chain<'u, 'r, U> {
     /// The order streams were first touched in: the order they are
     /// appended in.
     order: Vec<StreamKey>,
-    /// The originating book's stream, resolved origin and fingerprint,
-    /// recorded at append as a [`Claim`](super::Claim) when the origin is
+    /// The originating book's claim, recorded at append when its origin is
     /// keyed ([`UnitOfWork::record_command`]).
-    origin: Option<(StreamKey, Origin, Option<Fingerprint>)>,
+    origin: Option<Keyed>,
     path: Vec<Step>,
     limit: usize,
     /// Mints each delivery's [`Nonce`](super::Nonce): a counter, so the
     /// kernel needs no randomness.
     nonces: u64,
+}
+
+/// The originating book, as its claim will be recorded: its stream,
+/// resolved origin and fingerprint, and, for a fact, what its domain
+/// answers a payload mismatch with ([`Domain::fact_mismatch`], read in
+/// [`Chain::execute`], where the domain is known).
+struct Keyed {
+    stream: StreamKey,
+    origin: Origin,
+    fingerprint: Option<Fingerprint>,
+    fact_mismatch: FactMismatch,
 }
 
 impl<'u, 'r, U> Chain<'u, 'r, U> {
@@ -232,13 +242,20 @@ impl<'u, 'r, U> Chain<'u, 'r, U> {
     /// [`StoreError::Conflict`](super::StoreError::Conflict) naming it, a
     /// recorded key a [`StoreError::Duplicate`](super::StoreError::Duplicate)
     /// or, reused for another payload, a
-    /// [`StoreError::KeyReused`](super::StoreError::KeyReused); the caller
-    /// then drops the unit of work uncommitted.
+    /// [`StoreError::KeyReused`](super::StoreError::KeyReused), except a
+    /// fact whose domain answers a mismatch [`FactMismatch::Duplicate`]: its
+    /// `KeyReused` becomes a
+    /// [`StoreError::DivergentDuplicate`](super::StoreError::DivergentDuplicate)
+    /// with the same range. The caller then drops the unit of work
+    /// uncommitted.
     pub fn append(self) -> Result<Recorded, KernelError>
     where
         U: UnitOfWork,
     {
-        todo!("proposal: append each staged stream's new events, then record_command(Claim)")
+        todo!(
+            "proposal: append each staged stream's new events, then record_command(Claim); \
+             a fact's KeyReused under FactMismatch::Duplicate becomes DivergentDuplicate"
+        )
     }
 }
 

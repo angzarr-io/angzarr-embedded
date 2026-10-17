@@ -25,7 +25,7 @@ fn row(seq: Seq, any: prost_types::Any) -> Envelope<Stored> {
     let meta = Meta {
         actor: None,
         correlation: correlation(0),
-        origin: Origin::request(request(seq as u32), 0),
+        origin: Origin::request(request(seq as u32)),
         recorded_at: Timestamp(1_000 + seq as i64),
         base_sequence: seq,
         rules_version: RulesVersion::from("none"),

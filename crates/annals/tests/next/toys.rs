@@ -9,8 +9,8 @@ use std::fmt;
 
 use annals::next::{
     commutative, Actor, Book, BookOf, Changed, CommutativeState, ConflictResolution, Correlation,
-    DeriveIds, Domain, EditionName, Fingerprint, Key, Origin, Provenance, RequestId, Root,
-    Rulebook, Sampled, Stream, StreamKey, Timestamp, Tx, UnitPath, Units, Uuid,
+    DeriveIds, Domain, EditionName, FactMismatch, Fingerprint, Key, Origin, Provenance, RequestId,
+    Root, Rulebook, Sampled, Stream, StreamKey, Timestamp, Tx, UnitPath, Units, Uuid,
 };
 use annals_diagnostic::{Arg, Diagnostic};
 
@@ -52,9 +52,10 @@ pub fn minted(at: i64) -> RequestId {
     RequestId(tagged(0x07, at as u128))
 }
 
-/// The fingerprint of payload `n`.
+/// The fingerprint of payload `n`. The real one is angzarr's UUIDv5
+/// (`annals_angzarr::fingerprint`); the kernel only compares.
 pub fn fingerprint(n: u8) -> Fingerprint {
-    Fingerprint([n; 32])
+    Fingerprint(tagged(0xf1, n as u128))
 }
 
 /// The toys' derivations: a fact's correlation is its external id's bytes
@@ -99,15 +100,14 @@ pub fn at(at: i64) -> Sampled {
     }
 }
 
-/// `cmd` for the `D` stream `stream`, the first command of request `n`,
-/// from ann, with no correlation; its payload's fingerprint is `n`'s.
+/// `cmd` for the `D` stream `stream`, as request `n`, from ann, with no correlation; its payload's fingerprint is `n`'s.
 pub fn book<D: Domain>(stream: &Stream<D>, cmd: D::Command, n: u128) -> BookOf<D> {
     book_at::<D>(stream.key(), cmd, n)
 }
 
-/// `cmd` for `key`, the first command of request `n`, from ann.
+/// `cmd` for `key`, as request `n`, from ann.
 pub fn book_at<D: Domain>(key: &StreamKey, cmd: D::Command, n: u128) -> BookOf<D> {
-    Book::command(key.clone(), cmd, Origin::request(request(n), 0), ann())
+    Book::command(key.clone(), cmd, Origin::request(request(n)), ann())
         .fingerprinted(fingerprint(n as u8))
 }
 
@@ -151,12 +151,19 @@ pub enum AccountEvent {
     /// A payment that arrived for an account that is not open: recorded,
     /// never refused.
     Unmatched(i64),
+    /// A bank statement's closing balance, for reconciliation.
+    Stated(i64),
 }
 
 /// Facts from the payment provider.
 #[derive(Clone, PartialEq, Debug)]
 pub enum AccountFact {
     PaymentReceived(i64),
+    /// A statement line from the bank, keyed by the line's id. The bank
+    /// re-signs each redelivery, so one line arrives as other bytes: the
+    /// account answers a mismatch on it as a duplicate (and the
+    /// application alerts), not as a refusal.
+    Statement(i64),
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -247,6 +254,17 @@ impl Domain for Account {
         match *fact {
             AccountFact::PaymentReceived(c) if s.open => vec![AccountEvent::Deposited(c)],
             AccountFact::PaymentReceived(c) => vec![AccountEvent::Unmatched(c)],
+            AccountFact::Statement(c) => vec![AccountEvent::Stated(c)],
+        }
+    }
+
+    /// Payments keep the default (a payment id reused for another amount
+    /// is refused); statements, re-signed on every redelivery, are answered
+    /// as duplicates.
+    fn fact_mismatch(fact: &AccountFact) -> FactMismatch {
+        match fact {
+            AccountFact::PaymentReceived(_) => FactMismatch::Refuse,
+            AccountFact::Statement(_) => FactMismatch::Duplicate,
         }
     }
 
@@ -257,7 +275,7 @@ impl Domain for Account {
             AccountEvent::Opened => s.open = true,
             AccountEvent::Deposited(c) => s.cents += c,
             AccountEvent::Withdrew(c) => s.cents -= c + rules.withdrawal,
-            AccountEvent::Unmatched(_) => {}
+            AccountEvent::Unmatched(_) | AccountEvent::Stated(_) => {}
         }
     }
 }

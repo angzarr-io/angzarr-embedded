@@ -75,6 +75,24 @@ pub trait Domain: Sized + 'static {
         ConflictResolution::Strict
     }
 
+    /// What a fact re-sent under a recorded `external_id` with **another
+    /// payload** (another [`Fingerprint`](super::Fingerprint)) is answered
+    /// with: the domain's configuration, per fact type, as
+    /// [`Domain::conflict_resolution`] is per command type. angzarr's
+    /// coordinator setting (per command type, then component, then the
+    /// built-in default), with the domain standing in for the component.
+    ///
+    /// [`FactMismatch::Refuse`] by default: the source reused an id for a
+    /// different payload (a source bug, or a correction the domain never
+    /// saw), refused as [`StoreError::KeyReused`](super::StoreError::KeyReused),
+    /// nothing recorded. A domain whose source's redeliveries vary in bytes
+    /// for one fact (a re-signed webhook, a timestamp field) opts that fact
+    /// type into [`FactMismatch::Duplicate`]. The same payload again is
+    /// always a duplicate, whatever this says.
+    fn fact_mismatch(fact: &Self::Fact) -> FactMismatch {
+        FactMismatch::default()
+    }
+
     /// The state's generated conflict-unit diff, when the state is a
     /// `commutative_state` message: `commutative::<Self::State>()`
     /// ([`commutative`](super::commutative)), naming the generated
@@ -90,6 +108,27 @@ pub trait Domain: Sized + 'static {
     /// head with the command's events)`; keep the events iff the two
     /// [do not overlap](super::Units::overlaps), else the command is stale.
     const COMMUTATIVE: Option<Changed<Self::State>> = None;
+}
+
+/// How a fact whose `external_id` is already recorded in its stream, but
+/// with another payload fingerprint, is answered ([`Domain::fact_mismatch`]).
+/// Kernel configuration, never on the wire, as angzarr's is coordinator
+/// configuration.
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default)]
+pub enum FactMismatch {
+    /// Refuse it: [`StoreError::KeyReused`](super::StoreError::KeyReused)
+    /// (angzarr's FAILED_PRECONDITION, [`Recovery::Bug`](super::Recovery::Bug)),
+    /// nothing committed and nothing claimed. The default.
+    #[default]
+    Refuse,
+    /// Answer it as the duplicate it claims to be, with the range recorded
+    /// the first time, and flag it for an alert:
+    /// [`StoreError::DivergentDuplicate`](super::StoreError::DivergentDuplicate)
+    /// ([`Recovery::Done`](super::Recovery::Done)). annals has no metrics
+    /// or alerting of its own; the variant is distinct from
+    /// [`StoreError::Duplicate`](super::StoreError::Duplicate) so the
+    /// application raises the alert and the metric.
+    Duplicate,
 }
 
 /// The in-process conflict nonce (angzarr's `ContextualCommand.conflict_nonce`):

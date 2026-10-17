@@ -166,10 +166,11 @@ pub struct EventId {
     pub seq: Seq,
 }
 
-/// The inbound request a command came in on: one API call, one job run.
-/// A UUID. **Always assigned**: either the caller's (client-supplied: any
-/// 16 bytes, reused verbatim on every retry, and with the command's index
-/// its idempotency key), or, when the caller supplied none, the UUIDv7 the
+/// The request a command came in as: one command's id, so a batch of
+/// commands has one each, grouped by correlation. A UUID. **Always
+/// assigned**: either the caller's (client-supplied: any 16 bytes, reused
+/// verbatim on every retry of that command, and alone its idempotency key
+/// at the addressed stream), or, when the caller supplied none, the UUIDv7 the
 /// application minted for the chain ([`Sampled::request`](super::Sampled::request)),
 /// recorded with [`RequestOrigin::minted`](super::RequestOrigin::minted)
 /// set and never deduplicating anything.
@@ -218,12 +219,20 @@ pub trait DeriveIds: Sync {
 
 /// A fingerprint of a keyed command's payload **as received**, recorded
 /// with its key ([`Claim`](super::Claim)) so a key reused for a different
-/// payload is refused ([`StoreError::KeyReused`](super::StoreError::KeyReused)),
-/// as angzarr's claim is. Opaque to the kernel, which only compares it:
-/// the adapter computes it (`annals_angzarr::fingerprint`: SHA-256 over
-/// the payload `Any`'s type URL and value bytes).
+/// payload is caught ([`StoreError::KeyReused`](super::StoreError::KeyReused)),
+/// as angzarr's claim is. A UUID (`IdempotencyClaim.fingerprint`, 16
+/// bytes): angzarr's UUIDv5 under `ANGZARR_FINGERPRINT_NAMESPACE` of the
+/// payload `Any`'s type URL, length-prefixed, and its value bytes. Opaque to
+/// the kernel, which only compares it (it has no SHA-1): the adapter
+/// computes it (`annals_angzarr::fingerprint`, over
+/// `angzarr_proto::ids::fingerprint`).
+///
+/// **Misuse detection, not tamper protection**: it catches an honest
+/// caller (or source) reusing a key for another payload. It makes no claim
+/// against an adversary, and it is unrelated to the deferred event hash
+/// chain.
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub struct Fingerprint(pub [u8; 32]);
+pub struct Fingerprint(pub Uuid);
 
 /// Who asked: opaque to the kernel. Make it a **pseudonymous** id, never a
 /// name or address, so erasing a person deletes the mapping outside the log

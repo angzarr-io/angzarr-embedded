@@ -450,7 +450,7 @@ pub fn book(key: &StreamKey, cmd: AccountCmd, n: u32) -> BookOf<Account> {
     fingerprinted(Book::command(
         key.clone(),
         cmd,
-        Origin::request(request(n), 0),
+        Origin::request(request(n)),
         ann(),
     ))
 }

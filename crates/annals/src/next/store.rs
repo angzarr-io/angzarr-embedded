@@ -72,11 +72,11 @@ pub trait EventStore<E> {
 /// `IdempotencyClaim`, scoped to the addressed stream.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Claim {
-    /// The key: a client-supplied request's (request id, index), or a
-    /// fact's external id. Only the key fields are compared; a fact's
-    /// description is not part of it.
+    /// The key: a client-supplied request's id alone, or a fact's
+    /// external id. Only the key fields are compared; a fact's description
+    /// is not part of it.
     pub origin: Origin,
-    /// The payload's fingerprint as received.
+    /// The payload's fingerprint as received (a UUIDv5, 16 bytes).
     pub fingerprint: Fingerprint,
     /// The applied range, `from..to` in the stream (possibly empty: a
     /// command with nothing to do is applied too).
@@ -97,17 +97,22 @@ pub struct Claim {
 /// - a **webhook fact** redelivered by its source: unique on (stream,
 ///   `external_id`);
 /// - an **HTTP retry** of a request with a client-supplied id: unique on
-///   (stream, request id, index), for a server that wants retry safety.
+///   (stream, request id), for a server that wants retry safety. A request
+///   id names one command; there is no index.
 ///
-/// A minted request id is never recorded. Each claim records the payload's
-/// [`Fingerprint`], as angzarr's does. A key already recorded is refused:
+/// A minted request id is never recorded, and neither is a causation (a
+/// chain's reactions commit with it, so nothing redelivers them). Each
+/// claim records the payload's [`Fingerprint`], as angzarr's does. A key
+/// already recorded is refused, the same way for every kind of key:
 ///
-/// - with the same fingerprint, or any fact: [`StoreError::Duplicate`]
-///   with the range recorded then (angzarr's DUPLICATE: the retry becomes
-///   a read);
-/// - a client-supplied request key with another fingerprint:
-///   [`StoreError::KeyReused`] (angzarr's FAILED_PRECONDITION: the key was
-///   reused for a different command).
+/// - with the same fingerprint: [`StoreError::Duplicate`] with the range
+///   recorded then (angzarr's DUPLICATE: the retry becomes a read);
+/// - with another fingerprint: [`StoreError::KeyReused`], with that range
+///   too. The store does not judge it: the kernel refuses it for a request
+///   (angzarr's FAILED_PRECONDITION: the key was reused for a different
+///   command) and, by default, for a fact; a fact whose domain configures
+///   [`FactMismatch::Duplicate`](super::FactMismatch::Duplicate) it
+///   answers [`StoreError::DivergentDuplicate`] instead.
 ///
 /// Either way the unit of work is dropped. Only applied commands are
 /// recorded; a rejection writes nothing, so it may be retried. The default
@@ -299,9 +304,10 @@ impl<E: Clone> UnitOfWork for InMemoryTx<'_, E> {
     }
 
     /// Records every claim: unique on (stream, key), the key being the
-    /// origin's key fields (a fact's external id alone). A repeat is
-    /// [`StoreError::Duplicate`], or [`StoreError::KeyReused`] for a
-    /// request key with another fingerprint.
+    /// origin's key fields (a request's id alone, a fact's external id
+    /// alone). A repeat is [`StoreError::Duplicate`] with the same
+    /// fingerprint, [`StoreError::KeyReused`] with another, whatever the
+    /// kind of key.
     fn record_command(&mut self, stream: &StreamKey, claim: &Claim) -> Result<(), StoreError> {
         todo!("proposal: compare with the store's or this unit's claim for the key, else hold it")
     }

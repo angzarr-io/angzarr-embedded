@@ -67,7 +67,7 @@ mod version;
 
 pub use book::{Body, Book, BookOf, ConflictResolution, Handling, Malformed, Sampled};
 pub use conflict::{commutative, Changed, CommutativeState, Key, UnitPath, Units};
-pub use domain::{Conflicts, Decision, Domain, Nonce, Tx};
+pub use domain::{Conflicts, Decision, Domain, FactMismatch, Nonce, Tx};
 pub use error::{Failure, KernelError, Recovery, ReplayError, Step, StepError, StoreError};
 pub use handle::{
     handle, handle_async, AsyncRoutes, Chain, Project, ProjectionRoute, ProjectorFailure, Recorded,

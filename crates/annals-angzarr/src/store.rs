@@ -9,7 +9,7 @@
 //! | `type_url` | the payload's type URL as written (before any upcast) |
 //! | `page` | the `EventPage` bytes as written: `sequence`, `meta`, `payload` |
 //! | `actor`, `correlation` | [`Meta`](annals::next::Meta)'s provenance; `correlation` a UUID |
-//! | `origin_kind`, `request_id`, `request_index`, `request_minted`, `cause_domain`, `cause_edition`, `cause_root`, `cause_sequence`, `cause_component`, `cause_index`, `external_id` | [`Meta::origin`](annals::next::Meta::origin), one set of columns per arm; `request_id` a UUID |
+//! | `origin_kind`, `request_id`, `request_minted`, `cause_domain`, `cause_edition`, `cause_root`, `cause_sequence`, `cause_component`, `cause_index`, `external_id` | [`Meta::origin`](annals::next::Meta::origin), one set of columns per arm; `request_id` a UUID |
 //! | `recorded_at`, `base_sequence`, `rules_version` | the rest of [`Meta`](annals::next::Meta) |
 //!
 //! `actor` is text; `correlation` and `request_id` are 16-byte UUIDs
@@ -18,17 +18,20 @@
 //!
 //! Claims, for [`UnitOfWork::record_command`], live in a commands table
 //! (angzarr's `IdempotencyClaim`): (domain, edition, root, the key's
-//! columns, `fingerprint` (32 bytes), first sequence, count), unique on
-//! (domain, edition, root, `external_id`) for facts and on (domain,
-//! edition, root, `request_id`, `request_index`) for client-supplied
-//! requests. A minted request id is never claimed. A unique violation is
-//! answered by reading the claim back: the same fingerprint (or any fact)
-//! is [`StoreError::Duplicate`](annals::next::StoreError::Duplicate), a
-//! request with another fingerprint
-//! [`StoreError::KeyReused`](annals::next::StoreError::KeyReused). Partial
-//! indexes on the events table cannot replace the table: a command that
-//! emits no events leaves no row to index, and the fingerprint belongs to
-//! the command, not to an event.
+//! columns, `fingerprint` (a UUID, Postgres `uuid`: [`fingerprint`](crate::fingerprint)),
+//! first sequence, count), unique on (domain, edition, root, `external_id`)
+//! for facts and on (domain, edition, root, `request_id`) for
+//! client-supplied requests (a request id names one command: there is no
+//! index). A minted request id is never claimed, nor is a causation. A
+//! unique violation is answered by reading the claim back: the same
+//! fingerprint is [`StoreError::Duplicate`](annals::next::StoreError::Duplicate),
+//! another fingerprint [`StoreError::KeyReused`](annals::next::StoreError::KeyReused)
+//! with the claimed range, for either kind of key; the kernel, not the
+//! store, decides whether a fact's mismatch is refused or answered as a
+//! duplicate ([`Domain::fact_mismatch`](annals::next::Domain::fact_mismatch)).
+//! Partial indexes on the events table cannot replace the table: a command
+//! that emits no events leaves no row to index, and the fingerprint belongs
+//! to the command, not to an event.
 //!
 //! The application's database implements the kernel's own store port over
 //! these rows, `EventStore<Stored>` (and `AsyncEventStore<Stored>`, and

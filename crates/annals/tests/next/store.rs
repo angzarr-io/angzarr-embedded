@@ -18,7 +18,7 @@ fn stamped(seq: Seq, event: &str) -> Envelope<String> {
         meta: Meta {
             actor: None,
             correlation: correlation(1),
-            origin: Origin::request(request(1), 0),
+            origin: Origin::request(request(1)),
             recorded_at: Timestamp(seq as i64),
             base_sequence: seq,
             rules_version: RulesVersion::from("none"),
@@ -279,11 +279,11 @@ fn a_unit_of_work_records_a_keyed_origin_once_per_stream() {
 }
 
 #[test]
-#[ignore = "proposal: a claim records the payload's fingerprint; a request key reused is refused"]
-fn a_request_key_reused_with_another_fingerprint_is_refused() {
+#[ignore = "proposal: a claim records the payload's fingerprint; any key reused is KeyReused"]
+fn a_key_reused_with_another_fingerprint_is_refused_whatever_its_kind() {
     let mut store = InMemoryStore::<String>::new();
     let a = key(1, "toy");
-    let request = Origin::request(request(1), 0);
+    let request = Origin::request(request(1));
     let payment = Origin::fact("pi_1", "Stripe webhook");
     let mut unit = store.begin();
     unit.record_command(&a, &claim(&request, 1, 0, 1)).unwrap();
@@ -295,7 +295,9 @@ fn a_request_key_reused_with_another_fingerprint_is_refused() {
         unit.record_command(&a, &claim(&request, 2, 2, 3)),
         Err(StoreError::KeyReused {
             stream: a.clone(),
-            origin: request.clone()
+            origin: request.clone(),
+            from: 0,
+            to: 1
         }),
         "angzarr's FAILED_PRECONDITION, never DUPLICATE"
     );
@@ -311,20 +313,70 @@ fn a_request_key_reused_with_another_fingerprint_is_refused() {
     );
     assert_eq!(
         unit.record_command(&a, &claim(&payment, 2, 2, 3)),
+        Err(StoreError::KeyReused {
+            stream: a.clone(),
+            origin: payment.clone(),
+            from: 1,
+            to: 2
+        }),
+        "a fact too: the store reports the mismatch with the claimed range, \
+         and the kernel decides (Domain::fact_mismatch)"
+    );
+    assert_eq!(
+        unit.record_command(&a, &claim(&payment, 1, 2, 3)),
         Err(StoreError::Duplicate {
             stream: a.clone(),
             origin: payment,
             from: 1,
             to: 2
         }),
-        "a fact: the source already delivered that id, so DUPLICATE"
+        "the source redelivered the same bytes: DUPLICATE"
     );
     assert_eq!(
         StoreError::KeyReused {
             stream: a,
-            origin: Origin::request(crate::toys::request(1), 0)
+            origin: Origin::request(crate::toys::request(1)),
+            from: 0,
+            to: 1
         }
         .recovery(),
         annals::next::Recovery::Bug
+    );
+}
+
+#[test]
+#[ignore = "proposal: a causation key reused for another payload is a bug, refused (angzarr KS-12)"]
+fn a_causation_key_reused_for_another_payload_is_a_bug() {
+    // The kernel never records a causation (Origin::is_keyed): a chain's
+    // reactions commit with it, so nothing redelivers them. A store handed
+    // one anyway keys it like any other, and a reuse is refused as a bug;
+    // with no dead-letter queue, the chain fails back to its caller.
+    let mut store = InMemoryStore::<String>::new();
+    let a = key(1, "toy");
+    let caused = Origin::Causation(annals::next::Causation {
+        event: annals::next::EventId {
+            stream: key(9, "ledger"),
+            seq: 3,
+        },
+        component: "books".to_string(),
+        index: 0,
+    });
+    assert!(!caused.is_keyed(), "the kernel never offers it");
+    let mut unit = store.begin();
+    unit.record_command(&a, &claim(&caused, 1, 0, 1)).unwrap();
+    let reused = unit.record_command(&a, &claim(&caused, 2, 1, 2));
+    assert_eq!(
+        reused,
+        Err(StoreError::KeyReused {
+            stream: a,
+            origin: caused,
+            from: 0,
+            to: 1
+        })
+    );
+    assert_eq!(
+        reused.unwrap_err().recovery(),
+        annals::next::Recovery::Bug,
+        "a framework bug: refused, never answered DUPLICATE"
     );
 }

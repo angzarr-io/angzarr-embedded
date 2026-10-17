@@ -57,16 +57,10 @@ pub enum BookError {
     NoRecordedAt,
     /// Event meta with no correlation: always set on a recorded event.
     NoCorrelation,
-    /// A request origin with no request id on a recorded event: every
-    /// recorded request has one, client-supplied or minted.
+    /// A request origin with no request id where one is required: on a
+    /// recorded event (every recorded request has one, client-supplied or
+    /// minted), or on a command whose sender set `minted`.
     NoRequestId,
-    /// A command's request origin with no request id but a non-zero index:
-    /// the kernel records such a request as minted, index 0, so an index
-    /// would be lost. (angzarr keeps the index on its minted origin; see
-    /// `docs/design/audit.md`, open questions.)
-    IndexWithoutRequestId {
-        index: u32,
-    },
     /// A `ConflictResolution` value this build does not know.
     UnknownConflictResolution {
         value: i32,

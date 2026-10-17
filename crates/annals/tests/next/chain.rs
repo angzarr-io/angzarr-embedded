@@ -239,7 +239,7 @@ fn a_successful_chain_commits_every_stream_with_causation_and_correlation() {
     let paid = Book::command(
         club(),
         ClubEvent::Paid(30),
-        Origin::request(crate::toys::request(2), 0),
+        Origin::request(crate::toys::request(2)),
         ann_in(77),
     )
     .fingerprinted(crate::toys::fingerprint(2));
@@ -907,22 +907,117 @@ fn a_redelivered_webhook_fact_is_a_duplicate() {
         2,
         "recorded once"
     );
+}
 
-    // The source re-used the id for another payload: still the same fact,
-    // already recorded (angzarr leaves this case open; see the design).
-    let reused = Book::fact(
-        account.clone(),
-        AccountFact::PaymentReceived(500),
-        Origin::fact("pi_1", "Stripe webhook"),
-        Provenance::default(),
+#[test]
+#[ignore = "proposal: a fact re-sent with another payload is refused by default"]
+fn a_fact_resent_with_another_payload_is_refused_by_default() {
+    use crate::toys::{fees, Account, AccountFact};
+    let mut store = InMemoryStore::new();
+    let account = opened(&mut store);
+    let r = fees("fees-1", 0);
+    let payment = |cents, print| {
+        Book::fact(
+            account.clone(),
+            AccountFact::PaymentReceived(cents),
+            Origin::fact("pi_1", "Stripe webhook"),
+            Provenance::default(),
+        )
+        .fingerprinted(fingerprint(print))
+    };
+    handle::<Account, _, _>(
+        store.begin(),
+        &Routes::new(),
+        &payment(5, 1),
+        &at(2),
+        &r,
+        &mut (),
     )
-    .fingerprinted(fingerprint(9));
-    assert!(matches!(
-        handle::<Account, _, _>(store.begin(), &Routes::new(), &reused, &at(4), &r, &mut ()),
-        Err(Failure::Kernel(KernelError::Store(
-            StoreError::Duplicate { .. }
-        )))
-    ));
+    .unwrap();
+
+    // The source reused the id for another payload: a source bug, or a
+    // correction the account never saw. Refused, as angzarr refuses it
+    // FAILED_PRECONDITION; never answered DUPLICATE.
+    let failure = handle::<Account, _, _>(
+        store.begin(),
+        &Routes::new(),
+        &payment(500, 9),
+        &at(4),
+        &r,
+        &mut (),
+    )
+    .err()
+    .unwrap();
+    assert_eq!(
+        failure,
+        Failure::Kernel(KernelError::Store(StoreError::KeyReused {
+            stream: account.clone(),
+            origin: Origin::fact("pi_1", "Stripe webhook"),
+            from: 1,
+            to: 2
+        }))
+    );
+    assert_eq!(failure.recovery(), Recovery::Bug, "an operator must look");
+    assert_eq!(
+        store.read(&account).unwrap().unwrap().len,
+        2,
+        "nothing written, and nothing claimed"
+    );
+}
+
+#[test]
+#[ignore = "proposal: a fact type configured DUPLICATE is answered as a duplicate, flagged for an alert"]
+fn a_fact_type_configured_duplicate_is_answered_as_a_flagged_duplicate() {
+    use crate::toys::{fees, Account, AccountFact};
+    let mut store = InMemoryStore::new();
+    let account = opened(&mut store);
+    let r = fees("fees-1", 0);
+    let line = |print| {
+        Book::fact(
+            account.clone(),
+            AccountFact::Statement(100),
+            Origin::fact("stmt_9", "bank statement"),
+            Provenance::default(),
+        )
+        .fingerprinted(fingerprint(print))
+    };
+    let run = |store: &mut InMemoryStore<_>, b: &annals::next::BookOf<Account>| {
+        handle::<Account, _, _>(store.begin(), &Routes::new(), b, &at(2), &r, &mut ())
+    };
+    run(&mut store, &line(1)).unwrap();
+
+    let resigned = run(&mut store, &line(2)).err().unwrap();
+    assert_eq!(
+        resigned,
+        Failure::Kernel(KernelError::Store(StoreError::DivergentDuplicate {
+            stream: account.clone(),
+            origin: Origin::fact("stmt_9", "bank statement"),
+            from: 1,
+            to: 2
+        })),
+        "Account::fact_mismatch says DUPLICATE for statements"
+    );
+    assert_eq!(
+        resigned.recovery(),
+        Recovery::Done,
+        "read the events instead, and alert"
+    );
+    assert!(
+        matches!(
+            run(&mut store, &line(1)),
+            Err(Failure::Kernel(KernelError::Store(StoreError::Duplicate {
+                from: 1,
+                to: 2,
+                ..
+            })))
+        ),
+        "the same bytes again: a plain duplicate, nothing to alert on"
+    );
+    assert_eq!(
+        store.read(&account).unwrap().unwrap().len,
+        2,
+        "recorded once"
+    );
 }
 
 #[test]
@@ -996,7 +1091,9 @@ fn a_request_key_reused_for_another_payload_is_refused() {
         failure,
         Failure::Kernel(KernelError::Store(StoreError::KeyReused {
             stream: account.clone(),
-            origin: Origin::request(crate::toys::request(8), 0),
+            origin: Origin::request(crate::toys::request(8)),
+            from: 1,
+            to: 2,
         })),
         "angzarr's FAILED_PRECONDITION: the key is bound to another payload"
     );

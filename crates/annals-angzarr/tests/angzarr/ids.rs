@@ -2,7 +2,7 @@
 //! derived ids come from `angzarr_proto::ids`, and text is for display and
 //! input only.
 
-use annals::next::{Correlation, DeriveIds, Root, Uuid};
+use annals::next::{Correlation, DeriveIds, Fingerprint, Root, Uuid};
 use annals_angzarr::ids::{self, ANGZARR_IDS};
 use annals_angzarr::pb;
 use annals_angzarr::BookError;
@@ -78,5 +78,49 @@ fn derived_ids_are_angzarrs_uuidv5s() {
     assert_eq!(
         correlation,
         Correlation(ids::from_wire(&angzarr_proto::ids::fact_correlation("pi_1234")).unwrap())
+    );
+}
+
+#[test]
+fn the_fingerprint_is_angzarrs_uuidv5_over_the_any_as_received() {
+    let any = |type_url: &str, value: &[u8]| prost_types::Any {
+        type_url: type_url.to_string(),
+        value: value.to_vec(),
+    };
+    let deposit =
+        annals_angzarr::fingerprint(&any("type.googleapis.com/examples.Deposit", &[0x08, 0x2a]));
+    assert_eq!(
+        deposit.0.to_string(),
+        "6d42fa9e-0dca-5047-94b1-0ae371532630",
+        "types.proto's worked example (derived_ids region)"
+    );
+    assert_eq!(deposit.0.version(), 5);
+    assert_eq!(
+        annals_angzarr::fingerprint(&any("type.googleapis.com/examples.Deposit", &[]))
+            .0
+            .to_string(),
+        "838a6be3-ad9d-5945-be34-61ec4c3d6432",
+        "an empty value"
+    );
+    assert_eq!(
+        annals_angzarr::fingerprint(&any("", &[])).0.to_string(),
+        "d0be6173-febd-50a7-a4fe-d083d14497ca",
+        "an empty type URL and value"
+    );
+    assert_ne!(
+        annals_angzarr::fingerprint(&any("a.B", b"Cx")),
+        annals_angzarr::fingerprint(&any("a.BC", b"x")),
+        "the type URL is length-prefixed, so it never runs into the value"
+    );
+    assert_eq!(
+        deposit,
+        Fingerprint(
+            ids::from_wire(&angzarr_proto::ids::fingerprint(
+                "type.googleapis.com/examples.Deposit",
+                &[0x08, 0x2a]
+            ))
+            .unwrap()
+        ),
+        "angzarr's own function, not a second implementation"
     );
 }

@@ -6,7 +6,7 @@
 //! [`ids::to_wire`](crate::ids::to_wire) and
 //! [`ids::from_wire`](crate::ids::from_wire).
 //!
-//! At angzarr-proto e733dd2 each value has exactly one home on the wire:
+//! At angzarr-proto 7956dc8 each value has exactly one home on the wire:
 //! correlation lives only in `Provenance` (never on the `Cover`), a
 //! command's cause only in its `Origin`, and the main timeline is the unset
 //! `Cover.edition`.
@@ -91,8 +91,9 @@ pub fn provenance_from_wire(provenance: Option<&pb::Provenance>) -> Result<Prove
 }
 
 /// An origin as angzarr's one `Origin` message: a request's id as a
-/// `UUID` with its index and `minted` flag, a causation's event an
-/// `EventRef`.
+/// `UUID` with its `minted` flag (there is no index: a request id names one
+/// command), a causation's event an `EventRef` with its component and
+/// index.
 pub fn origin(origin: &Origin) -> pb::Origin {
     todo!("proposal: one arm per variant")
 }
@@ -112,15 +113,17 @@ pub fn origin_from_wire(origin: Option<&pb::Origin>) -> Result<Origin, BookError
 }
 
 /// A command's origin as received (`CommandPage.origin`): unset, or a
-/// request with no `request_id` and index 0, is `None` (the kernel records
-/// the application's minted id). A request with no id but a non-zero index
-/// is refused ([`BookError::IndexWithoutRequestId`]); anything else reads
-/// as [`origin_from_wire`]. A set `minted` is read as sent: refusing it is
-/// the kernel's check ([`Malformed::MintedBySender`](annals::next::Malformed::MintedBySender)),
+/// request with no `request_id` and `minted` unset, is `None` (the kernel
+/// records the application's minted id); anything else reads as
+/// [`origin_from_wire`]. A set `minted` is read as sent: refusing it is the
+/// kernel's check ([`Malformed::MintedBySender`](annals::next::Malformed::MintedBySender)),
 /// as is whether the origin agrees with the body
-/// ([`Book::validate`](annals::next::Book::validate)).
+/// ([`Book::validate`](annals::next::Book::validate)). An id-less request
+/// with `minted` set has no id to carry the flag to the kernel, so it is
+/// refused here ([`BookError::NoRequestId`]); angzarr refuses it
+/// INVALID_ARGUMENT too.
 pub fn book_origin_from_wire(origin: Option<&pb::Origin>) -> Result<Option<Origin>, BookError> {
-    todo!("proposal: unset or an id-less index-0 request is None; else origin_from_wire")
+    todo!("proposal: unset or an id-less unminted request is None; else origin_from_wire")
 }
 
 /// A resolution as angzarr's enum.

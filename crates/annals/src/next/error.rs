@@ -162,12 +162,50 @@ pub enum StoreError {
         from: Seq,
         to: Seq,
     },
-    /// The client-supplied request key `origin` was already recorded in
-    /// `stream` for a payload with another fingerprint: the key was reused
-    /// for a different command. Nothing was committed, and the earlier
-    /// command is not answered: angzarr's FAILED_PRECONDITION, never
-    /// DUPLICATE.
-    KeyReused { stream: StreamKey, origin: Origin },
+    /// The key `origin` was already recorded in `stream` for a payload with
+    /// another [`Fingerprint`](super::Fingerprint): the key was reused for a
+    /// different command. Nothing was committed: angzarr's
+    /// FAILED_PRECONDITION, never DUPLICATE. `from..to` is the earlier
+    /// command's range, which the store reports for every key alike; the
+    /// kernel answers with it only for a fact its domain configures
+    /// [`FactMismatch::Duplicate`](super::FactMismatch::Duplicate) (as
+    /// [`StoreError::DivergentDuplicate`]), never for a request or a
+    /// causation.
+    ///
+    /// - **A client-supplied request id**: the caller reused it for another
+    ///   command.
+    /// - **A fact's `external_id`**, under the default
+    ///   [`FactMismatch::Refuse`](super::FactMismatch::Refuse): the source
+    ///   reused an id for another payload.
+    /// - **A causation** (angzarr's KS-12: refuse as a framework bug): never
+    ///   reached by the kernel, which records no causation key
+    ///   ([`Origin::is_keyed`](super::Origin::is_keyed)); a store that is
+    ///   handed one and finds it reused answers this too. annals has no
+    ///   dead-letter queue: the chain fails loudly, back to its caller.
+    ///
+    /// All three are [`Recovery::Bug`].
+    KeyReused {
+        stream: StreamKey,
+        origin: Origin,
+        from: Seq,
+        to: Seq,
+    },
+    /// A fact whose `external_id` was already recorded in `stream`, as seqs
+    /// `from..to`, re-sent with another payload, and answered as a
+    /// duplicate because its domain configures
+    /// [`FactMismatch::Duplicate`](super::FactMismatch::Duplicate) for it.
+    /// Nothing was committed; the earlier result stands, as for
+    /// [`StoreError::Duplicate`] ([`Recovery::Done`]), and the application
+    /// **raises an alert and a metric**: the kernel has neither, and this
+    /// variant exists so the case cannot pass as an ordinary duplicate.
+    /// Made by the kernel from the store's [`StoreError::KeyReused`]; a
+    /// store never returns it.
+    DivergentDuplicate {
+        stream: StreamKey,
+        origin: Origin,
+        from: Seq,
+        to: Seq,
+    },
     /// The store failed: I/O, a timeout, a dropped connection. The adapter's
     /// own error, as a report. An append may or may not have landed.
     Unavailable(Report),
@@ -193,13 +231,15 @@ pub enum Recovery {
     /// then retry).
     Retry,
     /// Already done: the store holds this command's events
-    /// ([`StoreError::Duplicate`]). Read them instead.
+    /// ([`StoreError::Duplicate`], or [`StoreError::DivergentDuplicate`],
+    /// which the application also alerts on). Read them instead.
     Done,
     /// The domain said no: a rejection, at the origin or downstream. The
     /// same command will be refused the same way; tell the person.
     Business,
-    /// A bug or a misconfiguration: a malformed book, a request key reused
-    /// for another payload, a discontinuous append, a key of the wrong domain, a chain too deep, unknown rules, a
+    /// A bug or a misconfiguration: a malformed book, a key reused for
+    /// another payload ([`StoreError::KeyReused`]: a request id, a fact's
+    /// external id, a causation), a discontinuous append, a key of the wrong domain, a chain too deep, unknown rules, a
     /// log that does not replay, an event the store cannot read back.
     /// Retrying will not help; an operator must.
     Bug,
@@ -226,7 +266,7 @@ impl KernelError {
 impl StoreError {
     pub fn recovery(&self) -> Recovery {
         todo!(
-            "proposal: Conflict and Unavailable Retry; Duplicate Done; KeyReused and the rest Bug"
+            "proposal: Conflict and Unavailable Retry; Duplicate and DivergentDuplicate Done; KeyReused and the rest Bug"
         )
     }
 }

@@ -28,14 +28,15 @@ fn v2() -> Option<EditionName> {
     Some(EditionName::new("v2").unwrap())
 }
 
-/// A deposit to account 7 in edition v2: request 5's fourth command, in
-/// workflow 1, expecting the stream at 4 and resolving its own conflicts.
+/// A deposit to account 7 in edition v2: request 5 (a request id names
+/// one command), in workflow 1, expecting the stream at 4 and resolving
+/// its own conflicts.
 fn deposit() -> BookOf<Account> {
     fingerprinted(
         Book::command(
             StreamKey::new("account", v2(), Root::from_bytes([7; 16])),
             AccountCmd::Deposit(250),
-            Origin::request(request(5), 3),
+            Origin::request(request(5)),
             Provenance {
                 correlation: Some(correlation(1)),
                 ..ann()
@@ -82,7 +83,6 @@ fn a_book_round_trips_through_a_one_page_command_book() {
         page.origin.as_ref().unwrap().kind,
         Some(origin::Kind::Request(pb::RequestOrigin {
             request_id: Some(ids::to_wire(request(5).0)),
-            index: 3,
             minted: false,
         }))
     );
@@ -258,7 +258,6 @@ fn a_command_book_annals_cannot_read_is_refused() {
             b.page.as_mut().unwrap().origin = Some(pb::Origin {
                 kind: Some(origin::Kind::Request(pb::RequestOrigin {
                     request_id: Some(Uuid { value: vec![] }),
-                    index: 0,
                     minted: false,
                 })),
             })
@@ -271,12 +270,12 @@ fn a_command_book_annals_cannot_read_is_refused() {
             b.page.as_mut().unwrap().origin = Some(pb::Origin {
                 kind: Some(origin::Kind::Request(pb::RequestOrigin {
                     request_id: None,
-                    index: 2,
-                    minted: false,
+                    minted: true,
                 })),
             })
         }),
-        BookError::IndexWithoutRequestId { index: 2 }
+        BookError::NoRequestId,
+        "a sender's minted flag with no id to carry it to the kernel"
     );
     assert_eq!(
         refused(&|b| {
@@ -318,7 +317,7 @@ fn a_malformed_book_off_the_wire_is_refused_by_the_kernel() {
         Origin::fact("pi_1", "Stripe webhook"),
         Provenance::default(),
     ));
-    wire_book.page.as_mut().unwrap().origin = Some(wire::origin(&Origin::request(request(1), 0)));
+    wire_book.page.as_mut().unwrap().origin = Some(wire::origin(&Origin::request(request(1))));
     let read = book_from_wire::<Account>(&wire_book).expect("it reads: agreement is the kernel's");
 
     let registry = registry();
@@ -420,7 +419,6 @@ fn every_recorded_page_has_a_request_id_and_a_correlation() {
         meta.origin.unwrap().kind,
         Some(origin::Kind::Request(pb::RequestOrigin {
             request_id: Some(ids::to_wire(minted(2).0)),
-            index: 0,
             minted: true,
         })),
         "recorded, flagged minted"
@@ -496,7 +494,7 @@ fn a_chain_becomes_event_books_with_event_meta_on_every_page() {
                     actor: "pseudonym-ann".to_string(),
                     correlation_id: Some(ids::to_wire(request(1).0)),
                 }),
-                origin: Some(wire::origin(&Origin::request(request(1), 0))),
+                origin: Some(wire::origin(&Origin::request(request(1)))),
                 recorded_at: Some(prost_types::Timestamp {
                     seconds: 0,
                     nanos: 1_001_000
@@ -647,7 +645,7 @@ fn sequences_above_u32_max_survive_every_mapping() {
 }
 
 #[test]
-#[ignore = "proposal: a duplicate is answered DUPLICATE; annals never parks"]
+#[ignore = "proposal: a duplicate is answered DUPLICATE, a reused key never; annals never parks"]
 fn a_recorded_key_is_answered_duplicate() {
     let duplicate: Result<annals::next::Recorded, Failure<crate::toys::NotOpen>> =
         Err(Failure::Kernel(KernelError::Store(StoreError::Duplicate {
@@ -663,15 +661,36 @@ fn a_recorded_key_is_answered_duplicate() {
     let rejected: Result<annals::next::Recorded, _> = Err(Failure::Rejected(crate::toys::NotOpen));
     assert_eq!(outcome(&rejected), None);
 
-    let reused: Result<annals::next::Recorded, Failure<crate::toys::NotOpen>> =
-        Err(Failure::Kernel(KernelError::Store(StoreError::KeyReused {
+    for origin in [
+        Origin::request(request(1)),
+        Origin::fact("pi_1", "Stripe webhook"),
+    ] {
+        let reused: Result<annals::next::Recorded, Failure<crate::toys::NotOpen>> =
+            Err(Failure::Kernel(KernelError::Store(StoreError::KeyReused {
+                stream: account(1),
+                origin,
+                from: 1,
+                to: 2,
+            })));
+        assert_eq!(
+            outcome(&reused),
+            None,
+            "FAILED_PRECONDITION, an error status: never DUPLICATE, a fact by default too"
+        );
+    }
+
+    let divergent: Result<annals::next::Recorded, Failure<crate::toys::NotOpen>> = Err(
+        Failure::Kernel(KernelError::Store(StoreError::DivergentDuplicate {
             stream: account(1),
-            origin: Origin::request(request(1), 0),
-        })));
+            origin: Origin::fact("stmt_9", "bank statement"),
+            from: 1,
+            to: 2,
+        })),
+    );
     assert_eq!(
-        outcome(&reused),
-        None,
-        "FAILED_PRECONDITION, an error status: never DUPLICATE"
+        outcome(&divergent).unwrap().delivery(),
+        pb::DeliveryOutcome::Duplicate,
+        "a fact configured DUPLICATE: answered so, as angzarr does; the alert is the application's"
     );
 
     // A fact's wire form names its type.

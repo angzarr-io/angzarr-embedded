@@ -34,7 +34,7 @@ pub struct Provenance {
 /// ([`Malformed`](super::Malformed)).
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum Origin {
-    /// Issued by a caller as part of one inbound request.
+    /// Issued directly by a caller.
     Request(RequestOrigin),
     /// Issued by a policy reacting to an event. Only the kernel builds one,
     /// in a chain or a backlog.
@@ -43,12 +43,17 @@ pub enum Origin {
     Fact(FactOrigin),
 }
 
-/// A command issued directly by a caller, as part of one inbound request.
-/// `request` is always set; `minted` says whose it is.
+/// A command issued directly by a caller. `request` is always set;
+/// `minted` says whose it is.
+///
+/// A request id names **one command** (angzarr pass 10 deleted
+/// `RequestOrigin.index`): a caller that sends several commands together
+/// (a batch, one API call fanning out) gives each its own request id and
+/// groups them by a shared [`Provenance::correlation`].
 ///
 /// - **Client-supplied** (`minted: false`): the caller's id, reused on
-///   every retry. `(request, index)` is the command's idempotency key at
-///   the addressed stream.
+///   every retry of that command. The request id alone is the command's
+///   idempotency key at the addressed stream.
 /// - **Minted** (`minted: true`): the caller supplied none, and the kernel
 ///   recorded the application's UUIDv7 ([`Sampled::request`](super::Sampled::request)).
 ///   For audit only: never recorded as a key, never deduplicating (a
@@ -57,8 +62,6 @@ pub enum Origin {
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct RequestOrigin {
     pub request: RequestId,
-    /// The command's position within its request.
-    pub index: u32,
     pub minted: bool,
 }
 
@@ -84,21 +87,19 @@ pub struct FactOrigin {
 }
 
 impl Origin {
-    /// The `index`th command of the client-supplied request `request`.
-    pub fn request(request: RequestId, index: u32) -> Origin {
+    /// The command whose client-supplied request id is `request`.
+    pub fn request(request: RequestId) -> Origin {
         Origin::Request(RequestOrigin {
             request,
-            index,
             minted: false,
         })
     }
 
-    /// The origin the kernel records for a book with none: the request
-    /// `request`, minted by the application, index 0.
+    /// The origin the kernel records for a book with none: the request id
+    /// `request`, minted by the application.
     pub fn minted(request: RequestId) -> Origin {
         Origin::Request(RequestOrigin {
             request,
-            index: 0,
             minted: true,
         })
     }
@@ -122,8 +123,9 @@ impl Origin {
     /// Whether this origin is a key the store may record
     /// ([`UnitOfWork::record_command`](super::UnitOfWork::record_command)):
     /// a request with a client-supplied id, or a fact. Never a minted
-    /// request, and never a causation (annals records only a chain's
-    /// originating book).
+    /// request, and never a causation: annals records only a chain's
+    /// originating book, so a causation's fingerprint is never compared
+    /// (see [`StoreError::KeyReused`](super::StoreError::KeyReused)).
     pub fn is_keyed(&self) -> bool {
         todo!("proposal: Request with !minted, or Fact")
     }

@@ -46,7 +46,7 @@ fn handlers_receive_identity_position_and_metadata() {
     assert_eq!(log[1].stream, key(5, "account"));
     assert_eq!(log[1].seq, 1);
     assert_eq!(log[1].meta, s.events()[1].meta);
-    assert_eq!(log[1].meta.origin, Origin::request(request(2), 0));
+    assert_eq!(log[1].meta.origin, Origin::request(request(2)));
     assert_eq!(log[1].event, AccountEvent::Deposited(40));
     assert_eq!(
         log[1].after,

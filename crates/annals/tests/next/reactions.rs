@@ -471,7 +471,7 @@ fn a_policys_command_carries_the_triggers_provenance_and_a_causation() {
             let join = Book::command(
                 club.key().clone(),
                 joined(name),
-                Origin::request(crate::toys::request(100 + i as u128), 0),
+                Origin::request(crate::toys::request(100 + i as u128)),
                 ann_in(555),
             )
             .fingerprinted(crate::toys::fingerprint(i as u8));
