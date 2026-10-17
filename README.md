@@ -11,7 +11,7 @@ Every error is localizable: a stable code and named args (see
 
 | Crate | What it is |
 |---|---|
-| [`annals`](crates/annals) | event-sourcing kernel: decide, emit, apply, replay; `annals::next`, the audited kernel on angzarr's proto types (a proposal) |
+| [`annals`](crates/annals) | event-sourcing kernel: decide, emit, apply, replay; `annals::next`, the audited kernel on angzarr's proto types |
 | [`annals-diagnostic`](crates/annals-diagnostic) | localizable errors: every error has a stable code and named args for a Fluent catalog |
 | [`annals-graph`](crates/annals-graph) | typed-id graph with tags, queries and Dijkstra search |
 | [`annals-yaml`](crates/annals-yaml) | a strict YAML subset, read and written; versioned documents with registered migrations |

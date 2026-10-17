@@ -23,10 +23,9 @@
 //!
 //! The crate knows nothing about any particular game.
 //!
-//! [`next`] is a **proposal** for the kernel that replaces this one, for
-//! auditability, operating on angzarr's wire types (`io.angzarr.v1`, through
-//! angzarr-proto): see `docs/design/audit.md`. Its parse and identification
-//! steps are implemented; its other bodies are `todo!()`.
+//! [`next`] is the kernel that is to replace this one, for auditability,
+//! operating on angzarr's wire types (`io.angzarr.v1`, through
+//! angzarr-proto): see `docs/design/audit.md`.
 
 mod domain;
 pub mod next;

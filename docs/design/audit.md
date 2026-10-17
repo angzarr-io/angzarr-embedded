@@ -1,11 +1,8 @@
-# The audited kernel on angzarr's proto types: design proposal
+# The audited kernel on angzarr's proto types: design
 
-Status: **proposal**. The kernel's signatures are in
-`crates/annals/src/next/`. The parse step, identification, the registry,
-payload packing and the dead-letter line are implemented; every other
-non-trivial body is `todo!("proposal: ...")`, pinned by ignored tests in
-`crates/annals/tests/next/`. Nothing else is implemented until this document
-has been reviewed.
+Status: **implemented** in `crates/annals/src/next/`, pinned by the tests in
+`crates/annals/tests/next/`. It does not yet replace the crate root's
+kernel: hatpick moves onto it first.
 
 The wire contract is angzarr's protos at angzarr-project `feat/audit-meta`
 **5850057** (pass 13: `EventMeta.causation` is the event's direct cause,
@@ -435,9 +432,9 @@ Every event carries angzarr's `EventMeta`, the same in both runtimes:
 
 **No trigger on a reaction's events**: a policy's command names its trigger
 (`CommandPage.causation_id`), its events name the command. The edge from
-trigger to command goes to tracing and logs; `Identified::meta` carries a
-note where the hook belongs (see open question 1). Readers find a
-reaction's events by correlation and group them by `command_id`.
+trigger to command goes to tracing and logs, through the application's
+[`TriggerLog`](#dead-letters-a-logger). Readers find a reaction's events by
+correlation and group them by `command_id`.
 
 **No actor**, anywhere: who did it belongs in the deployment's separate
 security log, written by the application with the command id, so erasing
@@ -510,7 +507,7 @@ pub trait Policy: Reaction {
 pub trait Projection<D: Domain> { fn project(&mut self, c: &Committed<'_, D>); }
 
 let routes = Routes::new().policy::<ListToDrawSystems>();   // built once, no store type
-let kernel = Kernel::new(&registry, &dead_letters);          // .limit(n), default 8
+let kernel = Kernel::new(&registry, &dead_letters);          // .limit(n), default 8; .triggers(&log)
 kernel.handle::<List, _, _>(unit, &routes, book, &sampled, &mut projections)?;   // -> Handled
 ```
 
@@ -649,6 +646,23 @@ line starts with the prefix**: anything arriving there almost certainly
 indicates a problem, so an operator alerts on it. The line is built from
 angzarr's own `AngzarrDeadLetter`, so it says what an angzarr DLQ entry
 would. annals never answers PARKED.
+
+**Trigger edges go beside it.** No event records the edge from a trigger
+to the reaction command it set off (angzarr decision 13.3; angzarr sends it
+to OpenTelemetry, its backlog PS-6). annals has no tracing dependency, so
+the chain hands the application each reaction command's (`causation_id`,
+`command_id`, target cover) as it dispatches it, and the application logs
+or spans it:
+
+```rust
+pub trait TriggerLog: Send + Sync {
+    fn dispatched(&self, causation_id: &EventRef, command_id: &Uuid, target: &Cover) {}  // no-op
+}
+let kernel = Kernel::new(&registry, &dead_letters).triggers(&log);   // default: NoTriggerLog
+```
+
+It is called before the command is deduplicated or decided, so a chain
+that fails later has still reported the edges it dispatched.
 
 ## Errors and recovery
 
@@ -839,50 +853,43 @@ form is angzarr's.
 
 ## Open questions, each with a recommendation
 
-1. **Where the trigger edge goes in annals.** Since pass 13 a reaction's
-   events do not name its trigger; angzarr sends the edge to OpenTelemetry
-   (its backlog PS-6). annals has no tracing dependency. I recommend a
-   hook beside `DeadLetterLog`: the chain hands the application each
-   reaction command's (`causation_id`, `command_id`, target cover) as it
-   dispatches it, and the application logs or spans it. Only a note in
-   `Identified::meta` marks the place today.
-2. **Re-drive commands.** Repairs are new commands; angzarr may ship
+1. **Re-drive commands.** Repairs are new commands; angzarr may ship
    standard ones (its backlog RD-1, undecided). I recommend annals adopt
    whatever angzarr ships as ordinary commands, and hand-build any it needs
    before then.
-3. **Snapshot validity in the coordinator**, not the typed step. The
+2. **Snapshot validity in the coordinator**, not the typed step. The
    registry holds the state's type URL and the rules version, so the
    domain-blind coordinator can discard early and load from 0 in one read.
    I recommend keeping it there (divergence 5).
-4. **Dedup for policy commands inside a chain.** Uniform with the origin,
+3. **Dedup for policy commands inside a chain.** Uniform with the origin,
    cheap with the index, and it makes a chain that revisits a stream
    idempotent by construction. I recommend keeping it.
-5. **Configuration on the domain as consts** (by command full name),
+4. **Configuration on the domain as consts** (by command full name),
    checked at registration, rather than registration options. The compiler
    keeps it beside the types it names. I recommend consts; revisit if
    hatpick needs per-deployment configuration.
-6. **`Envelope` holds the checked metadata fields**, not the `EventMeta`,
+5. **`Envelope` holds the checked metadata fields**, not the `EventMeta`,
    so its accessors need no unwrap (`meta()` rebuilds the message). I
    recommend it: it is the read-side twin of `Checked`.
-7. **A panicking ingest on `panic = "abort"` targets** (wasm32 by default)
+6. **A panicking ingest on `panic = "abort"` targets** (wasm32 by default)
    aborts the process instead of failing the chain. Nothing is written
    either way. I recommend documenting it and not adding unwind
    requirements.
-8. **`Recovery::Invalid`** is new: a malformed book or an unknown command
+7. **`Recovery::Invalid`** is new: a malformed book or an unknown command
    type is the caller's to fix, not a bug. I recommend keeping it distinct
    from `Bug` so the server can answer 400 without alerting.
-9. **`Stream::execute`** runs the whole pipeline in memory with no store.
+8. **`Stream::execute`** runs the whole pipeline in memory with no store.
    I recommend keeping it, for tests and in-browser use.
-10. **The upcaster: a mirror or the router's.** I recommend the mirror, and
+9. **The upcaster: a mirror or the router's.** I recommend the mirror, and
     switching when angzarr remaps the router onto angzarr-proto.
-11. **Old `annals.log.v1` logs.** I recommend leaving them: hatpick stores
+10. **Old `annals.log.v1` logs.** I recommend leaving them: hatpick stores
     none.
-12. **The default depth limit of 8.** I recommend 8; hatpick's deepest
+11. **The default depth limit of 8.** I recommend 8; hatpick's deepest
     chain is two levels.
 
-Decided since the last revision: every annals user builds angzarr-proto
-(no feature gate; the workspace `CLAUDE.md` says so), the re-pin to
-5850057 is done, and the re-run switch is dropped.
+Decided: every annals user builds angzarr-proto (no feature gate; the
+workspace `CLAUDE.md` says so); there is no re-run switch; trigger edges go
+to the application's `TriggerLog`, beside the dead-letter log.
 
 ## Not now
 
@@ -897,18 +904,17 @@ Decided since the last revision: every annals user builds angzarr-proto
 | Configuration that forbids a `Handling` override | No hatpick command needs it. | A command type whose resolution a client must not choose. |
 | A `!Send` async store port | No browser store exists. | A wasm adapter over IndexedDB. |
 | Reading angzarr `EventBook`s into annals | annals writes books; nothing feeds it angzarr's. | An angzarr runtime delivering to annals. |
-| `Diagnostic` impls and catalog entries for the new errors | They would make the catalog check sample `todo!()`s. | The implementation, in the same change. |
 
-## The proposal tests
+## The tests
 
-`crates/annals/tests/next/`: 64 tests. **20 run** (the implemented parse,
-identification, registry, payload and dead-letter line); **44 are ignored**
-(`#[ignore = "proposal: ..."]`), each failing on a `todo!("proposal: ...")`
-when run with `--ignored`. One unit test in `src/next/check.rs` (runs)
-pins that a reaction's events carry `causation.command_id` and nothing of
-its trigger, while its book keeps the trigger as `causation_id`.
+`crates/annals/tests/next/`, one file per contract, over the toy domains
+in `toys.rs`. Unit tests in `src/next/check.rs` pin what only the kernel
+can reach: a policy's book is checked through the reaction entry (no ids,
+no fact, no handling, a trigger that names an id) and identified from its
+trigger, and a reaction's events carry `causation.command_id` and nothing
+of its trigger, while its book keeps the trigger as `causation_id`.
 
-- **parse.rs** (runs): a checked command's accessors are non-optional where
+- **parse.rs**: a checked command's accessors are non-optional where
   the book had to say something; a fact carries its source in its body; the
   sender's ids and handling are kept; an empty handling is unset; a fact
   may name its derived id and nothing else; COMMUTATIVE is accepted where
@@ -919,23 +925,23 @@ its trigger, while its book keeps the trigger as `causation_id`.
   or with an empty external id or a non-derived id, a command with a fact
   origin, a fact with any handling, an unknown resolution, COMMUTATIVE on a
   state without conflict units).
-- **identify.rs** (runs): a client's command without ids gets the minted
+- **identify.rs**: a client's command without ids gets the minted
   v7 as both ids; sent ids are kept, an absent correlation is the command
   id; a fact's ids are the UUIDv5 of its external id (types.proto's worked
   example); every event's `EventMeta` carries its command as causation and
   no actor; an
   identified book re-checks and re-identifies the same; `recorded_at` is
   raised, never lowered.
-- **registry.rs** (runs): registration fills the state descriptor;
+- **registry.rs**: registration fills the state descriptor;
   **COMMUTATIVE is the default where the state declares units, else STRICT**,
   under the precedence; misconfiguration is refused at registration; a
   configured resolution the state lacks is refused; a snapshot is usable
   only under the current rules and state type.
-- **payload.rs** (runs): payloads are `Any` packed by `prost::Name`; the
+- **payload.rs**: payloads are `Any` packed by `prost::Name`; the
   type URL is the version; an old type is refused, never decoded as
   current.
 - **dead_letter.rs**: a dead-letter line starts with the warning prefix
-  and names the command (runs); **a panicking ingest aborts the chain,
+  and names the command; **a panicking ingest aborts the chain,
   writes nothing and logs a prefixed line**.
 - **dedup.rs**: a retried command is DUPLICATE with its events, nothing
   re-stamped; **a zero-event decision is decided again**; a reused id with
@@ -946,7 +952,8 @@ its trigger, while its book keeps the trigger as `causation_id`.
   while a new stale command is stale; a malformed retry of an applied
   command is still malformed; an unknown command type is refused at decode,
   after the sequence check and after dedup; the coordinator's steps take
-  only the previous step's output.
+  only the previous step's output, and a windowed command gets its window
+  and a nonce.
 - **conflict.rs**: COMMUTATIVE by default for a state with units (disjoint
   kept, overlapping stale); STRICT by default without units; a command type
   configured STRICT on a COMMUTATIVE state; an unmarked field conflicts with
@@ -960,7 +967,8 @@ its trigger, while its book keeps the trigger as `causation_id`.
   replay through the upcaster and are never rewritten; an unknown event
   type fails replay naming it; **an old command is upcast then decided**,
   and refused naming its type URL without an upcaster; an upcaster is
-  checked whole.
+  checked whole (duplicates, rules out of order, dead ends; untyped rules
+  not followed); a rule's own failure and unreadable bytes are reported.
 - **ingest.rs**: **ingest reads a read-only context** (recorded instant,
   ids, source, rules version); a fact is never refused; a fact is stamped
   at the head.
@@ -968,11 +976,26 @@ its trigger, while its book keeps the trigger as `causation_id`.
   causation, the trigger's correlation, and no trigger; **a rejection downstream fails
   the whole chain, the origin included, with the path**, and its retry
   runs again; a chain deeper than its limit is refused; a chain in an
-  edition stays in it; a book for another domain is refused.
+  edition stays in it; a book for another domain is refused; each reaction
+  command's trigger edge goes to the `TriggerLog`; a chain sees its own
+  staged events and streams; projections run after commit, a duplicate
+  runs none; the async handler has the same contract and a `Send` future;
+  a catch-up delivers each owed order once, in order, refusing a gap;
+  a target that comes back breaks the backlog; a policy book for an
+  unregistered target is a dead-lettered bug.
 - **handlers.rs**: handlers receive the cover, sequence, meta and state
   after; a position places next, redelivery and gap; a tracked handler
-  drops redeliveries.
+  drops redeliveries and keeps the first gap until it advances.
 - **store.rs**: append checks the expected length and continuity; a cover
   is (domain, edition, root); **`find_command` answers the dedup lookup from
   the events**, per stream; a unit of work lands at commit or not at all;
-  the async port has the same contract.
+  the async port has the same contract; a unit of work checks and reads
+  its pending appends; an empty append creates nothing; a store keeps the
+  newest snapshot per stream.
+- **replay.rs**: replay folds each event with the rules it names, and
+  refuses a log that does not hold together (sequence, metadata, instant,
+  rules, domain, a process event's trigger); a stream resumes from a
+  snapshot and dispatches only after it; a decision commits only to its
+  own stream and head; golden fixtures replay through the upcaster and
+  name every failure; every failure says how to recover; errors render
+  their English, and wrappers their cause.

@@ -90,7 +90,7 @@ impl Domain for Counter {
 
 ## Not yet
 
-- **The audited kernel** (`annals::next`, a proposal) operates on
+- **The audited kernel** (`annals::next`) operates on
   angzarr's proto types directly: a stream is a `Cover` (domain, edition,
   root; main is the unset edition), a command a `CommandBook`, an event an
   `EventPage` with its `EventMeta` (causation, the producing command's id;
@@ -103,9 +103,10 @@ impl Domain for Counter {
   conflict resolution (COMMUTATIVE by default where the state declares
   conflict units, else STRICT); then the command or fact is decoded
   (upcast by type URL) and decided, or ingested with a read-only context.
-  Policies run in the same atomic chain, and the dead-letter queue is a
-  logger. The parse, identification, registry and payload packing are
-  implemented; the rest is `todo!()`. See `docs/design/audit.md`.
+  Policies run in the same atomic chain, the dead-letter queue is a
+  logger, and each policy command's trigger edge goes to the application's
+  `TriggerLog`. It is implemented and tested; hatpick moves onto it before
+  it replaces the root API. See `docs/design/audit.md`.
 
 - **Upcasting.** `Header::schema` is reserved and never read. Upcasting
   arrives with `annals::next`, by payload type URL, for events and

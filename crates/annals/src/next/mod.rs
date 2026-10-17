@@ -1,12 +1,7 @@
-//! **Proposal, partly implemented**: the audited kernel that replaces the
-//! crate root's [`Stream`](crate::Stream), [`Tx`](crate::Tx),
+//! The audited kernel, designed in `docs/design/audit.md`, that is to
+//! replace the crate root's [`Stream`](crate::Stream), [`Tx`](crate::Tx),
 //! [`EventStore`](crate::EventStore), [`Projection`](crate::Projection) and
-//! [`policy`](crate::policy) once the design in `docs/design/audit.md` is
-//! reviewed. The parse step ([`check`], [`Checked`]), identification
-//! ([`Identified`]), the [`Registry`], payload packing and the dead-letter
-//! line are implemented; every other non-trivial body is
-//! `todo!("proposal: ...")`, and the tests that pin it, in `tests/next/`,
-//! are ignored until it is.
+//! [`policy`](crate::policy). Its tests are in `tests/next/`.
 //!
 //! annals is the in-process runtime, and it **operates on angzarr's wire
 //! types directly** (`io.angzarr.v1`, re-exported as [`v1`]): a stream is a
