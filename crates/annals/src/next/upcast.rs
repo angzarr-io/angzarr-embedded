@@ -41,7 +41,8 @@ use annals_diagnostic::Report;
 use prost::{Message, Name};
 use prost_types::Any;
 
-use super::error::{UpcastChainError, UpcastError};
+use super::error::{ChainProblem, PayloadError, UpcastChainError, UpcastError};
+use super::payload::{pack, type_name};
 
 /// Transforms one payload to its next schema version, as the router's
 /// `UpcastFn` (with annals' error type).
@@ -97,7 +98,30 @@ impl Upcaster {
         From: Message + Name + Default + 'static,
         To: Message + Name + 'static,
     {
-        todo!("proposal: a Rule {{ source: From::full_name(), target: Some(To::full_name()), .. }}")
+        let source = From::full_name();
+        let transform = {
+            let source = source.clone();
+            move |any: &Any| {
+                let from = From::decode(&any.value[..]).map_err(|error| {
+                    UpcastError::Payload(PayloadError::Decode {
+                        type_url: any.type_url.clone(),
+                        error,
+                    })
+                })?;
+                let to = step(from).map_err(|error| UpcastError::Rule {
+                    source: source.clone(),
+                    error,
+                })?;
+                Ok(pack(&to))
+            }
+        };
+        let mut upcaster = self;
+        upcaster.rules.push(Rule {
+            source,
+            target: Some(To::full_name()),
+            transform: Box::new(transform),
+        });
+        upcaster
     }
 
     /// The component name.
@@ -117,25 +141,47 @@ impl Upcaster {
 
     /// Runs one stored event's payload through the rule chain.
     pub fn upcast_event(&self, event: &Any) -> Result<Any, UpcastError> {
-        todo!("proposal: each rule in order whose source is the current type")
+        let mut current = event.clone();
+        for rule in &self.rules {
+            if type_name(&current.type_url) == rule.source {
+                current = (rule.transform)(&current)?;
+            }
+        }
+        Ok(current)
     }
 
     /// Runs one command's (or fact's) payload through the same rule chain,
     /// before it is decoded. Discouraged; see the module docs.
     pub fn upcast_command(&self, command: &Any) -> Result<Any, UpcastError> {
-        todo!("proposal: the same chain as upcast_event")
+        self.upcast_event(command)
     }
 
     /// One page with its payload (if any) run through the rule chain; its
     /// `sequence` and `meta` kept.
     pub fn upcast_page(&self, page: &EventPage) -> Result<EventPage, UpcastError> {
-        todo!("proposal: as the router's")
+        Ok(EventPage {
+            payload: page
+                .payload
+                .as_ref()
+                .map(|p| self.upcast_event(p))
+                .transpose()?,
+            ..page.clone()
+        })
     }
 
     /// `UpcasterService.Upcast`'s body: every page's event through the rule
     /// chain; a request for another domain unchanged.
     pub fn dispatch(&self, request: &UpcastRequest) -> Result<UpcastResponse, UpcastError> {
-        todo!("proposal: as the router's")
+        let events = if request.domain == self.domain {
+            request
+                .events
+                .iter()
+                .map(|p| self.upcast_page(p))
+                .collect::<Result<_, _>>()?
+        } else {
+            request.events.clone()
+        };
+        Ok(UpcastResponse { events })
     }
 
     /// Check the typed rules can all run, given the type URLs the domain
@@ -144,6 +190,62 @@ impl Upcaster {
     /// Untyped rules ([`Upcaster::on_event`]) are not followed. Every
     /// problem is listed.
     pub fn check(&self, current: &[String]) -> Result<(), Vec<UpcastChainError>> {
-        todo!("proposal: follow each typed rule's target to the end of its chain")
+        let problem = |problem| UpcastChainError {
+            domain: self.domain.clone(),
+            problem,
+        };
+        let typed: Vec<(usize, &str, &str)> = (self.rules.iter().enumerate())
+            .filter_map(|(i, r)| Some((i, r.source.as_str(), r.target.as_deref()?)))
+            .collect();
+        let mut problems = Vec::new();
+        for (n, &(i, source, _)) in typed.iter().enumerate() {
+            if typed[..n].iter().any(|&(_, s, _)| s == source) {
+                problems.push(problem(ChainProblem::Duplicate {
+                    source: source.to_string(),
+                }));
+            }
+            if let Some(&(_, produced_by, _)) =
+                typed.iter().find(|&&(j, _, t)| j > i && t == source)
+            {
+                problems.push(problem(ChainProblem::OutOfOrder {
+                    source: source.to_string(),
+                    produced_by: produced_by.to_string(),
+                }));
+            }
+        }
+        // Each chain from its head (a source no typed rule produces), as a
+        // payload of that type runs through the rules.
+        let mut heads: Vec<&str> = Vec::new();
+        for &(_, source, _) in &typed {
+            if typed.iter().any(|&(_, _, t)| t == source) || heads.contains(&source) {
+                continue;
+            }
+            heads.push(source);
+            let mut at = source;
+            let mut followed = true;
+            for rule in &self.rules {
+                if rule.source != at {
+                    continue;
+                }
+                match &rule.target {
+                    Some(target) => at = target,
+                    None => {
+                        followed = false;
+                        break;
+                    }
+                }
+            }
+            if followed && !current.iter().any(|url| type_name(url) == at) {
+                problems.push(problem(ChainProblem::DeadEnd {
+                    source: source.to_string(),
+                    ends_at: at.to_string(),
+                }));
+            }
+        }
+        if problems.is_empty() {
+            Ok(())
+        } else {
+            Err(problems)
+        }
     }
 }

@@ -49,7 +49,10 @@
 
 use std::collections::BTreeMap;
 use std::future::Future;
+use std::pin::pin;
+use std::task::{Context, Poll, Waker};
 
+use angzarr_proto::v1::event_meta::Causation;
 use angzarr_proto::v1::{Cover, EventPage, EventRef, Snapshot, Uuid};
 use prost_types::Timestamp;
 
@@ -70,7 +73,8 @@ pub struct Slice {
 /// Where streams are kept, synchronously.
 pub trait EventStore {
     /// Append `pages` to `stream`, creating it if `expected` is 0 and it does
-    /// not exist. Refuses (appending nothing) a stream not at `expected`
+    /// not exist (appending no pages checks `expected` and changes nothing).
+    /// Refuses (appending nothing) a stream not at `expected`
     /// ([`StoreError::Conflict`]) and pages whose sequences do not run on
     /// from `expected` ([`StoreError::Discontinuous`]). Returns the new
     /// length.
@@ -107,21 +111,21 @@ pub trait EventStore {
     /// process manager yet, so nothing is found by default.
     fn find_triggered(
         &mut self,
-        stream: &Cover,
-        trigger: &EventRef,
+        _stream: &Cover,
+        _trigger: &EventRef,
     ) -> Result<Vec<EventPage>, StoreError> {
         Ok(Vec::new())
     }
 
     /// The newest snapshot of `stream`, if any. None kept by default. The
     /// kernel checks it is usable ([`Registry::snapshot_usable`](super::Registry::snapshot_usable)).
-    fn read_snapshot(&mut self, stream: &Cover) -> Result<Option<Snapshot>, StoreError> {
+    fn read_snapshot(&mut self, _stream: &Cover) -> Result<Option<Snapshot>, StoreError> {
         Ok(None)
     }
 
     /// Keep `snapshot` as `stream`'s newest, replacing the one before.
     /// Discarded by default.
-    fn write_snapshot(&mut self, stream: &Cover, snapshot: &Snapshot) -> Result<(), StoreError> {
+    fn write_snapshot(&mut self, _stream: &Cover, _snapshot: &Snapshot) -> Result<(), StoreError> {
         Ok(())
     }
 }
@@ -167,7 +171,7 @@ pub trait AsyncEventStore {
     /// As [`EventStore::read_snapshot`].
     fn read_snapshot(
         &mut self,
-        stream: &Cover,
+        _stream: &Cover,
     ) -> impl Future<Output = Result<Option<Snapshot>, StoreError>> + Send {
         async { Ok(None) }
     }
@@ -175,8 +179,8 @@ pub trait AsyncEventStore {
     /// As [`EventStore::write_snapshot`].
     fn write_snapshot(
         &mut self,
-        stream: &Cover,
-        snapshot: &Snapshot,
+        _stream: &Cover,
+        _snapshot: &Snapshot,
     ) -> impl Future<Output = Result<(), StoreError>> + Send {
         async { Ok(()) }
     }
@@ -236,11 +240,72 @@ impl<S: UnitOfWork + Send> AsyncUnitOfWork for Ready<S> {
 /// since prost's `Cover` has no ordering of its own.
 type Key = (String, Option<String>, Vec<u8>);
 
-/// One stream as [`InMemoryStore`] holds it.
+fn key(stream: &Cover) -> Key {
+    (
+        stream.domain.clone(),
+        stream.edition.clone(),
+        stream
+            .root
+            .as_ref()
+            .map(|r| r.value.to_vec())
+            .unwrap_or_default(),
+    )
+}
+
+/// One stream as [`InMemoryStore`] (or a unit of work's pending appends)
+/// holds it.
 struct Held {
     stream: Cover,
     pages: Vec<EventPage>,
-    snapshot: Option<Snapshot>,
+}
+
+/// Refuse an append to a stream of `length` events that does not expect
+/// that length, or whose pages do not run on from it.
+fn check_append(
+    stream: &Cover,
+    length: u64,
+    expected: u64,
+    pages: &[EventPage],
+) -> Result<(), StoreError> {
+    if expected != length {
+        return Err(StoreError::Conflict {
+            stream: stream.clone(),
+            expected,
+            actual: length,
+        });
+    }
+    for (due, page) in (expected..).zip(pages) {
+        if page.sequence != due {
+            return Err(StoreError::Discontinuous {
+                stream: stream.clone(),
+                expected: due,
+                found: page.sequence,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Whether `page` is one of `command_id`'s events.
+pub(crate) fn produced_by(page: &EventPage, command_id: &Uuid) -> bool {
+    matches!(
+        page.meta.as_ref().and_then(|m| m.causation.as_ref()),
+        Some(Causation::CommandId(id)) if id == command_id
+    )
+}
+
+/// `pages`, the whole of a stream, as a slice from `from`.
+fn slice(stream: &Cover, pages: &[EventPage], from: u64) -> Slice {
+    let start = usize::try_from(from).map_or(pages.len(), |f| f.min(pages.len()));
+    Slice {
+        stream: stream.clone(),
+        next_sequence: pages.len() as u64,
+        last_recorded_at: pages
+            .last()
+            .and_then(|p| p.meta.as_ref())
+            .and_then(|m| m.recorded_at),
+        pages: pages[start..].to_vec(),
+    }
 }
 
 /// Streams held in memory, in key order. Checks everything a real store
@@ -248,6 +313,7 @@ struct Held {
 #[derive(Default)]
 pub struct InMemoryStore {
     streams: BTreeMap<Key, Held>,
+    snapshots: BTreeMap<Key, Snapshot>,
 }
 
 impl InMemoryStore {
@@ -268,6 +334,12 @@ impl InMemoryStore {
             pending: BTreeMap::new(),
         }
     }
+
+    fn pages(&self, stream: &Cover) -> &[EventPage] {
+        self.streams
+            .get(&key(stream))
+            .map_or(&[], |h| h.pages.as_slice())
+    }
 }
 
 impl EventStore for InMemoryStore {
@@ -277,11 +349,23 @@ impl EventStore for InMemoryStore {
         expected: u64,
         pages: &[EventPage],
     ) -> Result<u64, StoreError> {
-        todo!("proposal: check length and continuity, then extend")
+        check_append(stream, self.pages(stream).len() as u64, expected, pages)?;
+        if pages.is_empty() {
+            return Ok(expected);
+        }
+        let held = self.streams.entry(key(stream)).or_insert_with(|| Held {
+            stream: stream.clone(),
+            pages: Vec::new(),
+        });
+        held.pages.extend_from_slice(pages);
+        Ok(held.pages.len() as u64)
     }
 
     fn read_from(&mut self, stream: &Cover, from: u64) -> Result<Option<Slice>, StoreError> {
-        todo!("proposal: clone the tail, with the last recorded_at")
+        Ok(self
+            .streams
+            .get(&key(stream))
+            .map(|h| slice(&h.stream, &h.pages, from)))
     }
 
     fn find_command(
@@ -289,22 +373,39 @@ impl EventStore for InMemoryStore {
         stream: &Cover,
         command_id: &Uuid,
     ) -> Result<Vec<EventPage>, StoreError> {
-        todo!("proposal: the pages whose meta's command_id matches")
+        Ok(self
+            .pages(stream)
+            .iter()
+            .filter(|p| produced_by(p, command_id))
+            .cloned()
+            .collect())
     }
 
     fn read_snapshot(&mut self, stream: &Cover) -> Result<Option<Snapshot>, StoreError> {
-        todo!("proposal: the held snapshot")
+        Ok(self.snapshots.get(&key(stream)).cloned())
     }
 
     fn write_snapshot(&mut self, stream: &Cover, snapshot: &Snapshot) -> Result<(), StoreError> {
-        todo!("proposal: replace the held snapshot")
+        self.snapshots.insert(key(stream), snapshot.clone());
+        Ok(())
     }
 }
 
 /// A unit of work over an [`InMemoryStore`]. See [`InMemoryStore::begin`].
 pub struct InMemoryTx<'s> {
     store: &'s mut InMemoryStore,
-    pending: BTreeMap<Key, Vec<EventPage>>,
+    pending: BTreeMap<Key, Held>,
+}
+
+impl InMemoryTx<'_> {
+    /// The stream's pages: the store's, then the pending ones.
+    fn pages(&self, stream: &Cover) -> Vec<EventPage> {
+        let mut pages = self.store.pages(stream).to_vec();
+        if let Some(pending) = self.pending.get(&key(stream)) {
+            pages.extend_from_slice(&pending.pages);
+        }
+        pages
+    }
 }
 
 impl EventStore for InMemoryTx<'_> {
@@ -314,11 +415,24 @@ impl EventStore for InMemoryTx<'_> {
         expected: u64,
         pages: &[EventPage],
     ) -> Result<u64, StoreError> {
-        todo!("proposal: check against store + pending, hold in pending")
+        let length = self.pages(stream).len() as u64;
+        check_append(stream, length, expected, pages)?;
+        if !pages.is_empty() {
+            let held = self.pending.entry(key(stream)).or_insert_with(|| Held {
+                stream: stream.clone(),
+                pages: Vec::new(),
+            });
+            held.pages.extend_from_slice(pages);
+        }
+        Ok(length + pages.len() as u64)
     }
 
     fn read_from(&mut self, stream: &Cover, from: u64) -> Result<Option<Slice>, StoreError> {
-        todo!("proposal: the store's stream with pending appends after it")
+        let k = key(stream);
+        if !self.store.streams.contains_key(&k) && !self.pending.contains_key(&k) {
+            return Ok(None);
+        }
+        Ok(Some(slice(stream, &self.pages(stream), from)))
     }
 
     fn find_command(
@@ -326,7 +440,9 @@ impl EventStore for InMemoryTx<'_> {
         stream: &Cover,
         command_id: &Uuid,
     ) -> Result<Vec<EventPage>, StoreError> {
-        todo!("proposal: the store's and pending pages whose command_id matches")
+        let mut pages = self.pages(stream);
+        pages.retain(|p| produced_by(p, command_id));
+        Ok(pages)
     }
 
     fn read_snapshot(&mut self, stream: &Cover) -> Result<Option<Snapshot>, StoreError> {
@@ -336,6 +452,126 @@ impl EventStore for InMemoryTx<'_> {
 
 impl UnitOfWork for InMemoryTx<'_> {
     fn commit(self) -> Result<(), StoreError> {
-        todo!("proposal: move pending into the store")
+        let InMemoryTx { store, pending } = self;
+        for held in pending.into_values() {
+            let length = store.pages(&held.stream).len() as u64;
+            store.append(&held.stream, length, &held.pages)?;
+        }
+        Ok(())
+    }
+}
+
+/// The store operations a chain makes, as futures: one chain serves the
+/// sync port ([`SyncPort`], every future ready at once) and the async one
+/// ([`AsyncPort`]). Not `Send`-bound, so a synchronous store need not be
+/// `Send`; over the async port the futures are `Send` whenever the store's
+/// are.
+pub(crate) trait Port {
+    fn append(
+        &mut self,
+        stream: &Cover,
+        expected: u64,
+        pages: &[EventPage],
+    ) -> impl Future<Output = Result<u64, StoreError>>;
+
+    fn read_from(
+        &mut self,
+        stream: &Cover,
+        from: u64,
+    ) -> impl Future<Output = Result<Option<Slice>, StoreError>>;
+
+    fn find_command(
+        &mut self,
+        stream: &Cover,
+        command_id: &Uuid,
+    ) -> impl Future<Output = Result<Vec<EventPage>, StoreError>>;
+
+    fn read_snapshot(
+        &mut self,
+        stream: &Cover,
+    ) -> impl Future<Output = Result<Option<Snapshot>, StoreError>>;
+}
+
+/// A synchronous store as a [`Port`].
+pub(crate) struct SyncPort<'a, S>(pub(crate) &'a mut S);
+
+impl<S: EventStore> Port for SyncPort<'_, S> {
+    fn append(
+        &mut self,
+        stream: &Cover,
+        expected: u64,
+        pages: &[EventPage],
+    ) -> impl Future<Output = Result<u64, StoreError>> {
+        std::future::ready(self.0.append(stream, expected, pages))
+    }
+
+    fn read_from(
+        &mut self,
+        stream: &Cover,
+        from: u64,
+    ) -> impl Future<Output = Result<Option<Slice>, StoreError>> {
+        std::future::ready(self.0.read_from(stream, from))
+    }
+
+    fn find_command(
+        &mut self,
+        stream: &Cover,
+        command_id: &Uuid,
+    ) -> impl Future<Output = Result<Vec<EventPage>, StoreError>> {
+        std::future::ready(self.0.find_command(stream, command_id))
+    }
+
+    fn read_snapshot(
+        &mut self,
+        stream: &Cover,
+    ) -> impl Future<Output = Result<Option<Snapshot>, StoreError>> {
+        std::future::ready(self.0.read_snapshot(stream))
+    }
+}
+
+/// An async store as a [`Port`].
+pub(crate) struct AsyncPort<'a, S>(pub(crate) &'a mut S);
+
+impl<S: AsyncEventStore> Port for AsyncPort<'_, S> {
+    fn append(
+        &mut self,
+        stream: &Cover,
+        expected: u64,
+        pages: &[EventPage],
+    ) -> impl Future<Output = Result<u64, StoreError>> {
+        self.0.append(stream, expected, pages)
+    }
+
+    fn read_from(
+        &mut self,
+        stream: &Cover,
+        from: u64,
+    ) -> impl Future<Output = Result<Option<Slice>, StoreError>> {
+        self.0.read_from(stream, from)
+    }
+
+    fn find_command(
+        &mut self,
+        stream: &Cover,
+        command_id: &Uuid,
+    ) -> impl Future<Output = Result<Vec<EventPage>, StoreError>> {
+        self.0.find_command(stream, command_id)
+    }
+
+    fn read_snapshot(
+        &mut self,
+        stream: &Cover,
+    ) -> impl Future<Output = Result<Option<Snapshot>, StoreError>> {
+        self.0.read_snapshot(stream)
+    }
+}
+
+/// Run a future over a [`SyncPort`] to its end: every future it awaits is
+/// ready at once, so one poll finishes it.
+pub(crate) fn block<F: Future>(future: F) -> F::Output {
+    let mut cx = Context::from_waker(Waker::noop());
+    match pin!(future).poll(&mut cx) {
+        Poll::Ready(out) => out,
+        Poll::Pending => unreachable!("a synchronous port's futures are ready at once"),
     }
 }

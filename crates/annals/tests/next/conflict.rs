@@ -238,7 +238,6 @@ fn units(paths: &[&str]) -> Units {
 }
 
 #[test]
-#[ignore = "proposal: unit paths are angzarr's syntax, escaped once by the kernel"]
 fn unit_paths_follow_angzarrs_syntax() {
     let items = UnitPath::field("items");
     let path = |p: &UnitPath| p.to_string();
@@ -265,7 +264,6 @@ fn unit_paths_follow_angzarrs_syntax() {
 }
 
 #[test]
-#[ignore = "proposal: overlap is equality or a prefix at a . or [ boundary; a wildcard overlaps everything"]
 fn units_overlap_by_angzarrs_rule() {
     let overlaps = |a: &[&str], b: &[&str]| units(a).overlaps(&units(b));
     let path = |p: &str| UnitPath::field(p);

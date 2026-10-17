@@ -28,7 +28,7 @@ pub trait State: prost::Message + prost::Name + Default + Clone + Send + 'static
     /// with the fail-safe wildcard for every unmarked field that differs).
     /// Pure. Called only under COMMUTATIVE, so only for a state that lists
     /// it; the default, for a state with no units, says "everything".
-    fn changed(before: &Self, after: &Self) -> Units {
+    fn changed(_before: &Self, _after: &Self) -> Units {
         Units::everything()
     }
 }
@@ -246,14 +246,17 @@ impl<'a, D: Domain> Tx<'a, D> {
     /// rule: angzarr's `resolve_conflicts(window, nonce)`. Without this
     /// call (with this delivery's nonce) a decide under AGGREGATE_HANDLES
     /// that returns `Ok` fails as stale, its events discarded.
-    pub fn resolve_conflicts(&mut self, window: &[Envelope<D::Event>], nonce: Nonce) {
-        todo!("proposal: keep the nonce; the kernel compares it after decide returns")
+    pub fn resolve_conflicts(&mut self, _window: &[Envelope<D::Event>], nonce: Nonce) {
+        self.resolved = Some(nonce);
     }
 
     /// Stage an event and fold it into the staged state. Returns the
     /// sequence it will have if committed. The kernel stamps its meta.
     pub fn emit(&mut self, event: D::Event) -> u64 {
-        todo!("proposal: clone the state at the first emit, apply, stage")
+        let state = self.staged.get_or_insert_with(|| self.committed.clone());
+        D::apply(state, &event, self.rules);
+        self.events.push(event);
+        self.next_sequence() - 1
     }
 
     /// The sequence the next emitted event will take.

@@ -29,7 +29,6 @@ fn page(sequence: u64, payload: annals::next::Any) -> EventPage {
 }
 
 #[test]
-#[ignore = "proposal: upcasting by type URL runs v0 -> v1, as the router's dispatch"]
 fn upcasting_by_type_url_runs_the_chain_as_the_router_does() {
     let upcaster = account_upcaster();
     assert_eq!(

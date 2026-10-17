@@ -30,7 +30,6 @@ fn page(sequence: u64, n: u128) -> EventPage {
 }
 
 #[test]
-#[ignore = "proposal: append returns the new length and refuses a stale expected or a gap in sequences"]
 fn append_checks_the_expected_length_and_continuity() {
     let mut store = InMemoryStore::new();
     let stream = cover("account", 1);
@@ -59,7 +58,6 @@ fn append_checks_the_expected_length_and_continuity() {
 }
 
 #[test]
-#[ignore = "proposal: the same root in another domain or edition is another stream"]
 fn a_cover_is_domain_edition_and_root() {
     let mut store = InMemoryStore::new();
     store
@@ -73,7 +71,6 @@ fn a_cover_is_domain_edition_and_root() {
 }
 
 #[test]
-#[ignore = "proposal: find_command answers the deduplication lookup from the events"]
 fn find_command_finds_a_commands_events_on_its_stream() {
     let mut store = InMemoryStore::new();
     let stream = cover("account", 1);
@@ -93,7 +90,6 @@ fn find_command_finds_a_commands_events_on_its_stream() {
 }
 
 #[test]
-#[ignore = "proposal: a unit of work lands at commit or not at all, and reads see its own appends"]
 fn a_unit_of_work_lands_at_commit_or_not_at_all() {
     let mut store = InMemoryStore::new();
     let stream = cover("account", 1);
@@ -113,7 +109,6 @@ fn a_unit_of_work_lands_at_commit_or_not_at_all() {
 }
 
 #[test]
-#[ignore = "proposal: the async port has the same contract"]
 fn the_async_port_has_the_same_contract() {
     let mut store = InMemoryStore::new();
     let stream = cover("account", 1);

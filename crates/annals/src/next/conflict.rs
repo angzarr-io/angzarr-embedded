@@ -64,28 +64,55 @@ pub enum Key<'a> {
 impl UnitPath {
     /// The top-level field `name`.
     pub fn field(name: &str) -> UnitPath {
-        todo!("proposal: the name's bytes")
+        UnitPath(name.as_bytes().to_vec())
     }
 
     /// The inner field `name` of this (descended) message: `self.name`.
     pub fn dot(&self, name: &str) -> UnitPath {
-        todo!("proposal: self, '.', name")
+        let mut path = self.0.clone();
+        path.push(b'.');
+        path.extend_from_slice(name.as_bytes());
+        UnitPath(path)
     }
 
     /// This map's or keyed list's entry `key`: `self[key]`, escaped.
     pub fn key(&self, key: Key<'_>) -> UnitPath {
-        todo!("proposal: self, '[', the key written and escaped as Key says, ']'")
+        let mut path = self.0.clone();
+        path.push(b'[');
+        let escaped = |path: &mut Vec<u8>, raw: &[u8]| {
+            for &b in raw {
+                if matches!(b, b'\\' | b']' | b'#') {
+                    path.push(b'\\');
+                }
+                path.push(b);
+            }
+        };
+        match key {
+            Key::Int(n) => path.extend_from_slice(n.to_string().as_bytes()),
+            Key::Uint(n) => path.extend_from_slice(n.to_string().as_bytes()),
+            Key::Bool(b) => path.extend_from_slice(if b { b"true" } else { b"false" }),
+            Key::Enum(n) => path.extend_from_slice(n.to_string().as_bytes()),
+            Key::Str(s) => escaped(&mut path, s.as_bytes()),
+            Key::Bytes(raw) => escaped(&mut path, raw),
+        }
+        path.push(b']');
+        UnitPath(path)
     }
 
     /// This keyed, ordered list's order unit: `self[#order]`.
     pub fn order(&self) -> UnitPath {
-        todo!("proposal: self, \"[#order]\"")
+        let mut path = self.0.clone();
+        path.extend_from_slice(b"[#order]");
+        UnitPath(path)
     }
 
     /// The wildcard for this unmarked field: `*` then its path. Overlaps
     /// every unit of a non-empty other set.
     pub fn wildcard(&self) -> UnitPath {
-        todo!("proposal: '*', self")
+        let mut path = Vec::with_capacity(self.0.len() + 1);
+        path.push(b'*');
+        path.extend_from_slice(&self.0);
+        UnitPath(path)
     }
 
     /// The wildcard for unknown fields at the top level: `*` alone.
@@ -108,7 +135,13 @@ impl UnitPath {
     /// units inside it, which makes every fallback sound. Wildcards are
     /// [`Units::overlaps`]'s concern.
     pub fn overlaps(&self, other: &UnitPath) -> bool {
-        todo!("proposal: equal, or the longer continues the shorter with '.' or '['")
+        let (short, long) = if self.0.len() <= other.0.len() {
+            (&self.0, &other.0)
+        } else {
+            (&other.0, &self.0)
+        };
+        long.starts_with(short)
+            && (long.len() == short.len() || matches!(long[short.len()], b'.' | b'['))
     }
 }
 
@@ -147,7 +180,11 @@ impl Units {
     /// overlaps nothing, so an empty window or a command that changes
     /// nothing always commutes.
     pub fn overlaps(&self, other: &Units) -> bool {
-        todo!("proposal: wildcard against non-empty, else any pair of UnitPath::overlaps")
+        let wild = |units: &Units| units.iter().any(UnitPath::is_wildcard);
+        if self.is_empty() || other.is_empty() {
+            return false;
+        }
+        wild(self) || wild(other) || self.iter().any(|a| other.iter().any(|b| a.overlaps(b)))
     }
 }
 
