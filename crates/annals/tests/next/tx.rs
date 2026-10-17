@@ -284,3 +284,89 @@ fn decide_reads_the_rules_the_stream_the_instant_and_the_ids() {
         crate::toys::command_id(4).value.to_vec()
     );
 }
+
+/// Each probe event → the ledger: the probe emits two per command, so
+/// this sets off two sibling steps, two deep.
+struct ProbeToLedger;
+
+impl Reaction for ProbeToLedger {
+    type Source = ProbeDomain;
+    type Target = crate::toys::Ledger;
+    type TargetId = ();
+
+    const NAME: &'static str = "probe-to-ledger";
+
+    fn targets(_: &ProbeState) -> Vec<()> {
+        vec![()]
+    }
+
+    fn root((): &()) -> Uuid {
+        crate::toys::ledger_root()
+    }
+
+    fn position(_: &crate::toys::LedgerState) -> Position {
+        Position::START
+    }
+}
+
+impl Policy for ProbeToLedger {
+    fn command((): &(), c: &Committed<'_, ProbeDomain>) -> crate::toys::ledger::Record {
+        crate::toys::ledger::Record {
+            source_sequence: c.sequence(),
+            cents: 1,
+        }
+    }
+}
+
+#[test]
+fn a_two_deep_chain_keeps_the_path_to_the_step_running_and_its_limit() {
+    let mut registry = registry();
+    registry
+        .register::<crate::toys::Ledger>(Rulebook::new("v1", ()), Upcaster::new("u", "ledger"))
+        .unwrap();
+    let log = MemoryDeadLetters::new();
+    let mut store = InMemoryStore::new();
+    opened(&mut store, &registry, 1, 0);
+    let routes = annals::next::Routes::new()
+        .policy::<Probing>()
+        .policy::<ProbeToLedger>();
+    let deposit = || command(cover("account", 1), AccountCmd::Deposit(5).to_any()).id(3);
+
+    let kernel = Kernel::new(&registry, &log).limit(2);
+    let mut unit = store.begin();
+    let sampled = at(50);
+    let mut chain = annals::next::Chain::new(&kernel, &mut unit, &routes, &sampled);
+    chain
+        .execute::<Account>(annals::next::check(deposit(), &registry).unwrap())
+        .unwrap();
+    let path = chain.path();
+    assert_eq!(path.len(), 2, "the probe step, then the second ledger step");
+    assert_eq!(path[0].stream.domain, "probe");
+    assert_eq!(path[1].stream.domain, "ledger");
+    assert_eq!(path[1].cause.sequence, 1, "the second sibling");
+    assert_eq!(
+        chain
+            .state::<crate::toys::Ledger>(&path[1].stream)
+            .unwrap()
+            .total,
+        2
+    );
+    drop(chain);
+    drop(unit);
+
+    let shallow = Kernel::new(&registry, &log).limit(1);
+    let failure = shallow
+        .handle::<Account, _, _>(store.begin(), &routes, deposit(), &at(50), &mut ())
+        .err()
+        .unwrap();
+    assert!(matches!(
+        &failure,
+        annals::next::Failure::Downstream {
+            path,
+            error: annals::next::StepError::Kernel(annals::next::KernelError::ChainTooDeep {
+                limit: 1
+            }),
+        } if path.len() == 2
+    ));
+    assert_eq!(shallow.registry().domains().count(), 3);
+}

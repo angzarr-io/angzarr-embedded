@@ -215,3 +215,61 @@ fn a_store_keeps_the_newest_snapshot_per_stream() {
     let mut unit = Ready(store.begin());
     assert_eq!(ready(unit.read_from(&stream, 0)), Ok(None));
 }
+
+/// A store that implements only what the port requires.
+struct Minimal(InMemoryStore);
+
+impl EventStore for Minimal {
+    fn append(
+        &mut self,
+        stream: &annals::next::v1::Cover,
+        expected: u64,
+        pages: &[EventPage],
+    ) -> Result<u64, StoreError> {
+        self.0.append(stream, expected, pages)
+    }
+
+    fn read_from(
+        &mut self,
+        stream: &annals::next::v1::Cover,
+        from: u64,
+    ) -> Result<Option<annals::next::Slice>, StoreError> {
+        self.0.read_from(stream, from)
+    }
+
+    fn find_command(
+        &mut self,
+        stream: &annals::next::v1::Cover,
+        command_id: &annals::next::v1::Uuid,
+    ) -> Result<Vec<EventPage>, StoreError> {
+        self.0.find_command(stream, command_id)
+    }
+}
+
+#[test]
+fn a_store_keeps_no_snapshots_and_finds_no_process_events_by_default() {
+    use annals::next::v1::{EventRef, Snapshot};
+    let stream = cover("account", 1);
+    let trigger = EventRef {
+        stream: Some(stream.clone()),
+        sequence: 0,
+    };
+    let mut minimal = Minimal(InMemoryStore::new());
+    minimal.append(&stream, 0, &[page(0, 1)]).unwrap();
+    assert_eq!(minimal.read(&stream).unwrap().unwrap().pages, [page(0, 1)]);
+    minimal
+        .write_snapshot(&stream, &Snapshot::default())
+        .unwrap();
+    assert_eq!(minimal.read_snapshot(&stream), Ok(None));
+    assert_eq!(minimal.find_triggered(&stream, &trigger), Ok(vec![]));
+    let mut store = InMemoryStore::new();
+    store.append(&stream, 0, &[page(0, 1)]).unwrap();
+    assert_eq!(store.find_triggered(&stream, &trigger), Ok(vec![]));
+
+    let mut async_store = Ready(InMemoryStore::new());
+    ready(async_store.write_snapshot(&stream, &Snapshot::default())).unwrap();
+    assert_eq!(
+        ready(async_store.read_snapshot(&stream)),
+        Ok(Some(Snapshot::default()))
+    );
+}

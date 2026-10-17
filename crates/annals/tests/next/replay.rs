@@ -625,3 +625,114 @@ fn a_domain_the_registry_lacks_cannot_be_replayed_or_snapshotted() {
     assert_eq!(stream.snapshot(&empty), None);
     let _ = (Ledger, Shelf);
 }
+
+#[test]
+fn a_facts_events_read_back_with_its_origin() {
+    let registry = registry();
+    let mut store = annals::next::InMemoryStore::new();
+    crate::toys::handle::<Account>(
+        &mut store,
+        &registry,
+        crate::toys::fact(
+            cover("account", 1),
+            crate::toys::AccountFact::PaymentReceived(3).to_any(),
+            "pi_r",
+        ),
+        &at(5),
+    )
+    .unwrap();
+    use annals::next::EventStore;
+    let pages = store.read(&cover("account", 1)).unwrap().unwrap().pages;
+    let stream = Stream::<Account>::replay(cover("account", 1), &pages, &registry).unwrap();
+    assert_eq!(stream.events()[0].fact().unwrap().external_id, "pi_r");
+    assert!(!stream.is_empty());
+    assert!(Stream::<Account>::new(root(9), None).unwrap().is_empty());
+}
+
+#[test]
+fn a_decision_for_another_stream_at_the_same_head_does_not_commit() {
+    let registry = registry();
+    let log = annals::next::MemoryDeadLetters::new();
+    let mut store = annals::next::InMemoryStore::new();
+    let mut unit = store.begin();
+    let mut coordinator = annals::next::Coordinator::new(&mut unit, &registry);
+    let identified = annals::next::check(
+        command(cover("account", 1), AccountCmd::Open.to_any()),
+        &registry,
+    )
+    .unwrap()
+    .identify(&at(1));
+    let annals::next::Deduplicated::Novel(novel) = coordinator.deduplicate(identified).unwrap()
+    else {
+        panic!("new");
+    };
+    let mut prepared = coordinator
+        .load(novel)
+        .unwrap()
+        .decode::<Account>(&registry)
+        .unwrap();
+    let decision = prepared.decide(&at(1), &registry, &log).unwrap();
+    let mut other = Stream::<Account>::new(root(2), None).unwrap();
+    assert_eq!(
+        other.commit(decision, &registry, &mut []),
+        Err(KernelError::Stale {
+            stream: cover("account", 1),
+            expected: 0,
+            actual: 0
+        })
+    );
+}
+
+#[test]
+fn commutative_cannot_compare_a_window_hidden_in_a_snapshot() {
+    use crate::toys::{set, shelf, ShelfState};
+    use annals::next::v1::ConflictResolution;
+    let registry = registry();
+    let log = annals::next::MemoryDeadLetters::new();
+    let snapshot = Snapshot {
+        sequence: 1,
+        state: Some(pack(&ShelfState {
+            items: [("a".to_string(), 1), ("b".to_string(), 2)].into(),
+            ..Default::default()
+        })),
+        rules_version: "v1".to_string(),
+    };
+    let set_page = |sequence: u64, item: &str| EventPage {
+        payload: Some(pack(&shelf::WasSet {
+            item: item.to_string(),
+            count: 3,
+            window: None,
+        })),
+        meta: Some(meta(sequence, "v1")),
+        sequence,
+    };
+    let mut stream = Stream::<Shelf>::resume(
+        cover("shelf", 3),
+        &snapshot,
+        None,
+        &[set_page(2, "c")],
+        &registry,
+    )
+    .unwrap();
+    let behind = |n: u128, expected| {
+        command(cover("shelf", 3), set("d", 1))
+            .id(n)
+            .expecting(expected, ConflictResolution::Commutative)
+    };
+    assert_eq!(
+        stream
+            .execute(behind(11, 1), &registry, &at(9), &log, &mut [])
+            .err(),
+        Some(Failure::Kernel(KernelError::BeforeSnapshot {
+            stream: cover("shelf", 3),
+            first: 2
+        }))
+    );
+    let applied = stream
+        .execute(behind(12, 2), &registry, &at(9), &log, &mut [])
+        .unwrap();
+    assert!(
+        matches!(&applied, annals::next::Executed::Applied(e) if e.len() == 1),
+        "the window from the first held event is held: c and d commute: {applied:?}"
+    );
+}

@@ -392,14 +392,9 @@ impl<D: Domain> Stream<D> {
                 actual: head,
             }));
         }
-        let found = self.find_command(command.command_id()).len();
-        if found > 0 {
-            let start = self
-                .events
-                .iter()
-                .position(|e| e.command_id() == Some(command.command_id()))
-                .unwrap_or_default();
-            return Ok(Executed::Duplicate(&self.events[start..start + found]));
+        let found = self.command_run(command.command_id());
+        if !found.is_empty() {
+            return Ok(Executed::Duplicate(&self.events[found]));
         }
         let resolution = resolution(registry, &command).map_err(kernel)?;
         let mut nonces = head;
@@ -572,15 +567,21 @@ impl<D: Domain> Stream<D> {
     /// finds in memory. Empty if none (never applied, or applied with no
     /// events).
     pub fn find_command(&self, command_id: &Uuid) -> &[Envelope<D::Event>] {
+        &self.events[self.command_run(command_id)]
+    }
+
+    /// Where the held events of command `command_id` are: one contiguous
+    /// run, or empty.
+    fn command_run(&self, command_id: &Uuid) -> std::ops::Range<usize> {
         let produced = |e: &Envelope<D::Event>| e.command_id() == Some(command_id);
         let Some(start) = self.events.iter().position(produced) else {
-            return &[];
+            return 0..0;
         };
         let run = self.events[start..]
             .iter()
             .take_while(|e| produced(e))
             .count();
-        &self.events[start..start + run]
+        start..start + run
     }
 
     pub fn cover(&self) -> &Cover {

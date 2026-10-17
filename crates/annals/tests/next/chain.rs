@@ -700,3 +700,140 @@ fn a_policy_book_for_an_unregistered_target_is_a_dead_lettered_bug() {
     ));
     assert_eq!(log.lines().len(), 2);
 }
+
+#[test]
+fn a_command_on_a_staged_stream_owes_only_its_own_events() {
+    let registry = registry();
+    let log = MemoryDeadLetters::new();
+    let edges = Edges::default();
+    let kernel = Kernel::new(&registry, &log).triggers(&edges);
+    let mut store = InMemoryStore::new();
+    opened(&mut store, &registry, 1, 0);
+    let routes = Routes::new().policy::<Bookkeeping>();
+    let mut unit = store.begin();
+    let sampled = at(30);
+    let mut chain = annals::next::Chain::new(&kernel, &mut unit, &routes, &sampled);
+    for n in [3, 4] {
+        chain
+            .execute::<Account>(annals::next::check(deposit(n, 1), &registry).unwrap())
+            .unwrap();
+    }
+    assert_eq!(
+        edges
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(trigger, ..)| trigger.sequence)
+            .collect::<Vec<_>>(),
+        [2, 3],
+        "each deposit's own event, once"
+    );
+}
+
+#[test]
+fn a_chain_on_a_stream_loaded_from_a_snapshot_records_only_its_events() {
+    let registry = registry();
+    let log = MemoryDeadLetters::new();
+    let kernel = Kernel::new(&registry, &log);
+    let mut store = InMemoryStore::new();
+    opened(&mut store, &registry, 1, 7);
+    let source = account_stream(&mut store, &registry);
+    store
+        .write_snapshot(&cover("account", 1), &source.snapshot(&registry).unwrap())
+        .unwrap();
+    let (mut one, mut two) = (Deposits::default(), Deposits::default());
+    let first = annals::next::ProjectionRoute {
+        name: "first",
+        projection: &mut one,
+        domain: std::marker::PhantomData,
+    };
+    let second = annals::next::ProjectionRoute {
+        name: "second",
+        projection: &mut two,
+        domain: std::marker::PhantomData,
+    };
+    let handled = kernel
+        .handle::<Account, _, _>(
+            store.begin(),
+            &Routes::new(),
+            deposit(3, 25),
+            &at(30),
+            &mut (first, second),
+        )
+        .unwrap();
+    let annals::next::Handled::Applied(recorded) = handled else {
+        panic!("applied");
+    };
+    assert!(recorded.projector_failures().is_empty());
+    let events = recorded.events::<Account>(&cover("account", 1)).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].sequence(), 2);
+    let seen = [one.0, two.0];
+    assert_eq!(seen, [vec![25], vec![25]], "both projections ran");
+}
+
+#[test]
+fn a_committed_event_names_its_stream() {
+    let registry = registry();
+    let mut store = InMemoryStore::new();
+    opened(&mut store, &registry, 1, 7);
+    let source = account_stream(&mut store, &registry);
+    let mut covers = Vec::new();
+    let mut handler = |c: &annals::next::Committed<'_, Account>| {
+        covers.push((c.cover().clone(), c.envelope().sequence()))
+    };
+    source.dispatch(1, &registry, &mut [&mut handler]).unwrap();
+    assert_eq!(covers, [(cover("account", 1), 1)]);
+    assert_eq!(annals::next::Position::at(4).last(), Some(4));
+    assert_eq!(annals::next::Position::START.last(), None);
+}
+
+/// Two ledgers per account event: orders are indexed in target order.
+struct TwoLedgers;
+
+impl annals::next::Reaction for TwoLedgers {
+    type Source = Account;
+    type Target = Ledger;
+    type TargetId = u8;
+
+    const NAME: &'static str = "two-ledgers";
+
+    fn targets(_: &crate::toys::account::AccountState) -> Vec<u8> {
+        vec![0, 1]
+    }
+
+    fn root(n: &u8) -> annals::next::v1::Uuid {
+        ids::compute_root("ledger", &n.to_string()).unwrap()
+    }
+
+    fn position(_: &crate::toys::LedgerState) -> annals::next::Position {
+        annals::next::Position::START
+    }
+}
+
+impl annals::next::Policy for TwoLedgers {
+    fn command(_: &u8, c: &annals::next::Committed<'_, Account>) -> ledger::Record {
+        ledger::Record {
+            source_sequence: c.sequence(),
+            cents: 0,
+        }
+    }
+}
+
+#[test]
+fn a_triggers_orders_are_indexed_in_target_order() {
+    let registry = registry();
+    let mut store = InMemoryStore::new();
+    opened(&mut store, &registry, 1, 0);
+    let source = account_stream(&mut store, &registry);
+    let owed = annals::next::orders_owed::<TwoLedgers>(
+        &source,
+        &registry,
+        &std::collections::BTreeMap::new(),
+    )
+    .unwrap();
+    assert_eq!(owed[&0][0].index(), 0);
+    assert_eq!(owed[&1][0].index(), 1);
+    assert_ne!(owed[&0][0].cover(), owed[&1][0].cover());
+}

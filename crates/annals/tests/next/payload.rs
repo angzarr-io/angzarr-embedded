@@ -58,3 +58,20 @@ fn payloads_are_any_packed_by_their_prost_name() {
         Err(PayloadError::Decode { type_url, .. }) if type_url == "/toy.account.v1.Deposited"
     ));
 }
+
+#[test]
+fn a_domain_that_takes_no_facts_decodes_none() {
+    use annals::next::Payload;
+    use std::convert::Infallible;
+    assert!(<Infallible as Payload>::type_urls().is_empty());
+    assert_eq!(
+        <Infallible as Payload>::from_any(&annals::next::Any {
+            type_url: "/a.B".to_string(),
+            value: Vec::new(),
+        })
+        .err(),
+        Some(annals::next::PayloadError::UnknownType {
+            type_url: "/a.B".to_string()
+        })
+    );
+}

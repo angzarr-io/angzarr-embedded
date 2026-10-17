@@ -294,3 +294,42 @@ fn an_upcast_rule_reports_its_own_failure_and_bytes_it_cannot_read() {
         .dispatch(&request)
         .is_err());
 }
+
+#[test]
+fn an_upcaster_names_itself_and_each_problem_once() {
+    assert_eq!(account_upcaster().name(), "account-upcaster");
+    let problems = |upcaster: Upcaster| -> Vec<ChainProblem> {
+        let mut registry = Registry::new();
+        registry.register::<Account>(fees(), upcaster).unwrap();
+        registry
+            .check()
+            .err()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|e| e.problem)
+            .collect()
+    };
+    let same = Upcaster::new("u", "account").rule::<account::Deposited, account::Deposited>(Ok);
+    assert_eq!(
+        problems(same),
+        [],
+        "a rule onto its own type is not out of order"
+    );
+    let rule = |c: account::v0::Credited| Ok(account::v9::Bonus { cents: c.euros });
+    let twice = Upcaster::new("u", "account")
+        .rule::<account::v0::Credited, account::v9::Bonus>(rule)
+        .rule::<account::v0::Credited, account::v9::Bonus>(rule);
+    assert_eq!(
+        problems(twice),
+        [
+            ChainProblem::Duplicate {
+                source: "toy.account.v0.Credited".to_string()
+            },
+            ChainProblem::DeadEnd {
+                source: "toy.account.v0.Credited".to_string(),
+                ends_at: "toy.account.v9.Bonus".to_string()
+            }
+        ],
+        "one chain, one dead end"
+    );
+}
