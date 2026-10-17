@@ -50,6 +50,8 @@ pub struct Probed {
     pub bumps_committed: u32,
     #[prost(bool, tag = "12")]
     pub conflicts: bool,
+    #[prost(uint64, tag = "13")]
+    pub emitted_before: u64,
 }
 
 impl prost::Name for Probed {
@@ -141,6 +143,7 @@ impl Domain for ProbeDomain {
 
     fn decide(_: &Probe, tx: &mut Tx<'_, Self>) -> Result<(), Infallible> {
         let conflicts = tx.conflicts().is_some();
+        let emitted_before = tx.emitted() as u64;
         let committed = tx.state().bumps;
         let first = tx.emit(ProbeEvent::Bumped);
         let probed = Probed {
@@ -156,6 +159,7 @@ impl Domain for ProbeDomain {
             bumps_seen: tx.state().bumps,
             bumps_committed: committed,
             conflicts,
+            emitted_before,
         };
         let () = *tx.rules();
         tx.emit(ProbeEvent::Probed(probed));
@@ -268,6 +272,7 @@ fn decide_reads_the_rules_the_stream_the_instant_and_the_ids() {
             bumps_seen: 1,
             bumps_committed: 0,
             conflicts: false,
+            emitted_before: 0,
         }]
     );
 

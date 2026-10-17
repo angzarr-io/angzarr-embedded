@@ -67,6 +67,7 @@ fn a_checked_fact_carries_its_source_in_its_body() {
         Some(&source),
         "a fact's source is never optional"
     );
+    assert!(checked.body().is_fact());
     assert_eq!(checked.payload(), &payment(70));
 }
 
