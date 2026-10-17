@@ -12,15 +12,15 @@ changes, rewrite the text in place to say what is true now.
 - A rejected alternative may stay only as rationale for the current design
   ("not X, because …"), never as a story of how we got here.
 
-## Zero dependencies, no domain
+## Few dependencies, no domain
 
 Annals is an event-sourced, deterministic game engine. Every crate here knows
 nothing about any particular game. They are shared by card-game and
 tdautobattle, so anything specific to one of them belongs in that
 repository, not here.
 
-Every crate has zero third-party dependencies, except annals-log,
-annals-angzarr and annals-catalog-check. A crate may depend on another
+Every crate has zero third-party dependencies, except annals,
+annals-log and annals-catalog-check. A crate may depend on another
 crate in this workspace, as annals-sim does on annals.
 
 annals-catalog-check is test-only: its one dev-dependency, `fluent-syntax`
@@ -31,14 +31,15 @@ annals-log depends on `prost` because it is a protobuf format: the wire
 encoding needs a protobuf runtime, and hand-rolling the encoding would be a
 second, unchecked implementation of a published format.
 
-annals-angzarr depends on `angzarr-proto` (a git dependency pinned by rev:
+annals depends on `angzarr-proto` (a git dependency pinned by rev:
 angzarr's own prost types for `io.angzarr.v1`, whose build needs `protoc`),
-`prost` and `prost-types`, because it maps annals onto angzarr's wire
-contract, which angzarr owns. It is the only crate that knows angzarr.
+`prost` and `prost-types`, because its event-sourcing kernel (`annals::next`)
+operates on angzarr's wire types directly rather than on parallel annals
+types: angzarr owns that contract, and annals is its in-process runtime.
+Every user of annals therefore builds angzarr-proto; this is accepted.
 
-All protobuf code stays in annals-log (annals' own log format) and
-annals-angzarr (angzarr's), so annals and everything else stay
-dependency-free.
+Protobuf code lives in annals (angzarr's types) and annals-log (annals' own
+log format); every other crate stays dependency-free.
 
 ## annals-log's wire types are hand-written; the `.proto` is the schema of record
 
@@ -99,13 +100,13 @@ design; a new allow needs a comment saying why.
 ## Use `just`
 
 Plain `cargo build` and `cargo test` work from a clean checkout and skip the
-codegen check; annals-angzarr's build also needs `protoc` and github.com
+codegen check; annals' build also needs `protoc` and github.com
 (for angzarr-proto). `just test`, `just lint` and `just build` run `just gen` first
 and turn on `annals-log/codegen-check`, so they need `buf` and
 `protoc-gen-prost`.
 `just breaking` checks the schema against main for wire-breaking changes.
-`just wasm` builds annals and annals-angzarr for `wasm32-unknown-unknown`;
-both must keep building there.
+`just wasm` builds annals for `wasm32-unknown-unknown`; it must keep
+building there.
 
 ## Versioned documents: bump, register a step, keep an old fixture
 
