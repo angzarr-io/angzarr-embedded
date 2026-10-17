@@ -4,18 +4,20 @@
 //! event ids as `EventRef`s; the `Outcome`.
 
 use annals::next::{
-    handle, Book, BookOf, Causation, ConflictResolution, Correlation, EditionName, Envelope,
-    EventId, Failure, InMemoryStore, KernelError, Malformed, Meta, Origin, Provenance, Root,
-    Routes, RulesVersion, StoreError, StreamKey, Timestamp,
+    handle, Book, BookOf, Causation, ConflictResolution, EditionName, Envelope, EventId, Failure,
+    InMemoryStore, KernelError, Malformed, Meta, Origin, Provenance, Root, Routes, RulesVersion,
+    StoreError, StreamKey, Timestamp,
 };
 use annals_angzarr::pb::{self, command_page, origin, Cover, Uuid};
 use annals_angzarr::{
-    book_from_wire, command_book, event_page, outcome, pack, wire, BookError, PayloadError, Stored,
+    book_from_wire, command_book, event_page, fingerprint, fingerprinted, ids, outcome, pack, wire,
+    BookError, PayloadError, Stored,
 };
+use prost::Message;
 
 use crate::toys::{
-    account, ann, at, book, cmd, fact, ledger_key, registry, request, rules, Account, AccountCmd,
-    AccountEvent, AccountFact, Books, Ledger,
+    account, ann, at, book, cmd, correlation, fact, ledger_key, minted, registry, request, rules,
+    Account, AccountCmd, AccountEvent, AccountFact, Books, Ledger,
 };
 
 fn uuid(n: u8) -> Uuid {
@@ -27,18 +29,20 @@ fn v2() -> Option<EditionName> {
 }
 
 /// A deposit to account 7 in edition v2: request 5's fourth command, in
-/// workflow-1, expecting the stream at 4 and resolving its own conflicts.
+/// workflow 1, expecting the stream at 4 and resolving its own conflicts.
 fn deposit() -> BookOf<Account> {
-    Book::command(
-        StreamKey::new("account", v2(), Root::from_bytes([7; 16])),
-        AccountCmd::Deposit(250),
-        Origin::request(request(5), 3),
-        Provenance {
-            correlation: Some(Correlation::from("workflow-1")),
-            ..ann()
-        },
+    fingerprinted(
+        Book::command(
+            StreamKey::new("account", v2(), Root::from_bytes([7; 16])),
+            AccountCmd::Deposit(250),
+            Origin::request(request(5), 3),
+            Provenance {
+                correlation: Some(correlation(1)),
+                ..ann()
+            },
+        )
+        .expecting(4, ConflictResolution::AggregateHandles),
     )
-    .expecting(4, ConflictResolution::AggregateHandles)
 }
 
 #[test]
@@ -70,20 +74,26 @@ fn a_book_round_trips_through_a_one_page_command_book() {
         page.provenance,
         Some(pb::Provenance {
             actor: "pseudonym-ann".to_string(),
-            correlation_id: "workflow-1".to_string(),
-        })
+            correlation_id: Some(ids::to_wire(correlation(1).0)),
+        }),
+        "the correlation as its 16 bytes"
     );
     assert_eq!(
         page.origin.as_ref().unwrap().kind,
         Some(origin::Kind::Request(pb::RequestOrigin {
-            request_id: "req-5".to_string(),
-            index: 3
+            request_id: Some(ids::to_wire(request(5).0)),
+            index: 3,
+            minted: false,
         }))
     );
-    assert_eq!(book_from_wire::<Account>(&wire_book), Ok(book));
+    assert_eq!(
+        book_from_wire::<Account>(&wire_book),
+        Ok(book),
+        "fingerprinted over the bytes received, which are prost's"
+    );
 
     // A policy's command, caused by an event above u32::MAX, no handling.
-    let reaction = BookOf::<Account>::command(
+    let reaction = fingerprinted(BookOf::<Account>::command(
         account(2),
         AccountCmd::Open,
         Origin::Causation(Causation {
@@ -96,9 +106,9 @@ fn a_book_round_trips_through_a_one_page_command_book() {
         }),
         Provenance {
             actor: None,
-            correlation: Some(Correlation::from("workflow-2")),
+            correlation: Some(correlation(2)),
         },
-    );
+    ));
     assert_eq!(
         book_from_wire::<Account>(&command_book(&reaction)),
         Ok(reaction),
@@ -106,12 +116,12 @@ fn a_book_round_trips_through_a_one_page_command_book() {
     );
 
     // A fact, on the fact arm, with its fact origin.
-    let payment = BookOf::<Account>::fact(
+    let payment = fingerprinted(BookOf::<Account>::fact(
         account(1),
         AccountFact::PaymentReceived(5),
         Origin::fact("pi_1", "Stripe webhook"),
         Provenance::default(),
-    );
+    ));
     let wire_payment = command_book(&payment);
     assert!(matches!(
         wire_payment.page.as_ref().unwrap().body,
@@ -120,21 +130,82 @@ fn a_book_round_trips_through_a_one_page_command_book() {
     assert_eq!(wire_payment.handling, None, "no handling sent: none");
     assert_eq!(book_from_wire::<Account>(&wire_payment), Ok(payment));
 
-    // A keyless request: an empty RequestOrigin on the wire.
-    let keyless = BookOf::<Account>::command(
+    // A request whose id the receiver mints: no origin on the wire.
+    let unkeyed = fingerprinted(BookOf::<Account>::minting(
         account(1),
         AccountCmd::Open,
-        Origin::keyless(),
         Provenance::default(),
-    );
-    let wire_keyless = command_book(&keyless);
+    ));
+    let mut wire_unkeyed = command_book(&unkeyed);
+    assert_eq!(wire_unkeyed.page.as_ref().unwrap().origin, None);
     assert_eq!(
-        wire_keyless.page.as_ref().unwrap().origin,
-        Some(pb::Origin {
-            kind: Some(origin::Kind::Request(pb::RequestOrigin::default()))
-        })
+        book_from_wire::<Account>(&wire_unkeyed),
+        Ok(unkeyed.clone())
     );
-    assert_eq!(book_from_wire::<Account>(&wire_keyless), Ok(keyless));
+    wire_unkeyed.page.as_mut().unwrap().origin = Some(pb::Origin {
+        kind: Some(origin::Kind::Request(pb::RequestOrigin::default())),
+    });
+    assert_eq!(
+        book_from_wire::<Account>(&wire_unkeyed),
+        Ok(unkeyed),
+        "a request origin with no id is a request whose id is minted"
+    );
+}
+
+#[test]
+#[ignore = "proposal: a book is fingerprinted over its payload bytes exactly as received"]
+fn a_book_is_fingerprinted_over_the_bytes_received() {
+    let mut wire_book = command_book(&book(&account(1), AccountCmd::Deposit(1), 1));
+    let canonical = cmd::Deposit { cents: 1 }.encode_to_vec();
+    // The same message, encoded another valid way: cents twice, the last
+    // one winning, as protobuf decoding says.
+    let mut other = cmd::Deposit { cents: 9 }.encode_to_vec();
+    other.extend_from_slice(&canonical);
+    let received = prost_types::Any {
+        type_url: "/toy.account.cmd.v1.Deposit".to_string(),
+        value: other,
+    };
+    wire_book.page.as_mut().unwrap().body = Some(command_page::Body::Command(pb::Command {
+        payload: Some(received.clone()),
+    }));
+
+    let read = book_from_wire::<Account>(&wire_book).unwrap();
+    assert!(matches!(
+        read.body,
+        annals::next::Body::Command(AccountCmd::Deposit(1))
+    ));
+    assert_eq!(
+        read.fingerprint,
+        Some(fingerprint(&received)),
+        "the bytes as they arrived, never re-encoded"
+    );
+    assert_ne!(
+        read.fingerprint,
+        book(&account(1), AccountCmd::Deposit(1), 1).fingerprint,
+        "so the same value sent as other bytes is another fingerprint"
+    );
+
+    assert_ne!(
+        fingerprint(&pack(&cmd::Deposit { cents: 1 })),
+        fingerprint(&pack(&cmd::Deposit { cents: 2 })),
+        "another payload, another fingerprint"
+    );
+    assert_ne!(
+        fingerprint(&prost_types::Any {
+            type_url: "/a".to_string(),
+            value: b"b".to_vec()
+        }),
+        fingerprint(&prost_types::Any {
+            type_url: "/ab".to_string(),
+            value: vec![]
+        }),
+        "the type URL is length-prefixed, so it never runs into the value"
+    );
+    assert_eq!(
+        book(&account(1), AccountCmd::Deposit(1), 1).fingerprint,
+        book(&account(1), AccountCmd::Deposit(1), 2).fingerprint,
+        "deterministic: an honest retry reproduces it"
+    );
 }
 
 #[test]
@@ -168,6 +239,44 @@ fn a_command_book_annals_cannot_read_is_refused() {
     assert_eq!(
         refused(&|b| b.handling.as_mut().unwrap().conflict_resolution = 9),
         BookError::UnknownConflictResolution { value: 9 }
+    );
+    assert_eq!(
+        refused(&|b| {
+            b.page
+                .as_mut()
+                .unwrap()
+                .provenance
+                .as_mut()
+                .unwrap()
+                .correlation_id = Some(Uuid { value: vec![1; 36] })
+        }),
+        BookError::BadId { len: 36 },
+        "an id is 16 bytes, never its text"
+    );
+    assert_eq!(
+        refused(&|b| {
+            b.page.as_mut().unwrap().origin = Some(pb::Origin {
+                kind: Some(origin::Kind::Request(pb::RequestOrigin {
+                    request_id: Some(Uuid { value: vec![] }),
+                    index: 0,
+                    minted: false,
+                })),
+            })
+        }),
+        BookError::BadId { len: 0 },
+        "set but empty is malformed, not absent"
+    );
+    assert_eq!(
+        refused(&|b| {
+            b.page.as_mut().unwrap().origin = Some(pb::Origin {
+                kind: Some(origin::Kind::Request(pb::RequestOrigin {
+                    request_id: None,
+                    index: 2,
+                    minted: false,
+                })),
+            })
+        }),
+        BookError::IndexWithoutRequestId { index: 2 }
     );
     assert_eq!(
         refused(&|b| {
@@ -237,11 +346,33 @@ fn a_malformed_book_off_the_wire_is_refused_by_the_kernel() {
         None,
         "an error status, not an outcome"
     );
+
+    let mut sent_minted = command_book(&book(&account(1), AccountCmd::Open, 1));
+    sent_minted.page.as_mut().unwrap().origin = Some(wire::origin(&Origin::minted(request(1))));
+    let read = book_from_wire::<Account>(&sent_minted).expect("read as sent");
+    let failure = handle::<Account, _, _>(
+        registry.store(store.begin()),
+        &Routes::new(),
+        &read,
+        &at(1),
+        &r,
+        &mut (),
+    )
+    .err()
+    .unwrap();
+    assert_eq!(
+        failure,
+        Failure::Kernel(KernelError::Malformed {
+            stream: account(1),
+            malformed: Malformed::MintedBySender
+        }),
+        "only the receiver mints"
+    );
 }
 
 #[test]
-#[ignore = "proposal: every recorded page's correlation is set: given, derived or minted"]
-fn every_recorded_page_has_a_correlation() {
+#[ignore = "proposal: every recorded page has a request id and a correlation, as angzarr derives them"]
+fn every_recorded_page_has_a_request_id_and_a_correlation() {
     let registry = registry();
     let mut store = db();
     let r = rules();
@@ -256,30 +387,57 @@ fn every_recorded_page_has_a_correlation() {
         )
         .unwrap();
         let books = registry.event_books(&recorded).unwrap();
-        let meta = books[0].pages[0].meta.clone().unwrap();
-        meta.provenance.unwrap().correlation_id
+        books[0].pages[0].meta.clone().unwrap()
+    };
+    let correlation_of = |meta: &pb::EventMeta| {
+        meta.provenance
+            .as_ref()
+            .unwrap()
+            .correlation_id
+            .clone()
+            .unwrap()
     };
 
-    let keyed = book(&account(1), AccountCmd::Open, 5);
+    let keyed = run(&mut store, &book(&account(1), AccountCmd::Open, 5), at(1));
     assert_eq!(
-        run(&mut store, &keyed, at(1)),
-        "req-5",
-        "derived from the key"
+        correlation_of(&keyed),
+        ids::to_wire(request(5).0),
+        "the request id verbatim"
     );
-    let keyless = BookOf::<Account>::command(
+
+    let unkeyed = fingerprinted(BookOf::<Account>::minting(
         account(1),
         AccountCmd::Deposit(1),
-        Origin::keyless(),
         Provenance::default(),
+    ));
+    let meta = run(&mut store, &unkeyed, at(2));
+    assert_eq!(
+        correlation_of(&meta),
+        ids::to_wire(minted(2).0),
+        "the minted id"
     );
-    assert_eq!(run(&mut store, &keyless, at(2)), "minted-2", "minted");
-    let payment = BookOf::<Account>::fact(
+    assert_eq!(
+        meta.origin.unwrap().kind,
+        Some(origin::Kind::Request(pb::RequestOrigin {
+            request_id: Some(ids::to_wire(minted(2).0)),
+            index: 0,
+            minted: true,
+        })),
+        "recorded, flagged minted"
+    );
+
+    let payment = fingerprinted(BookOf::<Account>::fact(
         account(1),
         AccountFact::PaymentReceived(5),
-        Origin::fact("pi_1", "Stripe webhook"),
+        Origin::fact("pi_1234", "Stripe webhook"),
         Provenance::default(),
+    ));
+    let meta = run(&mut store, &payment, at(3));
+    assert_eq!(
+        correlation_of(&meta).to_string(),
+        "917f26ae-ea2e-58af-86de-77013a69617e",
+        "UUIDv5 of the external id under angzarr's FACT_CORRELATION namespace"
     );
-    assert_eq!(run(&mut store, &payment, at(3)), "pi_1", "a fact's key");
 }
 
 #[test]
@@ -336,7 +494,7 @@ fn a_chain_becomes_event_books_with_event_meta_on_every_page() {
             Some(pb::EventMeta {
                 provenance: Some(pb::Provenance {
                     actor: "pseudonym-ann".to_string(),
-                    correlation_id: "req-1".to_string(),
+                    correlation_id: Some(ids::to_wire(request(1).0)),
                 }),
                 origin: Some(wire::origin(&Origin::request(request(1), 0))),
                 recorded_at: Some(prost_types::Timestamp {
@@ -371,7 +529,7 @@ fn a_chain_becomes_event_books_with_event_meta_on_every_page() {
         );
         assert_eq!(
             record.provenance.as_ref().unwrap().correlation_id,
-            "req-1",
+            Some(ids::to_wire(request(1).0)),
             "a reaction keeps the origin's correlation, and has no request of its own"
         );
         assert_eq!(
@@ -444,7 +602,7 @@ fn sequences_above_u32_max_survive_every_mapping() {
         seq: big,
         meta: Meta {
             actor: None,
-            correlation: Correlation::from("c"),
+            correlation: correlation(3),
             origin: Origin::Causation(Causation {
                 event: id,
                 component: "books".to_string(),
@@ -504,6 +662,17 @@ fn a_recorded_key_is_answered_duplicate() {
 
     let rejected: Result<annals::next::Recorded, _> = Err(Failure::Rejected(crate::toys::NotOpen));
     assert_eq!(outcome(&rejected), None);
+
+    let reused: Result<annals::next::Recorded, Failure<crate::toys::NotOpen>> =
+        Err(Failure::Kernel(KernelError::Store(StoreError::KeyReused {
+            stream: account(1),
+            origin: Origin::request(request(1), 0),
+        })));
+    assert_eq!(
+        outcome(&reused),
+        None,
+        "FAILED_PRECONDITION, an error status: never DUPLICATE"
+    );
 
     // A fact's wire form names its type.
     let any = fact::PaymentReceived { cents: 5 };

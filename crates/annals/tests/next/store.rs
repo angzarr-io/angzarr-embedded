@@ -6,18 +6,18 @@ use std::pin::pin;
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use annals::next::{
-    AsyncEventStore, AsyncUnitOfWork, Correlation, Envelope, EventStore, InMemoryStore, Meta,
-    Origin, Ready, Root, RulesVersion, Seq, StoreError, StreamKey, Timestamp, UnitOfWork,
+    AsyncEventStore, AsyncUnitOfWork, Claim, Envelope, EventStore, InMemoryStore, Meta, Origin,
+    Ready, Root, RulesVersion, Seq, StoreError, StreamKey, Timestamp, UnitOfWork,
 };
 
-use crate::toys::{edition, key, request};
+use crate::toys::{correlation, edition, fingerprint, key, request};
 
 fn stamped(seq: Seq, event: &str) -> Envelope<String> {
     Envelope {
         seq,
         meta: Meta {
             actor: None,
-            correlation: Correlation::from("req-1"),
+            correlation: correlation(1),
             origin: Origin::request(request(1), 0),
             recorded_at: Timestamp(seq as i64),
             base_sequence: seq,
@@ -215,6 +215,16 @@ fn the_async_port_has_the_same_contract() {
     assert_eq!(store.read(&h).unwrap().unwrap().len, 3);
 }
 
+/// A claim of `origin` with payload `print`, applied as `from..to`.
+fn claim(origin: &Origin, print: u8, from: Seq, to: Seq) -> Claim {
+    Claim {
+        origin: origin.clone(),
+        fingerprint: fingerprint(print),
+        from,
+        to,
+    }
+}
+
 #[test]
 #[ignore = "proposal: a unit of work records a keyed origin once per stream, at commit"]
 fn a_unit_of_work_records_a_keyed_origin_once_per_stream() {
@@ -224,9 +234,9 @@ fn a_unit_of_work_records_a_keyed_origin_once_per_stream() {
     {
         let mut unit = store.begin();
         unit.append(&a, 0, &log(0..1)).unwrap();
-        unit.record_command(&a, &payment, 0, 1).unwrap();
+        unit.record_command(&a, &claim(&payment, 1, 0, 1)).unwrap();
         assert_eq!(
-            unit.record_command(&a, &payment, 1, 1),
+            unit.record_command(&a, &claim(&payment, 1, 1, 1)),
             Err(StoreError::Duplicate {
                 stream: a.clone(),
                 origin: payment.clone(),
@@ -240,20 +250,81 @@ fn a_unit_of_work_records_a_keyed_origin_once_per_stream() {
 
     let mut unit = store.begin();
     unit.append(&a, 0, &log(0..1)).unwrap();
-    unit.record_command(&a, &payment, 0, 1).unwrap();
-    unit.record_command(&b, &payment, 0, 0)
+    unit.record_command(&a, &claim(&payment, 1, 0, 1)).unwrap();
+    unit.record_command(&b, &claim(&payment, 1, 0, 0))
         .expect("another stream: another claim");
     unit.commit().unwrap();
 
     let mut unit = store.begin();
     assert_eq!(
-        unit.record_command(&a, &payment, 1, 2),
+        unit.record_command(&a, &claim(&payment, 1, 1, 2)),
+        Err(StoreError::Duplicate {
+            stream: a.clone(),
+            origin: payment.clone(),
+            from: 0,
+            to: 1
+        }),
+        "after commit"
+    );
+    assert_eq!(
+        unit.record_command(&a, &claim(&Origin::fact("pi_1", "Stripe, again"), 1, 1, 2)),
         Err(StoreError::Duplicate {
             stream: a,
             origin: payment,
             from: 0,
             to: 1
         }),
-        "after commit"
+        "a fact's key is its external id: the description is not part of it"
+    );
+}
+
+#[test]
+#[ignore = "proposal: a claim records the payload's fingerprint; a request key reused is refused"]
+fn a_request_key_reused_with_another_fingerprint_is_refused() {
+    let mut store = InMemoryStore::<String>::new();
+    let a = key(1, "toy");
+    let request = Origin::request(request(1), 0);
+    let payment = Origin::fact("pi_1", "Stripe webhook");
+    let mut unit = store.begin();
+    unit.record_command(&a, &claim(&request, 1, 0, 1)).unwrap();
+    unit.record_command(&a, &claim(&payment, 1, 1, 2)).unwrap();
+    unit.commit().unwrap();
+
+    let mut unit = store.begin();
+    assert_eq!(
+        unit.record_command(&a, &claim(&request, 2, 2, 3)),
+        Err(StoreError::KeyReused {
+            stream: a.clone(),
+            origin: request.clone()
+        }),
+        "angzarr's FAILED_PRECONDITION, never DUPLICATE"
+    );
+    assert_eq!(
+        unit.record_command(&a, &claim(&request, 1, 2, 3)),
+        Err(StoreError::Duplicate {
+            stream: a.clone(),
+            origin: request,
+            from: 0,
+            to: 1
+        }),
+        "the same payload: DUPLICATE"
+    );
+    assert_eq!(
+        unit.record_command(&a, &claim(&payment, 2, 2, 3)),
+        Err(StoreError::Duplicate {
+            stream: a.clone(),
+            origin: payment,
+            from: 1,
+            to: 2
+        }),
+        "a fact: the source already delivered that id, so DUPLICATE"
+    );
+    assert_eq!(
+        StoreError::KeyReused {
+            stream: a,
+            origin: Origin::request(crate::toys::request(1), 0)
+        }
+        .recovery(),
+        annals::next::Recovery::Bug
     );
 }

@@ -7,15 +7,20 @@
 //! is the in-process runtime, and its kernel stays dependency-free. This
 //! crate is the one place the two meet:
 //!
-//! | annals | angzarr (angzarr-proto 279bc89) |
+//! | annals | angzarr (angzarr-proto e733dd2) |
 //! |---|---|
 //! | [`StreamKey`](annals::next::StreamKey) (domain, edition, root) | `Cover { domain, root, optional edition }` |
 //! | `edition: None` / `Some(name)` | `Cover.edition` unset / set; a set `""` refused |
 //! | [`EventId`](annals::next::EventId) | `EventRef { stream, sequence }` |
 //! | [`Book`](annals::next::Book) | a one-page `CommandBook { cover, handling, page }` |
 //! | [`Handling`](annals::next::Handling), [`ConflictResolution`](annals::next::ConflictResolution) | `Handling { expected_sequence, conflict_resolution }` |
-//! | [`Provenance`](annals::next::Provenance) | `Provenance { actor, correlation_id }` |
-//! | [`Origin`](annals::next::Origin) | `Origin { request \| causation \| fact }` |
+//! | [`Provenance`](annals::next::Provenance) | `Provenance { actor, UUID correlation_id }` |
+//! | [`Origin`](annals::next::Origin) | `Origin { request \| causation \| fact }`; `RequestOrigin { UUID request_id, index, minted }` |
+//! | a book's `origin: None` | `CommandPage.origin` unset: the request id is minted on receipt |
+//! | [`Uuid`](annals::next::Uuid), [`RequestId`](annals::next::RequestId), [`Correlation`](annals::next::Correlation) | `UUID { bytes value }`, 16 bytes ([`ids`]) |
+//! | [`DeriveIds`](annals::next::DeriveIds), derived roots | `angzarr_proto::ids::{fact_correlation, compute_root}` ([`ids::ANGZARR_IDS`], [`ids::compute_root`]) |
+//! | [`Fingerprint`](annals::next::Fingerprint), [`Claim`](annals::next::Claim) | `IdempotencyClaim { stream, key, fingerprint, first_sequence, event_count }` ([`fingerprint`]) |
+//! | [`CommutativeState`](annals::next::CommutativeState) | `changed()` generated from `(commutative_state)` and `(conflict)` (backlog CR-1) |
 //! | [`Body`](annals::next::Body) | `CommandPage.body`: `Command` or `Fact` |
 //! | [`Envelope`](annals::next::Envelope) | `EventPage { sequence, meta, payload }` |
 //! | [`Meta`](annals::next::Meta) | `EventMeta { provenance, origin, recorded_at, base_sequence, rules_version }` |
@@ -46,13 +51,16 @@
 mod book;
 mod error;
 mod fixture;
+pub mod ids;
 mod payload;
 mod registry;
 mod store;
 mod upcast;
 pub mod wire;
 
-pub use book::{book_from_wire, command_book, event_book, event_page, outcome};
+pub use book::{
+    book_from_wire, command_book, event_book, event_page, fingerprint, fingerprinted, outcome,
+};
 pub use error::{
     BookError, ChainProblem, PayloadError, ReadError, ReadProblem, UpcastChainError, UpcastError,
 };

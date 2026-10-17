@@ -1,14 +1,16 @@
 //! Toy domains for the proposal tests: an account whose fee comes from its
 //! rules and which ingests payments, a jug whose pour reads its own staged
-//! events, a hat that draws, and a shelf that resolves its own conflicts.
+//! events, a hat that draws, and a shelf shaped like hatpick's `ListState`
+//! whose conflict units stand in for generated code.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::fmt;
 
 use annals::next::{
-    Actor, Book, BookOf, ConflictResolution, Correlation, Domain, EditionName, Origin, Provenance,
-    RequestId, Root, Rulebook, Sampled, Stream, StreamKey, Timestamp, Tx,
+    commutative, Actor, Book, BookOf, Changed, CommutativeState, ConflictResolution, Correlation,
+    DeriveIds, Domain, EditionName, Fingerprint, Key, Origin, Provenance, RequestId, Root,
+    Rulebook, Sampled, Stream, StreamKey, Timestamp, Tx, UnitPath, Units, Uuid,
 };
 use annals_diagnostic::{Arg, Diagnostic};
 
@@ -27,14 +29,48 @@ pub fn stream<D: Domain>(id: u64) -> Stream<D> {
     Stream::new(None, Root::from(id))
 }
 
-/// The request `n`'s id.
+/// A UUID whose first byte is `tag` and whose last bytes are `n`: ids of
+/// different kinds never collide.
+pub fn tagged(tag: u8, n: u128) -> Uuid {
+    let mut bytes = n.to_be_bytes();
+    bytes[0] = tag;
+    Uuid(bytes)
+}
+
+/// The client-supplied request `n`'s id.
 pub fn request(n: u128) -> RequestId {
-    RequestId(format!("req-{n}"))
+    RequestId(tagged(0x52, n))
 }
 
 /// The correlation `n`.
 pub fn correlation(n: u128) -> Correlation {
-    Correlation(format!("corr-{n}"))
+    Correlation(tagged(0x43, n))
+}
+
+/// The request id the application minted at `at` (a UUIDv7's stand-in).
+pub fn minted(at: i64) -> RequestId {
+    RequestId(tagged(0x07, at as u128))
+}
+
+/// The fingerprint of payload `n`.
+pub fn fingerprint(n: u8) -> Fingerprint {
+    Fingerprint([n; 32])
+}
+
+/// The toys' derivations: a fact's correlation is its external id's bytes
+/// under the tag 0xFC. The real one is UUIDv5 (`annals_angzarr::ids`); the
+/// kernel only asks.
+pub struct ToyIds;
+
+impl DeriveIds for ToyIds {
+    fn fact_correlation(&self, external_id: &str) -> Correlation {
+        let mut bytes = [0; 16];
+        bytes[0] = 0xfc;
+        for (b, c) in bytes[1..].iter_mut().zip(external_id.bytes()) {
+            *b = c;
+        }
+        Correlation(Uuid(bytes))
+    }
 }
 
 /// Ann, giving no correlation.
@@ -53,29 +89,26 @@ pub fn ann_in(n: u128) -> Provenance {
     }
 }
 
-/// What the application sampled at `at` microseconds: that instant, and a
-/// minted correlation that names it.
+/// What the application supplied at `at` microseconds: that instant, the
+/// request id it minted then, and the toys' derivations.
 pub fn at(at: i64) -> Sampled {
     Sampled {
         now: Timestamp(at),
-        minted: Correlation(format!("minted-{at}")),
+        request: minted(at),
+        derive: &ToyIds,
     }
 }
 
 /// `cmd` for the `D` stream `stream`, the first command of request `n`,
-/// from ann, with no correlation.
+/// from ann, with no correlation; its payload's fingerprint is `n`'s.
 pub fn book<D: Domain>(stream: &Stream<D>, cmd: D::Command, n: u128) -> BookOf<D> {
-    Book::command(
-        stream.key().clone(),
-        cmd,
-        Origin::request(request(n), 0),
-        ann(),
-    )
+    book_at::<D>(stream.key(), cmd, n)
 }
 
 /// `cmd` for `key`, the first command of request `n`, from ann.
 pub fn book_at<D: Domain>(key: &StreamKey, cmd: D::Command, n: u128) -> BookOf<D> {
     Book::command(key.clone(), cmd, Origin::request(request(n), 0), ann())
+        .fingerprinted(fingerprint(n as u8))
 }
 
 // ---------------------------------------------------------------- an account
@@ -406,13 +439,68 @@ impl Domain for Hat {
 
 // ---------------------------------------------------------------- a shelf
 
-/// Counts per item. Its commands set one item's count; it can say which
-/// items a change touched (so it supports COMMUTATIVE), and under
-/// AGGREGATE_HANDLES its decide acknowledges the window only when told to.
+/// Shaped like hatpick's `ListState` in angzarr's worked example
+/// (`options.proto`, `conflict_units`): items per key, the columns whole,
+/// the settings whole, plus a field with no marker. Commutative by default.
+/// Under AGGREGATE_HANDLES its decide acknowledges the window only when
+/// told to.
 pub struct Shelf;
 
+/// The state, as if generated from
+///
+/// ```text
+/// message ShelfState {
+///   option (io.angzarr.v1.commutative_state) = true;
+///   map<string, int64> items = 1 [(io.angzarr.v1.conflict) = {}];
+///   repeated string columns = 2 [(io.angzarr.v1.conflict) = {}];
+///   Settings settings = 3 [(io.angzarr.v1.conflict) = {}];
+///   string notes = 4;  // unmarked: conflicts with everything
+/// }
+/// ```
 #[derive(Default, Clone, PartialEq, Debug)]
-pub struct Counts(pub BTreeMap<String, i64>);
+pub struct ShelfState {
+    pub items: BTreeMap<String, i64>,
+    pub columns: Vec<String>,
+    pub settings: Settings,
+    pub notes: String,
+}
+
+#[derive(Default, Clone, PartialEq, Debug)]
+pub struct Settings {
+    pub cooldown_days: u32,
+}
+
+/// **A test fixture standing in for generated code**: what
+/// `protoc-gen-angzarr-conflict` emits for `ShelfState`'s markers. Never
+/// hand-write this for a real domain.
+impl CommutativeState for ShelfState {
+    fn changed(before: &Self, after: &Self) -> Units {
+        let mut units = Units::new();
+        let items = UnitPath::field("items");
+        for item in before.items.keys().chain(after.items.keys()) {
+            if before.items.get(item) != after.items.get(item) {
+                units.insert(items.key(Key::Str(item)));
+            }
+        }
+        if before.columns != after.columns {
+            units.insert(UnitPath::field("columns"));
+        }
+        if before.settings != after.settings {
+            units.insert(UnitPath::field("settings"));
+        }
+        if before.notes != after.notes {
+            units.insert(UnitPath::field("notes").wildcard());
+        }
+        units
+    }
+}
+
+pub enum ShelfCmd {
+    Set(Set),
+    Columns(Vec<String>),
+    Cooldown(u32),
+    Note(String),
+}
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Set {
@@ -424,6 +512,14 @@ pub struct Set {
 }
 
 #[derive(Clone, PartialEq, Debug)]
+pub enum ShelfEvent {
+    WasSet(WasSet),
+    ColumnsSet(Vec<String>),
+    CooldownSet(u32),
+    Noted(String),
+}
+
+#[derive(Clone, PartialEq, Debug)]
 pub struct WasSet {
     pub item: String,
     pub count: i64,
@@ -431,61 +527,68 @@ pub struct WasSet {
     pub window: Option<usize>,
 }
 
-pub fn set(item: &str, count: i64) -> Set {
-    Set {
+pub fn set(item: &str, count: i64) -> ShelfCmd {
+    ShelfCmd::Set(Set {
         item: item.to_string(),
         count,
         resolve: true,
-    }
+    })
 }
 
 impl Domain for Shelf {
-    type State = Counts;
-    type Command = Set;
+    type State = ShelfState;
+    type Command = ShelfCmd;
     type Fact = Infallible;
-    type Event = WasSet;
+    type Event = ShelfEvent;
     type Rejection = Infallible;
     type Rules = ();
 
     const NAME: &'static str = "shelf";
 
-    fn decide(cmd: &Set, tx: &mut Tx<'_, Self>) -> Result<(), Infallible> {
-        let mut window = None;
-        if let Some(conflicts) = tx.conflicts() {
-            window = Some(conflicts.window.len());
-            if cmd.resolve {
-                tx.resolve_conflicts(conflicts.window, conflicts.nonce);
+    const COMMUTATIVE: Option<Changed<ShelfState>> = commutative::<ShelfState>();
+
+    fn decide(cmd: &ShelfCmd, tx: &mut Tx<'_, Self>) -> Result<(), Infallible> {
+        let event = match cmd {
+            ShelfCmd::Set(set) => {
+                let mut window = None;
+                if let Some(conflicts) = tx.conflicts() {
+                    window = Some(conflicts.window.len());
+                    if set.resolve {
+                        tx.resolve_conflicts(conflicts.window, conflicts.nonce);
+                    }
+                }
+                ShelfEvent::WasSet(WasSet {
+                    item: set.item.clone(),
+                    count: set.count,
+                    window,
+                })
             }
-        }
-        tx.emit(WasSet {
-            item: cmd.item.clone(),
-            count: cmd.count,
-            window,
-        });
+            ShelfCmd::Columns(columns) => ShelfEvent::ColumnsSet(columns.clone()),
+            ShelfCmd::Cooldown(days) => ShelfEvent::CooldownSet(*days),
+            ShelfCmd::Note(note) => ShelfEvent::Noted(note.clone()),
+        };
+        tx.emit(event);
         Ok(())
     }
 
-    fn ingest(_: &Counts, fact: &Infallible, (): &()) -> Vec<WasSet> {
+    fn ingest(_: &ShelfState, fact: &Infallible, (): &()) -> Vec<ShelfEvent> {
         match *fact {}
     }
 
-    fn apply(s: &mut Counts, e: &WasSet, (): &()) {
-        s.0.insert(e.item.clone(), e.count);
+    fn apply(s: &mut ShelfState, e: &ShelfEvent, (): &()) {
+        match e {
+            ShelfEvent::WasSet(set) => {
+                s.items.insert(set.item.clone(), set.count);
+            }
+            ShelfEvent::ColumnsSet(columns) => s.columns = columns.clone(),
+            ShelfEvent::CooldownSet(days) => s.settings.cooldown_days = *days,
+            ShelfEvent::Noted(note) => s.notes = note.clone(),
+        }
     }
 
     /// Commutative by default: two writers to different items never
     /// conflict.
-    fn conflict_resolution(_: &Set) -> ConflictResolution {
+    fn conflict_resolution(_: &ShelfCmd) -> ConflictResolution {
         ConflictResolution::Commutative
-    }
-
-    fn changed(before: &Counts, after: &Counts) -> Option<BTreeSet<String>> {
-        let items = before.0.keys().chain(after.0.keys());
-        Some(
-            items
-                .filter(|item| before.0.get(*item) != after.0.get(*item))
-                .cloned()
-                .collect(),
-        )
     }
 }

@@ -20,7 +20,9 @@
 //!
 //! 1. **Validate and resolve**, before business code: the body arm and the
 //!    origin agree ([`Malformed`]); the expected sequence is checked or
-//!    stamped, under the book's [`ConflictResolution`].
+//!    stamped, under the book's [`ConflictResolution`]; the origin is
+//!    resolved (a request without a client-supplied id gets the
+//!    application's minted UUIDv7), and so is the correlation.
 //! 2. **Decide or ingest**, picked by the body arm ([`Body`]): a command is
 //!    decided, purely ([`Domain::decide`], fallible, staging in a [`Tx`]);
 //!    a fact ingested ([`Domain::ingest`], infallible). Business output is
@@ -31,8 +33,9 @@
 //!    depth first. Everything stays staged in memory.
 //! 4. **Append, atomically**: once the whole chain has succeeded, every
 //!    staged stream is appended through the application's unit of work,
-//!    each checked against the length it was loaded at, the book's key
-//!    recorded if it has one, and the unit committed. Any failure anywhere
+//!    each checked against the length it was loaded at, the book's claim
+//!    (key and payload fingerprint) recorded if it is keyed, and the unit
+//!    committed. Any failure anywhere
 //!    fails it all ([`Failure`], with the path to the failing [`Step`]).
 //! 5. **Project**: [`Projection`]s run on the committed events only.
 //!
@@ -49,6 +52,7 @@
 #![allow(clippy::result_large_err)]
 
 mod book;
+mod conflict;
 mod domain;
 mod error;
 mod handle;
@@ -62,6 +66,7 @@ mod stream;
 mod version;
 
 pub use book::{Body, Book, BookOf, ConflictResolution, Handling, Malformed, Sampled};
+pub use conflict::{commutative, Changed, CommutativeState, Key, UnitPath, Units};
 pub use domain::{Conflicts, Decision, Domain, Nonce, Tx};
 pub use error::{Failure, KernelError, Recovery, ReplayError, Step, StepError, StoreError};
 pub use handle::{
@@ -70,8 +75,8 @@ pub use handle::{
 };
 pub use handler::{Admit, Committed, Gap, Handler, Position, Tracked};
 pub use id::{
-    Actor, Correlation, EditionName, EmptyEditionName, EventId, RequestId, Root, RulesVersion, Seq,
-    StreamKey, Timestamp,
+    Actor, Correlation, DeriveIds, EditionName, EmptyEditionName, EventId, Fingerprint, RequestId,
+    Root, RulesVersion, Seq, StreamKey, Timestamp, Uuid,
 };
 pub use meta::{Causation, FactOrigin, Meta, Origin, Provenance, RequestOrigin};
 pub use reaction::{
@@ -80,7 +85,7 @@ pub use reaction::{
 };
 pub use snapshot::{load, Loaded, Snapshot, SnapshotStore};
 pub use store::{
-    AsyncEventStore, AsyncUnitOfWork, EventStore, InMemoryStore, InMemoryTx, Ready, Slice,
+    AsyncEventStore, AsyncUnitOfWork, Claim, EventStore, InMemoryStore, InMemoryTx, Ready, Slice,
     UnitOfWork,
 };
 pub use stream::{Envelope, Stream};

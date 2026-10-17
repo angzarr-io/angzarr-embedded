@@ -8,17 +8,27 @@
 //! | `sequence` | the envelope's seq (64-bit) |
 //! | `type_url` | the payload's type URL as written (before any upcast) |
 //! | `page` | the `EventPage` bytes as written: `sequence`, `meta`, `payload` |
-//! | `actor`, `correlation` | [`Meta`](annals::next::Meta)'s provenance |
-//! | `origin_kind`, `request_id`, `request_index`, `cause_domain`, `cause_edition`, `cause_root`, `cause_sequence`, `cause_component`, `cause_index`, `external_id` | [`Meta::origin`](annals::next::Meta::origin), one set of columns per arm |
+//! | `actor`, `correlation` | [`Meta`](annals::next::Meta)'s provenance; `correlation` a UUID |
+//! | `origin_kind`, `request_id`, `request_index`, `request_minted`, `cause_domain`, `cause_edition`, `cause_root`, `cause_sequence`, `cause_component`, `cause_index`, `external_id` | [`Meta::origin`](annals::next::Meta::origin), one set of columns per arm; `request_id` a UUID |
 //! | `recorded_at`, `base_sequence`, `rules_version` | the rest of [`Meta`](annals::next::Meta) |
 //!
-//! Keys, for [`UnitOfWork::record_command`]: a unique index on (domain,
-//! edition, root, `external_id`) where `external_id` is set refuses a
-//! redelivered webhook fact; one on (domain, edition, root, `request_id`,
-//! `request_index`) a retried HTTP request, if the server wants that. They
-//! can be partial indexes on the events table itself, but a command that
-//! emits no events leaves no row to index, so a separate commands table
-//! (stream, origin, first sequence, count) is the general form.
+//! `actor` is text; `correlation` and `request_id` are 16-byte UUIDs
+//! (Postgres `uuid`), never their text; `request_minted` says whose the
+//! request id is.
+//!
+//! Claims, for [`UnitOfWork::record_command`], live in a commands table
+//! (angzarr's `IdempotencyClaim`): (domain, edition, root, the key's
+//! columns, `fingerprint` (32 bytes), first sequence, count), unique on
+//! (domain, edition, root, `external_id`) for facts and on (domain,
+//! edition, root, `request_id`, `request_index`) for client-supplied
+//! requests. A minted request id is never claimed. A unique violation is
+//! answered by reading the claim back: the same fingerprint (or any fact)
+//! is [`StoreError::Duplicate`](annals::next::StoreError::Duplicate), a
+//! request with another fingerprint
+//! [`StoreError::KeyReused`](annals::next::StoreError::KeyReused). Partial
+//! indexes on the events table cannot replace the table: a command that
+//! emits no events leaves no row to index, and the fingerprint belongs to
+//! the command, not to an event.
 //!
 //! The application's database implements the kernel's own store port over
 //! these rows, `EventStore<Stored>` (and `AsyncEventStore<Stored>`, and
@@ -34,7 +44,7 @@
 //! upcasting happens on every read.
 
 use annals::next::{
-    AsyncEventStore, AsyncUnitOfWork, Domain, Envelope, EventStore, Origin, Rulebook, Seq, Slice,
+    AsyncEventStore, AsyncUnitOfWork, Claim, Domain, Envelope, EventStore, Rulebook, Seq, Slice,
     StoreError, Stream, StreamKey, UnitOfWork,
 };
 
@@ -123,14 +133,8 @@ impl<S: UnitOfWork> UnitOfWork for Opaque<'_, S> {
         self.stored.commit()
     }
 
-    fn record_command(
-        &mut self,
-        stream: &StreamKey,
-        origin: &Origin,
-        from: Seq,
-        to: Seq,
-    ) -> Result<(), StoreError> {
-        self.stored.record_command(stream, origin, from, to)
+    fn record_command(&mut self, stream: &StreamKey, claim: &Claim) -> Result<(), StoreError> {
+        self.stored.record_command(stream, claim)
     }
 }
 
@@ -165,10 +169,8 @@ impl<S: AsyncUnitOfWork + Send> AsyncUnitOfWork for Opaque<'_, S> {
     async fn record_command(
         &mut self,
         stream: &StreamKey,
-        origin: &Origin,
-        from: Seq,
-        to: Seq,
+        claim: &Claim,
     ) -> Result<(), StoreError> {
-        self.stored.record_command(stream, origin, from, to).await
+        self.stored.record_command(stream, claim).await
     }
 }

@@ -22,6 +22,19 @@ pub enum BookError {
     BadRoot {
         len: usize,
     },
+    /// A set request or correlation id that is not a UUID's 16 bytes:
+    /// angzarr refuses it INVALID_ARGUMENT.
+    BadId {
+        len: usize,
+    },
+    /// Text that is not a hyphenated 8-4-4-4-12 UUID, at an input boundary
+    /// ([`ids::parse`](crate::ids::parse)).
+    BadIdText,
+    /// A domain containing `:`, which [`ids::compute_root`](crate::ids::compute_root)
+    /// refuses: it separates the domain from the key.
+    DomainContainsColon {
+        domain: String,
+    },
     /// A set but empty `Cover.edition`: the main timeline is the unset
     /// edition, never `""` (angzarr refuses it INVALID_ARGUMENT too).
     EmptyEdition,
@@ -42,9 +55,18 @@ pub enum BookError {
     NoCausationEvent,
     /// Event meta with no `recorded_at`: angzarr always records it.
     NoRecordedAt,
-    /// Event meta with an empty correlation: never empty on a recorded
-    /// event.
+    /// Event meta with no correlation: always set on a recorded event.
     NoCorrelation,
+    /// A request origin with no request id on a recorded event: every
+    /// recorded request has one, client-supplied or minted.
+    NoRequestId,
+    /// A command's request origin with no request id but a non-zero index:
+    /// the kernel records such a request as minted, index 0, so an index
+    /// would be lost. (angzarr keeps the index on its minted origin; see
+    /// `docs/design/audit.md`, open questions.)
+    IndexWithoutRequestId {
+        index: u32,
+    },
     /// A `ConflictResolution` value this build does not know.
     UnknownConflictResolution {
         value: i32,

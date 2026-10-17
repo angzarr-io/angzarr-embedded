@@ -1,9 +1,12 @@
 //! The small conversions between annals' identities and angzarr's
 //! messages, one function per direction: a key and a `Cover`, an event id
 //! and an `EventRef`, a root and a `UUID`, a timestamp, provenance, an
-//! origin, handling, a `Meta` and an `EventMeta`, a snapshot.
+//! origin, handling, a `Meta` and an `EventMeta`, a snapshot. Request and
+//! correlation ids go on and off the wire as `UUID`s through
+//! [`ids::to_wire`](crate::ids::to_wire) and
+//! [`ids::from_wire`](crate::ids::from_wire).
 //!
-//! At angzarr-proto 279bc89 each value has exactly one home on the wire:
+//! At angzarr-proto e733dd2 each value has exactly one home on the wire:
 //! correlation lives only in `Provenance` (never on the `Cover`), a
 //! command's cause only in its `Origin`, and the main timeline is the unset
 //! `Cover.edition`.
@@ -74,31 +77,50 @@ pub fn micros(at: &prost_types::Timestamp) -> Result<Timestamp, BookError> {
     todo!("proposal: seconds * 1e6 + nanos / 1e3, refusing a sub-microsecond remainder")
 }
 
-/// A command's provenance as sent: an absent actor or correlation is the
-/// empty string, as angzarr's "not supplied".
+/// A command's provenance as sent: an absent actor is the empty string and
+/// an absent correlation the unset `UUID`, angzarr's "not supplied".
 pub fn provenance(provenance: &Provenance) -> pb::Provenance {
-    todo!("proposal: actor and correlation_id, empty for None")
+    todo!("proposal: actor, empty for None; correlation_id, ids::to_wire or unset")
 }
 
-/// The inverse of [`provenance`]: an empty field is `None`.
-pub fn provenance_from_wire(provenance: Option<&pb::Provenance>) -> Provenance {
-    todo!("proposal: empty strings are None; no provenance is the default")
+/// The inverse of [`provenance`]: an empty actor or an unset correlation is
+/// `None`. Refuses a set correlation that is not 16 bytes
+/// ([`BookError::BadId`]).
+pub fn provenance_from_wire(provenance: Option<&pb::Provenance>) -> Result<Provenance, BookError> {
+    todo!("proposal: empty actor None; correlation_id through ids::from_wire; none is the default")
 }
 
-/// An origin as angzarr's one `Origin` message: a keyless request is an
-/// empty `RequestOrigin` (`request_id` ""); a causation's event an
+/// An origin as angzarr's one `Origin` message: a request's id as a
+/// `UUID` with its index and `minted` flag, a causation's event an
 /// `EventRef`.
 pub fn origin(origin: &Origin) -> pb::Origin {
     todo!("proposal: one arm per variant")
 }
 
-/// The inverse of [`origin`]. No origin at all is a keyless request (as
-/// angzarr records it). Refuses a causation with no event
-/// ([`BookError::NoCausationEvent`]) or an event ref [`event_id`] refuses.
-/// Whether the origin agrees with the body is the kernel's check
-/// ([`Book::validate`](annals::next::Book::validate)), not this one's.
+/// A book's origin as `CommandPage.origin`: unset for a book with none (a
+/// request whose caller supplied no id, which the receiver mints).
+pub fn book_origin(origin: Option<&Origin>) -> Option<pb::Origin> {
+    todo!("proposal: origin.map(wire::origin)")
+}
+
+/// A recorded event's origin (`EventMeta.origin`): always set, and a
+/// request always with its id ([`BookError::NoRequestId`]). Refuses a
+/// causation with no event ([`BookError::NoCausationEvent`]), an event ref
+/// [`event_id`] refuses, and an id that is not 16 bytes.
 pub fn origin_from_wire(origin: Option<&pb::Origin>) -> Result<Origin, BookError> {
-    todo!("proposal: the inverse of origin; unset is Origin::keyless()")
+    todo!("proposal: the inverse of origin")
+}
+
+/// A command's origin as received (`CommandPage.origin`): unset, or a
+/// request with no `request_id` and index 0, is `None` (the kernel records
+/// the application's minted id). A request with no id but a non-zero index
+/// is refused ([`BookError::IndexWithoutRequestId`]); anything else reads
+/// as [`origin_from_wire`]. A set `minted` is read as sent: refusing it is
+/// the kernel's check ([`Malformed::MintedBySender`](annals::next::Malformed::MintedBySender)),
+/// as is whether the origin agrees with the body
+/// ([`Book::validate`](annals::next::Book::validate)).
+pub fn book_origin_from_wire(origin: Option<&pb::Origin>) -> Result<Option<Origin>, BookError> {
+    todo!("proposal: unset or an id-less index-0 request is None; else origin_from_wire")
 }
 
 /// A resolution as angzarr's enum.
@@ -127,9 +149,9 @@ pub fn event_meta(meta: &Meta) -> pb::EventMeta {
 }
 
 /// The inverse of [`event_meta`]: what an `EventPage` read back says.
-/// Refuses meta with no `recorded_at` ([`BookError::NoRecordedAt`]) or an
-/// empty correlation ([`BookError::NoCorrelation`]): angzarr always records
-/// both.
+/// Refuses meta with no `recorded_at` ([`BookError::NoRecordedAt`]), no
+/// correlation ([`BookError::NoCorrelation`]) or a request with no id
+/// ([`BookError::NoRequestId`]): angzarr always records all three.
 pub fn meta(meta: &pb::EventMeta) -> Result<Meta, BookError> {
     todo!("proposal: the inverse of event_meta")
 }

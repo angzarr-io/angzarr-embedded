@@ -12,9 +12,10 @@ use std::fmt;
 
 use annals::next::{
     Actor, Book, BookOf, Committed, Correlation, Domain, EditionName, Origin, Policy, Position,
-    Provenance, Reaction, RequestId, Root, Rulebook, Sampled, Seq, StreamKey, Timestamp, Tx,
+    Provenance, Reaction, RequestId, Root, Rulebook, Sampled, Seq, StreamKey, Timestamp, Tx, Uuid,
 };
-use annals_angzarr::{pack, Decoder, Payload, PayloadError, Upcaster};
+use annals_angzarr::ids::ANGZARR_IDS;
+use annals_angzarr::{fingerprinted, pack, Decoder, Payload, PayloadError, Upcaster};
 use annals_diagnostic::{Arg, Diagnostic, Report};
 use prost_types::Any;
 
@@ -417,8 +418,22 @@ pub fn ledger_key(edition: Option<EditionName>) -> StreamKey {
     StreamKey::new("ledger", edition, LEDGER_ROOT)
 }
 
+/// A UUID whose first byte is `tag` and whose last bytes are `n`.
+pub fn tagged(tag: u8, n: u32) -> Uuid {
+    let mut bytes = [0; 16];
+    bytes[0] = tag;
+    bytes[12..].copy_from_slice(&n.to_be_bytes());
+    Uuid(bytes)
+}
+
+/// The client-supplied request `n`'s id.
 pub fn request(n: u32) -> RequestId {
-    RequestId(format!("req-{n}"))
+    RequestId(tagged(0x52, n))
+}
+
+/// The request id the application minted at `at` (a UUIDv7's stand-in).
+pub fn minted(at: i64) -> RequestId {
+    RequestId(tagged(0x07, at as u32))
 }
 
 /// Ann, giving no correlation.
@@ -429,21 +444,30 @@ pub fn ann() -> Provenance {
     }
 }
 
-/// `cmd` for account `key`, the first command of request `n`, from ann.
+/// `cmd` for account `key`, the first command of request `n`, from ann,
+/// fingerprinted as the adapter does.
 pub fn book(key: &StreamKey, cmd: AccountCmd, n: u32) -> BookOf<Account> {
-    Book::command(key.clone(), cmd, Origin::request(request(n), 0), ann())
+    fingerprinted(Book::command(
+        key.clone(),
+        cmd,
+        Origin::request(request(n), 0),
+        ann(),
+    ))
 }
 
-/// What the application sampled at `at` microseconds.
+/// What the application supplied at `at` microseconds: the instant, the
+/// request id it minted, and angzarr's derivations.
 pub fn at(at: i64) -> Sampled {
     Sampled {
         now: Timestamp(at),
-        minted: Correlation(format!("minted-{at}")),
+        request: minted(at),
+        derive: &ANGZARR_IDS,
     }
 }
 
-pub fn correlation(text: &str) -> Correlation {
-    Correlation(text.to_string())
+/// The workflow `n`'s correlation.
+pub fn correlation(n: u32) -> Correlation {
+    Correlation(tagged(0x43, n))
 }
 
 /// The registry of both domains.

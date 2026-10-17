@@ -7,11 +7,12 @@ pinned by ignored tests in `crates/annals/tests/next/` and
 `crates/annals-angzarr/tests/angzarr/`. Nothing here is implemented until
 this document has been reviewed.
 
-This revision realigns the proposal to angzarr's final protos:
-angzarr-project `feat/audit-meta` at **279bc89** (pass 7: the main timeline
-is the unset edition), the contract recorded in angzarr's
-`docs/design/audit-meta/` (`decision-log.md`, `annals-divergence.md`,
-`critical-review-source.md`).
+This revision aligns the proposal to angzarr's protos at angzarr-project
+`feat/audit-meta` **e733dd2** (pass 9: one 16-byte UUID type, UUIDv5
+derived ids, text only at the boundary; with pass 8's conflict units,
+UUIDv7 minted ids and always-assigned request ids), and to the contract
+recorded in angzarr's `docs/design/audit-meta/` (`decision-log.md`,
+`annals-divergence.md`, `idempotency.md`, `critical-review-source.md`).
 
 ## Why
 
@@ -85,11 +86,13 @@ flowchart TB
   contract lets a runtime wrap it: failures say whether to retry
   (`Recovery`), origins are idempotency keys, and its metadata, keys and
   books have angzarr's wire form.
-- **Pure and deterministic.** There is no clock, no randomness, no I/O and
-  no hash-map iteration in the kernel. The application samples everything
-  and passes it in (`Sampled { now, minted }`), including the fresh
-  correlation a keyless request is given. The in-process conflict nonce is
-  a counter, not a random value.
+- **Pure and deterministic.** There is no clock, no randomness, no hash,
+  no I/O and no hash-map iteration in the kernel. The application supplies
+  everything and passes it in (`Sampled { now, request, derive }`): the
+  instant, the UUIDv7 a request without a client-supplied id is given, and
+  the UUIDv5 derivations (`DeriveIds`, angzarr's through annals-angzarr).
+  Fingerprints are the adapter's. The in-process conflict nonce is a
+  counter, not a random value.
 - **The kernel stays synchronous.** The only async parts are the async store
   port beside the sync one, and the command handler over it. Both use native
   `impl Future` in traits, with zero dependencies. The kernel's MSRV is 1.77;
@@ -108,9 +111,9 @@ sequenceDiagram
   participant H as annals handle()
   participant C as Chain (in memory)
   participant U as Unit of work (one DB transaction, via annals-angzarr)
-  App->>App: sample now, minted correlation, random values
+  App->>App: sample now, mint a UUIDv7 request id, random values
   App->>H: handle(registry.store(tx), routes, book, sampled, rules, projections)
-  H->>H: validate the book (body arm vs origin); resolve handling
+  H->>H: validate the book (body arm vs origin, fingerprint); resolve handling, origin, correlation
   H->>U: read the origin stream (rows decoded, upcast, unpacked)
   H->>C: decide (command arm) or ingest (fact arm), staged
   loop every policy routed for each staged event, depth first
@@ -122,21 +125,24 @@ sequenceDiagram
     Note over U: dropped uncommitted: nothing anywhere
   else the whole chain succeeded
     H->>U: append every staged stream as rows (each expects its loaded length)
-    H->>U: record_command(origin stream, origin) if keyed
+    H->>U: record_command(origin stream, claim: key + fingerprint) if keyed
     H->>U: commit
     H->>H: run projections on committed events
     H-->>App: Recorded (every event; registry.event_books, outcome)
   end
 ```
 
-1. **The application samples** the instant and a fresh correlation (a
-   UUID's text) into `Sampled`, and any random values into the command, for
-   example `Draw { roll }`. The book carries the actor, a correlation if the
-   request had one, the origin (request id and index) and the handling.
+1. **The application samples** the instant and mints a UUIDv7 into
+   `Sampled` (with angzarr's derivations), and any random values into the
+   command, for example `Draw { roll }`. The book carries the actor, a
+   correlation if the request had one, the origin (a client-supplied request
+   id and index, or none), the handling, and its payload's fingerprint.
 2. **Validate and resolve, before business code.** The body arm and the
-   origin must agree; `Handling` is resolved: an absent
-   `expected_sequence` is the head, an absent resolution the domain's
-   default, and STRICT refuses a stale one.
+   origin must agree, and a keyed book carries a fingerprint; `Handling` is
+   resolved: an absent `expected_sequence` is the head, an absent resolution
+   the domain's default, and STRICT refuses a stale one. A book with no
+   origin is recorded with the minted request id; a book with no
+   correlation gets its origin's.
 3. **Decide or ingest**, picked by the body arm. A command goes to the
    fallible, pure `decide`; a fact to the infallible `ingest`. Business code
    produces payloads only.
@@ -150,8 +156,9 @@ sequenceDiagram
    nothing is appended anywhere, not even the originating command's events.
    On success every staged stream is appended through the unit of work, each
    expecting the length it had when the chain loaded it (optimistic
-   concurrency on **every stream touched**); the originating book's key is
-   recorded if it has one; the unit of work is committed: one transaction.
+   concurrency on **every stream touched**); the originating book's claim
+   (key, fingerprint, range) is recorded if it is keyed; the unit of work is
+   committed: one transaction.
 6. **Project.** Projections run after the commit, on committed events only.
    They never see a failed chain, and a failing one never undoes the commit
    (`Recorded::projector_failures`).
@@ -168,8 +175,9 @@ pub struct Book<C, F> {                  // angzarr's one-page CommandBook
     pub stream: StreamKey,               // cover
     pub handling: Handling,              // never persisted
     pub provenance: Provenance,          // page.provenance, as sent
-    pub origin: Origin,                  // page.origin
+    pub origin: Option<Origin>,          // page.origin; None: the request id is minted
     pub body: Body<C, F>,                // page.body
+    pub fingerprint: Option<Fingerprint>,// of the payload as received; required when keyed
 }
 pub type BookOf<D> = Book<D::Command, D::Fact>;
 pub enum Body<C, F> { Command(C), Fact(F) }
@@ -177,13 +185,18 @@ pub struct Handling { pub expected_sequence: Option<Seq>, pub conflict_resolutio
 pub enum ConflictResolution { Strict /* default */, AggregateHandles, Commutative }
 pub struct Provenance { pub actor: Option<Actor>, pub correlation: Option<Correlation> }
 pub enum Origin { Request(RequestOrigin), Causation(Causation), Fact(FactOrigin) }
-pub struct RequestOrigin { pub request: Option<RequestId>, pub index: u32 }   // None: keyless
+pub struct RequestOrigin { pub request: RequestId, pub index: u32, pub minted: bool }
 pub struct Causation { pub event: EventId, pub component: String, pub index: u32 }
 pub struct FactOrigin { pub external_id: String, pub description: String }
-pub struct Sampled { pub now: Timestamp, pub minted: Correlation }
+pub struct Sampled { pub now: Timestamp, pub request: RequestId, pub derive: &'static dyn DeriveIds }
 impl<C, F> Book<C, F> {
+    pub fn command(stream, cmd, origin: Origin, provenance) -> Self;
+    pub fn minting(stream, cmd, provenance) -> Self;       // origin None
+    pub fn fact(stream, fact, origin: Origin, provenance) -> Self;
+    pub fn fingerprinted(self, fingerprint: Fingerprint) -> Self;
     pub fn validate(&self) -> Result<(), Malformed>;
-    pub fn correlation(&self, minted: &Correlation) -> Correlation;
+    pub fn origin(&self, sampled: &Sampled) -> Origin;     // always with a request id
+    pub fn correlation(&self, sampled: &Sampled) -> Correlation;
 }
 ```
 
@@ -196,16 +209,71 @@ impl<C, F> Book<C, F> {
   (`CommandWithFactOrigin`); a fact's external id is not empty
   (`EmptyExternalId`); a fact has no expected sequence
   (`FactWithExpectedSequence`); a causation carries no handling
-  (`HandlingOnReaction`); COMMUTATIVE needs a domain that can say what
-  changed (`CommutativeUnsupported`). angzarr answers these INVALID_ARGUMENT
-  (or dead-letters a reactor's).
-- **Correlation is always set**: the caller's, else derived from the key
-  (`Correlation::derived`: a keyed request's id, a fact's external id),
-  else `Sampled::minted`. A policy's commands carry their trigger's.
-- **A keyless request is allowed** (`Origin::keyless()`), as angzarr
-  records one: its correlation is minted and it is never deduplicated.
-  (The plan's "refuse a request with no id" predates this; see open
-  question 3.)
+  (`HandlingOnReaction`) and does carry its trigger's correlation
+  (`CausationWithoutCorrelation`); only the kernel sets `minted`
+  (`MintedBySender`); a keyed book has a fingerprint (`Unfingerprinted`);
+  COMMUTATIVE needs a `commutative_state` state
+  (`CommutativeUnsupported`). angzarr answers these INVALID_ARGUMENT (or
+  dead-letters a reactor's).
+- **Request ids are always assigned.** A book whose caller supplied no
+  request id has no origin (`Book::minting`, angzarr's unset
+  `CommandPage.origin`). The kernel records it as
+  `RequestOrigin { request: sampled.request, index: 0, minted: true }`: the
+  application's UUIDv7, kept for audit, **never a key** and never
+  deduplicating (a retry gets another id). Only a client-supplied id
+  (`minted: false`) is a key. The kernel never mints: the application does,
+  once per book, so the kernel stays deterministic.
+- **Correlation is always set**: the caller's, else derived from the
+  resolved origin (`Correlation::derived`): a request's id verbatim (the
+  same 16 bytes, client-supplied or minted); a fact's
+  UUIDv5(`FACT_CORRELATION` namespace, `external_id`), from
+  `sampled.derive`; a causation's is stamped from its trigger, never
+  derived. Nothing is minted for a correlation.
+- **Fingerprints.** A keyed book (a client-supplied request, or a fact)
+  carries the fingerprint of its payload **as received**, recorded with
+  its key ([The store ports](#the-store-ports)). The kernel only compares
+  it; the adapter takes it over the bytes that arrived
+  (`book_from_wire`), or over the payload's prost encoding for a book built
+  in Rust (`annals_angzarr::fingerprinted`). A minted request has no claim
+  and so no fingerprint.
+
+## Identifiers
+
+```rust
+pub struct Uuid(pub [u8; 16]);            // RFC 9562 byte order; Display is the canonical text
+pub struct RequestId(pub Uuid);
+pub struct Correlation(pub Uuid);
+pub struct Fingerprint(pub [u8; 32]);     // opaque to the kernel; SHA-256 in annals-angzarr
+pub trait DeriveIds: Sync { fn fact_correlation(&self, external_id: &str) -> Correlation; }
+```
+
+- **One UUID type, 16 bytes.** Request and correlation ids are the
+  kernel's own `Uuid` newtype (so the kernel stays dependency-free), mapped
+  one to one onto the wire's `UUID { bytes value }` by annals-angzarr
+  (`ids::to_wire`, `ids::from_wire`). They are compared, ordered, hashed and
+  stored as bytes (Postgres `uuid` columns), never as text. A
+  client-supplied id must be a UUID: a set wire id that is not 16 bytes is
+  refused (`BookError::BadId`), as angzarr refuses it INVALID_ARGUMENT. Its
+  version is never checked. `Root` stays a `u128` holding the same 16
+  bytes.
+- **Text is a boundary concern.** `Uuid`'s `Display` writes the canonical
+  lowercase hyphenated form, for logs and messages; `annals_angzarr::ids::
+  parse` reads what a person typed (angzarr-proto's `FromStr`: hyphenated,
+  either case). `external_id` and `actor` stay strings.
+- **Minted ids are UUIDv7**, minted by the application (a request id the
+  caller did not supply). **Derived ids are UUIDv5**, angzarr's own:
+  derived roots are `angzarr_proto::ids::compute_root(domain, key)` =
+  UUIDv5(`ROOT` namespace, `"{domain}:{key}"`), and a fact's correlation
+  `angzarr_proto::ids::fact_correlation(external_id)`. annals-angzarr
+  re-uses both rather than re-deriving (`ids::compute_root`,
+  `ids::fact_correlation`), so a business key names the same stream under
+  either runtime.
+- **How the kernel gets a derived id without the dependency.** The kernel
+  needs only the fact correlation, and asks `Sampled::derive` for it; the
+  application passes `&annals_angzarr::ids::ANGZARR_IDS`. The kernel never
+  derives a root: domain code that keys a stream by a business key
+  (`Reaction::root`, an API handler) calls `annals_angzarr::ids::
+  compute_root`.
 
 ## Decide and ingest
 
@@ -222,7 +290,7 @@ pub trait Domain: Sized + 'static {
     fn ingest(state: &Self::State, fact: &Self::Fact, rules: &Self::Rules) -> Vec<Self::Event>;
     fn apply(state: &mut Self::State, event: &Self::Event, rules: &Self::Rules);
     fn conflict_resolution(cmd: &Self::Command) -> ConflictResolution { ConflictResolution::Strict }
-    fn changed(before: &Self::State, after: &Self::State) -> Option<BTreeSet<String>> { None }
+    const COMMUTATIVE: Option<Changed<Self::State>> = None;   // commutative::<State>() when generated
 }
 ```
 
@@ -268,7 +336,7 @@ STRICT. An expected sequence past the head is stale under every resolution.
 |---|---|
 | `Strict` (default) | `KernelError::Stale { stream, expected, actual }` before decide runs (angzarr's ABORTED; `Recovery::Retry`: re-read, re-issue). |
 | `AggregateHandles` | decide runs against the head and is handed the **window** (the committed events from `expected_sequence` on) and a **nonce**: `tx.conflicts() -> Option<Conflicts { window, nonce }>`. It applies its own rule and acknowledges with `tx.resolve_conflicts(window, nonce)`. If it returns `Ok` without doing so, its events are discarded and the command fails as `KernelError::Unresolved` (stale, and a handler bug). An empty window is handed over too. |
-| `Commutative` (opt-in) | Delivered as `AggregateHandles`, but the kernel resolves: it compares `Domain::changed(state at expected, state at head)` (what the window changed) with `Domain::changed(state at head, state after the command)` (what the command changes). Disjoint: kept. Overlapping: `Stale`. decide is never handed the window. |
+| `Commutative` (opt-in) | The kernel resolves, by angzarr's resolver: `window = changed(state at expected, state at head)`; decide runs on the head (never handed the window), so its invariants see the window's effects; `mine = changed(head, head with the command's events)`. No overlap: kept. Overlap: `Stale`. An empty window or an empty `mine` never overlaps. Only for a domain whose state is `commutative_state` (`Domain::COMMUTATIVE`); otherwise `Malformed::CommutativeUnsupported`, stale or not. |
 
 **The in-process nonce (decided here).** angzarr's nonce is an opaque value
 minted per delivery and checked by the client library, so a handler cannot
@@ -280,16 +348,55 @@ constructible nor clonable outside the kernel, and taken back by value in
 is local and costs nothing, as angzarr's is; Rust's ownership makes "pass
 another delivery's nonce" impossible rather than merely detectable.
 
-**COMMUTATIVE in annals (decided here).** angzarr's client libraries diff
-the state by protobuf reflection, field by field. The kernel has no
-reflection and its states are plain Rust types, so the domain says what a
-change touched: `Domain::changed(before, after) -> Option<BTreeSet<String>>`,
-`None` by default (COMMUTATIVE unsupported, refused as malformed). The
-names are the domain's: a top-level field, or something finer such as
-`item:42`, which suits hatpick's "content edits conflict only on overlap"
-better than top-level fields would. The same caveat as angzarr's applies:
-a structural diff cannot see an invariant that spans two fields, so it is
-opt-in only.
+**COMMUTATIVE by conflict units, generated, as in angzarr.** A state
+message opts in with `option (io.angzarr.v1.commutative_state) = true` and
+marks its fields with `(io.angzarr.v1.conflict) = { descend, element_key,
+ordered }` (`options.proto`, the `conflict_units` region). From the markers
+a generator (angzarr's `protoc-gen-angzarr-conflict`, backlog CR-1, one
+plugin for every language, annals included) emits the pure function
+`changed(before, after) -> unit paths`, and a shared golden parity suite
+holds every implementation, annals' among them, to identical output. annals
+builds no generator of its own; the kernel defines what the Rust output
+implements:
+
+```rust
+pub trait CommutativeState { fn changed(before: &Self, after: &Self) -> Units; }  // generated only
+pub type Changed<S> = fn(&S, &S) -> Units;
+pub const fn commutative<S: CommutativeState>() -> Option<Changed<S>>;
+pub struct UnitPath(Vec<u8>);   // field(name), dot(name), key(Key), order(), wildcard(), unknown()
+pub enum Key<'a> { Int(i64), Uint(u64), Bool(bool), Enum(i32), Str(&'a str), Bytes(&'a [u8]) }
+pub struct Units(BTreeSet<UnitPath>);
+impl UnitPath { pub fn overlaps(&self, other: &UnitPath) -> bool; }
+impl Units { pub fn overlaps(&self, other: &Units) -> bool; }
+```
+
+- **Unit paths** are the proto's syntax: proto field names joined by `.`,
+  keys in brackets (`items[42]`, `items[42].weight`), the order unit
+  `columns[#order]`, string and bytes keys escaping `\`, `]` and `#` (so a
+  key never collides with `[#order]`). Held as bytes (a bytes key is raw)
+  and compared as byte strings. The escaping is the kernel's, once, in
+  `UnitPath::key`.
+- **The overlap rule.** Two units overlap iff they are equal or one is a
+  prefix of the other ending at a `.` or `[` boundary (`items[42]` overlaps
+  `items[42].weight`; `items[4]` does not overlap `items[42]`). Two sets
+  overlap iff a unit of one overlaps a unit of the other, or one holds a
+  **wildcard** and the other is non-empty.
+- **Fail-safe unmarked fields.** A changed field without a marker is
+  reported as the wildcard `*` + its path (`*notes`; unknown fields `*`),
+  which overlaps everything: an unmarked change makes COMMUTATIVE as strict
+  as STRICT, never a blind merge.
+- **Refused on any other state.** A domain names its state's generated diff
+  in `const COMMUTATIVE` (`commutative::<ListState>()`); `None`, the
+  default, means the state is not `commutative_state`, and a book resolved
+  to COMMUTATIVE is malformed before decide.
+- **Hand-written only as a fixture.** The tests' `ShelfState` (hatpick's
+  `ListState` shape from angzarr's worked example: items per key, columns
+  whole, settings whole, plus an unmarked `notes`) implements
+  `CommutativeState` by hand, standing in for generated code. A real domain
+  never does.
+- The same caveat as angzarr's applies: a structural comparison cannot see
+  a caller's intent that depended on state the window changed in a
+  disjoint unit, so COMMUTATIVE is opt-in only.
 
 **`base_sequence`** is the head decide saw, for every resolution: the version
 the decision was made against, recorded on every event.
@@ -342,8 +449,8 @@ pub struct Meta {                          // angzarr's EventMeta; stamped, neve
 | Field | Supplied by | Within a chain | angzarr |
 |---|---|---|---|
 | `actor` | the book's provenance | kept: a policy acts on the original actor's behalf | `EventMeta.provenance.actor` (empty = the system) |
-| `correlation` | the book, else derived, else minted | kept | `EventMeta.provenance.correlation_id` |
-| `origin` | the book (request or fact); the kernel (causation) | a policy's commands are `Causation { event, component, index }` | `EventMeta.origin` |
+| `correlation` | the book, else derived from the origin (request id; fact v5) | kept | `EventMeta.provenance.correlation_id` (a `UUID`) |
+| `origin` | the book (request or fact), a minted request if it has none; the kernel (causation) | a policy's commands are `Causation { event, component, index }` | `EventMeta.origin` (`RequestOrigin.minted` included) |
 | `recorded_at` | the kernel, from `Sampled::now` | one instant for the chain, raised per stream to its last | `EventMeta.recorded_at` |
 | `base_sequence` | the kernel | each stream's own head | `EventMeta.base_sequence` |
 | `rules_version` | the kernel, from the registration | the target domain's | `EventMeta.rules_version` |
@@ -363,10 +470,11 @@ pub struct Meta {                          // angzarr's EventMeta; stamped, neve
   angzarr's `EventRef { stream, sequence }`. It is unique as long as stream
   keys are, never minted, the same on every replay, and what a causation
   points at.
-- **Origins are idempotency keys.** A request is `(request, index)`; a
-  causation `(event, component, index)`, deterministic, so a retried chain
-  issues the same keys; a fact its `external_id`. Every `Reaction` has a
-  stable `NAME` for this.
+- **Origins are idempotency keys.** A client-supplied request is
+  `(request, index)`; a causation `(event, component, index)`,
+  deterministic, so a retried chain issues the same keys; a fact its
+  `external_id`. A minted request is no key. Every `Reaction` has a stable
+  `NAME` for this.
 - **Business time stays in payloads.** `recorded_at` is audit time.
 - **Actors are pseudonymous.** Erasing a person deletes the
   pseudonym-to-person mapping outside the log. The log is never rewritten.
@@ -527,10 +635,10 @@ pub trait EventStore<E> {
     fn read_from(&mut self, key: &StreamKey, from: Seq) -> Result<Option<Slice<E>>, StoreError>;
     fn read(&mut self, key: &StreamKey) -> Result<Option<Slice<E>>, StoreError> { self.read_from(key, 0) }
 }
+pub struct Claim { pub origin: Origin, pub fingerprint: Fingerprint, pub from: Seq, pub to: Seq }
 pub trait UnitOfWork {                     // dropped = rolled back
     fn commit(self) -> Result<(), StoreError>;
-    fn record_command(&mut self, stream: &StreamKey, origin: &Origin, from: Seq, to: Seq)
-        -> Result<(), StoreError> { Ok(()) }
+    fn record_command(&mut self, stream: &StreamKey, claim: &Claim) -> Result<(), StoreError> { Ok(()) }
 }
 pub trait AsyncEventStore<E> { /* the same, each returning impl Future<Output = ..> + Send */ }
 pub trait AsyncUnitOfWork { /* the same, async */ }
@@ -550,16 +658,23 @@ pub struct Slice<E> { pub key: StreamKey, pub len: Seq, pub events: Vec<Envelope
   for an I/O failure, and `Err(Unreadable { stream, seq, reason })` for an
   event it holds but cannot give back (an unknown type URL). These are never
   confused, and an unreadable event is never skipped.
-- **Idempotency: no key store, one optional record.** annals keeps no
-  idempotency key store (a divergence; see below). The command handler calls
-  `UnitOfWork::record_command` once, for the originating book, when its
-  origin is keyed (`Origin::is_keyed`: a request with an id, or a fact), in
-  the same unit of work as its events. A store that records keys answers a
-  repeat with `StoreError::Duplicate { stream, origin, from, to }`
-  (`Recovery::Done`: read the range; angzarr's DUPLICATE). The default
-  records nothing. Only applied commands are recorded; a rejection writes
-  nothing, so it may be retried (angzarr's "rejections are released").
-  `InMemoryStore` records every keyed origin, for tests.
+- **Idempotency: no key store, one optional claim.** annals keeps no
+  idempotency key store for reactions (a divergence; see below). The
+  command handler calls `UnitOfWork::record_command` once, for the
+  originating book, when its origin is keyed (`Origin::is_keyed`: a
+  client-supplied request id, or a fact; never a minted id), in the same
+  unit of work as its events. The `Claim` is angzarr's `IdempotencyClaim`
+  scoped to the stream: the key, **the payload's fingerprint**, and the
+  applied range. A store that records claims answers a repeated key by its
+  fingerprint: the same fingerprint (or any fact) is `StoreError::Duplicate
+  { stream, origin, from, to }` (`Recovery::Done`: read the range;
+  angzarr's DUPLICATE); a request key with **another** fingerprint is
+  `StoreError::KeyReused { stream, origin }` (`Recovery::Bug`: the key was
+  reused for a different command; angzarr's FAILED_PRECONDITION, never
+  DUPLICATE). The default records nothing. Only applied commands are
+  recorded; a rejection writes nothing, so it may be retried (angzarr's
+  "rejections are released"). `InMemoryStore` records every claim, for
+  tests.
 - **Async futures are `Send`.** tokio's multi-threaded runtime needs that.
   `Ready<S>` serves a sync store through the async port.
 
@@ -616,7 +731,7 @@ Every error has `.recovery() -> Recovery`:
 | `Retry` | `StoreError::Conflict` (re-read and re-decide); `KernelError::Stale` and `Unresolved` (re-read, re-issue against the new head; angzarr's ABORTED); `Unavailable` (only under a recorded key, since the commit may have landed); `KernelError::Gap` (catch up, then retry) |
 | `Done` | `StoreError::Duplicate`: the command is already recorded |
 | `Business` | `Rejected`, and `Downstream` with `StepError::Rejected` |
-| `Bug` | `Malformed`, `Discontinuous`, `Unreadable`, `WrongDomain`, `ChainTooDeep`, `TargetReturned`, `BeforeSnapshot`, `Replay` |
+| `Bug` | `Malformed`, `KeyReused` (the caller reused a request key for another payload), `Discontinuous`, `Unreadable`, `WrongDomain`, `ChainTooDeep`, `TargetReturned`, `BeforeSnapshot`, `Replay` |
 
 `Recovery::Integrity` is gone with `FactRefused`.
 
@@ -625,7 +740,8 @@ messages in each crate's `locales/en-US/` catalog and samples in
 `diagnostic_samples()`. The proposed codes are:
 
 - annals: `annals-store-conflict` (reused), `annals-store-discontinuous`,
-  `annals-store-duplicate`, `annals-store-unavailable`,
+  `annals-store-duplicate`, `annals-store-key-reused`,
+  `annals-store-unavailable`,
   `annals-store-unreadable`; `annals-kernel-malformed-<variant>`,
   `annals-kernel-stale`, `annals-kernel-unresolved`, `annals-kernel-gap`
   (from `annals-policy-gap`), `annals-kernel-target-returned`,
@@ -663,12 +779,14 @@ snapshots are discarded by it.
 
 annals-angzarr maps annals onto angzarr's types. It depends on
 `angzarr-proto` (a git dependency pinned to angzarr-project rev
-**279bc89**, `feat/audit-meta` pass 7; its build needs `protoc`), `prost`
-and `prost-types` 0.14 (the versions angzarr-proto generates for, so the
-types unify), and annals. It re-exports angzarr-proto's `io.angzarr.v1` as
-`annals_angzarr::pb`, so an application names one pin.
+**e733dd2**, `feat/audit-meta` pass 9; its build needs `protoc`; it brings
+`uuid` without default features, v5 only, wasm-safe), `prost` and
+`prost-types` 0.14 (the versions angzarr-proto generates for, so the types
+unify), and annals. It re-exports angzarr-proto's `io.angzarr.v1` as
+`annals_angzarr::pb`, so an application names one pin. The fingerprint's
+SHA-256 adds `sha2` when it is implemented.
 
-### Mapping (annals ↔ angzarr 279bc89)
+### Mapping (annals ↔ angzarr e733dd2)
 
 | annals | angzarr | Where |
 |---|---|---|
@@ -683,14 +801,22 @@ types unify), and annals. It re-exports angzarr-proto's `io.angzarr.v1` as
 | `Handling { expected_sequence, conflict_resolution }` | `Handling { optional expected_sequence; conflict_resolution }`; `None` = UNSPECIFIED | `wire::handling`, `wire::handling_from_wire` |
 | `ConflictResolution::{Strict, AggregateHandles, Commutative}` | `CONFLICT_RESOLUTION_{STRICT, AGGREGATE_HANDLES, COMMUTATIVE}` | `wire::conflict_resolution` |
 | `Nonce` (in-process token) | `ContextualCommand.conflict_nonce` (never on a `CommandBook`) | not mapped: annals delivers in process |
-| `Provenance { actor, correlation }` | `Provenance { actor, correlation_id }`; empty = not supplied | `wire::provenance`, `wire::provenance_from_wire` |
-| `Origin::{Request, Causation, Fact}` | `Origin { RequestOrigin request \| Causation causation \| FactOrigin fact }`; keyless = empty `RequestOrigin`; no origin read as keyless | `wire::origin`, `wire::origin_from_wire` |
+| `Uuid`, `RequestId`, `Correlation` | `UUID { bytes value }`, exactly 16 bytes; anything else refused (`BadId`) | `ids::to_wire`, `ids::from_wire`; text: `ids::parse`, `Display` |
+| `Provenance { actor, correlation }` | `Provenance { actor, UUID correlation_id }`; empty actor, unset correlation = not supplied | `wire::provenance`, `wire::provenance_from_wire` |
+| `Origin::{Request, Causation, Fact}` | `Origin { RequestOrigin request \| Causation causation \| FactOrigin fact }` | `wire::origin`, `wire::origin_from_wire` |
+| `RequestOrigin { request, index, minted }` | `RequestOrigin { UUID request_id, index, minted }` | `wire::origin` |
+| `Book::origin: None` | `CommandPage.origin` unset, or a `RequestOrigin` with no `request_id` and index 0 (a non-zero index refused: `IndexWithoutRequestId`) | `wire::book_origin`, `wire::book_origin_from_wire` |
+| `DeriveIds` | `angzarr_proto::ids::fact_correlation` | `ids::AngzarrIds`, `ids::ANGZARR_IDS` |
+| a derived root | `angzarr_proto::ids::compute_root(domain, key)` | `ids::compute_root` |
+| `Fingerprint`, `Claim` | `IdempotencyClaim { stream, key, fingerprint, first_sequence, event_count }`, scoped to the stream | `fingerprint`, `fingerprinted`, the commands table |
+| `CommutativeState::changed`, `Units` | `changed()` generated from `(commutative_state)` / `(conflict)` (options.proto), CR-1 | the generator's Rust output |
 | `Body::{Command, Fact}` | `CommandPage.body { Command command \| Fact fact }`, each `{ Any payload }` | `command_book`, `book_from_wire` |
 | `Envelope<E> { seq, meta, event }` | `EventPage { sequence, meta, payload }` | `event_page` |
 | `Meta` | `EventMeta { provenance { actor, correlation_id }, origin, recorded_at, base_sequence, rules_version }` | `wire::event_meta`, `wire::meta` |
 | `Snapshot<S> { sequence, state, rules_version, recorded_at }` | `Snapshot { sequence, state: Any, rules_version }`; `recorded_at` off the row | `wire::snapshot`, `wire::snapshot_from_wire` |
 | what a chain recorded (`Recorded`) | one `EventBook` per stream, first-touched order, `next_sequence` = new length, no snapshot | `event_book::<D>`, `Registry::event_books` |
 | `Ok(Recorded)` / `StoreError::Duplicate` | `Outcome { delivery: APPLIED \| DUPLICATE, projector_failures }`; never PARKED | `outcome` |
+| `StoreError::KeyReused` | FAILED_PRECONDITION (an error status, no outcome) | `outcome` answers `None` |
 | `ProjectorFailure { projector, error }` | `ProjectorFailure { projector, code: INTERNAL, message }` | `outcome` |
 | `Rulebook` current version | `ComponentDescriptor.rules_version`, stamped as `EventMeta.rules_version` | |
 | an event, command or fact payload | `Any`, packed by `prost::Name` (`/pkg.vN.Type`) | `pack`, `Payload`, `Decoder` |
@@ -699,7 +825,7 @@ types unify), and annals. It re-exports angzarr-proto's `io.angzarr.v1` as
 | upcasting | `UpcasterDispatch` semantics, mirrored | `Upcaster` |
 | the stored form | `Stored { type_url, page }`, with `Meta` as columns | `Stored`, `Opaque` |
 
-**One home per value.** At 279bc89 correlation lives only in `Provenance`
+**One home per value.** Since 279bc89 correlation lives only in `Provenance`
 (`Cover.correlation_id` is gone), a command's cause only in its `Origin`
 (`CommandMeta`, `PageHeader` and the deferred sequences are gone), and the
 main timeline is the unset edition. The earlier draft's "one pair of
@@ -708,8 +834,9 @@ functions per contested value" collapses to one plain pair per value.
 **Refused, never repaired.** A `CommandBook` with no cover (`NoCover`), page
 (`NoPage`) or body (`NoBody`), for another domain (`WrongDomain`), with a
 set empty edition (`EmptyEdition`), an unknown conflict resolution
-(`UnknownConflictResolution`), or a payload its arm's type does not decode
-(`Payload`) is refused by `book_from_wire`. Whether body and origin agree is
+(`UnknownConflictResolution`), an id that is not 16 bytes (`BadId`), a
+request index with no request id (`IndexWithoutRequestId`), or a payload
+its arm's type does not decode (`Payload`) is refused by `book_from_wire`. Whether body and origin agree is
 the kernel's check (`Malformed`), so a book built in Rust and one read off
 the wire are refused the same way.
 
@@ -725,8 +852,20 @@ pub fn pack<M: Message + Name>(message: &M) -> Any;
 pub struct Decoder<E>;   // Decoder::new().on::<v3::Opened>(|_| Event::Opened)...decode(&any)
 
 pub fn command_book<C: Payload, F: Payload>(book: &Book<C, F>) -> CommandBook;
-pub fn book_from_wire<D: Domain>(book: &CommandBook) -> Result<BookOf<D>, BookError>
+pub fn book_from_wire<D: Domain>(book: &CommandBook) -> Result<BookOf<D>, BookError>   // fingerprinted as received
     where D::Command: Payload, D::Fact: Payload;
+pub fn fingerprint(payload: &Any) -> Fingerprint;     // SHA-256(len(type_url) BE u64 || type_url || value)
+pub fn fingerprinted<C: Payload, F: Payload>(book: Book<C, F>) -> Book<C, F>;   // over to_any()
+
+pub mod ids {
+    pub fn to_wire(id: Uuid) -> pb::Uuid;
+    pub fn from_wire(id: &pb::Uuid) -> Result<Uuid, BookError>;
+    pub fn parse(text: &str) -> Result<Uuid, BookError>;
+    pub fn compute_root(domain: &str, key: &str) -> Result<Root, BookError>;
+    pub fn fact_correlation(external_id: &str) -> Correlation;
+    pub struct AngzarrIds;                     // impl DeriveIds
+    pub static ANGZARR_IDS: AngzarrIds;
+}
 pub fn event_page<E: Payload>(envelope: &Envelope<E>) -> EventPage;
 pub fn event_book<D: Domain>(recorded: &Recorded, key: &StreamKey) -> Option<EventBook>
     where D::Event: Payload;
@@ -759,14 +898,20 @@ Each `Envelope<Stored>` is one row; it never decodes a payload.
 | `sequence` | the seq, 64-bit |
 | `type_url` | the payload's type URL as written, before any upcast: indexable, to find rows still at an old type |
 | `page` | the `EventPage` bytes as written: `sequence`, `meta`, `payload` |
-| `actor`, `correlation` | `Meta`'s provenance |
-| `origin_kind`, `request_id`, `request_index`, `cause_domain`, `cause_edition`, `cause_root`, `cause_sequence`, `cause_component`, `cause_index`, `external_id` | `Meta::origin`, one set of columns per arm |
+| `actor`, `correlation` | `Meta`'s provenance; `correlation` a `uuid` |
+| `origin_kind`, `request_id`, `request_index`, `request_minted`, `cause_domain`, `cause_edition`, `cause_root`, `cause_sequence`, `cause_component`, `cause_index`, `external_id` | `Meta::origin`, one set of columns per arm; `request_id` a `uuid` |
 | `recorded_at`, `base_sequence`, `rules_version` | the rest of `Meta` |
 
-`record_command` is backed by a commands table, (stream, origin key, first
-sequence, count), unique on (stream, origin key): a command that emits no
-events leaves no event row to index, so partial unique indexes on the
-events table cannot cover every case. Rows are strictly append-only;
+`record_command` is backed by a commands table, angzarr's
+`IdempotencyClaim` as columns: (stream, the key's columns, `fingerprint`
+(32 bytes), first sequence, count), unique on (stream, `external_id`) for
+facts and (stream, `request_id`, `request_index`) for client-supplied
+requests; a minted request id is never claimed. A unique violation is
+answered by reading the claim back: the same fingerprint (or any fact) is
+`Duplicate`, a request with another fingerprint `KeyReused`. A command that
+emits no events leaves no event row to index, and the fingerprint is the
+command's, not an event's, so partial unique indexes on the events table
+cannot replace the table. Rows are strictly append-only;
 erasing a person deletes the pseudonym mapping, never a row.
 
 `Registry::store(unit)` gives `Opaque`, which implements `EventStore<E>`
@@ -819,37 +964,51 @@ the execution model is not.
    no draw ever sees a draw system behind its list. (This is the CASCADE
    mode angzarr removed; multi-stream units of work are standard elsewhere:
    KurrentDB `MultiStreamAppend`, Marten and Wolverine.)
-2. **No idempotency key store.** In process and atomic, with no
-   at-least-once bus, nothing inside a chain is redelivered, so annals
-   claims no keys for reactions and keeps no expiry. The two residual edges
-   are answered by the optional `UnitOfWork::record_command`, called for the
-   originating book only: **webhook facts** (unique on (stream,
-   `external_id`)) and **HTTP retries** (unique on (stream, request id,
-   index)), for a server that wants retry safety. Unlike angzarr's claim
-   check, the duplicate is detected at commit, after business code ran (the
-   transaction is then dropped); there is no payload fingerprint.
+2. **No idempotency key store for reactions; claims only at the edges.** In
+   process and atomic, with no at-least-once bus, nothing inside a chain is
+   redelivered, so annals claims no causation keys and keeps no expiry. The
+   two residual edges are answered by the optional
+   `UnitOfWork::record_command`, called for the originating book only:
+   **webhook facts** (unique on (stream, `external_id`)) and **HTTP
+   retries** (unique on (stream, request id, index), client-supplied ids
+   only), for a server that wants retry safety. Each claim carries the
+   payload fingerprint and a reused request key is refused, exactly as
+   angzarr's claim; unlike angzarr's check, the duplicate is detected at
+   commit, after business code ran (the transaction is then dropped).
 3. **No transient outbox.** Reactions commit in the same transaction as
    their trigger, so there is nothing to re-send.
 4. **`rules_version` is load-bearing.** angzarr treats it as opaque, to
    explain a decision. annals replays each event under the rules its
    version names, and discards a snapshot folded under another version.
-5. **Correlation only, no request on every event (D2).** annals drops its
-   draft's per-event request; a reaction's event carries its causation and
-   correlation only, as angzarr's. Not a divergence any more; listed because
-   the draft diverged.
-6. **No PARKED, no dead-letter queue.** `ingest` is infallible by type; a
+5. **No PARKED, no dead-letter queue.** `ingest` is infallible by type; a
    panicking one aborts the request with nothing written, and the source
    redelivers. annals never answers PARKED.
-7. **No edition registry, no branching.** annals accepts any non-empty
+6. **No edition registry, no branching.** annals accepts any non-empty
    edition name without a `CreateEdition`, records no divergence point and
    does not read through to main; a named edition's streams start empty.
    Until it models branching, that is all it does with editions.
-8. **COMMUTATIVE by domain-declared fields, not reflection**, and the
-   conflict nonce is an in-process token, not bytes on a
-   `ContextualCommand`. Same rule, different mechanism.
-9. **`recorded_at` is sampled by the application**, once per chain, then
+7. **The conflict nonce is an in-process token**, not bytes on a
+   `ContextualCommand`. Same check, different mechanism.
+8. **`recorded_at` is sampled by the application**, once per chain, then
    raised per stream to keep it non-decreasing; angzarr's coordinator
    stamps it at persist. Same guarantee.
+9. **A request index without a request id is refused**
+   (`BookError::IndexWithoutRequestId`); angzarr keeps the index on the
+   minted origin. annals records a book with no client id as index 0 (see
+   open question 1).
+
+**Where annals matches angzarr** (no longer divergences): no request on
+every event (D2: a reaction's event carries its causation and correlation
+only); payload fingerprints on request keys, a reused key refused
+FAILED_PRECONDITION; request ids always assigned, a UUIDv7 minted when
+absent and flagged `minted`, only client-supplied ids deduplicating;
+request and correlation ids as 16-byte UUIDs, text only at display and
+input; a missing correlation derived as angzarr derives it (the request id
+verbatim; a fact's UUIDv5); derived roots by angzarr's `compute_root`; and
+**COMMUTATIVE by the same conflict units**, `changed()` generated from the
+same `(commutative_state)` and `(conflict)` markers, with angzarr's overlap
+rule, fail-safe wildcard for unmarked fields, and refusal for a state
+without `commutative_state`.
 
 ## Migration
 
@@ -887,8 +1046,21 @@ moves):
 - **Draw systems are created and retired through the list.** A mode change
   is a list event that retires one draw system and creates another, so
   `targets()` keeps the contiguity invariant.
-- Content edits may use `ConflictResolution::Commutative` with `changed`
-  naming items and columns (overlap-only staleness); draws keep STRICT.
+- **The list's state becomes a `commutative_state` message**, so content
+  edits may use `ConflictResolution::Commutative`: `ListState` as a prost
+  message (`hatpick.list.v1`) with `option (io.angzarr.v1.commutative_state)
+  = true` and `(io.angzarr.v1.conflict)` markers (items `{}` per key, or
+  `{descend: true}` for per-field units; columns `{}` whole, or
+  `{element_key: "id", ordered: true}`; settings `{}`), its `changed()`
+  generated by `protoc-gen-angzarr-conflict` (CR-1), and the list domain
+  naming it: `const COMMUTATIVE = commutative::<ListState>()`. Every field
+  is marked: an unmarked one makes every edit conflict. Draws keep STRICT.
+- **Payloads encode deterministically**, so a retried request's fingerprint
+  matches: generate every payload with a proto `map` as a `BTreeMap`
+  (prost-build's `btree_map`), never the default `HashMap`.
+- **Roots keyed by a business key** use `annals_angzarr::ids::
+  compute_root(domain, key)` (UUIDv5), so angzarr derives the same root;
+  `Reaction::root` returns a stored UUID as before.
 - `ChangeColumns` must also emit `ItemsEdited` (value conversion), carried
   over from the earlier plan.
 - **The draw lifecycle moves into the draw-system stream.** Draw is a
@@ -904,11 +1076,19 @@ moves):
   diesel-async adapter implementing `AsyncEventStore<Stored>` and
   `AsyncUnitOfWork` (with `record_command`) over one transaction;
   `registry.store(tx)` and `handle_async`.
-- Each HTTP request takes a request id (the client's idempotency key, or one
-  minted per request), samples the instant and a minted correlation, and
-  passes the pseudonymous actor and the client's correlation, if any, in
-  the book's provenance. A retried request with the same id is answered from
-  `StoreError::Duplicate`.
+- Each HTTP request takes the client's request id if it sent one (a UUID,
+  parsed at the boundary with `ids::parse`; anything else is refused 400),
+  and builds a `Book::command` with it, or a `Book::minting` without. Per
+  request it samples the instant and mints a UUIDv7 (`uuid` with `v7`, in
+  the server only) into `Sampled { now, request, derive: &ANGZARR_IDS }`,
+  and passes the pseudonymous actor and the client's correlation, if any,
+  in the book's provenance. Books built in Rust are fingerprinted with
+  `annals_angzarr::fingerprinted`. A retried request with the same id and
+  payload is answered from `StoreError::Duplicate`; the same id with another
+  payload, `StoreError::KeyReused`, is answered 422.
+- Ids are stored as Postgres `uuid` (correlation, request id) with
+  `request_minted`; the commands table holds the claim with its 32-byte
+  fingerprint.
 
 **annals-sim.** `schedule::advance(tx: &mut Tx<D>, ..)` and `Clock::run`
 move to `next::Tx` unchanged in shape. The test domain drops `type Ctx = ()`
@@ -920,46 +1100,56 @@ root API. annals has no wire schema for `next`: its wire form is angzarr's.
 
 ## Open questions, each with a recommendation
 
-1. **Correlation derivation across runtimes.** angzarr says a missing
-   correlation is "derived deterministically from the command's key" but
-   does not say how. annals uses the key's text verbatim (request id, or
-   external id). I recommend angzarr specify exactly that, so the same
-   request gets the same correlation under either runtime.
-2. **`ingest`'s signature.** The plan says `ingest(state, fact) -> events`;
+1. **A request index with no request id.** angzarr accepts a
+   `RequestOrigin` with an unset `request_id` and a non-zero index, and
+   keeps the index on the minted origin; annals refuses it, since a book
+   without a client id has no origin to carry an index and a minted id
+   groups nothing. I recommend angzarr refuse it too (INVALID_ARGUMENT):
+   the index orders commands within one request, and without a request id
+   there is no request to order them in.
+2. **A fact's external id re-used for another payload.** angzarr leaves the
+   answer open (its KS-10: DUPLICATE plus an alert, or refusal plus a dead
+   letter). annals answers DUPLICATE: the source has already delivered that
+   id, and in process there is no dead-letter queue to refuse into. I
+   recommend DUPLICATE in both runtimes, with angzarr adding the alert.
+3. **The fingerprint's hash.** annals-angzarr hashes with SHA-256 over the
+   length-prefixed type URL and the value bytes, adding the `sha2` crate
+   (wasm-safe) when it is implemented. angzarr names no algorithm; the two
+   runtimes never share a claims table, so they need not agree. I recommend
+   SHA-256, and that angzarr pin the same so a future shared store would
+   work.
+4. **`Sampled::derive` as `&'static dyn DeriveIds`.** The kernel needs one
+   UUIDv5 (a fact's correlation) and has no SHA-1. A trait object in
+   `Sampled` keeps every `handle` signature unchanged. I recommend it over
+   a hand-rolled SHA-1 in the kernel (a second, unchecked implementation)
+   and over making the adapter pre-fill a fact's correlation (which would
+   blur "supplied" and "derived").
+5. **`ingest`'s signature.** The plan says `ingest(state, fact) -> events`;
    this proposal adds `rules`, for symmetry with `decide` and `apply`. I
    recommend keeping `rules`: a fact's interpretation may depend on
    reference data (a currency table), and leaving it out would push that
    into the fact.
-3. **Keyless requests.** The plan said annals refuses a request with no id;
-   angzarr records a keyless request and mints its correlation, and this
-   proposal follows angzarr. I recommend allowing keyless requests in the
-   kernel and having hatpick's server always set a request id, so its
-   retries are safe.
-4. **Duplicates detected after business code.** `record_command` runs at
+6. **Duplicates detected after business code.** `record_command` runs at
    commit, so a duplicate's business code runs and is thrown away. I
    recommend accepting that (in process it costs one decide); if a server
    needs it earlier, a `UnitOfWork::claimed(stream, origin)` pre-check can be
    added without changing the contract.
-5. **No fingerprint.** angzarr refuses a request key reused for a different
-   payload (FAILED_PRECONDITION). I recommend deferring it: hatpick's request
-   ids are minted per request, so reuse with another payload is a client
-   bug it would not catch either way.
-6. **Routes are per unit of work**, because their type names the unit's
+7. **Routes are per unit of work**, because their type names the unit's
    type. I recommend accepting this; revisit with a store-family trait if
    hatpick's handlers find it noisy.
-7. **The workspace build needs `protoc` and github.com** (angzarr-proto is a
+8. **The workspace build needs `protoc` and github.com** (angzarr-proto is a
    git dependency with a protoc build). I recommend keeping annals-angzarr a
    workspace member and installing `protoc` in CI.
-8. **The upcaster: a mirror or the router's.** I recommend the mirror, and
+9. **The upcaster: a mirror or the router's.** I recommend the mirror, and
    switching when angzarr remaps the router onto angzarr-proto.
-9. **Snapshots through the chain.** The chain reads whole streams. I
-   recommend keeping it so until replay latency matters; then `load` with
-   W12's bound for a stream whose book has an `expected_sequence`.
-10. **Old `annals.log.v1` logs.** I recommend leaving them: hatpick is
+10. **Snapshots through the chain.** The chain reads whole streams. I
+    recommend keeping it so until replay latency matters; then `load` with
+    W12's bound for a stream whose book has an `expected_sequence`.
+11. **Old `annals.log.v1` logs.** I recommend leaving them: hatpick is
     pre-launch and stores none.
-11. **The default depth limit of 8.** I recommend 8. hatpick's deepest chain
+12. **The default depth limit of 8.** I recommend 8. hatpick's deepest chain
     is two levels.
-12. **`Tx`'s staged copy, or a pure `(state, cmd, rules) -> Vec<Event>` for
+13. **`Tx`'s staged copy, or a pure `(state, cmd, rules) -> Vec<Event>` for
     decide?** I recommend `Tx`, for the reasons under
     [Decide and ingest](#decide-and-ingest).
 
@@ -974,30 +1164,43 @@ root API. annals has no wire schema for `next`: its wire form is angzarr's.
 | A `!Send` async store port | No browser store exists. | A wasm adapter over IndexedDB. |
 | Reading `EventBook`s from angzarr into annals | annals writes books; nothing yet feeds it angzarr's. | An angzarr runtime delivering to annals. |
 | `Diagnostic` impls and catalog entries for the new errors | They would make the catalog check sample `todo!()`s. | The implementation, in the same change. |
+| Running angzarr's golden conflict-unit parity suite in annals, and the generated Rust `CommutativeState` impls | The generator and the suite are angzarr's backlog CR-1; until they exist the kernel pins only the interface, and a hand-written fixture stands in. | CR-1 landing in angzarr-project: then a parity test here runs every fixture pair through the generated Rust and `Units::overlaps`. |
 
 ## The proposal tests
 
 All ignored (`#[ignore = "proposal: ..."]`), each failing on a `todo!` when
-run with `--ignored`, except three kernel tests that already pass (a UUID is
-a root, rulebook lookup, an unavailable store is not a missing stream).
+run with `--ignored`, except seven that already pass: four in the kernel (a
+UUID is a root, a UUID is its bytes and its text is for display, rulebook
+lookup, an unavailable store is not a missing stream) and the adapter's
+three id tests.
 
-**`crates/annals/tests/next/`** (51 tests, 48 ignored)
+**`crates/annals/tests/next/`** (59 tests, 55 ignored)
 
 - **kernel.rs**: the main timeline is no edition and an edition name is
   never empty; a rejection leaves nothing behind (A6); decide stages and
   commit applies; commit refuses a stale decision (`Retry`); the kernel
   stamps one meta on every event of a write (A1); correlation is given,
-  else derived from the key, else minted; `base_sequence` is the head and
+  else the request id verbatim (client-supplied or minted), else a fact's
+  UUIDv5 from the application, never derived for a causation; **a request
+  id is always assigned**, the application's minted one recorded with
+  `minted` set and never a key; `base_sequence` is the head and
   `recorded_at` never goes backwards (replay refuses one that does); a
   malformed book (body arm and origin disagree, empty external id, a fact
-  with an expected sequence, a reaction with handling) is refused before
-  business code; a fact is ingested, never decided and never refused, the
-  arm picking the pipeline; STRICT refuses a stale expected sequence before
-  decide; AGGREGATE_HANDLES hands decide the window and demands the nonce
-  back; COMMUTATIVE accepts disjoint changes, refuses overlapping ones, and
-  is malformed for a domain that cannot say what changed; replay resolves
-  rules by each event's version (A3); replay refuses a log of another
-  domain; replay checks causations within the stream only.
+  with an expected sequence, a reaction with handling or with no
+  correlation, a request marked minted by its sender, a keyed book with no
+  fingerprint) is refused before business code; a fact is ingested, never
+  decided and never refused, the arm picking the pipeline; STRICT refuses a
+  stale expected sequence before decide; AGGREGATE_HANDLES hands decide the
+  window and demands the nonce back; **unit paths follow angzarr's syntax**
+  (keys, `[#order]`, escaping, the wildcard); **units overlap by angzarr's
+  rule** (equality or a prefix at a `.`/`[` boundary; a wildcard overlaps
+  any non-empty set; an empty set nothing); COMMUTATIVE accepts disjoint
+  units (different items, the columns, the settings) and refuses
+  overlapping ones; **an unmarked field conflicts with everything**;
+  COMMUTATIVE is refused for a state without conflict units, stale or not;
+  replay resolves rules by each event's version (A3); replay refuses a log
+  of another domain; replay checks causations within the stream only; a
+  UUID is its bytes and its text only for display.
 - **snapshot.rs**: a snapshot under another rules version is discarded and
   the stream replayed (a poisoned snapshot shows when one is used); a stream
   snapshots under the current rules version.
@@ -1022,33 +1225,51 @@ a root, rulebook lookup, an unavailable store is not a missing stream).
   limit is refused; failures are classified; the command handler returns
   what it recorded; a chain in an edition touches only that edition; a
   command for a key of another domain is refused; a redelivered webhook fact
-  is a duplicate; a retried keyed request is a duplicate, a rejection is
-  released, and a keyless request is never deduplicated.
+  is a duplicate (even re-used for another payload); a retried keyed
+  request is a duplicate, a rejection is released, and a request whose id
+  was minted is never deduplicated but its id is recorded; **a request key
+  reused for another payload is refused** (`KeyReused`, `Bug`), and the
+  same bytes again are a duplicate.
 - **store.rs**: append returns the new length and refuses a stale
   `expected`; append refuses discontinuous seqs; the same root in another
   domain or edition is another stream; `read_from` returns the tail and a
   missing stream is `None`; a unit of work lands at commit or not at all; a
-  unit of work records a keyed origin once per stream, at commit; the async
-  port has the same contract.
+  unit of work records a keyed origin once per stream, at commit (a fact's
+  key is its external id, not its description); **a claim records the
+  payload's fingerprint**: a request key with another one is `KeyReused`,
+  the same one `Duplicate`, a fact `Duplicate` either way; the async port
+  has the same contract.
 
 Dropped with `Translation`: "a fact is refused only for integrity" (facts no
 longer come from reactions; its position and refusal cases moved to "a
 propagated change is placed, then decided") and the `FactRefused`
 recovery case.
 
-**`crates/annals-angzarr/tests/angzarr/`** (17 tests, all ignored)
+**`crates/annals-angzarr/tests/angzarr/`** (21 tests, 18 ignored)
 
+- **ids.rs** (passing): the kernel's UUID is the wire's 16 bytes, with one
+  canonical text; text is parsed only at the boundary, as angzarr parses
+  it; derived ids are angzarr's UUIDv5s (`compute_root`'s and
+  `fact_correlation`'s worked examples from `types.proto`, the colon
+  refused, the two namespaces apart).
 - **books.rs**: a book round-trips through a one-page `CommandBook`
-  (request, causation above `u32::MAX`, fact, keyless); a `CommandBook`
-  annals cannot read is refused (no cover, page or body, another domain, a
-  set empty edition, an unknown resolution, a payload its arm does not
-  decode); a malformed book off the wire is refused by the kernel; every
-  recorded page's correlation is set (derived, minted, a fact's key); a
-  chain becomes `EventBook`s with `EventMeta` on every page and causations as
-  `EventRef`s, answered APPLIED; a cover is a stream key, main the unset
+  (request ids and correlations as `UUID`s, causation above `u32::MAX`,
+  fact, a request whose id is minted as an unset origin), fingerprinted
+  over the bytes received; **a book is fingerprinted over its payload
+  bytes exactly as received** (a non-canonical encoding of the same value
+  is another fingerprint; the type URL is length-prefixed; an honest retry
+  reproduces it); a `CommandBook` annals cannot read is refused (no cover,
+  page or body, another domain, a set empty edition, an unknown
+  resolution, an id that is not 16 bytes, an index with no request id, a
+  payload its arm does not decode); a malformed book off the wire is
+  refused by the kernel (a sender's `minted` too); every recorded page has
+  a request id and a correlation as angzarr derives them (the request id,
+  the minted id flagged `minted`, a fact's UUIDv5 by its worked example); a
+  chain becomes `EventBook`s with `EventMeta` on every page and causations
+  as `EventRef`s, answered APPLIED; a cover is a stream key, main the unset
   edition and `""` refused; sequences above `u32::MAX` survive every
-  mapping; a recorded key is answered DUPLICATE and a rejection is no
-  outcome.
+  mapping; a recorded key is answered DUPLICATE, and a rejection and a
+  reused key are no outcome.
 - **payload.rs**: payloads are `Any` packed by their `prost::Name`.
 - **upcast.rs**: upcasting by type URL runs v1 → v2 → v3 with the router's
   semantics; an upcaster is checked whole.

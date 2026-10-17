@@ -473,7 +473,8 @@ fn a_policys_command_carries_the_triggers_provenance_and_a_causation() {
                 joined(name),
                 Origin::request(crate::toys::request(100 + i as u128), 0),
                 ann_in(555),
-            );
+            )
+            .fingerprinted(crate::toys::fingerprint(i as u8));
             club.execute(&join, &at(1_000), &rules(), &mut [&mut m])
                 .unwrap();
         }
@@ -484,7 +485,7 @@ fn a_policys_command_carries_the_triggers_provenance_and_a_causation() {
     };
     let to_bob: Vec<&Order<ClubToMembers>> = copies
         .iter()
-        .filter(|o| o.book.origin.cause() == Some(&bobs_join))
+        .filter(|o| o.book.origin.as_ref().and_then(Origin::cause) == Some(&bobs_join))
         .collect();
     assert_eq!(
         to_bob
@@ -494,19 +495,19 @@ fn a_policys_command_carries_the_triggers_provenance_and_a_causation() {
         [
             (
                 "ann",
-                Origin::Causation(Causation {
+                Some(Origin::Causation(Causation {
                     event: bobs_join.clone(),
                     component: "club-to-members".to_string(),
                     index: 0
-                })
+                }))
             ),
             (
                 "bob",
-                Origin::Causation(Causation {
+                Some(Origin::Causation(Causation {
                     event: bobs_join.clone(),
                     component: "club-to-members".to_string(),
                     index: 1
-                })
+                }))
             ),
         ],
         "one causation per command the policy issued for the event"
@@ -599,7 +600,11 @@ fn a_propagated_change_is_placed_then_decided() {
                 component: "club-to-members".to_string(),
                 index: 0,
             }),
-            Provenance::default(),
+            // A policy's command carries its trigger's correlation.
+            Provenance {
+                actor: None,
+                correlation: Some(correlation(555)),
+            },
         ),
     };
     assert_eq!(
@@ -651,7 +656,7 @@ fn a_backlog_serves_every_target_from_its_own_position() {
     let seqs = |target: &str| -> Vec<Seq> {
         owed[target]
             .iter()
-            .map(|o| o.book.origin.cause().unwrap().seq)
+            .map(|o| o.book.origin.as_ref().and_then(Origin::cause).unwrap().seq)
             .collect()
     };
     assert_eq!(seqs("ann"), [3, 4], "after her position");
@@ -743,7 +748,12 @@ fn a_reaction_never_crosses_timelines() {
         StreamKey::new("member", edition("v2"), member_root("ann"))
     );
     assert_eq!(
-        order.book.origin.cause().map(|c| &c.stream),
+        order
+            .book
+            .origin
+            .as_ref()
+            .and_then(Origin::cause)
+            .map(|c| &c.stream),
         Some(&source),
         "the causation names the source in its edition"
     );

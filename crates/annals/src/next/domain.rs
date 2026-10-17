@@ -1,10 +1,9 @@
 //! Deciding, ingesting and applying, with deciding made pure.
 
-use std::collections::BTreeSet;
-
 use annals_diagnostic::Diagnostic;
 
 use super::book::ConflictResolution;
+use super::conflict::Changed;
 use super::id::{Actor, Correlation, Seq, StreamKey, Timestamp};
 use super::meta::Origin;
 use super::stream::Envelope;
@@ -76,15 +75,21 @@ pub trait Domain: Sized + 'static {
         ConflictResolution::Strict
     }
 
-    /// The fields that differ between `before` and `after`, by name (a
-    /// field, or a finer path such as `item:42`): what COMMUTATIVE compares.
-    /// `None`, the default, means the domain does not support COMMUTATIVE,
-    /// and a COMMUTATIVE book for it is malformed. annals has no reflection;
-    /// the domain says what a change touches, which may be finer than
-    /// angzarr's top-level protobuf fields.
-    fn changed(before: &Self::State, after: &Self::State) -> Option<BTreeSet<String>> {
-        None
-    }
+    /// The state's generated conflict-unit diff, when the state is a
+    /// `commutative_state` message: `commutative::<Self::State>()`
+    /// ([`commutative`](super::commutative)), naming the generated
+    /// [`CommutativeState`](super::CommutativeState) impl. `None`, the
+    /// default: COMMUTATIVE is refused for this domain, before decide
+    /// ([`Malformed::CommutativeUnsupported`](super::Malformed::CommutativeUnsupported)),
+    /// as angzarr refuses it for a state without `commutative_state`.
+    ///
+    /// Under COMMUTATIVE the kernel follows angzarr's resolver
+    /// (`options.proto`, *The resolver*): fold to `expected_sequence` and to
+    /// the head; `window = changed(expected, head)`; decide runs on the head,
+    /// so its invariants see the window's effects; `mine = changed(head,
+    /// head with the command's events)`; keep the events iff the two
+    /// [do not overlap](super::Units::overlaps), else the command is stale.
+    const COMMUTATIVE: Option<Changed<Self::State>> = None;
 }
 
 /// The in-process conflict nonce (angzarr's `ContextualCommand.conflict_nonce`):

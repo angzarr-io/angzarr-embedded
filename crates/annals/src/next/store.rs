@@ -30,7 +30,7 @@ use std::collections::BTreeMap;
 use std::future::Future;
 
 use super::error::StoreError;
-use super::id::{Seq, StreamKey};
+use super::id::{Fingerprint, Seq, StreamKey};
 use super::meta::Origin;
 use super::stream::Envelope;
 
@@ -68,6 +68,22 @@ pub trait EventStore<E> {
     }
 }
 
+/// One applied command, recorded under its key: angzarr's
+/// `IdempotencyClaim`, scoped to the addressed stream.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Claim {
+    /// The key: a client-supplied request's (request id, index), or a
+    /// fact's external id. Only the key fields are compared; a fact's
+    /// description is not part of it.
+    pub origin: Origin,
+    /// The payload's fingerprint as received.
+    pub fingerprint: Fingerprint,
+    /// The applied range, `from..to` in the stream (possibly empty: a
+    /// command with nothing to do is applied too).
+    pub from: Seq,
+    pub to: Seq,
+}
+
 /// A transaction over one or more [`EventStore`]s: what it appended lands
 /// at [`UnitOfWork::commit`], all at once, or (dropped) not at all.
 ///
@@ -75,31 +91,34 @@ pub trait EventStore<E> {
 /// chain is in process and atomic, with no at-least-once bus inside it, so
 /// nothing in it is redelivered. Two edges remain, and both are answered
 /// here, by the command handler calling [`UnitOfWork::record_command`] for
-/// the originating command when its origin is keyed
-/// ([`Origin::is_keyed`]), in the same unit of work as its events:
+/// the originating book when its origin is keyed ([`Origin::is_keyed`]),
+/// in the same unit of work as its events:
 ///
-/// - a **webhook fact** redelivered by its source: a unique index on
-///   (stream, `external_id`);
-/// - an **HTTP retry** of a request: a unique index on (stream, request id,
-///   index), for a server that wants retry safety.
+/// - a **webhook fact** redelivered by its source: unique on (stream,
+///   `external_id`);
+/// - an **HTTP retry** of a request with a client-supplied id: unique on
+///   (stream, request id, index), for a server that wants retry safety.
 ///
-/// A recorded key is refused as [`StoreError::Duplicate`] with the range
-/// recorded then, and the unit of work is dropped: the retry becomes a read
-/// (angzarr's DUPLICATE). Only applied commands are recorded; a rejection
-/// writes nothing, so it may be retried. The default records nothing.
+/// A minted request id is never recorded. Each claim records the payload's
+/// [`Fingerprint`], as angzarr's does. A key already recorded is refused:
+///
+/// - with the same fingerprint, or any fact: [`StoreError::Duplicate`]
+///   with the range recorded then (angzarr's DUPLICATE: the retry becomes
+///   a read);
+/// - a client-supplied request key with another fingerprint:
+///   [`StoreError::KeyReused`] (angzarr's FAILED_PRECONDITION: the key was
+///   reused for a different command).
+///
+/// Either way the unit of work is dropped. Only applied commands are
+/// recorded; a rejection writes nothing, so it may be retried. The default
+/// records nothing.
 pub trait UnitOfWork {
     fn commit(self) -> Result<(), StoreError>;
 
-    /// Record that the command keyed `origin` was applied to `stream` as
-    /// seqs `from..to` (possibly empty), or refuse a key already recorded
-    /// ([`StoreError::Duplicate`]). Records nothing by default.
-    fn record_command(
-        &mut self,
-        stream: &StreamKey,
-        origin: &Origin,
-        from: Seq,
-        to: Seq,
-    ) -> Result<(), StoreError> {
+    /// Record `claim` against `stream`, or refuse a key already recorded
+    /// there ([`StoreError::Duplicate`], [`StoreError::KeyReused`]).
+    /// Records nothing by default.
+    fn record_command(&mut self, stream: &StreamKey, claim: &Claim) -> Result<(), StoreError> {
         Ok(())
     }
 }
@@ -112,9 +131,7 @@ pub trait AsyncUnitOfWork {
     fn record_command(
         &mut self,
         stream: &StreamKey,
-        origin: &Origin,
-        from: Seq,
-        to: Seq,
+        claim: &Claim,
     ) -> impl Future<Output = Result<(), StoreError>> + Send {
         async { Ok(()) }
     }
@@ -189,16 +206,15 @@ impl<S: UnitOfWork + Send> AsyncUnitOfWork for Ready<S> {
     async fn record_command(
         &mut self,
         stream: &StreamKey,
-        origin: &Origin,
-        from: Seq,
-        to: Seq,
+        claim: &Claim,
     ) -> Result<(), StoreError> {
-        self.0.record_command(stream, origin, from, to)
+        self.0.record_command(stream, claim)
     }
 }
 
-/// One recorded key: the stream, the origin, and the seqs it applied.
-type Claims = BTreeMap<(StreamKey, Origin), (Seq, Seq)>;
+/// The recorded claims, by stream and key: the origin with a fact's
+/// description cleared, since it is not part of the key.
+type Claims = BTreeMap<(StreamKey, Origin), Claim>;
 
 /// Streams held in memory, in key order, and the keys its units of work
 /// recorded. Checks everything a real store must, so tests catch what
@@ -282,14 +298,11 @@ impl<E: Clone> UnitOfWork for InMemoryTx<'_, E> {
         todo!("proposal: move pending and the claims into the store")
     }
 
-    /// Records every keyed origin: a unique index on (stream, origin).
-    fn record_command(
-        &mut self,
-        stream: &StreamKey,
-        origin: &Origin,
-        from: Seq,
-        to: Seq,
-    ) -> Result<(), StoreError> {
-        todo!("proposal: Duplicate if the store or this unit holds it, else hold it")
+    /// Records every claim: unique on (stream, key), the key being the
+    /// origin's key fields (a fact's external id alone). A repeat is
+    /// [`StoreError::Duplicate`], or [`StoreError::KeyReused`] for a
+    /// request key with another fingerprint.
+    fn record_command(&mut self, stream: &StreamKey, claim: &Claim) -> Result<(), StoreError> {
+        todo!("proposal: compare with the store's or this unit's claim for the key, else hold it")
     }
 }

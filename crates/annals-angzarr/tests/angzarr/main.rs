@@ -3,6 +3,7 @@
 //! implemented; each is the contract `docs/design/audit.md` proposes.
 
 mod books;
+mod ids;
 mod payload;
 mod store;
 mod toys;

@@ -89,10 +89,11 @@ impl Domain for Counter {
 
 - **The audited kernel** (`annals::next`, a proposal): streams keyed by
   (domain, edition, root) with main as no edition, event metadata with an
-  always-set correlation, pure decide beside an infallible ingest for
-  facts, conflict resolution, atomic command chains of policies, store
-  ports with a unit of work, and snapshots discarded on a rules-version
-  mismatch. Its wire form is angzarr's, mapped by `annals-angzarr`. See
+  always-set correlation and request id (16-byte UUIDs), pure decide
+  beside an infallible ingest for facts, conflict resolution (COMMUTATIVE
+  by generated conflict units), atomic command chains of policies, store
+  ports with a unit of work and fingerprinted claims, and snapshots
+  discarded on a rules-version mismatch. Its wire form is angzarr's, mapped by `annals-angzarr`. See
   `docs/design/audit.md`.
 
 - **Upcasting.** `Header::schema` is reserved and never read. Upcasting

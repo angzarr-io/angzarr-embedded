@@ -21,7 +21,7 @@ use crate::reactions::{
     joined, member_stream, rules, Club, ClubEvent, ClubToMembers, Dues, Ledger, LedgerState,
     MemberEvent, Pot, Recorded, TREASURY_ROOT,
 };
-use crate::toys::{ann_in, at, book_at, correlation, edition, key};
+use crate::toys::{ann_in, at, book_at, correlation, edition, fingerprint, key};
 
 fn treasury() -> StreamKey {
     crate::reactions::treasury()
@@ -241,7 +241,8 @@ fn a_successful_chain_commits_every_stream_with_causation_and_correlation() {
         ClubEvent::Paid(30),
         Origin::request(crate::toys::request(2), 0),
         ann_in(77),
-    );
+    )
+    .fingerprinted(crate::toys::fingerprint(2));
     let recorded =
         handle::<Club, _, _>(db.begin(), &routes(&r), &paid, &at(20), &r, &mut ()).unwrap();
 
@@ -880,7 +881,8 @@ fn a_redelivered_webhook_fact_is_a_duplicate() {
         AccountFact::PaymentReceived(5),
         Origin::fact("pi_1", "Stripe webhook"),
         Provenance::default(),
-    );
+    )
+    .fingerprinted(fingerprint(1));
     handle::<Account, _, _>(store.begin(), &Routes::new(), &payment, &at(2), &r, &mut ()).unwrap();
 
     let again =
@@ -905,6 +907,22 @@ fn a_redelivered_webhook_fact_is_a_duplicate() {
         2,
         "recorded once"
     );
+
+    // The source re-used the id for another payload: still the same fact,
+    // already recorded (angzarr leaves this case open; see the design).
+    let reused = Book::fact(
+        account.clone(),
+        AccountFact::PaymentReceived(500),
+        Origin::fact("pi_1", "Stripe webhook"),
+        Provenance::default(),
+    )
+    .fingerprinted(fingerprint(9));
+    assert!(matches!(
+        handle::<Account, _, _>(store.begin(), &Routes::new(), &reused, &at(4), &r, &mut ()),
+        Err(Failure::Kernel(KernelError::Store(
+            StoreError::Duplicate { .. }
+        )))
+    ));
 }
 
 #[test]
@@ -938,17 +956,63 @@ fn a_retried_request_is_a_duplicate_and_a_rejection_is_released() {
         })))
     ));
 
-    let keyless = Book::command(
+    let unkeyed = Book::minting(
         account.clone(),
         AccountCmd::Deposit(1),
-        Origin::keyless(),
         Provenance::default(),
     );
-    run(&mut store, &keyless).unwrap();
-    run(&mut store, &keyless).unwrap();
+    run(&mut store, &unkeyed).unwrap();
+    run(&mut store, &unkeyed).unwrap();
+    let log = store.read(&account).unwrap().unwrap().events;
+    assert_eq!(
+        log.len(),
+        5,
+        "a request whose id was minted is never deduplicated"
+    );
+    assert_eq!(
+        log[4].meta.origin,
+        Origin::minted(crate::toys::minted(2)),
+        "but its minted id is recorded, for audit"
+    );
+}
+
+#[test]
+#[ignore = "proposal: a request key reused for another payload is refused, never answered DUPLICATE"]
+fn a_request_key_reused_for_another_payload_is_refused() {
+    use crate::toys::{fees, Account, AccountCmd};
+    let mut store = InMemoryStore::new();
+    let account = opened(&mut store);
+    let r = fees("fees-1", 0);
+    let run = |store: &mut InMemoryStore<_>, b: &annals::next::BookOf<Account>| {
+        handle::<Account, _, _>(store.begin(), &Routes::new(), b, &at(2), &r, &mut ())
+    };
+
+    let deposit = book_at::<Account>(&account, AccountCmd::Deposit(10), 8);
+    run(&mut store, &deposit).unwrap();
+    let other =
+        book_at::<Account>(&account, AccountCmd::Deposit(99), 8).fingerprinted(fingerprint(99));
+    let failure = run(&mut store, &other).err().unwrap();
+    assert_eq!(
+        failure,
+        Failure::Kernel(KernelError::Store(StoreError::KeyReused {
+            stream: account.clone(),
+            origin: Origin::request(crate::toys::request(8), 0),
+        })),
+        "angzarr's FAILED_PRECONDITION: the key is bound to another payload"
+    );
+    assert_eq!(failure.recovery(), Recovery::Bug, "the caller's bug");
     assert_eq!(
         store.read(&account).unwrap().unwrap().len,
-        5,
-        "a keyless request is never deduplicated"
+        2,
+        "nothing written"
+    );
+    assert!(
+        matches!(
+            run(&mut store, &deposit),
+            Err(Failure::Kernel(KernelError::Store(
+                StoreError::Duplicate { .. }
+            )))
+        ),
+        "the same bytes again: DUPLICATE"
     );
 }

@@ -162,6 +162,12 @@ pub enum StoreError {
         from: Seq,
         to: Seq,
     },
+    /// The client-supplied request key `origin` was already recorded in
+    /// `stream` for a payload with another fingerprint: the key was reused
+    /// for a different command. Nothing was committed, and the earlier
+    /// command is not answered: angzarr's FAILED_PRECONDITION, never
+    /// DUPLICATE.
+    KeyReused { stream: StreamKey, origin: Origin },
     /// The store failed: I/O, a timeout, a dropped connection. The adapter's
     /// own error, as a report. An append may or may not have landed.
     Unavailable(Report),
@@ -192,8 +198,8 @@ pub enum Recovery {
     /// The domain said no: a rejection, at the origin or downstream. The
     /// same command will be refused the same way; tell the person.
     Business,
-    /// A bug or a misconfiguration: a malformed book, a discontinuous
-    /// append, a key of the wrong domain, a chain too deep, unknown rules, a
+    /// A bug or a misconfiguration: a malformed book, a request key reused
+    /// for another payload, a discontinuous append, a key of the wrong domain, a chain too deep, unknown rules, a
     /// log that does not replay, an event the store cannot read back.
     /// Retrying will not help; an operator must.
     Bug,
@@ -219,6 +225,8 @@ impl KernelError {
 
 impl StoreError {
     pub fn recovery(&self) -> Recovery {
-        todo!("proposal: Conflict and Unavailable Retry; Duplicate Done; the rest Bug")
+        todo!(
+            "proposal: Conflict and Unavailable Retry; Duplicate Done; KeyReused and the rest Bug"
+        )
     }
 }

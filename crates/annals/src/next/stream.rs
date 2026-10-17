@@ -63,9 +63,11 @@ impl<D: Domain> Stream<D> {
     /// ([`Domain::decide`], in a staging [`Tx`](super::Tx), with the window
     /// and a nonce under AGGREGATE_HANDLES, checked after it returns), a
     /// fact ingested ([`Domain::ingest`], infallible). COMMUTATIVE is
-    /// resolved by the kernel ([`Domain::changed`]). Every event is stamped
-    /// with one [`Meta`]: the book's actor, its resolved correlation
-    /// ([`Book::correlation`](super::Book::correlation)), its origin,
+    /// resolved by the kernel, by conflict units ([`Domain::COMMUTATIVE`]).
+    /// Every event is stamped with one [`Meta`]: the book's actor, its
+    /// resolved correlation ([`Book::correlation`](super::Book::correlation)),
+    /// its resolved origin ([`Book::origin`](super::Book::origin): a
+    /// request id always set, minted from `sampled.request` if absent),
     /// `recorded_at = max(sampled.now, the last event's)`, `base_sequence =
     /// the head`, and the current rules version.
     pub fn decide(

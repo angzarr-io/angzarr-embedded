@@ -16,9 +16,10 @@
 //!   anywhere, the originating command's events included.
 //! - **On success** every staged stream is appended through the unit of
 //!   work, each checked against the length it was loaded at (optimistic
-//!   concurrency on every stream touched), the originating command's key is
-//!   recorded if it has one ([`UnitOfWork::record_command`]), and the unit
-//!   of work committed: one transaction.
+//!   concurrency on every stream touched), the originating book's claim is
+//!   recorded if its origin is keyed ([`UnitOfWork::record_command`]: a
+//!   client-supplied request id or a fact, with the payload's
+//!   fingerprint), and the unit of work committed: one transaction.
 //! - **Then projections run**, on committed events only. A failed chain is
 //!   never seen by one, and a failing projection never undoes the commit:
 //!   it is reported in [`Recorded::projector_failures`].
@@ -52,7 +53,7 @@ use super::book::{BookOf, Sampled};
 use super::domain::Domain;
 use super::error::{Failure, KernelError, Step, StepError};
 use super::handler::Handler;
-use super::id::{Seq, StreamKey};
+use super::id::{Fingerprint, Seq, StreamKey};
 use super::meta::Origin;
 use super::reaction::{Policy, Projection};
 use super::store::{AsyncEventStore, AsyncUnitOfWork, EventStore, UnitOfWork};
@@ -142,7 +143,8 @@ impl<'r, U: 'r> Default for AsyncRoutes<'r, U> {
 /// A command chain in progress: every stream it has touched, loaded once
 /// from the unit of work and staged since, the path from the originating
 /// command to the step running now, and what the application sampled for
-/// the whole chain (one instant; the minted correlation, for the origin).
+/// the whole chain (one instant; the minted request id and the
+/// derivations, for the originating book).
 pub struct Chain<'u, 'r, U> {
     store: &'u mut U,
     routes: &'u Routes<'r, U>,
@@ -154,9 +156,10 @@ pub struct Chain<'u, 'r, U> {
     /// The order streams were first touched in: the order they are
     /// appended in.
     order: Vec<StreamKey>,
-    /// The originating book's stream and origin, recorded at append when
+    /// The originating book's stream, resolved origin and fingerprint,
+    /// recorded at append as a [`Claim`](super::Claim) when the origin is
     /// keyed ([`UnitOfWork::record_command`]).
-    origin: Option<(StreamKey, Origin)>,
+    origin: Option<(StreamKey, Origin, Option<Fingerprint>)>,
     path: Vec<Step>,
     limit: usize,
     /// Mints each delivery's [`Nonce`](super::Nonce): a counter, so the
@@ -223,16 +226,19 @@ impl<'u, 'r, U> Chain<'u, 'r, U> {
 
     /// The whole chain succeeded: append every staged stream through the
     /// unit of work, in the order first touched, each expecting the length
-    /// it was loaded at, then record the originating book's key if it has
-    /// one. A conflict on any stream is a
-    /// [`StoreError::Conflict`](super::StoreError::Conflict) naming it, and
-    /// a recorded key a [`StoreError::Duplicate`](super::StoreError::Duplicate);
-    /// the caller then drops the unit of work uncommitted.
+    /// it was loaded at, then record the originating book's claim if its
+    /// origin is keyed (its key, fingerprint and applied range). A conflict
+    /// on any stream is a
+    /// [`StoreError::Conflict`](super::StoreError::Conflict) naming it, a
+    /// recorded key a [`StoreError::Duplicate`](super::StoreError::Duplicate)
+    /// or, reused for another payload, a
+    /// [`StoreError::KeyReused`](super::StoreError::KeyReused); the caller
+    /// then drops the unit of work uncommitted.
     pub fn append(self) -> Result<Recorded, KernelError>
     where
         U: UnitOfWork,
     {
-        todo!("proposal: append each staged stream's new events, then record_command")
+        todo!("proposal: append each staged stream's new events, then record_command(Claim)")
     }
 }
 

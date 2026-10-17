@@ -14,15 +14,19 @@ use super::id::{Actor, Correlation, EventId, RequestId, RulesVersion, Seq, Times
 pub struct Provenance {
     /// `None` for the system itself: a scheduled job, a migration.
     pub actor: Option<Actor>,
-    /// `None`: derived from the command's key, else minted (see
-    /// [`Correlation`]).
+    /// `None`: derived from the command's origin ([`Correlation::derived`]).
     pub correlation: Option<Correlation>,
 }
 
 /// Why a command exists, and therefore why its events exist: exactly one of
 /// three (angzarr's `Origin`). The same value is the command's origin, every
-/// one of its events' origin ([`Meta::origin`]) and, where it is keyed, the
-/// command's idempotency key.
+/// one of its events' origin ([`Meta::origin`]) and, where it is keyed
+/// ([`Origin::is_keyed`]), the command's idempotency key.
+///
+/// A request's id is always set: a book whose caller supplied none has no
+/// origin ([`Book::origin`](super::Book::origin) is `None`), and the kernel
+/// records it as a request with the application's minted id
+/// ([`Origin::minted`]).
 ///
 /// It must agree with the command's body ([`Body`](super::Body)): a fact
 /// requires [`Origin::Fact`]; a command requires a request or a causation.
@@ -39,14 +43,23 @@ pub enum Origin {
     Fact(FactOrigin),
 }
 
-/// A command issued directly by a caller. Keyed by (request, index) when
-/// `request` is set; a keyless request (`request: None`) is accepted, given
-/// a minted correlation, and is never deduplicated.
+/// A command issued directly by a caller, as part of one inbound request.
+/// `request` is always set; `minted` says whose it is.
+///
+/// - **Client-supplied** (`minted: false`): the caller's id, reused on
+///   every retry. `(request, index)` is the command's idempotency key at
+///   the addressed stream.
+/// - **Minted** (`minted: true`): the caller supplied none, and the kernel
+///   recorded the application's UUIDv7 ([`Sampled::request`](super::Sampled::request)).
+///   For audit only: never recorded as a key, never deduplicating (a
+///   retry gets another). Only the kernel sets it: a book that arrives
+///   with `minted` set is [`Malformed::MintedBySender`](super::Malformed::MintedBySender).
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct RequestOrigin {
-    pub request: Option<RequestId>,
+    pub request: RequestId,
     /// The command's position within its request.
     pub index: u32,
+    pub minted: bool,
 }
 
 /// A policy's command: the `index`th the policy named `component`
@@ -71,20 +84,22 @@ pub struct FactOrigin {
 }
 
 impl Origin {
-    /// The `index`th command of `request`.
-    pub fn request(request: impl Into<RequestId>, index: u32) -> Origin {
+    /// The `index`th command of the client-supplied request `request`.
+    pub fn request(request: RequestId, index: u32) -> Origin {
         Origin::Request(RequestOrigin {
-            request: Some(request.into()),
+            request,
             index,
+            minted: false,
         })
     }
 
-    /// A command with no request key: never deduplicated, its correlation
-    /// minted.
-    pub fn keyless() -> Origin {
+    /// The origin the kernel records for a book with none: the request
+    /// `request`, minted by the application, index 0.
+    pub fn minted(request: RequestId) -> Origin {
         Origin::Request(RequestOrigin {
-            request: None,
+            request,
             index: 0,
+            minted: true,
         })
     }
 
@@ -106,9 +121,11 @@ impl Origin {
 
     /// Whether this origin is a key the store may record
     /// ([`UnitOfWork::record_command`](super::UnitOfWork::record_command)):
-    /// a request with an id, or a fact.
+    /// a request with a client-supplied id, or a fact. Never a minted
+    /// request, and never a causation (annals records only a chain's
+    /// originating book).
     pub fn is_keyed(&self) -> bool {
-        todo!("proposal: Request with Some(request), or Fact")
+        todo!("proposal: Request with !minted, or Fact")
     }
 }
 

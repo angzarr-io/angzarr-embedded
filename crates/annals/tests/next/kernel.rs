@@ -6,15 +6,16 @@
 use std::collections::BTreeSet;
 
 use annals::next::{
-    Book, BookOf, Causation, ConflictResolution, Correlation, EditionName, EmptyEditionName,
-    EventId, Failure, KernelError, Malformed, Meta, Origin, Provenance, Recovery, ReplayError,
-    Root, RulesVersion, Stream, StreamKey, Timestamp,
+    Book, BookOf, Causation, ConflictResolution, Correlation, DeriveIds, EditionName,
+    EmptyEditionName, EventId, Failure, KernelError, Key, Malformed, Meta, Origin, Provenance,
+    Recovery, ReplayError, RequestId, RequestOrigin, Root, RulesVersion, Stream, StreamKey,
+    Timestamp, UnitPath, Units, Uuid,
 };
 
 use crate::toys::{
-    ann, ann_in, at, book, correlation, edition, fees, key, no_rules, request, set, stream,
-    Account, AccountCmd, AccountEvent, AccountFact, Balance, Fees, Jug, JugCmd, Refused, Shelf,
-    WasSet,
+    ann, ann_in, at, book, correlation, edition, fees, fingerprint, key, minted, no_rules, request,
+    set, stream, Account, AccountCmd, AccountEvent, AccountFact, Balance, Fees, Jug, JugCmd,
+    Refused, Set, Shelf, ShelfCmd, ShelfEvent, ToyIds, WasSet,
 };
 
 /// Account 1, opened at 10 (request 1) and credited `cents` at 20
@@ -180,7 +181,8 @@ fn the_kernel_stamps_one_meta_on_every_event_of_a_write() {
         JugCmd::Pour,
         Origin::request(request(42), 2),
         ann_in(9),
-    );
+    )
+    .fingerprinted(fingerprint(42));
     let poured = s
         .execute(&pour, &at(1_700_000_000_000_000), &rules, &mut [])
         .unwrap();
@@ -203,58 +205,93 @@ fn the_kernel_stamps_one_meta_on_every_event_of_a_write() {
 }
 
 #[test]
-#[ignore = "proposal: correlation is the caller's, else derived from the key, else minted"]
-fn correlation_is_given_else_derived_else_minted() {
+#[ignore = "proposal: correlation is the caller's, else the request id, else the fact's v5"]
+fn correlation_is_given_else_derived_from_the_origin() {
     assert_eq!(
-        Correlation::derived(&Origin::request(request(1), 0)),
-        Some(Correlation("req-1".to_string())),
-        "a keyed request: every retry lands in one correlation"
+        Correlation::derived(&Origin::request(request(1), 0), &ToyIds),
+        Some(Correlation(request(1).0)),
+        "a request: its id verbatim, so every retry lands in one correlation"
     );
     assert_eq!(
-        Correlation::derived(&Origin::fact("pi_1234", "Stripe webhook")),
-        Some(Correlation("pi_1234".to_string())),
-        "a fact: its external id"
+        Correlation::derived(&Origin::minted(minted(5)), &ToyIds),
+        Some(Correlation(minted(5).0)),
+        "a minted request id just the same"
     );
-    assert_eq!(Correlation::derived(&Origin::keyless()), None);
+    assert_eq!(
+        Correlation::derived(&Origin::fact("pi_1234", "Stripe webhook"), &ToyIds),
+        Some(ToyIds.fact_correlation("pi_1234")),
+        "a fact: the application's UUIDv5 of its external id"
+    );
+    let causation = Origin::Causation(Causation {
+        event: EventId {
+            stream: key(9, "ledger"),
+            seq: 0,
+        },
+        component: "books".to_string(),
+        index: 0,
+    });
+    assert_eq!(
+        Correlation::derived(&causation, &ToyIds),
+        None,
+        "a causation is stamped from its trigger, never derived"
+    );
 
     let mut s = stream::<Jug>(2);
     let rules = no_rules();
 
-    let keyless = Book::command(
-        s.key().clone(),
-        JugCmd::Fill(7, 3),
-        Origin::keyless(),
-        Provenance::default(),
-    );
-    assert_eq!(
-        keyless.correlation(&at(5).minted),
-        Correlation("minted-5".to_string())
-    );
-    s.execute(&keyless, &at(5), &rules, &mut []).unwrap();
-    assert_eq!(
-        s.events()[0].meta.correlation,
-        Correlation("minted-5".to_string()),
-        "minted by the application, never empty"
-    );
-    assert_eq!(s.events()[0].meta.actor, None, "the system");
-
-    let keyed = book(&s, JugCmd::Pour, 1);
-    s.execute(&keyed, &at(6), &rules, &mut []).unwrap();
-    assert!(s.events()[1..]
-        .iter()
-        .all(|e| e.meta.correlation == Correlation("req-1".to_string())));
+    let keyed = book(&s, JugCmd::Fill(7, 3), 1);
+    s.execute(&keyed, &at(5), &rules, &mut []).unwrap();
+    assert_eq!(s.events()[0].meta.correlation, Correlation(request(1).0));
 
     let given = Book::command(
         s.key().clone(),
         JugCmd::Fill(1, 1),
         Origin::request(request(2), 0),
         ann_in(77),
-    );
+    )
+    .fingerprinted(fingerprint(2));
     s.execute(&given, &at(7), &rules, &mut []).unwrap();
     assert_eq!(
         s.events().last().unwrap().meta.correlation,
         correlation(77),
         "a given correlation is kept"
+    );
+}
+
+#[test]
+#[ignore = "proposal: a request id is always assigned; minted when the caller gave none"]
+fn a_request_id_is_always_assigned() {
+    let mut s = stream::<Jug>(2);
+    let rules = no_rules();
+    let unkeyed = Book::minting(s.key().clone(), JugCmd::Fill(7, 3), Provenance::default());
+    assert_eq!(unkeyed.origin, None, "the caller supplied no request id");
+    assert_eq!(unkeyed.validate(), Ok(()), "needing no fingerprint");
+    assert_eq!(unkeyed.origin(&at(5)), Origin::minted(minted(5)));
+    assert_eq!(unkeyed.correlation(&at(5)), Correlation(minted(5).0));
+
+    s.execute(&unkeyed, &at(5), &rules, &mut []).unwrap();
+    let meta = &s.events()[0].meta;
+    assert_eq!(
+        meta.origin,
+        Origin::Request(RequestOrigin {
+            request: minted(5),
+            index: 0,
+            minted: true
+        }),
+        "recorded with the application's id, flagged minted, for audit"
+    );
+    assert!(!meta.origin.is_keyed(), "a minted id is never a key");
+    assert_eq!(meta.correlation, Correlation(minted(5).0));
+    assert_eq!(meta.actor, None, "the system");
+
+    assert!(Origin::request(request(1), 0).is_keyed());
+    assert!(Origin::fact("pi_1", "Stripe").is_keyed());
+
+    let keyed = book(&s, JugCmd::Pour, 1);
+    assert_eq!(
+        keyed.origin(&at(6)),
+        Origin::request(request(1), 0),
+        "a client-supplied id is kept; the minted one goes unused"
     );
 }
 
@@ -308,6 +345,7 @@ fn a_malformed_book_is_refused_before_business_code() {
         index: 0,
     });
 
+    let print = fingerprint(3);
     let cases = [
         (
             Book::fact(k.clone(), paid(), Origin::request(request(3), 0), ann()),
@@ -327,9 +365,26 @@ fn a_malformed_book_is_refused_before_business_code() {
             Malformed::FactWithExpectedSequence,
         ),
         (
-            Book::command(k.clone(), deposit(), causation, Provenance::default())
+            Book::command(k.clone(), deposit(), causation.clone(), ann_in(4))
                 .expecting(2, ConflictResolution::Strict),
             Malformed::HandlingOnReaction,
+        ),
+        (
+            Book::command(k.clone(), deposit(), causation, Provenance::default()),
+            Malformed::CausationWithoutCorrelation,
+        ),
+        (
+            Book::command(k.clone(), deposit(), Origin::minted(minted(3)), ann())
+                .fingerprinted(print),
+            Malformed::MintedBySender,
+        ),
+        (
+            Book::command(k.clone(), deposit(), Origin::request(request(3), 0), ann()),
+            Malformed::Unfingerprinted,
+        ),
+        (
+            Book::fact(k.clone(), paid(), Origin::fact("pi_1", "Stripe"), ann()),
+            Malformed::Unfingerprinted,
         ),
     ];
     for (bad, malformed) in cases {
@@ -348,13 +403,14 @@ fn a_malformed_book_is_refused_before_business_code() {
 
     assert_eq!(
         BookOf::<Account>::fact(k.clone(), paid(), Origin::fact("pi_1", "Stripe"), ann())
+            .fingerprinted(print)
             .validate(),
         Ok(())
     );
     assert_eq!(
-        BookOf::<Account>::command(k, deposit(), Origin::keyless(), ann()).validate(),
+        BookOf::<Account>::minting(k, deposit(), ann()).validate(),
         Ok(()),
-        "a keyless request is a request"
+        "a request whose id is minted needs no fingerprint"
     );
 }
 
@@ -379,7 +435,8 @@ fn a_fact_is_ingested_never_decided_and_never_refused() {
         AccountFact::PaymentReceived(5),
         Origin::fact("pi_1", "Stripe webhook"),
         Provenance::default(),
-    );
+    )
+    .fingerprinted(fingerprint(1));
     let recorded = s.execute(&payment, &at(2), &rules, &mut []).unwrap();
     assert_eq!(
         recorded[0].event,
@@ -392,7 +449,8 @@ fn a_fact_is_ingested_never_decided_and_never_refused() {
     );
     assert_eq!(
         recorded[0].meta.correlation,
-        Correlation("pi_1".to_string())
+        ToyIds.fact_correlation("pi_1"),
+        "derived by the application: UUIDv5 under angzarr's namespace"
     );
 
     let open = book(&s, AccountCmd::Open, 2);
@@ -402,7 +460,8 @@ fn a_fact_is_ingested_never_decided_and_never_refused() {
         AccountFact::PaymentReceived(7),
         Origin::fact("pi_2", "Stripe webhook"),
         Provenance::default(),
-    );
+    )
+    .fingerprinted(fingerprint(2));
     let recorded = s.execute(&again, &at(4), &rules, &mut []).unwrap();
     assert_eq!(recorded[0].event, AccountEvent::Deposited(7));
     assert_eq!(s.state().cents, 7);
@@ -452,11 +511,11 @@ fn aggregate_handles_demands_the_nonce_back() {
     let e = s.execute(&resolved, &at(2), &rules, &mut []).unwrap();
     assert_eq!(
         e[0].event,
-        WasSet {
+        ShelfEvent::WasSet(WasSet {
             item: "a".to_string(),
             count: 5,
             window: Some(1)
-        },
+        }),
         "decide saw the one event it had not seen"
     );
     assert_eq!(e[0].meta.base_sequence, 2, "decided against the head");
@@ -464,13 +523,16 @@ fn aggregate_handles_demands_the_nonce_back() {
     let empty = book(&s, set("c", 1), 3).expecting(3, ConflictResolution::AggregateHandles);
     let e = s.execute(&empty, &at(3), &rules, &mut []).unwrap();
     assert_eq!(
-        e[0].event.window,
+        window(&e[0].event),
         Some(0),
         "an empty window is handed over too"
     );
 
-    let mut careless = set("b", 9);
-    careless.resolve = false;
+    let careless = ShelfCmd::Set(Set {
+        item: "b".to_string(),
+        count: 9,
+        resolve: false,
+    });
     let unresolved = book(&s, careless, 4).expecting(1, ConflictResolution::AggregateHandles);
     let failure = s.execute(&unresolved, &at(4), &rules, &mut []).unwrap_err();
     assert_eq!(
@@ -486,9 +548,83 @@ fn aggregate_handles_demands_the_nonce_back() {
     assert_eq!(s.len(), 4, "its events were discarded");
 }
 
+/// The window a shelf's `WasSet` saw.
+fn window(event: &ShelfEvent) -> Option<usize> {
+    match event {
+        ShelfEvent::WasSet(set) => set.window,
+        other => panic!("not a set: {other:?}"),
+    }
+}
+
+/// Units from paths written as text (no bytes keys).
+fn units(paths: &[&str]) -> Units {
+    paths
+        .iter()
+        .map(|p| match p.strip_prefix('*') {
+            Some(rest) => UnitPath::field(rest).wildcard(),
+            None => UnitPath::field(p),
+        })
+        .collect()
+}
+
 #[test]
-#[ignore = "proposal: COMMUTATIVE keeps a command whose fields are disjoint from the window's"]
-fn commutative_accepts_disjoint_changes_and_refuses_overlapping_ones() {
+#[ignore = "proposal: unit paths are angzarr's syntax, escaped once by the kernel"]
+fn unit_paths_follow_angzarrs_syntax() {
+    let items = UnitPath::field("items");
+    let path = |p: &UnitPath| p.to_string();
+    assert_eq!(
+        path(&items.key(Key::Uint(42)).dot("weight")),
+        "items[42].weight"
+    );
+    assert_eq!(path(&items.key(Key::Int(-1))), "items[-1]");
+    assert_eq!(path(&items.key(Key::Bool(true))), "items[true]");
+    assert_eq!(path(&UnitPath::field("columns").order()), "columns[#order]");
+    assert_eq!(
+        path(&items.key(Key::Str("#order"))),
+        "items[\\#order]",
+        "a key never starts with a bare #, so it never collides with [#order]"
+    );
+    assert_eq!(path(&items.key(Key::Str("a]b\\c"))), "items[a\\]b\\\\c]");
+    assert_eq!(
+        items.key(Key::Bytes(&[0xff, b']'])).as_bytes(),
+        b"items[\xff\\]]",
+        "bytes keys are raw"
+    );
+    assert_eq!(path(&UnitPath::field("notes").wildcard()), "*notes");
+    assert!(UnitPath::unknown().is_wildcard());
+}
+
+#[test]
+#[ignore = "proposal: overlap is equality or a prefix at a . or [ boundary; a wildcard overlaps everything"]
+fn units_overlap_by_angzarrs_rule() {
+    let overlaps = |a: &[&str], b: &[&str]| units(a).overlaps(&units(b));
+    let path = |p: &str| UnitPath::field(p);
+    assert!(
+        path("items[42]").overlaps(&path("items[42].weight")),
+        "a coarser unit"
+    );
+    assert!(
+        path("items[42].weight").overlaps(&path("items[42]")),
+        "either way round"
+    );
+    assert!(
+        !path("items[4]").overlaps(&path("items[42]")),
+        "not at a boundary"
+    );
+    assert!(!path("item").overlaps(&path("items")));
+    assert!(path("settings").overlaps(&path("settings.cooldown_days")));
+
+    assert!(overlaps(&["items[a]"], &["items[a]", "columns"]));
+    assert!(!overlaps(&["items[a]"], &["items[b]", "columns"]));
+    assert!(overlaps(&["*notes"], &["items[b]"]), "unmarked: fail-safe");
+    assert!(overlaps(&["items[b]"], &["*notes"]));
+    assert!(!overlaps(&["*notes"], &[]), "nothing to overlap");
+    assert!(!overlaps(&[], &["items[a]"]), "an empty window commutes");
+}
+
+#[test]
+#[ignore = "proposal: COMMUTATIVE keeps a command whose conflict units are disjoint from the window's"]
+fn commutative_accepts_disjoint_units_and_refuses_overlapping_ones() {
     let mut s = shelf_a_b();
     let rules = no_rules();
 
@@ -496,12 +632,14 @@ fn commutative_accepts_disjoint_changes_and_refuses_overlapping_ones() {
     let disjoint = book(&s, set("a", 5), 2).expecting(1, ConflictResolution::Commutative);
     let e = s.execute(&disjoint, &at(2), &rules, &mut []).unwrap();
     assert_eq!(
-        e[0].event.window, None,
+        window(&e[0].event),
+        None,
         "the kernel resolves; decide is never handed the window"
     );
-    assert_eq!(s.state().0["a"], 5);
+    assert_eq!(s.state().items["a"], 5);
 
-    // Issued at the same point; the window (b, a) overlaps the command (b).
+    // Issued at the same point; the window (items b and a) overlaps the
+    // command (items[b]).
     let overlapping = book(&s, set("b", 7), 3).expecting(1, ConflictResolution::Commutative);
     assert_eq!(
         s.execute(&overlapping, &at(3), &rules, &mut [])
@@ -512,21 +650,70 @@ fn commutative_accepts_disjoint_changes_and_refuses_overlapping_ones() {
             actual: 3
         })
     );
-    assert_eq!(s.state().0["b"], 2);
+    assert_eq!(s.state().items["b"], 2);
 
-    let mut account = opened_with(100);
-    let unsupported =
-        book(&account, AccountCmd::Deposit(1), 3).expecting(2, ConflictResolution::Commutative);
+    // The columns and the settings are units of their own.
+    let columns = book(&s, ShelfCmd::Columns(vec!["due".to_string()]), 4)
+        .expecting(1, ConflictResolution::Commutative);
+    s.execute(&columns, &at(4), &rules, &mut []).unwrap();
+    let cooldown = book(&s, ShelfCmd::Cooldown(3), 5).expecting(1, ConflictResolution::Commutative);
+    s.execute(&cooldown, &at(5), &rules, &mut []).unwrap();
+    assert_eq!(s.len(), 5);
+}
+
+#[test]
+#[ignore = "proposal: an unmarked field makes COMMUTATIVE as strict as STRICT"]
+fn an_unmarked_field_conflicts_with_everything() {
+    let mut s = shelf_a_b();
+    let rules = no_rules();
+    let note = book(&s, ShelfCmd::Note("restock".to_string()), 2);
+    s.execute(&note, &at(2), &rules, &mut []).unwrap();
+
+    // Behind the note: the window changed `notes`, which carries no marker.
+    let behind = book(&s, set("c", 1), 3).expecting(2, ConflictResolution::Commutative);
     assert_eq!(
-        account
-            .execute(&unsupported, &at(30), &fees("fees-1", 0), &mut [])
-            .unwrap_err(),
-        Failure::Kernel(KernelError::Malformed {
-            stream: key(1, "account"),
-            malformed: Malformed::CommutativeUnsupported
+        s.execute(&behind, &at(3), &rules, &mut []).unwrap_err(),
+        Failure::Kernel(KernelError::Stale {
+            stream: key(3, "shelf"),
+            expected: 2,
+            actual: 3
         }),
-        "a domain that cannot say what changed cannot be commutative"
+        "never a blind merge"
     );
+
+    // A note issued behind an item change conflicts the other way round.
+    let late_note = book(&s, ShelfCmd::Note("count".to_string()), 4)
+        .expecting(1, ConflictResolution::Commutative);
+    assert!(s.execute(&late_note, &at(4), &rules, &mut []).is_err());
+
+    // At the head nothing is stale, whatever the units.
+    let current = book(&s, ShelfCmd::Note("done".to_string()), 5)
+        .expecting(3, ConflictResolution::Commutative);
+    s.execute(&current, &at(5), &rules, &mut []).unwrap();
+}
+
+#[test]
+#[ignore = "proposal: COMMUTATIVE is refused for a state that is not commutative_state"]
+fn commutative_is_refused_for_a_state_without_conflict_units() {
+    let mut account = opened_with(100);
+    for unsupported in [
+        book(&account, AccountCmd::Deposit(1), 3).expecting(2, ConflictResolution::Commutative),
+        book(&account, AccountCmd::Deposit(1), 4).expecting(1, ConflictResolution::Commutative),
+    ] {
+        let failure = account
+            .execute(&unsupported, &at(30), &fees("fees-1", 0), &mut [])
+            .unwrap_err();
+        assert_eq!(
+            failure,
+            Failure::Kernel(KernelError::Malformed {
+                stream: key(1, "account"),
+                malformed: Malformed::CommutativeUnsupported
+            }),
+            "refused before decide, stale or not"
+        );
+        assert_eq!(failure.recovery(), Recovery::Bug);
+    }
+    assert_eq!(account.len(), 2);
 }
 
 #[test]
@@ -620,6 +807,26 @@ fn a_uuid_is_a_root() {
     assert_eq!(root.to_bytes(), uuid);
     assert_eq!(root.0 >> 120, 0x67, "big-endian, as a UUID is written");
     assert_eq!(Root::from(7u64), Root(7));
+}
+
+#[test]
+fn a_uuid_is_its_bytes_and_text_is_for_display() {
+    let id = Uuid([
+        0x01, 0x8f, 0x3c, 0x2a, 0x7b, 0x10, 0x7c, 0xde, 0x8a, 0x00, 0x00, 0x11, 0x22, 0x33, 0x44,
+        0xff,
+    ]);
+    assert_eq!(id.to_string(), "018f3c2a-7b10-7cde-8a00-0011223344ff");
+    assert_eq!(id.version(), 7);
+    assert_eq!(Uuid::from_bytes(id.to_bytes()), id);
+    assert_eq!(
+        RequestId(id),
+        RequestId(Uuid(id.0)),
+        "compared as bytes, never as text"
+    );
+    assert!(
+        RequestId(Uuid([0; 16])) < RequestId(id),
+        "ordered as bytes: minted v7 ids sort by time"
+    );
 }
 
 #[test]

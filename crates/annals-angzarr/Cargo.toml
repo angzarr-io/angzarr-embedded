@@ -16,7 +16,7 @@ rust-version = "1.85"
 [dependencies]
 annals = { path = "../annals" }
 annals-diagnostic = { path = "../annals-diagnostic" }
-angzarr-proto = { git = "https://github.com/angzarr-io/angzarr-project", rev = "279bc896c33848f43d8492bf19c566c88f084ff0" }
+angzarr-proto = { git = "https://github.com/angzarr-io/angzarr-project", rev = "e733dd2bd7f07333d7972f309ab624466705f0aa" }
 prost = "0.14"
 prost-types = "0.14"
 
