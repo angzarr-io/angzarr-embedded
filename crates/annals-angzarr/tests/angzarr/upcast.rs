@@ -1,17 +1,14 @@
 //! Upcasting by type URL, with the router's semantics, and checked whole.
 
-use annals_angzarr::pb::{event_page, page_header, EventPage, PageHeader, UpcastRequest};
+use annals_angzarr::pb::{EventPage, UpcastRequest};
 use annals_angzarr::{pack, ChainProblem, Registry, UpcastChainError, Upcaster};
 
 use crate::toys::{account_upcaster, one_to_two, two_to_three, v1, v2, v3, v9, Account, Ledger};
 
 fn page(any: prost_types::Any) -> EventPage {
     EventPage {
-        header: Some(PageHeader {
-            sequence_type: Some(page_header::SequenceType::Sequence(u64::from(u32::MAX) + 1)),
-            sync_mode: None,
-        }),
-        payload: Some(event_page::Payload::Event(any)),
+        sequence: u64::from(u32::MAX) + 1,
+        payload: Some(any),
         ..EventPage::default()
     }
 }
@@ -49,11 +46,8 @@ fn upcasting_by_type_url_runs_a_v1_to_v2_to_v3_chain() {
 
     let old = page(pack(&v1::Deposit { amount: 2 }));
     let upcast = upcaster.upcast_page(&old).unwrap();
-    assert_eq!(upcast.header, old.header, "header kept");
-    assert_eq!(
-        upcast.payload,
-        Some(event_page::Payload::Event(current.clone()))
-    );
+    assert_eq!(upcast.sequence, old.sequence, "sequence kept");
+    assert_eq!(upcast.payload, Some(current.clone()));
 
     let request = UpcastRequest {
         domain: "ledger".to_string(),

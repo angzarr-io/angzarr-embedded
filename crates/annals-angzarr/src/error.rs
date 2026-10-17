@@ -16,38 +16,39 @@ use annals_diagnostic::Report;
 pub enum BookError {
     /// A book with no cover.
     NoCover,
-    /// A cover or an event ref with no root.
+    /// A cover with no root.
     NoRoot,
     /// A root that is not a UUID's 16 bytes.
     BadRoot {
         len: usize,
     },
-    /// An edition with explicit divergence points: angzarr's historical
-    /// branching, which annals does not model.
-    Divergences {
-        edition: String,
-    },
-    /// A command book for another domain than the command's.
+    /// A set but empty `Cover.edition`: the main timeline is the unset
+    /// edition, never `""` (angzarr refuses it INVALID_ARGUMENT too).
+    EmptyEdition,
+    /// An `EventRef` with no stream.
+    NoStream,
+    /// A command book for another domain than the book's.
     WrongDomain {
         found: String,
         expected: &'static str,
     },
-    /// A command book is one command: angzarr runs only a book's first
-    /// page, and annals refuses the rest rather than drop them.
-    NotOnePage {
-        pages: usize,
-    },
-    /// A page with no payload.
+    /// A command book with no page.
+    NoPage,
+    /// A page with neither a command nor a fact.
+    NoBody,
+    /// A command, a fact or an event with no payload.
     NoPayload,
-    /// A claim-check payload (`PayloadReference`): the payload is stored
-    /// elsewhere, and annals does not fetch it.
-    ExternalPayload,
-    /// A command with an external deferred sequence (a webhook's fact):
-    /// annals has no such commands.
-    ExternalDeferred,
-    /// A command with no request id: the request is half of the
-    /// idempotency key, so it is required.
-    NoRequest,
+    /// A causation origin with no event.
+    NoCausationEvent,
+    /// Event meta with no `recorded_at`: angzarr always records it.
+    NoRecordedAt,
+    /// Event meta with an empty correlation: never empty on a recorded
+    /// event.
+    NoCorrelation,
+    /// A `ConflictResolution` value this build does not know.
+    UnknownConflictResolution {
+        value: i32,
+    },
     /// A timestamp finer than the microsecond annals records.
     SubMicrosecond {
         seconds: i64,
@@ -126,7 +127,7 @@ pub enum ReadProblem {
     UnknownDomain,
     /// The stored page bytes are not an `EventPage`.
     Page(prost::DecodeError),
-    /// The page holds no inline payload.
+    /// The page holds no payload, or meta that does not read.
     Book(BookError),
     /// Upcasting failed.
     Upcast(UpcastError),

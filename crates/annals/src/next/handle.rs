@@ -1,34 +1,38 @@
 //! The command handler: a command and every reaction it sets off, as one
 //! atomic chain, in process.
 //!
-//! [`handle`] decides the command, then synchronously runs the policies
-//! and translations reacting to its events, which decide (or admit) in
-//! their targets, whose events set off their own reactions, and so on down
-//! the chain. Every event stays **staged in memory**, in a [`Chain`], across
-//! every stream involved; a later step sees the staged state of any stream
-//! an earlier step touched, the originating stream included. Nothing is
-//! appended until the whole chain has succeeded.
+//! [`handle`] handles the book (deciding a command, or ingesting a fact),
+//! then synchronously runs the policies reacting to its events, whose
+//! commands are decided in their targets, whose events set off their own
+//! policies, and so on down the chain. Every event stays **staged in
+//! memory**, in a [`Chain`], across every stream involved; a later step sees
+//! the staged state of any stream an earlier step touched, the originating
+//! stream included. Nothing is appended until the whole chain has
+//! succeeded.
 //!
-//! - **Any failure fails it all.** A policy's command rejected, a
-//!   translation's fact refused, a gap, the depth limit: the failure goes
-//!   back to the caller with the path to the step that failed
-//!   ([`Failure::Downstream`]), and nothing is appended anywhere, the
-//!   originating command's events included.
+//! - **Any failure fails it all.** A policy's command rejected, a gap, the
+//!   depth limit: the failure goes back to the caller with the path to the
+//!   step that failed ([`Failure::Downstream`]), and nothing is appended
+//!   anywhere, the originating command's events included.
 //! - **On success** every staged stream is appended through the unit of
 //!   work, each checked against the length it was loaded at (optimistic
-//!   concurrency on every stream touched), and the unit of work committed:
-//!   one transaction.
+//!   concurrency on every stream touched), the originating command's key is
+//!   recorded if it has one ([`UnitOfWork::record_command`]), and the unit
+//!   of work committed: one transaction.
 //! - **Then projections run**, on committed events only. A failed chain is
-//!   never seen by one.
+//!   never seen by one, and a failing projection never undoes the commit:
+//!   it is reported in [`Recorded::projector_failures`].
 //!
-//! Policies and translations are thereby inside the write side's
-//! consistency boundary, by choice: this is the in-process form of the
-//! pattern, where a reaction's target is updated in the same transaction as
-//! its source. A reaction that must cross a process or a service boundary
-//! is not one of these; it would read the committed log (a [`Position`]
-//! per stream, [`orders_owed`] / [`facts_owed`]) instead.
+//! **This is a deliberate divergence from angzarr** (see
+//! `docs/design/audit.md`, *Divergences*): angzarr appends one stream per
+//! write and runs reactions asynchronously, each its own command. annals
+//! keeps policies inside the write side's consistency boundary because it
+//! is the in-process runtime: one process, one transaction, no bus, no
+//! outbox and no retry loop. A reaction that must cross a process or a
+//! service boundary is not one of these; it reads the committed log (a
+//! [`Position`] per stream, [`orders_owed`]) instead.
 //!
-//! Which reactions run is a [`Routes`] table, keyed by source domain, so a
+//! Which policies run is a [`Routes`] table, keyed by source domain, so a
 //! chain can come back to a stream it already touched (A → B → A); a
 //! cascade deeper than the chain's limit is a
 //! [`KernelError::ChainTooDeep`], which is how a reaction cycle that never
@@ -40,17 +44,17 @@
 //!
 //! [`Position`]: super::Position
 //! [`orders_owed`]: super::orders_owed
-//! [`facts_owed`]: super::facts_owed
 
 use std::any::{Any, TypeId};
 use std::collections::BTreeMap;
 
+use super::book::{BookOf, Sampled};
 use super::domain::Domain;
 use super::error::{Failure, KernelError, Step, StepError};
 use super::handler::Handler;
 use super::id::{Seq, StreamKey};
-use super::meta::CommandMeta;
-use super::reaction::{Policy, Projection, Translation};
+use super::meta::Origin;
+use super::reaction::{Policy, Projection};
 use super::store::{AsyncEventStore, AsyncUnitOfWork, EventStore, UnitOfWork};
 use super::stream::Envelope;
 use super::version::Rulebook;
@@ -68,7 +72,7 @@ type Route<'r, U> = Box<
         + 'r,
 >;
 
-/// Which policies and translations react to which source domain, in the
+/// Which policies react to which source domain, in the
 /// order registered, with the rules of both ends. Built once; shared by
 /// every command. The async command handler takes an [`AsyncRoutes`].
 pub struct Routes<'r, U> {
@@ -100,19 +104,6 @@ impl<'r, U: 'r> Routes<'r, U> {
     {
         todo!("proposal: box a closure dispatching through policy() and chain.execute")
     }
-
-    /// Run `T` after any `T::Source` stream stages events: each fact it
-    /// owes is injected into its target, in the same chain.
-    pub fn translation<T: Translation>(
-        self,
-        source: &'r Rulebook<<T::Source as Domain>::Rules>,
-        target: &'r Rulebook<<T::Target as Domain>::Rules>,
-    ) -> Self
-    where
-        U: EventStore<<T::Source as Domain>::Event> + EventStore<<T::Target as Domain>::Event>,
-    {
-        todo!("proposal: box a closure dispatching through translation() and chain.inject")
-    }
 }
 
 /// [`Routes`] for the async command handler: the same table, its entries
@@ -140,19 +131,6 @@ impl<'r, U: 'r> AsyncRoutes<'r, U> {
     {
         todo!("proposal: as Routes::policy, async")
     }
-
-    /// As [`Routes::translation`].
-    pub fn translation<T: Translation>(
-        self,
-        source: &'r Rulebook<<T::Source as Domain>::Rules>,
-        target: &'r Rulebook<<T::Target as Domain>::Rules>,
-    ) -> Self
-    where
-        U: AsyncEventStore<<T::Source as Domain>::Event>
-            + AsyncEventStore<<T::Target as Domain>::Event>,
-    {
-        todo!("proposal: as Routes::translation, async")
-    }
 }
 
 impl<'r, U: 'r> Default for AsyncRoutes<'r, U> {
@@ -162,11 +140,13 @@ impl<'r, U: 'r> Default for AsyncRoutes<'r, U> {
 }
 
 /// A command chain in progress: every stream it has touched, loaded once
-/// from the unit of work and staged since, and the path from the
-/// originating command to the step running now.
+/// from the unit of work and staged since, the path from the originating
+/// command to the step running now, and what the application sampled for
+/// the whole chain (one instant; the minted correlation, for the origin).
 pub struct Chain<'u, 'r, U> {
     store: &'u mut U,
     routes: &'u Routes<'r, U>,
+    sampled: &'u Sampled,
     /// Each touched stream: the length it was loaded at, and the stream
     /// (a `Stream<D>`, boxed with how to append it) with the chain's events
     /// committed to it in memory.
@@ -174,21 +154,34 @@ pub struct Chain<'u, 'r, U> {
     /// The order streams were first touched in: the order they are
     /// appended in.
     order: Vec<StreamKey>,
+    /// The originating book's stream and origin, recorded at append when
+    /// keyed ([`UnitOfWork::record_command`]).
+    origin: Option<(StreamKey, Origin)>,
     path: Vec<Step>,
     limit: usize,
+    /// Mints each delivery's [`Nonce`](super::Nonce): a counter, so the
+    /// kernel needs no randomness.
+    nonces: u64,
 }
 
 impl<'u, 'r, U> Chain<'u, 'r, U> {
     /// An empty chain over `store`, reacting by `routes`, with
     /// [`DEFAULT_DEPTH_LIMIT`].
-    pub fn new(store: &'u mut U, routes: &'u Routes<'r, U>) -> Chain<'u, 'r, U> {
+    pub fn new(
+        store: &'u mut U,
+        routes: &'u Routes<'r, U>,
+        sampled: &'u Sampled,
+    ) -> Chain<'u, 'r, U> {
         Chain {
             store,
             routes,
+            sampled,
             staged: BTreeMap::new(),
             order: Vec::new(),
+            origin: None,
             path: Vec::new(),
             limit: DEFAULT_DEPTH_LIMIT,
+            nonces: 0,
         }
     }
 
@@ -209,57 +202,49 @@ impl<'u, 'r, U> Chain<'u, 'r, U> {
         &self.path
     }
 
-    /// Decide `cmd` in the stream `key` names (loaded from the store the
-    /// first time the chain touches it, staged after), stage its events,
+    /// Handle `book` in the stream it names (loaded from the store the
+    /// first time the chain touches it, staged after), as
+    /// [`Stream::decide`](super::Stream::decide) does, stage its events,
     /// then run the routes for `D` on them, depth first. A chain's first
-    /// `execute` is the originating command; a policy route's are the rest.
-    /// A key of another domain than `D` is a [`KernelError::WrongDomain`].
+    /// `execute` is the originating book (a command or a fact); a policy
+    /// route's are the rest, always commands. A key of another domain than
+    /// `D` is a [`KernelError::WrongDomain`].
     pub fn execute<D>(
         &mut self,
-        key: &StreamKey,
-        cmd: &D::Command,
-        meta: &CommandMeta,
+        book: &BookOf<D>,
         rules: &Rulebook<D::Rules>,
     ) -> Result<(), Failure<D::Rejection>>
     where
         D: Domain,
         U: EventStore<D::Event>,
     {
-        todo!("proposal: load or find, decide, stage, react")
-    }
-
-    /// Admit `fact` into the stream `key` names after placing its source
-    /// seq against the target's staged position (a translation route reads
-    /// that off the target's staged state), then run the routes for `D`.
-    pub fn inject<D>(
-        &mut self,
-        key: &StreamKey,
-        fact: D::Event,
-        meta: &CommandMeta,
-        rules: &Rulebook<D::Rules>,
-    ) -> Result<(), Failure<std::convert::Infallible>>
-    where
-        D: Domain,
-        U: EventStore<D::Event>,
-    {
-        todo!("proposal: load or find, admit, stage, react")
+        todo!("proposal: load or find, decide or ingest, stage, react")
     }
 
     /// The whole chain succeeded: append every staged stream through the
     /// unit of work, in the order first touched, each expecting the length
-    /// it was loaded at. A conflict on any is a
-    /// [`StoreError::Conflict`](super::StoreError::Conflict) naming it; the
-    /// caller then drops the unit of work uncommitted.
-    pub fn append(self) -> Result<Recorded, KernelError> {
-        todo!("proposal: append each staged stream's new events")
+    /// it was loaded at, then record the originating book's key if it has
+    /// one. A conflict on any stream is a
+    /// [`StoreError::Conflict`](super::StoreError::Conflict) naming it, and
+    /// a recorded key a [`StoreError::Duplicate`](super::StoreError::Duplicate);
+    /// the caller then drops the unit of work uncommitted.
+    pub fn append(self) -> Result<Recorded, KernelError>
+    where
+        U: UnitOfWork,
+    {
+        todo!("proposal: append each staged stream's new events, then record_command")
     }
 }
 
-/// Everything a chain recorded, every stream, after commit.
+/// Everything a chain recorded, every stream, after commit: angzarr's
+/// `CommandResponse.events` (one book per stream here, since a chain
+/// touches several), its delivery APPLIED.
 pub struct Recorded {
     /// Each stream touched, in the order first touched: the length it was
     /// loaded at, and the stream (a `Stream<D>`, boxed) after the chain.
     streams: Vec<(StreamKey, Seq, Box<dyn Any + Send>)>,
+    /// Projections that failed after the commit.
+    projector_failures: Vec<ProjectorFailure>,
 }
 
 impl Recorded {
@@ -285,51 +270,68 @@ impl Recorded {
     ) -> Result<(), KernelError> {
         todo!("proposal: Stream::dispatch from the loaded length")
     }
+
+    /// The projections that failed on the chain's events (angzarr's
+    /// `Outcome.projector_failures`). The commit stands regardless.
+    pub fn projector_failures(&self) -> &[ProjectorFailure] {
+        &self.projector_failures
+    }
+}
+
+/// One projection that failed after the commit.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ProjectorFailure {
+    /// The [`ProjectionRoute::name`].
+    pub projector: &'static str,
+    pub error: KernelError,
 }
 
 /// Projections the command handler runs after commit, over what the chain
-/// recorded: [`ProjectionRoute`]s; `()` is none, a pair is both.
+/// recorded: [`ProjectionRoute`]s; `()` is none, a pair is both. Each
+/// returns the projections that failed; a failure never stops the others.
 pub trait Project {
-    fn project(&mut self, recorded: &Recorded) -> Result<(), KernelError>;
+    fn project(&mut self, recorded: &Recorded) -> Vec<ProjectorFailure>;
 }
 
 /// A projection of one domain's streams, run after commit over every
 /// stream of that domain the chain recorded in.
 pub struct ProjectionRoute<'p, D: Domain, P: Projection<D>> {
+    /// Named in a [`ProjectorFailure`].
+    pub name: &'static str,
     pub projection: &'p mut P,
     pub rules: &'p Rulebook<D::Rules>,
 }
 
 impl Project for () {
-    fn project(&mut self, recorded: &Recorded) -> Result<(), KernelError> {
-        Ok(())
+    fn project(&mut self, recorded: &Recorded) -> Vec<ProjectorFailure> {
+        Vec::new()
     }
 }
 
 impl<A: Project, B: Project> Project for (A, B) {
-    fn project(&mut self, recorded: &Recorded) -> Result<(), KernelError> {
-        self.0.project(recorded)?;
-        self.1.project(recorded)
+    fn project(&mut self, recorded: &Recorded) -> Vec<ProjectorFailure> {
+        let mut failures = self.0.project(recorded);
+        failures.extend(self.1.project(recorded));
+        failures
     }
 }
 
 impl<D: Domain, P: Projection<D>> Project for ProjectionRoute<'_, D, P> {
-    fn project(&mut self, recorded: &Recorded) -> Result<(), KernelError> {
+    fn project(&mut self, recorded: &Recorded) -> Vec<ProjectorFailure> {
         todo!("proposal: dispatch each D stream recorded through projection()")
     }
 }
 
-/// Handle one command, with every reaction it sets off, as one atomic
-/// chain: [`Chain::execute`] the command, [`Chain::append`] everything
-/// staged, [`UnitOfWork::commit`], then run `projections`. Returns every
-/// event the chain recorded. On any failure nothing is committed and no
-/// projection runs.
+/// Handle one book, with every reaction it sets off, as one atomic chain:
+/// [`Chain::execute`] the book, [`Chain::append`] everything staged (and
+/// record its key), [`UnitOfWork::commit`], then run `projections`.
+/// Returns every event the chain recorded. On any failure nothing is
+/// committed and no projection runs.
 pub fn handle<D, U, Ps>(
     unit: U,
     routes: &Routes<'_, U>,
-    key: &StreamKey,
-    cmd: &D::Command,
-    meta: &CommandMeta,
+    book: &BookOf<D>,
+    sampled: &Sampled,
     rules: &Rulebook<D::Rules>,
     projections: &mut Ps,
 ) -> Result<Recorded, Failure<D::Rejection>>
@@ -338,7 +340,7 @@ where
     U: UnitOfWork + EventStore<D::Event>,
     Ps: Project,
 {
-    todo!("proposal: Chain::new(&mut unit, routes).execute, append, unit.commit, project")
+    todo!("proposal: Chain::new(&mut unit, routes, sampled).execute, append, commit, project")
 }
 
 /// [`handle`], over the async ports: the store's reads, appends and commit
@@ -346,9 +348,8 @@ where
 pub async fn handle_async<D, U, Ps>(
     unit: U,
     routes: &AsyncRoutes<'_, U>,
-    key: &StreamKey,
-    cmd: &D::Command,
-    meta: &CommandMeta,
+    book: &BookOf<D>,
+    sampled: &Sampled,
     rules: &Rulebook<D::Rules>,
     projections: &mut Ps,
 ) -> Result<Recorded, Failure<D::Rejection>>

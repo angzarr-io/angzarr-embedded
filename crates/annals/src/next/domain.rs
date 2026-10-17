@@ -1,35 +1,46 @@
-//! Deciding and applying, with deciding made pure.
+//! Deciding, ingesting and applying, with deciding made pure.
 
-use annals_diagnostic::{Diagnostic, Report};
+use std::collections::BTreeSet;
 
-use super::id::{EventId, Seq, StreamKey};
-use super::meta::CommandMeta;
+use annals_diagnostic::Diagnostic;
+
+use super::book::ConflictResolution;
+use super::id::{Actor, Correlation, Seq, StreamKey, Timestamp};
+use super::meta::Origin;
 use super::stream::Envelope;
 
-/// One kind of event stream: its state, its commands, its events and its
-/// rules for each. As the crate root's [`Domain`](crate::Domain), with
-/// these changes:
+/// One kind of event stream: its state, its commands and facts, its events
+/// and its rules for each. As the crate root's [`Domain`](crate::Domain),
+/// with these changes:
 ///
 /// - **No `Ctx`.** Decide is a function of its explicit inputs only: the
-///   state, the command, the command's [`CommandMeta`] and the rules. The
-///   command handler samples the clock and the actor before deciding and
-///   passes them in the metadata ([`Tx::meta`]); random values are sampled
-///   by the caller into the command, and a decide copies whatever it uses
-///   into the event's payload, which is all `apply` sees.
+///   state, the command and the rules, plus what the kernel stamps (the
+///   recorded instant, the actor, the origin), readable through [`Tx`].
+///   Random values are sampled by the caller into the command; a decide
+///   copies whatever it uses into the event's payload, which is all `apply`
+///   sees.
+/// - **Two inputs, two pipelines**, picked by the book's body arm
+///   ([`Body`](super::Body)): a command goes to the fallible
+///   [`Domain::decide`]; a fact to the infallible [`Domain::ingest`], which
+///   has no error to return.
+/// - **Business output is payloads only.** decide emits events; the kernel
+///   builds the pages: their seqs and their [`Meta`](super::Meta).
 /// - `State: Clone`, so a decide can fold its staged events into a copy;
 /// - a decide may reject at any point, emitted or not: nothing it staged is
 ///   kept;
-/// - everything `'static` and `Send`, so a command chain can stage streams
-///   of several domains side by side and the async command handler's
-///   future is `Send` (tokio's multi-threaded runtime, tonic);
-/// - [`Domain::admit_fact`]: the integrity check a fact (an event a
-///   reaction injects, see [`Reaction`](super::Reaction)) must pass.
+/// - everything `'static` and `Send`, so a chain can stage streams of
+///   several domains side by side and the async command handler's future is
+///   `Send` (tokio's multi-threaded runtime, tonic).
 pub trait Domain: Sized + 'static {
-    /// Folded from the events. Never stored.
+    /// Folded from the events. Never stored, except as a snapshot.
     type State: Default + Clone + Send + 'static;
     /// A request to change the stream. Decided, never stored.
     type Command: Send + 'static;
-    /// A fact. The only thing a stream stores.
+    /// Something that already happened outside the system (a webhook, an
+    /// integration). Ingested, never refused, never stored as such.
+    /// [`std::convert::Infallible`] for a domain that takes none.
+    type Fact: Send + 'static;
+    /// What a stream stores.
     type Event: Clone + Send + Sync + 'static;
     /// Why a command was refused, for the person who gave it. Kernel faults
     /// are never folded into it: see [`Failure`](super::Failure).
@@ -48,19 +59,50 @@ pub trait Domain: Sized + 'static {
     /// returns `Ok`.
     fn decide(cmd: &Self::Command, tx: &mut Tx<'_, Self>) -> Result<(), Self::Rejection>;
 
+    /// Record a fact: the events it becomes, given the state. **Infallible
+    /// by type**: a fact already happened, so an awkward one is recorded
+    /// (a payment for an unknown order becomes an event that says so),
+    /// never refused. A panic here is a bug; in process it aborts the whole
+    /// chain, and nothing is written.
+    fn ingest(state: &Self::State, fact: &Self::Fact, rules: &Self::Rules) -> Vec<Self::Event>;
+
     /// Fold one event into the state. Pure: the same state, event and rules
     /// always give the same result. Never sees the event's metadata.
     fn apply(state: &mut Self::State, event: &Self::Event, rules: &Self::Rules);
 
-    /// Whether this stream can take `fact`, an event that already happened
-    /// upstream and is injected without a decide. Not a business judgement
-    /// (a fact cannot be refused on business grounds) but integrity: the
-    /// stream is retired, or not created and `fact` does not create it.
-    /// The position check (gap, redelivery) is the kernel's and comes first.
-    /// Takes every fact by default.
-    fn admit_fact(state: &Self::State, fact: &Self::Event) -> Result<(), Report> {
-        Ok(())
+    /// The conflict resolution for `cmd` when its book does not choose one:
+    /// the domain's configuration, per command type. STRICT by default.
+    fn conflict_resolution(cmd: &Self::Command) -> ConflictResolution {
+        ConflictResolution::Strict
     }
+
+    /// The fields that differ between `before` and `after`, by name (a
+    /// field, or a finer path such as `item:42`): what COMMUTATIVE compares.
+    /// `None`, the default, means the domain does not support COMMUTATIVE,
+    /// and a COMMUTATIVE book for it is malformed. annals has no reflection;
+    /// the domain says what a change touches, which may be finer than
+    /// angzarr's top-level protobuf fields.
+    fn changed(before: &Self::State, after: &Self::State) -> Option<BTreeSet<String>> {
+        None
+    }
+}
+
+/// The in-process conflict nonce (angzarr's `ContextualCommand.conflict_nonce`):
+/// minted by the kernel per delivery under AGGREGATE_HANDLES, handed to
+/// decide with the window, and given back through
+/// [`Tx::resolve_conflicts`] as decide's declaration that it examined the
+/// window. Not constructible, clonable or copyable outside the kernel, so
+/// a decide cannot satisfy the check without having received it.
+#[derive(PartialEq, Eq, Debug)]
+pub struct Nonce(pub(crate) u64);
+
+/// What decide is handed under AGGREGATE_HANDLES: the window it did not see
+/// (the committed events from the book's `expected_sequence` to the head)
+/// and the nonce. An empty window is delivered too, so the path is uniform.
+#[derive(Debug)]
+pub struct Conflicts<'a, E> {
+    pub window: &'a [Envelope<E>],
+    pub nonce: Nonce,
 }
 
 /// A decide in progress. Reads go through it; emitted events are staged in
@@ -70,10 +112,18 @@ pub struct Tx<'a, D: Domain> {
     committed: &'a D::State,
     staged: Option<D::State>,
     rules: &'a D::Rules,
-    meta: &'a CommandMeta,
-    stream: StreamKey,
+    stream: &'a StreamKey,
+    /// The head: the length decide sees, and every event's base_sequence.
     base: Seq,
-    events: Vec<(D::Event, Option<EventId>)>,
+    recorded_at: Timestamp,
+    actor: Option<&'a Actor>,
+    correlation: &'a Correlation,
+    origin: &'a Origin,
+    /// Taken by [`Tx::conflicts`].
+    conflicts: Option<Conflicts<'a, D::Event>>,
+    /// The nonce decide gave back, if it did.
+    resolved: Option<Nonce>,
+    events: Vec<D::Event>,
 }
 
 impl<'a, D: Domain> Tx<'a, D> {
@@ -87,30 +137,51 @@ impl<'a, D: Domain> Tx<'a, D> {
         self.rules
     }
 
-    /// The command's metadata, read-only: the instant and the actor the
-    /// command handler sampled. A decide copies what the domain's own rules
-    /// need into the payload (a draw's time, who accepted it); `apply` sees
-    /// only what the payload holds.
-    pub fn meta(&self) -> &CommandMeta {
-        self.meta
-    }
-
     /// The stream being decided.
-    pub fn stream(&self) -> &StreamKey {
-        &self.stream
+    pub fn stream(&self) -> &'a StreamKey {
+        self.stream
     }
 
-    /// Stage an event, caused by whatever caused the command, and fold it
-    /// into the staged state. Returns the seq it will have if committed.
+    /// When the events will be recorded (non-decreasing within the stream).
+    /// A decide copies it into a payload where the domain's own rules need
+    /// business time (a draw's instant).
+    pub fn recorded_at(&self) -> Timestamp {
+        self.recorded_at
+    }
+
+    /// Who gave the command (the trigger's actor, for a policy's).
+    pub fn actor(&self) -> Option<&'a Actor> {
+        self.actor
+    }
+
+    /// The command's correlation, resolved: never empty.
+    pub fn correlation(&self) -> &'a Correlation {
+        self.correlation
+    }
+
+    /// Why the command exists.
+    pub fn origin(&self) -> &'a Origin {
+        self.origin
+    }
+
+    /// Under AGGREGATE_HANDLES, the window and the nonce, once; `None`
+    /// under STRICT (and under COMMUTATIVE, where the kernel resolves).
+    pub fn conflicts(&mut self) -> Option<Conflicts<'a, D::Event>> {
+        self.conflicts.take()
+    }
+
+    /// Declare that decide examined `window` and applied its own conflict
+    /// rule: angzarr's `resolve_conflicts(window, nonce)`. Without this
+    /// call (with this delivery's nonce) a decide under AGGREGATE_HANDLES
+    /// that returns `Ok` fails as stale, its events discarded.
+    pub fn resolve_conflicts(&mut self, window: &[Envelope<D::Event>], nonce: Nonce) {
+        todo!("proposal: keep the nonce; the kernel compares it after decide returns")
+    }
+
+    /// Stage an event and fold it into the staged state. Returns the seq it
+    /// will have if committed. The kernel stamps its meta.
     pub fn emit(&mut self, event: D::Event) -> Seq {
-        todo!("proposal: clone the state at the first emit, apply, stage with the command's cause")
-    }
-
-    /// As [`Tx::emit`], caused by `cause`: an earlier event of this stream
-    /// (one already committed, or one staged by this decide) or an event of
-    /// another stream.
-    pub fn emit_caused(&mut self, event: D::Event, cause: EventId) -> Seq {
-        todo!("proposal: as emit, with an explicit cause")
+        todo!("proposal: clone the state at the first emit, apply, stage")
     }
 
     /// The seq the next emitted event will take.
@@ -124,13 +195,14 @@ impl<'a, D: Domain> Tx<'a, D> {
     }
 }
 
-/// What a decide staged: events stamped with their metadata and seqs, ready
-/// to append to the store and then commit to the stream it was decided
-/// against. Dropping it discards them.
+/// What a decide (or an ingest) staged: events stamped with their seqs and
+/// one shared meta, ready to append to the store and then commit to the
+/// stream it was decided against. Dropping it discards them.
 #[must_use = "a decision changes nothing until it is committed"]
 pub struct Decision<D: Domain> {
     pub(crate) stream: StreamKey,
-    /// The stream's length the decide read: the store's expected length.
+    /// The stream's length the decide read: the store's expected length,
+    /// and every event's base_sequence.
     pub(crate) base: Seq,
     pub(crate) events: Vec<Envelope<D::Event>>,
 }

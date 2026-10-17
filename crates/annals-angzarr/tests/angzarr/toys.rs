@@ -11,8 +11,8 @@ use std::convert::Infallible;
 use std::fmt;
 
 use annals::next::{
-    Actor, CommandMeta, Committed, Correlation, Domain, Edition, Policy, Position, Reaction,
-    RequestId, Root, Rulebook, Seq, StreamKey, Timestamp, Tx,
+    Actor, Book, BookOf, Committed, Correlation, Domain, EditionName, Origin, Policy, Position,
+    Provenance, Reaction, RequestId, Root, Rulebook, Sampled, Seq, StreamKey, Timestamp, Tx,
 };
 use annals_angzarr::{pack, Decoder, Payload, PayloadError, Upcaster};
 use annals_diagnostic::{Arg, Diagnostic, Report};
@@ -68,6 +68,16 @@ pub mod v3 {
     );
 }
 
+/// The account's facts, for fact books.
+pub mod fact {
+    named!(
+        "toy.account.fact.v1",
+        PaymentReceived {
+            cents: i64 = int64 / "1"
+        }
+    );
+}
+
 /// The account's commands, for command books.
 pub mod cmd {
     named!("toy.account.cmd.v1", Open {});
@@ -115,6 +125,12 @@ pub enum AccountCmd {
     Deposit(i64),
 }
 
+/// A payment from the provider: a fact.
+#[derive(Clone, PartialEq, Debug)]
+pub enum AccountFact {
+    PaymentReceived(i64),
+}
+
 #[derive(Clone, PartialEq, Debug)]
 pub enum AccountEvent {
     Opened,
@@ -144,6 +160,7 @@ impl Diagnostic for NotOpen {
 impl Domain for Account {
     type State = Balance;
     type Command = AccountCmd;
+    type Fact = AccountFact;
     type Event = AccountEvent;
     type Rejection = NotOpen;
     type Rules = ();
@@ -166,6 +183,15 @@ impl Domain for Account {
             }
         }
         Ok(())
+    }
+
+    fn ingest(_: &Balance, fact: &AccountFact, (): &()) -> Vec<AccountEvent> {
+        match *fact {
+            AccountFact::PaymentReceived(cents) => vec![AccountEvent::Deposited {
+                cents,
+                currency: "EUR".to_string(),
+            }],
+        }
     }
 
     fn apply(s: &mut Balance, e: &AccountEvent, (): &()) {
@@ -231,6 +257,26 @@ impl Payload for AccountCmd {
     }
 }
 
+fn account_facts() -> Decoder<AccountFact> {
+    Decoder::new().on::<fact::PaymentReceived>(|m| AccountFact::PaymentReceived(m.cents))
+}
+
+impl Payload for AccountFact {
+    fn to_any(&self) -> Any {
+        match self {
+            AccountFact::PaymentReceived(cents) => pack(&fact::PaymentReceived { cents: *cents }),
+        }
+    }
+
+    fn from_any(any: &Any) -> Result<Self, PayloadError> {
+        account_facts().decode(any)
+    }
+
+    fn type_urls() -> Vec<String> {
+        account_facts().type_urls()
+    }
+}
+
 /// Euros to cents.
 pub fn one_to_two(old: v1::Deposit) -> Result<v2::Deposited, Report> {
     Ok(v2::Deposited {
@@ -272,6 +318,7 @@ pub struct Record {
 impl Domain for Ledger {
     type State = LedgerState;
     type Command = Record;
+    type Fact = Infallible;
     type Event = Record;
     type Rejection = Infallible;
     type Rules = ();
@@ -281,6 +328,10 @@ impl Domain for Ledger {
     fn decide(cmd: &Record, tx: &mut Tx<'_, Self>) -> Result<(), Infallible> {
         tx.emit(cmd.clone());
         Ok(())
+    }
+
+    fn ingest(_: &LedgerState, fact: &Infallible, (): &()) -> Vec<Record> {
+        match *fact {}
     }
 
     fn apply(s: &mut LedgerState, r: &Record, (): &()) {
@@ -362,7 +413,7 @@ pub fn account(id: u64) -> StreamKey {
     StreamKey::main("account", Root::from(id))
 }
 
-pub fn ledger_key(edition: Edition) -> StreamKey {
+pub fn ledger_key(edition: Option<EditionName>) -> StreamKey {
     StreamKey::new("ledger", edition, LEDGER_ROOT)
 }
 
@@ -370,14 +421,25 @@ pub fn request(n: u32) -> RequestId {
     RequestId(format!("req-{n}"))
 }
 
-/// The first command of request `n`, from ann, at `at` microseconds, with
-/// no correlation.
-pub fn meta(n: u32, at: i64) -> CommandMeta {
-    CommandMeta::new(
-        Timestamp(at),
-        Some(Actor("pseudonym-ann".to_string())),
-        request(n),
-    )
+/// Ann, giving no correlation.
+pub fn ann() -> Provenance {
+    Provenance {
+        actor: Some(Actor("pseudonym-ann".to_string())),
+        correlation: None,
+    }
+}
+
+/// `cmd` for account `key`, the first command of request `n`, from ann.
+pub fn book(key: &StreamKey, cmd: AccountCmd, n: u32) -> BookOf<Account> {
+    Book::command(key.clone(), cmd, Origin::request(request(n), 0), ann())
+}
+
+/// What the application sampled at `at` microseconds.
+pub fn at(at: i64) -> Sampled {
+    Sampled {
+        now: Timestamp(at),
+        minted: Correlation(format!("minted-{at}")),
+    }
 }
 
 pub fn correlation(text: &str) -> Correlation {

@@ -1,58 +1,56 @@
-//! Reactions to committed events, three kinds over one base.
+//! Reactions to committed events: policies and projections, over one base.
 //!
 //! Every kind takes the same input, a [`Committed`] event (stream identity,
 //! position, metadata, payload, the state just after it), under the same
 //! [`Position`] contract (next, redelivery, gap), and runs through the same
-//! dispatch: each becomes a [`Handler`] of its source. On top sit three
-//! typed traits:
+//! dispatch: each becomes a [`Handler`] of its source.
 //!
 //! - [`Policy`] (Event Storming's term; an *automation* in Event
 //!   Modeling): event → **commands** to target streams. A command goes
-//!   through the target's decide and may be rejected.
-//! - [`Translation`] (Event Modeling; Fowler's *event-carried state
-//!   transfer*): event → **facts** injected into target streams. A fact
-//!   already happened upstream; the target records it without a decide and
-//!   may refuse it only for integrity: a position gap, or
-//!   [`Domain::admit_fact`] (retired, never created).
+//!   through the target's decide and may be rejected. **A reaction's only
+//!   output is commands**: there are no reaction-injected facts (facts come
+//!   from outside the system only, angzarr's decision), so the crate's
+//!   earlier `Translation` is gone. Propagating one aggregate's changes into
+//!   another (hatpick's list into its draw systems) is a policy whose
+//!   target records the change in its own events.
 //! - [`Projection`]: event → a read model's fold. It produces nothing.
 //!
-//! Policies and translations share [`Reaction`]: which targets a source
-//! event is owed to, which root each target is, and how far each target has
-//! got. A target's stream key is the target domain's, in **the source's
-//! edition**: a reaction never crosses timelines.
+//! A policy names which targets a source event is owed to, which root each
+//! target is, and how far each target has got. A target's stream key is
+//! the target domain's, in **the source's edition**: a reaction never
+//! crosses timelines.
 //!
 //! **The contiguity invariant.** Once a target appears in
 //! [`Reaction::targets`], it stays there for every source event until the
 //! one that retires it (inclusive), and never appears again. A target
 //! missing from one event and back for the next would never be delivered
 //! the missing one, and every later delivery would be a gap: it wedges.
-//! [`orders_owed`] and [`facts_owed`] check it, as
-//! [`KernelError::TargetReturned`].
+//! [`orders_owed`] checks it, as [`KernelError::TargetReturned`].
 
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
 
+use super::book::{BookOf, Sampled};
 use super::domain::Domain;
 use super::error::{Failure, KernelError};
 use super::handler::{Committed, Handler, Position};
-use super::id::{EventId, Root, StreamKey};
-use super::meta::CommandMeta;
+use super::id::{Root, StreamKey};
 use super::stream::{Envelope, Stream};
 use super::version::Rulebook;
 
 // ---------------------------------------------------------------- the base
 
-/// What a policy and a translation share: a source, a target domain, and
-/// the targets each source event is owed to. Stateless: live targets are a
-/// fold of the source, and each target's position a fold of the target.
+/// What a policy is over: a source, a target domain, and the targets each
+/// source event is owed to. Stateless: live targets are a fold of the
+/// source, and each target's position a fold of the target.
 pub trait Reaction {
     type Source: Domain;
     type Target: Domain;
     /// Names one target.
     type TargetId: Ord + Clone;
 
-    /// The reaction's name, stable across releases: part of every
-    /// [`CommandId::Reaction`](super::CommandId::Reaction) it issues.
+    /// The reaction's name, stable across releases: the `component` of
+    /// every [`Causation`](super::Causation) it issues.
     const NAME: &'static str;
 
     /// The targets owed the event that led to `source`, the source's state
@@ -65,16 +63,22 @@ pub trait Reaction {
     fn root(target: &Self::TargetId) -> Root;
 
     /// The last source seq `target` holds, read off its fold. The source seq
-    /// travels in the delivered payload for this, since `apply` never sees
+    /// travels in the command's payload for this, since `apply` never sees
     /// metadata. [`Position::START`] means the target has not been created:
     /// there is nothing to place against, so every delivery goes to its
-    /// decide (or [`Domain::admit_fact`]), which creates it or refuses.
+    /// decide, which creates it or refuses.
     fn position(target: &<Self::Target as Domain>::State) -> Position;
 }
 
 /// Event → commands. Each command is decided by its target and may be
-/// rejected; in the command handler a rejection fails the whole chain, as
-/// [`Failure::Downstream`] with [`StepError::Rejected`](super::StepError).
+/// rejected; in the command handler a rejection fails the whole chain, the
+/// originating command included, as [`Failure::Downstream`] with
+/// [`StepError::Rejected`](super::StepError).
+///
+/// Its commands carry no handling (the target is stamped at its head), and
+/// their provenance is the trigger's: the kernel stamps the source event's
+/// actor and correlation, and the origin [`Causation`](super::Causation)
+/// `{ event, component: NAME, index }`.
 pub trait Policy: Reaction {
     /// The command `target` is owed for `committed`. For the event that
     /// first makes `target` a target, whatever creates it.
@@ -82,28 +86,6 @@ pub trait Policy: Reaction {
         target: &Self::TargetId,
         committed: &Committed<'_, Self::Source>,
     ) -> <Self::Target as Domain>::Command;
-
-    /// Compensation: the commands to issue to the source when `order` was
-    /// rejected. Never called in process, where a chain is all or nothing;
-    /// it is for a wrapping runtime that delivers across a process boundary
-    /// and must undo instead of roll back. None by default.
-    fn on_rejected(
-        order: &Order<Self>,
-        rejection: &annals_diagnostic::Report,
-    ) -> Vec<<Self::Source as Domain>::Command> {
-        Vec::new()
-    }
-}
-
-/// Event → facts. Each fact is recorded in its target as it is, refused
-/// only for integrity, never on business grounds.
-pub trait Translation: Reaction {
-    /// The fact `target` is owed for `committed`. For the event that first
-    /// makes `target` a target, the fact that creates it.
-    fn fact(
-        target: &Self::TargetId,
-        committed: &Committed<'_, Self::Source>,
-    ) -> <Self::Target as Domain>::Event;
 }
 
 /// Event → read model. Produces nothing. Read models are replayed from the
@@ -116,40 +98,20 @@ pub trait Projection<D: Domain> {
 
 // ---------------------------------------------------------------- dispatch
 
-/// One delivery owed to one target, caused by one source event and carrying
-/// its correlation: a command (`O` = the target's command) from a policy,
-/// or a fact (`O` = the target's event) from a translation.
-pub struct Owed<R: Reaction + ?Sized, O> {
-    pub target: R::TargetId,
-    /// The source event: [`EventId`] `{ source stream, seq }`.
-    pub source: EventId,
-    /// [`CommandMeta::reacting_to`] the source event.
-    pub meta: CommandMeta,
-    pub output: O,
+/// One command a policy owes one target: a book with a causation origin,
+/// the trigger's provenance and no handling.
+pub struct Order<P: Policy> {
+    pub target: P::TargetId,
+    pub book: BookOf<P::Target>,
 }
 
 /// Everything owed, by target, each target's in source order.
-pub type Backlog<R, O> = BTreeMap<<R as Reaction>::TargetId, Vec<Owed<R, O>>>;
-
-/// A policy's command for one target.
-pub type Order<P> = Owed<P, <<P as Reaction>::Target as Domain>::Command>;
-
-/// A translation's fact for one target.
-pub type Fact<T> = Owed<T, <<T as Reaction>::Target as Domain>::Event>;
+pub type Backlog<P> = BTreeMap<<P as Reaction>::TargetId, Vec<Order<P>>>;
 
 /// A policy as a [`Handler`] of its source: each committed event becomes
 /// one [`Order`] per target, handed to `sink` in target order.
 pub fn policy<P: Policy, F: FnMut(Order<P>)>(sink: F) -> Reactor<P, F> {
     Reactor {
-        sink,
-        reaction: PhantomData,
-    }
-}
-
-/// A translation as a [`Handler`] of its source: each committed event
-/// becomes one [`Fact`] per target, handed to `sink` in target order.
-pub fn translation<T: Translation, F: FnMut(Fact<T>)>(sink: F) -> Translator<T, F> {
-    Translator {
         sink,
         reaction: PhantomData,
     }
@@ -166,24 +128,12 @@ pub struct Reactor<P, F> {
     reaction: PhantomData<fn() -> P>,
 }
 
-/// See [`translation`].
-pub struct Translator<T, F> {
-    sink: F,
-    reaction: PhantomData<fn() -> T>,
-}
-
 /// See [`projection`].
 pub struct Projector<'p, P>(&'p mut P);
 
 impl<P: Policy, F: FnMut(Order<P>)> Handler<P::Source> for Reactor<P, F> {
     fn handle(&mut self, committed: &Committed<'_, P::Source>) {
-        todo!("proposal: owe::<P>(committed, P::command) into the sink")
-    }
-}
-
-impl<T: Translation, F: FnMut(Fact<T>)> Handler<T::Source> for Translator<T, F> {
-    fn handle(&mut self, committed: &Committed<'_, T::Source>) {
-        todo!("proposal: owe::<T>(committed, T::fact) into the sink")
+        todo!("proposal: owe::<P>(committed) into the sink")
     }
 }
 
@@ -199,13 +149,11 @@ pub fn target_key<R: Reaction>(source: &StreamKey, target: &R::TargetId) -> Stre
     todo!("proposal: StreamKey::of::<R::Target>(source.edition.clone(), R::root(target))")
 }
 
-/// The one mechanism under both reactors and both backlogs: what `R` owes
-/// for `committed`, one per target, `output` making each.
-fn owe<R: Reaction, O>(
-    committed: &Committed<'_, R::Source>,
-    output: impl Fn(&R::TargetId, &Committed<'_, R::Source>) -> O,
-) -> Vec<Owed<R, O>> {
-    todo!("proposal: targets(state), each with meta reacting_to committed.id()")
+/// The one mechanism under the reactor, the chain and the backlog: what `P`
+/// owes for `committed`, one order per target, the `index`th target's
+/// causation index `index`.
+fn owe<P: Policy>(committed: &Committed<'_, P::Source>) -> Vec<Order<P>> {
+    todo!("proposal: targets(state), each a book: target_key, command, causation, trigger's provenance")
 }
 
 // ---------------------------------------------------------------- delivery
@@ -226,34 +174,19 @@ pub type OrderDelivery<'a, P> = Result<
     Failure<<<P as Reaction>::Target as Domain>::Rejection>,
 >;
 
-/// What [`inject`] returns. No rejection type: a fact is not rejectable.
-pub type FactDelivery<'a, T> =
-    Result<Delivered<'a, <<T as Reaction>::Target as Domain>::Event>, KernelError>;
-
-/// Deliver a policy's order to `target`, in memory. The target's
-/// [`Reaction::position`] places the source event first: a redelivery runs
-/// nothing and a gap is a [`KernelError::Gap`]. Only the next one is
-/// decided ([`Stream::decide`], so it may be [`Failure::Rejected`]) and
-/// committed.
+/// Deliver a policy's order to `target`, in memory, outside a chain (a
+/// catch-up). The target's [`Reaction::position`] places the source event
+/// first: a redelivery runs nothing and a gap is a [`KernelError::Gap`].
+/// Only the next one is decided ([`Stream::decide`], so it may be
+/// [`Failure::Rejected`]) and committed.
 pub fn deliver<'a, P: Policy>(
     target: &'a mut Stream<P::Target>,
     order: &Order<P>,
+    sampled: &Sampled,
     rules: &Rulebook<<P::Target as Domain>::Rules>,
     handlers: &mut [&mut dyn Handler<P::Target>],
 ) -> OrderDelivery<'a, P> {
     todo!("proposal: place, decide, commit")
-}
-
-/// Inject a translation's fact into `target`, in memory: placed as
-/// [`deliver`] places an order, then admitted ([`Stream::admit`], refused
-/// only as [`KernelError::FactRefused`]) and committed.
-pub fn inject<'a, T: Translation>(
-    target: &'a mut Stream<T::Target>,
-    fact: &Fact<T>,
-    rules: &Rulebook<<T::Target as Domain>::Rules>,
-    handlers: &mut [&mut dyn Handler<T::Target>],
-) -> FactDelivery<'a, T> {
-    todo!("proposal: place, admit, commit")
 }
 
 /// Every order a policy owes every target, from each target's position (a
@@ -265,27 +198,8 @@ pub fn orders_owed<P: Policy>(
     source: &Stream<P::Source>,
     rules: &Rulebook<<P::Source as Domain>::Rules>,
     positions: &BTreeMap<P::TargetId, Position>,
-) -> Result<Backlog<P, <P::Target as Domain>::Command>, KernelError> {
-    todo!("proposal: backlog::<P>(.., P::command)")
-}
-
-/// [`orders_owed`], for a translation's facts.
-pub fn facts_owed<T: Translation>(
-    source: &Stream<T::Source>,
-    rules: &Rulebook<<T::Source as Domain>::Rules>,
-    positions: &BTreeMap<T::TargetId, Position>,
-) -> Result<Backlog<T, <T::Target as Domain>::Event>, KernelError> {
-    todo!("proposal: backlog::<T>(.., T::fact)")
-}
-
-/// The one backlog under both: dispatch the source from 0, [`owe`] each
-/// event, keep what each target's position has not yet passed, check
-/// contiguity.
-fn backlog<R: Reaction, O>(
-    source: &Stream<R::Source>,
-    rules: &Rulebook<<R::Source as Domain>::Rules>,
-    positions: &BTreeMap<R::TargetId, Position>,
-    output: impl Fn(&R::TargetId, &Committed<'_, R::Source>) -> O,
-) -> Result<Backlog<R, O>, KernelError> {
-    todo!("proposal: one dispatch, one fold")
+) -> Result<Backlog<P>, KernelError> {
+    todo!(
+        "proposal: one dispatch, one fold, owe each event, keep what each position has not passed"
+    )
 }

@@ -4,11 +4,21 @@
 //!
 //! | column | from |
 //! |---|---|
-//! | `domain`, `edition`, `root` | the stream key (edition by its canonical name) |
+//! | `domain`, `edition`, `root` | the stream key; `edition` NULL for the main timeline |
 //! | `sequence` | the envelope's seq (64-bit) |
 //! | `type_url` | the payload's type URL as written (before any upcast) |
-//! | `page` | the `EventPage` bytes as written: header, `created_at`, payload, `EventMeta` |
-//! | `recorded_at`, `actor`, `request_id`, `command_index`, `component`, `correlation`, `cause_*`, `rules_version` | [`Meta`](annals::next::Meta), every field |
+//! | `page` | the `EventPage` bytes as written: `sequence`, `meta`, `payload` |
+//! | `actor`, `correlation` | [`Meta`](annals::next::Meta)'s provenance |
+//! | `origin_kind`, `request_id`, `request_index`, `cause_domain`, `cause_edition`, `cause_root`, `cause_sequence`, `cause_component`, `cause_index`, `external_id` | [`Meta::origin`](annals::next::Meta::origin), one set of columns per arm |
+//! | `recorded_at`, `base_sequence`, `rules_version` | the rest of [`Meta`](annals::next::Meta) |
+//!
+//! Keys, for [`UnitOfWork::record_command`]: a unique index on (domain,
+//! edition, root, `external_id`) where `external_id` is set refuses a
+//! redelivered webhook fact; one on (domain, edition, root, `request_id`,
+//! `request_index`) a retried HTTP request, if the server wants that. They
+//! can be partial indexes on the events table itself, but a command that
+//! emits no events leaves no row to index, so a separate commands table
+//! (stream, origin, first sequence, count) is the general form.
 //!
 //! The application's database implements the kernel's own store port over
 //! these rows, `EventStore<Stored>` (and `AsyncEventStore<Stored>`, and
@@ -19,13 +29,12 @@
 //! read, decodes the page, upcasts the payload by type URL and unpacks it,
 //! strictly.
 //!
-//! The columns carry the metadata in full, a reaction's component included,
-//! which `EventMeta` has no field for at angzarr-proto 9cfed59; the page is
-//! what an angzarr reader is served. Nothing stored is ever rewritten:
+//! The columns and the page's `EventMeta` hold the same metadata; the page
+//! is what an angzarr reader is served. Nothing stored is ever rewritten:
 //! upcasting happens on every read.
 
 use annals::next::{
-    AsyncEventStore, AsyncUnitOfWork, Domain, Envelope, EventStore, Rulebook, Seq, Slice,
+    AsyncEventStore, AsyncUnitOfWork, Domain, Envelope, EventStore, Origin, Rulebook, Seq, Slice,
     StoreError, Stream, StreamKey, UnitOfWork,
 };
 
@@ -113,6 +122,16 @@ impl<S: UnitOfWork> UnitOfWork for Opaque<'_, S> {
     fn commit(self) -> Result<(), StoreError> {
         self.stored.commit()
     }
+
+    fn record_command(
+        &mut self,
+        stream: &StreamKey,
+        origin: &Origin,
+        from: Seq,
+        to: Seq,
+    ) -> Result<(), StoreError> {
+        self.stored.record_command(stream, origin, from, to)
+    }
 }
 
 impl<S, E> AsyncEventStore<E> for Opaque<'_, S>
@@ -141,5 +160,15 @@ where
 impl<S: AsyncUnitOfWork + Send> AsyncUnitOfWork for Opaque<'_, S> {
     async fn commit(self) -> Result<(), StoreError> {
         self.stored.commit().await
+    }
+
+    async fn record_command(
+        &mut self,
+        stream: &StreamKey,
+        origin: &Origin,
+        from: Seq,
+        to: Seq,
+    ) -> Result<(), StoreError> {
+        self.stored.record_command(stream, origin, from, to).await
     }
 }

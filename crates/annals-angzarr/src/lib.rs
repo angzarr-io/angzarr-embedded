@@ -7,14 +7,21 @@
 //! is the in-process runtime, and its kernel stays dependency-free. This
 //! crate is the one place the two meet:
 //!
-//! | annals | angzarr |
+//! | annals | angzarr (angzarr-proto 279bc89) |
 //! |---|---|
-//! | [`StreamKey`](annals::next::StreamKey) (domain, edition, root) | `Cover` (domain, edition, root) |
-//! | [`EventId`](annals::next::EventId) | `EventRef` |
-//! | [`Meta`](annals::next::Meta) | `EventMeta`, on every page |
-//! | a command and its [`CommandMeta`](annals::next::CommandMeta) ([`Command`]) | a one-page `CommandBook` with `CommandMeta` |
-//! | what a chain recorded ([`Recorded`](annals::next::Recorded)) | `EventBook`s, one per stream |
-//! | an event or command | `Any`, packed by [`prost::Name`] ([`pack`], [`Payload`]) |
+//! | [`StreamKey`](annals::next::StreamKey) (domain, edition, root) | `Cover { domain, root, optional edition }` |
+//! | `edition: None` / `Some(name)` | `Cover.edition` unset / set; a set `""` refused |
+//! | [`EventId`](annals::next::EventId) | `EventRef { stream, sequence }` |
+//! | [`Book`](annals::next::Book) | a one-page `CommandBook { cover, handling, page }` |
+//! | [`Handling`](annals::next::Handling), [`ConflictResolution`](annals::next::ConflictResolution) | `Handling { expected_sequence, conflict_resolution }` |
+//! | [`Provenance`](annals::next::Provenance) | `Provenance { actor, correlation_id }` |
+//! | [`Origin`](annals::next::Origin) | `Origin { request \| causation \| fact }` |
+//! | [`Body`](annals::next::Body) | `CommandPage.body`: `Command` or `Fact` |
+//! | [`Envelope`](annals::next::Envelope) | `EventPage { sequence, meta, payload }` |
+//! | [`Meta`](annals::next::Meta) | `EventMeta { provenance, origin, recorded_at, base_sequence, rules_version }` |
+//! | [`Snapshot`](annals::next::Snapshot) | `Snapshot { sequence, state, rules_version }` |
+//! | what a chain recorded ([`Recorded`](annals::next::Recorded)) | `EventBook`s, one per stream, and an `Outcome` ([`outcome`]) |
+//! | an event, command or fact | `Any`, packed by [`prost::Name`] ([`pack`], [`Payload`]) |
 //! | the payload's version | its type URL (`pkg.v1.Foo` then `pkg.v2.Foo`) |
 //! | upcasting | [`Upcaster`], a mirror of angzarr-router's `UpcasterDispatch` |
 //! | the store port's stored form | [`Stored`]: type URL + page as written, the metadata as columns |
@@ -23,9 +30,9 @@
 //!   decodes fails the read with an error naming it ([`ReadError`]); an
 //!   event is never skipped. [`Registry::check`] and golden replay fixtures
 //!   ([`assert_replay_fixtures`]) catch it in CI first.
-//! - **Correlation and a command's cause** each go on and off the wire
-//!   through one pair of functions ([`wire`]), because where angzarr keeps
-//!   them is under review.
+//! - **One home per value.** Correlation is in `Provenance` only, a
+//!   command's cause in its `Origin` only: each goes on and off the wire
+//!   through one pair of functions in [`wire`].
 //! - Builds for `wasm32-unknown-unknown`, as angzarr-proto does.
 
 // Proposal bodies are `todo!()`, so arguments and fields go unread until the
@@ -45,7 +52,7 @@ mod store;
 mod upcast;
 pub mod wire;
 
-pub use book::{command_book, command_from_book, event_book, event_page, Command};
+pub use book::{book_from_wire, command_book, event_book, event_page, outcome};
 pub use error::{
     BookError, ChainProblem, PayloadError, ReadError, ReadProblem, UpcastChainError, UpcastError,
 };

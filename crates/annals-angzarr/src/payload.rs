@@ -32,6 +32,24 @@ pub trait Payload: Sized {
     fn type_urls() -> Vec<String>;
 }
 
+/// A domain that takes no facts (`type Fact = Infallible`): nothing to pack,
+/// and every payload refused as [`PayloadError::UnknownType`].
+impl Payload for std::convert::Infallible {
+    fn to_any(&self) -> Any {
+        match *self {}
+    }
+
+    fn from_any(any: &Any) -> Result<Self, PayloadError> {
+        Err(PayloadError::UnknownType {
+            type_url: any.type_url.clone(),
+        })
+    }
+
+    fn type_urls() -> Vec<String> {
+        Vec::new()
+    }
+}
+
 /// `message` as an `Any` whose type URL is its [`Name::type_url`]
 /// (`/pkg.v1.Foo`, as angzarr writes them). Encoding to a vector cannot
 /// run out of room, so this cannot fail.

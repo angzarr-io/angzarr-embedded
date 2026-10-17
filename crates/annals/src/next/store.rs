@@ -31,6 +31,7 @@ use std::future::Future;
 
 use super::error::StoreError;
 use super::id::{Seq, StreamKey};
+use super::meta::Origin;
 use super::stream::Envelope;
 
 /// Part of a stream, from a seq on.
@@ -50,15 +51,6 @@ pub trait EventStore<E> {
     /// at `expected` ([`StoreError::Conflict`]) and events whose seqs do not
     /// run on from `expected` ([`StoreError::Discontinuous`]). Returns the
     /// new length.
-    ///
-    /// **Idempotency (optional).** Every event's
-    /// [`Meta::command`](super::Meta::command) names the command that
-    /// recorded it. An adapter that indexes it (a unique index on the
-    /// originating command id, say) may refuse an append whose originating
-    /// command it already holds (the request and the command id), as
-    /// [`StoreError::Duplicate`] with the range recorded then, so a wrapping
-    /// runtime's retry becomes a read. annals neither requires nor builds
-    /// this.
     fn append(
         &mut self,
         key: &StreamKey,
@@ -78,13 +70,54 @@ pub trait EventStore<E> {
 
 /// A transaction over one or more [`EventStore`]s: what it appended lands
 /// at [`UnitOfWork::commit`], all at once, or (dropped) not at all.
+///
+/// **Idempotency, optional.** annals keeps no idempotency key store: a
+/// chain is in process and atomic, with no at-least-once bus inside it, so
+/// nothing in it is redelivered. Two edges remain, and both are answered
+/// here, by the command handler calling [`UnitOfWork::record_command`] for
+/// the originating command when its origin is keyed
+/// ([`Origin::is_keyed`]), in the same unit of work as its events:
+///
+/// - a **webhook fact** redelivered by its source: a unique index on
+///   (stream, `external_id`);
+/// - an **HTTP retry** of a request: a unique index on (stream, request id,
+///   index), for a server that wants retry safety.
+///
+/// A recorded key is refused as [`StoreError::Duplicate`] with the range
+/// recorded then, and the unit of work is dropped: the retry becomes a read
+/// (angzarr's DUPLICATE). Only applied commands are recorded; a rejection
+/// writes nothing, so it may be retried. The default records nothing.
 pub trait UnitOfWork {
     fn commit(self) -> Result<(), StoreError>;
+
+    /// Record that the command keyed `origin` was applied to `stream` as
+    /// seqs `from..to` (possibly empty), or refuse a key already recorded
+    /// ([`StoreError::Duplicate`]). Records nothing by default.
+    fn record_command(
+        &mut self,
+        stream: &StreamKey,
+        origin: &Origin,
+        from: Seq,
+        to: Seq,
+    ) -> Result<(), StoreError> {
+        Ok(())
+    }
 }
 
 /// [`UnitOfWork`], async. Its future is `Send`, like the async store's.
 pub trait AsyncUnitOfWork {
     fn commit(self) -> impl Future<Output = Result<(), StoreError>> + Send;
+
+    /// As [`UnitOfWork::record_command`].
+    fn record_command(
+        &mut self,
+        stream: &StreamKey,
+        origin: &Origin,
+        from: Seq,
+        to: Seq,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send {
+        async { Ok(()) }
+    }
 }
 
 /// [`EventStore`], async: for a database driver. Native return-position
@@ -152,18 +185,34 @@ impl<S: UnitOfWork + Send> AsyncUnitOfWork for Ready<S> {
     async fn commit(self) -> Result<(), StoreError> {
         self.0.commit()
     }
+
+    async fn record_command(
+        &mut self,
+        stream: &StreamKey,
+        origin: &Origin,
+        from: Seq,
+        to: Seq,
+    ) -> Result<(), StoreError> {
+        self.0.record_command(stream, origin, from, to)
+    }
 }
 
-/// Streams held in memory, in key order. Checks everything a real store
-/// must, so tests catch what production would.
+/// One recorded key: the stream, the origin, and the seqs it applied.
+type Claims = BTreeMap<(StreamKey, Origin), (Seq, Seq)>;
+
+/// Streams held in memory, in key order, and the keys its units of work
+/// recorded. Checks everything a real store must, so tests catch what
+/// production would.
 pub struct InMemoryStore<E> {
     streams: BTreeMap<StreamKey, Held<E>>,
+    claims: Claims,
 }
 
 impl<E> Default for InMemoryStore<E> {
     fn default() -> Self {
         InMemoryStore {
             streams: BTreeMap::new(),
+            claims: BTreeMap::new(),
         }
     }
 }
@@ -201,6 +250,7 @@ impl<E: Clone> InMemoryStore<E> {
         InMemoryTx {
             store: self,
             pending: BTreeMap::new(),
+            claims: BTreeMap::new(),
         }
     }
 }
@@ -209,6 +259,7 @@ impl<E: Clone> InMemoryStore<E> {
 pub struct InMemoryTx<'s, E> {
     store: &'s mut InMemoryStore<E>,
     pending: BTreeMap<StreamKey, Held<E>>,
+    claims: Claims,
 }
 
 impl<E: Clone> EventStore<E> for InMemoryTx<'_, E> {
@@ -228,6 +279,17 @@ impl<E: Clone> EventStore<E> for InMemoryTx<'_, E> {
 
 impl<E: Clone> UnitOfWork for InMemoryTx<'_, E> {
     fn commit(self) -> Result<(), StoreError> {
-        todo!("proposal: move pending into the store")
+        todo!("proposal: move pending and the claims into the store")
+    }
+
+    /// Records every keyed origin: a unique index on (stream, origin).
+    fn record_command(
+        &mut self,
+        stream: &StreamKey,
+        origin: &Origin,
+        from: Seq,
+        to: Seq,
+    ) -> Result<(), StoreError> {
+        todo!("proposal: Duplicate if the store or this unit holds it, else hold it")
     }
 }

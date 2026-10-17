@@ -110,8 +110,8 @@ impl Upcaster {
         todo!("proposal: each rule in order whose source is the current type")
     }
 
-    /// One page with its event (if any) run through the rule chain; the
-    /// header, `created_at` and `meta` kept.
+    /// One page with its payload (if any) run through the rule chain; its
+    /// `sequence` and `meta` kept.
     pub fn upcast_page(&self, page: &EventPage) -> Result<EventPage, UpcastError> {
         todo!("proposal: as the router's")
     }

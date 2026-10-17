@@ -6,24 +6,22 @@ use std::pin::pin;
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use annals::next::{
-    AsyncEventStore, AsyncUnitOfWork, CommandId, Correlation, Edition, Envelope, EventStore,
-    InMemoryStore, Meta, Ready, RequestId, Root, RulesVersion, Seq, StoreError, StreamKey,
-    Timestamp, UnitOfWork,
+    AsyncEventStore, AsyncUnitOfWork, Correlation, Envelope, EventStore, InMemoryStore, Meta,
+    Origin, Ready, Root, RulesVersion, Seq, StoreError, StreamKey, Timestamp, UnitOfWork,
 };
 
-use crate::toys::key;
+use crate::toys::{edition, key, request};
 
 fn stamped(seq: Seq, event: &str) -> Envelope<String> {
     Envelope {
         seq,
         meta: Meta {
-            recorded_at: Timestamp(seq as i64),
             actor: None,
-            request: RequestId::from("req-1"),
-            command: CommandId::Origin { index: 0 },
             correlation: Correlation::from("req-1"),
-            cause: None,
-            rules: RulesVersion::from("none"),
+            origin: Origin::request(request(1), 0),
+            recorded_at: Timestamp(seq as i64),
+            base_sequence: seq,
+            rules_version: RulesVersion::from("none"),
         },
         event: event.to_string(),
     }
@@ -88,19 +86,19 @@ fn the_same_root_in_another_domain_or_edition_is_another_stream() {
     store.append(&main, 0, &log(0..3)).unwrap();
     for other in [
         StreamKey::main("other", root),
-        StreamKey::new("toy", Edition::new("v2"), root),
+        StreamKey::new("toy", edition("v2"), root),
     ] {
         assert_eq!(store.read(&other), Ok(None), "{other:?}");
         assert_eq!(store.append(&other, 0, &log(0..1)), Ok(1));
     }
     assert_eq!(
         store
-            .read(&StreamKey::new("toy", Edition::new("angzarr"), root))
+            .read(&StreamKey::new("toy", None, root))
             .unwrap()
             .unwrap()
             .len,
         3,
-        "every spelling of the main timeline reads the same stream"
+        "main is the stream with no edition"
     );
     assert_eq!(store.keys().len(), 3);
 }
@@ -215,4 +213,47 @@ fn the_async_port_has_the_same_contract() {
         ready(port.commit()).unwrap();
     }
     assert_eq!(store.read(&h).unwrap().unwrap().len, 3);
+}
+
+#[test]
+#[ignore = "proposal: a unit of work records a keyed origin once per stream, at commit"]
+fn a_unit_of_work_records_a_keyed_origin_once_per_stream() {
+    let mut store = InMemoryStore::<String>::new();
+    let (a, b) = (key(1, "toy"), key(2, "toy"));
+    let payment = Origin::fact("pi_1", "Stripe webhook");
+    {
+        let mut unit = store.begin();
+        unit.append(&a, 0, &log(0..1)).unwrap();
+        unit.record_command(&a, &payment, 0, 1).unwrap();
+        assert_eq!(
+            unit.record_command(&a, &payment, 1, 1),
+            Err(StoreError::Duplicate {
+                stream: a.clone(),
+                origin: payment.clone(),
+                from: 0,
+                to: 1
+            }),
+            "within the unit"
+        );
+        // Dropped: rolled back, the key with it.
+    }
+
+    let mut unit = store.begin();
+    unit.append(&a, 0, &log(0..1)).unwrap();
+    unit.record_command(&a, &payment, 0, 1).unwrap();
+    unit.record_command(&b, &payment, 0, 0)
+        .expect("another stream: another claim");
+    unit.commit().unwrap();
+
+    let mut unit = store.begin();
+    assert_eq!(
+        unit.record_command(&a, &payment, 1, 2),
+        Err(StoreError::Duplicate {
+            stream: a,
+            origin: payment,
+            from: 0,
+            to: 1
+        }),
+        "after commit"
+    );
 }

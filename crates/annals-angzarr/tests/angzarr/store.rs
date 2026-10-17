@@ -3,10 +3,10 @@
 //! fixtures; the async port.
 
 use annals::next::{
-    handle, AsyncEventStore, AsyncUnitOfWork, CommandId, Edition, Envelope, EventId, EventStore,
-    InMemoryStore, Meta, Ready, Routes, RulesVersion, Seq, StoreError, Timestamp,
+    handle, AsyncEventStore, AsyncUnitOfWork, Causation, Envelope, EventId, EventStore,
+    InMemoryStore, Meta, Origin, Ready, Routes, RulesVersion, Seq, StoreError, Timestamp,
 };
-use annals_angzarr::pb::{event_page, page_header, EventPage, PageHeader};
+use annals_angzarr::pb::EventPage;
 use annals_angzarr::{
     assert_replay_fixtures, pack, read_event, replay_stored, wire, PayloadError, ReadError,
     ReadProblem, Registry, ReplayFixture, Stored, UpcastError, Upcaster,
@@ -16,29 +16,24 @@ use prost::Message;
 
 use crate::ready;
 use crate::toys::{
-    account, correlation, ledger_key, meta, registry, request, rules, v1, v2, v3, v9, Account,
+    account, at, book, correlation, ledger_key, registry, request, rules, v1, v2, v3, v9, Account,
     AccountCmd, AccountEvent, Balance, Books,
 };
 
 /// A row as some older release wrote it: `any` at `seq`, with its page.
 fn row(seq: Seq, any: prost_types::Any) -> Envelope<Stored> {
     let meta = Meta {
-        recorded_at: Timestamp(1_000 + seq as i64),
         actor: None,
-        request: request(seq as u32),
-        command: CommandId::Origin { index: 0 },
         correlation: correlation("old"),
-        cause: None,
-        rules: RulesVersion::from("none"),
+        origin: Origin::request(request(seq as u32), 0),
+        recorded_at: Timestamp(1_000 + seq as i64),
+        base_sequence: seq,
+        rules_version: RulesVersion::from("none"),
     };
     let page = EventPage {
-        header: Some(PageHeader {
-            sequence_type: Some(page_header::SequenceType::Sequence(seq)),
-            sync_mode: None,
-        }),
-        created_at: Some(wire::timestamp(meta.recorded_at)),
-        payload: Some(event_page::Payload::Event(any.clone())),
+        sequence: seq,
         meta: Some(wire::event_meta(&meta)),
+        payload: Some(any.clone()),
     };
     Envelope {
         seq,
@@ -73,17 +68,16 @@ fn the_store_keeps_opaque_rows_as_written() {
     let mut store = InMemoryStore::<Stored>::new();
     let r = rules();
     for (i, cmd) in [AccountCmd::Open, AccountCmd::Deposit(30)]
-        .iter()
+        .into_iter()
         .enumerate()
     {
         handle::<Account, _, _>(
             registry.store(store.begin()),
             // Routes name the unit of work's type, so they are built per
-            // unit (open question 7).
+            // unit (an open question).
             &Routes::new().policy::<Books>(&r, &r),
-            &account(1),
-            cmd,
-            &meta(i as u32, 0),
+            &book(&account(1), cmd, i as u32),
+            &at(0),
             &r,
             &mut (),
         )
@@ -98,30 +92,30 @@ fn the_store_keeps_opaque_rows_as_written() {
         Some(wire::event_meta(&rows[1].meta)),
         "the page carries EventMeta"
     );
+    assert_eq!(page.sequence, 1);
     assert_eq!(
         page.payload,
-        Some(event_page::Payload::Event(pack(&v3::Deposited {
+        Some(pack(&v3::Deposited {
             cents: 30,
             currency: "EUR".to_string()
-        })))
+        }))
     );
 
-    let ledger = store
-        .read(&ledger_key(Edition::MAIN))
-        .unwrap()
-        .unwrap()
-        .events;
-    assert_eq!(
-        ledger[1].meta.command,
-        CommandId::Reaction {
-            source: EventId {
-                stream: account(1),
-                seq: 1
-            },
-            component: "books".to_string(),
-            index: 0
+    let ledger = store.read(&ledger_key(None)).unwrap().unwrap().events;
+    let causation = Origin::Causation(Causation {
+        event: EventId {
+            stream: account(1),
+            seq: 1,
         },
-        "the columns keep a reaction's component, which EventMeta has no field for"
+        component: "books".to_string(),
+        index: 0,
+    });
+    assert_eq!(ledger[1].meta.origin, causation, "the columns");
+    let ledger_page = EventPage::decode(ledger[1].event.page.as_slice()).unwrap();
+    assert_eq!(
+        ledger_page.meta.unwrap().origin,
+        Some(wire::origin(&causation)),
+        "and the page: EventMeta now carries the component"
     );
 
     let mut typed = registry.store(store.begin());

@@ -1,12 +1,14 @@
 //! Toy domains for the proposal tests: an account whose fee comes from its
-//! rules, and a jug whose pour reads its own staged events.
+//! rules and which ingests payments, a jug whose pour reads its own staged
+//! events, a hat that draws, and a shelf that resolves its own conflicts.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 use std::fmt;
 
 use annals::next::{
-    Actor, CommandMeta, Correlation, Domain, Edition, RequestId, Root, Rulebook, Stream, StreamKey,
-    Timestamp, Tx,
+    Actor, Book, BookOf, ConflictResolution, Correlation, Domain, EditionName, Origin, Provenance,
+    RequestId, Root, Rulebook, Sampled, Stream, StreamKey, Timestamp, Tx,
 };
 use annals_diagnostic::{Arg, Diagnostic};
 
@@ -15,9 +17,14 @@ pub fn key(id: u64, domain: &str) -> StreamKey {
     StreamKey::main(domain, Root::from(id))
 }
 
+/// The edition `name`.
+pub fn edition(name: &str) -> Option<EditionName> {
+    Some(EditionName::new(name).unwrap())
+}
+
 /// An empty `D` stream `id`, on the main timeline.
 pub fn stream<D: Domain>(id: u64) -> Stream<D> {
-    Stream::new(Edition::MAIN, Root::from(id))
+    Stream::new(None, Root::from(id))
 }
 
 /// The request `n`'s id.
@@ -30,19 +37,45 @@ pub fn correlation(n: u128) -> Correlation {
     Correlation(format!("corr-{n}"))
 }
 
-/// The first command of request `n`, from ann, at `at` microseconds, with
-/// no correlation given.
-pub fn meta(n: u128, at: i64) -> CommandMeta {
-    CommandMeta::new(
-        Timestamp(at),
-        Some(Actor("pseudonym-ann".to_string())),
-        request(n),
+/// Ann, giving no correlation.
+pub fn ann() -> Provenance {
+    Provenance {
+        actor: Some(Actor("pseudonym-ann".to_string())),
+        correlation: None,
+    }
+}
+
+/// Ann, continuing the correlation `n`.
+pub fn ann_in(n: u128) -> Provenance {
+    Provenance {
+        correlation: Some(correlation(n)),
+        ..ann()
+    }
+}
+
+/// What the application sampled at `at` microseconds: that instant, and a
+/// minted correlation that names it.
+pub fn at(at: i64) -> Sampled {
+    Sampled {
+        now: Timestamp(at),
+        minted: Correlation(format!("minted-{at}")),
+    }
+}
+
+/// `cmd` for the `D` stream `stream`, the first command of request `n`,
+/// from ann, with no correlation.
+pub fn book<D: Domain>(stream: &Stream<D>, cmd: D::Command, n: u128) -> BookOf<D> {
+    Book::command(
+        stream.key().clone(),
+        cmd,
+        Origin::request(request(n), 0),
+        ann(),
     )
 }
 
-/// A command continuing the correlation `correlation`.
-pub fn meta_in(n: u128, at: i64, correlation_n: u128) -> CommandMeta {
-    meta(n, at).correlated(correlation(correlation_n))
+/// `cmd` for `key`, the first command of request `n`, from ann.
+pub fn book_at<D: Domain>(key: &StreamKey, cmd: D::Command, n: u128) -> BookOf<D> {
+    Book::command(key.clone(), cmd, Origin::request(request(n), 0), ann())
 }
 
 // ---------------------------------------------------------------- an account
@@ -82,6 +115,15 @@ pub enum AccountEvent {
     Opened,
     Deposited(i64),
     Withdrew(i64),
+    /// A payment that arrived for an account that is not open: recorded,
+    /// never refused.
+    Unmatched(i64),
+}
+
+/// Facts from the payment provider.
+#[derive(Clone, PartialEq, Debug)]
+pub enum AccountFact {
+    PaymentReceived(i64),
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -124,6 +166,7 @@ impl Diagnostic for Refused {
 impl Domain for Account {
     type State = Balance;
     type Command = AccountCmd;
+    type Fact = AccountFact;
     type Event = AccountEvent;
     type Rejection = Refused;
     type Rules = Fees;
@@ -164,6 +207,16 @@ impl Domain for Account {
         Ok(())
     }
 
+    /// A payment is a deposit if the account is open, and recorded as
+    /// unmatched if not: the same situation a `Deposit` command is refused
+    /// for, recorded instead.
+    fn ingest(s: &Balance, fact: &AccountFact, _: &Fees) -> Vec<AccountEvent> {
+        match *fact {
+            AccountFact::PaymentReceived(c) if s.open => vec![AccountEvent::Deposited(c)],
+            AccountFact::PaymentReceived(c) => vec![AccountEvent::Unmatched(c)],
+        }
+    }
+
     /// The fee is the rules': replaying under the wrong rules would give
     /// the wrong balance.
     fn apply(s: &mut Balance, e: &AccountEvent, rules: &Fees) {
@@ -171,6 +224,7 @@ impl Domain for Account {
             AccountEvent::Opened => s.open = true,
             AccountEvent::Deposited(c) => s.cents += c,
             AccountEvent::Withdrew(c) => s.cents -= c + rules.withdrawal,
+            AccountEvent::Unmatched(_) => {}
         }
     }
 }
@@ -203,6 +257,7 @@ const CUP: u32 = 3;
 impl Domain for Jug {
     type State = Cups;
     type Command = JugCmd;
+    type Fact = Infallible;
     type Event = JugEvent;
     type Rejection = Infallible;
     type Rules = ();
@@ -229,6 +284,10 @@ impl Domain for Jug {
         Ok(())
     }
 
+    fn ingest(_: &Cups, fact: &Infallible, (): &()) -> Vec<JugEvent> {
+        match *fact {}
+    }
+
     fn apply(s: &mut Cups, e: &JugEvent, (): &()) {
         match *e {
             JugEvent::Filled { jug, cups } => {
@@ -250,8 +309,8 @@ pub fn no_rules() -> Rulebook<()> {
 // ---------------------------------------------------------------- a hat
 
 /// Draws a slip. The random value is sampled by the caller into the
-/// command; the instant comes from the command's metadata. Both land in the
-/// event's payload, which is all apply sees.
+/// command; the instant is the one the kernel records the event at. Both
+/// land in the event's payload, which is all apply sees.
 pub struct Hat;
 
 #[derive(Default, Clone, PartialEq, Debug)]
@@ -272,7 +331,7 @@ pub enum HatCmd {
 pub struct Drawn {
     pub slip: String,
     pub roll: u64,
-    /// Business time, copied from the command's metadata.
+    /// Business time, copied from the recorded instant.
     pub at: i64,
 }
 
@@ -304,6 +363,7 @@ impl Diagnostic for Empty {
 impl Domain for Hat {
     type State = Slips;
     type Command = HatCmd;
+    type Fact = Infallible;
     type Event = HatEvent;
     type Rejection = Empty;
     type Rules = ();
@@ -321,7 +381,7 @@ impl Domain for Hat {
                     return Err(Empty);
                 }
                 let slip = slips[(*roll % slips.len() as u64) as usize].clone();
-                let at = tx.meta().recorded_at.0;
+                let at = tx.recorded_at().0;
                 tx.emit(HatEvent::Drawn(Drawn {
                     slip,
                     roll: *roll,
@@ -332,10 +392,100 @@ impl Domain for Hat {
         Ok(())
     }
 
+    fn ingest(_: &Slips, fact: &Infallible, (): &()) -> Vec<HatEvent> {
+        match *fact {}
+    }
+
     fn apply(s: &mut Slips, e: &HatEvent, (): &()) {
         match e {
             HatEvent::Put(slip) => s.slips.push(slip.clone()),
             HatEvent::Drawn(drawn) => s.last = Some(drawn.clone()),
         }
+    }
+}
+
+// ---------------------------------------------------------------- a shelf
+
+/// Counts per item. Its commands set one item's count; it can say which
+/// items a change touched (so it supports COMMUTATIVE), and under
+/// AGGREGATE_HANDLES its decide acknowledges the window only when told to.
+pub struct Shelf;
+
+#[derive(Default, Clone, PartialEq, Debug)]
+pub struct Counts(pub BTreeMap<String, i64>);
+
+#[derive(Clone, PartialEq, Debug)]
+pub struct Set {
+    pub item: String,
+    pub count: i64,
+    /// Under AGGREGATE_HANDLES: acknowledge the window
+    /// (`resolve_conflicts`), or return without doing so (a handler bug).
+    pub resolve: bool,
+}
+
+#[derive(Clone, PartialEq, Debug)]
+pub struct WasSet {
+    pub item: String,
+    pub count: i64,
+    /// How many events the window held, when decide was handed one.
+    pub window: Option<usize>,
+}
+
+pub fn set(item: &str, count: i64) -> Set {
+    Set {
+        item: item.to_string(),
+        count,
+        resolve: true,
+    }
+}
+
+impl Domain for Shelf {
+    type State = Counts;
+    type Command = Set;
+    type Fact = Infallible;
+    type Event = WasSet;
+    type Rejection = Infallible;
+    type Rules = ();
+
+    const NAME: &'static str = "shelf";
+
+    fn decide(cmd: &Set, tx: &mut Tx<'_, Self>) -> Result<(), Infallible> {
+        let mut window = None;
+        if let Some(conflicts) = tx.conflicts() {
+            window = Some(conflicts.window.len());
+            if cmd.resolve {
+                tx.resolve_conflicts(conflicts.window, conflicts.nonce);
+            }
+        }
+        tx.emit(WasSet {
+            item: cmd.item.clone(),
+            count: cmd.count,
+            window,
+        });
+        Ok(())
+    }
+
+    fn ingest(_: &Counts, fact: &Infallible, (): &()) -> Vec<WasSet> {
+        match *fact {}
+    }
+
+    fn apply(s: &mut Counts, e: &WasSet, (): &()) {
+        s.0.insert(e.item.clone(), e.count);
+    }
+
+    /// Commutative by default: two writers to different items never
+    /// conflict.
+    fn conflict_resolution(_: &Set) -> ConflictResolution {
+        ConflictResolution::Commutative
+    }
+
+    fn changed(before: &Counts, after: &Counts) -> Option<BTreeSet<String>> {
+        let items = before.0.keys().chain(after.0.keys());
+        Some(
+            items
+                .filter(|item| before.0.get(*item) != after.0.get(*item))
+                .cloned()
+                .collect(),
+        )
     }
 }

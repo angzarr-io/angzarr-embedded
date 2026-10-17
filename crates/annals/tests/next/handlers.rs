@@ -1,10 +1,12 @@
 //! Handlers: what they are given, and the one position contract.
 
 use annals::next::{
-    Admit, CommandId, Committed, Gap, Handler, Meta, Position, Seq, StreamKey, Tracked,
+    Admit, Committed, Gap, Handler, Meta, Origin, Position, Seq, StreamKey, Tracked,
 };
 
-use crate::toys::{fees, key, meta, request, stream, Account, AccountCmd, AccountEvent, Balance};
+use crate::toys::{
+    at, book, fees, key, request, stream, Account, AccountCmd, AccountEvent, Balance,
+};
 
 /// Everything a handler was handed, owned.
 #[derive(Clone, PartialEq, Debug)]
@@ -33,22 +35,18 @@ fn handlers_receive_identity_position_and_metadata() {
     let rules = fees("fees-1", 0);
     let mut log = Vec::new();
     let mut handler = |c: &Committed<'_, Account>| log.push(seen(c));
-    s.execute(&AccountCmd::Open, &meta(1, 10), &rules, &mut [&mut handler])
+    let open = book(&s, AccountCmd::Open, 1);
+    s.execute(&open, &at(10), &rules, &mut [&mut handler])
         .unwrap();
-    s.execute(
-        &AccountCmd::Deposit(40),
-        &meta(2, 20),
-        &rules,
-        &mut [&mut handler],
-    )
-    .unwrap();
+    let deposit = book(&s, AccountCmd::Deposit(40), 2);
+    s.execute(&deposit, &at(20), &rules, &mut [&mut handler])
+        .unwrap();
 
     assert_eq!(log.len(), 2);
     assert_eq!(log[1].stream, key(5, "account"));
     assert_eq!(log[1].seq, 1);
     assert_eq!(log[1].meta, s.events()[1].meta);
-    assert_eq!(log[1].meta.request, request(2));
-    assert_eq!(log[1].meta.command, CommandId::Origin { index: 0 });
+    assert_eq!(log[1].meta.origin, Origin::request(request(2), 0));
     assert_eq!(log[1].event, AccountEvent::Deposited(40));
     assert_eq!(
         log[1].after,
@@ -70,11 +68,11 @@ fn dispatch_hands_history_to_handlers_from_a_seq() {
         AccountCmd::Deposit(40),
         AccountCmd::Deposit(2),
     ]
-    .iter()
+    .into_iter()
     .enumerate()
     {
-        s.execute(cmd, &meta(i as u128, 0), &rules, &mut [])
-            .unwrap();
+        let b = book(&s, cmd, i as u128);
+        s.execute(&b, &at(0), &rules, &mut []).unwrap();
     }
     let mut a = Vec::new();
     let mut b = Vec::new();
@@ -131,11 +129,11 @@ fn a_tracked_handler_drops_redeliveries_and_records_gaps() {
         AccountCmd::Deposit(2),
         AccountCmd::Deposit(3),
     ]
-    .iter()
+    .into_iter()
     .enumerate()
     {
-        s.execute(cmd, &meta(i as u128, 0), &rules, &mut [])
-            .unwrap();
+        let b = book(&s, cmd, i as u128);
+        s.execute(&b, &at(0), &rules, &mut []).unwrap();
     }
     let mut seqs = Vec::new();
     let mut tracked = Tracked::new(|c: &Committed<'_, Account>| seqs.push(c.seq()));

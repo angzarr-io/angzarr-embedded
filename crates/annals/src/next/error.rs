@@ -9,18 +9,20 @@
 
 use annals_diagnostic::Report;
 
+use super::book::Malformed;
 use super::handler::Gap;
-use super::id::{CommandId, EventId, RequestId, RulesVersion, Seq, StreamKey};
+use super::id::{EventId, RulesVersion, Seq, StreamKey};
+use super::meta::Origin;
 
 /// Why a command did not commit.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Failure<R> {
     /// The domain refused it. Nothing was staged, appended or applied.
     Rejected(R),
-    /// A step further down the chain failed: a policy's command rejected
-    /// by its target, a translation's fact refused, a chain too deep.
-    /// `path` runs from the first reaction to the step that failed. Nothing
-    /// was appended anywhere, the originating command's events included.
+    /// A step further down the chain failed: a policy's command rejected by
+    /// its target, a gap, a chain too deep. `path` runs from the first
+    /// reaction to the step that failed. Nothing was appended anywhere, the
+    /// originating command's events included.
     Downstream { path: Vec<Step>, error: StepError },
     /// The kernel or the store failed at the originating stream or at the
     /// commit (a conflict on any stream the chain touched). Nothing was
@@ -28,24 +30,15 @@ pub enum Failure<R> {
     Kernel(KernelError),
 }
 
-/// One step of a command chain: a command or a fact delivered to `stream`,
-/// caused by `cause`. Reactions are pure, so the step's command or fact is
-/// the reaction's output for that cause, recomputable from the log.
+/// One step of a command chain: a policy's command delivered to `stream`,
+/// caused by `cause`. Policies are pure, so the step's command is the
+/// policy's output for that cause, recomputable from the log.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Step {
     /// The target stream; its domain is the target's
     /// [`Domain::NAME`](super::Domain::NAME).
     pub stream: StreamKey,
-    pub kind: StepKind,
     pub cause: EventId,
-}
-
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub enum StepKind {
-    /// A policy's command.
-    Command,
-    /// A translation's fact.
-    Fact,
 }
 
 /// Why a step down the chain failed.
@@ -54,17 +47,33 @@ pub enum StepError {
     /// The target's decide rejected the command: its rejection, as a
     /// report.
     Rejected(Report),
-    /// A kernel fault at that step: a gap, a refused fact, the depth limit,
-    /// a store read.
+    /// A kernel fault at that step: a gap, the depth limit, a store read.
     Kernel(KernelError),
 }
 
 /// A fault outside any domain's rules.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum KernelError {
-    /// A decision committed to a stream that is not the one, or not at the
-    /// length, it was decided against.
+    /// The book was refused before business code ran.
+    Malformed {
+        stream: StreamKey,
+        malformed: Malformed,
+    },
+    /// The stream is not at the length expected: a book's
+    /// `expected_sequence` under STRICT (or past the head under any
+    /// resolution), COMMUTATIVE's window overlapping the command, or a
+    /// decision committed to a stream that moved. angzarr's ABORTED: re-read,
+    /// then re-issue.
     Stale {
+        stream: StreamKey,
+        expected: Seq,
+        actual: Seq,
+    },
+    /// A decide under AGGREGATE_HANDLES returned `Ok` without acknowledging
+    /// the window with this delivery's nonce: its events were discarded,
+    /// and the command fails as stale would. Also a handler bug, to log
+    /// loudly.
+    Unresolved {
         stream: StreamKey,
         expected: Seq,
         actual: Seq,
@@ -81,13 +90,7 @@ pub enum KernelError {
         left: Seq,
         returned: Seq,
     },
-    /// `stream` refused a fact for integrity: retired, or never created.
-    /// The domain's own reason, as a report.
-    FactRefused {
-        stream: StreamKey,
-        reason: Report,
-    },
-    /// A command or a log for `stream` was given to a `expected` stream: a
+    /// A book or a log for `stream` was given to an `expected` stream: a
     /// key of another domain. Caught at the origin of a chain and at
     /// replay; a reaction builds its target's key from the target's domain,
     /// so it cannot happen there.
@@ -100,10 +103,11 @@ pub enum KernelError {
     ChainTooDeep {
         limit: usize,
     },
-    /// A log names rules the rulebook does not hold.
-    UnknownRules {
-        seq: Seq,
-        version: RulesVersion,
+    /// A dispatch from before a resumed stream's snapshot: those events are
+    /// not held.
+    BeforeSnapshot {
+        stream: StreamKey,
+        first: Seq,
     },
     Replay(ReplayError),
     Store(StoreError),
@@ -114,10 +118,12 @@ pub enum KernelError {
 pub enum ReplayError {
     /// Event at `index` claims seq `found`.
     OutOfSequence { index: usize, found: Seq },
-    /// Event `seq` names an event of its own stream at or after itself as
-    /// its cause.
+    /// Event `seq`'s causation names an event of its own stream at or after
+    /// itself.
     CauseNotEarlier { seq: Seq, cause: Seq },
-    /// The log is `found`'s, given to a `expected` stream.
+    /// Event `seq` was recorded before the event before it.
+    RecordedBackwards { seq: Seq },
+    /// The log is `found`'s, given to an `expected` stream.
     WrongDomain {
         found: String,
         expected: &'static str,
@@ -145,14 +151,14 @@ pub enum StoreError {
         expected: Seq,
         found: Seq,
     },
-    /// Command `command` of request `request` was already recorded in
-    /// `stream`, as seqs `from..to` (see the idempotency note on
-    /// [`EventStore::append`](super::EventStore::append)). Nothing was
-    /// appended; the earlier result stands.
+    /// The command keyed `origin` was already recorded in `stream`, as seqs
+    /// `from..to` (see
+    /// [`UnitOfWork::record_command`](super::UnitOfWork::record_command)).
+    /// Nothing was committed; the earlier result stands: angzarr's
+    /// DUPLICATE.
     Duplicate {
         stream: StreamKey,
-        request: RequestId,
-        command: CommandId,
+        origin: Origin,
         from: Seq,
         to: Seq,
     },
@@ -170,29 +176,26 @@ pub enum StoreError {
     },
 }
 
-/// What a wrapping runtime (angzarr) should do about a failure: retry,
-/// treat it as done, or give up, and why. annals never retries anything
-/// itself.
+/// What to do about a failure: retry, treat it as done, or give up, and
+/// why. annals never retries anything itself.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Recovery {
-    /// Run the command again from a fresh read: a store conflict (re-read
-    /// and re-decide), the store unavailable (safe only under an
-    /// idempotency key: an unavailable append may have landed), a gap
-    /// (catch the target up, then retry).
+    /// Run the command again from a fresh read: a store conflict, a stale
+    /// or unresolved command (re-read, and re-issue against the new head),
+    /// the store unavailable (safe only under a recorded key: an
+    /// unavailable commit may have landed), a gap (catch the target up,
+    /// then retry).
     Retry,
     /// Already done: the store holds this command's events
     /// ([`StoreError::Duplicate`]). Read them instead.
     Done,
     /// The domain said no: a rejection, at the origin or downstream. The
-    /// same command will be refused the same way; tell the person, or
-    /// compensate.
+    /// same command will be refused the same way; tell the person.
     Business,
-    /// A fact was refused for integrity: a retired or unknown target.
-    Integrity,
-    /// A bug or a misconfiguration: a stale decision, a discontinuous
+    /// A bug or a misconfiguration: a malformed book, a discontinuous
     /// append, a key of the wrong domain, a chain too deep, unknown rules, a
-    /// log that does not replay, an event the store cannot read back. Retrying will not help; an operator
-    /// must.
+    /// log that does not replay, an event the store cannot read back.
+    /// Retrying will not help; an operator must.
     Bug,
 }
 
@@ -210,7 +213,7 @@ impl StepError {
 
 impl KernelError {
     pub fn recovery(&self) -> Recovery {
-        todo!("proposal: Gap Retry; FactRefused Integrity; Store by StoreError; the rest Bug")
+        todo!("proposal: Stale, Unresolved, Gap Retry; Store by StoreError; the rest Bug")
     }
 }
 

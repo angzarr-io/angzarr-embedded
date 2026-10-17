@@ -1,26 +1,21 @@
 //! The small conversions between annals' identities and angzarr's
-//! messages: a key and a `Cover`, an event id and an `EventRef`, a root and
-//! a `UUID`, a timestamp, a `Meta` and an `EventMeta`.
+//! messages, one function per direction: a key and a `Cover`, an event id
+//! and an `EventRef`, a root and a `UUID`, a timestamp, provenance, an
+//! origin, handling, a `Meta` and an `EventMeta`, a snapshot.
 //!
-//! Two mappings are each kept behind one function per direction, because
-//! where angzarr carries them is under review and may change in
-//! angzarr-proto:
-//!
-//! - **correlation**: today on `Cover.correlation_id` and again per page in
-//!   `EventMeta.correlation_id` / `CommandMeta.correlation_id`
-//!   ([`correlation_to_wire`], [`correlation_from_wire`]);
-//! - **a command's cause**: today in `CommandMeta.cause` and
-//!   `command_index`, and again, for a reaction's command, in the page
-//!   header's `AngzarrDeferredSequence` ([`command_cause_to_wire`],
-//!   [`command_cause_from_wire`]).
-//!
-//! Switching either source is a change to its pair of functions and nothing
-//! else.
+//! At angzarr-proto 279bc89 each value has exactly one home on the wire:
+//! correlation lives only in `Provenance` (never on the `Cover`), a
+//! command's cause only in its `Origin`, and the main timeline is the unset
+//! `Cover.edition`.
 
-use angzarr_proto::v1::{self as pb, Cover, EventRef, PageHeader, Uuid};
-use annals::next::{CommandId, Correlation, Edition, EventId, Meta, Root, StreamKey, Timestamp};
+use angzarr_proto::v1::{self as pb, Cover, EventRef, Uuid};
+use annals::next::{
+    ConflictResolution, EditionName, EventId, Handling, Meta, Origin, Provenance, Root, Snapshot,
+    StreamKey, Timestamp,
+};
 
 use crate::error::BookError;
+use crate::payload::Payload;
 
 /// A root as angzarr's `UUID`: its 16 bytes, big-endian.
 pub fn uuid(root: Root) -> Uuid {
@@ -32,34 +27,38 @@ pub fn root(uuid: &Uuid) -> Result<Root, BookError> {
     todo!("proposal: exactly 16 bytes, else BookError::BadRoot")
 }
 
-/// A key's edition as a `Cover`'s: unset for the main timeline (the wire
-/// form angzarr's `Edition` documents), the name otherwise, with no
-/// divergences.
-pub fn edition(edition: &Edition) -> Option<pb::Edition> {
-    todo!("proposal: None for MAIN, else Some(Edition {{ name, divergences: [] }})")
+/// A key's edition as `Cover.edition` (`optional string`): unset for the
+/// main timeline, the name for a named edition.
+pub fn edition(edition: Option<&EditionName>) -> Option<String> {
+    todo!("proposal: edition.map(|e| e.as_str().to_string())")
 }
 
-/// A `Cover` for `key`. Its correlation is set by [`correlation_to_wire`],
-/// not here.
+/// `Cover.edition` as a key's edition: unset is main; a set name is a named
+/// edition; a set empty string is refused ([`BookError::EmptyEdition`]),
+/// as angzarr refuses it (INVALID_ARGUMENT).
+pub fn edition_name(edition: Option<&str>) -> Result<Option<EditionName>, BookError> {
+    todo!("proposal: None => None, Some(\"\") => EmptyEdition, Some(name) => Some(EditionName)")
+}
+
+/// A `Cover` for `key`: domain, root, edition. Nothing else: a cover is
+/// stream identity only.
 pub fn cover(key: &StreamKey) -> Cover {
-    todo!("proposal: domain, root, edition; correlation and ext unset")
+    todo!("proposal: domain, uuid(root), edition(key.edition)")
 }
 
-/// The key a `Cover` names, its edition normalised ("", "angzarr" and
-/// unset are the main timeline). Refuses a cover with no root, a root that
-/// is not 16 bytes, and explicit divergences, which annals does not model.
+/// The key a `Cover` names. Refuses a cover with no root, a root that is
+/// not 16 bytes, and a set empty edition.
 pub fn key(cover: &Cover) -> Result<StreamKey, BookError> {
-    todo!("proposal: Edition::from(name), refuse divergences")
+    todo!("proposal: root(cover.root), edition_name(cover.edition)")
 }
 
-/// An event id as an `EventRef`: its stream's domain, edition (by its
-/// canonical name: [`Edition::MAIN_NAME`] for the main timeline), root,
-/// and its seq as the sequence.
+/// An event id as an `EventRef { stream: cover, sequence }`.
 pub fn event_ref(id: &EventId) -> EventRef {
-    todo!("proposal: domain, edition.name(), uuid(root), seq")
+    todo!("proposal: cover(&id.stream), id.seq")
 }
 
-/// The event id an `EventRef` names, its edition normalised.
+/// The event id an `EventRef` names. Refuses one with no stream
+/// ([`BookError::NoStream`]) or a cover [`key`] refuses.
 pub fn event_id(event: &EventRef) -> Result<EventId, BookError> {
     todo!("proposal: the inverse of event_ref")
 }
@@ -75,68 +74,80 @@ pub fn micros(at: &prost_types::Timestamp) -> Result<Timestamp, BookError> {
     todo!("proposal: seconds * 1e6 + nanos / 1e3, refusing a sub-microsecond remainder")
 }
 
-/// A recorded event's metadata as angzarr's `EventMeta`: `recorded_at`,
-/// `actor` (empty for the system), `request_id`, `command_index`, the
-/// correlation ([`correlation_to_wire`]), `cause` and `rules_version`.
-///
-/// A reaction's component ([`CommandId::Reaction`]'s `component`) has no
-/// `EventMeta` field at angzarr-proto 9cfed59, so it is not on the page; it
-/// is kept in storage, in the row's metadata (see [`crate::Stored`]).
+/// A command's provenance as sent: an absent actor or correlation is the
+/// empty string, as angzarr's "not supplied".
+pub fn provenance(provenance: &Provenance) -> pb::Provenance {
+    todo!("proposal: actor and correlation_id, empty for None")
+}
+
+/// The inverse of [`provenance`]: an empty field is `None`.
+pub fn provenance_from_wire(provenance: Option<&pb::Provenance>) -> Provenance {
+    todo!("proposal: empty strings are None; no provenance is the default")
+}
+
+/// An origin as angzarr's one `Origin` message: a keyless request is an
+/// empty `RequestOrigin` (`request_id` ""); a causation's event an
+/// `EventRef`.
+pub fn origin(origin: &Origin) -> pb::Origin {
+    todo!("proposal: one arm per variant")
+}
+
+/// The inverse of [`origin`]. No origin at all is a keyless request (as
+/// angzarr records it). Refuses a causation with no event
+/// ([`BookError::NoCausationEvent`]) or an event ref [`event_id`] refuses.
+/// Whether the origin agrees with the body is the kernel's check
+/// ([`Book::validate`](annals::next::Book::validate)), not this one's.
+pub fn origin_from_wire(origin: Option<&pb::Origin>) -> Result<Origin, BookError> {
+    todo!("proposal: the inverse of origin; unset is Origin::keyless()")
+}
+
+/// A resolution as angzarr's enum.
+pub fn conflict_resolution(resolution: ConflictResolution) -> pb::ConflictResolution {
+    todo!("proposal: one value each")
+}
+
+/// Handling as sent: `expected_sequence` as given, the resolution
+/// UNSPECIFIED when the book leaves it to the domain.
+pub fn handling(handling: &Handling) -> pb::Handling {
+    todo!("proposal: expected_sequence, conflict_resolution or UNSPECIFIED")
+}
+
+/// The inverse of [`handling`]: no handling is the default; UNSPECIFIED is
+/// `None` (the domain's default); a value the enum does not know is
+/// refused ([`BookError::UnknownConflictResolution`]).
+pub fn handling_from_wire(handling: Option<&pb::Handling>) -> Result<Handling, BookError> {
+    todo!("proposal: the inverse of handling")
+}
+
+/// A recorded event's metadata as angzarr's `EventMeta`: `provenance`
+/// (actor, empty for the system; correlation), `origin`, `recorded_at`,
+/// `base_sequence`, `rules_version`. Field for field; nothing is left out.
 pub fn event_meta(meta: &Meta) -> pb::EventMeta {
-    todo!("proposal: field for field; correlation through correlation_to_wire")
+    todo!("proposal: field for field")
 }
 
-/// Where a correlation goes on the wire.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct WireCorrelation {
-    /// For `Cover.correlation_id`.
-    pub cover: String,
-    /// For the page's `EventMeta.correlation_id` or
-    /// `CommandMeta.correlation_id`.
-    pub page: String,
+/// The inverse of [`event_meta`]: what an `EventPage` read back says.
+/// Refuses meta with no `recorded_at` ([`BookError::NoRecordedAt`]) or an
+/// empty correlation ([`BookError::NoCorrelation`]): angzarr always records
+/// both.
+pub fn meta(meta: &pb::EventMeta) -> Result<Meta, BookError> {
+    todo!("proposal: the inverse of event_meta")
 }
 
-/// **The one place a correlation is put on the wire.** angzarr carries it
-/// on the cover and on each page's metadata today; which of them survives
-/// is under review, so every writer goes through here.
-pub fn correlation_to_wire(correlation: &Correlation) -> WireCorrelation {
-    todo!("proposal: both fields, the correlation's text")
+/// A snapshot as angzarr's `Snapshot`: `sequence`, `state` packed as `Any`
+/// (its type URL is the state type compared on load), `rules_version`. Its
+/// `recorded_at` has no field there; the adapter keeps it beside the row.
+pub fn snapshot<S: Payload>(snapshot: &Snapshot<S>) -> pb::Snapshot {
+    todo!("proposal: sequence, state.to_any(), rules_version")
 }
 
-/// **The one place a correlation is read off the wire**, from a cover and
-/// one page's correlation field: `None` when neither carries one (annals
-/// then generates one from the request: [`Correlation::generated`]).
-pub fn correlation_from_wire(cover: &Cover, page: &str) -> Option<Correlation> {
-    todo!("proposal: the page's if set, else the cover's, else None")
-}
-
-/// Where a command's identity and cause go on a `CommandPage`.
-#[derive(Clone, PartialEq, Debug)]
-pub struct WireCommandCause {
-    /// The page header: `AngzarrDeferredSequence { source, source_seq,
-    /// source_component, command_index }` for a reaction's command, unset
-    /// for a command the application issued.
-    pub header: Option<PageHeader>,
-    /// `CommandMeta.command_index`.
-    pub command_index: u32,
-    /// `CommandMeta.cause`.
-    pub cause: Option<EventRef>,
-}
-
-/// **The one place a command's identity and cause are put on the wire.**
-/// angzarr carries a reaction's cause twice today (`CommandMeta.cause` and
-/// `command_index`, and the header's `AngzarrDeferredSequence`); which
-/// survives is under review, so every writer goes through here.
-pub fn command_cause_to_wire(command: &CommandId, cause: Option<&EventId>) -> WireCommandCause {
-    todo!("proposal: Origin: no header, index, cause; Reaction: deferred header, index, cause")
-}
-
-/// **The one place a command's identity and cause are read off the
-/// wire.** A deferred header makes it a [`CommandId::Reaction`]; no header,
-/// or an explicit sequence, an [`CommandId::Origin`]. An external deferred
-/// sequence (a webhook's fact) is refused: annals has no such commands.
-pub fn command_cause_from_wire(
-    page: &pb::CommandPage,
-) -> Result<(CommandId, Option<EventId>), BookError> {
-    todo!("proposal: the inverse of command_cause_to_wire")
+/// A stored snapshot, if its state is a type `S` decodes: `None` when it is
+/// not (the state type changed), so the load discards it and replays, never
+/// an error. Whether its rules version is current is the kernel's check
+/// ([`Snapshot::usable`]).
+pub fn snapshot_from_wire<S: Payload>(
+    snapshot: &pb::Snapshot,
+    recorded_at: Timestamp,
+) -> Option<Snapshot<S>> {
+    todo!("proposal: S::from_any(state).ok(), with the sequence and rules version")
 }

@@ -1,20 +1,20 @@
-//! Policies, translations and projections on the proposed kernel: a club,
-//! its members' copies (a translation: facts, as hatpick's list feeds its
-//! draw systems), its treasury's ledger (a policy: commands, rejectable)
-//! and its pot (a projection).
+//! Policies and projections on the proposed kernel: a club; its members'
+//! copies, kept by a policy whose commands each member records in its own
+//! events (as hatpick's list feeds its draw systems); its treasury's ledger
+//! (a policy whose target may refuse); and its pot (a projection).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 use std::fmt;
 
 use annals::next::{
-    deliver, facts_owed, inject, orders_owed, policy, projection, translation, CommandId,
-    Committed, Delivered, Domain, Edition, EventId, Fact, Failure, Gap, KernelError, Order, Policy,
-    Position, Projection, Reaction, Root, Rulebook, Seq, Stream, StreamKey, Tx,
+    deliver, orders_owed, policy, projection, Body, Book, Causation, Committed, Delivered, Domain,
+    EventId, Failure, Gap, KernelError, Order, Origin, Policy, Position, Projection, Provenance,
+    Reaction, Root, Rulebook, Seq, Stream, StreamKey, Tx,
 };
-use annals_diagnostic::{Arg, Diagnostic, Report};
+use annals_diagnostic::{Arg, Diagnostic};
 
-use crate::toys::{correlation, meta, meta_in, stream};
+use crate::toys::{ann, ann_in, at, book, correlation, edition, stream};
 
 // ---------------------------------------------------------------- the source: a club
 
@@ -37,6 +37,7 @@ pub(crate) enum ClubEvent {
 impl Domain for Club {
     type State = ClubState;
     type Command = ClubEvent;
+    type Fact = Infallible;
     type Event = ClubEvent;
     type Rejection = Infallible;
     type Rules = ();
@@ -46,6 +47,10 @@ impl Domain for Club {
     fn decide(cmd: &ClubEvent, tx: &mut Tx<'_, Self>) -> Result<(), Infallible> {
         tx.emit(cmd.clone());
         Ok(())
+    }
+
+    fn ingest(_: &ClubState, fact: &Infallible, (): &()) -> Vec<ClubEvent> {
+        match *fact {}
     }
 
     fn apply(s: &mut ClubState, e: &ClubEvent, (): &()) {
@@ -63,7 +68,7 @@ impl Domain for Club {
     }
 }
 
-// ---------------------------------------------------------------- a translation target: a member's copy
+// ---------------------------------------------------------------- a policy target: a member's copy
 
 pub(crate) struct Member;
 
@@ -75,10 +80,23 @@ pub(crate) struct MemberState {
     pub(crate) departed: bool,
 }
 
-/// A member takes facts only. Its commands are its own business; none here.
+/// The club's changes, commanded into a member's copy: a normal command,
+/// decided by the member. Each carries its source seq, because `apply`
+/// never sees metadata and the member's position is a fold.
 #[derive(Clone, PartialEq, Debug)]
-pub(crate) enum MemberCmd {}
+pub(crate) enum MemberCmd {
+    Enroll {
+        name: String,
+        source_seq: Seq,
+        club: ClubState,
+    },
+    ApplyClubChange {
+        source_seq: Seq,
+        event: ClubEvent,
+    },
+}
 
+/// What the member records: its own events, which reuse the club's fold.
 #[derive(Clone, PartialEq, Debug)]
 pub(crate) enum MemberEvent {
     Enrolled {
@@ -86,23 +104,82 @@ pub(crate) enum MemberEvent {
         source_seq: Seq,
         club: ClubState,
     },
-    FromClub {
+    ClubChanged {
         source_seq: Seq,
         event: ClubEvent,
     },
 }
 
+/// A member refuses a club change only when it cannot be one: never
+/// enrolled, or departed. Neither happens while the club's targets keep the
+/// contiguity invariant; in a chain either fails the club's command whole.
+#[derive(Clone, PartialEq, Debug)]
+pub(crate) enum MemberRefused {
+    NotEnrolled,
+    Retired,
+}
+
+impl fmt::Display for MemberRefused {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MemberRefused::NotEnrolled => f.write_str("not enrolled"),
+            MemberRefused::Retired => f.write_str("the member has left"),
+        }
+    }
+}
+
+impl Diagnostic for MemberRefused {
+    fn code(&self) -> &'static str {
+        match self {
+            MemberRefused::NotEnrolled => "toy-member-not-enrolled",
+            MemberRefused::Retired => "toy-member-retired",
+        }
+    }
+
+    fn args(&self) -> Vec<(&'static str, Arg)> {
+        vec![]
+    }
+}
+
 impl Domain for Member {
     type State = MemberState;
     type Command = MemberCmd;
+    type Fact = Infallible;
     type Event = MemberEvent;
-    type Rejection = Infallible;
+    type Rejection = MemberRefused;
     type Rules = ();
 
     const NAME: &'static str = "member";
 
-    fn decide(cmd: &MemberCmd, _: &mut Tx<'_, Self>) -> Result<(), Infallible> {
-        match *cmd {}
+    fn decide(cmd: &MemberCmd, tx: &mut Tx<'_, Self>) -> Result<(), MemberRefused> {
+        let s = tx.state();
+        if s.departed {
+            return Err(MemberRefused::Retired);
+        }
+        match cmd.clone() {
+            MemberCmd::Enroll {
+                name,
+                source_seq,
+                club,
+            } => {
+                tx.emit(MemberEvent::Enrolled {
+                    name,
+                    source_seq,
+                    club,
+                });
+            }
+            MemberCmd::ApplyClubChange { source_seq, event } => {
+                if s.name.is_none() {
+                    return Err(MemberRefused::NotEnrolled);
+                }
+                tx.emit(MemberEvent::ClubChanged { source_seq, event });
+            }
+        }
+        Ok(())
+    }
+
+    fn ingest(_: &MemberState, fact: &Infallible, (): &()) -> Vec<MemberEvent> {
+        match *fact {}
     }
 
     fn apply(s: &mut MemberState, e: &MemberEvent, (): &()) {
@@ -116,27 +193,13 @@ impl Domain for Member {
                 s.checkpoint = Some(*source_seq);
                 s.club = club.clone();
             }
-            MemberEvent::FromClub { source_seq, event } => {
+            MemberEvent::ClubChanged { source_seq, event } => {
                 s.checkpoint = Some(*source_seq);
                 Club::apply(&mut s.club, event, &());
                 if matches!(event, ClubEvent::Left(name) if s.name.as_ref() == Some(name)) {
                     s.departed = true;
                 }
             }
-        }
-    }
-
-    /// Integrity only: a departed member is retired, and only enrolment
-    /// creates one.
-    fn admit_fact(s: &MemberState, fact: &MemberEvent) -> Result<(), Report> {
-        if s.departed {
-            return Err(Report::new("toy-member-retired", "the member has left"));
-        }
-        match fact {
-            MemberEvent::FromClub { .. } if s.name.is_none() => {
-                Err(Report::new("toy-member-unknown", "not enrolled"))
-            }
-            _ => Ok(()),
         }
     }
 }
@@ -179,15 +242,15 @@ impl Reaction for ClubToMembers {
     }
 }
 
-impl annals::next::Translation for ClubToMembers {
-    fn fact(target: &String, c: &Committed<'_, Club>) -> MemberEvent {
+impl Policy for ClubToMembers {
+    fn command(target: &String, c: &Committed<'_, Club>) -> MemberCmd {
         match c.event() {
-            ClubEvent::Joined(name) if name == target => MemberEvent::Enrolled {
+            ClubEvent::Joined(name) if name == target => MemberCmd::Enroll {
                 name: name.clone(),
                 source_seq: c.seq(),
                 club: c.state.clone(),
             },
-            event => MemberEvent::FromClub {
+            event => MemberCmd::ApplyClubChange {
                 source_seq: c.seq(),
                 event: event.clone(),
             },
@@ -236,6 +299,7 @@ impl Diagnostic for NotARefund {
 impl Domain for Ledger {
     type State = LedgerState;
     type Command = Record;
+    type Fact = Infallible;
     type Event = Recorded;
     type Rejection = NotARefund;
     type Rules = ();
@@ -248,6 +312,10 @@ impl Domain for Ledger {
         }
         tx.emit(Recorded(cmd.clone()));
         Ok(())
+    }
+
+    fn ingest(_: &LedgerState, fact: &Infallible, (): &()) -> Vec<Recorded> {
+        match *fact {}
     }
 
     fn apply(s: &mut LedgerState, Recorded(r): &Recorded, (): &()) {
@@ -333,194 +401,222 @@ pub(crate) fn ann_and_bob() -> Stream<Club> {
         joined("bob"),
         ClubEvent::Paid(2),
     ]
-    .iter()
+    .into_iter()
     .enumerate()
     {
-        s.execute(e, &meta(i as u128, 0), &rules(), &mut [])
-            .unwrap();
+        let b = book(&s, e, i as u128);
+        s.execute(&b, &at(0), &rules(), &mut []).unwrap();
     }
     s
 }
 
 pub(crate) fn copy_of(name: &str) -> Stream<Member> {
-    Stream::new(Edition::MAIN, member_root(name))
+    Stream::new(None, member_root(name))
+}
+
+fn body<C: Clone, F>(order: &Book<C, F>) -> C {
+    match &order.body {
+        Body::Command(c) => c.clone(),
+        Body::Fact(_) => panic!("a policy's order is always a command"),
+    }
 }
 
 // ---------------------------------------------------------------- tests
 
 #[test]
-#[ignore = "proposal: one dispatch serves a projection, a policy and a translation"]
-fn one_dispatch_serves_all_three_kinds() {
+#[ignore = "proposal: one dispatch serves a projection and policies"]
+fn one_dispatch_serves_a_projection_and_policies() {
     let mut club = ann_and_bob();
     let mut pot = Pot::default();
-    let mut orders: Vec<Order<Dues>> = Vec::new();
-    let mut facts: Vec<Fact<ClubToMembers>> = Vec::new();
+    let mut dues: Vec<Order<Dues>> = Vec::new();
+    let mut copies: Vec<Order<ClubToMembers>> = Vec::new();
     {
         let mut p = projection(&mut pot);
-        let mut d = policy::<Dues, _>(|o| orders.push(o));
-        let mut t = translation::<ClubToMembers, _>(|f| facts.push(f));
-        club.execute(
-            &ClubEvent::Paid(7),
-            &meta(9, 90),
-            &rules(),
-            &mut [&mut p, &mut d, &mut t],
-        )
-        .unwrap();
+        let mut d = policy::<Dues, _>(|o| dues.push(o));
+        let mut m = policy::<ClubToMembers, _>(|o| copies.push(o));
+        let paid = book(&club, ClubEvent::Paid(7), 9);
+        club.execute(&paid, &at(90), &rules(), &mut [&mut p, &mut d, &mut m])
+            .unwrap();
     }
     assert_eq!(pot.0, 7);
-    assert_eq!(orders.len(), 1);
+    assert_eq!(dues.len(), 1);
     assert_eq!(
-        orders[0].output,
+        body(&dues[0].book),
         Record {
             source_seq: 5,
             cents: 7
         }
     );
+    assert_eq!(dues[0].book.stream, treasury());
     assert_eq!(
-        facts.iter().map(|f| f.target.as_str()).collect::<Vec<_>>(),
+        copies.iter().map(|o| o.target.as_str()).collect::<Vec<_>>(),
         ["ann", "bob"]
     );
-    assert!(facts.iter().all(|f| f.output
-        == MemberEvent::FromClub {
+    assert!(copies.iter().all(|o| body(&o.book)
+        == MemberCmd::ApplyClubChange {
             source_seq: 5,
             event: ClubEvent::Paid(7)
         }));
 }
 
 #[test]
-#[ignore = "proposal: metadata propagates through a reaction (A1, A2)"]
-fn reactions_keep_correlation_and_point_their_cause_at_the_source_event() {
+#[ignore = "proposal: a policy's command carries the trigger's provenance and a causation (A1, A2)"]
+fn a_policys_command_carries_the_triggers_provenance_and_a_causation() {
     let mut club = stream::<Club>(1);
-    let mut ann = copy_of("ann");
-    let mut facts = Vec::new();
-    let mut orders = Vec::new();
+    let mut ann_copy = copy_of("ann");
+    let mut copies = Vec::new();
     {
-        let mut t = translation::<ClubToMembers, _>(|f| facts.push(f));
-        let mut d = policy::<Dues, _>(|o| orders.push(o));
-        club.execute(
-            &joined("ann"),
-            &meta_in(100, 1_000, 555),
-            &rules(),
-            &mut [&mut t, &mut d],
-        )
-        .unwrap();
+        let mut m = policy::<ClubToMembers, _>(|o| copies.push(o));
+        for (i, name) in ["ann", "bob"].into_iter().enumerate() {
+            let join = Book::command(
+                club.key().clone(),
+                joined(name),
+                Origin::request(crate::toys::request(100 + i as u128), 0),
+                ann_in(555),
+            );
+            club.execute(&join, &at(1_000), &rules(), &mut [&mut m])
+                .unwrap();
+        }
     }
-    let source = EventId {
+    let bobs_join = EventId {
+        stream: club.key().clone(),
+        seq: 1,
+    };
+    let to_bob: Vec<&Order<ClubToMembers>> = copies
+        .iter()
+        .filter(|o| o.book.origin.cause() == Some(&bobs_join))
+        .collect();
+    assert_eq!(
+        to_bob
+            .iter()
+            .map(|o| (o.target.as_str(), o.book.origin.clone()))
+            .collect::<Vec<_>>(),
+        [
+            (
+                "ann",
+                Origin::Causation(Causation {
+                    event: bobs_join.clone(),
+                    component: "club-to-members".to_string(),
+                    index: 0
+                })
+            ),
+            (
+                "bob",
+                Origin::Causation(Causation {
+                    event: bobs_join.clone(),
+                    component: "club-to-members".to_string(),
+                    index: 1
+                })
+            ),
+        ],
+        "one causation per command the policy issued for the event"
+    );
+    for order in &copies {
+        assert_eq!(
+            order.book.provenance,
+            Provenance {
+                actor: ann().actor,
+                correlation: Some(correlation(555)),
+            },
+            "the trigger's actor and correlation"
+        );
+        assert_eq!(order.book.handling, Default::default(), "no handling");
+        assert_eq!(order.book.validate(), Ok(()));
+    }
+
+    let Delivered::Next(events) =
+        deliver(&mut ann_copy, &copies[0], &at(2_000), &rules(), &mut []).unwrap()
+    else {
+        panic!("the first command is decided")
+    };
+    let joined_ann = EventId {
         stream: club.key().clone(),
         seq: 0,
     };
-    for meta in [&facts[0].meta, &orders[0].meta] {
-        assert_eq!(meta.cause, Some(source.clone()));
-        assert_eq!(meta.correlation, Some(correlation(555)));
-        assert_eq!(
-            meta.request,
-            club.events()[0].meta.request,
-            "the origin's request"
-        );
-        assert!(matches!(
-            &meta.command,
-            CommandId::Reaction { source: s, index: 0, .. } if *s == source
-        ));
-        assert_eq!(meta.actor, club.events()[0].meta.actor);
-    }
-    assert_eq!(facts[0].source, source);
-    assert_eq!(
-        facts[0].meta.command,
-        CommandId::Reaction {
-            source: source.clone(),
-            component: "club-to-members".to_string(),
-            index: 0
-        }
-    );
-    assert_eq!(
-        orders[0].meta.command,
-        CommandId::Reaction {
-            source: source.clone(),
-            component: "dues".to_string(),
-            index: 0
-        }
-    );
-
-    let Delivered::Next(events) = inject(&mut ann, &facts[0], &rules(), &mut []).unwrap() else {
-        panic!("the first fact is recorded")
-    };
-    assert_eq!(events[0].meta.cause, Some(source), "on the target's event");
+    assert_eq!(events[0].meta.origin.cause(), Some(&joined_ann));
     assert_eq!(events[0].meta.correlation, correlation(555));
+    assert_eq!(events[0].meta.actor, ann().actor);
 }
 
 #[test]
-#[ignore = "proposal: a fact is placed, then admitted, never decided"]
-fn a_fact_is_refused_only_for_integrity() {
+#[ignore = "proposal: a propagated change is placed by position, then decided like any command"]
+fn a_propagated_change_is_placed_then_decided() {
     let mut club = ann_and_bob();
-    let mut ann = copy_of("ann");
-    let owed = facts_owed::<ClubToMembers>(&club, &rules(), &BTreeMap::new()).unwrap();
-    for fact in &owed["ann"] {
-        inject(&mut ann, fact, &rules(), &mut []).unwrap();
+    let mut ann_copy = copy_of("ann");
+    let owed = orders_owed::<ClubToMembers>(&club, &rules(), &BTreeMap::new()).unwrap();
+    for order in &owed["ann"] {
+        deliver(&mut ann_copy, order, &at(1), &rules(), &mut []).unwrap();
     }
-    assert_eq!(ann.state().club, *club.state());
-    let len = ann.len();
-
-    for fact in &owed["ann"] {
+    assert_eq!(ann_copy.state().club, *club.state());
+    let len = ann_copy.len();
+    for order in &owed["ann"] {
         assert_eq!(
-            inject(&mut ann, fact, &rules(), &mut []),
+            deliver(&mut ann_copy, order, &at(1), &rules(), &mut []),
             Ok(Delivered::Redelivery)
         );
     }
-    assert_eq!(ann.len(), len, "redelivery records nothing");
+    assert_eq!(ann_copy.len(), len, "a redelivery decides nothing");
 
     let mut later = Vec::new();
     for (i, e) in [ClubEvent::Left("ann".to_string()), ClubEvent::Paid(1)]
-        .iter()
+        .into_iter()
         .enumerate()
     {
-        let mut t = translation::<ClubToMembers, _>(|f| later.push(f));
-        club.execute(e, &meta(50 + i as u128, 0), &rules(), &mut [&mut t])
-            .unwrap();
+        let mut m = policy::<ClubToMembers, _>(|o| later.push(o));
+        let b = book(&club, e, 50 + i as u128);
+        club.execute(&b, &at(2), &rules(), &mut [&mut m]).unwrap();
     }
-    let to_ann: Vec<_> = later.iter().filter(|f| f.target == "ann").collect();
-    assert_eq!(to_ann.len(), 1, "her departure, then nothing");
-    let departure = to_ann[0];
-    let bobs_next = later.iter().find(|f| f.target == "bob").unwrap();
-    let mut bob = copy_of("bob");
+    let to_ann: Vec<_> = later.iter().filter(|o| o.target == "ann").collect();
     assert_eq!(
-        inject(&mut bob, bobs_next, &rules(), &mut []).unwrap_err(),
-        KernelError::FactRefused {
-            stream: bob.key().clone(),
-            reason: Report::new("toy-member-unknown", "not enrolled"),
-        },
-        "a copy never created has no position to place against: its admit_fact decides"
+        to_ann.len(),
+        1,
+        "her departure, then nothing: she left the targets"
     );
 
-    inject(&mut ann, departure, &rules(), &mut []).unwrap();
-    assert!(ann.state().departed);
-    let source = EventId {
-        stream: club.key().clone(),
-        seq: 7,
-    };
-    let stray: Fact<ClubToMembers> = annals::next::Owed {
+    let bobs_next = later.iter().find(|o| o.target == "bob").unwrap();
+    let mut bob_copy = copy_of("bob");
+    assert_eq!(
+        deliver(&mut bob_copy, bobs_next, &at(3), &rules(), &mut []).unwrap_err(),
+        Failure::Rejected(MemberRefused::NotEnrolled),
+        "a copy never created has no position to place against: its decide refuses"
+    );
+
+    deliver(&mut ann_copy, to_ann[0], &at(3), &rules(), &mut []).unwrap();
+    assert!(ann_copy.state().departed);
+    let stray = |source_seq: Seq| Order::<ClubToMembers> {
         target: "ann".to_string(),
-        source: source.clone(),
-        meta: annals::next::CommandMeta::reacting_to(
-            &club.events()[6].meta,
-            source,
-            "club-to-members",
-            0,
+        book: Book::command(
+            member_stream("ann"),
+            MemberCmd::ApplyClubChange {
+                source_seq,
+                event: ClubEvent::Paid(1),
+            },
+            Origin::Causation(Causation {
+                event: EventId {
+                    stream: club.key().clone(),
+                    seq: source_seq,
+                },
+                component: "club-to-members".to_string(),
+                index: 0,
+            }),
+            Provenance::default(),
         ),
-        output: MemberEvent::FromClub {
-            source_seq: 7,
-            event: ClubEvent::Paid(1),
-        },
     };
     assert_eq!(
-        inject(&mut ann, &stray, &rules(), &mut []).unwrap_err(),
-        KernelError::Gap {
-            stream: ann.key().clone(),
+        deliver(&mut ann_copy, &stray(7), &at(4), &rules(), &mut []).unwrap_err(),
+        Failure::Kernel(KernelError::Gap {
+            stream: ann_copy.key().clone(),
             gap: Gap {
                 expected: 6,
                 found: 7
             }
-        },
-        "the position is checked before integrity"
+        }),
+        "the position is checked before decide"
+    );
+    assert_eq!(
+        deliver(&mut ann_copy, &stray(6), &at(4), &rules(), &mut []).unwrap_err(),
+        Failure::Rejected(MemberRefused::Retired),
+        "a stray past retirement is refused, loudly"
     );
 }
 
@@ -528,24 +624,19 @@ fn a_fact_is_refused_only_for_integrity() {
 #[ignore = "proposal: a policy's command goes through the target's decide"]
 fn a_policys_command_may_be_rejected_by_its_target() {
     let mut club = stream::<Club>(1);
-    let mut ledger = Stream::<Ledger>::new(Edition::MAIN, TREASURY_ROOT);
+    let mut ledger = Stream::<Ledger>::new(None, TREASURY_ROOT);
     let mut orders = Vec::new();
-    for (i, n) in [4, -1].iter().enumerate() {
+    for (i, n) in [4, -1].into_iter().enumerate() {
         let mut d = policy::<Dues, _>(|o| orders.push(o));
-        club.execute(
-            &ClubEvent::Paid(*n),
-            &meta(i as u128, 0),
-            &rules(),
-            &mut [&mut d],
-        )
-        .unwrap();
+        let b = book(&club, ClubEvent::Paid(n), i as u128);
+        club.execute(&b, &at(0), &rules(), &mut [&mut d]).unwrap();
     }
     assert!(matches!(
-        deliver(&mut ledger, &orders[0], &rules(), &mut []),
+        deliver(&mut ledger, &orders[0], &at(1), &rules(), &mut []),
         Ok(Delivered::Next(_))
     ));
     assert_eq!(
-        deliver(&mut ledger, &orders[1], &rules(), &mut []).unwrap_err(),
+        deliver(&mut ledger, &orders[1], &at(1), &rules(), &mut []).unwrap_err(),
         Failure::Rejected(NotARefund)
     );
     assert_eq!(ledger.state().cents, 4);
@@ -556,18 +647,23 @@ fn a_policys_command_may_be_rejected_by_its_target() {
 fn a_backlog_serves_every_target_from_its_own_position() {
     let club = ann_and_bob();
     let positions = BTreeMap::from([("ann".to_string(), Position::at(2))]);
-    let owed = facts_owed::<ClubToMembers>(&club, &rules(), &positions).unwrap();
-    let seqs = |target: &str| -> Vec<Seq> { owed[target].iter().map(|f| f.source.seq).collect() };
+    let owed = orders_owed::<ClubToMembers>(&club, &rules(), &positions).unwrap();
+    let seqs = |target: &str| -> Vec<Seq> {
+        owed[target]
+            .iter()
+            .map(|o| o.book.origin.cause().unwrap().seq)
+            .collect()
+    };
     assert_eq!(seqs("ann"), [3, 4], "after her position");
     assert_eq!(seqs("bob"), [3, 4], "from where he first appears");
     assert!(matches!(
-        owed["bob"][0].output,
-        MemberEvent::Enrolled { .. }
+        body(&owed["bob"][0].book),
+        MemberCmd::Enroll { .. }
     ));
     assert_eq!(owed.len(), 2);
 
     let orders = orders_owed::<Dues>(&club, &rules(), &BTreeMap::new()).unwrap();
-    assert_eq!(orders[&()].len(), 5, "the same pass, for a policy");
+    assert_eq!(orders[&()].len(), 5, "the same pass, for another policy");
 }
 
 /// Targets ann whenever the pot is even: so she can leave and come back,
@@ -598,9 +694,9 @@ impl Reaction for Fickle {
     }
 }
 
-impl annals::next::Translation for Fickle {
-    fn fact(_: &String, c: &Committed<'_, Club>) -> MemberEvent {
-        MemberEvent::FromClub {
+impl Policy for Fickle {
+    fn command(_: &String, c: &Committed<'_, Club>) -> MemberCmd {
+        MemberCmd::ApplyClubChange {
             source_seq: c.seq(),
             event: c.event().clone(),
         }
@@ -611,12 +707,12 @@ impl annals::next::Translation for Fickle {
 #[ignore = "proposal: a backlog checks the contiguity invariant (B1)"]
 fn a_backlog_refuses_a_target_that_comes_back() {
     let mut club = stream::<Club>(1);
-    for (i, n) in [2, 1, 1].iter().enumerate() {
-        club.execute(&ClubEvent::Paid(*n), &meta(i as u128, 0), &rules(), &mut [])
-            .unwrap();
+    for (i, n) in [2, 1, 1].into_iter().enumerate() {
+        let b = book(&club, ClubEvent::Paid(n), i as u128);
+        club.execute(&b, &at(0), &rules(), &mut []).unwrap();
     }
     assert_eq!(
-        facts_owed::<Fickle>(&club, &rules(), &BTreeMap::new()).err(),
+        orders_owed::<Fickle>(&club, &rules(), &BTreeMap::new()).err(),
         Some(KernelError::TargetReturned {
             left: 1,
             returned: 2
@@ -627,25 +723,28 @@ fn a_backlog_refuses_a_target_that_comes_back() {
 #[test]
 #[ignore = "proposal: a reaction's target is in its source's edition"]
 fn a_reaction_never_crosses_timelines() {
-    let v2 = Edition::new("v2");
-    let source = StreamKey::new("club", v2.clone(), Root::from(1));
+    let source = StreamKey::new("club", edition("v2"), Root::from(1));
     assert_eq!(
         annals::next::target_key::<ClubToMembers>(&source, &"ann".to_string()),
-        StreamKey::new("member", v2.clone(), member_root("ann")),
+        StreamKey::new("member", edition("v2"), member_root("ann")),
         "the target's domain, the source's edition, the target's root"
     );
 
-    let mut club = Stream::<Club>::new(v2.clone(), Root::from(1));
-    let mut facts = Vec::new();
+    let mut club = Stream::<Club>::new(edition("v2"), Root::from(1));
+    let mut orders = Vec::new();
     {
-        let mut t = translation::<ClubToMembers, _>(|f| facts.push(f));
-        club.execute(&joined("ann"), &meta(1, 0), &rules(), &mut [&mut t])
-            .unwrap();
+        let mut m = policy::<ClubToMembers, _>(|o| orders.push(o));
+        let b = book(&club, joined("ann"), 1);
+        club.execute(&b, &at(0), &rules(), &mut [&mut m]).unwrap();
     }
-    assert_eq!(facts[0].source.stream, source);
+    let order: &Order<ClubToMembers> = &orders[0];
     assert_eq!(
-        facts[0].meta.cause.as_ref().map(|c| &c.stream),
+        order.book.stream,
+        StreamKey::new("member", edition("v2"), member_root("ann"))
+    );
+    assert_eq!(
+        order.book.origin.cause().map(|c| &c.stream),
         Some(&source),
-        "the cause names the source in its edition"
+        "the causation names the source in its edition"
     );
 }
