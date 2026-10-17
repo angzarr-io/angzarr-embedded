@@ -24,8 +24,8 @@
 
 use angzarr_proto::ids::{self, UuidError};
 use angzarr_proto::v1::{
-    command_page, CommandBook, CommandPage, ConflictResolution, Cover, EventMeta, EventRef,
-    FactOrigin, Handling, Uuid,
+    command_page, event_meta, CommandBook, CommandPage, ConflictResolution, Cover, EventMeta,
+    EventRef, FactOrigin, Handling, Uuid,
 };
 use prost_types::{Any, Timestamp};
 
@@ -188,28 +188,19 @@ pub fn check(book: CommandBook, registry: &Registry) -> Result<Checked, Malforme
 /// must name no ids of its own, no handling and no fact, and its command id
 /// is derived here ([`ids::reaction_command_id`]).
 ///
-/// `rerun_version` is the reactor's [`Reaction::RERUN_VERSION`](super::Reaction::RERUN_VERSION):
-/// when set, the derivation also names it, so a re-run after a version bump
-/// yields new command ids (angzarr's coming re-run switch; the derivation
-/// with a version is pending the re-pin past eec6676).
+/// The id never names the reactor's rules version or code, so a re-run over
+/// a handled trigger (catch-up, redelivery) re-derives the same id and
+/// deduplicates (angzarr decision 13.4). Repairs are new commands.
 pub(crate) fn check_reaction(
     book: CommandBook,
     registry: &Registry,
     trigger: EventRef,
     component: &str,
     index: u32,
-    rerun_version: Option<&str>,
     correlation_id: Uuid,
 ) -> Result<Checked, Malformed> {
-    let command_id = match rerun_version {
-        None => {
-            ids::reaction_command_id(&trigger, component, index).map_err(Malformed::BadTrigger)?
-        }
-        Some(version) => todo!(
-            "proposal: angzarr's reaction_command_id with the reactor's rules version {version}, \
-             pending the re-pin"
-        ),
-    };
+    let command_id =
+        ids::reaction_command_id(&trigger, component, index).map_err(Malformed::BadTrigger)?;
     parse(
         book,
         registry,
@@ -407,7 +398,8 @@ impl Checked {
     ///   (a sent one was checked equal); correlation as sent, else
     ///   [`ids::fact_correlation`] (the same value).
     /// - A reaction: the command id derived from its trigger, the trigger's
-    ///   correlation, and the trigger as its causation.
+    ///   correlation, and the trigger as the command's own causation
+    ///   (`CommandPage.causation_id`; never copied onto its events).
     ///
     /// Infallible: everything that could make it fail was refused by the
     /// check.
@@ -505,7 +497,12 @@ impl Identified {
         &self.correlation_id
     }
 
-    /// The trigger, for a reaction; `None` otherwise.
+    /// The command's own causation (`CommandPage.causation_id`): the
+    /// trigger, for a reaction; `None` otherwise. Transport and trace
+    /// metadata, and the input its derived command id hashes. It is **not**
+    /// stamped on the command's events ([`Identified::meta`]), whose
+    /// causation is the command itself (angzarr decision 13.3): the
+    /// trigger-to-command edge belongs in tracing and logs.
     pub fn causation_id(&self) -> Option<&EventRef> {
         self.causation_id.as_ref()
     }
@@ -519,13 +516,19 @@ impl Identified {
     }
 
     /// The metadata every event this command produces carries (angzarr's
-    /// `EventMeta`): its command id, causation, fact source and
-    /// correlation, the instant it is recorded at and the rules version it
-    /// is decided under. No actor: who did it belongs in a security log.
+    /// `EventMeta`): its causation (this command's id, the deduplication
+    /// key), fact source and correlation, the instant it is recorded at and
+    /// the rules version it is decided under. No actor: who did it belongs
+    /// in a security log. No trigger: a reaction's events name their
+    /// command, not what the command reacted to.
+    //
+    // Trace hook (not yet wired; annals has no tracing dependency): for a
+    // reaction, the edge `causation_id` -> `command_id` is what a span or a
+    // log line records (angzarr backlog PS-6), at the point the chain
+    // dispatches the policy's command.
     pub fn meta(&self, recorded_at: Timestamp, rules_version: &str) -> EventMeta {
         EventMeta {
-            command_id: Some(self.command_id.clone()),
-            causation_id: self.causation_id.clone(),
+            causation: Some(event_meta::Causation::CommandId(self.command_id.clone())),
             fact: self.body.source().cloned(),
             correlation_id: Some(self.correlation_id.clone()),
             recorded_at: Some(recorded_at),
@@ -559,5 +562,75 @@ impl Identified {
             }),
             handling: (handling != Handling::default()).then_some(handling),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use angzarr_proto::v1::event_meta::Causation;
+    use prost::Message;
+
+    use super::*;
+
+    fn uuid(n: u8) -> Uuid {
+        Uuid {
+            value: vec![n; 16].into(),
+        }
+    }
+
+    /// A reaction's command as the chain identifies it: built directly,
+    /// since `check_reaction` needs a registered domain and only the
+    /// meta is under test.
+    fn reaction(trigger: EventRef) -> Identified {
+        let command_id = ids::reaction_command_id(&trigger, "bookkeeping", 0).unwrap();
+        Identified {
+            cover: Cover {
+                domain: "ledger".to_string(),
+                root: Some(uuid(2)),
+                edition: None,
+            },
+            root: uuid(2),
+            body: Body::Command {
+                payload: Any::default(),
+            },
+            command_id,
+            correlation_id: uuid(8),
+            causation_id: Some(trigger),
+            expected_sequence: None,
+            conflict_resolution: None,
+        }
+    }
+
+    #[test]
+    fn a_reactions_events_carry_its_command_id_as_causation_and_no_trigger() {
+        let trigger = EventRef {
+            stream: Some(Cover {
+                domain: "account".to_string(),
+                root: Some(uuid(0xa7)),
+                edition: None,
+            }),
+            sequence: 2,
+        };
+        let id = reaction(trigger.clone());
+        assert_eq!(id.causation_id(), Some(&trigger), "the command keeps it");
+
+        let meta = id.meta(Timestamp::default(), "v1");
+        assert_eq!(
+            meta.causation,
+            Some(Causation::CommandId(
+                ids::reaction_command_id(&trigger, "bookkeeping", 0).unwrap()
+            )),
+            "the direct cause: the command"
+        );
+        let bytes = meta.encode_to_vec();
+        assert!(
+            !bytes.windows(16).any(|w| w == [0xa7; 16]),
+            "nothing of the trigger is on the event"
+        );
+        assert_eq!(
+            id.to_book().page.unwrap().causation_id,
+            Some(trigger),
+            "the book still names it, for transport and traces"
+        );
     }
 }

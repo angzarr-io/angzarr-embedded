@@ -17,7 +17,9 @@ fn page(sequence: u64, n: u128) -> EventPage {
             cents: sequence as i64,
         })),
         meta: Some(EventMeta {
-            command_id: Some(command_id(n)),
+            causation: Some(annals::next::v1::event_meta::Causation::CommandId(
+                command_id(n),
+            )),
             correlation_id: Some(command_id(n)),
             recorded_at: Some(instant(sequence as i64)),
             rules_version: "v2".to_string(),

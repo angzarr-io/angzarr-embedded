@@ -1,6 +1,7 @@
 //! A stream: an append-only log of stamped events and the state folded from
 //! it.
 
+use angzarr_proto::v1::event_meta::Causation;
 use angzarr_proto::v1::{
     CommandBook, Cover, EventMeta, EventPage, EventRef, FactOrigin, Snapshot, Uuid,
 };
@@ -15,27 +16,6 @@ use super::payload::Payload;
 use super::registry::Registry;
 use super::upcast::Upcaster;
 
-/// What produced an event: angzarr's coming `EventMeta.produced_by` oneof
-/// (the proto pass after eec6676; annals is pinned to eec6676, so this
-/// enum stands in for the generated `v1::event_meta::ProducedBy` until the
-/// re-pin, when it is replaced by it).
-///
-/// - `Command`: the event was decided or ingested for a command (a
-///   client's, a fact, or a policy's), whose id it carries; deduplicated on
-///   it in the stream.
-/// - `TriggeringEvent`: the event was written by a **process manager** in
-///   reaction to another event, with no command between; deduplicated on
-///   the trigger within the process manager's stream, and carrying the
-///   trigger's correlation. annals has no process manager yet (see
-///   `docs/design/audit.md`, *Process managers*); the variant is here so the
-///   metadata is ready for one. At eec6676 it cannot be persisted: the
-///   page's `EventMeta` has no field for it.
-#[derive(Clone, PartialEq, Debug)]
-pub enum ProducedBy {
-    Command(Uuid),
-    TriggeringEvent(EventRef),
-}
-
 /// One recorded event, checked and decoded: an [`EventPage`] whose
 /// `EventMeta` had every field a recorded event always has (so its
 /// accessors are not optional) and whose payload, upcast, decoded as `E`.
@@ -44,9 +24,8 @@ pub enum ProducedBy {
 #[derive(Clone, PartialEq, Debug)]
 pub struct Envelope<E> {
     pub(crate) sequence: u64,
-    pub(crate) produced_by: ProducedBy,
+    pub(crate) causation: Causation,
     pub(crate) correlation_id: Uuid,
-    pub(crate) causation_id: Option<EventRef>,
     pub(crate) fact: Option<FactOrigin>,
     pub(crate) recorded_at: Timestamp,
     pub(crate) rules_version: String,
@@ -59,40 +38,41 @@ impl<E> Envelope<E> {
         self.sequence
     }
 
-    /// What produced it: a command, or (for a process manager's event) a
-    /// triggering event. Exactly one; never absent on a recorded event.
-    pub fn produced_by(&self) -> &ProducedBy {
-        &self.produced_by
+    /// Its direct cause (angzarr's `EventMeta.causation`): the producing
+    /// command's id, or (for a process manager's own process event) the
+    /// event it reacted to. Exactly one; never absent on a recorded event.
+    ///
+    /// For an event of a policy's command this is the command, never the
+    /// policy's trigger: events record their direct cause only (angzarr
+    /// decision 13.3). The trigger is the command's own causation
+    /// ([`Identified::causation_id`](super::Identified::causation_id)),
+    /// which goes to tracing, not to the event.
+    pub fn causation(&self) -> &Causation {
+        &self.causation
     }
 
     /// The producing command's id, what deduplication finds; `None` for a
-    /// process manager's event.
+    /// process manager's process event.
     pub fn command_id(&self) -> Option<&Uuid> {
-        match &self.produced_by {
-            ProducedBy::Command(id) => Some(id),
-            ProducedBy::TriggeringEvent(_) => None,
+        match &self.causation {
+            Causation::CommandId(id) => Some(id),
+            Causation::TriggeringEvent(_) => None,
         }
     }
 
-    /// The event a process manager reacted to in writing this one; `None`
-    /// for a command's event.
+    /// The event a process manager reacted to in writing this one, what its
+    /// deduplication finds within its stream; `None` for a command's event.
     pub fn triggering_event(&self) -> Option<&EventRef> {
-        match &self.produced_by {
-            ProducedBy::TriggeringEvent(trigger) => Some(trigger),
-            ProducedBy::Command(_) => None,
+        match &self.causation {
+            Causation::TriggeringEvent(trigger) => Some(trigger),
+            Causation::CommandId(_) => None,
         }
     }
 
-    /// Never absent on a recorded event.
+    /// Never absent on a recorded event: for a process event, its
+    /// trigger's.
     pub fn correlation_id(&self) -> &Uuid {
         &self.correlation_id
-    }
-
-    /// The trigger, only for an event whose command was a policy's
-    /// reaction. A process manager's event names its trigger in
-    /// [`Envelope::produced_by`] instead.
-    pub fn causation_id(&self) -> Option<&EventRef> {
-        self.causation_id.as_ref()
     }
 
     /// The source, for a fact's event.
@@ -113,13 +93,10 @@ impl<E> Envelope<E> {
         &self.event
     }
 
-    /// The metadata, as angzarr's `EventMeta`. At eec6676 a triggering
-    /// event has no field yet, so a process manager's event cannot be
-    /// written until the re-pin.
+    /// The metadata, as angzarr's `EventMeta`.
     pub fn meta(&self) -> EventMeta {
         EventMeta {
-            command_id: self.command_id().cloned(),
-            causation_id: self.causation_id.clone(),
+            causation: Some(self.causation.clone()),
             fact: self.fact.clone(),
             correlation_id: Some(self.correlation_id.clone()),
             recorded_at: Some(self.recorded_at),
@@ -244,8 +221,8 @@ impl<D: Domain> Stream<D> {
     /// ([`Envelope::decode`], upcast) and folded with the rules its
     /// `rules_version` names, from the registry's rulebook; the caller does
     /// not choose them. Refuses a cover of another domain, a rules version
-    /// the rulebook lacks, a sequence out of order, a causation in this
-    /// stream that is not earlier, and a `recorded_at` earlier than the
+    /// the rulebook lacks, a sequence out of order, a triggering event in
+    /// this stream that is not earlier, and a `recorded_at` earlier than the
     /// event before.
     pub fn replay(
         cover: Cover,

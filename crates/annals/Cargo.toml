@@ -16,7 +16,7 @@ rust-version = "1.85"
 # this deliberately: see docs/design/audit.md, *Layering*.
 [dependencies]
 annals-diagnostic = { path = "../annals-diagnostic" }
-angzarr-proto = { git = "https://github.com/angzarr-io/angzarr-project", rev = "eec66762023dcc4ba1ca213a3295d6b5014b8ed5" }
+angzarr-proto = { git = "https://github.com/angzarr-io/angzarr-project", rev = "58500578b81264f4bc4314c3c54078f6a643f590" }
 prost = "0.14"
 prost-types = "0.14"
 

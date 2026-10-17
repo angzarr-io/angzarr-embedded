@@ -230,7 +230,8 @@ impl<'a, D: Domain> Tx<'a, D> {
         self.correlation_id
     }
 
-    /// The triggering event, for a policy's command.
+    /// The command's own causation: the triggering event, for a policy's
+    /// command. Not on the events it emits, whose causation is the command.
     pub fn causation_id(&self) -> Option<&'a EventRef> {
         self.causation_id
     }

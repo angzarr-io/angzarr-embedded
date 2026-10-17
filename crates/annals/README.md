@@ -93,8 +93,9 @@ impl Domain for Counter {
 - **The audited kernel** (`annals::next`, a proposal) operates on
   angzarr's proto types directly: a stream is a `Cover` (domain, edition,
   root; main is the unset edition), a command a `CommandBook`, an event an
-  `EventPage` with its `EventMeta` (command id, causation, fact source,
-  correlation, recorded-at, rules version; no actor), every id a 16-byte
+  `EventPage` with its `EventMeta` (causation, the producing command's id;
+  fact source, correlation, recorded-at, rules version; no actor and no
+  reaction trigger), every id a 16-byte
   `UUID`. One domain-blind parse (`check`) checks a book and yields a
   `Checked` with non-optional accessors; `identify` assigns its command id
   and correlation; the in-process `Coordinator` deduplicates by command id

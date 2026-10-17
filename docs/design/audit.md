@@ -8,20 +8,27 @@ non-trivial body is `todo!("proposal: ...")`, pinned by ignored tests in
 has been reviewed.
 
 The wire contract is angzarr's protos at angzarr-project `feat/audit-meta`
-**eec6676** (pass 12: one `command_id` per command, deduplication on the
-events, no actor, `StateOptions`/`StateDescriptor`, commands may be upcast),
+**5850057** (pass 13: `EventMeta.causation` is the event's direct cause,
+`oneof { command_id, triggering_event }`, with no command-causation on
+events; PM process events deduplicate on their trigger; reactor re-runs
+always deduplicate. On top of pass 12: one `command_id` per command,
+deduplication on the events, no actor, `StateOptions`/`StateDescriptor`,
+commands may be upcast),
 and the record in angzarr's `docs/design/audit-meta/` (`decision-log.md`,
 `idempotency.md`, `annals-divergence.md`) and
 `docs/guide/state-and-conflicts.md`.
 
-**Re-pin pending.** Two decisions came after eec6676 and are designed here
-ahead of their proto pass: `EventMeta`'s `oneof produced_by { UUID
-command_id; EventRef triggering_event; }` (for process managers' events) and
-the per-reactor re-run switch, whose derived command ids include the
-reactor's rules version. annals stays pinned to eec6676 until that pass
-lands; until then `ProducedBy` is annals' stand-in for the generated oneof,
-and the re-run derivation is a `todo!` (see [Metadata](#metadata),
-[Process managers](#process-managers), [Re-runs](#reactor-re-runs)).
+**Causation is the direct cause** (angzarr decisions 13.1 and 13.3). An
+event's `EventMeta.causation` names what produced it: its command
+(`command_id`, every command's event, a policy's included), or, for a
+process manager's own process event, the event it reacted to
+(`triggering_event`). A policy's command still names its trigger in
+`CommandPage.causation_id`, the command's own causation (transport and
+trace metadata, and the input its derived id hashes), but that is never
+copied onto its events: the trigger-to-command edge belongs in tracing and
+logs. There is no re-run switch: a reaction's id never names a rules
+version, so a re-run deduplicates, and repairs are new commands (decision
+13.4; see [Reactor re-runs](#reactor-re-runs)).
 
 ## Why
 
@@ -36,7 +43,7 @@ places:
 | ID | Finding | Resolution here |
 |---|---|---|
 | A1 | `Envelope` holds only seq, cause and event: no when, no why. Consumers put metadata in the payload (hatpick's `Stamp`, annals-sim's `Ticked`). | Every event carries angzarr's `EventMeta`, stamped by the kernel. Business code emits payloads only. [Metadata](#metadata) |
-| A2 | `cause` is only within a stream; there is no correlation id. | `causation_id` is an `EventRef` into any stream; correlation is always set and kept through every reaction. [Identification](#step-2-identification) |
+| A2 | `cause` is only within a stream; there is no correlation id. | Every event names its direct cause (its command, or a process event's trigger, an `EventRef` into any stream); a reaction command names its trigger as its own `causation_id`; correlation is always set and kept through every reaction. [Identification](#step-2-identification), [Metadata](#metadata) |
 | A3 | `Header.rules` is a free string replay never checks. | The rules version is registered, stamped per event, resolved by a `Rulebook` at replay, and invalidates snapshots. [Rules versions](#rules-versions) |
 | A5 | `Header.schema` is unused; there is no upcasting. | A payload's type URL is its version. Old types are upcast by type URL, strictly, events at read and (discouraged) commands before decode. [Decode](#step-5-decode-then-decide-or-ingest) |
 | A6 | Events emitted before a rejection stay in the `Stream`. | Decide is pure and stages its events; a rejection leaves nothing. |
@@ -205,7 +212,7 @@ pub struct Sampled { pub now: Timestamp, pub command_id: Uuid }   // the applica
 impl Identified {
     pub fn command_id(&self) -> &Uuid;            // never absent
     pub fn correlation_id(&self) -> &Uuid;        // never absent
-    pub fn causation_id(&self) -> Option<&EventRef>;
+    pub fn causation_id(&self) -> Option<&EventRef>; // the command's (CommandPage), never its events'
     pub fn meta(&self, recorded_at: Timestamp, rules_version: &str) -> EventMeta;
     pub fn to_book(&self) -> CommandBook;         // ids filled: for a dead letter or an audit line
     // and the Checked accessors
@@ -219,7 +226,9 @@ impl Identified {
 | a policy's command | `ids::reaction_command_id(trigger, component, index)` (UUIDv5) | the trigger's | the trigger's `EventRef` |
 
 `component` is `Reaction::NAME`; `index` is the order's place among those
-the trigger set off for that policy. Identification is infallible: the
+the trigger set off for that policy. The `causation_id` column is the
+command's own (`CommandPage.causation_id`); `Identified::meta` stamps the
+events with `causation.command_id` only. Identification is infallible: the
 check refused everything that could make it fail. Text forms of ids exist
 only at display and input (`Display`/`FromStr` on `v1::Uuid`).
 
@@ -418,12 +427,17 @@ Every event carries angzarr's `EventMeta`, the same in both runtimes:
 
 | Field | annals stamps |
 |---|---|
-| `produced_by` | exactly one of: `command_id`, the producing command's (step 2), its deduplication key; or `triggering_event`, for an event a process manager wrote in reaction to another event with no command between (see [Process managers](#process-managers)). At eec6676 only `command_id` exists; annals' `ProducedBy` enum stands in until the re-pin |
-| `causation_id` | the trigger's `EventRef`, **only** for an event whose command was a reaction (a policy's); unset for a client's command, a fact, and a process manager's own event |
+| `causation` | the event's direct cause, exactly one of: `command_id`, the producing command's (step 2: a client's, a fact's or a policy's), its deduplication key; or `triggering_event`, for a process event a process manager wrote in reaction to another event with no command between (see [Process managers](#process-managers)) |
 | `fact` | the fact's `FactOrigin`, for a fact; unset otherwise |
 | `correlation_id` | the producing command's; never unset |
 | `recorded_at` | `max(Sampled::now, the stream's last recorded_at)`: non-decreasing per stream, one instant per chain, so as-of-time reads are prefixes |
 | `rules_version` | the registered rulebook's current version |
+
+**No trigger on a reaction's events**: a policy's command names its trigger
+(`CommandPage.causation_id`), its events name the command. The edge from
+trigger to command goes to tracing and logs; `Identified::meta` carries a
+note where the hook belongs (see open question 1). Readers find a
+reaction's events by correlation and group them by `command_id`.
 
 **No actor**, anywhere: who did it belongs in the deployment's separate
 security log, written by the application with the command id, so erasing
@@ -434,9 +448,10 @@ instant) belongs in the payload, where `apply` sees it; decide copies
 `tx.recorded_at()` there when the domain needs it.
 
 A decoded event is an `Envelope<E>`: a checked `EventPage`, its metadata's
-required fields outside their `Option`s (`produced_by()`, `correlation_id()`,
-`recorded_at()`, `rules_version()`; `command_id()` and `triggering_event()`
-are the two sides of `produced_by`), its payload decoded. A stored page
+required fields outside their `Option`s (`causation()`, the generated
+`v1::event_meta::Causation`; `correlation_id()`, `recorded_at()`,
+`rules_version()`; `command_id()` and `triggering_event()` are the two arms
+of `causation()`), its payload decoded. A stored page
 whose meta lacks one is `ReplayError::IncompleteMeta`.
 
 ## Process managers
@@ -450,22 +465,23 @@ how one would fit the chain:
   its own events** (its state: what it has seen and decided) and may
   **issue commands**.
 - Its own events are produced by no command: they carry
-  `produced_by.triggering_event` = the trigger's `EventRef` and the
-  **trigger's correlation**, and no `causation_id`. They are deduplicated
+  `causation.triggering_event` = the trigger's `EventRef` and the
+  **trigger's correlation**, never a `command_id`. They are deduplicated
   on the trigger within the process manager's stream
   (`EventStore::find_triggered`, over an index on (stream, triggering
   event)), so a redelivered trigger writes nothing twice.
 - Its commands are reaction commands like a policy's: checked through the
   reaction entry, identified from the trigger (`reaction_command_id` with
-  the process manager's name), with `causation_id` = the trigger.
+  the process manager's name), with the command's `causation_id` = the
+  trigger; their events name the command.
 - In the chain it is one more route kind: staged and committed with
   everything else, its rejection-free event write followed by its commands
   taking steps 3 to 5 in their targets, depth first, under the same depth
   limit.
 
-Nothing of this is implemented beyond `ProducedBy`, `Envelope`'s accessors
-and the defaulted `find_triggered` (which finds nothing until the re-pin
-gives the page a field to find it by).
+Nothing of this is implemented beyond `Envelope`'s `causation()`
+accessors and the defaulted `find_triggered` (which finds nothing: no
+process manager writes yet).
 
 ## Rules versions
 
@@ -529,7 +545,7 @@ kernel.handle::<List, _, _>(unit, &routes, book, &sampled, &mut projections)?;  
   its own stream (the source sequence travels in the command's payload,
   because apply never sees metadata). `Tracked<H>` keeps one per cover.
   Within a chain neither a redelivery nor a gap can happen.
-- **Reactor re-runs** (`Reaction::RERUN_VERSION`, see
+- **Reactor re-runs always deduplicate** (see
   [below](#reactor-re-runs)).
 - **Propagating one aggregate into another** (hatpick's list into its draw
   systems) is a policy whose target records the change in its own events.
@@ -541,23 +557,22 @@ kernel.handle::<List, _, _>(unit, &routes, book, &sampled, &mut projections)?;  
 
 ### Reactor re-runs
 
-`Reaction::RERUN_VERSION: Option<&'static str>` is the per-reactor switch,
-default `None` (off):
+There is no switch (angzarr decision 13.4). A reaction's command id is
+UUIDv5(trigger, `Reaction::NAME`, index) and names nothing else: not a
+rules version, not the policy's code. So:
 
-- **Off**: a reaction's command id is UUIDv5(trigger, component, index), so
-  re-delivering a trigger finds the same ids and deduplicates. To reprocess
-  history under changed logic, the developer issues new commands.
-- **On** (`Some("v2")`, the reactor's own rules version, bumped when its
-  logic changes): the derivation also names the version, so a re-run after
-  a bump yields **new** command ids and the targets **append new events**.
-  Nothing is overwritten; history stays.
-
-In annals this matters only on the catch-up and redelivery paths
-(`orders_owed` then `Kernel::deliver`): inside a chain a reaction runs
-exactly once per trigger, atomically with it, and is never re-run. The
-version-naming derivation is angzarr's (`ids::reaction_command_id` gains it
-in the pass after eec6676); until the re-pin, `check_reaction` reaches a
-`todo!` for a reactor that turns the switch on.
+- **A re-run deduplicates.** Re-delivering a trigger (a catch-up after a
+  reset, `orders_owed` then `Kernel::deliver`) re-derives the same ids, and
+  every target answers DUPLICATE with the events the first run wrote, even
+  if the policy would now decide differently (the "reused id with another
+  payload" cost, applied to reactions).
+- **Repairs are new commands.** To fix what a buggy policy did, issue new
+  commands, with new ids, that make the corrections; their events append
+  after the buggy-era ones. **History is never rewritten.** angzarr plans
+  standard re-drive commands (its backlog RD-1); annals would adopt them
+  as ordinary commands.
+- **Inside a chain** a reaction runs exactly once per trigger, atomically
+  with it, so the question does not arise there.
 
 ## The store port
 
@@ -585,9 +600,9 @@ payload; upcasting is the kernel's, on every read. The Postgres shape:
 | `sequence` | `EventPage.sequence` (`bigint`; u64 in range) |
 | `type_url` | the payload's type URL as written, before any upcast |
 | `page` | the `EventPage` bytes as written |
-| `command_id`, `correlation_id` | `EventMeta`'s, `uuid`; `command_id` NULL for a process manager's event |
-| `trigger_domain`, `trigger_edition`, `trigger_root`, `trigger_sequence` | `EventMeta.produced_by.triggering_event` (after the re-pin); NULL unless a process manager wrote it |
-| `cause_domain`, `cause_edition`, `cause_root`, `cause_sequence` | `EventMeta.causation_id`; NULL unless a policy's command produced it |
+| `command_id` | `EventMeta.causation.command_id`, `uuid`; NULL for a process manager's process event |
+| `trigger_domain`, `trigger_edition`, `trigger_root`, `trigger_sequence` | `EventMeta.causation.triggering_event`; NULL unless a process manager wrote it |
+| `correlation_id` | `EventMeta`'s, `uuid` |
 | `external_id` | `EventMeta.fact.external_id`; NULL unless a fact produced it |
 | `recorded_at`, `rules_version` | the rest of `EventMeta` |
 
@@ -659,13 +674,14 @@ type itself:
 | Concept | Type |
 |---|---|
 | stream identity | `v1::Cover { domain, root: Uuid, optional edition }`; main is the unset edition |
-| an event's identity, a causation | `v1::EventRef { stream: Cover, sequence }` |
+| an event's identity; a reaction command's causation; a process event's trigger | `v1::EventRef { stream: Cover, sequence }` |
 | a command or a fact | `v1::CommandBook { cover, page: CommandPage { body: Command \| Fact, command_id, correlation_id, causation_id, fact_origin }, handling }` |
 | how to handle it | `v1::Handling { optional expected_sequence, conflict_resolution }` |
 | a conflict resolution | `v1::ConflictResolution` |
 | a state's capabilities | `v1::StateDescriptor { type_url, StateOptions { conflict_resolutions } }` |
 | an event, stored | `v1::EventPage { sequence, meta: EventMeta, payload: Any }` |
-| an event's metadata | `v1::EventMeta { command_id, causation_id, fact, correlation_id, recorded_at, rules_version }`; after the re-pin, `command_id` moves into `oneof produced_by { command_id, triggering_event }` (annals' `ProducedBy` until then) |
+| an event's metadata | `v1::EventMeta { oneof causation { command_id, triggering_event }, fact, correlation_id, recorded_at, rules_version }` |
+| an event's direct cause | `v1::event_meta::Causation::{CommandId(Uuid), TriggeringEvent(EventRef)}` (`Envelope::causation()`) |
 | every id | `v1::Uuid` (16 bytes); text through `ids` at the boundary |
 | derived ids | `ids::{compute_root, reaction_command_id, fact_command_id, fact_correlation}` |
 | a snapshot | `v1::Snapshot { sequence, state: Any, rules_version }` |
@@ -675,8 +691,7 @@ type itself:
 
 annals' own types are the ones angzarr has no message for, because they
 are execution, not wire: `Checked`, `Identified`, `Contextual`, `Prepared`,
-`Envelope` (a checked, decoded page), `ProducedBy` (temporary: the
-generated oneof replaces it at the re-pin), `Stream`, `Tx`, `IngestCtx`, `Nonce`,
+`Envelope` (a checked, decoded page), `Stream`, `Tx`, `IngestCtx`, `Nonce`,
 `Rulebook`, `Registry`, `Routes`, `Chain`, `Kernel`.
 
 ## Key signatures
@@ -736,7 +751,8 @@ is not. This list matches angzarr's `docs/design/audit-meta/annals-divergence.md
    record is identical.
 3. **Causation is never accepted from outside**, because nothing outside
    the process can call annals; angzarr needs mTLS-identified framework
-   components for the same guarantee.
+   components for the same guarantee. (This is the command's
+   `causation_id`; it is never persisted on events, in either runtime.)
 4. **The dead-letter queue is a logger**, every line prefixed with its
    warning; there is no PARKED and no replay.
 5. **`rules_version` is load-bearing**: replay resolves rules per event, and
@@ -753,6 +769,10 @@ is not. This list matches angzarr's `docs/design/audit-meta/annals-divergence.md
    read-through to main.
 9. **`recorded_at` is sampled by the application** once per chain, then
    raised per stream; same guarantee as angzarr's stamp at persist.
+
+Not divergences (pass 13): `EventMeta` is the same in both runtimes
+(`causation`, the event's direct cause; no trigger on a reaction's events,
+no actor), and reactor re-runs deduplicate in both, with no switch.
 
 ## hatpick changes
 
@@ -819,17 +839,17 @@ form is angzarr's.
 
 ## Open questions, each with a recommendation
 
-1. **Every user of annals now builds angzarr-proto**, so card-game and
-   tdautobattle, which use only the root kernel, need `protoc` and
-   github.com to build. I recommend a default-off cargo feature (`next`)
-   gating `annals::next` and its three dependencies until the root API is
-   retired at migration, so the games keep building with plain `cargo`;
-   `just` recipes turn it on. Not done here because it changes the
-   decision's scope.
-2. **The workspace's `CLAUDE.md`** still says annals is dependency-free and
-   names annals-angzarr as the only crate that knows angzarr. It needs the
-   project owner's edit; I recommend rewriting its "Zero dependencies"
-   section to name annals (and why) beside annals-log.
+1. **Where the trigger edge goes in annals.** Since pass 13 a reaction's
+   events do not name its trigger; angzarr sends the edge to OpenTelemetry
+   (its backlog PS-6). annals has no tracing dependency. I recommend a
+   hook beside `DeadLetterLog`: the chain hands the application each
+   reaction command's (`causation_id`, `command_id`, target cover) as it
+   dispatches it, and the application logs or spans it. Only a note in
+   `Identified::meta` marks the place today.
+2. **Re-drive commands.** Repairs are new commands; angzarr may ship
+   standard ones (its backlog RD-1, undecided). I recommend annals adopt
+   whatever angzarr ships as ordinary commands, and hand-build any it needs
+   before then.
 3. **Snapshot validity in the coordinator**, not the typed step. The
    registry holds the state's type URL and the rules version, so the
    domain-blind coordinator can discard early and load from 0 in one read.
@@ -859,15 +879,10 @@ form is angzarr's.
     none.
 12. **The default depth limit of 8.** I recommend 8; hatpick's deepest
     chain is two levels.
-13. **The re-pin past eec6676** (`produced_by`, the versioned reaction id).
-    I recommend re-pinning as soon as the proto pass lands, replacing
-    `ProducedBy` with the generated oneof and the re-run `todo!` with
-    angzarr's derivation, so annals never derives an id angzarr would not.
-14. **Where a re-running reactor's version comes from.** annals' policies
-    have no rulebook of their own, so the switch carries the label
-    (`RERUN_VERSION: Option<&str>`): one const is both the switch and the
-    version. I recommend it over a separate bool and version, which could
-    disagree.
+
+Decided since the last revision: every annals user builds angzarr-proto
+(no feature gate; the workspace `CLAUDE.md` says so), the re-pin to
+5850057 is done, and the re-run switch is dropped.
 
 ## Not now
 
@@ -878,7 +893,7 @@ form is angzarr's.
 | Snapshot frequency and retention configuration | `write_snapshot` is the application's; the load and discard rules are specified. | Replay latency that matters. |
 | Persisted projections | Replay on read. | Read latency; `Tracked` is ready. |
 | Edition registry, branching, read-through | hatpick uses only main. | A what-if feature in hatpick. |
-| Process managers (stateful reactors writing their own events) | hatpick needs none; the metadata (`ProducedBy`) and the store lookup (`find_triggered`) are ready. | A workflow that must remember across triggers, and the re-pin. |
+| Process managers (stateful reactors writing their own events) | hatpick needs none; the metadata (`causation.triggering_event`) and the store lookup (`find_triggered`) are ready. | A workflow that must remember across triggers. |
 | Configuration that forbids a `Handling` override | No hatpick command needs it. | A command type whose resolution a client must not choose. |
 | A `!Send` async store port | No browser store exists. | A wasm adapter over IndexedDB. |
 | Reading angzarr `EventBook`s into annals | annals writes books; nothing feeds it angzarr's. | An angzarr runtime delivering to annals. |
@@ -889,7 +904,9 @@ form is angzarr's.
 `crates/annals/tests/next/`: 64 tests. **20 run** (the implemented parse,
 identification, registry, payload and dead-letter line); **44 are ignored**
 (`#[ignore = "proposal: ..."]`), each failing on a `todo!("proposal: ...")`
-when run with `--ignored`.
+when run with `--ignored`. One unit test in `src/next/check.rs` (runs)
+pins that a reaction's events carry `causation.command_id` and nothing of
+its trigger, while its book keeps the trigger as `causation_id`.
 
 - **parse.rs** (runs): a checked command's accessors are non-optional where
   the book had to say something; a fact carries its source in its body; the
@@ -905,7 +922,8 @@ when run with `--ignored`.
 - **identify.rs** (runs): a client's command without ids gets the minted
   v7 as both ids; sent ids are kept, an absent correlation is the command
   id; a fact's ids are the UUIDv5 of its external id (types.proto's worked
-  example); every event's `EventMeta` carries the ids and no actor; an
+  example); every event's `EventMeta` carries its command as causation and
+  no actor; an
   identified book re-checks and re-identifies the same; `recorded_at` is
   raised, never lowered.
 - **registry.rs** (runs): registration fills the state descriptor;
@@ -946,8 +964,8 @@ when run with `--ignored`.
 - **ingest.rs**: **ingest reads a read-only context** (recorded instant,
   ids, source, rules version); a fact is never refused; a fact is stamped
   at the head.
-- **chain.rs**: a policy's events carry the derived reaction id, the
-  trigger's correlation and the causation; **a rejection downstream fails
+- **chain.rs**: a policy's events carry the derived reaction id as their
+  causation, the trigger's correlation, and no trigger; **a rejection downstream fails
   the whole chain, the origin included, with the path**, and its retry
   runs again; a chain deeper than its limit is refused; a chain in an
   edition stays in it; a book for another domain is refused.

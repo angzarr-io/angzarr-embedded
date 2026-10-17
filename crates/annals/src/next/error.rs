@@ -130,12 +130,12 @@ pub enum KernelError {
 pub enum ReplayError {
     /// The page at `index` claims sequence `found`.
     OutOfSequence { index: usize, found: u64 },
-    /// Event `sequence`'s causation names an event of its own stream at or
-    /// after itself.
+    /// Event `sequence`'s `causation.triggering_event` names an event of
+    /// its own stream at or after itself.
     CauseNotEarlier { sequence: u64, cause: u64 },
     /// Event `sequence` was recorded before the event before it.
     RecordedBackwards { sequence: u64 },
-    /// Event `sequence`'s `EventMeta` lacks `field` (what produced it,
+    /// Event `sequence`'s `EventMeta` lacks `field` (`causation`,
     /// `correlation_id` or `recorded_at`), or holds it malformed: every
     /// recorded event has all three.
     IncompleteMeta { sequence: u64, field: &'static str },

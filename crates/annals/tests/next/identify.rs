@@ -1,6 +1,7 @@
 //! Step 2: ids are assigned once, after the check, as angzarr assigns them.
 //! These run: identification is implemented.
 
+use annals::next::v1::event_meta::Causation;
 use annals::next::v1::{EventMeta, FactOrigin};
 use annals::next::{check, ids, pack, Identified};
 
@@ -74,13 +75,12 @@ fn a_fact_is_identified_by_its_external_id() {
 }
 
 #[test]
-fn every_event_of_a_command_carries_its_ids_and_no_actor() {
+fn every_event_of_a_command_carries_it_as_causation_and_no_actor() {
     let id = identified(command(cover("account", 1), deposit()).id(7), 30);
     assert_eq!(
         id.meta(instant(31), "v2"),
         EventMeta {
-            command_id: Some(command_id(7)),
-            causation_id: None,
+            causation: Some(Causation::CommandId(command_id(7))),
             fact: None,
             correlation_id: Some(command_id(7)),
             recorded_at: Some(instant(31)),

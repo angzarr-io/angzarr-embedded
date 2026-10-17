@@ -16,7 +16,9 @@ fn page(sequence: u64, payload: annals::next::Any) -> EventPage {
     EventPage {
         payload: Some(payload),
         meta: Some(EventMeta {
-            command_id: Some(command_id(sequence as u128)),
+            causation: Some(annals::next::v1::event_meta::Causation::CommandId(
+                command_id(sequence as u128),
+            )),
             correlation_id: Some(command_id(sequence as u128)),
             recorded_at: Some(instant(sequence as i64)),
             rules_version: "v2".to_string(),

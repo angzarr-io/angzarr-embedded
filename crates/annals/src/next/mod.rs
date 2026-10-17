@@ -12,7 +12,8 @@
 //! types directly** (`io.angzarr.v1`, re-exported as [`v1`]): a stream is a
 //! [`Cover`](v1::Cover), a command a [`CommandBook`](v1::CommandBook), an
 //! event an [`EventPage`](v1::EventPage) with its
-//! [`EventMeta`](v1::EventMeta), a causation an [`EventRef`](v1::EventRef),
+//! [`EventMeta`](v1::EventMeta) (whose `causation` is the event's direct
+//! cause), a trigger an [`EventRef`](v1::EventRef),
 //! every id a 16-byte [`Uuid`](v1::Uuid), and derived ids are
 //! [`angzarr_proto::ids`]'. There is no parallel type for any of them.
 //! annals is **not** angzarr: where their execution models differ (the
@@ -30,7 +31,8 @@
 //!    else the application's minted UUIDv7 from [`Sampled`]; a fact's
 //!    UUIDv5 of its external id; a reaction's UUIDv5 of its trigger), the
 //!    correlation (given, else the command id; a reaction's trigger's) and,
-//!    for a reaction, the causation. An [`Identified`].
+//!    for a reaction, the command's own causation (its trigger: transport
+//!    and trace metadata, never stamped on its events). An [`Identified`].
 //! 3. **Deduplicate** ([`Coordinator::deduplicate`]): the addressed stream
 //!    already holds events with this command id? Answered
 //!    [`Handled::Duplicate`] with them, and nothing below runs.
@@ -109,7 +111,7 @@ pub use store::{
     AsyncEventStore, AsyncUnitOfWork, EventStore, InMemoryStore, InMemoryTx, Ready, Slice,
     UnitOfWork,
 };
-pub use stream::{Envelope, Executed, ProducedBy, Stream};
+pub use stream::{Envelope, Executed, Stream};
 pub use upcast::{UpcastFn, Upcaster};
 pub use version::Rulebook;
 

@@ -22,7 +22,10 @@
 //! book, then identifies it from its trigger: command id
 //! [`ids::reaction_command_id`](super::ids::reaction_command_id)(trigger,
 //! [`Reaction::NAME`], index), the trigger's correlation, and the trigger as
-//! its `causation_id`. Nothing outside the kernel can build one.
+//! its `causation_id`. Nothing outside the kernel can build one. The
+//! command's events name the command as their causation
+//! (`EventMeta.causation.command_id`), never the trigger: the trigger edge
+//! is the command's, for tracing.
 //!
 //! A target's cover is the target domain's, in **the source's edition**: a
 //! reaction never crosses timelines.
@@ -60,23 +63,15 @@ pub trait Reaction {
     /// The reaction's name, stable across releases and never empty: the
     /// `component` its commands' ids are derived from. Changing it changes
     /// every derived command id.
-    const NAME: &'static str;
-
-    /// The re-run switch (angzarr's per-reactor configuration, in the proto
-    /// pass after eec6676). `None`, the default: off. The reactor's command
-    /// ids are a function of (trigger, component, index) only, so
-    /// re-delivering a trigger finds the same ids and deduplicates; to
-    /// reprocess, the developer issues new commands. `Some(version)`: on,
-    /// with the reactor's own rules version (a short label, bumped when
-    /// the policy's logic changes). The derivation then also names the
-    /// version, so a re-run after a bump yields new ids, and the targets
-    /// append new events. Nothing is overwritten; history stays.
     ///
-    /// In annals this matters only on the catch-up and redelivery paths
-    /// ([`orders_owed`] then [`Kernel::deliver`](super::Kernel::deliver)):
-    /// inside a chain a reaction runs exactly once per trigger, atomically
-    /// with it, so it is never re-run.
-    const RERUN_VERSION: Option<&'static str> = None;
+    /// The ids name nothing else of the reaction: not a rules version, not
+    /// its code. A re-run over a trigger it already handled (catch-up after
+    /// a reset, redelivery) re-derives the same ids and deduplicates, even
+    /// if the policy now decides differently. Repairs are new commands with
+    /// new ids, appended after what the old code wrote; history is never
+    /// rewritten (angzarr decision 13.4). Inside a chain a reaction runs
+    /// exactly once per trigger, atomically with it.
+    const NAME: &'static str;
 
     /// The targets owed the event that led to `source`, the source's state
     /// just after it, including a target that event retires. Must keep the
@@ -145,7 +140,7 @@ impl<P: Policy> Order<P> {
         &self.command
     }
 
-    /// The source event: the command's causation.
+    /// The source event: the command's causation (not its events').
     pub fn trigger(&self) -> &EventRef {
         &self.trigger
     }
@@ -167,7 +162,7 @@ impl<P: Policy> Order<P> {
     pub(crate) fn check(&self, registry: &Registry) -> Result<Checked, Malformed> {
         todo!(
             "proposal: build the CommandBook, then \
-             check_reaction(trigger, P::NAME, index, P::RERUN_VERSION, correlation)"
+             check_reaction(trigger, P::NAME, index, correlation)"
         )
     }
 }

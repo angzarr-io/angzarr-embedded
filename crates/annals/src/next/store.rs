@@ -16,14 +16,16 @@
 //! | `sequence` | `EventPage.sequence` (64-bit) |
 //! | `type_url` | the payload's type URL as written, before any upcast |
 //! | `page` | the `EventPage` bytes as written |
-//! | `command_id`, `correlation_id` | `EventMeta`'s, Postgres `uuid` |
-//! | `cause_domain`, `cause_edition`, `cause_root`, `cause_sequence` | `EventMeta.causation_id`, NULL unless a policy's command produced it |
+//! | `command_id` | `EventMeta.causation.command_id`, Postgres `uuid`; NULL for a process manager's process event |
+//! | `trigger_domain`, `trigger_edition`, `trigger_root`, `trigger_sequence` | `EventMeta.causation.triggering_event`, NULL unless a process manager wrote it |
+//! | `correlation_id` | `EventMeta`'s, Postgres `uuid` |
 //! | `external_id` | `EventMeta.fact.external_id`, NULL unless a fact produced it |
 //! | `recorded_at`, `rules_version` | the rest of `EventMeta` |
 //!
 //! with a unique key on (`domain`, `edition`, `root`, `sequence`) and a
 //! **non-unique index on (`domain`, `edition`, `root`, `command_id`)**: the
-//! deduplication lookup ([`EventStore::find_command`]). Not unique, because
+//! deduplication lookup ([`EventStore::find_command`]); a process manager's
+//! stream adds one on the trigger columns ([`EventStore::find_triggered`]). Not unique, because
 //! one command may produce several events. There is no commands table and
 //! no claim: "already applied?" is "does the stream hold events with this
 //! command id?", atomic with the append because the id is written with the
@@ -88,7 +90,7 @@ pub trait EventStore {
         self.read_from(stream, 0)
     }
 
-    /// The pages of `stream` whose `EventMeta.command_id` is `command_id`,
+    /// The pages of `stream` whose `EventMeta.causation` is `command_id`,
     /// in sequence order: the deduplication lookup, over the index on
     /// (stream, command_id). Empty when the command never applied there, or
     /// applied and produced nothing.
@@ -99,11 +101,10 @@ pub trait EventStore {
     ) -> Result<Vec<EventPage>, StoreError>;
 
     /// The pages of `stream` that a process manager wrote in reaction to
-    /// `trigger` (`EventMeta.produced_by.triggering_event`), in sequence
+    /// `trigger` (`EventMeta.causation.triggering_event`), in sequence
     /// order: a process manager's deduplication lookup within its own
     /// stream, over an index on (stream, triggering event). annals has no
-    /// process manager yet, and at eec6676 the page has no field to find
-    /// it by, so nothing is found by default; implemented with the re-pin.
+    /// process manager yet, so nothing is found by default.
     fn find_triggered(
         &mut self,
         stream: &Cover,

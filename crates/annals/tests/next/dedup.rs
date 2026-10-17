@@ -131,8 +131,10 @@ fn a_redelivered_fact_is_a_duplicate() {
     assert_eq!(again.outcome().delivery, DeliveryOutcome::Duplicate as i32);
     let meta = again.books()[0].pages[0].meta.clone().unwrap();
     assert_eq!(
-        meta.command_id,
-        Some(annals::next::ids::fact_command_id("pi_1234")),
+        meta.causation,
+        Some(annals::next::v1::event_meta::Causation::CommandId(
+            annals::next::ids::fact_command_id("pi_1234")
+        )),
         "the id is on the event, where the lookup finds it"
     );
 }

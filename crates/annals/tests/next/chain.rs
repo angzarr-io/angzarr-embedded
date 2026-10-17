@@ -3,6 +3,7 @@
 //! reaction's rejection fails the origin (a documented divergence from
 //! angzarr).
 
+use annals::next::v1::event_meta::Causation;
 use annals::next::v1::{CommandBook, EventMeta, EventRef};
 use annals::next::{
     ids, EventStore, Failure, InMemoryStore, Kernel, KernelError, MemoryDeadLetters, Payload,
@@ -27,8 +28,8 @@ fn ledger_cover() -> annals::next::v1::Cover {
 }
 
 #[test]
-#[ignore = "proposal: a policy's command is identified from its trigger: derived id, trigger's correlation, causation"]
-fn a_policys_events_carry_the_derived_id_the_correlation_and_the_causation() {
+#[ignore = "proposal: a policy's command is identified from its trigger; its events name the command, not the trigger"]
+fn a_policys_events_carry_the_derived_command_id_as_causation_and_no_trigger() {
     let registry = registry();
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry, &log);
@@ -61,11 +62,13 @@ fn a_policys_events_carry_the_derived_id_the_correlation_and_the_causation() {
         sequence: 2,
     };
     let meta: EventMeta = books[1].pages[0].meta.clone().unwrap();
-    assert_eq!(meta.causation_id, Some(trigger.clone()));
     assert_eq!(
-        meta.command_id,
-        Some(ids::reaction_command_id(&trigger, "bookkeeping", 0).unwrap()),
-        "UUIDv5 of (trigger, component, index), as angzarr derives it"
+        meta.causation,
+        Some(Causation::CommandId(
+            ids::reaction_command_id(&trigger, "bookkeeping", 0).unwrap()
+        )),
+        "the direct cause is the command, UUIDv5 of (trigger, component, \
+         index) as angzarr derives it; never the trigger (decision 13.3)"
     );
     assert_eq!(
         meta.correlation_id,

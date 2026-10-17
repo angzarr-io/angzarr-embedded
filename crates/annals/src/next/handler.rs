@@ -19,7 +19,8 @@ pub struct Committed<'a, D: Domain> {
 
 impl<'a, D: Domain> Committed<'a, D> {
     /// The event's reference: its stream and sequence (angzarr's
-    /// `EventRef`), what a policy's command names as its causation.
+    /// `EventRef`), what a policy's command names as its causation (on the
+    /// command only; the command's events name the command).
     pub fn event_ref(&self) -> EventRef {
         EventRef {
             stream: Some(self.cover.clone()),

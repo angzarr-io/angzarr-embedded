@@ -37,7 +37,12 @@ fn ingest_gets_a_read_only_context() {
         "the context's recorded_at, source and rules version, copied by the toy"
     );
     let meta = handled.books()[0].pages[0].meta.clone().unwrap();
-    assert_eq!(meta.command_id, Some(ids::fact_command_id("pi_7")));
+    assert_eq!(
+        meta.causation,
+        Some(annals::next::v1::event_meta::Causation::CommandId(
+            ids::fact_command_id("pi_7")
+        ))
+    );
     assert_eq!(meta.fact.unwrap().external_id, "pi_7");
 }
 
