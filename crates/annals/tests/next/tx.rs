@@ -67,8 +67,18 @@ impl prost::Name for Bumped {
     const PACKAGE: &'static str = "toy.probe.v1";
 }
 
+/// `stash`: 0 acknowledges any window with its own nonce; 1 keeps the
+/// nonce in [`STASHED`] and acknowledges nothing; 2 acknowledges the window
+/// with the stashed nonce instead of its own: a decide smuggling a nonce
+/// from one delivery into another.
 #[derive(Clone, PartialEq, prost::Message)]
-pub struct Probe {}
+pub struct Probe {
+    #[prost(uint32, tag = "1")]
+    pub stash: u32,
+}
+
+/// The nonce a probe kept from an earlier delivery.
+static STASHED: std::sync::Mutex<Option<annals::next::Nonce>> = std::sync::Mutex::new(None);
 
 impl prost::Name for Probe {
     const NAME: &'static str = "Probe";
@@ -141,8 +151,21 @@ impl Domain for ProbeDomain {
 
     const NAME: &'static str = "probe";
 
-    fn decide(_: &Probe, tx: &mut Tx<'_, Self>) -> Result<(), Infallible> {
-        let conflicts = tx.conflicts().is_some();
+    fn decide(probe: &Probe, tx: &mut Tx<'_, Self>) -> Result<(), Infallible> {
+        let window = tx.conflicts();
+        let conflicts = window.is_some();
+        if let Some(c) = window {
+            let mut stashed = STASHED.lock().unwrap();
+            match probe.stash {
+                1 => *stashed = Some(c.nonce),
+                2 => {
+                    if let Some(nonce) = stashed.take() {
+                        tx.resolve_conflicts(c.window, nonce);
+                    }
+                }
+                _ => tx.resolve_conflicts(c.window, c.nonce),
+            }
+        }
         let emitted_before = tx.emitted() as u64;
         let committed = tx.state().bumps;
         let first = tx.emit(ProbeEvent::Bumped);
@@ -206,7 +229,7 @@ impl Reaction for Probing {
 
 impl Policy for Probing {
     fn command((): &(), _: &Committed<'_, Account>) -> Probe {
-        Probe {}
+        Probe { stash: 0 }
     }
 }
 
@@ -374,4 +397,54 @@ fn a_two_deep_chain_keeps_the_path_to_the_step_running_and_its_limit() {
         } if path.len() == 2
     ));
     assert_eq!(shallow.registry().domains().count(), 3);
+}
+
+#[test]
+fn a_nonce_acknowledges_only_the_delivery_it_was_issued_for() {
+    use annals::next::v1::ConflictResolution;
+    use annals::next::{check, Coordinator, Deduplicated, Failure, KernelError};
+
+    let registry = registry();
+    let log = MemoryDeadLetters::new();
+    let mut store = InMemoryStore::new();
+    let mut unit = store.begin();
+    let mut coordinator = Coordinator::new(&mut unit, &registry);
+    let mut probe = |n: u128, stash: u32| {
+        let book = command(cover("probe", 1), Probe { stash }.to_any())
+            .id(n)
+            .resolved_by(ConflictResolution::AggregateHandles);
+        let identified = check(book, &registry).unwrap().identify(&at(60));
+        let Deduplicated::Novel(novel) = coordinator.deduplicate(identified).unwrap() else {
+            panic!("new");
+        };
+        coordinator
+            .load(novel)
+            .unwrap()
+            .decode::<ProbeDomain>(&registry)
+            .unwrap()
+    };
+    // Two deliveries by one coordinator: the first's decide keeps its nonce,
+    // the second's presents it instead of its own.
+    let mut first = probe(1, 1);
+    let mut second = probe(2, 2);
+    let unresolved = || {
+        Failure::Kernel(KernelError::Unresolved {
+            stream: cover("probe", 1),
+            expected: 0,
+            actual: 0,
+        })
+    };
+    assert_eq!(
+        first.decide(&at(60), &registry, &log).err(),
+        Some(unresolved()),
+        "kept, not acknowledged"
+    );
+    assert_eq!(
+        second.decide(&at(60), &registry, &log).err(),
+        Some(unresolved()),
+        "another delivery's nonce acknowledges nothing"
+    );
+    assert_eq!(log.lines().len(), 2, "each a dead-lettered handler bug");
+    let mut honest = probe(3, 0);
+    assert!(honest.decide(&at(60), &registry, &log).is_ok());
 }
