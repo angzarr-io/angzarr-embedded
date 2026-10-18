@@ -674,7 +674,7 @@ that fails later has still reported the edges it dispatched.
 | `KernelError::UnknownType` | a command or fact type the domain does not decode, after upcasting | `Invalid` |
 | `KernelError::Stale`, `Unresolved`, `Gap` | re-read and re-issue; catch up | `Retry` |
 | `StoreError::Conflict`, `Unavailable` | run again with the same command id (step 3 makes it safe) | `Retry` |
-| `IngestPanicked`, `Upcast`, `WrongDomain`, `ChainTooDeep`, `TargetReturned`, `BeforeSnapshot`, `Replay(..)`, `StoreError::Discontinuous`, `Unreadable` | a bug or a misconfiguration | `Bug` |
+| `IngestPanicked`, `Upcast`, `WrongDomain`, `ChainTooDeep`, `TargetReturned`, `BeforeSnapshot`, `UnregisteredDomain` (a stored stream of a domain the application did not register; an incoming book for one is `Malformed`), `Replay(..)`, `StoreError::Discontinuous`, `Unreadable` | a bug or a misconfiguration | `Bug` |
 
 A duplicate is not an error: it is `Handled::Duplicate`. Each error becomes
 a `Diagnostic` with the implementation (codes under `annals-next-*`,

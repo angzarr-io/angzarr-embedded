@@ -65,6 +65,7 @@ annals-next-target-returned = a target left the source's targets at event { $lef
 annals-next-wrong-domain = stream { $stream } was given to the { $expected } domain's code
 annals-next-chain-too-deep = the command chain went deeper than its limit of { $limit }
 annals-next-before-snapshot = stream { $stream } holds its events from { $first } on only, after its snapshot
+annals-next-unregistered-domain = a stored { $domain } stream was read, but no domain "{ $domain }" is registered
 
 annals-next-replay-out-of-sequence = page { $index } of the log claims sequence { $found }, not the one due
 annals-next-replay-cause-not-earlier = event { $sequence } names event { $cause } of its own stream as its trigger, which is not earlier

@@ -261,10 +261,8 @@ impl<D: Domain> Stream<D> {
         registry
             .rules::<D>()
             .zip(registry.upcaster(D::NAME))
-            .ok_or_else(|| {
-                KernelError::Malformed(Malformed::UnknownDomain {
-                    domain: D::NAME.to_string(),
-                })
+            .ok_or_else(|| KernelError::UnregisteredDomain {
+                domain: D::NAME.to_string(),
             })
     }
 

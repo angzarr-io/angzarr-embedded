@@ -279,11 +279,20 @@ impl<D: Domain> Prepared<D> {
     }
 }
 
-/// The refusal for a domain the registry does not hold.
+/// The refusal for an incoming book whose domain the registry does not
+/// hold: the caller's.
 pub(crate) fn unknown_domain(domain: &str) -> KernelError {
     KernelError::Malformed(Malformed::UnknownDomain {
         domain: domain.to_string(),
     })
+}
+
+/// The refusal for running `D`'s typed code when the registry does not hold
+/// `D`: the application's misconfiguration.
+fn unregistered<D: Domain>() -> KernelError {
+    KernelError::UnregisteredDomain {
+        domain: D::NAME.to_string(),
+    }
 }
 
 /// Step 3 over `port`, also finding the command's events among `staged`,
@@ -439,7 +448,7 @@ pub(crate) fn decode_input<D: Domain>(
     let stream = || command.cover().clone();
     let upcaster = registry
         .upcaster(D::NAME)
-        .ok_or_else(|| unknown_domain(D::NAME))?;
+        .ok_or_else(|| unregistered::<D>())?;
     let payload = upcaster
         .upcast_command(command.payload())
         .map_err(|error| KernelError::Upcast {
@@ -481,7 +490,7 @@ pub(crate) fn decide_on<D: Domain>(
     let recorded_at = crate::next::not_before(stream.last_recorded_at().as_ref(), sampled.now);
     let (rules_version, rules) = registry
         .rules::<D>()
-        .ok_or_else(|| kernel(unknown_domain(D::NAME)))?
+        .ok_or_else(|| kernel(unregistered::<D>()))?
         .current();
     let events = match input {
         Input::Fact(fact, source) => {

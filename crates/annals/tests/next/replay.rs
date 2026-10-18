@@ -613,9 +613,9 @@ fn errors_render_their_english_and_wrappers_their_cause() {
 #[test]
 fn a_domain_the_registry_lacks_cannot_be_replayed_or_snapshotted() {
     let empty = annals::next::Registry::new();
-    let unknown = Some(KernelError::Malformed(Malformed::UnknownDomain {
+    let unknown = Some(KernelError::UnregisteredDomain {
         domain: "account".to_string(),
-    }));
+    });
     assert_eq!(
         Stream::<Account>::replay(cover("account", 1), &log(), &empty).err(),
         unknown
@@ -623,6 +623,22 @@ fn a_domain_the_registry_lacks_cannot_be_replayed_or_snapshotted() {
     let stream = replay(&log()).unwrap();
     assert_eq!(stream.dispatch(0, &empty, &mut []).err(), unknown);
     assert_eq!(stream.snapshot(&empty), None);
+    assert_eq!(
+        KernelError::UnregisteredDomain {
+            domain: "account".to_string()
+        }
+        .recovery(),
+        Recovery::Bug,
+        "the application's misconfiguration, not the caller's"
+    );
+    assert_eq!(
+        Failure::<Malformed>::Kernel(KernelError::Malformed(Malformed::UnknownDomain {
+            domain: "account".to_string()
+        }))
+        .recovery(),
+        Recovery::Invalid,
+        "an incoming book for it is the caller's"
+    );
     let _ = (Ledger, Shelf);
 }
 

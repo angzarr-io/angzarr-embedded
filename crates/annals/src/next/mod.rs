@@ -220,6 +220,7 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn annals_diagnostic::Diagnostic>
             stream: stream(),
             first: 10,
         },
+        KernelError::UnregisteredDomain { domain: domain() },
     ];
     let replay = [
         ReplayError::OutOfSequence { index: 1, found: 2 },

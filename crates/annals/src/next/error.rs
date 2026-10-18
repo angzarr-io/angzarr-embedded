@@ -125,6 +125,14 @@ pub enum KernelError {
         stream: Cover,
         first: u64,
     },
+    /// A stored stream of `domain` was replayed, resumed or dispatched, or
+    /// its typed step run, but the registry does not hold `domain`: the
+    /// application did not register it. A misconfiguration, unlike an
+    /// incoming book for an unregistered domain
+    /// ([`Malformed::UnknownDomain`], the caller's).
+    UnregisteredDomain {
+        domain: String,
+    },
     Replay(ReplayError),
     Store(StoreError),
 }
@@ -289,6 +297,7 @@ impl KernelError {
             | KernelError::WrongDomain { .. }
             | KernelError::ChainTooDeep { .. }
             | KernelError::BeforeSnapshot { .. }
+            | KernelError::UnregisteredDomain { .. }
             | KernelError::Replay(_) => Recovery::Bug,
         }
     }
@@ -441,6 +450,10 @@ impl fmt::Display for KernelError {
                 "stream {} holds its events from {first} on only, after its snapshot",
                 cover_text(stream)
             ),
+            KernelError::UnregisteredDomain { domain } => write!(
+                f,
+                "a stored {domain} stream was read, but no domain \"{domain}\" is registered"
+            ),
             KernelError::Replay(error) => error.fmt(f),
             KernelError::Store(error) => error.fmt(f),
         }
@@ -461,6 +474,7 @@ impl Diagnostic for KernelError {
             KernelError::WrongDomain { .. } => "annals-next-wrong-domain",
             KernelError::ChainTooDeep { .. } => "annals-next-chain-too-deep",
             KernelError::BeforeSnapshot { .. } => "annals-next-before-snapshot",
+            KernelError::UnregisteredDomain { .. } => "annals-next-unregistered-domain",
             KernelError::Replay(error) => error.code(),
             KernelError::Store(error) => error.code(),
         }
@@ -517,6 +531,9 @@ impl Diagnostic for KernelError {
             KernelError::ChainTooDeep { limit } => vec![("limit", (*limit).into())],
             KernelError::BeforeSnapshot { stream: s, first } => {
                 vec![("stream", stream(s)), ("first", (*first).into())]
+            }
+            KernelError::UnregisteredDomain { domain } => {
+                vec![("domain", domain.as_str().into())]
             }
             KernelError::Replay(error) => error.args(),
             KernelError::Store(error) => error.args(),
