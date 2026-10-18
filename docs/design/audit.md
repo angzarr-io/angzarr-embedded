@@ -292,7 +292,10 @@ There is no service and nothing is sent.
 **The resolution** (`Registry::resolve`, angzarr's precedence, highest
 first): the book's `Handling.conflict_resolution`; the domain's
 configuration for the command's type (`Domain::CONFLICT_RESOLUTION_BY_COMMAND`,
-by full type name); the domain's own (`Domain::CONFLICT_RESOLUTION`); the
+by full type name, looked up by the command's current type after upcasting,
+so an old command type has its current type's setting; a payload whose
+upcast fails is looked up as sent, and decoding reports the failure); the
+domain's own (`Domain::CONFLICT_RESOLUTION`); the
 built-in default, **COMMUTATIVE where the state declares conflict units,
 otherwise STRICT**. Configuration a state does not support is refused at
 registration (`Misconfigured::UnsupportedResolution`); a book's request, at

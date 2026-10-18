@@ -310,7 +310,7 @@ impl Registry {
 
     /// The resolution for a command of type `command_type_url` to `domain`
     /// whose book requested `requested` (angzarr's precedence, highest
-    /// first): the book's request; the configuration for its command type;
+    /// first; the kernel passes the command's type after upcasting): the book's request; the configuration for its command type;
     /// the domain's; the built-in default, **COMMUTATIVE where the state
     /// supports it, otherwise STRICT**. Never UNSPECIFIED. `None` for a
     /// domain not registered.

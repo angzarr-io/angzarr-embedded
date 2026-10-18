@@ -85,7 +85,9 @@ pub trait Domain: Sized + 'static {
     /// Configured resolutions per command type, by the command message's
     /// full name (`"hatpick.list.v1.Draw"`): above the domain's own, below a
     /// book's request. Refused at registration if the state does not
-    /// support one.
+    /// support one. Looked up by the command's current type, after
+    /// upcasting: an old command type has its current type's setting, so
+    /// only current types are named here.
     const CONFLICT_RESOLUTION_BY_COMMAND: &'static [(&'static str, ConflictResolution)] = &[];
 
     /// Decide a command against the current state. Pure: its only output is

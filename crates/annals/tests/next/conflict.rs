@@ -310,3 +310,88 @@ fn a_fact_keeps_its_sent_correlation() {
         Some(crate::toys::correlation(4))
     );
 }
+
+/// The old note command: upcast to `toy.shelf.cmd.v1.Note`.
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct OldNote {
+    #[prost(string, tag = "1")]
+    pub text: String,
+}
+
+impl prost::Name for OldNote {
+    const NAME: &'static str = "Note";
+    const PACKAGE: &'static str = "toy.shelf.cmd.v0";
+}
+
+#[test]
+fn an_old_command_type_has_its_current_types_resolution() {
+    use annals::next::{Registry, Rulebook, Upcaster};
+    let mut registry = Registry::new();
+    registry
+        .register::<Shelf>(
+            Rulebook::new("v1", ()),
+            Upcaster::new("shelf-upcaster", "shelf")
+                .rule::<OldNote, shelf::Note>(|old| Ok(shelf::Note { note: old.text })),
+        )
+        .unwrap();
+    let mut store = InMemoryStore::new();
+    for (n, item) in [(1, "a"), (2, "b")] {
+        handle::<Shelf>(
+            &mut store,
+            &registry,
+            command(cover("shelf", 3), set(item, 1)).id(n),
+            &at(n as i64),
+        )
+        .unwrap();
+    }
+    let old = || {
+        annals::next::pack(&OldNote {
+            text: "restock".to_string(),
+        })
+    };
+    assert_eq!(
+        handle::<Shelf>(
+            &mut store,
+            &registry,
+            command(cover("shelf", 3), old())
+                .id(3)
+                .expecting(1, ConflictResolution::Unspecified),
+            &at(3),
+        )
+        .err()
+        .unwrap(),
+        stale(1, 2),
+        "configured STRICT by its current type, though sent as v0"
+    );
+    let handled = handle::<Shelf>(
+        &mut store,
+        &registry,
+        command(cover("shelf", 3), old()).id(4),
+        &at(4),
+    )
+    .unwrap();
+    assert_eq!(
+        shelf_events(&handled),
+        [ShelfEvent::Noted("restock".to_string())]
+    );
+
+    // An upcast that fails is looked up as sent, and decoding reports it.
+    let mut failing = Registry::new();
+    failing
+        .register::<Shelf>(
+            Rulebook::new("v1", ()),
+            Upcaster::new("shelf-upcaster", "shelf").rule::<OldNote, shelf::Note>(|_| {
+                Err(annals_diagnostic::Report::new("toy-no", "no"))
+            }),
+        )
+        .unwrap();
+    assert!(matches!(
+        handle::<Shelf>(
+            &mut store,
+            &failing,
+            command(cover("shelf", 3), old()).id(5),
+            &at(5)
+        ),
+        Err(Failure::Kernel(KernelError::Upcast { .. }))
+    ));
+}

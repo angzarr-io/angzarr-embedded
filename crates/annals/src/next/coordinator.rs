@@ -320,17 +320,23 @@ pub(crate) async fn deduplicate<P: Port>(
 }
 
 /// The command's resolution ([`Registry::resolve`]): never UNSPECIFIED.
+/// The configuration per command type is looked up by the command's
+/// current type, after the domain's upcaster, so an old type has the
+/// setting of the type it upcasts to. A payload whose upcast fails is
+/// looked up as sent; decoding then reports the failure.
 pub(crate) fn resolution(
     registry: &Registry,
     command: &Identified,
 ) -> Result<ConflictResolution, KernelError> {
+    let domain = command.domain();
+    let sent = command.payload();
+    let current = registry
+        .upcaster(domain)
+        .and_then(|u| u.upcast_command(sent).ok())
+        .map_or_else(|| sent.type_url.clone(), |any| any.type_url);
     registry
-        .resolve(
-            command.domain(),
-            &command.payload().type_url,
-            command.conflict_resolution(),
-        )
-        .ok_or_else(|| unknown_domain(command.domain()))
+        .resolve(domain, &current, command.conflict_resolution())
+        .ok_or_else(|| unknown_domain(domain))
 }
 
 /// The expected sequence, stamped with `head` or checked against it, and
