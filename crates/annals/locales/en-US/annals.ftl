@@ -61,7 +61,6 @@ annals-next-unknown-type = stream { $stream }'s domain does not decode the type 
 annals-next-upcast = upcasting a payload for stream { $stream } failed: { $error }
 annals-next-ingest-panicked = ingesting fact { $command_id } into stream { $stream } panicked: a bug
 annals-next-gap = a delivery to stream { $stream } skips ahead to { $found } from { $expected }, the next due
-annals-next-target-returned = a target left the source's targets at event { $left } and came back at event { $returned }
 annals-next-wrong-domain = stream { $stream } was given to the { $expected } domain's code
 annals-next-chain-too-deep = the command chain went deeper than its limit of { $limit }
 annals-next-before-snapshot = stream { $stream } holds its events from { $first } on only, after its snapshot

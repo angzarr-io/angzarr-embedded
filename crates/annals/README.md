@@ -98,12 +98,14 @@ impl Domain for Counter {
   reaction trigger), every id a 16-byte
   `UUID`. One domain-blind parse (`check`) checks a book and yields a
   `Checked` with non-optional accessors; `identify` assigns its command id
-  and correlation; the in-process `Coordinator` deduplicates by command id
-  on the stream's events, loads the snapshot and events and resolves the
-  conflict resolution (COMMUTATIVE by default where the state declares
+  and correlation; the in-process `Coordinator` loads the snapshot and
+  events, then deduplicates by command id on the stream's events (load
+  first, so a concurrent commit of the same command is never missed), and
+  resolves the conflict resolution (COMMUTATIVE by default where the state declares
   conflict units, else STRICT); then the command or fact is decoded
   (upcast by type URL) and decided, or ingested with a read-only context.
-  Policies run in the same atomic chain, the dead-letter queue is a
+  Policies run in the same atomic chain, targeting from the event (so a
+  policy may forward only some events; contiguity is kept per target), the dead-letter queue is a
   logger, and each policy command's trigger edge goes to the application's
   `TriggerLog`. It is implemented and tested; hatpick moves onto it before
   it replaces the root API. See `docs/design/audit.md`.

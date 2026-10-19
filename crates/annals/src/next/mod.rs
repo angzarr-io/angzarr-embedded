@@ -28,11 +28,14 @@
 //!    correlation (given, else the command id; a reaction's trigger's) and,
 //!    for a reaction, the command's own causation (its trigger: transport
 //!    and trace metadata, never stamped on its events). An [`Identified`].
-//! 3. **Deduplicate** ([`Coordinator::deduplicate`]): the addressed stream
-//!    already holds events with this command id? Answered
-//!    [`Handled::Duplicate`] with them, and nothing below runs.
-//! 4. **Load and resolve** ([`Coordinator::load`]): the snapshot and newer
-//!    events; the expected sequence stamped or checked under the resolved
+//! 3. **Load, then deduplicate** ([`Coordinator::deduplicate`]): the
+//!    snapshot and newer events are loaded first; then, does the addressed
+//!    stream already hold events with this command id? Answered
+//!    [`Handled::Duplicate`] with them, and nothing below runs. (Loading
+//!    first closes the race in which a retry's lookup misses an original
+//!    that commits before the retry loads.)
+//! 4. **Resolve** ([`Coordinator::load`]): the expected sequence stamped or
+//!    checked, against the head step 3 loaded, under the resolved
 //!    [`ConflictResolution`](v1::ConflictResolution) (STRICT refuses a stale
 //!    one here); the window and a [`Nonce`] otherwise. A [`Contextual`].
 //! 5. **Decode, then decide or ingest** ([`Contextual::decode`],
@@ -206,10 +209,6 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn annals_diagnostic::Diagnostic>
         KernelError::Gap {
             stream: stream(),
             gap: gap.clone(),
-        },
-        KernelError::TargetReturned {
-            left: 3,
-            returned: 5,
         },
         KernelError::WrongDomain {
             stream: stream(),

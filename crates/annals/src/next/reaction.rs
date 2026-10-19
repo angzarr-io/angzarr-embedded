@@ -30,12 +30,22 @@
 //! A target's cover is the target domain's, in **the source's edition**: a
 //! reaction never crosses timelines.
 //!
-//! **The contiguity invariant.** Once a target appears in
-//! [`Reaction::targets`], it stays there for every source event until the
-//! one that retires it (inclusive), and never appears again. A target
-//! missing from one event and back for the next would never be delivered
-//! the missing one, and every later delivery would be a gap: it wedges.
-//! [`orders_owed`] checks it, as [`KernelError::TargetReturned`].
+//! **Targeting from the event.** [`Reaction::targets`] receives the whole
+//! committed event (the event and the source's state just after it), so a
+//! policy may forward **only some events** to a target: hatpick's list
+//! forwards content changes to its draw systems and keeps its invites to
+//! itself. A target's owed orders are the source events it was targeted
+//! for, in source order.
+//!
+//! **Contiguity is per target.** Each [`Order`] names the source sequence
+//! of the order owed to the same target just before it
+//! ([`Order::previous`]), so a delivery outside a chain is placed against
+//! the target's own [`Position`] (the last source sequence it holds, a fold
+//! of its own stream): at or before it, a redelivery; after it while the
+//! previous owed order is not yet held, a [`Gap`](super::Gap) (deliver that
+//! one first); otherwise the next. Sequences a target was never owed are no
+//! gap. Inside a chain every order is delivered with its trigger, so
+//! neither can happen there.
 
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
@@ -75,10 +85,11 @@ pub trait Reaction {
     /// exactly once per trigger, atomically with it.
     const NAME: &'static str;
 
-    /// The targets owed the event that led to `source`, the source's state
-    /// just after it, including a target that event retires. Must keep the
-    /// contiguity invariant (see the module docs).
-    fn targets(source: &<Self::Source as Domain>::State) -> Vec<Self::TargetId>;
+    /// The targets owed `committed` (the event, with the source's state just
+    /// after it): every target it must reach, a target the event retires
+    /// included. May depend on the event, so a policy can forward only some
+    /// events (see the module docs).
+    fn targets(committed: &Committed<'_, Self::Source>) -> Vec<Self::TargetId>;
 
     /// The root of `target`'s stream: a stored UUID, or
     /// [`ids::compute_root`](super::ids::compute_root) of a business key.
@@ -126,6 +137,9 @@ pub struct Order<P: Policy> {
     pub(crate) trigger: EventRef,
     pub(crate) index: u32,
     pub(crate) correlation_id: Uuid,
+    /// The source sequence of the order owed to the same target just before
+    /// this one, if known: `None` for the first one, and inside a chain.
+    pub(crate) previous: Option<u64>,
 }
 
 impl<P: Policy> Order<P> {
@@ -156,6 +170,13 @@ impl<P: Policy> Order<P> {
     /// The trigger's correlation, which the command keeps.
     pub fn correlation_id(&self) -> &Uuid {
         &self.correlation_id
+    }
+
+    /// The source sequence of the order owed to this target just before
+    /// this one ([`orders_owed`] sets it; `None` for a target's first order
+    /// and inside a chain): what a delivery must find the target holding.
+    pub fn previous(&self) -> Option<u64> {
+        self.previous
     }
 
     /// The order as a book, checked through the kernel's reaction entry:
@@ -255,53 +276,35 @@ pub fn target_cover<R: Reaction>(source: &Cover, target: &R::TargetId) -> Cover 
 /// order index `index`.
 fn owe<P: Policy>(committed: &Committed<'_, P::Source>) -> Vec<Order<P>> {
     (0..)
-        .zip(P::targets(committed.state))
+        .zip(P::targets(committed))
         .map(|(index, target)| Order {
             cover: target_cover::<P>(committed.cover, &target),
             command: P::command(&target, committed),
             trigger: committed.event_ref(),
             index,
             correlation_id: committed.envelope.correlation_id().clone(),
+            previous: None,
             target,
         })
         .collect()
 }
 
 /// Every order a policy owes every target, from each target's position (a
-/// target absent from `positions` is owed everything from where it first
-/// appears), in one fold of the source, grouped by target, each group in
-/// source order. Refuses a source whose targets break the contiguity
-/// invariant.
+/// target absent from `positions` is owed everything it was targeted for),
+/// in one fold of the source, grouped by target, each group in source
+/// order, each order naming the one owed to its target before it
+/// ([`Order::previous`]), whether that one is still owed or already held.
 pub fn orders_owed<P: Policy>(
     source: &Stream<P::Source>,
     registry: &Registry,
     positions: &BTreeMap<P::TargetId, Position>,
 ) -> Result<Backlog<P>, KernelError> {
     let mut backlog = Backlog::<P>::new();
-    // Each target seen: `None` while it is a target, else the sequence of
-    // the first source event it was missing from.
-    let mut seen: BTreeMap<P::TargetId, Option<u64>> = BTreeMap::new();
-    let mut returned = None;
+    let mut last: BTreeMap<P::TargetId, u64> = BTreeMap::new();
     let mut owing = |committed: &Committed<'_, P::Source>| {
-        if returned.is_some() {
-            return;
-        }
         let sequence = committed.sequence();
-        let orders = owe::<P>(committed);
-        for (target, left) in &mut seen {
-            if left.is_none() && !orders.iter().any(|o| &o.target == target) {
-                *left = Some(sequence);
-            }
-        }
-        for order in orders {
-            if let Some(&Some(left)) = seen.get(&order.target) {
-                returned = Some(KernelError::TargetReturned {
-                    left,
-                    returned: sequence,
-                });
-                return;
-            }
-            seen.insert(order.target.clone(), None);
+        for mut order in owe::<P>(committed) {
+            order.previous = last.insert(order.target.clone(), sequence);
             if positions
                 .get(&order.target)
                 .is_none_or(|p| sequence >= p.next())
@@ -311,8 +314,5 @@ pub fn orders_owed<P: Policy>(
         }
     };
     source.dispatch(source.first(), registry, &mut [&mut owing])?;
-    match returned {
-        Some(error) => Err(error),
-        None => Ok(backlog),
-    }
+    Ok(backlog)
 }

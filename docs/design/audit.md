@@ -138,16 +138,19 @@ CommandBook ─check──▶ Checked ─identify──▶ Identified ─Coordin
 
 1. **Validate** (`check`): domain-blind, everything at once.
 2. **Identify** (`Checked::identify`): command id, correlation, causation.
-3. **Deduplicate** (`Coordinator::deduplicate`): the stream already holds
-   events with this command id? They are the answer.
-4. **Load and resolve** (`Coordinator::load`): the conflict resolution, the
-   snapshot and events, the expected sequence stamped or checked (STRICT's
-   stale refusal is here), the window and nonce.
+3. **Load, then deduplicate** (`Coordinator::deduplicate`): the conflict
+   resolution, the snapshot and events are loaded **first**; then, does the
+   stream already hold events with this command id? They are the answer.
+4. **Resolve** (`Coordinator::load`): the expected sequence stamped or
+   checked against the head step 3 loaded (STRICT's stale refusal is
+   here), the window and nonce.
 5. **Decode, then decide or ingest** (`Contextual::decode`,
    `Prepared::decide`): typed, upcast, strict; the body arm picks decide or
    ingest; the kernel stamps the events.
 
-**Deduplication comes before the sequence check**, so a retry of an applied
+**The load comes before the lookup**, so a concurrent commit of the same
+command cannot slip between them (see *Races* below). **Deduplication
+comes before the sequence check**, so a retry of an applied
 command whose expected sequence is now stale is answered DUPLICATE, never
 stale. **Validation comes before deduplication**, so a malformed retry of an
 applied command is still malformed. **Decoding comes after both**, so an
@@ -264,7 +267,14 @@ twice.
 **Races.** Two deliveries of one command race on the append's sequence
 check: one commits; the other's commit fails `StoreError::Conflict`
 (`Recovery::Retry`). Run again with the same command id in a fresh unit of
-work, it starts at step 3 and finds the winner's events.
+work, it starts at step 3 and finds the winner's events. **This needs the
+load before the lookup**, under READ COMMITTED: had the lookup run first, the
+original could commit between it and the load, and the retry, finding
+nothing and loading the new head, would append after the original's events
+with no conflict: applied twice. Loading first, a commit after the load is
+either seen by the lookup or makes this delivery's append fail its expected
+head. Pinned by `a_retry_racing_its_original_commit_is_never_applied_twice`
+(a store that lets a commit land after the first read).
 
 ## Step 4: load and conflict resolution
 
@@ -502,7 +512,7 @@ needs a snapshot migration.
 pub trait Reaction {
     type Source: Domain; type Target: Domain; type TargetId: Ord + Clone;
     const NAME: &'static str;           // the component its command ids derive from
-    fn targets(source: &<Self::Source as Domain>::State) -> Vec<Self::TargetId>;
+    fn targets(committed: &Committed<'_, Self::Source>) -> Vec<Self::TargetId>;   // event + state
     fn root(target: &Self::TargetId) -> Uuid;   // covered in the source's edition
     fn position(target: &<Self::Target as Domain>::State) -> Position;
 }
@@ -537,23 +547,26 @@ kernel.handle::<List, _, _>(unit, &routes, book, &sampled, &mut projections)?;  
   the sync and the async handler alike.
 - **Depth limit** (`Kernel::limit`, default 8): `KernelError::ChainTooDeep`,
   the cycle check for a chain that may legitimately revisit a stream.
-- **The contiguity invariant**: once a target appears in `targets()`, it
-  stays for every source event up to the one that retires it, and never
-  comes back; `orders_owed` (one fold of the source for all targets, for a
-  catch-up outside a chain, delivered by `Kernel::deliver`) checks it as
-  `KernelError::TargetReturned`.
-- **The position contract**: `Position` (the last sequence handled) places
-  a delivery as next, redelivery or gap; a target's position is a fold of
-  its own stream (the source sequence travels in the command's payload,
-  because apply never sees metadata). `Tracked<H>` keeps one per cover.
-  Within a chain neither a redelivery nor a gap can happen.
+- **Targeting from the event**: `targets()` receives the committed event
+  (and the state after it), so a policy may forward only some events to a
+  target. A target is owed exactly the events it was targeted for.
+- **Contiguity per target**: `orders_owed` (one fold of the source for all
+  targets, for a catch-up outside a chain, delivered by `Kernel::deliver`)
+  gives each order the source sequence of the order owed to the same target
+  before it (`Order::previous`). A delivery is placed against the target's
+  own `Position` (the last source sequence it holds, a fold of its own
+  stream, because apply never sees metadata): at or before it, a
+  redelivery; after it while the previous owed order is not yet held, a
+  `Gap` naming that one; otherwise the next. Sequences a target was never
+  owed are no gap. `Tracked<H>` keeps one position per cover. Within a
+  chain neither a redelivery nor a gap can happen.
 - **Reactor re-runs always deduplicate** (see
   [below](#reactor-re-runs)).
 - **Propagating one aggregate into another** (hatpick's list into its draw
   systems) is a policy whose target records the change in its own events.
-  A command to a retired or never-created target means the contiguity
-  invariant was broken: decide refuses it, and the list edit fails whole,
-  loudly. So retiring a draw system goes through the list.
+  A command to a retired or never-created target is a policy bug: decide
+  refuses it, and the list edit fails whole, loudly. So retiring a draw
+  system goes through the list, and the policy targets from the event.
 - **Read models are replayed on read** (`Stream::dispatch` from 0); none is
   persisted.
 
@@ -679,7 +692,7 @@ that fails later has still reported the edges it dispatched.
 | `KernelError::UnknownType` | a command or fact type the domain does not decode, after upcasting | `Invalid` |
 | `KernelError::Stale`, `Unresolved`, `Gap` | re-read and re-issue; catch up | `Retry` |
 | `StoreError::Conflict`, `Unavailable` | run again with the same command id (step 3 makes it safe) | `Retry` |
-| `IngestPanicked`, `Upcast`, `WrongDomain`, `ChainTooDeep`, `TargetReturned`, `BeforeSnapshot`, `UnregisteredDomain` (a stored stream of a domain the application did not register; an incoming book for one is `Malformed`), `Replay(..)`, `StoreError::Discontinuous`, `Unreadable` | a bug or a misconfiguration | `Bug` |
+| `IngestPanicked`, `Upcast`, `WrongDomain`, `ChainTooDeep`, `BeforeSnapshot`, `UnregisteredDomain` (a stored stream of a domain the application did not register; an incoming book for one is `Malformed`), `Replay(..)`, `StoreError::Discontinuous`, `Unreadable` | a bug or a misconfiguration | `Bug` |
 
 A duplicate is not an error: it is `Handled::Duplicate`. Each error becomes
 a `Diagnostic` with the implementation (codes under `annals-next-*`,
@@ -821,7 +834,7 @@ no actor), and reactor re-runs deduplicate in both, with no switch.
   `ApplyListChange { source_seq, change }`, recorded by the draw system as
   its own events; `DrawSystemRejection::Gap` disappears (the kernel's `Gap`);
   `Retired` and `NotInstantiated` stay, as bugs. Draw systems are created
-  and retired through list events, keeping the contiguity invariant.
+  and retired through list events; the policy targets from the event.
 - **The draw lifecycle is events in the draw-system stream**: `Draw {
   random }` (sampled by the API handler) → `Drawn`; `Accepted`, `Skipped`,
   `Expired`. History and stats replay on read.

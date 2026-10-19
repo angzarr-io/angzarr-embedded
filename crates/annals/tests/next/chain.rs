@@ -554,79 +554,103 @@ fn a_catch_up_delivers_each_owed_order_once_and_in_order() {
     );
 }
 
-/// Account deposits → the ledger, but only while the balance is even: a
-/// policy that breaks the contiguity invariant.
-struct EvenOnly;
+/// Account deposits → the ledger, and nothing else: a policy that targets
+/// from the event, so the ledger is owed only some of the account's events.
+struct DepositsOnly;
 
-impl annals::next::Reaction for EvenOnly {
+impl annals::next::Reaction for DepositsOnly {
     type Source = Account;
     type Target = Ledger;
-    type TargetId = u8;
+    type TargetId = ();
 
-    const NAME: &'static str = "even-only";
+    const NAME: &'static str = "deposits-only";
 
-    fn targets(source: &crate::toys::account::AccountState) -> Vec<u8> {
-        if source.cents % 2 == 0 {
-            vec![0]
-        } else {
-            vec![]
+    fn targets(committed: &annals::next::Committed<'_, Account>) -> Vec<()> {
+        match committed.event() {
+            crate::toys::AccountEvent::Deposited(_) => vec![()],
+            _ => vec![],
         }
     }
 
-    fn root(_: &u8) -> annals::next::v1::Uuid {
+    fn root((): &()) -> annals::next::v1::Uuid {
         ledger_root()
     }
 
-    fn position(_: &crate::toys::LedgerState) -> annals::next::Position {
-        annals::next::Position::START
+    fn position(target: &crate::toys::LedgerState) -> annals::next::Position {
+        match target.next_source {
+            0 => annals::next::Position::START,
+            next => annals::next::Position::at(next - 1),
+        }
     }
 }
 
-impl annals::next::Policy for EvenOnly {
-    fn command(_: &u8, c: &annals::next::Committed<'_, Account>) -> ledger::Record {
+impl annals::next::Policy for DepositsOnly {
+    fn command((): &(), c: &annals::next::Committed<'_, Account>) -> ledger::Record {
+        let cents = match c.event() {
+            crate::toys::AccountEvent::Deposited(cents) => *cents,
+            _ => 0,
+        };
         ledger::Record {
             source_sequence: c.sequence(),
-            cents: 0,
+            cents,
         }
     }
 }
 
 #[test]
-fn a_target_that_comes_back_breaks_the_backlog() {
+fn a_filtered_policy_keeps_contiguity_per_target() {
+    use annals::next::Handled;
     let registry = registry();
+    let log = MemoryDeadLetters::new();
+    let kernel = Kernel::new(&registry, &log);
     let mut store = InMemoryStore::new();
+    // 0: opened (not owed), 1: deposited 1; then 2: deposited 2.
     opened(&mut store, &registry, 1, 1);
+    crate::toys::handle::<Account>(&mut store, &registry, deposit(3, 2), &at(20)).unwrap();
     let source = account_stream(&mut store, &registry);
-    let owed = annals::next::orders_owed::<EvenOnly>(
+    let owed = annals::next::orders_owed::<DepositsOnly>(
         &source,
         &registry,
         &std::collections::BTreeMap::new(),
     )
     .unwrap();
+    let orders = &owed[&()];
     assert_eq!(
-        owed[&0].len(),
-        1,
-        "owed the open; retired by the odd deposit"
+        orders
+            .iter()
+            .map(|o| (o.trigger().sequence, o.previous()))
+            .collect::<Vec<_>>(),
+        [(1, None), (2, Some(1))],
+        "only the deposits, each naming the one owed before it"
+    );
+    let routes = Routes::new();
+
+    let skipped = kernel
+        .deliver(store.begin(), &routes, &orders[1], &at(30), &mut ())
+        .err()
+        .unwrap();
+    assert_eq!(
+        skipped,
+        Failure::Kernel(KernelError::Gap {
+            stream: ledger_cover(),
+            gap: annals::next::Gap {
+                expected: 1,
+                found: 2
+            }
+        }),
+        "the gap is the target's own owed order, not sequence 0"
     );
 
-    crate::toys::handle::<Account>(&mut store, &registry, deposit(3, 1), &at(20)).unwrap();
-    crate::toys::handle::<Account>(&mut store, &registry, deposit(4, 2), &at(21)).unwrap();
-    let source = account_stream(&mut store, &registry);
-    let error = annals::next::orders_owed::<EvenOnly>(
-        &source,
-        &registry,
-        &std::collections::BTreeMap::new(),
-    )
-    .err()
-    .unwrap();
-    assert_eq!(
-        error,
-        KernelError::TargetReturned {
-            left: 1,
-            returned: 2
-        }
-    );
-    assert_eq!(error.recovery(), Recovery::Bug);
+    for order in orders {
+        kernel
+            .deliver(store.begin(), &routes, order, &at(31), &mut ())
+            .unwrap();
+    }
+    assert_eq!(store.read(&ledger_cover()).unwrap().unwrap().pages.len(), 2);
+    let again = kernel
+        .deliver(store.begin(), &routes, &orders[0], &at(32), &mut ())
+        .unwrap();
+    assert!(matches!(&again, Handled::Applied(r) if r.books().is_empty()));
 }
 
 #[test]
@@ -799,7 +823,7 @@ impl annals::next::Reaction for TwoLedgers {
 
     const NAME: &'static str = "two-ledgers";
 
-    fn targets(_: &crate::toys::account::AccountState) -> Vec<u8> {
+    fn targets(_: &annals::next::Committed<'_, Account>) -> Vec<u8> {
         vec![0, 1]
     }
 

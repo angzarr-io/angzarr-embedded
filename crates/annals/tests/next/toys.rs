@@ -1036,7 +1036,7 @@ impl Reaction for Bookkeeping {
 
     const NAME: &'static str = "bookkeeping";
 
-    fn targets(_: &AccountState) -> Vec<()> {
+    fn targets(_: &Committed<'_, Account>) -> Vec<()> {
         vec![()]
     }
 

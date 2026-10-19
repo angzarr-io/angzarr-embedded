@@ -2,7 +2,7 @@
 //! atomic chain, in process.
 //!
 //! [`Kernel::handle`] runs the book through the five steps (validate,
-//! identify, deduplicate, load and resolve, decode and decide or ingest),
+//! identify, load then deduplicate, resolve, decode and decide or ingest),
 //! then synchronously runs the policies reacting to its events, whose
 //! commands take the same five steps in their targets, whose events set off
 //! their own policies, and so on down the chain. Every event stays **staged
@@ -53,13 +53,13 @@ use angzarr_proto::v1::{
 
 use super::check::{check, Checked, Sampled};
 use super::coordinator::{
-    deduplicate, expect, load, prepare, resolution, run_step, unknown_domain, Contextual,
-    Deduplicated,
+    deduplicate, expect, find_duplicate, load, novel, prepare, read, resolution, run_step,
+    unknown_domain, Contextual, Deduplicated,
 };
 use super::dead_letter::{DeadLetterLog, NoTriggerLog, TriggerLog};
 use super::domain::Domain;
 use super::error::{Failure, KernelError, Step, StepError};
-use super::handler::{Admit, Handler};
+use super::handler::{Admit, Gap, Handler, Position};
 use super::reaction::{policy, projection, Order, Policy, Projection};
 use super::registry::Registry;
 use super::store::{block, AsyncPort, AsyncUnitOfWork, EventStore, Port, SyncPort, UnitOfWork};
@@ -242,18 +242,14 @@ impl<'k> Kernel<'k> {
         let mut unit = unit;
         let mut port = SyncPort(&mut unit);
         let mut run = Run::new(self, routes, sampled);
-        let contextual = block(load(
-            &mut port,
-            self.registry,
-            checked.clone().identify(sampled),
-            &mut run.nonces,
-        ))
-        .map_err(kernel)?;
+        let identified = checked.clone().identify(sampled);
+        let loaded = block(read(&mut port, self.registry, &identified)).map_err(kernel)?;
+        let contextual = load(novel(identified, loaded), &mut run.nonces).map_err(kernel)?;
         let head = contextual.head();
         let target = prepare::<P::Target>(contextual, None, self.registry)
             .map_err(kernel)?
             .into_stream();
-        match P::position(target.state()).place(order.trigger().sequence) {
+        match place(P::position(target.state()), order) {
             Ok(Admit::Next) => {}
             Ok(Admit::Redelivery) => return Ok(Handled::Applied(Recorded::default())),
             Err(gap) => {
@@ -518,18 +514,27 @@ impl<'u> Run<'u> {
         command: super::Identified,
     ) -> Result<Found, KernelError> {
         let cover = command.cover().clone();
-        let staged_pages = self.staged.get(&cover).map_or(&[][..], |s| &s.pages);
-        let command = match deduplicate(port, command, staged_pages)
+        let Some(staged_pages) = self.staged.get(&cover).map(|s| &s.pages) else {
+            // Not yet in the chain: load, then look up (step 3), then step 4.
+            return match deduplicate(port, self.registry, command).await? {
+                Deduplicated::Duplicate { events, .. } => Ok(Found::Duplicate(events)),
+                Deduplicated::Novel(novel) => {
+                    let contextual = load(novel, &mut self.nonces)?;
+                    Ok(Found::Novel(Box::new(contextual), None))
+                }
+            };
+        };
+        // Loaded when the chain first touched it: look up, store and staged.
+        if let Some(events) = find_duplicate(port, &command, staged_pages)
             .await
             .map_err(KernelError::Store)?
         {
-            Deduplicated::Duplicate { events, .. } => return Ok(Found::Duplicate(events)),
-            Deduplicated::Novel(novel) => novel.into_command(),
-        };
-        let Some(staged) = self.staged.get_mut(&cover) else {
-            let contextual = load(port, self.registry, command, &mut self.nonces).await?;
-            return Ok(Found::Novel(Box::new(contextual), None));
-        };
+            return Ok(Found::Duplicate(events));
+        }
+        let staged = self
+            .staged
+            .get_mut(&cover)
+            .expect("the chain holds the stream it just looked up");
         let head = staged.loaded_at + staged.pages.len() as u64;
         let resolution = resolution(self.registry, &command)?;
         let (expected, nonce) = expect(&command, resolution, head, &mut self.nonces)?;
@@ -820,5 +825,24 @@ impl<D: Domain, P: Projection<D>> Project for ProjectionRoute<'_, D, P> {
             }
         }
         failures
+    }
+}
+
+/// Where `order` falls against its target's `position`, per target: at or
+/// before the last source sequence it holds, a redelivery; past it while
+/// the order owed before this one ([`Order::previous`]) is not yet held, a
+/// gap naming that one; otherwise the next. Sequences the target was never
+/// owed (a filtered policy) are no gap.
+fn place<P: Policy>(position: Position, order: &Order<P>) -> Result<Admit, Gap> {
+    let sequence = order.trigger().sequence;
+    if position.last().is_some_and(|last| sequence <= last) {
+        return Ok(Admit::Redelivery);
+    }
+    match order.previous() {
+        Some(previous) if position.last().is_none_or(|last| last < previous) => Err(Gap {
+            expected: previous,
+            found: sequence,
+        }),
+        _ => Ok(Admit::Next),
     }
 }

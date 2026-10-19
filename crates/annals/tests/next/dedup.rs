@@ -151,3 +151,112 @@ fn a_rejection_leaves_nothing_and_a_retry_runs_again() {
     let retried = handle::<crate::toys::Account>(&mut store, &registry, early(), &at(20)).unwrap();
     assert_eq!(retried.outcome().delivery, DeliveryOutcome::Applied as i32);
 }
+
+/// A unit of work that plays READ COMMITTED with a concurrent commit: the
+/// store already holds the original delivery's events, but the first read
+/// this unit makes (whichever it is) sees the stream as it was before them;
+/// every later read, and every append, sees the store as it is.
+struct CommitLandsAfterFirstRead<'s> {
+    store: &'s mut InMemoryStore,
+    /// The stream's length before the original commit.
+    before: u64,
+    seen: bool,
+}
+
+impl CommitLandsAfterFirstRead<'_> {
+    fn first_read(&mut self) -> bool {
+        !std::mem::replace(&mut self.seen, true)
+    }
+}
+
+impl annals::next::EventStore for CommitLandsAfterFirstRead<'_> {
+    fn append(
+        &mut self,
+        stream: &annals::next::v1::Cover,
+        expected: u64,
+        pages: &[annals::next::v1::EventPage],
+    ) -> Result<u64, annals::next::StoreError> {
+        self.store.append(stream, expected, pages)
+    }
+
+    fn read_from(
+        &mut self,
+        stream: &annals::next::v1::Cover,
+        from: u64,
+    ) -> Result<Option<annals::next::Slice>, annals::next::StoreError> {
+        let early = self.first_read();
+        let mut slice = self.store.read_from(stream, from)?;
+        if early {
+            if let Some(slice) = slice.as_mut() {
+                slice.pages.retain(|p| p.sequence < self.before);
+                slice.next_sequence = self.before;
+            }
+        }
+        Ok(slice)
+    }
+
+    fn find_command(
+        &mut self,
+        stream: &annals::next::v1::Cover,
+        command_id: &annals::next::v1::Uuid,
+    ) -> Result<Vec<annals::next::v1::EventPage>, annals::next::StoreError> {
+        let early = self.first_read();
+        let mut pages = self.store.find_command(stream, command_id)?;
+        if early {
+            pages.retain(|p| p.sequence < self.before);
+        }
+        Ok(pages)
+    }
+}
+
+impl annals::next::UnitOfWork for CommitLandsAfterFirstRead<'_> {
+    fn commit(self) -> Result<(), annals::next::StoreError> {
+        Ok(())
+    }
+}
+
+#[test]
+fn a_retry_racing_its_original_commit_is_never_applied_twice() {
+    // The stream is loaded before the command is looked up, so an original
+    // that commits between the retry's two reads is seen by the lookup.
+    // (Looked up first, the retry would find nothing, then load the head
+    // after the original's events and append again.)
+    use annals::next::EventStore;
+    let registry = registry();
+    let mut store = InMemoryStore::new();
+    opened(&mut store, &registry, 1, 100);
+    let before = store
+        .read(&cover("account", 1))
+        .unwrap()
+        .unwrap()
+        .next_sequence;
+    handle::<crate::toys::Account>(&mut store, &registry, deposit(3, 25), &at(20)).unwrap();
+
+    let log = annals::next::MemoryDeadLetters::new();
+    let kernel = annals::next::Kernel::new(&registry, &log);
+    let racing = CommitLandsAfterFirstRead {
+        store: &mut store,
+        before,
+        seen: false,
+    };
+    let retry = kernel
+        .handle::<crate::toys::Account, _, _>(
+            racing,
+            &annals::next::Routes::new(),
+            deposit(3, 25),
+            &at(21),
+            &mut (),
+        )
+        .unwrap();
+    assert!(
+        matches!(retry, Handled::Duplicate(_)),
+        "found, not re-applied"
+    );
+    let deposits = store
+        .read(&cover("account", 1))
+        .unwrap()
+        .unwrap()
+        .pages
+        .len() as u64;
+    assert_eq!(deposits, before + 1, "the deposit is on the stream once");
+}

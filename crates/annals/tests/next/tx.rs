@@ -214,7 +214,7 @@ impl Reaction for Probing {
 
     const NAME: &'static str = "probing";
 
-    fn targets(_: &crate::toys::account::AccountState) -> Vec<()> {
+    fn targets(_: &annals::next::Committed<'_, Account>) -> Vec<()> {
         vec![()]
     }
 
@@ -324,7 +324,7 @@ impl Reaction for ProbeToLedger {
 
     const NAME: &'static str = "probe-to-ledger";
 
-    fn targets(_: &ProbeState) -> Vec<()> {
+    fn targets(_: &annals::next::Committed<'_, ProbeDomain>) -> Vec<()> {
         vec![()]
     }
 

@@ -1,4 +1,4 @@
-//! The normative order: validate → identify → deduplicate → load and
+//! The normative order: validate → identify → load, then deduplicate →
 //! resolve → decode (and upcast) → decide or ingest. Each test pins one
 //! boundary by sending something that two adjacent steps would answer
 //! differently.

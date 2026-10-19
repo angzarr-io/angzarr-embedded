@@ -101,13 +101,6 @@ pub enum KernelError {
         stream: Cover,
         gap: Gap,
     },
-    /// A reaction's target left the source's targets and came back: the
-    /// targets of a source are not contiguous, so a backlog cannot be
-    /// computed.
-    TargetReturned {
-        left: u64,
-        returned: u64,
-    },
     /// A book or a log for `stream` was given to an `expected` domain's
     /// code.
     WrongDomain {
@@ -293,7 +286,6 @@ impl KernelError {
             KernelError::Store(error) => error.recovery(),
             KernelError::Upcast { .. }
             | KernelError::IngestPanicked { .. }
-            | KernelError::TargetReturned { .. }
             | KernelError::WrongDomain { .. }
             | KernelError::ChainTooDeep { .. }
             | KernelError::BeforeSnapshot { .. }
@@ -433,10 +425,6 @@ impl fmt::Display for KernelError {
                 gap.found,
                 gap.expected
             ),
-            KernelError::TargetReturned { left, returned } => write!(
-                f,
-                "a target left the source's targets at event {left} and came back at event {returned}"
-            ),
             KernelError::WrongDomain { stream, expected } => write!(
                 f,
                 "stream {} was given to the {expected} domain's code",
@@ -470,7 +458,6 @@ impl Diagnostic for KernelError {
             KernelError::Upcast { .. } => "annals-next-upcast",
             KernelError::IngestPanicked { .. } => "annals-next-ingest-panicked",
             KernelError::Gap { .. } => "annals-next-gap",
-            KernelError::TargetReturned { .. } => "annals-next-target-returned",
             KernelError::WrongDomain { .. } => "annals-next-wrong-domain",
             KernelError::ChainTooDeep { .. } => "annals-next-chain-too-deep",
             KernelError::BeforeSnapshot { .. } => "annals-next-before-snapshot",
@@ -519,9 +506,6 @@ impl Diagnostic for KernelError {
                 ("expected", gap.expected.into()),
                 ("found", gap.found.into()),
             ],
-            KernelError::TargetReturned { left, returned } => {
-                vec![("left", (*left).into()), ("returned", (*returned).into())]
-            }
             KernelError::WrongDomain {
                 stream: s,
                 expected,

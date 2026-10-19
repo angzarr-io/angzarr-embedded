@@ -7,16 +7,24 @@
 //! work, and it does the same steps in process, domain-blind (it sees
 //! `Cover`s, pages and the [`Registry`], never a domain's types):
 //!
-//! 3. [`Coordinator::deduplicate`]: does the addressed stream already hold
-//!    events with this command id? Then the command was applied: answered
-//!    [`Deduplicated::Duplicate`] with those events, and nothing below
-//!    runs. Before the sequence check, so a retry of an applied STRICT
+//! 3. [`Coordinator::deduplicate`]: **load the stream first** (resolve the
+//!    conflict resolution: the book's, the command type's, the domain's,
+//!    else COMMUTATIVE where the state supports it and STRICT otherwise,
+//!    [`Registry::resolve`]; then the newest usable snapshot and the events
+//!    after it), **then** look the command id up: does the addressed
+//!    stream already hold events with this command id? Then the command
+//!    was applied: answered [`Deduplicated::Duplicate`] with those events,
+//!    and nothing below runs. The load comes first so that a concurrent
+//!    commit of the same command (a retry racing its original) can never
+//!    slip between the two reads unseen: if it lands after the load, either
+//!    the lookup sees its events, or this command's append, expecting the
+//!    head it loaded, fails as a conflict and the retry then finds the
+//!    duplicate. (Lookup first, the original could commit between the
+//!    lookup and the load, and the retry would append after it: applied
+//!    twice.) Before the sequence check, so a retry of an applied STRICT
 //!    command whose expected sequence is now stale is a duplicate, never
 //!    stale.
-//! 4. [`Coordinator::load`]: resolve the conflict resolution (the book's,
-//!    the command type's, the domain's, else COMMUTATIVE where the state
-//!    supports it and STRICT otherwise: [`Registry::resolve`]); load the
-//!    newest usable snapshot and the events after it; stamp an absent
+//! 4. [`Coordinator::load`]: stamp an absent
 //!    expected sequence with the head, or check a present one: under
 //!    STRICT it must be the head ([`KernelError::Stale`]); under
 //!    AGGREGATE_HANDLES and COMMUTATIVE the events from it to the head are
@@ -35,7 +43,9 @@
 //!
 //! In a [`Chain`](super::Chain), steps 3 and 4 consult the chain's staged
 //! streams before the store, so a later step sees an earlier step's
-//! uncommitted events (and its command ids).
+//! uncommitted events (and its command ids). A stream the chain already
+//! holds was loaded when the chain first touched it, so its lookup still
+//! follows its load.
 
 use std::any::Any as AnyType;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -89,18 +99,32 @@ pub enum Deduplicated {
     Novel(Novel),
 }
 
-/// An [`Identified`] command that deduplication did not find: the only
-/// thing [`Coordinator::load`] takes.
-pub struct Novel(Identified);
+/// An [`Identified`] command that deduplication did not find, with the
+/// stream it loaded first: the only thing [`Coordinator::load`] takes.
+pub struct Novel {
+    command: Identified,
+    loaded: Loaded,
+}
 
 impl Novel {
     pub fn command(&self) -> &Identified {
-        &self.0
+        &self.command
     }
 
-    pub(crate) fn into_command(self) -> Identified {
-        self.0
+    /// The stream's next sequence when it was loaded.
+    pub fn head(&self) -> u64 {
+        self.loaded.head
     }
+}
+
+/// What step 3 read, before its lookup: the resolution, the snapshot, the
+/// events after it, the head and the last instant.
+pub(crate) struct Loaded {
+    resolution: ConflictResolution,
+    snapshot: Option<Snapshot>,
+    pages: Vec<EventPage>,
+    head: u64,
+    last_recorded_at: Option<Timestamp>,
 }
 
 impl<'u, U: EventStore> Coordinator<'u, U> {
@@ -112,24 +136,23 @@ impl<'u, U: EventStore> Coordinator<'u, U> {
         }
     }
 
-    /// Step 3: look the command id up on the addressed stream
+    /// Step 3: load the stream (the resolution, the snapshot and the events
+    /// after it), then look the command id up on it
     /// ([`EventStore::find_command`], over the index on (stream,
-    /// command_id)).
-    pub fn deduplicate(&mut self, command: Identified) -> Result<Deduplicated, StoreError> {
-        block(deduplicate(&mut SyncPort(self.unit), command, &[]))
-    }
-
-    /// Step 4: resolve the conflict resolution, load the snapshot and the
-    /// events, and stamp or check the expected sequence (see the module
-    /// docs). STRICT's stale command is refused here, before anything is
-    /// decoded.
-    pub fn load(&mut self, command: Novel) -> Result<Contextual, KernelError> {
-        block(load(
+    /// command_id)). Load first: see the module docs.
+    pub fn deduplicate(&mut self, command: Identified) -> Result<Deduplicated, KernelError> {
+        block(deduplicate(
             &mut SyncPort(self.unit),
             self.registry,
-            command.into_command(),
-            &mut self.nonces,
+            command,
         ))
+    }
+
+    /// Step 4: stamp or check the expected sequence against the head step 3
+    /// loaded (see the module docs). STRICT's stale command is refused
+    /// here, before anything is decoded.
+    pub fn load(&mut self, command: Novel) -> Result<Contextual, KernelError> {
+        load(command, &mut self.nonces)
     }
 }
 
@@ -295,28 +318,50 @@ fn unregistered<D: Domain>() -> KernelError {
     }
 }
 
-/// Step 3 over `port`, also finding the command's events among `staged`,
-/// a chain's uncommitted pages of the same stream.
+/// Step 3 over `port`: load the stream, then look the command up.
 pub(crate) async fn deduplicate<P: Port>(
     port: &mut P,
+    registry: &Registry,
     command: Identified,
+) -> Result<Deduplicated, KernelError> {
+    let loaded = read(port, registry, &command).await?;
+    match find_duplicate(port, &command, &[])
+        .await
+        .map_err(KernelError::Store)?
+    {
+        Some(events) => Ok(Deduplicated::Duplicate { command, events }),
+        None => Ok(Deduplicated::Novel(Novel { command, loaded })),
+    }
+}
+
+/// The lookup half of step 3: the command's events on its stream, also
+/// among `staged` (a chain's uncommitted pages of the same stream), as
+/// the duplicate's answer; `None` if there are none. Only ever run after
+/// the stream was loaded (here, or earlier in the same chain).
+pub(crate) async fn find_duplicate<P: Port>(
+    port: &mut P,
+    command: &Identified,
     staged: &[EventPage],
-) -> Result<Deduplicated, StoreError> {
+) -> Result<Option<EventBook>, StoreError> {
     let id = command.command_id();
     let mut pages = port.find_command(command.cover(), id).await?;
     pages.extend(staged.iter().filter(|p| produced_by(p, id)).cloned());
-    let Some(next_sequence) = pages.last().map(|p| p.sequence + 1) else {
-        return Ok(Deduplicated::Novel(Novel(command)));
-    };
-    Ok(Deduplicated::Duplicate {
-        events: EventBook {
+    Ok(pages
+        .last()
+        .map(|p| p.sequence + 1)
+        .map(|next_sequence| EventBook {
             cover: Some(command.cover().clone()),
             snapshot: None,
             pages,
             next_sequence,
-        },
-        command,
-    })
+        }))
+}
+
+/// A command and the stream loaded for it, as step 4's input, without a
+/// lookup: for a caller that runs its own (a delivery, whose chain looks
+/// the command up once it has placed it).
+pub(crate) fn novel(command: Identified, loaded: Loaded) -> Novel {
+    Novel { command, loaded }
 }
 
 /// The command's resolution ([`Registry::resolve`]): never UNSPECIFIED.
@@ -362,14 +407,14 @@ pub(crate) fn expect(
     Ok((expected, nonce))
 }
 
-/// Step 4 over `port`.
-pub(crate) async fn load<P: Port>(
+/// The read half of step 3: the resolution, the newest usable snapshot and
+/// the events after it.
+pub(crate) async fn read<P: Port>(
     port: &mut P,
     registry: &Registry,
-    command: Identified,
-    nonces: &mut u64,
-) -> Result<Contextual, KernelError> {
-    let resolution = resolution(registry, &command)?;
+    command: &Identified,
+) -> Result<Loaded, KernelError> {
+    let resolution = resolution(registry, command)?;
     let cover = command.cover();
     let windowed = resolution != ConflictResolution::Strict;
     let snapshot = port
@@ -394,15 +439,28 @@ pub(crate) async fn load<P: Port>(
         ),
         None => (None, Vec::new(), 0, None),
     };
-    let (expected, nonce) = expect(&command, resolution, head, nonces)?;
-    Ok(Contextual {
-        command,
+    Ok(Loaded {
         resolution,
-        expected,
         snapshot,
         pages,
         head,
         last_recorded_at,
+    })
+}
+
+/// Step 4: the expected sequence stamped or checked against the head step 3
+/// loaded.
+pub(crate) fn load(novel: Novel, nonces: &mut u64) -> Result<Contextual, KernelError> {
+    let Novel { command, loaded } = novel;
+    let (expected, nonce) = expect(&command, loaded.resolution, loaded.head, nonces)?;
+    Ok(Contextual {
+        command,
+        resolution: loaded.resolution,
+        expected,
+        snapshot: loaded.snapshot,
+        pages: loaded.pages,
+        head: loaded.head,
+        last_recorded_at: loaded.last_recorded_at,
         nonce,
     })
 }

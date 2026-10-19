@@ -486,13 +486,6 @@ fn every_failure_says_how_to_recover() {
         ),
         (
             Recovery::Bug,
-            KernelError::TargetReturned {
-                left: 1,
-                returned: 2,
-            },
-        ),
-        (
-            Recovery::Bug,
             KernelError::WrongDomain {
                 stream: stream.clone(),
                 expected: "ledger",
