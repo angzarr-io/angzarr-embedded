@@ -5,7 +5,9 @@ Status: **implemented** in `crates/annals/src/next/`, pinned by the tests in
 kernel: hatpick moves onto it first.
 
 The wire contract is angzarr's protos at angzarr-project `feat/audit-meta`
-**5850057** (pass 13: `EventMeta.causation` is the event's direct cause,
+**5850057** (the crate is pinned at 672ed76, which changes no proto and
+only adds angzarr-proto's embedded `.proto` sources for dependents' own
+protos) (pass 13: `EventMeta.causation` is the event's direct cause,
 `oneof { command_id, triggering_event }`, with no command-causation on
 events; PM process events deduplicate on their trigger; reactor re-runs
 always deduplicate. On top of pass 12: one `command_id` per command,
