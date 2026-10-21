@@ -48,12 +48,24 @@ impl SqliteStore {
             .await
     }
 
+    /// Connect, then migrate holding the database's write lock: sqlx's
+    /// migrator takes no lock on SQLite and reads which migrations are
+    /// applied before it begins each one, so stores opening a new file at
+    /// once (one per process) would each apply the first migration, and
+    /// all but one fail on tables that already exist. Under `BEGIN
+    /// IMMEDIATE` they take turns (waiting the connection's busy timeout),
+    /// and each after the first finds nothing to apply.
     async fn on(options: SqliteConnectOptions) -> Result<SqliteStore, StoreError> {
         let mut conn = options.connect().await.map_err(unavailable)?;
-        sqlx::migrate!("./migrations/sqlite")
-            .run(&mut conn)
+        let mut tx = conn
+            .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(unavailable)?;
+        sqlx::migrate!("./migrations/sqlite")
+            .run(&mut *tx)
+            .await
+            .map_err(unavailable)?;
+        tx.commit().await.map_err(unavailable)?;
         Ok(SqliteStore { conn })
     }
 }

@@ -75,3 +75,32 @@ async fn reopening_a_migrated_file_migrates_nothing_twice() {
     drop(store);
     std::fs::remove_file(&path).unwrap();
 }
+
+#[tokio::test]
+async fn stores_opening_a_new_file_at_once_all_open_it_migrated() {
+    // Processes racing to open a project's database for the first time:
+    // each connection is its own SQLite handle on its own thread, as each
+    // process's is. Every one must open it, migrated once.
+    for _ in 0..5 {
+        let path = database();
+        let open = || async { SqliteStore::open(&path).await.map(drop) };
+        let opened = tokio::join!(
+            open(),
+            open(),
+            open(),
+            open(),
+            open(),
+            open(),
+            open(),
+            open()
+        );
+        let opened = [
+            opened.0, opened.1, opened.2, opened.3, opened.4, opened.5, opened.6, opened.7,
+        ];
+        assert_eq!(opened, [const { Ok(()) }; 8]);
+        let mut store = SqliteStore::open(&path).await.unwrap();
+        assert_eq!(store.covers("tasks").await, Ok(vec![]));
+        drop(store);
+        std::fs::remove_file(&path).unwrap();
+    }
+}
