@@ -379,3 +379,17 @@ async fn stores_opening_a_file_in_rollback_mode_at_once_all_move_it_to_wal() {
         remove(&path);
     }
 }
+
+#[test]
+fn every_migration_runs_inside_the_open_transaction() {
+    // `open` migrates inside `BEGIN IMMEDIATE`: a migration outside any
+    // transaction, or one changing the journal mode, cannot run there.
+    for migration in MIGRATOR.iter() {
+        assert!(!migration.no_tx, "{}", migration.version);
+        assert!(
+            !migration.sql.to_ascii_lowercase().contains("journal_mode"),
+            "{}",
+            migration.version
+        );
+    }
+}
