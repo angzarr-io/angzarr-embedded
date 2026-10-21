@@ -92,3 +92,44 @@ fn a_set_stays_sorted_and_changes() {
     assert!(s.remove(TagId(3))); // and clears
     assert!(!s.has(TagId(3)));
 }
+
+#[test]
+fn a_word_is_lowercase_letters_digits_underscores_and_hyphens() {
+    let mut r = TagRegistry::new();
+    for good in ["a-b", "a_b", "a2", "9", "-", "_", "x-1_y"] {
+        assert!(r.parse(good).is_ok(), "{good:?}");
+        let symbol = format!("k={good}");
+        assert!(r.parse(&symbol).is_ok(), "{symbol:?}");
+    }
+    for bad in ["a.b", "a b", "A", "a+"] {
+        assert!(r.parse(bad).is_err(), "{bad:?}");
+    }
+}
+
+#[test]
+fn a_registry_counts_its_keys() {
+    let mut r = TagRegistry::new();
+    assert!(r.is_empty());
+    assert_eq!(r.len(), 0);
+    r.parse("terrain:rooftop").unwrap();
+    r.parse("faction:owner=crimson").unwrap();
+    r.parse("terrain:rooftop").unwrap();
+    assert!(!r.is_empty());
+    assert_eq!(r.len(), 2);
+}
+
+#[test]
+fn a_set_lists_and_counts_its_tags_in_key_order() {
+    let mut s = TagSet::new();
+    assert!(s.is_empty());
+    assert_eq!(s.len(), 0);
+    s.set(TagId(7), TagValue::Int(-2));
+    s.set(TagId(2), TagValue::Flag);
+    assert!(!s.is_empty());
+    assert_eq!(s.len(), 2);
+    assert_eq!(
+        s.iter().collect::<Vec<_>>(),
+        vec![(TagId(2), TagValue::Flag), (TagId(7), TagValue::Int(-2))]
+    );
+    assert_eq!(s.tags(), &s);
+}
