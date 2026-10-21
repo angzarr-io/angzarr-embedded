@@ -281,7 +281,7 @@ impl<I: Id, N, E> Graph<I, N, E> {
                     (Some(old), _) if nd < old => true,
                     // Equal cost: prefer the lower predecessor, then the
                     // lower edge — ties break on id, never on order.
-                    (Some(old), Some((p, pe))) if nd == old => (at, edge) < (p, pe),
+                    (Some(old), Some((p, pe))) if nd == old => (at, edge).cmp(&(p, pe)).is_lt(),
                     _ => false,
                 };
                 if better {
