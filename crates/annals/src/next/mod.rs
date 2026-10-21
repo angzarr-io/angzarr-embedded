@@ -1,7 +1,8 @@
 //! The audited kernel, designed in `docs/design/audit.md`, that is to
 //! replace the crate root's [`Stream`](crate::Stream), [`Tx`](crate::Tx),
 //! [`EventStore`](crate::EventStore), [`Projection`](crate::Projection) and
-//! [`policy`](crate::policy). Its tests are in `tests/next/`.
+//! [`policy`](crate::policy). Each module's tests are in its `*.test.rs`, over
+//! the toy domains of `toys.test.rs`.
 //!
 //! annals is the in-process runtime, and it **operates on angzarr's wire
 //! types directly** (`io.angzarr.v1`, re-exported as [`v1`]): a stream is a
@@ -84,6 +85,11 @@ mod stream;
 mod upcast;
 mod version;
 mod wire;
+
+// The toy domains the kernel's tests run on.
+#[cfg(test)]
+#[path = "toys.test.rs"]
+pub(crate) mod toys;
 
 pub use check::{check, Body, Checked, Identified, Malformed, Sampled};
 pub use conflict::{Key, UnitPath, Units};

@@ -26,3 +26,13 @@ pub use parallel::parallel;
 pub use record::{Rec, Value};
 pub use rng::{derive, fnv1a, mix, Rng};
 pub use schedule::{advance, Advance, Clock, Key, Scheduler, Tick, Ticked};
+
+// A toy domain, fighters swinging on a clock, that the tests below and the
+// Gherkin runner's test drive.
+#[cfg(test)]
+#[path = "brawl.test.rs"]
+pub(crate) mod brawl;
+
+#[cfg(test)]
+#[path = "lib.test.rs"]
+mod tests;

@@ -249,3 +249,7 @@ impl Upcaster {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "upcast.test.rs"]
+mod tests;

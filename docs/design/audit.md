@@ -1,8 +1,8 @@
 # The audited kernel on angzarr's proto types: design
 
-Status: **implemented** in `crates/annals/src/next/`, pinned by the tests in
-`crates/annals/tests/next/`. It does not yet replace the crate root's
-kernel: hatpick moves onto it first.
+Status: **implemented** in `crates/annals/src/next/`, pinned by the tests
+beside it (`*.test.rs`). It does not yet replace the crate root's kernel:
+hatpick moves onto it first.
 
 The wire contract is angzarr's protos at angzarr-project `feat/audit-meta`
 **5850057** (the crate is pinned at 672ed76, which changes no proto and
@@ -364,7 +364,7 @@ message is its own snapshot form. `Registry::register::<D>` fills its entry
 from `D::State::descriptor()`, as angzarr's `registry.register::<D>()` fills
 `ComponentDescriptor.state`, and refuses a descriptor whose type URL is not
 the snapshot form's. angzarr's generator (backlog CR-1, CR-4) emits the impl;
-the test fixtures write it by hand (`tests/next/toys.rs`).
+the test fixtures write it by hand (`src/next/toys.test.rs`).
 
 **The risk of COMMUTATIVE.** No structural diff sees a value derived from,
 or meaningful only together with, another unit: a total over items, two
@@ -947,12 +947,13 @@ to the application's `TriggerLog`, beside the dead-letter log.
 
 ## The tests
 
-`crates/annals/tests/next/`, one file per contract, over the toy domains
-in `toys.rs`. Unit tests in `src/next/check.rs` pin what only the kernel
-can reach: a policy's book is checked through the reaction entry (no ids,
-no fact, no handling, a trigger that names an id) and identified from its
-trigger, and a reaction's events carry `causation.command_id` and nothing
-of its trigger, while its book keeps the trigger as `causation_id`.
+Beside the module each contract is about, in its `*.test.rs` under
+`crates/annals/src/next/`, over the toy domains in `toys.test.rs`. Tests in
+`check.test.rs` also pin what only the kernel can reach: a policy's book is
+checked through the reaction entry (no ids, no fact, no handling, a trigger
+that names an id) and identified from its trigger, and a reaction's events
+carry `causation.command_id` and nothing of its trigger, while its book
+keeps the trigger as `causation_id`.
 
 - **parse.rs**: a checked command's accessors are non-optional where
   the book had to say something; a fact carries its source in its body; the

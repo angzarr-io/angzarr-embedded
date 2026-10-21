@@ -2,8 +2,8 @@
 #
 # Nothing is excluded. What might have been:
 # - annals-log's generated protobuf (crates/annals-log/gen) is reached only by
-#   `include!` from tests/codegen.rs, a test target, so cargo-mutants never
-#   walks it.
+#   `include!` from src/codegen.test.rs, a `#[cfg(test)]` module, which
+#   cargo-mutants skips.
 # - annals-catalog-check's src/lib.rs holds no code; its check is a test.
 # - Display impls are not noise: annals-catalog-check fails an empty English
 #   Display, so with test_workspace those mutants are caught.

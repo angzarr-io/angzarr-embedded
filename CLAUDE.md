@@ -51,9 +51,9 @@ breaking` guard the `.proto`.
 
 Codegen is only a test-time cross-check: `buf generate` writes into
 `crates/annals-log/gen/`, which is gitignored and never committed, and
-`crates/annals-log/tests/codegen.rs` (the `codegen-check` feature) proves the
-hand-written and generated types are wire-identical. Never edit or include
-`gen/` from library code.
+`crates/annals-log/src/codegen.test.rs` (the `codegen-check` feature) proves
+the hand-written and generated types are wire-identical. Never edit `gen/`, or
+include it from anything but that test.
 
 ## Licence: EUPL-1.2; not published
 
@@ -93,9 +93,34 @@ it without depending on the event-sourcing kernel.
 The workspace denies three clippy lints, and every crate opts in with
 `[lints] workspace = true`: `invisible_characters`, `unicode_not_nfc` and
 `non_ascii_literal`. A non-ASCII character in a literal is written as an
-escape (`"\u{e9}"`), so what the code holds is plain. The one allow is
-`crates/annals-yaml/tests/roundtrip.rs`, whose corpus is readable text by
-design; a new allow needs a comment saying why.
+escape (`"\u{e9}"`), so what the code holds is plain. The one allow is the
+`roundtrip` module of `crates/annals-yaml/src/lib.test.rs`, whose corpus is
+readable text by design; a new allow needs a comment saying why.
+
+## Tests live beside the code, in `*.test.rs`
+
+A source file `foo.rs` keeps its tests in `foo.test.rs` in the same
+directory, included at the end of `foo.rs`:
+
+```rust
+#[cfg(test)]
+#[path = "foo.test.rs"]
+mod tests;
+```
+
+Not an inline `mod tests { ... }`, and no `tests/` directory: the tests stay
+next to what they test, and out of the source file, so reading the code does
+not put its tests in the reader's (or an LLM's) context.
+
+- Shared fixtures are `*.test.rs` files too, declared
+  `#[cfg(test)] #[path = "toys.test.rs"] pub(crate) mod toys;`
+  (`annals::next::toys`, `annals_log::toy`, `annals_sim::brawl`).
+- A source file with several test files includes each,
+  `#[cfg(test)] #[path = "edit_map.test.rs"] mod edit_map_tests;`, or keeps
+  one `foo.test.rs` with a module per subject.
+- A test reaches the crate as `crate::`, its private items included.
+- Library-source scans (the catalog parity's code-literal check) skip
+  `*.test.rs`.
 
 ## Use `just`
 

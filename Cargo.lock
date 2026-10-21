@@ -28,6 +28,7 @@ name = "annals"
 version = "0.1.0"
 dependencies = [
  "angzarr-proto",
+ "annals",
  "annals-diagnostic",
  "prost",
  "prost-types",

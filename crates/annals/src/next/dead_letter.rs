@@ -117,3 +117,7 @@ impl DeadLetterLog for MemoryDeadLetters {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "dead_letter.test.rs"]
+mod tests;

@@ -627,3 +627,7 @@ impl<D: Domain> Stream<D> {
         (self.cover, self.events, self.state)
     }
 }
+
+#[cfg(test)]
+#[path = "stream.test.rs"]
+mod tests;

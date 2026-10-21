@@ -30,7 +30,7 @@ message MyEnvelope {
 
 and it is byte-for-byte the generic `Envelope` with `event` set to
 `MyEvent`'s encoding. Generic tools read any log; a domain reads its own
-typed. `tests/format.rs` proves it with the toy counter in
+typed. `src/format.test.rs` proves it with the toy counter in
 `proto/annals/log/toy/v1/toy.proto`. An event that encodes to no bytes is
 left off the wire either way and reads back as the event type's default.
 
@@ -106,13 +106,13 @@ match. `just lint` runs `buf lint` on it and `just breaking` checks it
 against main for wire-breaking changes.
 
 Codegen exists only to check the hand-written types. `just gen` runs `buf
-generate` into `gen/` (gitignored), and `tests/codegen.rs`, compiled only
+generate` into `gen/` (gitignored), and `src/codegen.test.rs`, compiled only
 with the `codegen-check` feature (which `just test` turns on), encodes varied
 values with both the hand-written and the generated types — absent and
 present `cause`, `u64::MAX`, empty and large payloads — and checks the bytes
 are equal and that each side decodes the other's. Plain `cargo test` skips
 it. The toy test domains in `proto/annals/log/toy/v1/toy.proto` are
-hand-written the same way, in `tests/toy/mod.rs`, and checked by the same
+hand-written the same way, in `src/toy.test.rs`, and checked by the same
 test.
 
 The check needs:

@@ -397,3 +397,7 @@ impl Registry {
         self.domains.keys().map(String::as_str)
     }
 }
+
+#[cfg(test)]
+#[path = "registry.test.rs"]
+mod tests;

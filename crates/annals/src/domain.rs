@@ -161,3 +161,7 @@ impl<'a, D: Domain> Tx<'a, D> {
         self.emitted
     }
 }
+
+#[cfg(test)]
+#[path = "domain.test.rs"]
+mod tests;

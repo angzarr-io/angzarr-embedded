@@ -143,3 +143,7 @@ impl<E: 'static> Decoder<E> {
         self.by_name.keys().map(|name| format!("/{name}")).collect()
     }
 }
+
+#[cfg(test)]
+#[path = "payload.test.rs"]
+mod tests;

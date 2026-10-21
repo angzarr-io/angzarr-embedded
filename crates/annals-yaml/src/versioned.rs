@@ -1027,3 +1027,7 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn Diagnostic>> {
     out.push(Box::new(chain(ChainProblem::Gap { from: 1 })));
     out
 }
+
+#[cfg(test)]
+#[path = "versioned.test.rs"]
+mod tests;

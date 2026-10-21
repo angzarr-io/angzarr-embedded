@@ -846,3 +846,7 @@ fn place<P: Policy>(position: Position, order: &Order<P>) -> Result<Admit, Gap> 
         _ => Ok(Admit::Next),
     }
 }
+
+#[cfg(test)]
+#[path = "handle.test.rs"]
+mod tests;

@@ -18,7 +18,7 @@ annals-diagnostic = { path = "../annals-diagnostic" }
 prost = "0.14"
 
 [features]
-# Runs tests/codegen.rs, which checks the hand-written types against the ones
+# Runs src/codegen.test.rs, which checks the hand-written types against the ones
 # `buf generate` writes into gen/. Needs `just gen` first; `just test` turns
 # it on.
 codegen-check = []

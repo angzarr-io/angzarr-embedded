@@ -146,3 +146,7 @@ impl Diagnostic for Gap {
         ]
     }
 }
+
+#[cfg(test)]
+#[path = "policy.test.rs"]
+mod tests;

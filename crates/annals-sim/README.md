@@ -57,7 +57,8 @@ fieldless enums and id newtypes.
 ## Also
 
 - `parallel(items, f)`: `f` over `items` on every core, order kept.
-- `gherkin`: a hand-rolled runner for `harness = false` test targets —
-  `parse_feature`, `quoted`, `numbers`, and `main(dir, new_world, step)`,
-  which runs each scenario in a fresh world under `catch_unwind` and exits
-  non-zero on failure. See `tests/gherkin.rs`.
+- `gherkin`: a hand-rolled runner — `parse_feature`, `quoted`, `numbers`,
+  `run_dir(dir, new_world, step)`, which runs each scenario in a fresh world
+  under `catch_unwind` and reports the ones that failed, and `main`, which
+  does the same for a `harness = false` test target and exits non-zero on
+  failure. `src/gherkin.test.rs` runs `features/` from a `#[test]`.

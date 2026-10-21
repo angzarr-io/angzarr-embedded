@@ -202,3 +202,7 @@ impl FromIterator<UnitPath> for Units {
         Units(iter.into_iter().collect())
     }
 }
+
+#[cfg(test)]
+#[path = "conflict.test.rs"]
+mod tests;

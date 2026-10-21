@@ -916,3 +916,22 @@ pub mod testing {
         }
     }
 }
+
+// The toy test domains, shared by the tests below.
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "toy.test.rs"]
+pub(crate) mod toy;
+
+#[cfg(test)]
+#[path = "format.test.rs"]
+mod format_tests;
+
+#[cfg(test)]
+#[path = "sequence.test.rs"]
+mod sequence_tests;
+
+// Needs `gen/` (`just gen`): only with the `codegen-check` feature.
+#[cfg(all(test, feature = "codegen-check"))]
+#[path = "codegen.test.rs"]
+mod codegen_tests;

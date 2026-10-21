@@ -652,3 +652,7 @@ pub(crate) fn block<F: Future>(future: F) -> F::Output {
         Poll::Pending => unreachable!("a synchronous port's futures are ready at once"),
     }
 }
+
+#[cfg(test)]
+#[path = "store.test.rs"]
+mod tests;

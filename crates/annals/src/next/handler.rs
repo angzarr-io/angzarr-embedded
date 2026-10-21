@@ -220,3 +220,7 @@ impl<D: Domain, H: Handler<D>> Handler<D> for Tracked<H> {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "handler.test.rs"]
+mod tests;

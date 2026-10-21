@@ -692,3 +692,7 @@ pub(crate) fn run_step<D: Domain>(
         .map_err(Failure::Kernel)?;
     Ok((stream, pages))
 }
+
+#[cfg(test)]
+#[path = "coordinator.test.rs"]
+mod tests;

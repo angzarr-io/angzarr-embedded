@@ -8,7 +8,7 @@ publish.workspace = true
 # It reads annals-log's samples, so it needs what annals-log needs.
 rust-version = "1.85"
 
-# No library to speak of and no dependencies: the check is tests/parity.rs.
+# No library to speak of and no dependencies: the check is src/lib.test.rs.
 [dependencies]
 
 # fluent-syntax (Apache-2.0 OR MIT) parses the catalogs. Test-only: nothing

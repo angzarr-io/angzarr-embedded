@@ -325,3 +325,7 @@ impl<D: Domain> Decision<D> {
         self.events.is_empty()
     }
 }
+
+#[cfg(test)]
+#[path = "domain.test.rs"]
+mod tests;

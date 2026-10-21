@@ -1070,3 +1070,11 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn Diagnostic>> {
     })
     .collect()
 }
+
+#[cfg(test)]
+#[path = "edit.test.rs"]
+mod tests;
+
+#[cfg(test)]
+#[path = "edit_map.test.rs"]
+mod edit_map_tests;
