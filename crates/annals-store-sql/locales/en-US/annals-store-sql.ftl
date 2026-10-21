@@ -5,3 +5,9 @@ annals-store-sql-unmigrated =
         [one] a migration
        *[other] { $pending } migrations
     } not yet applied
+annals-store-sql-damaged =
+    the database file is damaged: { $first }{ $more ->
+        [0] {""}
+        [one] {" "}(and 1 more problem)
+       *[other] {" "}(and { $more } more problems)
+    }

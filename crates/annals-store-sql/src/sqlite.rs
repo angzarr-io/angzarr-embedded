@@ -19,8 +19,8 @@ use sqlx::migrate::{MigrateError, Migration, Migrator};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection, SqliteRow};
 use sqlx::{ConnectOptions, Connection, Row, Sqlite, Transaction};
 
-use crate::error::{unavailable, unmigrated};
-use crate::{rows, statements, Dialect};
+use crate::error::{unavailable, unmigrated, Damage};
+use crate::{rows, statements, Dialect, Integrity};
 
 /// SQLite keeps NULLs distinct in a key, so the main timeline is `''`.
 pub struct SqliteDialect;
@@ -113,6 +113,40 @@ impl SqliteStore {
     /// this build's disagree with (`annals-store-sql-unavailable`).
     pub async fn open_existing(path: &Path) -> Result<Option<SqliteStore>, StoreError> {
         read_only(path, BUSY_TIMEOUT, || {}).await
+    }
+
+    /// Whether the database file is sound: SQLite's `PRAGMA
+    /// integrity_check`, its problems returned as it reports them (up to
+    /// its limit of 100). A read: it takes no write lock, so it runs on a
+    /// store opened by [`open_existing`](SqliteStore::open_existing) and
+    /// waits on no writer, and it checks the last committed state.
+    ///
+    /// `integrity_check`, not `quick_check`: only it checks that every
+    /// index holds exactly its table's rows, and the store answers a
+    /// command's deduplication from an index, so a damaged index would
+    /// pass `quick_check` and repeat a command. A store's file is small
+    /// enough that the full check's cost does not matter.
+    ///
+    /// A page too damaged to check stops the check with `SQLITE_CORRUPT`:
+    /// that is damage too, its one problem SQLite's message. Any other
+    /// failure to run the check is the store's error
+    /// (`annals-store-sql-unavailable`), not damage found.
+    pub async fn integrity_check(&mut self) -> Result<Integrity, StoreError> {
+        let reported: Vec<String> = match sqlx::query_scalar("PRAGMA integrity_check")
+            .fetch_all(&mut self.conn)
+            .await
+        {
+            Ok(reported) => reported,
+            Err(error) if primary_code(&error) == Some(SQLITE_CORRUPT) => {
+                let message = error.as_database_error().map(|e| e.message().to_string());
+                message.into_iter().collect()
+            }
+            Err(error) => return Err(unavailable(error)),
+        };
+        Ok(match reported.as_slice() {
+            [only] if only == "ok" => Integrity::Intact,
+            _ => Integrity::Damaged(Damage { problems: reported }),
+        })
     }
 
     /// A database held only in memory, migrated.
@@ -340,15 +374,24 @@ async fn into_wal(conn: &mut SqliteConnection) -> Result<(), StoreError> {
 
 /// Whether `error` is SQLite's `SQLITE_BUSY`, extended codes included.
 fn busy(error: &sqlx::Error) -> bool {
+    primary_code(error) == Some(SQLITE_BUSY)
+}
+
+/// SQLite's primary result code for `error`, its extended code's low byte:
+/// `None` for an error not SQLite's own.
+fn primary_code(error: &sqlx::Error) -> Option<i32> {
     error
         .as_database_error()
         .and_then(|e| e.code())
         .and_then(|code| code.parse::<i32>().ok())
-        .is_some_and(|code| code & 0xff == SQLITE_BUSY)
+        .map(|code| code & 0xff)
 }
 
 /// SQLite's primary result code for a lock another connection holds.
 const SQLITE_BUSY: i32 = 5;
+
+/// SQLite's primary result code for a database file found malformed.
+const SQLITE_CORRUPT: i32 = 11;
 
 impl AsyncEventStore for SqliteStore {
     async fn append(

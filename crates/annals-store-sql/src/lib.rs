@@ -33,7 +33,7 @@ pub mod sqlite;
 
 use annals::next::v1::Cover;
 
-pub use error::{diagnostic_samples, SqlError};
+pub use error::{diagnostic_samples, Damage, Integrity, SqlError};
 
 /// This crate's en-US Fluent catalog, its name first: what a dependent
 /// embeds to render this crate's diagnostics. The text of

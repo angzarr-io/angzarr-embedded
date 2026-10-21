@@ -14,6 +14,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection};
 use sqlx::{ConnectOptions, Connection};
 
 use super::{into_wal, migrate, pause, read_only, SqliteStore, BUSY_TIMEOUT, MIGRATOR};
+use crate::{Damage, Integrity};
 
 annals::async_store_contract!(#[tokio::test], SqliteStore::open_in_memory().await.unwrap());
 
@@ -522,6 +523,128 @@ fn every_migration_runs_inside_the_open_transaction() {
     }
 }
 
+// --------------------------------------------------------------- integrity
+
+#[tokio::test]
+async fn a_healthy_database_is_intact_however_it_is_opened() {
+    let path = database();
+    let stream = cover("tasks", 1);
+    let mut store = SqliteStore::open(&path).await.unwrap();
+    store
+        .append(&stream, 0, &[page(0, 1), page(1, 2)])
+        .await
+        .unwrap();
+    assert_eq!(store.integrity_check().await, Ok(Integrity::Intact));
+    let mut read_only = SqliteStore::open_existing(&path).await.unwrap().unwrap();
+    assert_eq!(read_only.integrity_check().await, Ok(Integrity::Intact));
+    let mut memory = SqliteStore::open_in_memory().await.unwrap();
+    assert_eq!(memory.integrity_check().await, Ok(Integrity::Intact));
+    drop((store, read_only));
+    remove(&path);
+}
+
+#[tokio::test]
+async fn checking_a_read_only_store_waits_on_no_writer() {
+    // The writer holds the write lock throughout: a check that took it
+    // would wait the busy timeout and fail.
+    let path = database();
+    let stream = cover("tasks", 1);
+    let mut writer = SqliteStore::open(&path).await.unwrap();
+    writer.append(&stream, 0, &[page(0, 1)]).await.unwrap();
+    let mut unit = writer.begin().await;
+    unit.append(&stream, 1, &[page(1, 2)]).await.unwrap();
+
+    let mut read_only = SqliteStore::open_existing(&path).await.unwrap().unwrap();
+    let started = Instant::now();
+    assert_eq!(read_only.integrity_check().await, Ok(Integrity::Intact));
+    assert!(started.elapsed() < BUSY_TIMEOUT, "{:?}", started.elapsed());
+
+    unit.commit().await.unwrap();
+    drop((writer, read_only));
+    remove(&path);
+}
+
+/// Change the page of `path` holding `index`'s root with `tamper`: the
+/// index is damaged, and the tables `open` reads are not.
+async fn damage_index(path: &Path, index: &str, tamper: impl FnOnce(&mut [u8])) {
+    let mut conn = raw(path).await;
+    let page_size: i64 = sqlx::query_scalar("PRAGMA page_size")
+        .fetch_one(&mut conn)
+        .await
+        .unwrap();
+    let root: i64 = sqlx::query_scalar("SELECT rootpage FROM sqlite_master WHERE name = ?")
+        .bind(index)
+        .fetch_one(&mut conn)
+        .await
+        .unwrap();
+    // Everything into the file itself, so the bytes changed are the page's
+    // only copy.
+    sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    conn.close().await.unwrap();
+    let mut bytes = std::fs::read(path).unwrap();
+    let start = usize::try_from((root - 1) * page_size).unwrap();
+    let end = start + usize::try_from(page_size).unwrap();
+    tamper(&mut bytes[start..end]);
+    std::fs::write(path, bytes).unwrap();
+}
+
+/// A file holding one stream of two events, its index then changed by
+/// `tamper`, checked opened each way: the damage each check found.
+async fn check_damaged(tamper: impl FnOnce(&mut [u8])) -> Vec<Damage> {
+    let path = database();
+    let stream = cover("tasks", 1);
+    {
+        let mut store = SqliteStore::open(&path).await.unwrap();
+        store
+            .append(&stream, 0, &[page(0, 1), page(1, 2)])
+            .await
+            .unwrap();
+    }
+    damage_index(&path, "events_by_command", tamper).await;
+    let mut found = Vec::new();
+    for mut store in [
+        SqliteStore::open_existing(&path).await.unwrap().unwrap(),
+        SqliteStore::open(&path).await.unwrap(),
+    ] {
+        match store.integrity_check().await {
+            Ok(Integrity::Damaged(damage)) => found.push(damage),
+            other => panic!("the damaged index went unseen: {other:?}"),
+        }
+    }
+    remove(&path);
+    found
+}
+
+#[tokio::test]
+async fn an_index_entry_changed_is_reported_as_sqlite_words_it() {
+    // The page's last byte is the last entry's last key byte: the page
+    // still reads, and the entry no longer matches its row.
+    for damage in check_damaged(|page| *page.last_mut().unwrap() ^= 1).await {
+        assert_eq!(damage.code(), "annals-store-sql-damaged");
+        assert!(
+            damage
+                .problems()
+                .iter()
+                .any(|p| p.contains("events_by_command")),
+            "{:?}",
+            damage.problems()
+        );
+        assert!(damage.problems().iter().all(|p| p != "ok"));
+    }
+}
+
+#[tokio::test]
+async fn a_page_beyond_reading_is_damage_not_a_failure_to_check() {
+    // SQLite stops the check with SQLITE_CORRUPT rather than reporting
+    // rows: that is damage found, in SQLite's words.
+    for damage in check_damaged(|page| page.fill(0xff)).await {
+        assert_eq!(damage.problems(), ["database disk image is malformed"]);
+    }
+}
+
 // ------------------------------------------------------------------ Send
 
 /// Compiles only if `future` is `Send`, so a store can be opened on a
@@ -536,4 +659,8 @@ fn every_open_is_a_send_future() {
     drop(send(SqliteStore::open(&path)));
     drop(send(SqliteStore::open_existing(&path)));
     drop(send(SqliteStore::open_in_memory()));
+    drop(send(async {
+        let mut store = SqliteStore::open_in_memory().await?;
+        store.integrity_check().await
+    }));
 }

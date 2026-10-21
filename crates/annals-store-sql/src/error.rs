@@ -57,6 +57,60 @@ impl Diagnostic for SqlError {
     }
 }
 
+/// What an integrity check found: the database file is sound, or it is
+/// damaged.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Integrity {
+    /// The database reported no problem.
+    Intact,
+    /// The database reported at least one problem.
+    Damaged(Damage),
+}
+
+/// The problems the database reported in its own file, as it worded them:
+/// at least one. A database keeps its own wording, so each problem is text
+/// that was read, not a message to translate.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Damage {
+    pub(crate) problems: Vec<String>,
+}
+
+impl Damage {
+    /// Every problem reported, in the database's order; never empty.
+    pub fn problems(&self) -> &[String] {
+        &self.problems
+    }
+
+    fn first(&self) -> &str {
+        self.problems.first().map_or("", String::as_str)
+    }
+
+    fn more(&self) -> usize {
+        self.problems.len().saturating_sub(1)
+    }
+}
+
+impl fmt::Display for Damage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "the database file is damaged: {}", self.first())?;
+        match self.more() {
+            0 => Ok(()),
+            1 => write!(f, " (and 1 more problem)"),
+            more => write!(f, " (and {more} more problems)"),
+        }
+    }
+}
+
+impl Diagnostic for Damage {
+    fn code(&self) -> &'static str {
+        "annals-store-sql-damaged"
+    }
+
+    fn args(&self) -> Vec<(&'static str, Arg)> {
+        vec![("first", self.first().into()), ("more", self.more().into())]
+    }
+}
+
 /// One value of every error this crate defines, for the catalog test.
 pub fn diagnostic_samples() -> Vec<Box<dyn Diagnostic>> {
     let detail = || "x".to_string();
@@ -64,6 +118,9 @@ pub fn diagnostic_samples() -> Vec<Box<dyn Diagnostic>> {
         Box::new(SqlError::Unavailable { detail: detail() }),
         Box::new(SqlError::Undecodable { detail: detail() }),
         Box::new(SqlError::Unmigrated { pending: 1 }),
+        Box::new(Damage {
+            problems: vec![detail()],
+        }),
     ]
 }
 
