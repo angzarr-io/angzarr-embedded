@@ -147,7 +147,10 @@ gates-link:
 gates-check:
     #!/usr/bin/env bash
     set -euo pipefail
-    if [ -f .gates/gates.just ] && [ -f .gates/lefthook.yml ]; then exit 0; fi
+    if [ -f .gates/gates.just ] && [ -f .gates/lefthook.yml ]; then
+        echo "ok   gates (.gates: $(readlink -f .gates))"
+        exit 0
+    fi
     just gates-link
     echo "FAIL gates: .gates was missing, so no gate ran; it is linked now: commit again." >&2
     exit 1
