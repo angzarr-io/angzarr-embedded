@@ -174,12 +174,20 @@ async fn schema(conn: &mut SqliteConnection) -> Result<Schema, StoreError> {
 /// Apply what is pending holding the write lock, waiting
 /// [`BUSY_TIMEOUT`] for it. The migrator reads again which migrations are
 /// applied, under the lock, and refuses a database it disagrees with.
+///
+/// Through `Migrator::run_direct`, the connection itself, rather than
+/// `Migrator::run`, which takes any `Acquire<'a>`: the compiler cannot
+/// prove `run`'s future `Send` for every `'a` ("implementation of
+/// `Acquire` is not general enough"), so no open calling it would be
+/// `Send`, and boxing it does not help, the obligation being on `run`'s own
+/// future. `run` acquires the connection and calls `run_direct`, so on a
+/// connection the two do the same.
 async fn migrate(conn: &mut SqliteConnection) -> Result<(), StoreError> {
     let mut tx = conn
         .begin_with("BEGIN IMMEDIATE")
         .await
         .map_err(unavailable)?;
-    MIGRATOR.run(&mut *tx).await.map_err(unavailable)?;
+    MIGRATOR.run_direct(&mut *tx).await.map_err(unavailable)?;
     tx.commit().await.map_err(unavailable)
 }
 

@@ -393,3 +393,19 @@ fn every_migration_runs_inside_the_open_transaction() {
         );
     }
 }
+
+// ------------------------------------------------------------------ Send
+
+/// Compiles only if `future` is `Send`, so a store can be opened on a
+/// multi-threaded runtime's task (`tokio::spawn`) without a blocking thread.
+fn send<F: std::future::Future + Send>(future: F) -> F {
+    future
+}
+
+#[test]
+fn every_open_is_a_send_future() {
+    let path = database();
+    drop(send(SqliteStore::open(&path)));
+    drop(send(SqliteStore::open_existing(&path)));
+    drop(send(SqliteStore::open_in_memory()));
+}
