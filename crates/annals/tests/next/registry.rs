@@ -160,6 +160,16 @@ fn a_state_descriptor_without_the_implicit_base_is_refused() {
     }
 
     impl annals::next::State for StrictOnly {
+        type Snapshot = Self;
+
+        fn to_snapshot(&self) -> Self {
+            self.clone()
+        }
+
+        fn from_snapshot(snapshot: Self) -> Result<Self, annals_diagnostic::Report> {
+            Ok(snapshot)
+        }
+
         fn descriptor() -> StateDescriptor {
             StateDescriptor {
                 type_url: "/toy.bad.v1.StrictOnly".to_string(),
@@ -198,6 +208,91 @@ fn a_state_descriptor_without_the_implicit_base_is_refused() {
         }
 
         fn apply(_: &mut StrictOnly, event: &std::convert::Infallible, (): &()) {
+            match *event {}
+        }
+    }
+
+    let mut registry = annals::next::Registry::new();
+    assert_eq!(
+        registry.register::<Bad>(
+            annals::next::Rulebook::new("v1", ()),
+            annals::next::Upcaster::new("u", "bad")
+        ),
+        Err(annals::next::Misconfigured::BadStateDescriptor {
+            domain: "bad".to_string()
+        })
+    );
+}
+
+#[test]
+fn a_state_descriptor_naming_another_type_than_its_snapshot_is_refused() {
+    use annals::next::v1::{ConflictResolution, StateDescriptor, StateOptions};
+
+    #[derive(Clone, PartialEq, prost::Message)]
+    pub struct Snap {}
+
+    impl prost::Name for Snap {
+        const NAME: &'static str = "Snap";
+        const PACKAGE: &'static str = "toy.bad.v1";
+    }
+
+    /// Its descriptor names a type its snapshots are not: a snapshot it
+    /// wrote would never be found usable.
+    #[derive(Clone, Default)]
+    pub struct Misnamed;
+
+    impl annals::next::State for Misnamed {
+        type Snapshot = Snap;
+
+        fn to_snapshot(&self) -> Snap {
+            Snap {}
+        }
+
+        fn from_snapshot(_: Snap) -> Result<Self, annals_diagnostic::Report> {
+            Ok(Misnamed)
+        }
+
+        fn descriptor() -> StateDescriptor {
+            StateDescriptor {
+                type_url: "/toy.bad.v1.Elsewhere".to_string(),
+                options: Some(StateOptions {
+                    conflict_resolutions: vec![
+                        ConflictResolution::Strict as i32,
+                        ConflictResolution::AggregateHandles as i32,
+                    ],
+                }),
+            }
+        }
+    }
+
+    struct Bad;
+
+    impl annals::next::Domain for Bad {
+        type State = Misnamed;
+        type Command = std::convert::Infallible;
+        type Fact = std::convert::Infallible;
+        type Event = std::convert::Infallible;
+        type Rejection = std::convert::Infallible;
+        type Rules = ();
+
+        const NAME: &'static str = "bad";
+
+        fn decide(
+            cmd: &std::convert::Infallible,
+            _: &mut annals::next::Tx<'_, Self>,
+        ) -> Result<(), std::convert::Infallible> {
+            match *cmd {}
+        }
+
+        fn ingest(
+            _: &Misnamed,
+            fact: &std::convert::Infallible,
+            _: &annals::next::IngestCtx<'_, Self>,
+        ) -> Vec<std::convert::Infallible> {
+            match *fact {}
+        }
+
+        fn apply(_: &mut Misnamed, event: &std::convert::Infallible, (): &()) {
             match *event {}
         }
     }

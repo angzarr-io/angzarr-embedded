@@ -86,6 +86,16 @@ impl prost::Name for Probe {
 }
 
 impl State for ProbeState {
+    type Snapshot = Self;
+
+    fn to_snapshot(&self) -> Self {
+        self.clone()
+    }
+
+    fn from_snapshot(snapshot: Self) -> Result<Self, annals_diagnostic::Report> {
+        Ok(snapshot)
+    }
+
     fn descriptor() -> StateDescriptor {
         StateDescriptor {
             type_url: "/toy.probe.v1.ProbeState".to_string(),

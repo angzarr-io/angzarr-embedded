@@ -138,3 +138,72 @@ fn a_stream_snapshots_under_the_current_rules_version() {
         .snapshot(&registry)
         .is_none());
 }
+
+/// Ledger 1 after recording `cents`, executed in memory.
+fn recorded(cents: i64) -> Stream<crate::toys::Ledger> {
+    use annals::next::MemoryDeadLetters;
+    let registry = registry();
+    let mut stream = Stream::<crate::toys::Ledger>::new(root(1), None).unwrap();
+    let book = command(
+        cover("ledger", 1),
+        crate::toys::ledger::Record {
+            source_sequence: 0,
+            cents,
+        }
+        .to_any(),
+    );
+    stream
+        .execute(
+            book,
+            &registry,
+            &at(10),
+            &MemoryDeadLetters::default(),
+            &mut [],
+        )
+        .unwrap();
+    stream
+}
+
+#[test]
+fn a_domain_typed_state_snapshots_as_its_wire_form_and_resumes_from_it() {
+    let registry = registry();
+    let stream = recorded(40);
+
+    let snapshot = stream.snapshot(&registry).unwrap();
+    assert_eq!(
+        snapshot.state.as_ref().unwrap().type_url,
+        "/toy.ledger.v1.LedgerSnapshot"
+    );
+    let resumed =
+        Stream::<crate::toys::Ledger>::resume(cover("ledger", 1), &snapshot, None, &[], &registry)
+            .unwrap();
+    assert_eq!(resumed.state(), stream.state());
+    assert_eq!(resumed.state().total, 40);
+}
+
+#[test]
+fn a_snapshot_whose_wire_form_is_not_a_valid_state_is_unreadable() {
+    use annals::next::{KernelError, StoreError};
+    use annals_diagnostic::Diagnostic;
+    let snapshot = Snapshot {
+        sequence: 0,
+        state: Some(pack(&crate::toys::ledger::LedgerSnapshot {
+            next_source: 1,
+            total: -5,
+        })),
+        rules_version: "v1".to_string(),
+    };
+    let error = Stream::<crate::toys::Ledger>::resume(
+        cover("ledger", 1),
+        &snapshot,
+        None,
+        &[],
+        &registry(),
+    )
+    .err()
+    .expect("a negative total is not a ledger");
+    let KernelError::Store(StoreError::Unreadable { reason, .. }) = error else {
+        panic!("expected an unreadable snapshot, got {error:?}");
+    };
+    assert_eq!(reason.code(), "annals-next-payload-invalid");
+}

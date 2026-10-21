@@ -58,6 +58,7 @@ annals-next-downstream = a reaction down the chain failed, at depth { $depth }: 
 annals-next-stale = stream { $stream } is at { $actual }, not the { $expected } expected: re-read and re-issue
 annals-next-unresolved = decide never acknowledged the window of stream { $stream } from { $expected } to { $actual }
 annals-next-unknown-type = stream { $stream }'s domain does not decode the type { $type_url }
+annals-next-invalid-payload = a { $type_url } for stream { $stream } is not a valid value: { $reason }
 annals-next-upcast = upcasting a payload for stream { $stream } failed: { $error }
 annals-next-ingest-panicked = ingesting fact { $command_id } into stream { $stream } panicked: a bug
 annals-next-gap = a delivery to stream { $stream } skips ahead to { $found } from { $expected }, the next due
@@ -84,6 +85,9 @@ annals-next-store-unreadable = event { $sequence } of stream { $stream } cannot 
 
 annals-next-payload-unknown-type = no decoder for the type { $type_url }
 annals-next-payload-decode = a payload of type { $type_url } does not decode
+annals-next-payload-invalid = a payload of type { $type_url } is not a valid value: { $reason }
+annals-next-wire-missing = { $message }.{ $field } is required and absent
+annals-next-wire-unknown-enum = { $message }.{ $field } holds { $value }, which no variant defines
 annals-next-upcast-rule = the upcast rule from { $source } failed: { $error }
 annals-next-upcaster-duplicate = domain { $domain }'s upcaster has two typed rules from { $source }: the second never runs
 annals-next-upcaster-out-of-order = domain { $domain }'s upcaster registers the rule from { $source } before the rule from { $produced_by }, which produces it

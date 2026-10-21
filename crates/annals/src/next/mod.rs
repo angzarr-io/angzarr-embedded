@@ -81,6 +81,7 @@ mod store;
 mod stream;
 mod upcast;
 mod version;
+mod wire;
 
 pub use check::{check, Body, Checked, Identified, Malformed, Sampled};
 pub use conflict::{Key, UnitPath, Units};
@@ -100,7 +101,7 @@ pub use handle::{
     DEFAULT_DEPTH_LIMIT,
 };
 pub use handler::{Admit, Committed, Gap, Handler, Position, Tracked};
-pub use payload::{pack, type_name, Decoder, Payload};
+pub use payload::{decode_as, pack, type_name, Decoder, Payload};
 pub use reaction::{
     orders_owed, policy, projection, target_cover, Backlog, Order, Policy, Projection, Projector,
     Reaction, Reactor,
@@ -113,6 +114,7 @@ pub use store::{
 pub use stream::{Envelope, Executed, Stream};
 pub use upcast::{UpcastFn, Upcaster};
 pub use version::Rulebook;
+pub use wire::WireError;
 
 /// angzarr's id helpers: `Display`/`FromStr` for [`v1::Uuid`] (text only at
 /// display and input), and the UUIDv5 derivations ([`ids::compute_root`],
@@ -195,6 +197,11 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn annals_diagnostic::Diagnostic>
             stream: stream(),
             type_url: "/toy.v9.Bonus".to_string(),
         },
+        KernelError::InvalidPayload {
+            stream: stream(),
+            type_url: "/toy.v1.Deposit".to_string(),
+            reason: report(),
+        },
         KernelError::Upcast {
             stream: stream(),
             error: UpcastError::Rule {
@@ -261,7 +268,15 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn annals_diagnostic::Diagnostic>
             }),
         },
     ];
+    let missing = WireError::Missing {
+        message: "toy.v1.Deposited",
+        field: "at",
+    };
     let payload = [
+        PayloadError::Invalid {
+            type_url: "/toy.v1.Deposited".to_string(),
+            reason: Report::of(&missing),
+        },
         PayloadError::UnknownType {
             type_url: "/toy.v9.Bonus".to_string(),
         },
@@ -325,5 +340,11 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn annals_diagnostic::Diagnostic>
         error: StepError::Kernel(KernelError::ChainTooDeep { limit: 8 }),
     }));
     samples.push(Box::new(gap));
+    samples.push(Box::new(missing));
+    samples.push(Box::new(WireError::UnknownEnum {
+        message: "toy.v1.Closed",
+        field: "reason",
+        value: 0,
+    }));
     samples
 }

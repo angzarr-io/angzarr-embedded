@@ -15,7 +15,10 @@ use std::collections::BTreeMap;
 use prost::{Message, Name};
 use prost_types::Any;
 
+use annals_diagnostic::Report;
+
 use super::error::PayloadError;
+use super::wire::WireError;
 
 /// A domain's events, commands or facts, as `Any`.
 pub trait Payload: Sized {
@@ -57,6 +60,25 @@ pub fn pack<M: Message + Name>(message: &M) -> Any {
         type_url: M::type_url(),
         value: message.encode_to_vec(),
     }
+}
+
+/// `any` decoded as the wire message `W`, then converted to its domain type
+/// `D`: what a generated payload enum's `from_any` does for each of its
+/// types. Bytes that do not decode are [`PayloadError::Decode`]; a message
+/// the domain type cannot hold is [`PayloadError::Invalid`].
+pub fn decode_as<W, D>(any: &Any) -> Result<D, PayloadError>
+where
+    W: Message + Default,
+    D: TryFrom<W, Error = WireError>,
+{
+    let wire = W::decode(&any.value[..]).map_err(|error| PayloadError::Decode {
+        type_url: any.type_url.clone(),
+        error,
+    })?;
+    D::try_from(wire).map_err(|error| PayloadError::Invalid {
+        type_url: any.type_url.clone(),
+        reason: Report::of(&error),
+    })
 }
 
 /// The full name a type URL ends with: everything after its last `/`

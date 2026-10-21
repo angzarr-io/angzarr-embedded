@@ -85,6 +85,14 @@ pub enum KernelError {
         stream: Cover,
         type_url: String,
     },
+    /// A command's or fact's payload that decodes as a type the domain
+    /// reads, but is not a valid value of it (a required field absent, an
+    /// undefined enum value): the sender's to fix, as `UnknownType` is.
+    InvalidPayload {
+        stream: Cover,
+        type_url: String,
+        reason: Report,
+    },
     /// A command's or fact's upcast rule failed.
     Upcast {
         stream: Cover,
@@ -199,6 +207,10 @@ pub enum PayloadError {
         type_url: String,
         error: prost::DecodeError,
     },
+    /// The bytes decode, but the message is not a valid domain value: a
+    /// required field absent, an enum value the domain does not define
+    /// ([`WireError`](super::WireError)), or a state's own invariant.
+    Invalid { type_url: String, reason: Report },
 }
 
 /// An upcast rule that failed on one payload.
@@ -279,7 +291,9 @@ impl StepError {
 impl KernelError {
     pub fn recovery(&self) -> Recovery {
         match self {
-            KernelError::Malformed(_) | KernelError::UnknownType { .. } => Recovery::Invalid,
+            KernelError::Malformed(_)
+            | KernelError::UnknownType { .. }
+            | KernelError::InvalidPayload { .. } => Recovery::Invalid,
             KernelError::Stale { .. }
             | KernelError::Unresolved { .. }
             | KernelError::Gap { .. } => Recovery::Retry,
@@ -408,6 +422,15 @@ impl fmt::Display for KernelError {
                 "stream {}'s domain does not decode the type {type_url}",
                 cover_text(stream)
             ),
+            KernelError::InvalidPayload {
+                stream,
+                type_url,
+                reason,
+            } => write!(
+                f,
+                "a {type_url} for stream {} is not a valid value: {reason}",
+                cover_text(stream)
+            ),
             KernelError::Upcast { stream, error } => write!(
                 f,
                 "upcasting a payload for stream {} failed: {error}",
@@ -455,6 +478,7 @@ impl Diagnostic for KernelError {
             KernelError::Stale { .. } => "annals-next-stale",
             KernelError::Unresolved { .. } => "annals-next-unresolved",
             KernelError::UnknownType { .. } => "annals-next-unknown-type",
+            KernelError::InvalidPayload { .. } => "annals-next-invalid-payload",
             KernelError::Upcast { .. } => "annals-next-upcast",
             KernelError::IngestPanicked { .. } => "annals-next-ingest-panicked",
             KernelError::Gap { .. } => "annals-next-gap",
@@ -490,6 +514,15 @@ impl Diagnostic for KernelError {
             } => vec![
                 ("stream", stream(s)),
                 ("type_url", type_url.as_str().into()),
+            ],
+            KernelError::InvalidPayload {
+                stream: s,
+                type_url,
+                reason,
+            } => vec![
+                ("stream", stream(s)),
+                ("type_url", type_url.as_str().into()),
+                ("reason", Arg::nested(reason)),
             ],
             KernelError::Upcast { stream: s, error } => {
                 vec![("stream", stream(s)), ("error", Arg::nested(error))]
@@ -685,6 +718,12 @@ impl fmt::Display for PayloadError {
             PayloadError::Decode { type_url, error } => {
                 write!(f, "a payload of type {type_url} does not decode: {error}")
             }
+            PayloadError::Invalid { type_url, reason } => {
+                write!(
+                    f,
+                    "a payload of type {type_url} is not a valid value: {reason}"
+                )
+            }
         }
     }
 }
@@ -694,6 +733,7 @@ impl Diagnostic for PayloadError {
         match self {
             PayloadError::UnknownType { .. } => "annals-next-payload-unknown-type",
             PayloadError::Decode { .. } => "annals-next-payload-decode",
+            PayloadError::Invalid { .. } => "annals-next-payload-invalid",
         }
     }
 
@@ -702,6 +742,10 @@ impl Diagnostic for PayloadError {
             PayloadError::UnknownType { type_url } | PayloadError::Decode { type_url, .. } => {
                 vec![("type_url", type_url.as_str().into())]
             }
+            PayloadError::Invalid { type_url, reason } => vec![
+                ("type_url", type_url.as_str().into()),
+                ("reason", Arg::nested(reason)),
+            ],
         }
     }
 }

@@ -75,3 +75,81 @@ fn a_domain_that_takes_no_facts_decodes_none() {
         })
     );
 }
+
+/// A wire message and the domain type it converts to, as angzarr's generator
+/// emits them: the domain type requires `at`, which the wire leaves optional.
+mod wire_and_domain {
+    use annals::next::{Timestamp, WireError};
+
+    #[derive(Clone, PartialEq, prost::Message)]
+    pub struct Stamped {
+        #[prost(message, optional, tag = "1")]
+        pub at: Option<Timestamp>,
+    }
+
+    impl prost::Name for Stamped {
+        const NAME: &'static str = "Stamped";
+        const PACKAGE: &'static str = "toy.wire.v1";
+    }
+
+    #[derive(Clone, PartialEq, Debug)]
+    pub struct StampedDomain {
+        pub at: Timestamp,
+    }
+
+    impl TryFrom<Stamped> for StampedDomain {
+        type Error = WireError;
+
+        fn try_from(wire: Stamped) -> Result<Self, WireError> {
+            Ok(StampedDomain {
+                at: wire.at.ok_or(WireError::Missing {
+                    message: "toy.wire.v1.Stamped",
+                    field: "at",
+                })?,
+            })
+        }
+    }
+}
+
+#[test]
+fn decode_as_converts_a_valid_wire_message_to_its_domain_type() {
+    use annals::next::{decode_as, Timestamp};
+    use wire_and_domain::{Stamped, StampedDomain};
+
+    let at = Timestamp {
+        seconds: 7,
+        nanos: 0,
+    };
+    let decoded = decode_as::<Stamped, StampedDomain>(&pack(&Stamped { at: Some(at) }));
+    assert_eq!(decoded, Ok(StampedDomain { at }));
+}
+
+#[test]
+fn decode_as_refuses_a_wire_message_its_domain_type_cannot_hold() {
+    use annals::next::decode_as;
+    use annals_diagnostic::Diagnostic;
+    use wire_and_domain::{Stamped, StampedDomain};
+
+    let error = decode_as::<Stamped, StampedDomain>(&pack(&Stamped { at: None }))
+        .expect_err("at is required");
+    let PayloadError::Invalid { type_url, reason } = &error else {
+        panic!("expected an invalid payload, got {error:?}");
+    };
+    assert_eq!(type_url, "/toy.wire.v1.Stamped");
+    assert_eq!(reason.code(), "annals-next-wire-missing");
+}
+
+#[test]
+fn decode_as_refuses_bytes_that_do_not_decode() {
+    use annals::next::decode_as;
+    use wire_and_domain::{Stamped, StampedDomain};
+
+    let any = Any {
+        type_url: "/toy.wire.v1.Stamped".to_string(),
+        value: vec![0x0a],
+    };
+    assert!(matches!(
+        decode_as::<Stamped, StampedDomain>(&any),
+        Err(PayloadError::Decode { .. })
+    ));
+}

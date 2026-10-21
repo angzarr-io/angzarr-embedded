@@ -525,12 +525,17 @@ pub(crate) fn decode_input<D: Domain>(
             D::Fact::from_any(&payload).map(|fact| Input::Fact(fact, source.clone()))
         }
     };
-    input.map_err(|e| KernelError::UnknownType {
-        stream: stream(),
-        type_url: match e {
-            PayloadError::UnknownType { type_url } | PayloadError::Decode { type_url, .. } => {
-                type_url
+    input.map_err(|e| match e {
+        PayloadError::UnknownType { type_url } | PayloadError::Decode { type_url, .. } => {
+            KernelError::UnknownType {
+                stream: stream(),
+                type_url,
             }
+        }
+        PayloadError::Invalid { type_url, reason } => KernelError::InvalidPayload {
+            stream: stream(),
+            type_url,
+            reason,
         },
     })
 }

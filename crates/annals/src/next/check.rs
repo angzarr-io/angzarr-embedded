@@ -735,6 +735,16 @@ mod tests {
         }
 
         impl State for Nothing {
+            type Snapshot = Self;
+
+            fn to_snapshot(&self) -> Self {
+                self.clone()
+            }
+
+            fn from_snapshot(snapshot: Self) -> Result<Self, annals_diagnostic::Report> {
+                Ok(snapshot)
+            }
+
             fn descriptor() -> StateDescriptor {
                 StateDescriptor {
                     type_url: "/test.v1.Nothing".to_string(),

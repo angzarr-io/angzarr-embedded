@@ -348,16 +348,23 @@ from its `(io.angzarr.v1.state)` option and `(io.angzarr.v1.conflict)` field
 markers:
 
 ```rust
-pub trait State: prost::Message + prost::Name + Default + Clone + Send + 'static {
-    fn descriptor() -> StateDescriptor;     // type URL + the full resolved list of resolutions
+pub trait State: Default + Clone + Send + 'static {
+    type Snapshot: prost::Message + prost::Name + Default;   // the wire form a snapshot carries
+    fn to_snapshot(&self) -> Self::Snapshot;
+    fn from_snapshot(snapshot: Self::Snapshot) -> Result<Self, Report>;  // a wire value need not be a valid state
+    fn descriptor() -> StateDescriptor;     // type URL (the snapshot form's) + the full resolved list of resolutions
     fn changed(before: &Self, after: &Self) -> Units { Units::everything() }
 }
 ```
 
-`Registry::register::<D>` fills its entry from `D::State::descriptor()`, as
-angzarr's `registry.register::<D>()` fills `ComponentDescriptor.state`.
-Until angzarr's generator exists (backlog CR-1), a hand-written impl stands
-in, in test fixtures only (`tests/next/toys.rs`).
+The state is a domain type and its snapshot form the prost message: a
+snapshot that decodes but is not a valid state (`from_snapshot` refuses it)
+is unreadable, `PayloadError::Invalid`. A state that is itself a prost
+message is its own snapshot form. `Registry::register::<D>` fills its entry
+from `D::State::descriptor()`, as angzarr's `registry.register::<D>()` fills
+`ComponentDescriptor.state`, and refuses a descriptor whose type URL is not
+the snapshot form's. angzarr's generator (backlog CR-1, CR-4) emits the impl;
+the test fixtures write it by hand (`tests/next/toys.rs`).
 
 **The risk of COMMUTATIVE.** No structural diff sees a value derived from,
 or meaningful only together with, another unit: a total over items, two
@@ -690,6 +697,7 @@ that fails later has still reported the edges it dispatched.
 | `Failure::Downstream { path, error }` | a step down the chain failed; nothing appended anywhere | by `StepError`: a rejection `Business`, a malformed policy book `Bug`, else by `KernelError` |
 | `KernelError::Malformed` | step 1 refused the book | `Invalid` |
 | `KernelError::UnknownType` | a command or fact type the domain does not decode, after upcasting | `Invalid` |
+| `KernelError::InvalidPayload` | a command or fact that decodes but is not a valid domain value (`WireError`: a required field absent, an undefined enum value) | `Invalid` |
 | `KernelError::Stale`, `Unresolved`, `Gap` | re-read and re-issue; catch up | `Retry` |
 | `StoreError::Conflict`, `Unavailable` | run again with the same command id (step 3 makes it safe) | `Retry` |
 | `IngestPanicked`, `Upcast`, `WrongDomain`, `ChainTooDeep`, `BeforeSnapshot`, `UnregisteredDomain` (a stored stream of a domain the application did not register; an incoming book for one is `Malformed`), `Replay(..)`, `StoreError::Discontinuous`, `Unreadable` | a bug or a misconfiguration | `Bug` |

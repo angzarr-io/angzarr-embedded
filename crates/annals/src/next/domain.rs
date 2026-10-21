@@ -9,12 +9,27 @@ use super::coordinator::Nonce;
 use super::payload::Payload;
 use super::stream::Envelope;
 
-/// A domain's state: a prost message, so it can be snapshotted as `Any`,
-/// with the impl angzarr's generator emits from its `(io.angzarr.v1.state)`
-/// option and `(io.angzarr.v1.conflict)` field markers (`angzarr_build::compile`,
-/// backlog CR-1). Never hand-written for a real domain: until the generator
-/// exists, a hand-written impl is a test fixture standing in for it.
-pub trait State: prost::Message + prost::Name + Default + Clone + Send + 'static {
+/// A domain's state: a domain type, with a prost message as its snapshot
+/// form ([`State::Snapshot`]), so it can be snapshotted as `Any`. angzarr's
+/// generator (`angzarr_build`, backlog CR-1 and CR-4) emits the impl from the
+/// state message, its `(io.angzarr.v1.state)` option and its
+/// `(io.angzarr.v1.conflict)` field markers; a state that is itself a prost
+/// message is its own snapshot form.
+pub trait State: Default + Clone + Send + 'static {
+    /// The wire form a snapshot carries. Its type URL is the state's, as
+    /// [`State::descriptor`] names it; registration refuses a descriptor
+    /// naming another.
+    type Snapshot: prost::Message + prost::Name + Default;
+
+    /// The state as its snapshot form. Infallible: every state has one.
+    fn to_snapshot(&self) -> Self::Snapshot;
+
+    /// The state a snapshot holds, or why it holds none: a wire value need
+    /// not be a valid state (a required field absent, an enum value the
+    /// domain does not define, a broken invariant). A refusal makes the
+    /// snapshot unreadable ([`PayloadError::Invalid`](super::PayloadError)).
+    fn from_snapshot(snapshot: Self::Snapshot) -> Result<Self, annals_diagnostic::Report>;
+
     /// The state's type URL and the conflict resolutions it supports, the
     /// full resolved list (`[COMMUTATIVE, STRICT, AGGREGATE_HANDLES]` for a
     /// state that lists COMMUTATIVE and marks its units; `[STRICT,

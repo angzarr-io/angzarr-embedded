@@ -236,6 +236,12 @@ impl Registry {
             return Err(Misconfigured::EmptyRulesVersion { domain });
         }
         let state = D::State::descriptor();
+        // A snapshot is found usable by the descriptor's type URL, and is
+        // written as the snapshot form's: they must be one type.
+        if type_name(&state.type_url) != <<D::State as State>::Snapshot as prost::Name>::full_name()
+        {
+            return Err(Misconfigured::BadStateDescriptor { domain });
+        }
         let listed = state
             .options
             .as_ref()

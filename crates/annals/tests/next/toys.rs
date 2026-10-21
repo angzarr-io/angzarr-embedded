@@ -9,7 +9,8 @@
 //!   conflict units (COMMUTATIVE by default), one command type configured
 //!   STRICT;
 //! - a **ledger** a policy commands from the account, which refuses large
-//!   amounts, for the chain.
+//!   amounts, for the chain. Its state is a plain Rust type whose snapshot
+//!   form is a prost message, as a generated domain state's is.
 
 use std::convert::Infallible;
 use std::fmt;
@@ -23,7 +24,7 @@ use annals::next::{
     Position, Reaction, Registry, Rulebook, Sampled, State, Timestamp, Tx, UnitPath, Units,
     Upcaster,
 };
-use annals_diagnostic::{Arg, Diagnostic};
+use annals_diagnostic::{Arg, Diagnostic, Report};
 
 /// A message under `package`, with its `prost::Name`.
 macro_rules! named {
@@ -379,6 +380,17 @@ pub fn account_upcaster() -> Upcaster {
 /// No generated conflict units: the implicit base only, so STRICT is the
 /// default. (A fixture standing in for generated code.)
 impl State for AccountState {
+    /// A prost state is its own snapshot form.
+    type Snapshot = Self;
+
+    fn to_snapshot(&self) -> Self {
+        self.clone()
+    }
+
+    fn from_snapshot(snapshot: Self) -> Result<Self, Report> {
+        Ok(snapshot)
+    }
+
     fn descriptor() -> StateDescriptor {
         StateDescriptor {
             type_url: "/toy.account.v1.AccountState".to_string(),
@@ -712,6 +724,17 @@ pub use shelf::ShelfState;
 /// generator emits for `ShelfState`'s markers. Never hand-write this for a
 /// real domain.
 impl State for ShelfState {
+    /// A prost state is its own snapshot form.
+    type Snapshot = Self;
+
+    fn to_snapshot(&self) -> Self {
+        self.clone()
+    }
+
+    fn from_snapshot(snapshot: Self) -> Result<Self, Report> {
+        Ok(snapshot)
+    }
+
     fn descriptor() -> StateDescriptor {
         StateDescriptor {
             type_url: "/toy.shelf.v1.ShelfState".to_string(),
@@ -889,7 +912,7 @@ impl Domain for Shelf {
 pub mod ledger {
     named!(
         "toy.ledger.v1",
-        LedgerState {
+        LedgerSnapshot {
             /// The next account sequence the ledger is owed: its position.
             #[prost(uint64, tag = "1")]
             next_source: u64,
@@ -917,12 +940,43 @@ pub mod ledger {
     );
 }
 
-pub use ledger::LedgerState;
+/// The ledger's state, a domain type: its total is never negative, so a
+/// snapshot claiming one is not a ledger.
+#[derive(Clone, Default, PartialEq, Debug)]
+pub struct LedgerState {
+    /// The next account sequence the ledger is owed: its position.
+    pub next_source: u64,
+    pub total: i64,
+}
+
+/// A total below zero: the reason a ledger snapshot is refused.
+#[derive(Clone, PartialEq, Debug)]
+pub struct NegativeTotal {
+    pub total: i64,
+}
+
+impl fmt::Display for NegativeTotal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "a ledger total of {} is negative", self.total)
+    }
+}
+
+impl Diagnostic for NegativeTotal {
+    fn code(&self) -> &'static str {
+        "toy-ledger-negative-total"
+    }
+
+    fn args(&self) -> Vec<(&'static str, Arg)> {
+        vec![("total", self.total.into())]
+    }
+}
 
 impl State for LedgerState {
+    type Snapshot = ledger::LedgerSnapshot;
+
     fn descriptor() -> StateDescriptor {
         StateDescriptor {
-            type_url: "/toy.ledger.v1.LedgerState".to_string(),
+            type_url: "/toy.ledger.v1.LedgerSnapshot".to_string(),
             options: Some(StateOptions {
                 conflict_resolutions: vec![
                     ConflictResolution::Strict as i32,
@@ -930,6 +984,25 @@ impl State for LedgerState {
                 ],
             }),
         }
+    }
+
+    fn to_snapshot(&self) -> ledger::LedgerSnapshot {
+        ledger::LedgerSnapshot {
+            next_source: self.next_source,
+            total: self.total,
+        }
+    }
+
+    fn from_snapshot(snapshot: ledger::LedgerSnapshot) -> Result<Self, Report> {
+        if snapshot.total < 0 {
+            return Err(Report::of(&NegativeTotal {
+                total: snapshot.total,
+            }));
+        }
+        Ok(LedgerState {
+            next_source: snapshot.next_source,
+            total: snapshot.total,
+        })
     }
 }
 

@@ -12,7 +12,7 @@ use prost_types::Timestamp;
 use super::check::{check, Malformed, Sampled};
 use super::coordinator::{decide_on, decode_input, expect, resolution};
 use super::dead_letter::DeadLetterLog;
-use super::domain::{Decision, Domain};
+use super::domain::{Decision, Domain, State};
 use super::error::{Failure, KernelError, PayloadError, ReplayError, StoreError};
 use super::handler::{Committed, Handler};
 use super::payload::{pack, type_name, Payload};
@@ -478,11 +478,18 @@ impl<D: Domain> Stream<D> {
     ) -> Result<Stream<D>, KernelError> {
         Self::check_domain(&cover)?;
         let any = snapshot.state.clone().unwrap_or_default();
-        let state = if type_name(&any.type_url) == D::State::full_name() {
-            D::State::decode(&any.value[..]).map_err(|error| PayloadError::Decode {
-                type_url: any.type_url.clone(),
-                error,
-            })
+        let state = if type_name(&any.type_url) == <D::State as State>::Snapshot::full_name() {
+            <D::State as State>::Snapshot::decode(&any.value[..])
+                .map_err(|error| PayloadError::Decode {
+                    type_url: any.type_url.clone(),
+                    error,
+                })
+                .and_then(|wire| {
+                    D::State::from_snapshot(wire).map_err(|reason| PayloadError::Invalid {
+                        type_url: any.type_url.clone(),
+                        reason,
+                    })
+                })
         } else {
             Err(PayloadError::UnknownType {
                 type_url: any.type_url.clone(),
@@ -514,7 +521,7 @@ impl<D: Domain> Stream<D> {
         let sequence = self.len().checked_sub(1)?;
         Some(Snapshot {
             sequence,
-            state: Some(pack(&self.state)),
+            state: Some(pack(&self.state.to_snapshot())),
             rules_version: registry.rules_version(D::NAME)?.to_string(),
         })
     }
