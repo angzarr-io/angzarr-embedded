@@ -356,11 +356,11 @@ impl<'a> Parser<'a> {
             self.at += 1;
             if rest.is_empty() {
                 items.push(self.nested(indent, no)?);
-            } else if is_item(rest)
-                || split_key(rest).is_some() && !rest.starts_with('{') && !rest.starts_with('[')
-            {
-                // `- key: value` starts a mapping (or `- - x` a sequence)
-                // whose further lines sit at the item's own indent.
+            } else {
+                // The rest of the dash line is a block at the item's own
+                // indent: `- key: value` starts a mapping (or `- - x` a
+                // sequence) whose further lines sit there, and anything else
+                // is that one line's value.
                 self.lines.insert(
                     self.at,
                     Line {
@@ -370,8 +370,6 @@ impl<'a> Parser<'a> {
                     },
                 );
                 items.push(self.block(inner)?);
-            } else {
-                items.push(inline(rest, no)?);
             }
         }
         Ok(Value::Seq(items))
