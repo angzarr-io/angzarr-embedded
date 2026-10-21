@@ -1,0 +1,50 @@
+# The shared pre-commit gates. A consumer's lefthook.yml extends this file
+# through its `.gates` link and adds one command of its own, `gates` (`just
+# gates-check`): lefthook skips an `extends` file it cannot read and runs the
+# rest, so without that command a missing link would let every commit
+# through ungated.
+#
+# A failing hook is a finding: fix the cause and commit again; never bypass
+# with --no-verify. Every `run:` is one simple command, so it means the same
+# under whatever /bin/sh the committing machine has; anything longer is a
+# just recipe (gates.just, imported by the consumer's justfile).
+
+# Show a command's output only when it fails, then the per-command summary.
+# Each gate prints one line on a pass and the extract that matters on a
+# failure, with its full log in target/logs/ (gates.just's `_run`).
+output:
+  - execution_out
+  - failure
+  - summary
+
+pre-commit:
+  # One at a time in priority order, stopping at the first failure.
+  piped: true
+  commands:
+    fmt:
+      # Formats the staged Rust instead of refusing it, in the index itself
+      # (`just fmt-staged` says how), so a partially staged file's unstaged
+      # hunks are never moved. No `stage_fixed`: the recipe stages.
+      priority: 1
+      glob: "*.rs"
+      run: just fmt-staged {staged_files}
+    secrets:
+      priority: 2
+      run: just secrets-scan-staged
+    clippy:
+      # The consumer's own `lint`.
+      priority: 3
+      run: just lint
+    deps:
+      priority: 4
+      run: just lint-deps
+    tests:
+      # The tests of the crates the commit changes and of their workspace
+      # dependents, over the STAGED tree (`just test-staged` says how).
+      priority: 5
+      run: just test-staged
+    mutants:
+      # cargo mutants over the staged diff, judged per tier by the consumer's
+      # mutation_thresholds; last, because it is the slowest.
+      priority: 6
+      run: just mutants-staged
