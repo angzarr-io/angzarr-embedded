@@ -395,3 +395,140 @@ fn an_old_command_type_has_its_current_types_resolution() {
         Err(Failure::Kernel(KernelError::Upcast { .. }))
     ));
 }
+
+/// A state that lists COMMUTATIVE yet keeps [`State::changed`]'s default, so
+/// every change it reports is "everything": only a command with no window
+/// between its expected sequence and the head commits.
+mod tally {
+    use std::convert::Infallible;
+
+    use crate::next::v1::{ConflictResolution, StateDescriptor, StateOptions};
+    use crate::next::{pack, Decoder, Domain, IngestCtx, Payload, PayloadError, State, Tx};
+
+    #[derive(Clone, PartialEq, prost::Message)]
+    pub struct Tally {
+        #[prost(uint32, tag = "1")]
+        pub count: u32,
+    }
+
+    impl prost::Name for Tally {
+        const NAME: &'static str = "Tally";
+        const PACKAGE: &'static str = "toy.tally.v1";
+    }
+
+    impl State for Tally {
+        type Snapshot = Self;
+
+        fn to_snapshot(&self) -> Self {
+            self.clone()
+        }
+
+        fn from_snapshot(snapshot: Self) -> Result<Self, annals_diagnostic::Report> {
+            Ok(snapshot)
+        }
+
+        fn descriptor() -> StateDescriptor {
+            StateDescriptor {
+                type_url: "/toy.tally.v1.Tally".to_string(),
+                options: Some(StateOptions {
+                    conflict_resolutions: vec![
+                        ConflictResolution::Commutative as i32,
+                        ConflictResolution::Strict as i32,
+                        ConflictResolution::AggregateHandles as i32,
+                    ],
+                }),
+            }
+        }
+    }
+
+    /// The command and the event it becomes.
+    #[derive(Clone, PartialEq, prost::Message)]
+    pub struct Count {}
+
+    impl prost::Name for Count {
+        const NAME: &'static str = "Count";
+        const PACKAGE: &'static str = "toy.tally.v1";
+    }
+
+    impl Payload for Count {
+        fn to_any(&self) -> crate::next::Any {
+            pack(self)
+        }
+
+        fn from_any(any: &crate::next::Any) -> Result<Self, PayloadError> {
+            Decoder::new().on::<Count>(|c| c).decode(any)
+        }
+
+        fn type_urls() -> Vec<String> {
+            Vec::new()
+        }
+    }
+
+    pub struct Counter;
+
+    impl Domain for Counter {
+        type State = Tally;
+        type Command = Count;
+        type Fact = Infallible;
+        type Event = Count;
+        type Rejection = Infallible;
+        type Rules = ();
+
+        const NAME: &'static str = "tally";
+
+        fn decide(_: &Count, tx: &mut Tx<'_, Self>) -> Result<(), Infallible> {
+            tx.emit(Count {});
+            Ok(())
+        }
+
+        fn ingest(_: &Tally, fact: &Infallible, _: &IngestCtx<'_, Self>) -> Vec<Count> {
+            match *fact {}
+        }
+
+        fn apply(state: &mut Tally, _: &Count, (): &()) {
+            state.count += 1;
+        }
+    }
+}
+
+#[test]
+fn a_commutative_command_at_the_head_has_no_window_whatever_its_units() {
+    use crate::next::{Registry, Rulebook, Upcaster};
+    let mut registry = Registry::new();
+    registry
+        .register::<tally::Counter>(
+            Rulebook::new("v1", ()),
+            Upcaster::new("tally-upcaster", "tally"),
+        )
+        .unwrap();
+    let mut store = InMemoryStore::new();
+    let count = |n: u128| command(cover("tally", 1), crate::next::pack(&tally::Count {})).id(n);
+    for n in 1..=2 {
+        assert!(
+            handle::<tally::Counter>(&mut store, &registry, count(n), &at(n as i64)).is_ok(),
+            "stamped at the head: nothing between, nothing to overlap"
+        );
+    }
+    assert!(handle::<tally::Counter>(
+        &mut store,
+        &registry,
+        count(3).expecting(2, ConflictResolution::Commutative),
+        &at(3),
+    )
+    .is_ok());
+    assert_eq!(
+        handle::<tally::Counter>(
+            &mut store,
+            &registry,
+            count(4).expecting(1, ConflictResolution::Commutative),
+            &at(4),
+        )
+        .err(),
+        Some(Failure::Kernel(KernelError::Stale {
+            stream: cover("tally", 1),
+            expected: 1,
+            actual: 3,
+        })),
+        "a window, and every change overlaps it"
+    );
+}
