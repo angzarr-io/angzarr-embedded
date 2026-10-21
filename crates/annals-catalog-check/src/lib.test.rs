@@ -6,7 +6,8 @@
 //! every variant. A variant added without a sample is caught by reading the
 //! crates' sources: every code literal there (`"annals-..."`) must be the
 //! code of some sample. The catalogs are every
-//! `crates/<crate>/locales/<locale>/<crate>.ftl`.
+//! `crates/<crate>/locales/<locale>/<crate>.ftl`; each crate's en-US one is
+//! also its exported `EN_US`, which must be that file.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -23,6 +24,17 @@ fn samples() -> Vec<(&'static str, Vec<Box<dyn Diagnostic>>)> {
         ("annals-log", annals_log::diagnostic_samples()),
         ("annals-store-sql", annals_store_sql::diagnostic_samples()),
         ("annals-yaml", annals_yaml::diagnostic_samples()),
+    ]
+}
+
+/// Each checked crate's exported en-US catalog: its name and its text.
+fn exported() -> Vec<(&'static str, &'static str)> {
+    vec![
+        annals::EN_US,
+        annals_graph::EN_US,
+        annals_log::EN_US,
+        annals_store_sql::EN_US,
+        annals_yaml::EN_US,
     ]
 }
 
@@ -377,6 +389,25 @@ fn every_code_has_a_message_with_exactly_its_args_in_every_locale() {
         problems.len(),
         problems.join("\n")
     );
+}
+
+/// A dependent renders from the exported catalog, so it must be the file
+/// checked here, under the crate's own name, for every checked crate.
+#[test]
+fn every_checked_crate_exports_its_en_us_catalog() {
+    let exported = exported();
+    let names: Vec<&str> = exported.iter().map(|(name, _)| *name).collect();
+    let checked: Vec<&str> = samples().iter().map(|(krate, _)| *krate).collect();
+    assert_eq!(names, checked);
+    for (name, text) in exported {
+        let path = crates_dir()
+            .join(name)
+            .join("locales/en-US")
+            .join(format!("{name}.ftl"));
+        let file =
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        assert_eq!(text, file, "{name}::EN_US is not {}", path.display());
+    }
 }
 
 #[test]

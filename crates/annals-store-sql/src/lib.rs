@@ -35,6 +35,14 @@ use annals::next::v1::Cover;
 
 pub use error::{diagnostic_samples, SqlError};
 
+/// This crate's en-US Fluent catalog, its name first: what a dependent
+/// embeds to render this crate's diagnostics. The text of
+/// `crates/annals-store-sql/locales/en-US/annals-store-sql.ftl`.
+pub const EN_US: (&str, &str) = (
+    "annals-store-sql",
+    include_str!("../locales/en-US/annals-store-sql.ftl"),
+);
+
 /// What differs between SQL backends in how a stream is keyed.
 pub trait Dialect {
     /// The edition column's value for `cover`. A backend whose keys treat

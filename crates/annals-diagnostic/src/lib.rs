@@ -3,10 +3,13 @@
 //! Every error in Annals implements [`Diagnostic`]: a stable [`code`] that
 //! names the message, and the [`args`] the message fills in. The game client
 //! renders a diagnostic in the player's language by looking the code up in a
-//! Fluent catalog and passing the args by name; Annals ships an en-US catalog
-//! per crate (`crates/<crate>/locales/en-US/<crate>.ftl`) and renders
-//! nothing. The English `Display` every error keeps is the fallback, for logs
-//! and for a code no catalog has.
+//! Fluent catalog and passing the args by name. Annals renders nothing; it
+//! ships an en-US catalog per crate (`crates/<crate>/locales/en-US/<crate>.ftl`),
+//! which each crate with codes exports, embedded, as `EN_US`: the crate's
+//! name and the catalog's text (`annals::EN_US`, `annals_yaml::EN_US`, ...).
+//! A dependent adds those to its own catalog to render Annals' diagnostics.
+//! The English `Display` every error keeps is the fallback, for logs and for
+//! a code no catalog has.
 //!
 //! The rules:
 //!

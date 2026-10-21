@@ -27,6 +27,14 @@ pub use tags::{
     BadTag, NamespaceId, SymbolId, TagId, TagProblem, TagRegistry, TagSet, TagValue, Tagged,
 };
 
+/// This crate's en-US Fluent catalog, its name first: what a dependent
+/// embeds to render this crate's diagnostics. The text of
+/// `crates/annals-graph/locales/en-US/annals-graph.ftl`.
+pub const EN_US: (&str, &str) = (
+    "annals-graph",
+    include_str!("../locales/en-US/annals-graph.ftl"),
+);
+
 /// One value of every error this crate defines, each variant once, for the
 /// catalog parity test: each one's code must have a message in every locale,
 /// using exactly its args. Its messages are in
