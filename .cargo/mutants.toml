@@ -1,9 +1,14 @@
 # cargo-mutants (https://mutants.rs): `just mutants` runs it after `just gen`.
 #
-# Nothing is excluded. What might have been:
-# - annals-log's generated protobuf (crates/annals-log/gen) is reached only by
-#   `include!` from src/codegen.test.rs, a `#[cfg(test)]` module, which
-#   cargo-mutants skips.
+# Test code is not mutated: a test is what judges a mutant, so a mutant in
+# one measures the measure. cargo-mutants skips a module under a bare
+# `#[cfg(test)]`, but not one under `#[cfg(all(test, feature = ...))]`, as
+# annals-log's codegen check is; the glob names every test file instead.
+# That covers annals-log's generated protobuf (crates/annals-log/gen) too:
+# it is reached only by `include!` from src/codegen.test.rs.
+exclude_globs = ["*.test.rs"]
+
+# Nothing else is excluded wholesale. What might have been:
 # - annals-catalog-check's src/lib.rs holds no code; its check is a test.
 # - Display impls are not noise: annals-catalog-check fails an empty English
 #   Display, so with test_workspace those mutants are caught.
