@@ -219,10 +219,12 @@ async fn a_read_only_file_in_a_read_only_directory_opens_for_reading() {
     std::fs::create_dir(&dir).unwrap();
     let path = dir.join("state.db");
     let stream = cover("tasks", 1);
-    {
-        let mut store = SqliteStore::open(&path).await.unwrap();
-        store.append(&stream, 0, &[page(0, 1)]).await.unwrap();
-    }
+    // The writer stays open, so its WAL files stay: without them SQLite
+    // cannot read a WAL file in a directory it cannot write. Dropped
+    // here, it would close on sqlx's worker thread in its own time,
+    // deleting them, racing the read.
+    let mut writer = SqliteStore::open(&path).await.unwrap();
+    writer.append(&stream, 0, &[page(0, 1)]).await.unwrap();
     let mode = |path: &Path, mode| {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap()
     };
@@ -232,6 +234,7 @@ async fn a_read_only_file_in_a_read_only_directory_opens_for_reading() {
     let read = store.read_from(&stream, 0).await;
     let written = store.append(&stream, 1, &[page(1, 2)]).await;
     drop(store);
+    writer.conn.close().await.unwrap();
     mode(&dir, 0o755);
     mode(&path, 0o644);
     std::fs::remove_dir_all(&dir).unwrap();
