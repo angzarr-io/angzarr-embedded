@@ -1,0 +1,40 @@
+[package]
+name = "annals-store-sql"
+version = "0.1.0"
+description = "annals' store port on SQL: backend-neutral statements, and each backend's execution and migrations behind a feature."
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+# sqlx 0.8 and prost 0.14 (through annals).
+rust-version = "1.85"
+
+[features]
+# SQLite: execution and migrations on sqlx.
+sqlite = [
+    "dep:sqlx",
+    "sqlx/sqlite",
+    "sqlx/runtime-tokio",
+    "sqlx/migrate",
+    "sqlx/macros",
+    "dep:sea-query-binder",
+    "sea-query-binder/sqlx-sqlite",
+]
+
+# Third-party by design (see CLAUDE.md): a SQL store needs a query builder
+# and a driver, and hand-rolling either is a second, unchecked
+# implementation of each database's dialect.
+[dependencies]
+annals = { path = "../annals" }
+annals-diagnostic = { path = "../annals-diagnostic" }
+prost = "0.14"
+sea-query = "0.32"
+sea-query-binder = { version = "0.7", optional = true }
+sqlx = { version = "0.8", default-features = false, optional = true }
+
+[dev-dependencies]
+annals = { path = "../annals", features = ["contract"] }
+annals-store-sql = { path = ".", features = ["sqlite"] }
+tokio = { version = "1", features = ["macros", "rt"] }
+
+[lints]
+workspace = true

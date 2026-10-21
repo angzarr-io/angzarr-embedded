@@ -14,14 +14,13 @@ changes, rewrite the text in place to say what is true now.
 
 ## Few dependencies, no domain
 
-Annals is an event-sourced, deterministic game engine. Every crate here knows
-nothing about any particular game. They are shared by card-game and
-tdautobattle, so anything specific to one of them belongs in that
-repository, not here.
+Annals is a deterministic application engine on CQRS/ES. Every crate here
+knows nothing about any application that uses it, so anything specific to
+one belongs in that application's repository, not here.
 
 Every crate has zero third-party dependencies, except annals,
-annals-log and annals-catalog-check. A crate may depend on another
-crate in this workspace, as annals-sim does on annals.
+annals-log, annals-store-sql and annals-catalog-check. A crate may depend
+on another crate in this workspace, as annals-sim does on annals.
 
 annals-catalog-check is test-only: its one dev-dependency, `fluent-syntax`
 (Apache-2.0 OR MIT), parses the Fluent catalogs for the parity test.
@@ -38,8 +37,16 @@ operates on angzarr's wire types directly rather than on parallel annals
 types: angzarr owns that contract, and annals is its in-process runtime.
 Every user of annals therefore builds angzarr-proto; this is accepted.
 
+annals-store-sql depends on `sea-query` and, behind each backend's feature,
+`sqlx` and `sea-query-binder`, because it is a SQL store: hand-rolling a
+query builder or a driver would be a second, unchecked implementation of each
+database's dialect. Its statements are backend-neutral; only rendering,
+running, migrations and the dialect differ per backend. It lives here for
+now: angzarr core's own SQL storage is older, and this crate moves to angzarr
+core when that storage is brought onto it.
+
 Protobuf code lives in annals (angzarr's types) and annals-log (annals' own
-log format); every other crate stays dependency-free.
+log format); every other crate stays dependency-free except as above.
 
 ## annals-log's wire types are hand-written; the `.proto` is the schema of record
 

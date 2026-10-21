@@ -18,6 +18,7 @@ annals = { path = "../annals" }
 annals-diagnostic = { path = "../annals-diagnostic" }
 annals-graph = { path = "../annals-graph" }
 annals-log = { path = "../annals-log" }
+annals-store-sql = { path = "../annals-store-sql" }
 annals-yaml = { path = "../annals-yaml" }
 fluent-syntax = "0.12"
 

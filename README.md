@@ -1,10 +1,11 @@
 # Annals
 
-Annals is an event-sourced, deterministic game engine: small Rust crates
-shared by card-game and tdautobattle. All but annals, annals-log (and the
-test-only annals-catalog-check) have zero third-party dependencies; annals
-depends on angzarr's wire types (angzarr-proto, prost, prost-types), which
-its proposed kernel operates on directly.
+Annals is a deterministic application engine on CQRS/ES: small Rust
+crates, knowing nothing of the applications that use them. All but annals,
+annals-log, annals-store-sql (and the test-only annals-catalog-check) have
+zero third-party dependencies; annals depends on angzarr's wire types
+(angzarr-proto, prost, prost-types), which its kernel operates on directly,
+and annals-store-sql on sea-query and sqlx.
 Every error is localizable: a stable code and named args (see
 `annals-diagnostic`), with an en-US Fluent catalog per crate under
 `crates/<crate>/locales/`.
@@ -17,6 +18,7 @@ Every error is localizable: a stable code and named args (see
 | [`annals-yaml`](crates/annals-yaml) | a strict YAML subset, read and written; versioned documents with registered migrations |
 | [`annals-sim`](crates/annals-sim) | simulation parts on `annals`: per-entity dice, a folded tick scheduler, jobs as data, a parallel map, a Gherkin runner |
 | [`annals-log`](crates/annals-log) | a binary event-log format for `annals` streams: length-delimited protobuf (prost) |
+| [`annals-store-sql`](crates/annals-store-sql) | `annals::next`'s store port on SQL: backend-neutral sea-query statements, and each backend (`sqlite`) behind a feature, on sqlx with its migrations |
 | [`annals-catalog-check`](crates/annals-catalog-check) | test-only: every error code has a message, with exactly its args, in every shipped Fluent catalog |
 
 ```

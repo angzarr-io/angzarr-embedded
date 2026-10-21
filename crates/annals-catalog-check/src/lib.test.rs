@@ -21,6 +21,7 @@ fn samples() -> Vec<(&'static str, Vec<Box<dyn Diagnostic>>)> {
         ("annals", annals::diagnostic_samples()),
         ("annals-graph", annals_graph::diagnostic_samples()),
         ("annals-log", annals_log::diagnostic_samples()),
+        ("annals-store-sql", annals_store_sql::diagnostic_samples()),
         ("annals-yaml", annals_yaml::diagnostic_samples()),
     ]
 }
