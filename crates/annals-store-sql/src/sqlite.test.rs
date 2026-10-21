@@ -645,6 +645,36 @@ async fn a_page_beyond_reading_is_damage_not_a_failure_to_check() {
     }
 }
 
+#[tokio::test]
+async fn a_check_that_cannot_run_is_a_failure_not_damage() {
+    // A file in its rollback journal, locked exclusively by another
+    // connection: a store that waits on no lock cannot read it.
+    let path = database();
+    migrated_in_rollback_mode(&path).await;
+    let mut holder = raw(&path).await;
+    sqlx::query("PRAGMA locking_mode = EXCLUSIVE")
+        .execute(&mut holder)
+        .await
+        .unwrap();
+    let held = holder.begin_with("BEGIN EXCLUSIVE").await.unwrap();
+    let conn = SqliteConnectOptions::new()
+        .filename(&path)
+        .busy_timeout(Duration::ZERO)
+        .read_only(true)
+        .connect()
+        .await
+        .unwrap();
+    let checked = SqliteStore { conn }.integrity_check().await;
+    assert_eq!(
+        checked.as_ref().map_err(code),
+        Err(Some("annals-store-sql-unavailable")),
+        "{checked:?}"
+    );
+    held.rollback().await.unwrap();
+    drop(holder);
+    remove(&path);
+}
+
 // ------------------------------------------------------------------ Send
 
 /// Compiles only if `future` is `Send`, so a store can be opened on a
