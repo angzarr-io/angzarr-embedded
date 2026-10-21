@@ -61,6 +61,119 @@ fn numbers_skip_quotes() {
     assert_eq!(numbers(r#""7"8"#), [8]);
 }
 
+#[test]
+fn only_then_is_an_assertion() {
+    let f = parse_feature(SRC);
+    let asserts: Vec<bool> = f.scenarios[0]
+        .steps
+        .iter()
+        .map(Step::is_assertion)
+        .collect();
+    assert_eq!(asserts, [false, false, false, true, true]);
+}
+
+/// Two scenarios, the second of which fails, under `name`.
+fn half_failing(name: &str) -> String {
+    format!(
+        "Feature: {name}\n  Scenario: holds\n    Then it holds\n  Scenario: breaks\n    Given it fails\n    Then it holds\n"
+    )
+}
+
+/// A step that fails on any step saying so, counting what ran.
+fn failing_step(ran: &mut Vec<String>, s: &Step) {
+    ran.push(s.text.clone());
+    assert!(!s.text.contains("fails"), "the step fails");
+}
+
+#[test]
+fn a_feature_counts_its_passes_and_names_its_failures() {
+    let mut report = Report {
+        passed: 2,
+        failed: vec![],
+    };
+    run_feature(
+        &parse_feature(&half_failing("F")),
+        Vec::new,
+        failing_step,
+        &mut report,
+    );
+    assert_eq!(
+        report,
+        Report {
+            passed: 3,
+            failed: vec!["F: breaks".to_string()],
+        }
+    );
+}
+
+/// A fresh, empty directory of this process's for `name`.
+fn scratch(name: &str) -> std::path::PathBuf {
+    let dir =
+        std::env::temp_dir().join(format!("annals-sim-gherkin-{}-{name}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("make the scratch directory");
+    dir
+}
+
+#[test]
+fn a_directory_runs_its_feature_files_in_name_order() {
+    let dir = scratch("run-dir");
+    fs::write(dir.join("b.feature"), half_failing("B")).unwrap();
+    fs::write(dir.join("a.feature"), half_failing("A")).unwrap();
+    fs::write(dir.join("notes.txt"), half_failing("Notes")).unwrap();
+    let report = run_dir(&dir, Vec::new, failing_step);
+    fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(
+        report,
+        Report {
+            passed: 2,
+            failed: vec!["A: breaks".to_string(), "B: breaks".to_string()],
+        }
+    );
+}
+
+/// Set by [`main_exits_non_zero_only_on_a_failure`] for the child it
+/// starts: the features directory [`main_in_a_child`] runs.
+const CHILD_DIR: &str = "ANNALS_SIM_GHERKIN_MAIN_DIR";
+
+/// Runs [`main`] when started as a child, since `main` exits the process;
+/// otherwise does nothing.
+#[test]
+fn main_in_a_child() {
+    if let Some(dir) = std::env::var_os(CHILD_DIR) {
+        main(Path::new(&dir), Vec::new, failing_step);
+    }
+}
+
+/// This test binary, rerun on [`main_in_a_child`] alone over `dir`.
+fn main_child(dir: &Path) -> std::process::Output {
+    std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "gherkin::tests::main_in_a_child", "--nocapture"])
+        .env(CHILD_DIR, dir)
+        .output()
+        .expect("rerun this test binary")
+}
+
+#[test]
+fn main_exits_non_zero_only_on_a_failure() {
+    let dir = scratch("main");
+    fs::write(
+        dir.join("a.feature"),
+        "Feature: A\n  Scenario: holds\n    Then it holds\n",
+    )
+    .unwrap();
+    let passing = main_child(&dir);
+    fs::write(dir.join("b.feature"), half_failing("B")).unwrap();
+    let failing = main_child(&dir);
+    fs::remove_dir_all(&dir).unwrap();
+
+    let stdout = |o: &std::process::Output| String::from_utf8_lossy(&o.stdout).into_owned();
+    assert!(passing.status.success(), "{}", stdout(&passing));
+    assert!(stdout(&passing).contains("\n1 passed, 0 failed\n"));
+    assert_eq!(failing.status.code(), Some(1), "{}", stdout(&failing));
+    assert!(stdout(&failing).contains("\n2 passed, 1 failed\n  failed: B: breaks\n"));
+}
+
 mod brawl {
     //! The Gherkin runner, driving the toy domain through a feature file.
 
