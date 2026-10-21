@@ -1,7 +1,9 @@
 //! SQLite: the shared statements rendered by sea-query's SQLite builder and
 //! run on sqlx, over one connection per database; the schema created by
-//! `migrations/sqlite/`. A unit of work is a `BEGIN IMMEDIATE` transaction.
-//! A file is kept in WAL mode, so once it is made a reader waits on no writer.
+//! `migrations/sqlite/`. A unit of work is a `BEGIN IMMEDIATE` transaction;
+//! a read of more than one statement outside one runs in a deferred `BEGIN`
+//! of its own, so it reads one moment. A file is kept in WAL mode, so once
+//! it is made a reader waits on no writer.
 
 use std::future::Future;
 use std::path::Path;
@@ -408,7 +410,7 @@ impl AsyncEventStore for SqliteStore {
     }
 
     async fn read_from(&mut self, stream: &Cover, from: u64) -> Result<Option<Slice>, StoreError> {
-        read_from(&mut self.conn, stream, from).await
+        read_alone(&mut self.conn, stream, from, || {}).await
     }
 
     async fn find_command(
@@ -506,7 +508,7 @@ impl AsyncEventStore for SqliteUnit<'_> {
     }
 
     async fn read_from(&mut self, stream: &Cover, from: u64) -> Result<Option<Slice>, StoreError> {
-        read_from(self.conn()?, stream, from).await
+        read_from(self.conn()?, stream, from, || {}).await
     }
 
     async fn find_command(
@@ -628,15 +630,38 @@ async fn purge(conn: &mut SqliteConnection, stream: &Cover) -> Result<u64, Store
     Ok(deleted)
 }
 
+/// [`read_from`] outside a unit of work, in a read transaction of its own
+/// (deferred `BEGIN`), so its statements read one moment: under WAL a
+/// reader's transaction sees the database as its first statement found it,
+/// and waits on no writer. A write or purge that commits in between is not
+/// seen, so the read never answers a length its pages do not reach.
+async fn read_alone(
+    conn: &mut SqliteConnection,
+    stream: &Cover,
+    from: u64,
+    between: impl FnMut(),
+) -> Result<Option<Slice>, StoreError> {
+    let mut tx = conn.begin().await.map_err(unavailable)?;
+    let slice = read_from(&mut tx, stream, from, between).await?;
+    tx.commit().await.map_err(unavailable)?;
+    Ok(slice)
+}
+
+/// The stream's slice from `from`, in three statements: its length, its
+/// pages, and its last page's `recorded_at`. Consistent only inside a
+/// transaction. `between` runs after the length is read, before the pages
+/// are: a test's hook for writing in between, a no-op otherwise.
 async fn read_from(
     conn: &mut SqliteConnection,
     stream: &Cover,
     from: u64,
+    mut between: impl FnMut(),
 ) -> Result<Option<Slice>, StoreError> {
     let next_sequence = length(conn, stream).await?;
     if next_sequence == 0 {
         return Ok(None);
     }
+    between();
     let pages = select_pages(
         conn,
         stream,

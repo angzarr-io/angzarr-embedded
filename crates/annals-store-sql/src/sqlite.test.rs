@@ -13,7 +13,7 @@ use annals_diagnostic::Diagnostic;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection};
 use sqlx::{ConnectOptions, Connection};
 
-use super::{into_wal, migrate, pause, read_only, SqliteStore, BUSY_TIMEOUT, MIGRATOR};
+use super::{into_wal, migrate, pause, read_alone, read_only, SqliteStore, BUSY_TIMEOUT, MIGRATOR};
 use crate::{Damage, Integrity};
 
 annals::async_store_contract!(#[tokio::test], SqliteStore::open_in_memory().await.unwrap());
@@ -889,6 +889,79 @@ async fn an_append_racing_a_purge_lands_after_it_on_a_new_stream() {
     assert_eq!(slice.pages, [page(0, 2)]);
     assert_eq!(writer.covers("tasks").await, Ok(vec![stream]));
     drop((writer, purger, hasty));
+    remove(&path);
+}
+
+// ------------------------------------------------------- reading at once
+
+/// Run `future` to its end on a thread and runtime of its own, blocking
+/// until it is done: a write made through a second connection from inside
+/// a read's hook, while the read waits between its statements.
+fn elsewhere<F: std::future::Future + Send>(future: F) -> F::Output
+where
+    F::Output: Send,
+{
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .unwrap()
+                    .block_on(future)
+            })
+            .join()
+            .unwrap()
+    })
+}
+
+#[tokio::test]
+async fn a_read_outside_a_unit_is_one_moment_across_a_purge() {
+    // The purge commits after the read has the stream's length and before
+    // it has the pages: the read still answers the stream whole, never a
+    // stream of two events holding none.
+    let path = database();
+    let stream = cover("tasks", 1);
+    let mut writer = SqliteStore::open(&path).await.unwrap();
+    writer
+        .append(&stream, 0, &[page(0, 1), page(1, 2)])
+        .await
+        .unwrap();
+    let mut reader = SqliteStore::open_existing(&path).await.unwrap().unwrap();
+    let mut purged = None;
+    let read = read_alone(&mut reader.conn, &stream, 0, || {
+        purged = Some(elsewhere(writer.purge(&stream)));
+    })
+    .await;
+    assert_eq!(purged, Some(Ok(2)), "the purge ran in between");
+    let slice = read.unwrap().unwrap();
+    assert_eq!(slice.pages, [page(0, 1), page(1, 2)]);
+    assert_eq!(slice.next_sequence, 2);
+    assert_eq!(reader.read_from(&stream, 0).await, Ok(None), "then gone");
+    drop((writer, reader));
+    remove(&path);
+}
+
+#[tokio::test]
+async fn a_read_outside_a_unit_is_one_moment_across_an_append() {
+    // The append commits after the read has the stream's length and before
+    // it has the pages: the read answers the stream as it was, its pages
+    // ending at its length and its last `recorded_at` its last page's.
+    let path = database();
+    let stream = cover("tasks", 1);
+    let mut writer = SqliteStore::open(&path).await.unwrap();
+    writer.append(&stream, 0, &[page(0, 1)]).await.unwrap();
+    let mut reader = SqliteStore::open(&path).await.unwrap();
+    let mut appended = None;
+    let read = read_alone(&mut reader.conn, &stream, 0, || {
+        appended = Some(elsewhere(writer.append(&stream, 1, &[page(1, 2)])));
+    })
+    .await;
+    assert_eq!(appended, Some(Ok(2)), "the append ran in between");
+    let slice = read.unwrap().unwrap();
+    assert_eq!(slice.pages, [page(0, 1)]);
+    assert_eq!(slice.next_sequence, 1);
+    assert_eq!(slice.last_recorded_at, page(0, 1).meta.unwrap().recorded_at);
+    drop((writer, reader));
     remove(&path);
 }
 
