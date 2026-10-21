@@ -487,3 +487,48 @@ fn random_edits_read_back_as_the_value_expected() {
         }
     }
 }
+
+#[test]
+fn same_ignores_only_the_order_of_mapping_keys() {
+    use super::same;
+    let ab = parse("a: 1\nb: [x, {c: 2, d: 3}]\n").unwrap();
+    let ba = parse("b: [x, {d: 3, c: 2}]\na: 1\n").unwrap();
+    assert!(same(&ab, &ba));
+    for other in [
+        "a: 1\n",
+        "a: 1\nb: [x, {c: 2, d: 3}]\ne: 4\n",
+        "a: 1\nz: [x, {c: 2, d: 3}]\n",
+        "a: 1\nb: [x, {c: 2, d: 4}]\n",
+        "a: 1\nb: [x]\n",
+        "a: 1\nb: [x, {c: 2, d: 3}, y]\n",
+        "a: 1\nb: [y, {c: 2, d: 3}]\n",
+        "a: 1\nb: x\n",
+    ] {
+        assert!(!same(&ab, &parse(other).unwrap()), "{other:?}");
+    }
+    assert!(!same(&s("x"), &s("y")));
+    assert!(same(&Value::Null, &Value::Null));
+}
+
+/// A document whose kept value says something its text does not: what an
+/// edit must refuse rather than write, as it would a bug in its own splicing.
+fn out_of_step(text: &str, value: &str) -> Document {
+    Document {
+        bom: false,
+        lines: super::split(text),
+        value: parse(value).unwrap(),
+    }
+}
+
+#[test]
+fn an_edit_whose_text_reads_back_wrong_is_refused() {
+    let unfaithful = |path: &[&str]| EditError {
+        path: path.iter().map(|k| k.to_string()).collect(),
+        problem: EditProblem::Unfaithful,
+    };
+    let text = "a: 1\nl:\n  - x\n";
+    let mut d = out_of_step(text, "a: 2\nl: [x]\n");
+    assert_eq!(d.set(&[], "b", &s("y"), 0), Err(unfaithful(&["b"])));
+    assert_eq!(d.push(&["l"], &s("y"), 0), Err(unfaithful(&["l"])));
+    assert_eq!(d.text(), text, "a refused edit changes nothing");
+}

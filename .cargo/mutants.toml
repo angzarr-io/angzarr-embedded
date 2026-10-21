@@ -1,6 +1,7 @@
 # cargo-mutants (https://mutants.rs): `just mutants` runs it after `just gen`.
 #
-# Nothing is excluded. What might have been:
+# Excluded: each mutant judged equivalent, matched exactly, with its reason,
+# grouped by crate. Not excluded, though they might have been:
 # - annals-log's generated protobuf (crates/annals-log/gen) is reached only by
 #   `include!` from src/codegen.test.rs, a `#[cfg(test)]` module, which
 #   cargo-mutants skips.
@@ -19,3 +20,11 @@ test_workspace = true
 # Copy gitignored files into the scratch tree: the codegen check reads
 # crates/annals-log/gen, which `just gen` writes and git ignores.
 gitignore = false
+
+exclude_re = [
+    # annals-yaml
+    # update_to's last check, that the edits reached the target, cannot fail:
+    # reach returns Ok only once each differing entry is set and each edit
+    # has read back as intended, so the guard is always true when reached.
+    'replace match guard same\(&self\.value, target\) with true in Document::update_to',
+]
