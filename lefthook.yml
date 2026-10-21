@@ -7,7 +7,8 @@ extends:
 pre-commit:
   commands:
     gates:
-      # First: lefthook skips an extends file it cannot read, so without this
-      # a missing link would let the commit through with no gate run.
-      priority: 0
+      # lefthook skips an extends file it cannot read, so without this a
+      # missing link would let the commit through with no gate run. Its
+      # place in the order does not matter: whenever the link is broken it
+      # is the only command lefthook has.
       run: just gates-check

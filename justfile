@@ -128,6 +128,7 @@ mutants-diff base="main": gen
 
 # Link .gates to the shared gates checkout at `gates_dir`, failing with where
 # to clone it when it is not there.
+[no-exit-message]
 gates-link:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -140,7 +141,7 @@ gates-link:
     fi
     ln -sfn "$target" .gates
 
-# lefthook's first pre-commit command: fail while .gates does not reach the
+# lefthook's own pre-commit command (lefthook.yml): fail while .gates does not reach the
 # shared gates, because lefthook then runs no gate at all. A missing link is
 # made, and the commit still refused: the gates were not loaded for it.
 [no-exit-message]
