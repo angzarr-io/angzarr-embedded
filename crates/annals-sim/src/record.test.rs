@@ -35,3 +35,18 @@ fn a_wrong_shape_is_refused() {
     assert_eq!(Side::from_value(&Value::Str("Up".into())), None);
     assert_eq!(Value::Int(1).get("x"), None);
 }
+
+#[test]
+fn a_value_reads_back_as_itself() {
+    let v = Value::map(vec![("hp", Value::Int(3)), ("up", Value::Bool(true))]);
+    round_trip(v.clone());
+    assert_eq!(v.field::<Value>("hp"), Some(Value::Int(3)));
+}
+
+#[test]
+fn a_list_of_the_wrong_length_is_refused() {
+    let list = |n: i64| Value::List((0..n).map(Value::Int).collect());
+    assert_eq!(Option::<u8>::from_value(&list(2)), None);
+    assert_eq!(<(u8, u8)>::from_value(&list(1)), None);
+    assert_eq!(<(u8, u8)>::from_value(&list(3)), None);
+}
