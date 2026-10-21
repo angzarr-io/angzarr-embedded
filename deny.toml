@@ -18,7 +18,7 @@ ignore = []
 
 [licenses]
 version = 2
-# Annals is EUPL-1.2 and used as a library by applications under other
+# Annals is BSD-3-Clause and used as a library by applications under other
 # licences, so a dependency's licence must be permissive: it must not impose
 # its terms on annals or on what links it. Copyleft is not on this list.
 allow = [
@@ -26,7 +26,6 @@ allow = [
   "Apache-2.0 WITH LLVM-exception",
   "BSD-3-Clause",
   "BSL-1.0",
-  "EUPL-1.2",
   "MIT",
   "Unicode-3.0",
   "Unlicense",
@@ -37,7 +36,8 @@ confidence-threshold = 0.9
 # angzarr-proto, angzarr's wire types, which annals' kernel operates on
 # directly (CLAUDE.md, *Few dependencies*; docs/design/audit.md, *Layering*).
 # It is AGPL-3.0-only, so every build that links annals is subject to the
-# AGPL. Accepted with the dependency; any other copyleft crate fails here.
+# AGPL (README, *Licence*). Accepted with the dependency; any other copyleft
+# crate fails here.
 exceptions = [
   { crate = "angzarr-proto", allow = ["AGPL-3.0-only"] },
 ]

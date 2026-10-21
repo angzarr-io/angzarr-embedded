@@ -62,10 +62,10 @@ Codegen is only a test-time cross-check: `buf generate` writes into
 the hand-written and generated types are wire-identical. Never edit `gen/`, or
 include it from anything but that test.
 
-## Licence: EUPL-1.2; not published
+## Licence: BSD-3-Clause; not published
 
-Annals is licensed under the EUPL-1.2 (`LICENSE`, the official English text).
-Every crate has `license = "EUPL-1.2"` and `publish = false`, both inherited
+Annals is licensed under the BSD 3-Clause License (`LICENSE`).
+Every crate has `license = "BSD-3-Clause"` and `publish = false`, both inherited
 from `[workspace.package]`. A new crate sets `license.workspace = true` and
 `publish.workspace = true`.
 

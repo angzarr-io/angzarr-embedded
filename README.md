@@ -47,5 +47,9 @@ its config is `.cargo/mutants.toml`.
 
 ## Licence
 
-Annals is licensed under the [European Union Public Licence v. 1.2](LICENSE)
-(EUPL-1.2).
+Annals is licensed under the [BSD 3-Clause License](LICENSE) (BSD-3-Clause).
+
+Annals depends on `angzarr-proto`, angzarr's wire types, which is
+AGPL-3.0-only. While it does, a binary that links annals is effectively
+AGPL-3.0-only: annals' own source stays BSD-3-Clause, but the linked whole
+carries angzarr-proto's terms.
