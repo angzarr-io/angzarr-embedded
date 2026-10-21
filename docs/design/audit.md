@@ -1160,6 +1160,11 @@ keeps the trigger as `causation_id`.
   deletes a snapshot with no events; a purged stream starts again from
   nothing, a stale append refused; a purge in a unit of work lands at
   commit or not at all; a unit purges its own appends and appends after.
+  **Every check fails a store broken in the way it exists to catch** (an
+  in-memory store with one bug: a gap accepted, an edition ignored, a unit
+  blind to its own appends or writing through, an empty append that creates
+  a stream, a past-the-end read that forgets the end, the first snapshot
+  kept), and passes the same store with none.
 - **replay.rs**: replay folds each event with the rules it names, and
   refuses a log that does not hold together (sequence, metadata, instant,
   rules, domain, a process event's trigger); a stream resumes from a
