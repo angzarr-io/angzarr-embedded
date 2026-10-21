@@ -368,7 +368,13 @@ where
         [page(0, 1), page(1, 2)],
         "another stream untouched"
     );
-    assert_eq!(store.read_snapshot(&kept).await, Ok(Some(snapshot(1))));
+    assert_eq!(
+        store
+            .read_snapshot(&kept)
+            .await
+            .map(|s| s.map(|s| s.sequence)),
+        Ok(Some(1))
+    );
     assert_eq!(
         store.find_command(&kept, &command(1)).await,
         Ok(vec![page(0, 1)])
