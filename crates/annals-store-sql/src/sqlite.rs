@@ -1,14 +1,17 @@
 //! SQLite: the shared statements rendered by sea-query's SQLite builder and
 //! run on sqlx, over one connection per database; the schema created by
 //! `migrations/sqlite/`. A unit of work is a `BEGIN IMMEDIATE` transaction.
+//! A file is kept in WAL mode, so readers never wait on a writer.
 
 use std::path::Path;
 use std::str::FromStr;
+use std::time::Duration;
 
 use annals::next::v1::{Cover, EventPage, Snapshot, Uuid};
 use annals::next::{AsyncEventStore, AsyncStore, AsyncUnitOfWork, Slice, StoreError};
 use sea_query::{InsertStatement, SelectStatement, SqliteQueryBuilder};
 use sea_query_binder::SqlxBinder;
+use sqlx::migrate::Migrator;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection, SqliteRow};
 use sqlx::{ConnectOptions, Connection, Row, Sqlite, Transaction};
 
@@ -28,47 +31,107 @@ impl Dialect for SqliteDialect {
     }
 }
 
+/// The schema, `migrations/sqlite/`.
+static MIGRATOR: Migrator = sqlx::migrate!("./migrations/sqlite");
+
+/// How long a connection waits on another's lock before failing: SQLite's
+/// busy timeout. Readers wait on no one (WAL), so only writers queue, and a
+/// unit of work holds the lock for milliseconds; five seconds outlasts a
+/// queue of many processes' units, and is short enough that a lock held by
+/// something stuck surfaces as an error rather than a hang.
+pub const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How many times `open` tries to move a file into WAL before failing.
+/// Each try after the first waits (up to [`BUSY_TIMEOUT`]) until no other
+/// connection holds a lock, so only stores making the same move at the same
+/// instant take more than two.
+const WAL_ATTEMPTS: usize = 20;
+
 /// A store in one SQLite database.
 pub struct SqliteStore {
     conn: SqliteConnection,
 }
 
 impl SqliteStore {
-    /// The database at `path`, created if absent and migrated.
+    /// The database at `path`, created if absent, in WAL mode, and migrated.
     pub async fn open(path: &Path) -> Result<SqliteStore, StoreError> {
         let options = SqliteConnectOptions::new()
             .filename(path)
+            .busy_timeout(BUSY_TIMEOUT)
             .create_if_missing(true);
-        SqliteStore::on(options).await
+        let mut conn = options.connect().await.map_err(unavailable)?;
+        into_wal(&mut conn).await?;
+        SqliteStore::migrated(conn).await
     }
 
     /// A database held only in memory, migrated.
     pub async fn open_in_memory() -> Result<SqliteStore, StoreError> {
-        SqliteStore::on(SqliteConnectOptions::from_str("sqlite::memory:").map_err(unavailable)?)
-            .await
+        let options = SqliteConnectOptions::from_str("sqlite::memory:").map_err(unavailable)?;
+        SqliteStore::migrated(options.connect().await.map_err(unavailable)?).await
     }
 
-    /// Connect, then migrate holding the database's write lock: sqlx's
+    /// Migrate holding the database's write lock: sqlx's
     /// migrator takes no lock on SQLite and reads which migrations are
     /// applied before it begins each one, so stores opening a new file at
     /// once (one per process) would each apply the first migration, and
     /// all but one fail on tables that already exist. Under `BEGIN
     /// IMMEDIATE` they take turns (waiting the connection's busy timeout),
     /// and each after the first finds nothing to apply.
-    async fn on(options: SqliteConnectOptions) -> Result<SqliteStore, StoreError> {
-        let mut conn = options.connect().await.map_err(unavailable)?;
+    async fn migrated(mut conn: SqliteConnection) -> Result<SqliteStore, StoreError> {
         let mut tx = conn
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(unavailable)?;
-        sqlx::migrate!("./migrations/sqlite")
-            .run(&mut *tx)
-            .await
-            .map_err(unavailable)?;
+        MIGRATOR.run(&mut *tx).await.map_err(unavailable)?;
         tx.commit().await.map_err(unavailable)?;
         Ok(SqliteStore { conn })
     }
 }
+
+/// Move a file into WAL mode. WAL is the file's own, kept across
+/// connections, so this changes a file once and is a no-op after. The move
+/// takes the exclusive lock without waiting the busy timeout, failing at
+/// once if any connection holds a lock, so after such a failure `BEGIN
+/// EXCLUSIVE` waits (the busy timeout) until none does, lets go, and the
+/// move is tried again. It cannot run inside a transaction, so it runs
+/// before migrating. A file system that cannot hold WAL's shared memory
+/// leaves the file in its rollback journal, where the store still works
+/// and a reader waits only on a writer's commit.
+async fn into_wal(conn: &mut SqliteConnection) -> Result<(), StoreError> {
+    for _ in 1..WAL_ATTEMPTS {
+        match sqlx::query("PRAGMA journal_mode = WAL")
+            .execute(&mut *conn)
+            .await
+        {
+            Err(error) if busy(&error) => {
+                conn.begin_with("BEGIN EXCLUSIVE")
+                    .await
+                    .map_err(unavailable)?
+                    .commit()
+                    .await
+                    .map_err(unavailable)?;
+            }
+            outcome => return outcome.map(drop).map_err(unavailable),
+        }
+    }
+    sqlx::query("PRAGMA journal_mode = WAL")
+        .execute(&mut *conn)
+        .await
+        .map(drop)
+        .map_err(unavailable)
+}
+
+/// Whether `error` is SQLite's `SQLITE_BUSY`, extended codes included.
+fn busy(error: &sqlx::Error) -> bool {
+    error
+        .as_database_error()
+        .and_then(|e| e.code())
+        .and_then(|code| code.parse::<i32>().ok())
+        .is_some_and(|code| code & 0xff == SQLITE_BUSY)
+}
+
+/// SQLite's primary result code for a lock another connection holds.
+const SQLITE_BUSY: i32 = 5;
 
 impl AsyncEventStore for SqliteStore {
     async fn append(

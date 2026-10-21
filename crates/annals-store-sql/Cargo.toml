@@ -34,7 +34,7 @@ sqlx = { version = "0.8", default-features = false, optional = true }
 [dev-dependencies]
 annals = { path = "../annals", features = ["contract"] }
 annals-store-sql = { path = ".", features = ["sqlite"] }
-tokio = { version = "1", features = ["macros", "rt"] }
+tokio = { version = "1", features = ["macros", "rt", "time"] }
 
 [lints]
 workspace = true
