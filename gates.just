@@ -32,8 +32,9 @@
 # when the link is missing, saying where to clone this repository. Those and
 # `gates-link` must not use anything from this file: they run without it.
 #
-# Needs bash, git, jq, flock, cargo-nextest, cargo-deny, cargo-mutants,
-# gitleaks and lefthook. A missing tool fails its gate; nothing skips.
+# Needs bash, git, jq, flock, setsid, ps and pkill (util-linux, procps),
+# cargo-nextest, cargo-deny, cargo-mutants, gitleaks and lefthook. A missing
+# tool fails its gate; nothing skips.
 
 gates_root := justfile_directory()
 
@@ -364,6 +365,17 @@ _mutants-affected:
 # to verdict.txt beside mutants.out: its summary line, then the kill rate by
 # tier, for `_extract-mutants`. Mutants run under `cargo test`, not nextest:
 # a process per test only slows a run that rebuilds for each mutant.
+#
+# cargo mutants runs in a session of its own (setsid), and whatever is left
+# in that session when it ends, or when the gate is interrupted, is killed
+# (`reap`) and named in the log. A test that times out under a mutant is
+# killed by cargo-mutants (SIGTERM to the test's process group), but a
+# process the test spawned outlives it when the mutant broke that process's
+# own way to stop (a server with its SIGTERM handler installed and its stop
+# condition mutated): re-parented, it would run until the machine
+# restarts. No such process can hold the staged tree's lock either: fd 9 is
+# closed for the run. Only the session's processes are touched; nothing
+# started outside the run is in it.
 [no-exit-message]
 _mutants-judge:
     #!/usr/bin/env bash
@@ -374,7 +386,21 @@ _mutants-judge:
     mkdir -p "$out"
     verdict() { printf '%s\n' "$@" | tee -a "$out/verdict.txt"; }
     work=$(mktemp -d)
-    trap 'rm -rf "$work"' EXIT
+    # The run's session id: its leader's pid, written by the leader.
+    session="$work/session"
+    reap() {
+        local sid left
+        sid=$(cat "$session" 2>/dev/null) || return 0
+        [ -n "$sid" ] || return 0
+        left=$(ps -o pid=,args= -s "$sid" 2>/dev/null) || true
+        if [ -n "$left" ]; then
+            echo "mutants-staged: killed what the run left running:"
+            sed 's/^ */  /' <<< "$left"
+            pkill -KILL -s "$sid" || true
+        fi
+    }
+    trap 'reap; rm -rf "$work"' EXIT
+    trap 'exit 130' INT TERM HUP
     git diff --cached --no-color --no-ext-diff --no-renames --src-prefix=a/ --dst-prefix=b/ HEAD -- '*.rs' > "$work/staged.patch"
     read -ra rules <<< "{{feature_rules}}"
     features=()
@@ -394,8 +420,13 @@ _mutants-judge:
         just --justfile "$root/justfile" {{features_prepare}}
     fi
     rc=0
-    cargo mutants --dir "$root" --in-place --workspace "${features[@]}" --in-diff "$work/staged.patch" \
-        --output "$out" --colors never || rc=$?
+    # In the background, so an interrupt is handled at once rather than once
+    # the run ends: the trap's exit reaps the session, cargo mutants too.
+    setsid --wait bash -c 'echo $$ > "$1"; shift; exec "$@"' mutants-session "$session" \
+        cargo mutants --dir "$root" --in-place --workspace "${features[@]}" --in-diff "$work/staged.patch" \
+        --output "$out" --colors never 9>&- &
+    wait "$!" || rc=$?
+    reap
     case "$rc" in
         0|2|3) ;;
         4)
