@@ -11,11 +11,11 @@ use annals::next::v1::{Cover, EventPage, Snapshot, Uuid};
 use annals::next::{AsyncEventStore, AsyncStore, AsyncUnitOfWork, Slice, StoreError};
 use sea_query::{InsertStatement, SelectStatement, SqliteQueryBuilder};
 use sea_query_binder::SqlxBinder;
-use sqlx::migrate::Migrator;
+use sqlx::migrate::{MigrateError, Migration, Migrator};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection, SqliteRow};
 use sqlx::{ConnectOptions, Connection, Row, Sqlite, Transaction};
 
-use crate::error::unavailable;
+use crate::error::{unavailable, unmigrated};
 use crate::{rows, statements, Dialect};
 
 /// SQLite keeps NULLs distinct in a key, so the main timeline is `''`.
@@ -31,7 +31,9 @@ impl Dialect for SqliteDialect {
     }
 }
 
-/// The schema, `migrations/sqlite/`.
+/// The schema, `migrations/sqlite/`. `open` runs them inside `BEGIN
+/// IMMEDIATE`, so none may opt out of a transaction (`-- no-transaction`)
+/// or change `PRAGMA journal_mode`: neither can run inside one.
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations/sqlite");
 
 /// How long a connection waits on another's lock before failing: SQLite's
@@ -54,38 +56,131 @@ pub struct SqliteStore {
 
 impl SqliteStore {
     /// The database at `path`, created if absent, in WAL mode, and migrated.
+    ///
+    /// A database whose migrations are all applied is opened without the
+    /// write lock, so an open waits on no writer. Otherwise the migrations
+    /// run inside `BEGIN IMMEDIATE`: sqlx's migrator takes no lock on
+    /// SQLite and reads which migrations are applied before it begins each
+    /// one, so stores opening a new file at once (one per process) would
+    /// each apply the first migration. Under the lock they take turns, and
+    /// each after the first finds nothing to apply. A migration that opts
+    /// out of a transaction (`-- no-transaction`) or changes `PRAGMA
+    /// journal_mode` therefore cannot be added.
     pub async fn open(path: &Path) -> Result<SqliteStore, StoreError> {
         let options = SqliteConnectOptions::new()
             .filename(path)
             .busy_timeout(BUSY_TIMEOUT)
             .create_if_missing(true);
         let mut conn = options.connect().await.map_err(unavailable)?;
+        // A read first, so the connection knows a file already in WAL is,
+        // and moving it there is a no-op that waits on no writer.
+        let schema = schema(&mut conn).await?;
         into_wal(&mut conn).await?;
-        SqliteStore::migrated(conn).await
+        if !matches!(schema, Schema::Current) {
+            migrate(&mut conn).await?;
+        }
+        Ok(SqliteStore { conn })
+    }
+
+    /// The database at `path` opened read-only, or `None` if there is no
+    /// file there: nothing is created, migrated, or moved into WAL, so a
+    /// read-only file or mount opens. A database with migrations not yet
+    /// applied is refused (`annals-store-sql-unmigrated`), as is one whose
+    /// applied migrations this build's disagree with. Every write to the
+    /// store fails (`annals-store-sql-unavailable`).
+    pub async fn open_existing(path: &Path) -> Result<Option<SqliteStore>, StoreError> {
+        let options = SqliteConnectOptions::new()
+            .filename(path)
+            .busy_timeout(BUSY_TIMEOUT)
+            .read_only(true);
+        let mut conn = match options.connect().await {
+            Ok(conn) => conn,
+            Err(_) if matches!(path.try_exists(), Ok(false)) => return Ok(None),
+            Err(error) => return Err(unavailable(error)),
+        };
+        match schema(&mut conn).await? {
+            Schema::Current => Ok(Some(SqliteStore { conn })),
+            Schema::Pending(pending) => Err(unmigrated(pending)),
+            Schema::Refused(error) => Err(unavailable(error)),
+        }
     }
 
     /// A database held only in memory, migrated.
     pub async fn open_in_memory() -> Result<SqliteStore, StoreError> {
         let options = SqliteConnectOptions::from_str("sqlite::memory:").map_err(unavailable)?;
-        SqliteStore::migrated(options.connect().await.map_err(unavailable)?).await
-    }
-
-    /// Migrate holding the database's write lock: sqlx's
-    /// migrator takes no lock on SQLite and reads which migrations are
-    /// applied before it begins each one, so stores opening a new file at
-    /// once (one per process) would each apply the first migration, and
-    /// all but one fail on tables that already exist. Under `BEGIN
-    /// IMMEDIATE` they take turns (waiting the connection's busy timeout),
-    /// and each after the first finds nothing to apply.
-    async fn migrated(mut conn: SqliteConnection) -> Result<SqliteStore, StoreError> {
-        let mut tx = conn
-            .begin_with("BEGIN IMMEDIATE")
-            .await
-            .map_err(unavailable)?;
-        MIGRATOR.run(&mut *tx).await.map_err(unavailable)?;
-        tx.commit().await.map_err(unavailable)?;
+        let mut conn = options.connect().await.map_err(unavailable)?;
+        migrate(&mut conn).await?;
         Ok(SqliteStore { conn })
     }
+}
+
+/// How a database's applied migrations stand against [`MIGRATOR`].
+enum Schema {
+    /// Every migration is applied, as this build has it.
+    Current,
+    /// This many migrations are not yet applied; those that are agree.
+    Pending(usize),
+    /// What sqlx's migrator would refuse: a migration that failed, one this
+    /// build does not have, or one changed since it was applied.
+    Refused(MigrateError),
+}
+
+/// Where the database's migrations stand, read without taking a lock.
+///
+/// From sqlx's own record, `_sqlx_migrations`, rather than `PRAGMA
+/// user_version`: it is what the migrator checks, so the two cannot
+/// disagree, and it carries each migration's checksum, so a changed
+/// migration is refused here as the migrator would refuse it.
+async fn schema(conn: &mut SqliteConnection) -> Result<Schema, StoreError> {
+    let recorded: Option<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
+    )
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(unavailable)?;
+    let applied: Vec<(i64, Vec<u8>, bool)> = match recorded {
+        Some(_) => sqlx::query_as("SELECT version, checksum, success FROM _sqlx_migrations")
+            .fetch_all(&mut *conn)
+            .await
+            .map_err(unavailable)?,
+        None => Vec::new(),
+    };
+    let wanted: Vec<&Migration> = MIGRATOR
+        .iter()
+        .filter(|m| !m.migration_type.is_down_migration())
+        .collect();
+    for (version, checksum, success) in &applied {
+        if !success {
+            return Ok(Schema::Refused(MigrateError::Dirty(*version)));
+        }
+        match wanted.iter().find(|m| m.version == *version) {
+            None => return Ok(Schema::Refused(MigrateError::VersionMissing(*version))),
+            Some(m) if *m.checksum != **checksum => {
+                return Ok(Schema::Refused(MigrateError::VersionMismatch(*version)))
+            }
+            Some(_) => {}
+        }
+    }
+    let pending = wanted
+        .iter()
+        .filter(|m| !applied.iter().any(|(version, _, _)| *version == m.version))
+        .count();
+    Ok(match pending {
+        0 => Schema::Current,
+        n => Schema::Pending(n),
+    })
+}
+
+/// Apply what is pending holding the write lock, waiting
+/// [`BUSY_TIMEOUT`] for it. The migrator reads again which migrations are
+/// applied, under the lock, and refuses a database it disagrees with.
+async fn migrate(conn: &mut SqliteConnection) -> Result<(), StoreError> {
+    let mut tx = conn
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(unavailable)?;
+    MIGRATOR.run(&mut *tx).await.map_err(unavailable)?;
+    tx.commit().await.map_err(unavailable)
 }
 
 /// Move a file into WAL mode. WAL is the file's own, kept across

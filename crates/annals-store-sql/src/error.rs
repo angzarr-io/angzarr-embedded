@@ -11,6 +11,10 @@ pub enum SqlError {
     Unavailable { detail: String },
     /// A stored value's bytes do not decode as what was written.
     Undecodable { detail: String },
+    /// A database opened read-only has `pending` migrations this build
+    /// would apply: it is older than the build, and only a store opened to
+    /// write migrates it.
+    Unmigrated { pending: usize },
 }
 
 impl fmt::Display for SqlError {
@@ -20,6 +24,16 @@ impl fmt::Display for SqlError {
             SqlError::Undecodable { detail } => {
                 write!(f, "a stored value does not decode: {detail}")
             }
+            SqlError::Unmigrated { pending: 1 } => {
+                write!(
+                    f,
+                    "the database, opened to read, has a migration not yet applied"
+                )
+            }
+            SqlError::Unmigrated { pending } => write!(
+                f,
+                "the database, opened to read, has {pending} migrations not yet applied"
+            ),
         }
     }
 }
@@ -29,6 +43,7 @@ impl Diagnostic for SqlError {
         match self {
             SqlError::Unavailable { .. } => "annals-store-sql-unavailable",
             SqlError::Undecodable { .. } => "annals-store-sql-undecodable",
+            SqlError::Unmigrated { .. } => "annals-store-sql-unmigrated",
         }
     }
 
@@ -37,6 +52,7 @@ impl Diagnostic for SqlError {
             SqlError::Unavailable { detail } | SqlError::Undecodable { detail } => {
                 vec![("detail", detail.as_str().into())]
             }
+            SqlError::Unmigrated { pending } => vec![("pending", (*pending).into())],
         }
     }
 }
@@ -47,6 +63,7 @@ pub fn diagnostic_samples() -> Vec<Box<dyn Diagnostic>> {
     vec![
         Box::new(SqlError::Unavailable { detail: detail() }),
         Box::new(SqlError::Undecodable { detail: detail() }),
+        Box::new(SqlError::Unmigrated { pending: 1 }),
     ]
 }
 
@@ -56,6 +73,12 @@ pub(crate) fn unavailable(detail: impl fmt::Display) -> StoreError {
     StoreError::Unavailable(Report::of(&SqlError::Unavailable {
         detail: detail.to_string(),
     }))
+}
+
+/// A database opened read-only that is not migrated: only a store opened
+/// to write can migrate it.
+pub(crate) fn unmigrated(pending: usize) -> StoreError {
+    StoreError::Unavailable(Report::of(&SqlError::Unmigrated { pending }))
 }
 
 /// A stored value that does not decode (`Recovery::Bug`, as `Unreadable`).

@@ -6,8 +6,9 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use annals::next::contract::{cover, page};
-use annals::next::v1::Snapshot;
-use annals::next::{AsyncEventStore, AsyncStore, AsyncUnitOfWork};
+use annals::next::v1::{Cover, Snapshot};
+use annals::next::{AsyncEventStore, AsyncStore, AsyncUnitOfWork, StoreError};
+use annals_diagnostic::Diagnostic;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection};
 use sqlx::{ConnectOptions, Connection};
 
@@ -123,7 +124,24 @@ async fn stores_opening_a_new_file_at_once_all_open_it_migrated() {
     }
 }
 
-// ------------------------------------------------------------ journal mode
+// ------------------------------------------------- opening, by those who read
+
+/// What a reader that answers empty for a store never written does: `list`
+/// on a project with no database.
+async fn tasks_in(path: &Path) -> Result<Vec<Cover>, StoreError> {
+    match SqliteStore::open_existing(path).await? {
+        None => Ok(vec![]),
+        Some(mut store) => store.covers("tasks").await,
+    }
+}
+
+/// The code of the report `error` carries, if it is the store's own failure.
+fn code(error: &StoreError) -> Option<&'static str> {
+    match error {
+        StoreError::Unavailable(report) => Some(report.code()),
+        _ => None,
+    }
+}
 
 /// A connection of the test's own, under the store's feet.
 async fn raw(path: &Path) -> SqliteConnection {
@@ -157,6 +175,141 @@ async fn migrated_in_rollback_mode(path: &Path) {
 }
 
 #[tokio::test]
+async fn reading_a_store_never_written_finds_nothing_and_creates_nothing() {
+    let path = database();
+    assert!(matches!(SqliteStore::open_existing(&path).await, Ok(None)));
+    assert_eq!(tasks_in(&path).await, Ok(vec![]));
+    assert!(!path.exists());
+    let nested = database().join("no-such-directory").join("state.db");
+    assert!(matches!(
+        SqliteStore::open_existing(&nested).await,
+        Ok(None)
+    ));
+}
+
+#[tokio::test]
+async fn reading_what_is_there_but_no_database_fails() {
+    let dir = database();
+    std::fs::create_dir(&dir).unwrap();
+    let opened = SqliteStore::open_existing(&dir).await.map(drop);
+    std::fs::remove_dir(&dir).unwrap();
+    assert_eq!(
+        opened.map_err(|e| code(&e)),
+        Err(Some("annals-store-sql-unavailable"))
+    );
+}
+
+#[tokio::test]
+async fn reading_finds_what_was_written() {
+    let path = database();
+    let stream = cover("tasks", 1);
+    {
+        let mut store = SqliteStore::open(&path).await.unwrap();
+        store.append(&stream, 0, &[page(0, 1)]).await.unwrap();
+    }
+    assert_eq!(tasks_in(&path).await, Ok(vec![stream]));
+    remove(&path);
+}
+
+#[tokio::test]
+async fn a_read_only_file_in_a_read_only_directory_opens_for_reading() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = database();
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("state.db");
+    let stream = cover("tasks", 1);
+    {
+        let mut store = SqliteStore::open(&path).await.unwrap();
+        store.append(&stream, 0, &[page(0, 1)]).await.unwrap();
+    }
+    let mode = |path: &Path, mode| {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap()
+    };
+    mode(&path, 0o444);
+    mode(&dir, 0o555);
+    let mut store = SqliteStore::open_existing(&path).await.unwrap().unwrap();
+    let read = store.read_from(&stream, 0).await;
+    let written = store.append(&stream, 1, &[page(1, 2)]).await;
+    drop(store);
+    mode(&dir, 0o755);
+    mode(&path, 0o644);
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(read.unwrap().unwrap().pages, [page(0, 1)]);
+    assert_eq!(
+        written.as_ref().map_err(code),
+        Err(Some("annals-store-sql-unavailable"))
+    );
+}
+
+#[tokio::test]
+async fn reading_an_unmigrated_file_fails_and_leaves_it_unmigrated() {
+    let path = database();
+    std::fs::write(&path, b"").unwrap();
+    let opened = SqliteStore::open_existing(&path).await;
+    assert_eq!(
+        opened.as_ref().err().and_then(code),
+        Some("annals-store-sql-unmigrated")
+    );
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+    remove(&path);
+}
+
+/// Each way a database's applied migrations can disagree with this build's,
+/// which sqlx's migrator refuses: neither open passes it by.
+#[tokio::test]
+async fn a_database_whose_migrations_disagree_opens_neither_way() {
+    for tamper in [
+        "UPDATE _sqlx_migrations SET success = FALSE",
+        "UPDATE _sqlx_migrations SET checksum = x'00'",
+        "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time) \
+         VALUES (9999, 'from a newer build', TRUE, x'00', 0)",
+    ] {
+        let path = database();
+        drop(SqliteStore::open(&path).await.unwrap());
+        let mut conn = raw(&path).await;
+        sqlx::query(tamper).execute(&mut conn).await.unwrap();
+        conn.close().await.unwrap();
+        let written = SqliteStore::open(&path).await.map(drop);
+        let read = SqliteStore::open_existing(&path).await.map(drop);
+        remove(&path);
+        assert_eq!(
+            written.map_err(|e| code(&e)),
+            Err(Some("annals-store-sql-unavailable")),
+            "{tamper}"
+        );
+        assert_eq!(
+            read.map_err(|e| code(&e)),
+            Err(Some("annals-store-sql-unavailable")),
+            "{tamper}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_store_opens_and_reads_while_another_holds_the_write_lock() {
+    // No open takes the write lock once the file is migrated, so neither
+    // waits on a writer; WAL lets both read past its uncommitted write.
+    let path = database();
+    let stream = cover("tasks", 1);
+    let mut writer = SqliteStore::open(&path).await.unwrap();
+    let mut unit = writer.begin().await;
+    unit.append(&stream, 0, &[page(0, 1)]).await.unwrap();
+
+    let mut reader = SqliteStore::open(&path).await.unwrap();
+    assert_eq!(reader.read_from(&stream, 0).await, Ok(None));
+    let mut read_only = SqliteStore::open_existing(&path).await.unwrap().unwrap();
+    assert_eq!(read_only.read_from(&stream, 0).await, Ok(None));
+
+    unit.commit().await.unwrap();
+    assert_eq!(reader.covers("tasks").await, Ok(vec![stream.clone()]));
+    assert_eq!(read_only.covers("tasks").await, Ok(vec![stream]));
+    drop((writer, reader, read_only));
+    remove(&path);
+}
+
+// ------------------------------------------------------------ journal mode
+
+#[tokio::test]
 async fn an_opened_file_is_in_wal_mode() {
     let path = database();
     drop(SqliteStore::open(&path).await.unwrap());
@@ -188,6 +341,15 @@ async fn moving_into_wal_waits_for_a_writer_to_let_go() {
     drop(opened.unwrap());
     drop(writer);
     assert_eq!(journal_mode(&path).await, "wal");
+    remove(&path);
+}
+
+#[tokio::test]
+async fn reading_a_file_in_rollback_mode_leaves_its_journal_mode() {
+    let path = database();
+    migrated_in_rollback_mode(&path).await;
+    assert_eq!(tasks_in(&path).await, Ok(vec![]));
+    assert_eq!(journal_mode(&path).await, "delete");
     remove(&path);
 }
 
