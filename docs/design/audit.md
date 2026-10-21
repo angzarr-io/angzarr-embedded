@@ -752,6 +752,16 @@ No store keeps an edition registry yet, so none has created an edition, and
 every read unit reads main alone. The contract checks it once, in the read
 section.
 
+On SQLite a store's file is kept in WAL: without it a read of one moment,
+or a read-only unit of work, would wait on a writer and hold one up. So
+reading a store needs a directory the reader can write, even though it
+writes nothing: SQLite reads a WAL file through its `-wal` and `-shm`
+files beside it and makes them if they are absent. In a directory the
+reader cannot write, `open_existing` opens the file only while a writer
+holds it open; once the last writer closes it, the open fails. A store on
+a read-only mount is the caller's to arrange with its own tooling (a copy
+somewhere writable, say); annals does not read one.
+
 ### Watching for commits
 
 ```rust

@@ -98,11 +98,19 @@ impl SqliteStore {
     /// The database at `path` opened read-only, or `None` if there is no
     /// file there: nothing is created, migrated, or moved into WAL, so a
     /// read-only file opens. Every write to the store fails
-    /// (`annals-store-sql-unavailable`). In a directory this process cannot
-    /// write, a file in WAL opens only while its `-wal` and `-shm` files are
-    /// there (a writer has it open): SQLite cannot read it without them, and
-    /// cannot make them there, so once the last writer closes it the open
-    /// fails (`annals-store-sql-unavailable`).
+    /// (`annals-store-sql-unavailable`).
+    ///
+    /// A store's file is in WAL, so reading it needs a directory this
+    /// process can write, even though nothing is written: SQLite reads a
+    /// WAL file through its `-wal` and `-shm` files beside it, and makes
+    /// them if they are not there. In a directory it cannot write, the file
+    /// opens only while a writer holds it open, and so keeps those files
+    /// there; once the last writer closes it, the open fails
+    /// (`annals-store-sql-unavailable`). WAL is kept because without it a
+    /// read of one moment, or a read-only unit of work, would wait on a
+    /// writer and hold one up. A store on a read-only mount is the caller's
+    /// to arrange with its own tooling (copying the file somewhere
+    /// writable, say): this store does not read one.
     ///
     /// A file is opened once it is *usable*: it holds a committed database
     /// with every one of this build's migrations applied. A file that holds
