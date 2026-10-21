@@ -67,6 +67,8 @@
 
 mod check;
 mod conflict;
+#[cfg(feature = "contract")]
+pub mod contract;
 mod coordinator;
 mod dead_letter;
 mod domain;
@@ -108,7 +110,7 @@ pub use reaction::{
 };
 pub use registry::{Misconfigured, Registry};
 pub use store::{
-    AsyncEventStore, AsyncUnitOfWork, EventStore, InMemoryStore, InMemoryTx, Ready, Slice,
+    AsyncEventStore, AsyncUnitOfWork, EventStore, InMemoryStore, InMemoryTx, Ready, Slice, Store,
     UnitOfWork,
 };
 pub use stream::{Envelope, Executed, Stream};

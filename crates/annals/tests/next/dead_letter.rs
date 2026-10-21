@@ -70,7 +70,7 @@ fn a_panicking_ingest_aborts_the_chain_and_is_logged() {
         Failure::Kernel(KernelError::IngestPanicked { .. })
     ));
     assert_eq!(failure.recovery(), annals::next::Recovery::Bug);
-    assert!(store.covers().is_empty(), "nothing written");
+    assert!(store.streams().is_empty(), "nothing written");
     let lines = log.lines();
     assert_eq!(lines.len(), 1);
     assert!(lines[0].starts_with(DEAD_LETTER_PREFIX));

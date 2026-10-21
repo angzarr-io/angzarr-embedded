@@ -605,13 +605,23 @@ pub trait EventStore {
     fn read(&mut self, stream: &Cover) -> Result<Option<Slice>, StoreError>;      // from 0
     fn find_command(&mut self, stream: &Cover, command_id: &Uuid) -> Result<Vec<EventPage>, StoreError>;
     fn find_triggered(&mut self, stream: &Cover, trigger: &EventRef) -> Result<Vec<EventPage>, StoreError>; // PMs; none by default
+    fn covers(&mut self, domain: &str) -> Result<Vec<Cover>, StoreError>;   // a domain's streams: main first, then by edition, each by root
     fn read_snapshot(&mut self, stream: &Cover) -> Result<Option<Snapshot>, StoreError>;  // none by default
     fn write_snapshot(&mut self, stream: &Cover, snapshot: &Snapshot) -> Result<(), StoreError>;
 }
 pub trait UnitOfWork: EventStore { fn commit(self) -> Result<(), StoreError>; }
+pub trait Store: EventStore { type Unit<'s>: UnitOfWork where Self: 's; fn begin(&mut self) -> Self::Unit<'_>; }
 pub struct Slice { pub stream: Cover, pub next_sequence: u64, pub last_recorded_at: Option<Timestamp>, pub pages: Vec<EventPage> }
 // AsyncEventStore / AsyncUnitOfWork: the same, Send futures; Ready<S> serves a sync store async.
 ```
+
+**`covers`** enumerates a domain's streams: what a projector reads to
+catch up, with the store as the collection's scope (an application keeps
+one store per collection, as ctxloom keeps one per project). It promises no
+order across streams beyond its listing order; a projector numbers its own
+changes. **The store contract** (`annals::next::contract`, feature
+`contract`) is every store's tests: `store_contract!(fresh_store)` expands
+to one test per check, and `InMemoryStore` runs it in annals' own tests.
 
 **Opaque.** A store holds angzarr's pages as written and never decodes a
 payload; upcasting is the kernel's, on every read. The Postgres shape:

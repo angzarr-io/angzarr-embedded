@@ -117,6 +117,11 @@ pub trait EventStore {
         Ok(Vec::new())
     }
 
+    /// Every stream of `domain` holding at least one page, in every edition:
+    /// the main timeline's first, then each edition's in name order, each by
+    /// root (as bytes). What a projector enumerates to catch a domain up.
+    fn covers(&mut self, domain: &str) -> Result<Vec<Cover>, StoreError>;
+
     /// The newest snapshot of `stream`, if any. None kept by default. The
     /// kernel checks it is usable ([`Registry::snapshot_usable`](super::Registry::snapshot_usable)).
     fn read_snapshot(&mut self, _stream: &Cover) -> Result<Option<Snapshot>, StoreError> {
@@ -135,6 +140,17 @@ pub trait EventStore {
 /// through it see its own appends.
 pub trait UnitOfWork: EventStore {
     fn commit(self) -> Result<(), StoreError>;
+}
+
+/// A store that opens units of work: what an application holds, and what
+/// the store contract (`annals::next::contract`) runs against.
+pub trait Store: EventStore {
+    type Unit<'s>: UnitOfWork
+    where
+        Self: 's;
+
+    /// A unit of work over this store: appends land at its commit.
+    fn begin(&mut self) -> Self::Unit<'_>;
 }
 
 /// [`EventStore`], async: for a database driver. Native return-position
@@ -167,6 +183,12 @@ pub trait AsyncEventStore {
         stream: &Cover,
         command_id: &Uuid,
     ) -> impl Future<Output = Result<Vec<EventPage>, StoreError>> + Send;
+
+    /// As [`EventStore::covers`].
+    fn covers(
+        &mut self,
+        domain: &str,
+    ) -> impl Future<Output = Result<Vec<Cover>, StoreError>> + Send;
 
     /// As [`EventStore::read_snapshot`].
     fn read_snapshot(
@@ -215,6 +237,10 @@ impl<S: EventStore + Send> AsyncEventStore for Ready<S> {
         command_id: &Uuid,
     ) -> Result<Vec<EventPage>, StoreError> {
         self.0.find_command(stream, command_id)
+    }
+
+    async fn covers(&mut self, domain: &str) -> Result<Vec<Cover>, StoreError> {
+        self.0.covers(domain)
     }
 
     async fn read_snapshot(&mut self, stream: &Cover) -> Result<Option<Snapshot>, StoreError> {
@@ -321,8 +347,8 @@ impl InMemoryStore {
         Self::default()
     }
 
-    /// Every stream's cover, in key order.
-    pub fn covers(&self) -> Vec<Cover> {
+    /// Every stream's cover, in every domain, in key order.
+    pub fn streams(&self) -> Vec<Cover> {
         self.streams.values().map(|h| h.stream.clone()).collect()
     }
 
@@ -378,6 +404,17 @@ impl EventStore for InMemoryStore {
             .iter()
             .filter(|p| produced_by(p, command_id))
             .cloned()
+            .collect())
+    }
+
+    fn covers(&mut self, domain: &str) -> Result<Vec<Cover>, StoreError> {
+        // Key order is the port's: main (no edition) first, then each
+        // edition by name, each by root.
+        Ok(self
+            .streams
+            .iter()
+            .filter(|(k, _)| k.0 == domain)
+            .map(|(_, held)| held.stream.clone())
             .collect())
     }
 
@@ -445,6 +482,16 @@ impl EventStore for InMemoryTx<'_> {
         Ok(pages)
     }
 
+    fn covers(&mut self, domain: &str) -> Result<Vec<Cover>, StoreError> {
+        // The store's streams and this unit's new ones, merged in key order.
+        let held = self.store.streams.iter().chain(&self.pending);
+        let covers: BTreeMap<&Key, &Cover> = held
+            .filter(|(k, _)| k.0 == domain)
+            .map(|(k, held)| (k, &held.stream))
+            .collect();
+        Ok(covers.into_values().cloned().collect())
+    }
+
     fn read_snapshot(&mut self, stream: &Cover) -> Result<Option<Snapshot>, StoreError> {
         self.store.read_snapshot(stream)
     }
@@ -458,6 +505,14 @@ impl UnitOfWork for InMemoryTx<'_> {
             store.append(&held.stream, length, &held.pages)?;
         }
         Ok(())
+    }
+}
+
+impl Store for InMemoryStore {
+    type Unit<'s> = InMemoryTx<'s>;
+
+    fn begin(&mut self) -> InMemoryTx<'_> {
+        InMemoryStore::begin(self)
     }
 }
 

@@ -701,7 +701,7 @@ fn a_policy_book_for_an_unregistered_target_is_a_dead_lettered_bug() {
         "{}",
         lines[0]
     );
-    assert!(store.covers().is_empty());
+    assert!(store.streams().is_empty());
 
     let order_store = &mut InMemoryStore::new();
     crate::toys::opened(order_store, &crate::toys::registry(), 1, 0);

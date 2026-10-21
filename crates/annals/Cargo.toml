@@ -20,5 +20,13 @@ angzarr-proto = { git = "https://github.com/angzarr-io/angzarr-project", rev = "
 prost = "0.14"
 prost-types = "0.14"
 
+[features]
+# The store contract (`annals::next::contract`), for a store's tests.
+contract = []
+
+# annals' own tests run the store contract against InMemoryStore.
+[dev-dependencies]
+annals = { path = ".", features = ["contract"] }
+
 [lints]
 workspace = true

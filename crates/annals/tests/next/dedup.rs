@@ -145,7 +145,7 @@ fn a_rejection_leaves_nothing_and_a_retry_runs_again() {
         refused,
         Err(Failure::Rejected(crate::toys::Refused::NotOpen))
     ));
-    assert!(store.covers().is_empty());
+    assert!(store.streams().is_empty());
 
     opened(&mut store, &registry, 1, 0);
     let retried = handle::<crate::toys::Account>(&mut store, &registry, early(), &at(20)).unwrap();
@@ -206,6 +206,13 @@ impl annals::next::EventStore for CommitLandsAfterFirstRead<'_> {
             pages.retain(|p| p.sequence < self.before);
         }
         Ok(pages)
+    }
+
+    fn covers(
+        &mut self,
+        domain: &str,
+    ) -> Result<Vec<annals::next::v1::Cover>, annals::next::StoreError> {
+        self.store.covers(domain)
     }
 }
 
