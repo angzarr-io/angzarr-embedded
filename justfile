@@ -26,8 +26,8 @@ import? '.gates/gates.just'
 # hand-written library code whose behaviour its tests reach in-process
 # (annals-store-sql's SQLite backend included), so every crate is held to the
 # same bar. annals-log's generated protobuf (gen/) is not a tier: it is
-# reached only from a `#[cfg(test)]` module, which cargo-mutants never
-# mutates (.cargo/mutants.toml).
+# reached only from a test file, and .cargo/mutants.toml mutates no test
+# file.
 mutation_thresholds := "crates/annals=90 crates/annals-catalog-check=90 crates/annals-diagnostic=90 crates/annals-graph=90 crates/annals-log=90 crates/annals-sim=90 crates/annals-store-sql=90 crates/annals-yaml=90"
 
 # Staged paths outside any crate that test the whole workspace. buf's files

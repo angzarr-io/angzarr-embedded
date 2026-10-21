@@ -285,3 +285,122 @@ fn an_overlong_varint_is_refused() {
         Err(Error::BadLength)
     ));
 }
+
+#[test]
+fn a_length_of_exactly_the_limit_is_allowed() {
+    let mut bytes = log_bytes();
+    // MAX_MESSAGE_LEN as a varint, then nothing: allowed, so truncated.
+    let mut n = MAX_MESSAGE_LEN;
+    while n >= 0x80 {
+        bytes.push(n as u8 | 0x80);
+        n >>= 7;
+    }
+    bytes.push(n as u8);
+    assert!(matches!(
+        read_log::<CounterEvent, _>(bytes.as_slice()),
+        Err(Error::Truncated)
+    ));
+}
+
+#[test]
+fn a_length_whose_tenth_byte_is_0_or_1_is_a_varint() {
+    // Ten bytes, the tenth 0: a long way to write 0, the header's length.
+    let mut zero = vec![0x80; 9];
+    zero.push(0x00);
+    let r = Reader::new(zero.as_slice()).expect("an empty header");
+    assert_eq!(r.position(), 10);
+    // The tenth byte 2 would set a bit past 64.
+    let mut over = vec![0xff; 9];
+    over.push(0x02);
+    assert!(matches!(
+        Reader::new(over.as_slice()),
+        Err(Error::BadLength)
+    ));
+}
+
+#[test]
+fn input_that_ends_inside_a_length_is_truncated() {
+    let mut bytes = log_bytes();
+    bytes.push(0x80);
+    assert!(matches!(
+        read_log::<CounterEvent, _>(bytes.as_slice()),
+        Err(Error::Truncated)
+    ));
+}
+
+/// Reads `bytes`, but first fails once with `kind`.
+struct FailsOnce<'a> {
+    kind: Option<io::ErrorKind>,
+    bytes: &'a [u8],
+}
+
+impl Read for FailsOnce<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if let Some(kind) = self.kind.take() {
+            return Err(io::Error::from(kind));
+        }
+        self.bytes.read(buf)
+    }
+}
+
+#[test]
+fn an_interrupted_read_is_retried() {
+    let bytes = log_bytes();
+    let input = FailsOnce {
+        kind: Some(io::ErrorKind::Interrupted),
+        bytes: &bytes,
+    };
+    assert_eq!(Reader::new(input).expect("header").header(), &header());
+}
+
+#[test]
+fn any_other_failed_read_is_an_error() {
+    let bytes = log_bytes();
+    let input = FailsOnce {
+        kind: Some(io::ErrorKind::BrokenPipe),
+        bytes: &bytes,
+    };
+    match Reader::new(input) {
+        Err(Error::Io(e)) => assert_eq!(e.kind(), io::ErrorKind::BrokenPipe),
+        Err(e) => panic!("{e}"),
+        Ok(_) => panic!("read past a failure"),
+    }
+}
+
+#[test]
+fn an_error_s_source_is_the_error_it_wraps() {
+    use std::error::Error as _;
+    let io = Error::Io(io::Error::other("disk"));
+    assert_eq!(io.source().unwrap().to_string(), "disk");
+    let decode_error = Envelope::decode(&[0xff][..]).unwrap_err();
+    let shown = decode_error.to_string();
+    let decode = Error::Decode(decode_error);
+    assert_eq!(decode.source().unwrap().to_string(), shown);
+    let replay = annals::ReplayError::OutOfSequence { index: 1, found: 4 };
+    let shown = replay.to_string();
+    let sequence = Error::Sequence(replay);
+    assert_eq!(sequence.source().unwrap().to_string(), shown);
+    assert!(Error::Empty.source().is_none());
+}
+
+#[test]
+fn write_log_flushes_what_it_wrote() {
+    #[derive(Default)]
+    struct Flushed {
+        bytes: Vec<u8>,
+        flushed: usize,
+    }
+    impl io::Write for Flushed {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.bytes.write(buf)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            self.flushed = self.bytes.len();
+            Ok(())
+        }
+    }
+    let s = counted();
+    let out = write_log(Flushed::default(), s.header(), s.events()).expect("writes");
+    assert_eq!(out.flushed, out.bytes.len());
+    assert_eq!(out.bytes, log_bytes());
+}
