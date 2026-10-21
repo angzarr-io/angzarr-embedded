@@ -19,6 +19,19 @@
 //! `async_store_contract!(purge, #[tokio::test], fresh_store)`. A store that
 //! cannot purge runs only the rest.
 //!
+//! A store that opens read-only units of work
+//! ([`AsyncReadStore`](super::AsyncReadStore), or
+//! [`ReadStore`](super::ReadStore) through `Ready`) also runs the read
+//! checks, another opt-in section. Each takes two handles on one fresh,
+//! empty store, a reader and a writer (`(reader, writer)`), and writes
+//! through the writer while the reader's unit is open, between its reads,
+//! so a unit that does not read one moment is caught rather than lucky.
+//! `store_contract!(read, fresh_pair)` runs them on a synchronous store; an
+//! async store calls each check itself with its pair (as annals-store-sql's
+//! tests do), so it can remove whatever the pair made once the check is
+//! done: two handles on one store are two connections to one database,
+//! which a test makes on a file.
+//!
 //! Each check takes a fresh, empty store and panics, naming what failed.
 //! The pages are opaque to a store, so the checks write their own: a store
 //! never decodes a payload.
@@ -30,7 +43,9 @@ use angzarr_proto::v1::{Cover, EventMeta, EventPage, Snapshot, Uuid};
 use prost_types::{Any, Timestamp};
 
 use super::error::StoreError;
-use super::store::{AsyncEventStore, AsyncPurge, AsyncStore, AsyncUnitOfWork};
+use super::store::{
+    AsyncEventStore, AsyncPurge, AsyncReadStore, AsyncReadUnit, AsyncStore, AsyncUnitOfWork,
+};
 
 /// Complete a future whose every await is ready at once: a check run over a
 /// synchronous store through [`Ready`](super::Ready).
@@ -496,13 +511,95 @@ where
     assert_eq!(store.covers("account").await, Ok(vec![stream]));
 }
 
+// ------------------------------------------------------------ read (opt-in)
+
+pub async fn a_read_unit_sees_the_store_as_it_began<R, W>((mut reader, mut writer): (R, W))
+where
+    R: AsyncReadStore,
+    W: AsyncEventStore,
+{
+    let early = cover("account", 1);
+    let late = cover("account", 2);
+    writer.append(&early, 0, &[page(0, 1)]).await.unwrap();
+    let mut reads = reader.begin_read().await;
+    // Written after the unit began, before its first read.
+    writer.append(&early, 1, &[page(1, 2)]).await.unwrap();
+    writer.append(&late, 0, &[page(0, 2)]).await.unwrap();
+    assert_eq!(
+        reads.covers("account").await,
+        Ok(vec![early.clone()]),
+        "covers as the unit began"
+    );
+    // Written between the unit's reads.
+    writer.append(&early, 2, &[page(2, 3)]).await.unwrap();
+    let slice = reads.read_from(&early, 0).await.unwrap().unwrap();
+    assert_eq!(slice.pages, [page(0, 1)], "pages as the unit began");
+    assert_eq!(slice.next_sequence, 1);
+    assert_eq!(slice.last_recorded_at, Some(at(0)));
+    let tail = reads.read_from(&early, 1).await.unwrap().unwrap();
+    assert_eq!((tail.next_sequence, tail.pages), (1, vec![]), "its end");
+    assert_eq!(
+        reads.read_from(&late, 0).await,
+        Ok(None),
+        "a stream begun after"
+    );
+    drop(reads);
+    let mut later = reader.begin_read().await;
+    assert_eq!(later.covers("account").await, Ok(vec![early.clone(), late]));
+    let slice = later.read_from(&early, 0).await.unwrap().unwrap();
+    assert_eq!(slice.pages, [page(0, 1), page(1, 2), page(2, 3)]);
+    assert_eq!(slice.last_recorded_at, Some(at(2)));
+}
+
+pub async fn a_read_unit_keeps_a_stream_purged_after_it_began<R, W>(
+    (mut reader, mut writer): (R, W),
+) where
+    R: AsyncReadStore,
+    W: AsyncPurge,
+{
+    let purged = cover("account", 1);
+    let kept = cover("account", 2);
+    writer
+        .append(&purged, 0, &[page(0, 1), page(1, 2)])
+        .await
+        .unwrap();
+    writer.append(&kept, 0, &[page(0, 3)]).await.unwrap();
+    let mut reads = reader.begin_read().await;
+    let listed = reads.covers("account").await.unwrap();
+    assert_eq!(listed, [purged.clone(), kept.clone()]);
+    // Purged between the listing and the reads of what it listed.
+    assert_eq!(writer.purge(&purged).await, Ok(2));
+    let slice = reads.read_from(&purged, 0).await.unwrap().unwrap();
+    assert_eq!(
+        slice.pages,
+        [page(0, 1), page(1, 2)],
+        "whole, never a stream holding none of its events"
+    );
+    assert_eq!(slice.next_sequence, 2);
+    assert_eq!(slice.last_recorded_at, Some(at(1)));
+    assert_eq!(reads.covers("account").await, Ok(listed), "listed still");
+    drop(reads);
+    let mut later = reader.begin_read().await;
+    assert_eq!(later.covers("account").await, Ok(vec![kept]));
+    assert_eq!(later.read_from(&purged, 0).await, Ok(None));
+}
+
 /// One `#[test]` per contract check, each on a fresh synchronous store from
 /// `$fresh` (an expression evaluated once per test), run through
 /// [`Ready`](crate::next::Ready). `store_contract!(purge, $fresh)` runs the
 /// purge checks instead, for a store and unit of work that implement
 /// [`Purge`](crate::next::Purge): a store that purges invokes both.
+/// `store_contract!(read, $pair)` runs the read checks, for a store that
+/// implements [`ReadStore`](crate::next::ReadStore), on a fresh
+/// `(reader, writer)` pair from `$pair`: two handles on one empty store.
 #[macro_export]
 macro_rules! store_contract {
+    (read, $pair:expr) => {
+        $crate::store_contract!(@pair $pair;
+            a_read_unit_sees_the_store_as_it_began,
+            a_read_unit_keeps_a_stream_purged_after_it_began,
+        );
+    };
     (purge, $fresh:expr) => {
         $crate::store_contract!(@each $fresh;
             a_purge_deletes_a_streams_events_snapshot_and_command_ids,
@@ -525,6 +622,18 @@ macro_rules! store_contract {
             a_read_past_the_end_is_empty_but_knows_the_end,
             a_store_keeps_the_newest_snapshot_per_stream,
         );
+    };
+    (@pair $pair:expr; $($check:ident),* $(,)?) => {
+        $(
+            #[test]
+            fn $check() {
+                let (reader, writer) = $pair;
+                $crate::next::contract::block($crate::next::contract::$check((
+                    $crate::next::Ready(reader),
+                    $crate::next::Ready(writer),
+                )));
+            }
+        )*
     };
     (@each $fresh:expr; $($check:ident),* $(,)?) => {
         $(

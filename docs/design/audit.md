@@ -635,7 +635,10 @@ port: `store_contract!(fresh_store)` runs them on a synchronous store through
 caller's runtime; one test per check. `InMemoryStore` runs it in annals'
 own tests. A store that purges also runs the opt-in purge section:
 `store_contract!(purge, fresh_store)`,
-`async_store_contract!(purge, #[tokio::test], fresh_store)`.
+`async_store_contract!(purge, #[tokio::test], fresh_store)`. A store that
+reads one moment (below) also runs the opt-in read section:
+`store_contract!(read, fresh_pair)` on a synchronous store, and an async
+store calls each read check with its pair itself.
 
 **Opaque.** A store holds angzarr's pages as written and never decodes a
 payload; upcasting is the kernel's, on every read. The Postgres shape:
@@ -687,6 +690,42 @@ purge is purged with the rest; an append whose expected length was read
 before the purge committed fails `StoreError::Conflict` against the empty
 stream, and run again it starts a new stream from sequence 0. A purge
 undoes deduplication for the stream (step 3's accepted costs).
+
+### Reading one moment
+
+```rust
+pub trait ReadUnit {
+    fn covers(&mut self, domain: &str) -> Result<Vec<Cover>, StoreError>;
+    fn read_from(&mut self, stream: &Cover, from: u64) -> Result<Option<Slice>, StoreError>;
+    fn read(&mut self, stream: &Cover) -> Result<Option<Slice>, StoreError>;   // from 0
+}
+pub trait ReadStore { type Reads<'s>: ReadUnit + Send where Self: 's; fn begin_read(&mut self) -> Self::Reads<'_>; }
+pub trait AsyncReadUnit {
+    fn covers(&mut self, domain: &str) -> impl Future<Output = Result<Vec<Cover>, StoreError>> + Send;
+    fn read_from(&mut self, stream: &Cover, from: u64) -> impl Future<Output = Result<Option<Slice>, StoreError>> + Send;
+}
+pub trait AsyncReadStore { type Reads<'s>: AsyncReadUnit + Send where Self: 's; fn begin_read(&mut self) -> impl Future<Output = Self::Reads<'_>> + Send; }
+```
+
+Each read a store answers is one moment: a `read_from` never gives a
+length its pages do not reach, whatever commits while it runs. A run of
+reads is not: a reader that lists `covers(domain)` and then reads each
+stream would show each stream as of its own read, and a stream purged
+between the listing and its read would be listed and then missing. A
+reader that shows several streams together takes a **read-only unit of
+work** instead: `begin_read` opens one, and every read through it sees the
+store as it stood when it began. A write or a purge committed after,
+through any handle on the database, is not seen; a stream purged after is
+read whole. The unit writes nothing and takes no write lock, so it waits
+on no writer and no writer waits on it, and a store opened only for
+reading can open one. Dropping it ends it.
+
+It is opt-in, like purging, and needs no other store trait. `Ready`
+serves a synchronous `ReadStore` as an `AsyncReadStore`. `InMemoryStore`'s
+unit borrows the store, so nothing changes under it. The contract's read
+checks take a reader and a writer on one store and write through the
+writer while the reader's unit is open, after it began and between its
+reads, so a unit that reads live fails them.
 
 ## Snapshots
 

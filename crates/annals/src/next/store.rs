@@ -40,6 +40,14 @@
 //! its command ids in one unit of work. A store that does not is
 //! append-only by type.
 //!
+//! **Reading one moment** is opt-in too: a store that can hold reads to one
+//! moment implements [`ReadStore`] (or [`AsyncReadStore`]), whose read-only
+//! unit of work ([`ReadUnit`]) answers every read as the store stood when
+//! it began. A reader takes one to list a domain's streams and read each,
+//! so a write or a purge landing in between cannot mix two moments in what
+//! it shows. It writes nothing and takes no write lock. Each read on the
+//! store itself is one moment already; only a run of them needs the unit.
+//!
 //! A command chain touches several streams and commits them all or none, so
 //! the port is a **unit of work**: a database transaction. The application
 //! opens one and hands it to the [`Kernel`](super::Kernel), which reads
@@ -254,6 +262,66 @@ pub trait AsyncPurge: AsyncEventStore {
     fn purge(&mut self, stream: &Cover) -> impl Future<Output = Result<u64, StoreError>> + Send;
 }
 
+/// A read-only unit of work: reads that all see one moment, the store as it
+/// stood when the unit began. Nothing written after, through this store or
+/// any other handle on its database, is seen through it, and a stream
+/// purged after it began is read whole. It writes nothing and takes no
+/// write lock, so it waits on no writer and no writer waits on it. It ends
+/// when it is dropped.
+pub trait ReadUnit {
+    /// As [`EventStore::covers`], at the unit's moment.
+    fn covers(&mut self, domain: &str) -> Result<Vec<Cover>, StoreError>;
+
+    /// As [`EventStore::read_from`], at the unit's moment.
+    fn read_from(&mut self, stream: &Cover, from: u64) -> Result<Option<Slice>, StoreError>;
+
+    /// The whole stream, at the unit's moment.
+    fn read(&mut self, stream: &Cover) -> Result<Option<Slice>, StoreError> {
+        self.read_from(stream, 0)
+    }
+}
+
+/// A store that opens read-only units of work: what a reader holds to list
+/// a domain's streams and read each of them as one moment, rather than each
+/// read seeing a moment of its own. A store opts in by implementing it; it
+/// needs no other store trait, so a store opened only for reading can.
+pub trait ReadStore {
+    type Reads<'s>: ReadUnit + Send
+    where
+        Self: 's;
+
+    /// A read-only unit of work over this store, its moment now.
+    fn begin_read(&mut self) -> Self::Reads<'_>;
+}
+
+/// [`ReadUnit`], async. Its futures are `Send`, like the async store's.
+pub trait AsyncReadUnit {
+    /// As [`ReadUnit::covers`].
+    fn covers(
+        &mut self,
+        domain: &str,
+    ) -> impl Future<Output = Result<Vec<Cover>, StoreError>> + Send;
+
+    /// As [`ReadUnit::read_from`].
+    fn read_from(
+        &mut self,
+        stream: &Cover,
+        from: u64,
+    ) -> impl Future<Output = Result<Option<Slice>, StoreError>> + Send;
+}
+
+/// [`ReadStore`], async: a store whose read-only units of work are a
+/// database driver's read transactions. Beginning one is a future; a
+/// failure to begin is answered by the unit's reads.
+pub trait AsyncReadStore {
+    type Reads<'s>: AsyncReadUnit + Send
+    where
+        Self: 's;
+
+    /// As [`ReadStore::begin_read`].
+    fn begin_read(&mut self) -> impl Future<Output = Self::Reads<'_>> + Send;
+}
+
 /// A synchronous store served through the async port, every future ready
 /// at once.
 pub struct Ready<S>(pub S);
@@ -306,6 +374,27 @@ impl<S: UnitOfWork + Send> AsyncUnitOfWork for Ready<S> {
 impl<S: Purge + Send> AsyncPurge for Ready<S> {
     async fn purge(&mut self, stream: &Cover) -> Result<u64, StoreError> {
         self.0.purge(stream)
+    }
+}
+
+impl<S: ReadUnit + Send> AsyncReadUnit for Ready<S> {
+    async fn covers(&mut self, domain: &str) -> Result<Vec<Cover>, StoreError> {
+        self.0.covers(domain)
+    }
+
+    async fn read_from(&mut self, stream: &Cover, from: u64) -> Result<Option<Slice>, StoreError> {
+        self.0.read_from(stream, from)
+    }
+}
+
+impl<S: ReadStore + Send> AsyncReadStore for Ready<S> {
+    type Reads<'s>
+        = Ready<S::Reads<'s>>
+    where
+        Self: 's;
+
+    async fn begin_read(&mut self) -> Ready<S::Reads<'_>> {
+        Ready(self.0.begin_read())
     }
 }
 
@@ -425,6 +514,22 @@ impl InMemoryStore {
             .get(&key(stream))
             .map_or(&[], |h| h.pages.as_slice())
     }
+
+    fn slice_from(&self, stream: &Cover, from: u64) -> Option<Slice> {
+        self.streams
+            .get(&key(stream))
+            .map(|h| slice(&h.stream, &h.pages, from))
+    }
+
+    fn covers_of(&self, domain: &str) -> Vec<Cover> {
+        // Key order is the port's: main (no edition) first, then each
+        // edition by name, each by root.
+        self.streams
+            .iter()
+            .filter(|(k, _)| k.0 == domain)
+            .map(|(_, held)| held.stream.clone())
+            .collect()
+    }
 }
 
 impl EventStore for InMemoryStore {
@@ -447,10 +552,7 @@ impl EventStore for InMemoryStore {
     }
 
     fn read_from(&mut self, stream: &Cover, from: u64) -> Result<Option<Slice>, StoreError> {
-        Ok(self
-            .streams
-            .get(&key(stream))
-            .map(|h| slice(&h.stream, &h.pages, from)))
+        Ok(self.slice_from(stream, from))
     }
 
     fn find_command(
@@ -467,14 +569,7 @@ impl EventStore for InMemoryStore {
     }
 
     fn covers(&mut self, domain: &str) -> Result<Vec<Cover>, StoreError> {
-        // Key order is the port's: main (no edition) first, then each
-        // edition by name, each by root.
-        Ok(self
-            .streams
-            .iter()
-            .filter(|(k, _)| k.0 == domain)
-            .map(|(_, held)| held.stream.clone())
-            .collect())
+        Ok(self.covers_of(domain))
     }
 
     fn read_snapshot(&mut self, stream: &Cover) -> Result<Option<Snapshot>, StoreError> {
@@ -492,6 +587,29 @@ impl Purge for InMemoryStore {
         let k = key(stream);
         self.snapshots.remove(&k);
         Ok(self.streams.remove(&k).map_or(0, |h| h.pages.len() as u64))
+    }
+}
+
+impl ReadStore for InMemoryStore {
+    type Reads<'s> = InMemoryRead<'s>;
+
+    /// The unit borrows the store, so nothing is written while it is open.
+    fn begin_read(&mut self) -> InMemoryRead<'_> {
+        InMemoryRead(self)
+    }
+}
+
+/// A read-only unit of work over an [`InMemoryStore`]: it borrows the store,
+/// so the store cannot change under it.
+pub struct InMemoryRead<'s>(&'s InMemoryStore);
+
+impl ReadUnit for InMemoryRead<'_> {
+    fn covers(&mut self, domain: &str) -> Result<Vec<Cover>, StoreError> {
+        Ok(self.0.covers_of(domain))
+    }
+
+    fn read_from(&mut self, stream: &Cover, from: u64) -> Result<Option<Slice>, StoreError> {
+        Ok(self.0.slice_from(stream, from))
     }
 }
 
