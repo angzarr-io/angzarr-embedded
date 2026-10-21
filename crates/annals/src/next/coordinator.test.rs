@@ -81,6 +81,35 @@ mod dedup {
     }
 
     #[test]
+    fn a_creating_command_redelivered_after_a_purge_creates_its_stream_again() {
+        use crate::next::{EventStore, Purge};
+        let registry = registry();
+        let mut store = InMemoryStore::new();
+        let stream = cover("account", 1);
+        let open = || command(stream.clone(), AccountCmd::Open.to_any()).id(5);
+        handle::<crate::next::toys::Account>(&mut store, &registry, open(), &at(20)).unwrap();
+        let retry =
+            handle::<crate::next::toys::Account>(&mut store, &registry, open(), &at(21)).unwrap();
+        assert_eq!(retry.outcome().delivery, DeliveryOutcome::Duplicate as i32);
+
+        assert_eq!(store.purge(&stream), Ok(1));
+        let again =
+            handle::<crate::next::toys::Account>(&mut store, &registry, open(), &at(22)).unwrap();
+        assert_eq!(
+            again.outcome().delivery,
+            DeliveryOutcome::Applied as i32,
+            "the accepted cost: nothing left to find, so decided again"
+        );
+        assert_eq!(
+            payloads::<AccountEvent>(&again.books()),
+            [AccountEvent::Opened]
+        );
+        let slice = store.read(&stream).unwrap().unwrap();
+        assert_eq!(slice.next_sequence, 1, "a new stream, from sequence 0");
+        assert_eq!(slice.last_recorded_at.unwrap().seconds, 22);
+    }
+
+    #[test]
     fn a_reused_command_id_with_another_payload_is_answered_with_the_first() {
         let registry = registry();
         let mut store = InMemoryStore::new();

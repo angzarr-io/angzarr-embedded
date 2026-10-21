@@ -13,6 +13,12 @@
 //! Behind the `contract` feature: a store's crate enables it for its tests
 //! (`annals = { ..., features = ["contract"] }` under dev-dependencies).
 //!
+//! A store that can purge ([`AsyncPurge`](super::AsyncPurge), or
+//! [`Purge`](super::Purge) through `Ready`) also runs the purge checks, an
+//! opt-in section: `store_contract!(purge, fresh_store)`,
+//! `async_store_contract!(purge, #[tokio::test], fresh_store)`. A store that
+//! cannot purge runs only the rest.
+//!
 //! Each check takes a fresh, empty store and panics, naming what failed.
 //! The pages are opaque to a store, so the checks write their own: a store
 //! never decodes a payload.
@@ -24,7 +30,7 @@ use angzarr_proto::v1::{Cover, EventMeta, EventPage, Snapshot, Uuid};
 use prost_types::{Any, Timestamp};
 
 use super::error::StoreError;
-use super::store::{AsyncEventStore, AsyncStore, AsyncUnitOfWork};
+use super::store::{AsyncEventStore, AsyncPurge, AsyncStore, AsyncUnitOfWork};
 
 /// Complete a future whose every await is ready at once: a check run over a
 /// synchronous store through [`Ready`](super::Ready).
@@ -313,11 +319,193 @@ pub async fn a_store_keeps_the_newest_snapshot_per_stream<S: AsyncStore>(mut sto
     assert_eq!(unit.read_snapshot(&stream).await, Ok(Some(snapshot(4))));
 }
 
+// ----------------------------------------------------------- purge (opt-in)
+
+fn snapshot(sequence: u64) -> Snapshot {
+    Snapshot {
+        sequence,
+        state: None,
+        rules_version: "v1".to_string(),
+    }
+}
+
+/// Whether `stream` reads as never written: no pages, no snapshot, no
+/// command's events, and in no listing of its domain.
+async fn assert_gone<S: AsyncEventStore>(store: &mut S, stream: &Cover, what: &str) {
+    assert_eq!(store.read_from(stream, 0).await, Ok(None), "{what}: read");
+    assert_eq!(
+        store.read_snapshot(stream).await,
+        Ok(None),
+        "{what}: snapshot"
+    );
+    assert_eq!(
+        store.find_command(stream, &command(1)).await,
+        Ok(vec![]),
+        "{what}: command ids"
+    );
+    let covers = store.covers(&stream.domain).await.unwrap();
+    assert!(!covers.contains(stream), "{what}: covers {covers:?}");
+}
+
+pub async fn a_purge_deletes_a_streams_events_snapshot_and_command_ids<S>(mut store: S)
+where
+    S: AsyncStore + AsyncPurge,
+{
+    let purged = cover("account", 1);
+    let kept = cover("account", 2);
+    for stream in [&purged, &kept] {
+        store
+            .append(stream, 0, &[page(0, 1), page(1, 2)])
+            .await
+            .unwrap();
+        store.write_snapshot(stream, &snapshot(1)).await.unwrap();
+    }
+    assert_eq!(store.purge(&purged).await, Ok(2), "its two events");
+    assert_gone(&mut store, &purged, "purged").await;
+    assert_eq!(store.covers("account").await, Ok(vec![kept.clone()]));
+    assert_eq!(
+        store.read_from(&kept, 0).await.unwrap().unwrap().pages,
+        [page(0, 1), page(1, 2)],
+        "another stream untouched"
+    );
+    assert_eq!(store.read_snapshot(&kept).await, Ok(Some(snapshot(1))));
+    assert_eq!(
+        store.find_command(&kept, &command(1)).await,
+        Ok(vec![page(0, 1)])
+    );
+    assert_eq!(store.purge(&purged).await, Ok(0), "nothing left to purge");
+    assert_eq!(store.purge(&cover("account", 3)).await, Ok(0), "no stream");
+}
+
+pub async fn a_purge_deletes_a_snapshot_with_no_events<S>(mut store: S)
+where
+    S: AsyncStore + AsyncPurge,
+{
+    let stream = cover("account", 1);
+    store.write_snapshot(&stream, &snapshot(4)).await.unwrap();
+    assert_eq!(store.purge(&stream).await, Ok(0));
+    assert_eq!(store.read_snapshot(&stream).await, Ok(None));
+}
+
+pub async fn a_purged_stream_starts_again_from_nothing<S>(mut store: S)
+where
+    S: AsyncStore + AsyncPurge,
+{
+    // An append that raced the purge and lost, then one made after it: the
+    // stale writer is refused, and the stream begins again at sequence 0,
+    // its old command ids forgotten.
+    let stream = cover("account", 1);
+    store
+        .append(&stream, 0, &[page(0, 1), page(1, 1)])
+        .await
+        .unwrap();
+    store.purge(&stream).await.unwrap();
+    assert_eq!(
+        store.append(&stream, 2, &[page(2, 2)]).await,
+        Err(StoreError::Conflict {
+            stream: stream.clone(),
+            expected: 2,
+            actual: 0
+        })
+    );
+    assert_gone(&mut store, &stream, "after the refused append").await;
+    assert_eq!(store.append(&stream, 0, &[page(0, 3)]).await, Ok(1));
+    let slice = store.read_from(&stream, 0).await.unwrap().unwrap();
+    assert_eq!(slice.pages, [page(0, 3)]);
+    assert_eq!(slice.next_sequence, 1);
+    assert_eq!(slice.last_recorded_at, Some(at(0)));
+    assert_eq!(store.find_command(&stream, &command(1)).await, Ok(vec![]));
+    assert_eq!(store.covers("account").await, Ok(vec![stream]));
+}
+
+pub async fn a_purge_in_a_unit_of_work_lands_at_commit_or_not_at_all<S>(mut store: S)
+where
+    S: AsyncStore + AsyncPurge,
+    for<'s> S::Unit<'s>: AsyncPurge,
+{
+    let stream = cover("account", 1);
+    store
+        .append(&stream, 0, &[page(0, 1), page(1, 1)])
+        .await
+        .unwrap();
+    store.write_snapshot(&stream, &snapshot(1)).await.unwrap();
+    {
+        let mut unit = store.begin().await;
+        assert_eq!(unit.purge(&stream).await, Ok(2));
+        assert_gone(&mut unit, &stream, "inside the unit").await;
+    }
+    assert_eq!(
+        store.read_from(&stream, 0).await.unwrap().unwrap().pages,
+        [page(0, 1), page(1, 1)],
+        "dropped: nothing deleted"
+    );
+    assert_eq!(store.read_snapshot(&stream).await, Ok(Some(snapshot(1))));
+    assert_eq!(
+        store.find_command(&stream, &command(1)).await,
+        Ok(vec![page(0, 1), page(1, 1)])
+    );
+    assert_eq!(store.covers("account").await, Ok(vec![stream.clone()]));
+    let mut unit = store.begin().await;
+    unit.purge(&stream).await.unwrap();
+    unit.commit().await.unwrap();
+    assert_gone(&mut store, &stream, "committed").await;
+}
+
+pub async fn a_unit_of_work_purges_its_own_appends_and_appends_after<S>(mut store: S)
+where
+    S: AsyncStore + AsyncPurge,
+    for<'s> S::Unit<'s>: AsyncPurge,
+{
+    let stream = cover("account", 1);
+    let other = cover("account", 2);
+    store.append(&stream, 0, &[page(0, 1)]).await.unwrap();
+    store.write_snapshot(&stream, &snapshot(0)).await.unwrap();
+    let mut unit = store.begin().await;
+    unit.append(&stream, 1, &[page(1, 2)]).await.unwrap();
+    unit.append(&other, 0, &[page(0, 2)]).await.unwrap();
+    assert_eq!(unit.purge(&stream).await, Ok(2), "stored and pending");
+    assert_eq!(unit.purge(&other).await, Ok(1), "only pending");
+    assert_eq!(unit.covers("account").await, Ok(vec![]));
+    assert_eq!(
+        unit.append(&stream, 1, &[page(1, 3)]).await,
+        Err(StoreError::Conflict {
+            stream: stream.clone(),
+            expected: 1,
+            actual: 0
+        })
+    );
+    assert_eq!(unit.append(&stream, 0, &[page(0, 3)]).await, Ok(1));
+    assert_eq!(
+        unit.read_from(&stream, 0).await.unwrap().unwrap().pages,
+        [page(0, 3)]
+    );
+    assert_eq!(unit.read_snapshot(&stream).await, Ok(None));
+    unit.commit().await.unwrap();
+    let slice = store.read_from(&stream, 0).await.unwrap().unwrap();
+    assert_eq!(slice.pages, [page(0, 3)]);
+    assert_eq!(slice.next_sequence, 1);
+    assert_eq!(store.read_snapshot(&stream).await, Ok(None));
+    assert_eq!(store.find_command(&stream, &command(2)).await, Ok(vec![]));
+    assert_eq!(store.read_from(&other, 0).await, Ok(None));
+    assert_eq!(store.covers("account").await, Ok(vec![stream]));
+}
+
 /// One `#[test]` per contract check, each on a fresh synchronous store from
 /// `$fresh` (an expression evaluated once per test), run through
-/// [`Ready`](crate::next::Ready).
+/// [`Ready`](crate::next::Ready). `store_contract!(purge, $fresh)` runs the
+/// purge checks instead, for a store and unit of work that implement
+/// [`Purge`](crate::next::Purge): a store that purges invokes both.
 #[macro_export]
 macro_rules! store_contract {
+    (purge, $fresh:expr) => {
+        $crate::store_contract!(@each $fresh;
+            a_purge_deletes_a_streams_events_snapshot_and_command_ids,
+            a_purge_deletes_a_snapshot_with_no_events,
+            a_purged_stream_starts_again_from_nothing,
+            a_purge_in_a_unit_of_work_lands_at_commit_or_not_at_all,
+            a_unit_of_work_purges_its_own_appends_and_appends_after,
+        );
+    };
     ($fresh:expr) => {
         $crate::store_contract!(@each $fresh;
             append_checks_the_expected_length_and_continuity,
@@ -347,8 +535,20 @@ macro_rules! store_contract {
 /// One test per contract check for an [`AsyncStore`](crate::next::AsyncStore),
 /// each an `async fn` under the test attribute given (the caller's runtime:
 /// `#[tokio::test]`), on a fresh store from `$fresh`, which may `.await`.
+/// `async_store_contract!(purge, #[$test], $fresh)` runs the purge checks
+/// instead, for a store and unit of work that implement
+/// [`AsyncPurge`](crate::next::AsyncPurge): a store that purges invokes both.
 #[macro_export]
 macro_rules! async_store_contract {
+    (purge, #[$test:meta], $fresh:expr) => {
+        $crate::async_store_contract!(@each #[$test], $fresh;
+            a_purge_deletes_a_streams_events_snapshot_and_command_ids,
+            a_purge_deletes_a_snapshot_with_no_events,
+            a_purged_stream_starts_again_from_nothing,
+            a_purge_in_a_unit_of_work_lands_at_commit_or_not_at_all,
+            a_unit_of_work_purges_its_own_appends_and_appends_after,
+        );
+    };
     (#[$test:meta], $fresh:expr) => {
         $crate::async_store_contract!(@each #[$test], $fresh;
             append_checks_the_expected_length_and_continuity,

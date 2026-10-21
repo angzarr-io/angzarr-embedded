@@ -247,7 +247,8 @@ command is atomic with its effects, with nothing else to keep consistent.
 (KurrentDB deduplicates appends by event id the same way, and Equinox keeps
 processed ids in the stream.)
 
-**Accepted costs** (angzarr's decision 12.2, the same in both runtimes):
+**Accepted costs** (the first two are angzarr's decision 12.2, the same in
+both runtimes; the third is annals' own, divergence 10):
 
 - **A decision that produced no events leaves nothing to find**, so a
   redelivery of it is decided again, against the stream as it is then
@@ -256,8 +257,15 @@ processed ids in the stream.)
 - **A command id reused for a different command goes undetected**: it is
   answered DUPLICATE with the first command's events. Payloads are not
   fingerprinted; a client mints a new id for every new command.
-- **Deduplication is forever**: events are permanent, so there is no
-  expiry, purge or retention window.
+- **Deduplication lasts as long as the stream.** There is no expiry or
+  retention window, but a store that opts in can purge a stream (see
+  [Purging a stream](#purging-a-stream)), and a purge deletes its command
+  ids with its events. A command redelivered after its stream is purged
+  finds nothing, so it is decided again against the stream as it is then;
+  a creating command re-creates the stream, from sequence 0. An
+  application that purges bounds this by purging only streams quiet for
+  longer than any redelivery it expects to see. Pinned by
+  `a_creating_command_redelivered_after_a_purge_creates_its_stream_again`.
 
 Rejections leave nothing, so a rejected command's retry runs again. Within
 a chain, each policy command takes step 3 too (cheap, and uniform);
@@ -625,7 +633,9 @@ changes. **The store contract** (`annals::next::contract`, feature
 port: `store_contract!(fresh_store)` runs them on a synchronous store through
 `Ready`, `async_store_contract!(#[tokio::test], fresh_store)` under the
 caller's runtime; one test per check. `InMemoryStore` runs it in annals'
-own tests.
+own tests. A store that purges also runs the opt-in purge section:
+`store_contract!(purge, fresh_store)`,
+`async_store_contract!(purge, #[tokio::test], fresh_store)`.
 
 **Opaque.** A store holds angzarr's pages as written and never decodes a
 payload; upcasting is the kernel's, on every read. The Postgres shape:
@@ -651,6 +661,32 @@ stream), a refusal it is sure of (`Conflict`, `Discontinuous`) or a failure
 (`Unavailable`, `Unreadable`); an I/O failure is never "no such stream".
 Snapshots live beside the events, the newest per stream. The async port's
 futures are `Send`; a single-threaded adapter implements the sync port.
+
+### Purging a stream
+
+```rust
+pub trait Purge: EventStore { fn purge(&mut self, stream: &Cover) -> Result<u64, StoreError>; }
+pub trait AsyncPurge: AsyncEventStore { fn purge(&mut self, stream: &Cover) -> impl Future<Output = Result<u64, StoreError>> + Send; }
+```
+
+A purge deletes a stream's events, its snapshot, and the command ids
+recorded with its events, in one unit of work: all of it or, failing, none.
+It answers how many events it deleted (0 for no such stream). Afterwards
+the stream does not exist: it reads `None`, is in no `covers`, and an
+append starts it again at expected 0. It is the one deletion annals has,
+so it is opt-in: a store implements `Purge` (or `AsyncPurge`) beside its
+other traits, on the store and on its unit of work, and a store that does
+not stays append-only by type, nothing in `EventStore` reaching a delete.
+`Ready` serves a synchronous `Purge` as an `AsyncPurge`. On a unit of work
+a purge lands at commit, like an append, and reads through the unit see it
+at once; an append after it in the same unit starts the stream again.
+
+A purge and an append to the same stream serialize like two appends: the
+one that commits second sees the first. An append committed before the
+purge is purged with the rest; an append whose expected length was read
+before the purge committed fails `StoreError::Conflict` against the empty
+stream, and run again it starts a new stream from sequence 0. A purge
+undoes deduplication for the stream (step 3's accepted costs).
 
 ## Snapshots
 
@@ -823,6 +859,10 @@ is not. This list matches angzarr's `docs/design/audit-meta/annals-divergence.md
    read-through to main.
 9. **`recorded_at` is sampled by the application** once per chain, then
    raised per stream; same guarantee as angzarr's stamp at persist.
+10. **A stream can be purged** where its store opts in
+    ([Purging a stream](#purging-a-stream)). angzarr's events are
+    permanent and its deduplication forever; in annals deduplication lasts
+    as long as the stream, and a redelivery after a purge is decided again.
 
 Not divergences (pass 13): `EventMeta` is the same in both runtimes
 (`causation`, the event's direct cause; no trigger on a reaction's events,
@@ -985,7 +1025,8 @@ keeps the trigger as `causation_id`.
   and names the command; **a panicking ingest aborts the chain,
   writes nothing and logs a prefixed line**.
 - **dedup.rs**: a retried command is DUPLICATE with its events, nothing
-  re-stamped; **a zero-event decision is decided again**; a reused id with
+  re-stamped; **a zero-event decision is decided again**; a creating
+  command redelivered after a purge creates its stream again; a reused id with
   another payload goes undetected; dedup is per stream; a redelivered fact
   is found by its derived id; a rejection leaves nothing and its retry
   runs.
@@ -1032,7 +1073,11 @@ keeps the trigger as `causation_id`.
   the events**, per stream; a unit of work lands at commit or not at all;
   the async port has the same contract; a unit of work checks and reads
   its pending appends; an empty append creates nothing; a store keeps the
-  newest snapshot per stream.
+  newest snapshot per stream. The opt-in purge section: **a purge deletes
+  a stream's events, snapshot and command ids**, and no other stream's; it
+  deletes a snapshot with no events; a purged stream starts again from
+  nothing, a stale append refused; a purge in a unit of work lands at
+  commit or not at all; a unit purges its own appends and appends after.
 - **replay.rs**: replay folds each event with the rules it names, and
   refuses a log that does not hold together (sequence, metadata, instant,
   rules, domain, a process event's trigger); a stream resumes from a

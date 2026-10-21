@@ -6,6 +6,7 @@
 
 mod contract {
     crate::store_contract!(crate::next::InMemoryStore::new());
+    crate::store_contract!(purge, crate::next::InMemoryStore::new());
 }
 
 use crate::next::v1::{EventMeta, EventPage, Snapshot};

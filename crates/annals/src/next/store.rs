@@ -32,7 +32,13 @@
 //! events. The accepted costs: a decision that emitted nothing leaves
 //! nothing to find, so it is decided again on redelivery; a command id
 //! reused for a different command goes undetected (it is answered with the
-//! first command's events); deduplication is forever.
+//! first command's events); deduplication lasts as long as the stream, so
+//! a command redelivered after its stream is purged is decided again.
+//!
+//! **Purge** is opt-in: a store that can delete a stream implements
+//! [`Purge`] (or [`AsyncPurge`]), deleting its events, its snapshot and so
+//! its command ids in one unit of work. A store that does not is
+//! append-only by type.
 //!
 //! A command chain touches several streams and commits them all or none, so
 //! the port is a **unit of work**: a database transaction. The application
@@ -47,7 +53,7 @@
 //! is never "no such stream". Snapshots live beside the events; a store
 //! keeps the newest per stream.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::pin;
 use std::task::{Context, Poll, Waker};
@@ -224,6 +230,30 @@ pub trait AsyncStore: AsyncEventStore {
     fn begin(&mut self) -> impl Future<Output = Self::Unit<'_>> + Send;
 }
 
+/// A store that can delete a stream. A store opts in by implementing it,
+/// so one that does not stays append-only by type: nothing reaches a
+/// purge through [`EventStore`] alone.
+///
+/// A purge is the one deletion annals has. It undoes deduplication for the
+/// stream: a command redelivered after its stream is purged finds nothing,
+/// and is decided again (`docs/design/audit.md`, step 3).
+pub trait Purge: EventStore {
+    /// Delete `stream`'s events, its snapshot, and so the command ids
+    /// recorded with its events, all at once or (failing) none of them.
+    /// Afterwards the stream does not exist: it is read as `None`, is in no
+    /// [`covers`](EventStore::covers), and an append to it starts again
+    /// from expected 0. On a unit of work it lands at commit, and reads
+    /// through the unit see it at once. Returns how many events it deleted:
+    /// 0 when there was no such stream.
+    fn purge(&mut self, stream: &Cover) -> Result<u64, StoreError>;
+}
+
+/// [`Purge`], async. Its future is `Send`, like the async store's.
+pub trait AsyncPurge: AsyncEventStore {
+    /// As [`Purge::purge`].
+    fn purge(&mut self, stream: &Cover) -> impl Future<Output = Result<u64, StoreError>> + Send;
+}
+
 /// A synchronous store served through the async port, every future ready
 /// at once.
 pub struct Ready<S>(pub S);
@@ -270,6 +300,12 @@ impl<S: EventStore + Send> AsyncEventStore for Ready<S> {
 impl<S: UnitOfWork + Send> AsyncUnitOfWork for Ready<S> {
     async fn commit(self) -> Result<(), StoreError> {
         self.0.commit()
+    }
+}
+
+impl<S: Purge + Send> AsyncPurge for Ready<S> {
+    async fn purge(&mut self, stream: &Cover) -> Result<u64, StoreError> {
+        self.0.purge(stream)
     }
 }
 
@@ -380,6 +416,7 @@ impl InMemoryStore {
         InMemoryTx {
             store: self,
             pending: BTreeMap::new(),
+            purged: BTreeSet::new(),
         }
     }
 
@@ -450,17 +487,37 @@ impl EventStore for InMemoryStore {
     }
 }
 
+impl Purge for InMemoryStore {
+    fn purge(&mut self, stream: &Cover) -> Result<u64, StoreError> {
+        let k = key(stream);
+        self.snapshots.remove(&k);
+        Ok(self.streams.remove(&k).map_or(0, |h| h.pages.len() as u64))
+    }
+}
+
 /// A unit of work over an [`InMemoryStore`]. See [`InMemoryStore::begin`].
 pub struct InMemoryTx<'s> {
     store: &'s mut InMemoryStore,
     pending: BTreeMap<Key, Held>,
+    /// The streams this unit purged from the store: their events and
+    /// snapshots are deleted at commit, and hidden from its reads till then.
+    purged: BTreeSet<Key>,
 }
 
 impl InMemoryTx<'_> {
+    /// The store's stream, unless this unit purged it.
+    fn stored(&self, k: &Key) -> Option<&Held> {
+        if self.purged.contains(k) {
+            return None;
+        }
+        self.store.streams.get(k)
+    }
+
     /// The stream's pages: the store's, then the pending ones.
     fn pages(&self, stream: &Cover) -> Vec<EventPage> {
-        let mut pages = self.store.pages(stream).to_vec();
-        if let Some(pending) = self.pending.get(&key(stream)) {
+        let k = key(stream);
+        let mut pages = self.stored(&k).map_or(Vec::new(), |h| h.pages.clone());
+        if let Some(pending) = self.pending.get(&k) {
             pages.extend_from_slice(&pending.pages);
         }
         pages
@@ -488,7 +545,7 @@ impl EventStore for InMemoryTx<'_> {
 
     fn read_from(&mut self, stream: &Cover, from: u64) -> Result<Option<Slice>, StoreError> {
         let k = key(stream);
-        if !self.store.streams.contains_key(&k) && !self.pending.contains_key(&k) {
+        if self.stored(&k).is_none() && !self.pending.contains_key(&k) {
             return Ok(None);
         }
         Ok(Some(slice(stream, &self.pages(stream), from)))
@@ -505,8 +562,12 @@ impl EventStore for InMemoryTx<'_> {
     }
 
     fn covers(&mut self, domain: &str) -> Result<Vec<Cover>, StoreError> {
-        // The store's streams and this unit's new ones, merged in key order.
-        let held = self.store.streams.iter().chain(&self.pending);
+        // The store's streams (less those this unit purged) and this unit's
+        // new ones, merged in key order.
+        let stored = self.store.streams.iter();
+        let held = stored
+            .filter(|(k, _)| !self.purged.contains(*k))
+            .chain(&self.pending);
         let covers: BTreeMap<&Key, &Cover> = held
             .filter(|(k, _)| k.0 == domain)
             .map(|(k, held)| (k, &held.stream))
@@ -515,13 +576,36 @@ impl EventStore for InMemoryTx<'_> {
     }
 
     fn read_snapshot(&mut self, stream: &Cover) -> Result<Option<Snapshot>, StoreError> {
+        if self.purged.contains(&key(stream)) {
+            return Ok(None);
+        }
         self.store.read_snapshot(stream)
+    }
+}
+
+impl Purge for InMemoryTx<'_> {
+    fn purge(&mut self, stream: &Cover) -> Result<u64, StoreError> {
+        let deleted = self.pages(stream).len() as u64;
+        let k = key(stream);
+        self.pending.remove(&k);
+        self.purged.insert(k);
+        Ok(deleted)
     }
 }
 
 impl UnitOfWork for InMemoryTx<'_> {
     fn commit(self) -> Result<(), StoreError> {
-        let InMemoryTx { store, pending } = self;
+        let InMemoryTx {
+            store,
+            pending,
+            purged,
+        } = self;
+        // Purges first: what this unit appended after purging a stream
+        // starts it again.
+        for k in purged {
+            store.streams.remove(&k);
+            store.snapshots.remove(&k);
+        }
         for held in pending.into_values() {
             let length = store.pages(&held.stream).len() as u64;
             store.append(&held.stream, length, &held.pages)?;
