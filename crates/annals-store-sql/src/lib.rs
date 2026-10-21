@@ -16,7 +16,9 @@
 //! held to the contract's purge section too. Every backend opens read-only
 //! units of work (`annals::next::AsyncReadStore`), one read transaction
 //! each, held to the contract's read section, and answers each read outside
-//! a unit as one moment. Pages are stored as written and never
+//! a unit as one moment. Every backend answers a change token
+//! (`annals::next::AsyncWatch`), held to the contract's watch section.
+//! Pages are stored as written and never
 //! decoded except to read them back; the command id is copied into its own
 //! indexed column for the deduplication lookup.
 

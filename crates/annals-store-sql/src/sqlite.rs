@@ -4,7 +4,8 @@
 //! a read of more than one statement outside one runs in a deferred `BEGIN`
 //! of its own, so it reads one moment, and a read-only unit of work is a
 //! deferred `BEGIN` held open over many reads. A file is kept in WAL mode, so once
-//! it is made a reader waits on no writer.
+//! it is made a reader waits on no writer. A change token is the
+//! connection's `PRAGMA data_version` with its `total_changes()`.
 
 use std::future::Future;
 use std::path::Path;
@@ -16,8 +17,8 @@ use std::time::{Duration, Instant};
 
 use annals::next::v1::{Cover, EventPage, Snapshot, Uuid};
 use annals::next::{
-    AsyncEventStore, AsyncPurge, AsyncReadStore, AsyncReadUnit, AsyncStore, AsyncUnitOfWork, Slice,
-    StoreError,
+    AsyncEventStore, AsyncPurge, AsyncReadStore, AsyncReadUnit, AsyncStore, AsyncUnitOfWork,
+    AsyncWatch, ChangeToken, Slice, StoreError,
 };
 use sea_query::{SelectStatement, SqliteQueryBuilder};
 use sea_query_binder::SqlxBinder;
@@ -600,6 +601,33 @@ impl AsyncReadUnit for SqliteRead<'_> {
 
     async fn read_from(&mut self, stream: &Cover, from: u64) -> Result<Option<Slice>, StoreError> {
         read_from(self.conn()?, stream, from, || {}).await
+    }
+}
+
+impl AsyncWatch for SqliteStore {
+    /// The connection's `PRAGMA data_version` and its `total_changes()`,
+    /// read in one statement. `data_version` changes when another
+    /// connection, in this process or another, commits, and never for this
+    /// connection's own commits; `total_changes()` counts the rows this
+    /// connection's statements changed, so it moves with every commit of
+    /// its own (and with a unit it rolled back, a change that is not one).
+    /// Neither alone sees every commit; together they do. Not the events
+    /// table's largest rowid: a purge of any stream but the newest leaves
+    /// it as it was.
+    ///
+    /// Both come from the connection and the database's header (under WAL,
+    /// its index's), not from any table, so asking costs the same at any
+    /// size. It is a read: it takes no write lock, runs on a store opened
+    /// by [`open_existing`](SqliteStore::open_existing), and under WAL
+    /// waits on no writer.
+    async fn change_token(&mut self) -> Result<ChangeToken, StoreError> {
+        let (version, changes): (i64, i64) =
+            sqlx::query_as("SELECT data_version, total_changes() FROM pragma_data_version")
+                .fetch_one(&mut self.conn)
+                .await
+                .map_err(unavailable)?;
+        // Their bits as they are: a token is only compared for equality.
+        Ok(ChangeToken::new([version as u64, changes as u64]))
     }
 }
 

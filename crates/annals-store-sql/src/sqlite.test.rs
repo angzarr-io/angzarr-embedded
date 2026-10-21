@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 use annals::next::contract::{cover, page};
 use annals::next::v1::{Cover, Snapshot};
 use annals::next::{
-    AsyncEventStore, AsyncPurge, AsyncReadStore, AsyncReadUnit, AsyncStore, AsyncUnitOfWork, Slice,
-    StoreError,
+    AsyncEventStore, AsyncPurge, AsyncReadStore, AsyncReadUnit, AsyncStore, AsyncUnitOfWork,
+    AsyncWatch, ChangeToken, Slice, StoreError,
 };
 use annals_diagnostic::Diagnostic;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection};
@@ -24,6 +24,7 @@ use crate::{Damage, Integrity};
 
 annals::async_store_contract!(#[tokio::test], SqliteStore::open_in_memory().await.unwrap());
 annals::async_store_contract!(purge, #[tokio::test], SqliteStore::open_in_memory().await.unwrap());
+annals::async_store_contract!(watch, #[tokio::test], SqliteStore::open_in_memory().await.unwrap());
 
 /// A path for a database file of this test run's own.
 fn database() -> std::path::PathBuf {
@@ -1154,6 +1155,222 @@ async fn a_writer_waits_on_no_open_read_unit() {
     remove(&path);
 }
 
+// ------------------------------------------------------------- watching
+
+mod watch_contract {
+    use annals::next::contract as checks;
+
+    use super::{database, on_file, read_only_store, remove, writable, SqliteStore};
+
+    #[tokio::test]
+    async fn a_change_token_changes_when_another_handle_commits() {
+        on_file(
+            writable,
+            checks::a_change_token_changes_when_another_handle_commits,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_read_only_stores_change_token_changes_when_another_handle_commits() {
+        on_file(
+            read_only_store,
+            checks::a_change_token_changes_when_another_handle_commits,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_change_token_on_a_file_changes_when_its_own_store_commits() {
+        let path = database();
+        checks::a_change_token_changes_when_its_own_store_commits(
+            SqliteStore::open(&path).await.unwrap(),
+        )
+        .await;
+        remove(&path);
+    }
+}
+
+/// What a [`FaultyWatch`] answers for its token: each is how a token might
+/// be read from SQLite, and each misses some commit.
+#[derive(Clone, Copy)]
+enum TokenFault {
+    /// The same token always.
+    Never,
+    /// `PRAGMA data_version` alone: blind to this connection's own commits.
+    DataVersion,
+    /// `total_changes()` alone: blind to another connection's commits.
+    OwnChanges,
+    /// The events table's largest rowid: blind to a purge of any stream but
+    /// the newest.
+    LargestRowid,
+}
+
+/// A SQLite store whose change token is read as `fault` says: the watch
+/// checks must fail on it, so they are seen to force their interleaving
+/// through a second connection rather than pass by luck.
+struct FaultyWatch {
+    store: SqliteStore,
+    fault: TokenFault,
+}
+
+impl AsyncWatch for FaultyWatch {
+    async fn change_token(&mut self) -> Result<ChangeToken, StoreError> {
+        let sql = match self.fault {
+            TokenFault::Never => return Ok(ChangeToken::new([1, 1])),
+            TokenFault::DataVersion => "PRAGMA data_version",
+            TokenFault::OwnChanges => "SELECT total_changes()",
+            TokenFault::LargestRowid => "SELECT coalesce(max(rowid), 0) FROM events",
+        };
+        let part: i64 = sqlx::query_scalar(sql)
+            .fetch_one(&mut self.store.conn)
+            .await
+            .map_err(unavailable)?;
+        Ok(ChangeToken::new([part as u64, 0]))
+    }
+}
+
+impl AsyncEventStore for FaultyWatch {
+    async fn append(
+        &mut self,
+        stream: &Cover,
+        expected: u64,
+        pages: &[annals::next::v1::EventPage],
+    ) -> Result<u64, StoreError> {
+        self.store.append(stream, expected, pages).await
+    }
+
+    async fn read_from(&mut self, stream: &Cover, from: u64) -> Result<Option<Slice>, StoreError> {
+        self.store.read_from(stream, from).await
+    }
+
+    async fn find_command(
+        &mut self,
+        stream: &Cover,
+        command_id: &annals::next::v1::Uuid,
+    ) -> Result<Vec<annals::next::v1::EventPage>, StoreError> {
+        self.store.find_command(stream, command_id).await
+    }
+
+    async fn covers(&mut self, domain: &str) -> Result<Vec<Cover>, StoreError> {
+        self.store.covers(domain).await
+    }
+}
+
+impl AsyncPurge for FaultyWatch {
+    async fn purge(&mut self, stream: &Cover) -> Result<u64, StoreError> {
+        self.store.purge(stream).await
+    }
+}
+
+impl AsyncStore for FaultyWatch {
+    type Unit<'s> = super::SqliteUnit<'s>;
+
+    async fn begin(&mut self) -> super::SqliteUnit<'_> {
+        self.store.begin().await
+    }
+}
+
+/// Whether the pair check fails on a watcher with `fault` and a writer, two
+/// connections to one file.
+async fn another_fails(fault: TokenFault) -> bool {
+    use annals::next::contract as checks;
+    let path = database();
+    let writer = SqliteStore::open(&path).await.unwrap();
+    let store = SqliteStore::open(&path).await.unwrap();
+    let watcher = FaultyWatch { store, fault };
+    let check = checks::a_change_token_changes_when_another_handle_commits((watcher, writer));
+    let failed = tokio::spawn(check).await.is_err();
+    remove(&path);
+    failed
+}
+
+/// Whether the check on one store fails on a store with `fault`.
+async fn own_fails(fault: TokenFault) -> bool {
+    use annals::next::contract as checks;
+    let store = SqliteStore::open_in_memory().await.unwrap();
+    let check =
+        checks::a_change_token_changes_when_its_own_store_commits(FaultyWatch { store, fault });
+    tokio::spawn(check).await.is_err()
+}
+
+#[tokio::test]
+async fn every_watch_check_fails_a_token_that_never_changes() {
+    assert!(another_fails(TokenFault::Never).await, "another handle's");
+    assert!(own_fails(TokenFault::Never).await, "its own");
+}
+
+#[tokio::test]
+async fn the_watch_checks_fail_data_version_alone() {
+    // data_version is the connection's own: it changes for another's commit.
+    assert!(!another_fails(TokenFault::DataVersion).await);
+    assert!(own_fails(TokenFault::DataVersion).await);
+}
+
+#[tokio::test]
+async fn the_watch_checks_fail_total_changes_alone() {
+    assert!(another_fails(TokenFault::OwnChanges).await);
+    assert!(!own_fails(TokenFault::OwnChanges).await);
+}
+
+#[tokio::test]
+async fn the_watch_checks_fail_the_largest_rowid() {
+    assert!(another_fails(TokenFault::LargestRowid).await);
+    assert!(own_fails(TokenFault::LargestRowid).await);
+}
+
+#[tokio::test]
+async fn a_change_token_waits_on_no_writer() {
+    // The watchers wait on no lock at all: had asking taken the write lock,
+    // or waited on the unit holding it, it would fail at once.
+    let path = database();
+    let stream = cover("tasks", 1);
+    let mut writer = SqliteStore::open(&path).await.unwrap();
+    let mut hasty = impatient(&path).await;
+    let mut read_only = SqliteStore::open_existing(&path).await.unwrap().unwrap();
+    let hasty_before = hasty.change_token().await.unwrap();
+    let read_only_before = read_only.change_token().await.unwrap();
+    let mut unit = writer.begin().await;
+    unit.append(&stream, 0, &[page(0, 1)]).await.unwrap();
+    assert_eq!(hasty.change_token().await, Ok(hasty_before), "uncommitted");
+    assert_eq!(read_only.change_token().await, Ok(read_only_before));
+    unit.commit().await.unwrap();
+    assert_ne!(hasty.change_token().await, Ok(hasty_before), "committed");
+    assert_ne!(read_only.change_token().await, Ok(read_only_before));
+    drop((writer, hasty, read_only));
+    remove(&path);
+}
+
+#[tokio::test]
+async fn a_change_token_holds_across_a_unit_rolled_back_elsewhere() {
+    let path = database();
+    let mut writer = SqliteStore::open(&path).await.unwrap();
+    let mut watcher = SqliteStore::open(&path).await.unwrap();
+    let before = watcher.change_token().await.unwrap();
+    let mut unit = writer.begin().await;
+    unit.append(&cover("tasks", 1), 0, &[page(0, 1)])
+        .await
+        .unwrap();
+    drop(unit);
+    assert_eq!(watcher.change_token().await, Ok(before));
+    drop((writer, watcher));
+    remove(&path);
+}
+
+#[tokio::test]
+async fn a_change_token_changes_when_a_snapshot_is_written() {
+    let stream = cover("tasks", 1);
+    let snapshot = Snapshot {
+        sequence: 0,
+        state: None,
+        rules_version: "v1".to_string(),
+    };
+    let mut store = SqliteStore::open_in_memory().await.unwrap();
+    let before = store.change_token().await.unwrap();
+    store.write_snapshot(&stream, &snapshot).await.unwrap();
+    assert_ne!(store.change_token().await, Ok(before));
+}
+
 // ------------------------------------------------------------------ Send
 
 /// Compiles only if `future` is `Send`, so a store can be opened on a
@@ -1202,5 +1419,20 @@ fn every_read_unit_is_a_send_future() {
         };
         let mut reads = store.begin_read().await;
         reads.read_from(&stream, 0).await
+    }));
+}
+
+#[test]
+fn every_change_token_is_a_send_future() {
+    let path = database();
+    drop(send(async {
+        let mut store = SqliteStore::open_in_memory().await?;
+        store.change_token().await
+    }));
+    drop(send(async {
+        let Some(mut store) = SqliteStore::open_existing(&path).await? else {
+            return Ok(None);
+        };
+        store.change_token().await.map(Some)
     }));
 }
