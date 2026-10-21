@@ -1,0 +1,47 @@
+# Git hooks, managed by lefthook (`just hooks-install`, once per clone: every
+# worktree shares the hooks). A failing hook is a finding: fix the cause and
+# commit again; never bypass with --no-verify.
+#
+# Every `run:` is one simple command, so it means the same under whatever
+# /bin/sh the committing machine has; anything longer is a just recipe.
+
+# Show a command's output only when it fails, then the per-command summary.
+# Each gate prints one line on a pass and the extract that matters on a
+# failure, with its full log in target/logs/ (the justfile's `_run`).
+output:
+  - failure
+  - summary
+
+pre-commit:
+  # One at a time in priority order, stopping at the first failure.
+  piped: true
+  commands:
+    fmt:
+      # Formats, rather than refusing: rustfmt over the staged Rust files,
+      # re-staged by lefthook. lefthook sets a partially staged file's
+      # unstaged hunks aside while the hook runs, so only what was staged is
+      # formatted and committed. CI runs `just fmt-check`.
+      priority: 1
+      glob: "*.rs"
+      run: just fmt-staged {staged_files}
+      stage_fixed: true
+    secrets:
+      priority: 2
+      run: just secrets-scan-staged
+    clippy:
+      # buf lint, then clippy with warnings denied.
+      priority: 3
+      run: just lint
+    deps:
+      priority: 4
+      run: just lint-deps
+    tests:
+      # The tests of the crates the commit changes and of their workspace
+      # dependents, over the STAGED tree (`just test-staged` says how).
+      priority: 5
+      run: just test-staged
+    mutants:
+      # cargo mutants over the staged diff, judged per crate by the
+      # justfile's mutation_thresholds; last, because it is the slowest.
+      priority: 6
+      run: just mutants-staged

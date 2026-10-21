@@ -22,12 +22,14 @@ Every error is localizable: a stable code and named args (see
 | [`annals-catalog-check`](crates/annals-catalog-check) | test-only: every error code has a message, with exactly its args, in every shipped Fluent catalog |
 
 ```
-just test       # cargo test --release, plus annals-log's codegen cross-check
-just lint       # buf lint + clippy
-just breaking   # buf breaking against main
-just fmt        # cargo fmt --all (just fmt-check changes nothing)
-just mutants    # cargo-mutants over the workspace; `just mutants annals` for one crate
-just wasm       # build annals for wasm32-unknown-unknown
+just test           # cargo-nextest over the workspace, plus annals-log's codegen cross-check
+just lint           # buf lint + clippy
+just lint-deps      # cargo-deny: licences, sources, bans, advisories (deny.toml)
+just breaking       # buf breaking against main
+just fmt            # cargo fmt over the workspace's crates (just fmt-check changes nothing)
+just mutants        # cargo-mutants over the workspace; `just mutants annals` for one crate
+just wasm           # build annals for wasm32-unknown-unknown
+just hooks-install  # the pre-commit gates (lefthook.yml), once per clone
 ```
 
 annals depends on angzarr-proto, a git dependency whose build runs

@@ -140,6 +140,41 @@ and turn on `annals-log/codegen-check`, so they need `buf` and
 `just wasm` builds annals for `wasm32-unknown-unknown`; it must keep
 building there.
 
+Every gate prints one line on a pass, `ok   <gate> (<scope>) <duration>`;
+on a failure, a `FAIL` line, the extract worth reading, and the full log in
+`target/logs/<gate>.log`. `VERBOSE=1 just <gate>` shows the full output.
+`just test` runs cargo-nextest.
+
+## The pre-commit gates
+
+lefthook (`lefthook.yml`) runs the pre-commit gates one at a time, stopping
+at the first failure. `just hooks-install` wires them in, once per clone:
+every worktree of the repository shares its hooks. A failing gate is a
+finding: fix the cause and commit again; never `--no-verify`, and never
+weaken a gate to get through.
+
+1. **fmt** formats the staged `*.rs` files (`just fmt-staged`) and
+   re-stages them; it does not refuse. A partially staged file's unstaged
+   hunks are set aside while the hook runs, so they stay unstaged.
+   `just fmt-check` is CI's check.
+2. **secrets**: gitleaks over the staged changes (`.gitleaks.toml`). A fake
+   secret in a test ends its line with `gitleaks:allow`.
+3. **clippy**: `just lint`.
+4. **deps**: `just lint-deps`. A new licence, git source or advisory ignore
+   is a change to `deny.toml`, with its reason.
+5. **tests**: `just test-staged` tests the crates with staged changes and
+   their workspace dependents (normal, dev and build), on a throwaway
+   worktree of HEAD plus the staged diff (`target/staged-tree`), so unstaged
+   edits cannot pass or fail it.
+6. **mutants**: `just mutants-staged` runs `cargo mutants --in-diff` over
+   the staged diff in that tree and holds every crate's new code to a 90%
+   kill rate (the justfile's `mutation_thresholds`; a new crate gets a
+   threshold there before it gets code). The last run's mutants.out is kept
+   in `target/logs/mutants-staged/`. A mutant judged equivalent is excluded
+   by an `exclude_re` in `.cargo/mutants.toml` matching that one mutant,
+   with a comment saying why: not `#[mutants::skip]`, which needs the
+   `mutants` crate as a dependency, and never a lowered threshold.
+
 ## Versioned documents: bump, register a step, keep an old fixture
 
 `annals_yaml::versioned` loads content stamped with a root `version: N` (a
