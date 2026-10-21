@@ -145,7 +145,7 @@ pub trait UnitOfWork: EventStore {
 /// A store that opens units of work: what an application holds, and what
 /// the store contract (`annals::next::contract`) runs against.
 pub trait Store: EventStore {
-    type Unit<'s>: UnitOfWork
+    type Unit<'s>: UnitOfWork + Send
     where
         Self: 's;
 
@@ -213,6 +213,17 @@ pub trait AsyncUnitOfWork: AsyncEventStore {
     fn commit(self) -> impl Future<Output = Result<(), StoreError>> + Send;
 }
 
+/// [`Store`], async: a store whose units of work are a database driver's
+/// transactions. Beginning one is a future; a failure to begin is answered
+/// by the unit's operations.
+pub trait AsyncStore: AsyncEventStore {
+    type Unit<'s>: AsyncUnitOfWork + Send
+    where
+        Self: 's;
+
+    fn begin(&mut self) -> impl Future<Output = Self::Unit<'_>> + Send;
+}
+
 /// A synchronous store served through the async port, every future ready
 /// at once.
 pub struct Ready<S>(pub S);
@@ -259,6 +270,17 @@ impl<S: EventStore + Send> AsyncEventStore for Ready<S> {
 impl<S: UnitOfWork + Send> AsyncUnitOfWork for Ready<S> {
     async fn commit(self) -> Result<(), StoreError> {
         self.0.commit()
+    }
+}
+
+impl<S: Store + Send> AsyncStore for Ready<S> {
+    type Unit<'s>
+        = Ready<S::Unit<'s>>
+    where
+        Self: 's;
+
+    async fn begin(&mut self) -> Ready<S::Unit<'_>> {
+        Ready(self.0.begin())
     }
 }
 

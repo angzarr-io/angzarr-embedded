@@ -610,7 +610,8 @@ pub trait EventStore {
     fn write_snapshot(&mut self, stream: &Cover, snapshot: &Snapshot) -> Result<(), StoreError>;
 }
 pub trait UnitOfWork: EventStore { fn commit(self) -> Result<(), StoreError>; }
-pub trait Store: EventStore { type Unit<'s>: UnitOfWork where Self: 's; fn begin(&mut self) -> Self::Unit<'_>; }
+pub trait Store: EventStore { type Unit<'s>: UnitOfWork + Send where Self: 's; fn begin(&mut self) -> Self::Unit<'_>; }
+pub trait AsyncStore: AsyncEventStore { type Unit<'s>: AsyncUnitOfWork + Send where Self: 's; fn begin(&mut self) -> impl Future<Output = Self::Unit<'_>> + Send; }
 pub struct Slice { pub stream: Cover, pub next_sequence: u64, pub last_recorded_at: Option<Timestamp>, pub pages: Vec<EventPage> }
 // AsyncEventStore / AsyncUnitOfWork: the same, Send futures; Ready<S> serves a sync store async.
 ```
@@ -620,8 +621,11 @@ catch up, with the store as the collection's scope (an application keeps
 one store per collection, as ctxloom keeps one per project). It promises no
 order across streams beyond its listing order; a projector numbers its own
 changes. **The store contract** (`annals::next::contract`, feature
-`contract`) is every store's tests: `store_contract!(fresh_store)` expands
-to one test per check, and `InMemoryStore` runs it in annals' own tests.
+`contract`) is every store's tests, its checks written once over the async
+port: `store_contract!(fresh_store)` runs them on a synchronous store through
+`Ready`, `async_store_contract!(#[tokio::test], fresh_store)` under the
+caller's runtime; one test per check. `InMemoryStore` runs it in annals'
+own tests.
 
 **Opaque.** A store holds angzarr's pages as written and never decodes a
 payload; upcasting is the kernel's, on every read. The Postgres shape:
