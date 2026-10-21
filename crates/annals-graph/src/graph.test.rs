@@ -75,3 +75,11 @@ fn nodes_added_later_keep_every_earlier_id() {
     assert_eq!(*g.node(N(0)), "a");
     assert_eq!(g.costs_from(N(0), |e| Some(e.data))[4], Some(5));
 }
+
+#[test]
+fn a_graph_is_empty_until_it_has_a_node() {
+    let mut g: Graph<N, &str, u64> = Graph::new();
+    assert!(g.is_empty());
+    g.add_node("a");
+    assert!(!g.is_empty());
+}
