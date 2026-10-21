@@ -142,3 +142,7 @@ impl<K: JobContext> fmt::Debug for Registry<K> {
         f.debug_list().entries(self.kinds()).finish()
     }
 }
+
+#[cfg(test)]
+#[path = "job.test.rs"]
+mod tests;
