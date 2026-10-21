@@ -8,7 +8,10 @@
 # it is reached only by `include!` from src/codegen.test.rs.
 exclude_globs = ["*.test.rs"]
 
-# Nothing else is excluded wholesale. What might have been:
+# Otherwise excluded: only the mutants in `exclude_re` below, each equivalent
+# (no test can tell it from the code), each matched alone by its description.
+#
+# Not excluded, though they might have been:
 # - annals-catalog-check's src/lib.rs holds no code; its check is a test.
 # - Display impls are not noise: annals-catalog-check fails an empty English
 #   Display, so with test_workspace those mutants are caught.
@@ -24,3 +27,17 @@ test_workspace = true
 # Copy gitignored files into the scratch tree: the codegen check reads
 # crates/annals-log/gen, which `just gen` writes and git ignores.
 gitignore = false
+
+exclude_re = [
+    # A body that cannot run: no value of `Infallible` exists to call it on
+    # (`match *self {}`), so whatever the mutant returns is never returned.
+    '''replace <impl Payload for std::convert::Infallible>::to_any -> Any with Default::default\(\)$''',
+    '''replace <impl Diagnostic for std::convert::Infallible>::code -> &'static str with ""$''',
+    '''replace <impl Diagnostic for std::convert::Infallible>::code -> &'static str with "xyzzy"$''',
+    '''replace <impl Diagnostic for std::convert::Infallible>::args -> Vec<\(&'static str, Arg\)> with vec!\[\]$''',
+    # The mutant is the code: each already returns an empty Vec, so `vec![]`
+    # changes nothing.
+    '''replace <impl Payload for std::convert::Infallible>::type_urls -> Vec<String> with vec!\[\]$''',
+    '''replace <impl Project for \(\)>::project -> Vec<ProjectorFailure> with vec!\[\]$''',
+    '''replace EventStore::find_triggered -> Result<Vec<EventPage>, StoreError> with Ok\(vec!\[\]\)$''',
+]

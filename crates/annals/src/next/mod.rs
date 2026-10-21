@@ -141,10 +141,9 @@ pub use prost_types::{Any, Timestamp};
 /// goes backwards within a stream. prost's `Timestamp` has no ordering of
 /// its own; this compares `(seconds, nanos)`.
 pub fn not_before(floor: Option<&Timestamp>, now: Timestamp) -> Timestamp {
-    match floor {
-        Some(f) if (f.seconds, f.nanos) > (now.seconds, now.nanos) => *f,
-        _ => now,
-    }
+    let instant = |t: &Timestamp| (t.seconds, t.nanos);
+    let (seconds, nanos) = floor.map_or(instant(&now), |f| instant(f).max(instant(&now)));
+    Timestamp { seconds, nanos }
 }
 
 /// One value of every error `next` defines, each code once, for the

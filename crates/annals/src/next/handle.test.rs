@@ -864,3 +864,135 @@ fn a_triggers_orders_are_indexed_in_target_order() {
     assert_eq!(owed[&1][0].index(), 1);
     assert_ne!(owed[&0][0].cover(), owed[&1][0].cover());
 }
+
+#[test]
+fn a_target_that_holds_an_earlier_order_still_refuses_a_gap() {
+    let registry = registry();
+    let log = MemoryDeadLetters::new();
+    let kernel = Kernel::new(&registry, &log);
+    let mut store = InMemoryStore::new();
+    // 0: opened (not owed); 1, 2, 3: deposits, each owed.
+    opened(&mut store, &registry, 1, 1);
+    for (n, cents) in [(3, 2), (4, 3)] {
+        crate::next::toys::handle::<Account>(&mut store, &registry, deposit(n, cents), &at(20))
+            .unwrap();
+    }
+    let source = account_stream(&mut store, &registry);
+    let owed = crate::next::orders_owed::<DepositsOnly>(
+        &source,
+        &registry,
+        &std::collections::BTreeMap::new(),
+    )
+    .unwrap();
+    let orders = &owed[&()];
+    let routes = Routes::new();
+    kernel
+        .deliver(store.begin(), &routes, &orders[0], &at(30), &mut ())
+        .unwrap();
+    assert_eq!(
+        kernel
+            .deliver(store.begin(), &routes, &orders[2], &at(31), &mut ())
+            .err(),
+        Some(Failure::Kernel(KernelError::Gap {
+            stream: ledger_cover(),
+            gap: crate::next::Gap {
+                expected: 2,
+                found: 3
+            }
+        })),
+        "holding 1, owed 2 before 3"
+    );
+}
+
+/// A domain named "account" that is not the account: a projection routed
+/// through it finds the chain's account stream of another type.
+struct Impostor;
+
+impl crate::next::Domain for Impostor {
+    type State = crate::next::toys::LedgerState;
+    type Command = std::convert::Infallible;
+    type Fact = std::convert::Infallible;
+    type Event = std::convert::Infallible;
+    type Rejection = std::convert::Infallible;
+    type Rules = ();
+
+    const NAME: &'static str = "account";
+
+    fn decide(
+        cmd: &std::convert::Infallible,
+        _: &mut crate::next::Tx<'_, Self>,
+    ) -> Result<(), std::convert::Infallible> {
+        match *cmd {}
+    }
+
+    fn ingest(
+        _: &crate::next::toys::LedgerState,
+        fact: &std::convert::Infallible,
+        _: &crate::next::IngestCtx<'_, Self>,
+    ) -> Vec<std::convert::Infallible> {
+        match *fact {}
+    }
+
+    fn apply(_: &mut crate::next::toys::LedgerState, event: &std::convert::Infallible, (): &()) {
+        match *event {}
+    }
+}
+
+struct Unseen;
+
+impl crate::next::Projection<Impostor> for Unseen {
+    fn project(&mut self, _: &crate::next::Committed<'_, Impostor>) {}
+}
+
+#[test]
+fn a_projection_that_fails_is_reported_and_the_commit_stands() {
+    let registry = registry();
+    let log = MemoryDeadLetters::new();
+    let kernel = Kernel::new(&registry, &log);
+    let mut store = InMemoryStore::new();
+    opened(&mut store, &registry, 1, 0);
+    let mut deposits = Deposits::default();
+    let mut routes = (
+        crate::next::ProjectionRoute {
+            name: "impostor",
+            projection: &mut Unseen,
+            domain: std::marker::PhantomData::<fn() -> Impostor>,
+        },
+        crate::next::ProjectionRoute {
+            name: "deposits",
+            projection: &mut deposits,
+            domain: std::marker::PhantomData,
+        },
+    );
+    let handled = kernel
+        .handle::<Account, _, _>(
+            store.begin(),
+            &Routes::new(),
+            deposit(3, 25),
+            &at(30),
+            &mut routes,
+        )
+        .unwrap();
+    let failure = crate::next::ProjectorFailure {
+        projector: "impostor",
+        error: KernelError::WrongDomain {
+            stream: cover("account", 1),
+            expected: "account",
+        },
+    };
+    assert_eq!(handled.outcome().projector_failures.len(), 1);
+    let crate::next::Handled::Applied(recorded) = handled else {
+        panic!("applied");
+    };
+    assert_eq!(recorded.projector_failures(), [failure]);
+    assert_eq!(deposits.0, [25], "the other projection still ran");
+    assert_eq!(
+        store
+            .read(&cover("account", 1))
+            .unwrap()
+            .unwrap()
+            .next_sequence,
+        3,
+        "the commit stands"
+    );
+}

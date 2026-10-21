@@ -796,3 +796,7 @@ macro_rules! async_store_contract {
         )*
     };
 }
+
+#[cfg(test)]
+#[path = "contract.test.rs"]
+mod tests;

@@ -143,6 +143,8 @@ fn a_command_emits_events_that_fold_into_state() {
     ]);
     assert_eq!(s.state().cents, 300);
     assert_eq!(s.len(), 3);
+    assert!(!s.is_empty());
+    assert!(Stream::<Account>::new(header(1, "account")).is_empty());
 }
 
 #[test]
@@ -379,6 +381,40 @@ fn replay_refuses_a_malformed_log() {
     );
 }
 
+/// Each command emits two events, each holding the sequence
+/// [`Tx::next_seq`] promised it.
+struct Numbered;
+
+impl Domain for Numbered {
+    type State = ();
+    type Command = ();
+    type Event = crate::Seq;
+    type Rejection = Infallible;
+    type Rules = ();
+    type Ctx = ();
+
+    fn decide(_: &(), tx: &mut Tx<Self>) -> Result<(), Infallible> {
+        for _ in 0..2 {
+            let next = tx.next_seq();
+            tx.emit(next);
+        }
+        Ok(())
+    }
+
+    fn apply(_: &mut (), _: &crate::Seq, _: &()) {}
+}
+
+#[test]
+fn next_seq_is_the_sequence_the_next_event_takes() {
+    let mut s = Stream::<Numbered>::new(header(7, "numbered"));
+    s.execute(&(), &(), &mut ()).unwrap();
+    s.execute(&(), &(), &mut ()).unwrap();
+    for e in s.events() {
+        assert_eq!(e.event, e.seq);
+    }
+    assert_eq!(s.len(), 4);
+}
+
 // ---------------------------------------------------------------- validate, then emit
 
 /// Emits, then rejects — the bug the engine refuses to let pass quietly.
@@ -446,6 +482,7 @@ fn the_store_holds_streams_and_refuses_stale_appends() {
     let replayed = Stream::<Account>::replay(h, events, &()).unwrap();
     assert_eq!(replayed.state().cents, 40);
     assert!(store.read(StreamId(99)).is_none());
+    assert_eq!(store.ids(), [StreamId(1)]);
 }
 
 #[derive(Default)]

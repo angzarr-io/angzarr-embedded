@@ -454,6 +454,7 @@ mod pipeline {
         let Deduplicated::Novel(novel) = coordinator.deduplicate(novel).unwrap() else {
             panic!("never applied");
         };
+        assert_eq!(novel.head(), 2, "the head as step 3 loaded it");
         let contextual = coordinator.load(novel).unwrap();
         assert_eq!(contextual.conflict_resolution(), ConflictResolution::Strict);
         assert_eq!(contextual.expected_sequence(), 2, "stamped with the head");
@@ -492,6 +493,7 @@ mod pipeline {
             novel.command().command_id(),
             &crate::next::toys::command_id(9)
         );
+        assert_eq!(novel.head(), 3);
         let contextual = coordinator.load(novel).unwrap();
         assert_eq!(
             contextual.conflict_resolution(),
