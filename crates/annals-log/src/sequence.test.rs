@@ -307,3 +307,63 @@ fn a_seek_keeps_checking_ticks_across_the_jump() {
         })
     ));
 }
+
+#[test]
+fn an_envelope_field_of_the_wrong_wire_type_is_refused() {
+    for field in 1..=3u8 {
+        let mut bytes = Writer::new(Vec::new(), &header()).unwrap().into_inner();
+        // One envelope, five bytes long: the field as a fixed32, the wrong
+        // wire type for every one of them.
+        bytes.extend([5, field << 3 | 5, 0, 0, 0, 0]);
+        let (_, err) = read(&bytes, false);
+        assert!(
+            matches!(
+                err,
+                Some(Error::Wire(WireProblem::EnvelopeWrongType { field: f })) if f == u64::from(field)
+            ),
+            "field {field}: {err:?}"
+        );
+    }
+}
+
+#[test]
+fn a_varint_inside_a_message_may_take_ten_bytes_but_no_more_bits() {
+    let mut zero = vec![0x08];
+    zero.extend([0x80; 9]);
+    zero.push(0x00);
+    assert_eq!(event_tick(&zero).unwrap(), 0);
+    let mut max = vec![0x08];
+    max.extend([0xff; 9]);
+    max.push(0x01);
+    assert_eq!(event_tick(&max).unwrap(), u64::MAX);
+    let mut over = vec![0x08];
+    over.extend([0xff; 9]);
+    over.push(0x02);
+    assert!(matches!(
+        event_tick(&over),
+        Err(Error::Wire(WireProblem::VarintOver64Bits))
+    ));
+}
+
+#[test]
+fn a_reader_tells_the_next_seq_and_the_last_tick() {
+    let bytes = log(&[(0, None, 5), (1, Some(0), 7)]);
+    let mut r = Reader::new(bytes.as_slice()).unwrap().ticked();
+    assert_eq!((r.next_seq(), r.last_tick()), (0, None));
+    r.next_raw().unwrap().unwrap();
+    r.next_raw().unwrap().unwrap();
+    assert_eq!((r.next_seq(), r.last_tick()), (2, Some(7)));
+    let mut untimed = Reader::new(bytes.as_slice()).unwrap();
+    untimed.next_raw().unwrap().unwrap();
+    assert_eq!(untimed.last_tick(), None);
+}
+
+#[test]
+fn skipping_to_the_next_seq_reads_nothing() {
+    let bytes = log(&[(0, None, 5), (1, Some(0), 7)]);
+    let mut r = Reader::new(bytes.as_slice()).unwrap();
+    r.skip_to(0).expect("already there");
+    assert_eq!(r.next_raw().unwrap().unwrap().seq, 0);
+    r.skip_to(1).expect("already there");
+    assert_eq!(r.next_seq(), 1);
+}
