@@ -1,11 +1,15 @@
 //! SQLite: the shared statements rendered by sea-query's SQLite builder and
 //! run on sqlx, over one connection per database; the schema created by
 //! `migrations/sqlite/`. A unit of work is a `BEGIN IMMEDIATE` transaction.
-//! A file is kept in WAL mode, so readers never wait on a writer.
+//! A file is kept in WAL mode, so once it is made a reader waits on no writer.
 
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 use std::str::FromStr;
-use std::time::Duration;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::task::{Context, Poll, Waker};
+use std::time::{Duration, Instant};
 
 use annals::next::v1::{Cover, EventPage, Snapshot, Uuid};
 use annals::next::{AsyncEventStore, AsyncStore, AsyncUnitOfWork, Slice, StoreError};
@@ -84,25 +88,27 @@ impl SqliteStore {
 
     /// The database at `path` opened read-only, or `None` if there is no
     /// file there: nothing is created, migrated, or moved into WAL, so a
-    /// read-only file or mount opens. A database with migrations not yet
-    /// applied is refused (`annals-store-sql-unmigrated`), as is one whose
-    /// applied migrations this build's disagree with. Every write to the
-    /// store fails (`annals-store-sql-unavailable`).
+    /// read-only file or mount opens. Every write to the store fails
+    /// (`annals-store-sql-unavailable`).
+    ///
+    /// A file is opened once it is *usable*: it holds a committed database
+    /// with every one of this build's migrations applied. A file that holds
+    /// nothing committed (no table, index or anything else in its schema)
+    /// is one a writer's [`open`](SqliteStore::open) is still making. From
+    /// creating the file until its migration commits, the writer leaves it
+    /// zero bytes long, then in WAL with only its header, then migrated
+    /// under a lock not yet let go, and a read meets the same empty
+    /// database at each step. Such a file is read again until it is
+    /// usable, waiting up to [`BUSY_TIMEOUT`] as a lock is waited for. A
+    /// file still empty after that has no writer finishing it, and is
+    /// refused as unmigrated (`annals-store-sql-unmigrated`).
+    ///
+    /// A database that holds something committed but has migrations not
+    /// yet applied is older than this build, and is refused as unmigrated
+    /// at once, with nothing waited for. So is one whose applied migrations
+    /// this build's disagree with (`annals-store-sql-unavailable`).
     pub async fn open_existing(path: &Path) -> Result<Option<SqliteStore>, StoreError> {
-        let options = SqliteConnectOptions::new()
-            .filename(path)
-            .busy_timeout(BUSY_TIMEOUT)
-            .read_only(true);
-        let mut conn = match options.connect().await {
-            Ok(conn) => conn,
-            Err(_) if matches!(path.try_exists(), Ok(false)) => return Ok(None),
-            Err(error) => return Err(unavailable(error)),
-        };
-        match schema(&mut conn).await? {
-            Schema::Current => Ok(Some(SqliteStore { conn })),
-            Schema::Pending(pending) => Err(unmigrated(pending)),
-            Schema::Refused(error) => Err(unavailable(error)),
-        }
+        read_only(path, BUSY_TIMEOUT, || {}).await
     }
 
     /// A database held only in memory, migrated.
@@ -111,6 +117,110 @@ impl SqliteStore {
         let mut conn = options.connect().await.map_err(unavailable)?;
         migrate(&mut conn).await?;
         Ok(SqliteStore { conn })
+    }
+}
+
+/// [`SqliteStore::open_existing`], waiting up to `patience` for a file being
+/// made, and calling `waiting` each time it waits.
+///
+/// Whether the file exists is asked before it is opened, not after an open
+/// fails: a writer may create it between the two, and the failed open
+/// would then be taken for a failure to open a file that is there. A file
+/// found is still there to open, since a database is created at its path
+/// and never moved there.
+async fn read_only(
+    path: &Path,
+    patience: Duration,
+    mut waiting: impl FnMut(),
+) -> Result<Option<SqliteStore>, StoreError> {
+    if matches!(path.try_exists(), Ok(false)) {
+        return Ok(None);
+    }
+    let options = SqliteConnectOptions::new()
+        .filename(path)
+        .busy_timeout(BUSY_TIMEOUT)
+        .read_only(true);
+    let mut conn = options.connect().await.map_err(unavailable)?;
+    let deadline = Instant::now() + patience;
+    let mut wait = FIRST_WAIT;
+    loop {
+        // Emptiness first: once a file holds something committed it never
+        // holds nothing again, so the schema read after sees a committed
+        // database, not one a commit lands in the middle of.
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() || !empty(&mut conn).await? {
+            return match schema(&mut conn).await? {
+                Schema::Current => Ok(Some(SqliteStore { conn })),
+                Schema::Pending(pending) => Err(unmigrated(pending)),
+                Schema::Refused(error) => Err(unavailable(error)),
+            };
+        }
+        waiting();
+        pause(wait.min(left)).await;
+        wait = (wait * 2).min(LONGEST_WAIT);
+    }
+}
+
+/// How long a read waits for a file being made before it looks again,
+/// doubling each time it waits, up to [`LONGEST_WAIT`]. A writer makes a
+/// file in milliseconds, so most reads look twice or three times.
+const FIRST_WAIT: Duration = Duration::from_millis(1);
+
+/// The longest a read waits between looks at a file being made.
+const LONGEST_WAIT: Duration = Duration::from_millis(50);
+
+/// Whether the database holds nothing committed: no table, index or
+/// anything else in its schema.
+async fn empty(conn: &mut SqliteConnection) -> Result<bool, StoreError> {
+    let entries: i64 = sqlx::query_scalar("SELECT count(*) FROM sqlite_master")
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(unavailable)?;
+    Ok(entries == 0)
+}
+
+/// A future ready once `duration` has passed. The crate drives no runtime
+/// and so has no timer to ask for: a thread sleeps the time out and wakes
+/// the task.
+fn pause(duration: Duration) -> Pause {
+    Pause {
+        until: Instant::now() + duration,
+        waker: None,
+    }
+}
+
+/// See [`pause`].
+struct Pause {
+    until: Instant,
+    /// The task to wake, shared with the sleeping thread once it is started.
+    waker: Option<Arc<Mutex<Option<Waker>>>>,
+}
+
+impl Future for Pause {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        if Instant::now() >= self.until {
+            return Poll::Ready(());
+        }
+        let waker = Some(cx.waker().clone());
+        match &self.waker {
+            Some(shared) => *shared.lock().unwrap_or_else(PoisonError::into_inner) = waker,
+            None => {
+                let shared = Arc::new(Mutex::new(waker));
+                let woken = Arc::clone(&shared);
+                let until = self.until;
+                std::thread::spawn(move || {
+                    std::thread::sleep(until.saturating_duration_since(Instant::now()));
+                    let waker = woken.lock().unwrap_or_else(PoisonError::into_inner).take();
+                    if let Some(waker) = waker {
+                        waker.wake();
+                    }
+                });
+                self.waker = Some(shared);
+            }
+        }
+        Poll::Pending
     }
 }
 

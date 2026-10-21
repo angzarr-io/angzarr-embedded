@@ -3,7 +3,8 @@
 //! is particular to a store on a file.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use annals::next::contract::{cover, page};
 use annals::next::v1::{Cover, Snapshot};
@@ -12,7 +13,7 @@ use annals_diagnostic::Diagnostic;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection};
 use sqlx::{ConnectOptions, Connection};
 
-use super::{SqliteStore, MIGRATOR};
+use super::{into_wal, migrate, pause, read_only, SqliteStore, BUSY_TIMEOUT, MIGRATOR};
 
 annals::async_store_contract!(#[tokio::test], SqliteStore::open_in_memory().await.unwrap());
 
@@ -242,16 +243,140 @@ async fn a_read_only_file_in_a_read_only_directory_opens_for_reading() {
 }
 
 #[tokio::test]
-async fn reading_an_unmigrated_file_fails_and_leaves_it_unmigrated() {
+async fn reading_a_database_older_than_the_build_fails_at_once() {
+    // It holds what was committed to it, so it is no file being made: the
+    // read refuses it as it stands, waiting on no writer.
     let path = database();
-    std::fs::write(&path, b"").unwrap();
-    let opened = SqliteStore::open_existing(&path).await;
+    let mut conn = SqliteConnectOptions::new()
+        .filename(&path)
+        .create_if_missing(true)
+        .connect()
+        .await
+        .unwrap();
+    sqlx::query("CREATE TABLE older (x)")
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    conn.close().await.unwrap();
+    let waits = AtomicUsize::new(0);
+    let opened = read_only(&path, BUSY_TIMEOUT, || {
+        waits.fetch_add(1, Ordering::Relaxed);
+    })
+    .await;
     assert_eq!(
         opened.as_ref().err().and_then(code),
         Some("annals-store-sql-unmigrated")
     );
+    assert_eq!(waits.load(Ordering::Relaxed), 0);
+    assert_eq!(journal_mode(&path).await, "delete");
+    remove(&path);
+}
+
+// --------------------------------------- reading a file a writer is making
+
+/// A file `open` is making: created, and no further.
+async fn created(path: &Path) -> SqliteConnection {
+    let conn = SqliteConnectOptions::new()
+        .filename(path)
+        .busy_timeout(BUSY_TIMEOUT)
+        .create_if_missing(true)
+        .connect()
+        .await
+        .unwrap();
+    assert_eq!(std::fs::metadata(path).unwrap().len(), 0);
+    conn
+}
+
+/// Read the file at `path` as `open_existing` does, alongside `writer`,
+/// which runs only once the read has found the file being made and begun
+/// to wait for it: the read meets the file mid-creation, every run. A read
+/// that ends without waiting is returned as it is, the writer never run.
+async fn read_while<W: std::future::Future<Output = ()>>(
+    path: &Path,
+    writer: impl FnOnce() -> W,
+) -> Result<Option<SqliteStore>, StoreError> {
+    let waiting = AtomicBool::new(false);
+    let read = AtomicBool::new(false);
+    let (opened, ()) = tokio::join!(
+        async {
+            let opened = read_only(path, BUSY_TIMEOUT, || {
+                waiting.store(true, Ordering::Relaxed)
+            })
+            .await;
+            read.store(true, Ordering::Relaxed);
+            opened
+        },
+        async {
+            while !waiting.load(Ordering::Relaxed) {
+                if read.load(Ordering::Relaxed) {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+            writer().await;
+        }
+    );
+    opened
+}
+
+#[tokio::test]
+async fn reading_a_file_created_but_not_yet_in_wal_waits_for_its_writer() {
+    let path = database();
+    let mut writer = created(&path).await;
+    let read = read_while(&path, || async {
+        into_wal(&mut writer).await.unwrap();
+        migrate(&mut writer).await.unwrap();
+    })
+    .await;
+    let mut store = read.unwrap().expect("the database its writer made");
+    assert_eq!(store.covers("tasks").await, Ok(vec![]));
+    drop((store, writer));
+    remove(&path);
+}
+
+#[tokio::test]
+async fn reading_a_file_its_writer_is_migrating_waits_for_the_commit() {
+    let path = database();
+    let mut writer = created(&path).await;
+    into_wal(&mut writer).await.unwrap();
+    let mut tx = writer.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    MIGRATOR.run_direct(&mut *tx).await.unwrap();
+    let read = read_while(&path, || async { tx.commit().await.unwrap() }).await;
+    let mut store = read.unwrap().expect("the database its writer made");
+    assert_eq!(store.covers("tasks").await, Ok(vec![]));
+    drop((store, writer));
+    remove(&path);
+}
+
+#[tokio::test]
+async fn reading_a_file_whose_writer_never_finishes_fails_unmigrated() {
+    // An empty file nobody finishes, as a writer that died making it left
+    // it: the read waits out its patience, then refuses it, changing
+    // nothing. Each wait doubles, from a millisecond, and lasts at least as
+    // long as it says, so 20ms holds five at most however slow the machine:
+    // four take 15ms, and the fifth is cut to what is left.
+    let path = database();
+    std::fs::write(&path, b"").unwrap();
+    let waits = AtomicUsize::new(0);
+    let opened = read_only(&path, Duration::from_millis(20), || {
+        waits.fetch_add(1, Ordering::Relaxed);
+    })
+    .await;
+    assert_eq!(
+        opened.as_ref().err().and_then(code),
+        Some("annals-store-sql-unmigrated")
+    );
+    assert!((1..=5).contains(&waits.load(Ordering::Relaxed)));
     assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
     remove(&path);
+}
+
+#[tokio::test]
+async fn a_pause_lasts_as_long_as_it_says() {
+    let started = Instant::now();
+    pause(Duration::from_millis(30)).await;
+    assert!(started.elapsed() >= Duration::from_millis(30));
+    pause(Duration::ZERO).await;
 }
 
 /// Each way a database's applied migrations can disagree with this build's,

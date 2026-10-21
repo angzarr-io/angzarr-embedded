@@ -12,8 +12,8 @@ pub enum SqlError {
     /// A stored value's bytes do not decode as what was written.
     Undecodable { detail: String },
     /// A database opened read-only has `pending` migrations this build
-    /// would apply: it is older than the build, and only a store opened to
-    /// write migrates it.
+    /// would apply: it is older than the build, or empty with no writer
+    /// finishing it, and only a store opened to write migrates it.
     Unmigrated { pending: usize },
 }
 
