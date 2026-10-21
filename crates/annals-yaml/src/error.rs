@@ -159,3 +159,7 @@ impl Diagnostic for Error {
         args
     }
 }
+
+#[cfg(test)]
+#[path = "error.test.rs"]
+mod tests;

@@ -220,7 +220,6 @@ impl Document {
                 }
                 for (k, v) in now {
                     match was.iter().find(|(o, _)| o == k) {
-                        Some((_, ov)) if ov == v => {}
                         Some((_, ov)) => {
                             path.push(Seg::Key(k));
                             let deeper = self.reach(path, ov, v, flow_depth);
@@ -695,7 +694,9 @@ fn splice(lines: &mut Vec<Raw>, m: &Meaningful, place: &Place, op: &Op, items: &
                 if spans.len() >= 2 {
                     let (_, prev_end) = item_span(lines, m, spans[spans.len() - 2], *indent);
                     let (start, _) = item_span(lines, m, spans[spans.len() - 1], *indent);
-                    if lines[prev_end + 1..start].iter().any(|l| blank(&l.text)) {
+                    // From the previous item's last line, which is never
+                    // blank, to this one's first.
+                    if lines[prev_end..start].iter().any(|l| blank(&l.text)) {
                         new.push(line(String::new()));
                     }
                 }
@@ -892,16 +893,12 @@ impl View {
         }) else {
             return Ok(None);
         };
-        let end = self.value_end(at);
-        let last = if end > at + 1 {
-            self.raw(end - 1)
-        } else {
-            self.raw(at)
-        };
-        Ok(Some((at, last)))
+        // The key's line is the last when its value has none of its own.
+        Ok(Some((at, self.raw(self.value_end(at) - 1))))
     }
 
-    /// One past the last line of the value of the key at `at`.
+    /// One past the last line of the value of the key at `at`: `at + 1` when
+    /// the value is on the key's line or empty.
     fn value_end(&self, at: usize) -> usize {
         let indent = self.lines[at].1;
         let mut end = at + 1;

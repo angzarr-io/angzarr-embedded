@@ -9,7 +9,7 @@
 exclude_globs = ["*.test.rs"]
 
 # Otherwise excluded: only the mutants in `exclude_re` below, each equivalent
-# (no test can tell it from the code), each matched alone by its description.
+# (no test can tell it from the code), each matched alone by its description, grouped by crate.
 #
 # Not excluded, though they might have been:
 # - annals-catalog-check's src/lib.rs holds no code; its check is a test.
@@ -29,6 +29,7 @@ test_workspace = true
 gitignore = false
 
 exclude_re = [
+    # annals
     # A body that cannot run: no value of `Infallible` exists to call it on
     # (`match *self {}`), so whatever the mutant returns is never returned.
     '''replace <impl Payload for std::convert::Infallible>::to_any -> Any with Default::default\(\)$''',
@@ -40,4 +41,9 @@ exclude_re = [
     '''replace <impl Payload for std::convert::Infallible>::type_urls -> Vec<String> with vec!\[\]$''',
     '''replace <impl Project for \(\)>::project -> Vec<ProjectorFailure> with vec!\[\]$''',
     '''replace EventStore::find_triggered -> Result<Vec<EventPage>, StoreError> with Ok\(vec!\[\]\)$''',
+    # annals-yaml
+    # update_to's last check, that the edits reached the target, cannot fail:
+    # reach returns Ok only once each differing entry is set and each edit
+    # has read back as intended, so the guard is always true when reached.
+    'replace match guard same\(&self\.value, target\) with true in Document::update_to',
 ]

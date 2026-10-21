@@ -302,6 +302,8 @@ fn load_as_decodes_the_current_tree() {
 fn helpers_handle_the_edges() {
     let mut doc = parse("a: 1\nb: 2\nn:\n").unwrap();
     rename_key(&mut doc, "missing", "c").unwrap();
+    // A missing key is nothing to do, even when its new name is taken.
+    rename_key(&mut doc, "missing", "b").unwrap();
     rename_key(&mut doc, "a", "a").unwrap();
     assert_eq!(
         rename_key(&mut Value::scalar("x"), "a", "b"),
@@ -559,4 +561,55 @@ fn upgrade_keeping_reports_a_bad_document_like_load() {
         .upgrade_keeping(None, "version: 9\n", 2)
         .is_err());
     assert!(hp_loader().upgrade_keeping(None, "a: &x 1\n", 2).is_err());
+}
+
+#[test]
+fn a_loader_says_what_it_reads() {
+    let l = toy();
+    assert_eq!((l.kind(), l.oldest(), l.current()), ("toy", 0, 3));
+    let from_2 = Migrations::new("deck", 5)
+        .step(2, ok)
+        .step(3, ok)
+        .step(4, ok)
+        .build()
+        .unwrap();
+    assert_eq!(
+        (from_2.kind(), from_2.oldest(), from_2.current()),
+        ("deck", 2, 5)
+    );
+}
+
+#[test]
+fn a_version_0_loader_leaves_an_unstamped_document_unstamped() {
+    let none = Migrations::new("toy", 0).build().unwrap();
+    assert_eq!(none.load(None, "a: 1\n").unwrap(), parse("a: 1\n").unwrap());
+}
+
+#[test]
+fn a_load_error_gives_its_cause_as_its_source() {
+    use std::error::Error as _;
+    let source = |text: &str| {
+        toy()
+            .load(None, text)
+            .unwrap_err()
+            .source()
+            .map(|s| s.to_string())
+    };
+    let yaml = source("a: [1\n").expect("a parse error has a source");
+    assert_eq!(yaml, crate::parse("a: [1\n").unwrap_err().to_string());
+    assert_eq!(
+        source("version: 0\nhp: 1\nhealth: 2\n").as_deref(),
+        Some("rename \"hp\" to \"health\": \"health\" is already there")
+    );
+    let decode = toy()
+        .load_as(None, V0, |doc| {
+            doc.get("missing").cloned().ok_or_else(missing)
+        })
+        .unwrap_err();
+    assert_eq!(
+        decode.source().map(|s| s.to_string()).as_deref(),
+        Some("`missing` is missing")
+    );
+    assert!(source("version: 9\n").is_none());
+    assert!(source("- a\n").is_none());
 }

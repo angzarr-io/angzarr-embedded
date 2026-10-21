@@ -162,6 +162,27 @@ fn a_quote_opens_only_at_the_start_of_a_scalar() {
         parse("v: [l'a, 'b # c'] # d\n").unwrap().get("v"),
         Some(&Value::Seq(vec![s("l'a"), s("b # c")]))
     );
+    // A quote after `,` or `[` opens only inside a flow collection, and one
+    // closes when its `]` does.
+    assert_eq!(
+        parse("name: b,'c # d'\n").unwrap().get("name"),
+        Some(&s("b,'c"))
+    );
+    assert_eq!(
+        parse("name: x[y,'b # c'\n").unwrap().get("name"),
+        Some(&s("x[y,'b"))
+    );
+    assert_eq!(
+        parse("name: [b],'c # d'\n").unwrap_err().problem,
+        ParseProblem::Unexpected {
+            found: ",'c".into()
+        }
+    );
+    // A backslash escapes nothing inside single quotes.
+    assert_eq!(
+        parse("name: 'x\\' # c\n").unwrap().get("name"),
+        Some(&s("x\\"))
+    );
     // A quoted key ends at its closing quote, escapes and all.
     let keys = parse("\"a\\\": b\": 1\n'it''s: x' : 2\na]b: 3\n").unwrap();
     assert_eq!(keys.get("a\": b"), Some(&s("1")));
@@ -676,4 +697,59 @@ mod roundtrip {
             round_trip(&v, &format!("{src:?}"));
         }
     }
+}
+
+#[test]
+fn a_flow_collection_line_is_a_value_not_a_key() {
+    let m = Value::Map(vec![("a".into(), s("1"))]);
+    assert_eq!(parse("{a: 1}\n").unwrap(), m);
+    assert_eq!(parse("- {a: 1}\n").unwrap(), Value::Seq(vec![m.clone()]));
+    assert_eq!(
+        parse("k:\n  {a: 1}\n").unwrap(),
+        Value::Map(vec![("k".into(), m)])
+    );
+}
+
+#[test]
+fn an_item_indented_past_its_sequence_is_refused() {
+    let e = parse("- a\n  - b\n").unwrap_err();
+    assert_eq!((e.line, e.problem), (2, ParseProblem::UnexpectedIndent));
+}
+
+#[test]
+fn tilde_and_null_are_null() {
+    let v = parse("a: ~\nb: null\nc: nulls\nd: [~, null]\n").unwrap();
+    assert_eq!(v.get("a"), Some(&Value::Null));
+    assert_eq!(v.get("b"), Some(&Value::Null));
+    assert_eq!(v.get("c"), Some(&s("nulls")));
+    assert_eq!(
+        v.get("d"),
+        Some(&Value::Seq(vec![Value::Null, Value::Null]))
+    );
+}
+
+#[test]
+fn writes_plain_what_reads_back_plain() {
+    let v = Value::Map(vec![
+        ("n".into(), s("-5")),
+        ("dash".into(), s("-")),
+        ("words".into(), s("a b")),
+        ("quoted".into(), s("a 'b'")),
+    ]);
+    assert_eq!(
+        write(&v, 0),
+        "n: -5\ndash: \"-\"\nwords: a b\nquoted: \"a 'b'\"\n"
+    );
+}
+
+#[test]
+fn a_sequence_in_a_sequence_is_indented_under_its_dash() {
+    let v = Value::Seq(vec![Value::Seq(vec![s("a"), s("b")])]);
+    assert_eq!(write(&v, 9), "-\n  - a\n  - b\n");
+    let deeper = Value::Map(vec![("k".into(), v)]);
+    assert_eq!(write(&deeper, 9), "k:\n  -\n    - a\n    - b\n");
+    // Its own items are a level deeper: at flow depth 2, the third level is
+    // on one line.
+    let three = Value::Seq(vec![Value::Seq(vec![Value::Seq(vec![s("a")])])]);
+    assert_eq!(write(&three, 2), "-\n  - [a]\n");
 }
