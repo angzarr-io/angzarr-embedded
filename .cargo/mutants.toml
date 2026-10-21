@@ -1,6 +1,9 @@
 # cargo-mutants (https://mutants.rs): `just mutants` runs it after `just gen`.
 #
-# Nothing is excluded. What might have been:
+# Excluded: only the mutants below, each equivalent (no test can tell it
+# from the code), each matched alone by its description.
+#
+# Not excluded, though they might have been:
 # - annals-log's generated protobuf (crates/annals-log/gen) is reached only by
 #   `include!` from src/codegen.test.rs, a `#[cfg(test)]` module, which
 #   cargo-mutants skips.
@@ -19,3 +22,17 @@ test_workspace = true
 # Copy gitignored files into the scratch tree: the codegen check reads
 # crates/annals-log/gen, which `just gen` writes and git ignores.
 gitignore = false
+
+exclude_re = [
+    # A body that cannot run: no value of `Infallible` exists to call it on
+    # (`match *self {}`), so whatever the mutant returns is never returned.
+    '''replace <impl Payload for std::convert::Infallible>::to_any -> Any with Default::default\(\)$''',
+    '''replace <impl Diagnostic for std::convert::Infallible>::code -> &'static str with ""$''',
+    '''replace <impl Diagnostic for std::convert::Infallible>::code -> &'static str with "xyzzy"$''',
+    '''replace <impl Diagnostic for std::convert::Infallible>::args -> Vec<\(&'static str, Arg\)> with vec!\[\]$''',
+    # The mutant is the code: each already returns an empty Vec, so `vec![]`
+    # changes nothing.
+    '''replace <impl Payload for std::convert::Infallible>::type_urls -> Vec<String> with vec!\[\]$''',
+    '''replace <impl Project for \(\)>::project -> Vec<ProjectorFailure> with vec!\[\]$''',
+    '''replace EventStore::find_triggered -> Result<Vec<EventPage>, StoreError> with Ok\(vec!\[\]\)$''',
+]
