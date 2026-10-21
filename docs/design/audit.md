@@ -638,7 +638,11 @@ own tests. A store that purges also runs the opt-in purge section:
 `async_store_contract!(purge, #[tokio::test], fresh_store)`. A store that
 reads one moment (below) also runs the opt-in read section:
 `store_contract!(read, fresh_pair)` on a synchronous store, and an async
-store calls each read check with its pair itself.
+store calls each read check with its pair itself. A store that answers a
+change token (below) also runs the opt-in watch section:
+`store_contract!(watch, fresh_store, fresh_pair)`, or
+`async_store_contract!(watch, #[tokio::test], fresh_store)` with the pair
+check called by the store's tests.
 
 **Opaque.** A store holds angzarr's pages as written and never decodes a
 payload; upcasting is the kernel's, on every read. The Postgres shape:
@@ -726,6 +730,45 @@ unit borrows the store, so nothing changes under it. The contract's read
 checks take a reader and a writer on one store and write through the
 writer while the reader's unit is open, after it began and between its
 reads, so a unit that reads live fails them.
+
+### Watching for commits
+
+```rust
+pub struct ChangeToken(/* opaque */);   // Copy + Eq + Hash + Debug; ChangeToken::new([u64; 2]) for a store
+pub trait Watch { fn change_token(&mut self) -> Result<ChangeToken, StoreError>; }
+pub trait AsyncWatch { fn change_token(&mut self) -> impl Future<Output = Result<ChangeToken, StoreError>> + Send; }
+```
+
+A watcher (a view kept live as a store changes) would otherwise read every
+stream on every poll to learn whether anything moved, which costs as much
+as the store is big. Instead it keeps the store's **change token** and asks
+for a new one each poll: two equal tokens from one handle mean nothing was
+committed between them, through that handle or any other on the store's
+database (no append, no unit of work, no purge), so there is nothing new to
+read. A changed token says only that something may be new: a token may
+also change when nothing a reader sees did (a snapshot, a purge of no such
+stream, a unit rolled back), and the watcher reads and finds nothing. It
+never errs the other way, so a watcher never misses a commit. Tokens are
+compared for equality only, and only from one handle: two connections to
+one database may answer different tokens for the same moment.
+
+Asking reads no stream, writes nothing and takes no write lock, so a store
+opened only for reading answers it and no writer waits on it. It is
+opt-in, like purging, and needs no other store trait; `Ready` serves a
+synchronous `Watch` as an `AsyncWatch`. `InMemoryStore` counts its
+commits. The contract's watch checks commit through the store itself, and
+through a second handle between two of a watcher's reads, and require the
+token to change after each and to hold with nothing committed; a store
+whose token never changes fails both, and one whose token changes on every
+read fails them too.
+
+On SQLite the token is the connection's `PRAGMA data_version` with its
+`total_changes()`, read in one statement. `data_version` changes when
+another connection commits and never for this connection's own commits;
+`total_changes()` counts the rows this connection's own statements
+changed. Together they change on every commit from anywhere. Not the
+events table's largest rowid: a purge of any stream but the newest leaves
+it as it was, and it says nothing of a snapshot.
 
 ## Snapshots
 

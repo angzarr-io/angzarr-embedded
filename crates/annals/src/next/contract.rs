@@ -32,6 +32,19 @@
 //! done: two handles on one store are two connections to one database,
 //! which a test makes on a file.
 //!
+//! A store that answers a change token ([`AsyncWatch`](super::AsyncWatch),
+//! or [`Watch`](super::Watch) through `Ready`) also runs the watch checks,
+//! a third opt-in section. One commits through the store itself and reads
+//! its token between commits; the other takes a `(watcher, writer)` pair
+//! and commits through the writer between two of the watcher's reads, so a
+//! token that misses another handle's commits is caught. Both also read the
+//! token twice with nothing committed and require it to hold, so a token
+//! that changes on every read (correct, but no use to a watcher) fails.
+//! `store_contract!(watch, fresh_store, fresh_pair)` runs both on a
+//! synchronous store; `async_store_contract!(watch, #[tokio::test],
+//! fresh_store)` runs the first, and an async store calls the pair check
+//! itself, as it does the read checks.
+//!
 //! Each check takes a fresh, empty store and panics, naming what failed.
 //! The pages are opaque to a store, so the checks write their own: a store
 //! never decodes a payload.
@@ -45,6 +58,7 @@ use prost_types::{Any, Timestamp};
 use super::error::StoreError;
 use super::store::{
     AsyncEventStore, AsyncPurge, AsyncReadStore, AsyncReadUnit, AsyncStore, AsyncUnitOfWork,
+    AsyncWatch, ChangeToken,
 };
 
 /// Complete a future whose every await is ready at once: a check run over a
@@ -584,6 +598,80 @@ pub async fn a_read_unit_keeps_a_stream_purged_after_it_began<R, W>(
     assert_eq!(later.read_from(&purged, 0).await, Ok(None));
 }
 
+// ----------------------------------------------------- watch (opt-in)
+
+/// `watcher`'s token now, asked twice: nothing committed in between, so the
+/// two must be equal.
+async fn steady<W: AsyncWatch>(watcher: &mut W, what: &str) -> ChangeToken {
+    let token = watcher.change_token().await.unwrap();
+    assert_eq!(
+        watcher.change_token().await,
+        Ok(token),
+        "the token holds with nothing committed, after {what}"
+    );
+    token
+}
+
+pub async fn a_change_token_changes_when_another_handle_commits<R, W>(
+    (mut watcher, mut writer): (R, W),
+) where
+    R: AsyncWatch,
+    W: AsyncPurge,
+{
+    let first = cover("account", 1);
+    let second = cover("account", 2);
+    let empty = steady(&mut watcher, "nothing").await;
+    // Each commit lands through the writer between two of the watcher's
+    // reads of its token.
+    writer.append(&first, 0, &[page(0, 1)]).await.unwrap();
+    let created = steady(&mut watcher, "a stream created").await;
+    assert_ne!(created, empty, "a stream created through another handle");
+    writer.append(&first, 1, &[page(1, 2)]).await.unwrap();
+    let grown = steady(&mut watcher, "a stream grown").await;
+    assert_ne!(grown, created, "a stream grown through another handle");
+    writer.append(&second, 0, &[page(0, 3)]).await.unwrap();
+    let another = steady(&mut watcher, "another stream").await;
+    assert_ne!(another, grown, "another stream created");
+    // The first stream, not the newest: what goes is not the last written.
+    assert_eq!(writer.purge(&first).await, Ok(2));
+    let purged = steady(&mut watcher, "a purge").await;
+    assert_ne!(purged, another, "a stream purged through another handle");
+}
+
+pub async fn a_change_token_changes_when_its_own_store_commits<S>(mut store: S)
+where
+    S: AsyncWatch + AsyncStore + AsyncPurge,
+    for<'s> S::Unit<'s>: AsyncPurge,
+{
+    let first = cover("account", 1);
+    let second = cover("account", 2);
+    let empty = steady(&mut store, "nothing").await;
+    store.append(&first, 0, &[page(0, 1)]).await.unwrap();
+    let appended = steady(&mut store, "an append").await;
+    assert_ne!(appended, empty, "an append through the store itself");
+    // Reads commit nothing.
+    store.read_from(&first, 0).await.unwrap();
+    store.covers("account").await.unwrap();
+    store.find_command(&first, &command(1)).await.unwrap();
+    store.read_snapshot(&first).await.unwrap();
+    assert_eq!(store.change_token().await, Ok(appended), "after reads");
+    let mut unit = store.begin().await;
+    unit.append(&second, 0, &[page(0, 2)]).await.unwrap();
+    unit.append(&first, 1, &[page(1, 3)]).await.unwrap();
+    unit.commit().await.unwrap();
+    let committed = steady(&mut store, "a unit of work").await;
+    assert_ne!(committed, appended, "a unit of work committed");
+    // The first stream, not the newest: what goes is not the last written.
+    assert_eq!(store.purge(&first).await, Ok(2));
+    let purged = steady(&mut store, "a purge").await;
+    assert_ne!(purged, committed, "a purge through the store itself");
+    let mut unit = store.begin().await;
+    assert_eq!(unit.purge(&second).await, Ok(1));
+    unit.commit().await.unwrap();
+    let emptied = steady(&mut store, "a unit's purge").await;
+    assert_ne!(emptied, purged, "a purge in a unit of work committed");
+}
+
 /// One `#[test]` per contract check, each on a fresh synchronous store from
 /// `$fresh` (an expression evaluated once per test), run through
 /// [`Ready`](crate::next::Ready). `store_contract!(purge, $fresh)` runs the
@@ -592,8 +680,20 @@ pub async fn a_read_unit_keeps_a_stream_purged_after_it_began<R, W>(
 /// `store_contract!(read, $pair)` runs the read checks, for a store that
 /// implements [`ReadStore`](crate::next::ReadStore), on a fresh
 /// `(reader, writer)` pair from `$pair`: two handles on one empty store.
+/// `store_contract!(watch, $fresh, $pair)` runs the watch checks, for a
+/// store that implements [`Watch`](crate::next::Watch) (with
+/// [`Purge`](crate::next::Purge), on it and its unit of work): one on a
+/// fresh store, one on a fresh `(watcher, writer)` pair.
 #[macro_export]
 macro_rules! store_contract {
+    (watch, $fresh:expr, $pair:expr) => {
+        $crate::store_contract!(@each $fresh;
+            a_change_token_changes_when_its_own_store_commits,
+        );
+        $crate::store_contract!(@pair $pair;
+            a_change_token_changes_when_another_handle_commits,
+        );
+    };
     (read, $pair:expr) => {
         $crate::store_contract!(@pair $pair;
             a_read_unit_sees_the_store_as_it_began,
@@ -653,8 +753,17 @@ macro_rules! store_contract {
 /// `async_store_contract!(purge, #[$test], $fresh)` runs the purge checks
 /// instead, for a store and unit of work that implement
 /// [`AsyncPurge`](crate::next::AsyncPurge): a store that purges invokes both.
+/// `async_store_contract!(watch, #[$test], $fresh)` runs the watch check
+/// on one store, for one that implements
+/// [`AsyncWatch`](crate::next::AsyncWatch) and purges; the check on a
+/// `(watcher, writer)` pair the store's tests call themselves.
 #[macro_export]
 macro_rules! async_store_contract {
+    (watch, #[$test:meta], $fresh:expr) => {
+        $crate::async_store_contract!(@each #[$test], $fresh;
+            a_change_token_changes_when_its_own_store_commits,
+        );
+    };
     (purge, #[$test:meta], $fresh:expr) => {
         $crate::async_store_contract!(@each #[$test], $fresh;
             a_purge_deletes_a_streams_events_snapshot_and_command_ids,

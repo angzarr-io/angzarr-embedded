@@ -117,8 +117,8 @@ pub use reaction::{
 pub use registry::{Misconfigured, Registry};
 pub use store::{
     AsyncEventStore, AsyncPurge, AsyncReadStore, AsyncReadUnit, AsyncStore, AsyncUnitOfWork,
-    EventStore, InMemoryRead, InMemoryStore, InMemoryTx, Purge, ReadStore, ReadUnit, Ready, Slice,
-    Store, UnitOfWork,
+    AsyncWatch, ChangeToken, EventStore, InMemoryRead, InMemoryStore, InMemoryTx, Purge, ReadStore,
+    ReadUnit, Ready, Slice, Store, UnitOfWork, Watch,
 };
 pub use stream::{Envelope, Executed, Stream};
 pub use upcast::{UpcastFn, Upcaster};

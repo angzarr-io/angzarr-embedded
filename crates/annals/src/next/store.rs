@@ -48,6 +48,14 @@
 //! it shows. It writes nothing and takes no write lock. Each read on the
 //! store itself is one moment already; only a run of them needs the unit.
 //!
+//! **Watching** is opt-in as well: a store that can say cheaply whether
+//! anything was committed implements [`Watch`] (or [`AsyncWatch`]), whose
+//! [`ChangeToken`] a watcher compares between polls instead of reading
+//! every stream again. Equal tokens from one handle mean nothing was
+//! committed in between, through any handle on the store; a new token may
+//! come with nothing new to read. It reads no stream and takes no write
+//! lock, so a store opened only for reading can answer it.
+//!
 //! A command chain touches several streams and commits them all or none, so
 //! the port is a **unit of work**: a database transaction. The application
 //! opens one and hands it to the [`Kernel`](super::Kernel), which reads
@@ -322,6 +330,44 @@ pub trait AsyncReadStore {
     fn begin_read(&mut self) -> impl Future<Output = Self::Reads<'_>> + Send;
 }
 
+/// What a store's [`Watch::change_token`] answers: equal tokens from one
+/// handle mean nothing was committed to the store between the two reads.
+/// Opaque, and compared only for equality, and only with tokens from the
+/// same handle: two handles on one database may answer different tokens
+/// for the same moment.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct ChangeToken([u64; 2]);
+
+impl ChangeToken {
+    /// The token a store makes from whatever it counts commits by.
+    pub const fn new(parts: [u64; 2]) -> ChangeToken {
+        ChangeToken(parts)
+    }
+}
+
+/// A store that says, cheaply, whether anything has been committed to it
+/// since it was last asked: what a watcher polls instead of reading every
+/// stream again. A store opts in by implementing it; it needs no other
+/// store trait, so a store opened only for reading can.
+///
+/// Two tokens from one handle are equal only if nothing was committed in
+/// between, through this handle or any other on the store's database: no
+/// append, no unit of work, no purge. A token may change when nothing a
+/// reader sees did (a snapshot written, a purge of no such stream, a unit
+/// of work rolled back), so a watcher that sees a new token reads again and
+/// may find nothing new; it never misses a commit by seeing an old one. A
+/// token reads no stream, writes nothing, and takes no write lock.
+pub trait Watch {
+    /// The store's token now.
+    fn change_token(&mut self) -> Result<ChangeToken, StoreError>;
+}
+
+/// [`Watch`], async. Its future is `Send`, like the async store's.
+pub trait AsyncWatch {
+    /// As [`Watch::change_token`].
+    fn change_token(&mut self) -> impl Future<Output = Result<ChangeToken, StoreError>> + Send;
+}
+
 /// A synchronous store served through the async port, every future ready
 /// at once.
 pub struct Ready<S>(pub S);
@@ -395,6 +441,12 @@ impl<S: ReadStore + Send> AsyncReadStore for Ready<S> {
 
     async fn begin_read(&mut self) -> Ready<S::Reads<'_>> {
         Ready(self.0.begin_read())
+    }
+}
+
+impl<S: Watch + Send> AsyncWatch for Ready<S> {
+    async fn change_token(&mut self) -> Result<ChangeToken, StoreError> {
+        self.0.change_token()
     }
 }
 
@@ -487,6 +539,8 @@ fn slice(stream: &Cover, pages: &[EventPage], from: u64) -> Slice {
 pub struct InMemoryStore {
     streams: BTreeMap<Key, Held>,
     snapshots: BTreeMap<Key, Snapshot>,
+    /// How many times something was committed: its [`ChangeToken`].
+    commits: u64,
 }
 
 impl InMemoryStore {
@@ -521,6 +575,11 @@ impl InMemoryStore {
             .map(|h| slice(&h.stream, &h.pages, from))
     }
 
+    /// Count a commit, for [`Watch::change_token`].
+    fn committed(&mut self) {
+        self.commits = self.commits.wrapping_add(1);
+    }
+
     fn covers_of(&self, domain: &str) -> Vec<Cover> {
         // Key order is the port's: main (no edition) first, then each
         // edition by name, each by root.
@@ -548,7 +607,9 @@ impl EventStore for InMemoryStore {
             pages: Vec::new(),
         });
         held.pages.extend_from_slice(pages);
-        Ok(held.pages.len() as u64)
+        let length = held.pages.len() as u64;
+        self.committed();
+        Ok(length)
     }
 
     fn read_from(&mut self, stream: &Cover, from: u64) -> Result<Option<Slice>, StoreError> {
@@ -578,6 +639,7 @@ impl EventStore for InMemoryStore {
 
     fn write_snapshot(&mut self, stream: &Cover, snapshot: &Snapshot) -> Result<(), StoreError> {
         self.snapshots.insert(key(stream), snapshot.clone());
+        self.committed();
         Ok(())
     }
 }
@@ -586,7 +648,16 @@ impl Purge for InMemoryStore {
     fn purge(&mut self, stream: &Cover) -> Result<u64, StoreError> {
         let k = key(stream);
         self.snapshots.remove(&k);
+        self.committed();
         Ok(self.streams.remove(&k).map_or(0, |h| h.pages.len() as u64))
+    }
+}
+
+impl Watch for InMemoryStore {
+    /// How many times something was committed: an append, a snapshot, a
+    /// purge (of a stream or of nothing) or a unit of work.
+    fn change_token(&mut self) -> Result<ChangeToken, StoreError> {
+        Ok(ChangeToken::new([self.commits, 0]))
     }
 }
 
@@ -724,6 +795,7 @@ impl UnitOfWork for InMemoryTx<'_> {
             store.streams.remove(&k);
             store.snapshots.remove(&k);
         }
+        store.committed();
         for held in pending.into_values() {
             let length = store.pages(&held.stream).len() as u64;
             store.append(&held.stream, length, &held.pages)?;

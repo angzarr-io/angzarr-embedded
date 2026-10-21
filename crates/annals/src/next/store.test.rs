@@ -436,3 +436,154 @@ fn every_read_check_fails_a_store_whose_read_unit_reads_live() {
         a_read_unit_keeps_a_stream_purged_after_it_began(pair)
     )));
 }
+
+impl crate::next::Watch for Shared {
+    fn change_token(&mut self) -> Result<crate::next::ChangeToken, StoreError> {
+        self.with(|s| s.change_token())
+    }
+}
+
+mod watch_contract {
+    crate::store_contract!(
+        watch,
+        crate::next::InMemoryStore::new(),
+        super::shared(super::Reading::AsItBegan)
+    );
+}
+
+/// A store whose token never changes, whatever is committed: every watch
+/// check must fail on it.
+struct Frozen<S>(S);
+
+impl<S: EventStore> EventStore for Frozen<S> {
+    fn append(
+        &mut self,
+        stream: &crate::next::v1::Cover,
+        expected: u64,
+        pages: &[EventPage],
+    ) -> Result<u64, StoreError> {
+        self.0.append(stream, expected, pages)
+    }
+
+    fn read_from(
+        &mut self,
+        stream: &crate::next::v1::Cover,
+        from: u64,
+    ) -> Result<Option<crate::next::Slice>, StoreError> {
+        self.0.read_from(stream, from)
+    }
+
+    fn find_command(
+        &mut self,
+        stream: &crate::next::v1::Cover,
+        command_id: &crate::next::v1::Uuid,
+    ) -> Result<Vec<EventPage>, StoreError> {
+        self.0.find_command(stream, command_id)
+    }
+
+    fn covers(&mut self, domain: &str) -> Result<Vec<crate::next::v1::Cover>, StoreError> {
+        self.0.covers(domain)
+    }
+}
+
+impl<S: crate::next::Purge> crate::next::Purge for Frozen<S> {
+    fn purge(&mut self, stream: &crate::next::v1::Cover) -> Result<u64, StoreError> {
+        self.0.purge(stream)
+    }
+}
+
+impl<S: crate::next::Store> crate::next::Store for Frozen<S> {
+    type Unit<'s>
+        = S::Unit<'s>
+    where
+        Self: 's;
+
+    fn begin(&mut self) -> S::Unit<'_> {
+        self.0.begin()
+    }
+}
+
+impl<S> crate::next::Watch for Frozen<S> {
+    fn change_token(&mut self) -> Result<crate::next::ChangeToken, StoreError> {
+        Ok(crate::next::ChangeToken::new([7, 7]))
+    }
+}
+
+#[test]
+fn every_watch_check_fails_a_store_whose_token_never_changes() {
+    use crate::next::contract::*;
+    let own = std::panic::catch_unwind(|| {
+        block(a_change_token_changes_when_its_own_store_commits(Ready(
+            Frozen(InMemoryStore::new()),
+        )))
+    });
+    assert!(own.is_err(), "its own commits");
+    let another = std::panic::catch_unwind(|| {
+        let (watcher, writer) = shared(Reading::AsItBegan);
+        block(a_change_token_changes_when_another_handle_commits((
+            Ready(Frozen(watcher)),
+            Ready(writer),
+        )))
+    });
+    assert!(another.is_err(), "another handle's commits");
+}
+
+/// A store whose token changes every time it is asked: correct, since it
+/// never misses a commit, but no use to a watcher, which would read every
+/// stream again on every poll. The watch checks must fail on it.
+struct Restless(u64);
+
+impl crate::next::Watch for Restless {
+    fn change_token(&mut self) -> Result<crate::next::ChangeToken, StoreError> {
+        self.0 += 1;
+        Ok(crate::next::ChangeToken::new([self.0, 0]))
+    }
+}
+
+#[test]
+fn the_watch_checks_fail_a_token_that_changes_with_nothing_committed() {
+    use crate::next::contract::*;
+    let another = std::panic::catch_unwind(|| {
+        let (_, writer) = shared(Reading::AsItBegan);
+        block(a_change_token_changes_when_another_handle_commits((
+            Ready(Restless(0)),
+            Ready(writer),
+        )))
+    });
+    assert!(another.is_err());
+}
+
+#[test]
+fn a_change_token_is_served_async_and_is_the_stores_own() {
+    use crate::next::{AsyncWatch, Watch};
+    let mut store = InMemoryStore::new();
+    let before = store.change_token().unwrap();
+    let mut store = Ready(store);
+    assert_eq!(ready(store.change_token()), Ok(before));
+    store
+        .0
+        .append(&cover("account", 1), 0, &[page(0, 1)])
+        .unwrap();
+    assert_ne!(ready(store.change_token()), Ok(before));
+}
+
+#[test]
+fn an_in_memory_token_changes_on_a_snapshot_and_not_on_an_empty_append() {
+    use crate::next::Watch;
+    let stream = cover("account", 1);
+    let mut store = InMemoryStore::new();
+    let empty = store.change_token().unwrap();
+    assert_eq!(store.append(&stream, 0, &[]), Ok(0));
+    assert_eq!(store.change_token(), Ok(empty), "nothing appended");
+    let mut unit = store.begin();
+    unit.append(&stream, 0, &[page(0, 1)]).unwrap();
+    drop(unit);
+    assert_eq!(store.change_token(), Ok(empty), "a unit rolled back");
+    let snapshot = Snapshot {
+        sequence: 0,
+        state: None,
+        rules_version: "v2".to_string(),
+    };
+    store.write_snapshot(&stream, &snapshot).unwrap();
+    assert_ne!(store.change_token(), Ok(empty), "a snapshot written");
+}
