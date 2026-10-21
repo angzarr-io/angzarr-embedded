@@ -683,6 +683,107 @@ async fn a_check_that_cannot_run_is_a_failure_not_damage() {
     remove(&path);
 }
 
+// ------------------------------------------------- too damaged to open
+
+/// A copy of a healthy database (one stream of one event), checkpointed so
+/// the file holds everything, then changed by `tamper`: the original is
+/// removed, and the copy is what each open is given.
+async fn damaged_copy(tamper: impl FnOnce(&mut Vec<u8>)) -> std::path::PathBuf {
+    let original = database();
+    {
+        let mut store = SqliteStore::open(&original).await.unwrap();
+        store
+            .append(&cover("tasks", 1), 0, &[page(0, 1)])
+            .await
+            .unwrap();
+    }
+    let mut conn = raw(&original).await;
+    sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    conn.close().await.unwrap();
+    let copy = database();
+    std::fs::copy(&original, &copy).unwrap();
+    remove(&original);
+    let mut bytes = std::fs::read(&copy).unwrap();
+    tamper(&mut bytes);
+    std::fs::write(&copy, bytes).unwrap();
+    copy
+}
+
+/// Each open of the file `tamper` makes of a healthy copy: the code it
+/// fails with and the damage's first problem, the file left untouched.
+async fn open_damaged(tamper: impl FnOnce(&mut Vec<u8>)) -> Vec<(Option<&'static str>, String)> {
+    let path = damaged_copy(tamper).await;
+    let before = std::fs::read(&path).unwrap();
+    let mut found = Vec::new();
+    for opened in [
+        SqliteStore::open_existing(&path).await.map(drop),
+        SqliteStore::open(&path).await.map(drop),
+    ] {
+        let error = opened.expect_err("a damaged file opened");
+        let first = match &error {
+            StoreError::Unavailable(report) => report
+                .args()
+                .into_iter()
+                .find_map(|(name, arg)| match (name, arg) {
+                    ("first", annals_diagnostic::Arg::Str(s)) => Some(s),
+                    _ => None,
+                })
+                .unwrap_or_default(),
+            other => panic!("not the store's own failure: {other:?}"),
+        };
+        found.push((code(&error), first));
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), before, "an open changed it");
+    remove(&path);
+    found
+}
+
+#[tokio::test]
+async fn a_file_that_is_no_database_is_damaged_however_it_is_opened() {
+    // Something else written over the database: SQLITE_NOTADB.
+    let found = open_damaged(|bytes| {
+        let len = bytes.len();
+        *bytes = b"not a database\n"
+            .iter()
+            .copied()
+            .cycle()
+            .take(len)
+            .collect();
+    })
+    .await;
+    for (code, first) in found {
+        assert_eq!(code, Some("annals-store-sql-damaged"));
+        assert_eq!(first, "file is not a database");
+    }
+}
+
+#[tokio::test]
+async fn a_database_whose_header_is_overwritten_is_damaged_however_it_is_opened() {
+    // The magic string gone: SQLite no longer takes it for a database.
+    for (code, first) in open_damaged(|bytes| bytes[..16].fill(0)).await {
+        assert_eq!(code, Some("annals-store-sql-damaged"));
+        assert_eq!(first, "file is not a database");
+    }
+}
+
+#[tokio::test]
+async fn a_database_whose_schema_is_beyond_reading_is_damaged_however_it_is_opened() {
+    // The header intact, the schema's page after it overwritten: the
+    // first read of the schema fails SQLITE_CORRUPT.
+    let found = open_damaged(|bytes| {
+        let page_size = usize::from(u16::from_be_bytes([bytes[16], bytes[17]]));
+        bytes[100..page_size].fill(0xff);
+    })
+    .await;
+    for (code, first) in found {
+        assert_eq!(code, Some("annals-store-sql-damaged"));
+        assert_eq!(first, "database disk image is malformed");
+    }
+}
+
 // ------------------------------------------------------------------ purge
 
 fn snapshot(sequence: u64) -> Snapshot {

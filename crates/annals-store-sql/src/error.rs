@@ -143,6 +143,16 @@ pub(crate) fn unmigrated(pending: usize) -> StoreError {
     StoreError::Unavailable(Report::of(&SqlError::Unmigrated { pending }))
 }
 
+/// A database file too damaged to open, as the port's failure: damage,
+/// its one problem the database's own `message`
+/// (`annals-store-sql-damaged`, as `integrity_check` reports it).
+#[cfg(feature = "sqlite")]
+pub(crate) fn damaged(message: String) -> StoreError {
+    StoreError::Unavailable(Report::of(&Damage {
+        problems: vec![message],
+    }))
+}
+
 /// A stored value that does not decode (`Recovery::Bug`, as `Unreadable`).
 #[cfg(feature = "sqlite")]
 pub(crate) fn undecodable(error: prost::DecodeError) -> Report {

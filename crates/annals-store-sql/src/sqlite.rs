@@ -28,7 +28,7 @@ use sqlx::migrate::{MigrateError, Migration, Migrator};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection, SqliteRow};
 use sqlx::{ConnectOptions, Connection, Row, Sqlite, Transaction};
 
-use crate::error::{unavailable, unmigrated, Damage};
+use crate::error::{damaged, unavailable, unmigrated, Damage};
 use crate::{rows, statements, Dialect, Integrity};
 
 /// SQLite keeps NULLs distinct in a key, so the main timeline is `''`.
@@ -79,12 +79,16 @@ impl SqliteStore {
     /// each after the first finds nothing to apply. A migration that opts
     /// out of a transaction (`-- no-transaction`) or changes `PRAGMA
     /// journal_mode` therefore cannot be added.
+    ///
+    /// A file too damaged to open, one SQLite finds malformed or no
+    /// database at all, is refused as damage (`annals-store-sql-damaged`),
+    /// its one problem SQLite's message, and is left as it was.
     pub async fn open(path: &Path) -> Result<SqliteStore, StoreError> {
         let options = SqliteConnectOptions::new()
             .filename(path)
             .busy_timeout(BUSY_TIMEOUT)
             .create_if_missing(true);
-        let mut conn = options.connect().await.map_err(unavailable)?;
+        let mut conn = options.connect().await.map_err(opening)?;
         // A read first, so the connection knows a file already in WAL is,
         // and moving it there is a no-op that waits on no writer.
         let schema = schema(&mut conn).await?;
@@ -128,6 +132,13 @@ impl SqliteStore {
     /// yet applied is older than this build, and is refused as unmigrated
     /// at once, with nothing waited for. So is one whose applied migrations
     /// this build's disagree with (`annals-store-sql-unavailable`).
+    ///
+    /// A file too damaged to open, one SQLite finds malformed
+    /// (`SQLITE_CORRUPT`) or no database at all (`SQLITE_NOTADB`), is
+    /// refused as damage (`annals-store-sql-damaged`, the code
+    /// [`integrity_check`](SqliteStore::integrity_check) reports damage
+    /// under), its one problem SQLite's message. It is not waited on, and
+    /// is told from every other failure to open.
     pub async fn open_existing(path: &Path) -> Result<Option<SqliteStore>, StoreError> {
         read_only(path, BUSY_TIMEOUT, || {}).await
     }
@@ -195,7 +206,7 @@ async fn read_only(
         .filename(path)
         .busy_timeout(BUSY_TIMEOUT)
         .read_only(true);
-    let mut conn = options.connect().await.map_err(unavailable)?;
+    let mut conn = options.connect().await.map_err(opening)?;
     let deadline = Instant::now() + patience;
     let mut wait = FIRST_WAIT;
     loop {
@@ -230,7 +241,7 @@ async fn empty(conn: &mut SqliteConnection) -> Result<bool, StoreError> {
     let entries: i64 = sqlx::query_scalar("SELECT count(*) FROM sqlite_master")
         .fetch_one(&mut *conn)
         .await
-        .map_err(unavailable)?;
+        .map_err(opening)?;
     Ok(entries == 0)
 }
 
@@ -302,12 +313,12 @@ async fn schema(conn: &mut SqliteConnection) -> Result<Schema, StoreError> {
     )
     .fetch_optional(&mut *conn)
     .await
-    .map_err(unavailable)?;
+    .map_err(opening)?;
     let applied: Vec<(i64, Vec<u8>, bool)> = match recorded {
         Some(_) => sqlx::query_as("SELECT version, checksum, success FROM _sqlx_migrations")
             .fetch_all(&mut *conn)
             .await
-            .map_err(unavailable)?,
+            .map_err(opening)?,
         None => Vec::new(),
     };
     let wanted: Vec<&Migration> = MIGRATOR
@@ -404,11 +415,30 @@ fn primary_code(error: &sqlx::Error) -> Option<i32> {
         .map(|code| code & 0xff)
 }
 
+/// An open's failure, as the port's: a file SQLite finds malformed
+/// (`SQLITE_CORRUPT`) or no database at all (`SQLITE_NOTADB`) is damage
+/// (`annals-store-sql-damaged`), its one problem SQLite's message, so a
+/// caller can tell a file to repair or replace from a store that could not
+/// say. Any other failure is `annals-store-sql-unavailable`.
+fn opening(error: sqlx::Error) -> StoreError {
+    match primary_code(&error) {
+        Some(SQLITE_CORRUPT | SQLITE_NOTADB) => damaged(
+            error
+                .as_database_error()
+                .map_or_else(String::new, |e| e.message().to_string()),
+        ),
+        _ => unavailable(error),
+    }
+}
+
 /// SQLite's primary result code for a lock another connection holds.
 const SQLITE_BUSY: i32 = 5;
 
 /// SQLite's primary result code for a database file found malformed.
 const SQLITE_CORRUPT: i32 = 11;
+
+/// SQLite's primary result code for a file that is not a database.
+const SQLITE_NOTADB: i32 = 26;
 
 impl AsyncEventStore for SqliteStore {
     async fn append(
