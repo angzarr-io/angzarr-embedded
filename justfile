@@ -59,8 +59,9 @@ mutants *crates: gen
 
 # Mutation-test only the lines changed since `base` (default main): the
 # working tree, uncommitted and untracked files included, against the merge
-# base, so it matches the source cargo-mutants mutates. Same package
-# selection as `just mutants` (the workspace, with the codegen check).
+# base, so it matches the source cargo-mutants mutates. cargo-mutants builds
+# only the changed crates' packages, so the codegen check is on only when
+# annals-log changed (cargo refuses the feature otherwise).
 mutants-diff base="main": gen
     #!/usr/bin/env bash
     set -euo pipefail
@@ -73,4 +74,8 @@ mutants-diff base="main": gen
         echo "mutants-diff: no Rust changes since '{{base}}'; nothing to mutate."
         exit 0
     fi
-    cargo mutants --workspace --features annals-log/codegen-check --in-diff "$patch"
+    features=()
+    if grep -q '^+++ b/crates/annals-log/' "$patch"; then
+        features=(--features annals-log/codegen-check)
+    fi
+    cargo mutants --workspace "${features[@]}" --in-diff "$patch"
