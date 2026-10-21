@@ -2,8 +2,11 @@
 
 use std::fmt;
 
+#[cfg(feature = "sqlite")]
 use annals::next::StoreError;
-use annals_diagnostic::{Arg, Diagnostic, Report};
+#[cfg(feature = "sqlite")]
+use annals_diagnostic::Report;
+use annals_diagnostic::{Arg, Diagnostic};
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum SqlError {
@@ -126,6 +129,7 @@ pub fn diagnostic_samples() -> Vec<Box<dyn Diagnostic>> {
 
 /// The database's failure, as the port's: the store could not say
 /// (`Recovery::Retry`).
+#[cfg(feature = "sqlite")]
 pub(crate) fn unavailable(detail: impl fmt::Display) -> StoreError {
     StoreError::Unavailable(Report::of(&SqlError::Unavailable {
         detail: detail.to_string(),
@@ -134,11 +138,13 @@ pub(crate) fn unavailable(detail: impl fmt::Display) -> StoreError {
 
 /// A database opened read-only that is not migrated: only a store opened
 /// to write can migrate it.
+#[cfg(feature = "sqlite")]
 pub(crate) fn unmigrated(pending: usize) -> StoreError {
     StoreError::Unavailable(Report::of(&SqlError::Unmigrated { pending }))
 }
 
 /// A stored value that does not decode (`Recovery::Bug`, as `Unreadable`).
+#[cfg(feature = "sqlite")]
 pub(crate) fn undecodable(error: prost::DecodeError) -> Report {
     Report::of(&SqlError::Undecodable {
         detail: error.to_string(),

@@ -1,0 +1,65 @@
+# cargo-deny: what may enter the dependency graph. `just lint-deps` runs it.
+#
+# Annals keeps few dependencies on purpose (CLAUDE.md, *Few dependencies, no
+# domain*); this file is the machine check that what does enter is
+# permissively licensed, comes from crates.io or a pinned, named git repo,
+# and has no open RustSec advisory.
+
+[graph]
+# Every feature, so annals-store-sql's sqlite backend (sqlx and its tree) and
+# annals-log's codegen-check are judged too, not only the default build.
+all-features = true
+
+[advisories]
+version = 2
+# RustSec advisories. An ignore needs the advisory id and why it does not
+# apply here.
+ignore = []
+
+[licenses]
+version = 2
+# Annals is EUPL-1.2 and used as a library by applications under other
+# licences, so a dependency's licence must be permissive: it must not impose
+# its terms on annals or on what links it. Copyleft is not on this list.
+allow = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "EUPL-1.2",
+  "MIT",
+  "Unicode-3.0",
+  "Unlicense",
+  "Zlib",
+]
+confidence-threshold = 0.9
+# The one copyleft licence in the graph, allowed for that crate only:
+# angzarr-proto, angzarr's wire types, which annals' kernel operates on
+# directly (CLAUDE.md, *Few dependencies*; docs/design/audit.md, *Layering*).
+# It is AGPL-3.0-only, so every build that links annals is subject to the
+# AGPL. Accepted with the dependency; any other copyleft crate fails here.
+exceptions = [
+  { crate = "angzarr-proto", allow = ["AGPL-3.0-only"] },
+]
+
+[licenses.private]
+# Not ignored: annals' own crates are `publish = false`, and so is
+# angzarr-proto, whose licence is exactly what must be checked.
+ignore = false
+
+[bans]
+# Duplicate versions warn, not fail: they are logged by the gate, and most
+# come from upstream trees (sqlx) that annals does not control.
+multiple-versions = "warn"
+wildcards = "deny"
+# A path dependency has no version; allowed for unpublished crates only.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = [
+  # angzarr's wire contract (angzarr-proto), pinned by rev in crates/annals.
+  "https://github.com/angzarr-io/angzarr-project",
+]

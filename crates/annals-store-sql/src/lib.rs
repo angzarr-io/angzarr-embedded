@@ -31,8 +31,13 @@
 #![allow(clippy::result_large_err)]
 
 mod error;
+// The backend-neutral statements, row decoding and schema: built with a
+// backend that runs them, and only then.
+#[cfg(feature = "sqlite")]
 mod rows;
+#[cfg(feature = "sqlite")]
 mod schema;
+#[cfg(feature = "sqlite")]
 mod statements;
 
 #[cfg(feature = "sqlite")]

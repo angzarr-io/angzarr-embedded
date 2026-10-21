@@ -140,6 +140,53 @@ and turn on `annals-log/codegen-check`, so they need `buf` and
 `just wasm` builds annals for `wasm32-unknown-unknown`; it must keep
 building there.
 
+Every gate prints one line on a pass, `ok   <gate> (<scope>) <duration>`;
+on a failure, a `FAIL` line, the extract worth reading, and the full log in
+`target/logs/<gate>.log`. `VERBOSE=1 just <gate>` shows the full output.
+`just test` runs cargo-nextest.
+
+## The pre-commit gates are shared; annals gives their parameters
+
+The gates and their recipes live in the shared gates repository
+(`gates.just`, `lefthook.yml`), checked out at `gates_dir` (justfile)
+relative to annals' main checkout. The justfile imports `.gates/gates.just`
+and lefthook.yml extends `.gates/lefthook.yml`; `.gates` is a gitignored
+link made by `just gates-link`, once per checkout (worktrees included).
+`just hooks-install` links and installs the hooks, once per clone: every
+worktree shares them. A commit without the link is refused by `just
+gates-check`, saying where to clone the gates. Change a gate there, not
+here; annals keeps only its parameters (`mutation_thresholds`,
+`workspace_wide`, `staged_tree`, `feature_rules`, `features_prepare`), its
+`lint`, `deny.toml`, `.gitleaks.toml` and `.cargo/mutants.toml`.
+
+lefthook runs the gates one at a time, stopping at the first failure. A
+failing gate is a finding: fix the cause and commit again; never
+`--no-verify`, and never weaken a gate to get through.
+
+1. **fmt** formats the staged `*.rs` files in the index (`just
+   fmt-staged`); it does not refuse. A fully staged file's working copy gets
+   the same content; a partially staged file's working copy is left exactly
+   as it was, and named. `just fmt-check` is CI's check.
+2. **secrets**: gitleaks over the staged changes (`.gitleaks.toml`). A fake
+   secret in a test ends its line with `gitleaks:allow`.
+3. **clippy**: `just lint`: buf lint, clippy over the workspace with the
+   codegen check, and annals-store-sql's library with no backend, which the
+   workspace run cannot see (its own dev-dependency turns `sqlite` on).
+4. **deps**: `just lint-deps`. A new licence, git source or advisory ignore
+   is a change to `deny.toml`, with its reason.
+5. **tests**: `just test-staged` tests the crates with staged changes and
+   their workspace dependents (normal, dev and build), on a throwaway
+   worktree of HEAD plus the staged diff (`target/staged-tree`), so unstaged
+   edits cannot pass or fail it.
+6. **mutants**: `just mutants-staged` runs `cargo mutants --in-diff` over
+   the staged diff in that tree and holds every crate's new code to a 90%
+   kill rate (`mutation_thresholds`; a new crate gets a threshold there
+   before it gets code). The last run's mutants.out is kept in
+   `target/logs/mutants-staged/`. A mutant judged equivalent is excluded by
+   an `exclude_re` in `.cargo/mutants.toml` matching that one mutant, with a
+   comment saying why: not `#[mutants::skip]`, which needs the `mutants`
+   crate as a dependency, and never a lowered threshold.
+
 ## Versioned documents: bump, register a step, keep an old fixture
 
 `annals_yaml::versioned` loads content stamped with a root `version: N` (a
