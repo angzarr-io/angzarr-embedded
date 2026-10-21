@@ -8,12 +8,18 @@ use std::time::{Duration, Instant};
 
 use annals::next::contract::{cover, page};
 use annals::next::v1::{Cover, Snapshot};
-use annals::next::{AsyncEventStore, AsyncPurge, AsyncStore, AsyncUnitOfWork, StoreError};
+use annals::next::{
+    AsyncEventStore, AsyncPurge, AsyncReadStore, AsyncReadUnit, AsyncStore, AsyncUnitOfWork, Slice,
+    StoreError,
+};
 use annals_diagnostic::Diagnostic;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection};
 use sqlx::{ConnectOptions, Connection};
 
-use super::{into_wal, migrate, pause, read_alone, read_only, SqliteStore, BUSY_TIMEOUT, MIGRATOR};
+use super::{
+    covers, into_wal, migrate, pause, read_alone, read_from, read_only, unavailable, SqliteRead,
+    SqliteStore, BUSY_TIMEOUT, MIGRATOR,
+};
 use crate::{Damage, Integrity};
 
 annals::async_store_contract!(#[tokio::test], SqliteStore::open_in_memory().await.unwrap());
@@ -965,6 +971,189 @@ async fn a_read_outside_a_unit_is_one_moment_across_an_append() {
     remove(&path);
 }
 
+// --------------------------------------------------- reading one moment
+
+/// Run the read check `check` on a reader and a writer on one new file,
+/// the reader from `open_reader`, then remove the file.
+async fn on_file<R, F>(
+    open_reader: impl AsyncFnOnce(&Path) -> R,
+    check: impl FnOnce((R, SqliteStore)) -> F,
+) where
+    F: std::future::Future<Output = ()>,
+{
+    let path = database();
+    let writer = SqliteStore::open(&path).await.unwrap();
+    let reader = open_reader(&path).await;
+    check((reader, writer)).await;
+    remove(&path);
+}
+
+async fn writable(path: &Path) -> SqliteStore {
+    SqliteStore::open(path).await.unwrap()
+}
+
+async fn read_only_store(path: &Path) -> SqliteStore {
+    SqliteStore::open_existing(path).await.unwrap().unwrap()
+}
+
+mod read_contract {
+    use annals::next::contract as checks;
+
+    use super::{on_file, read_only_store, writable};
+
+    #[tokio::test]
+    async fn a_read_unit_sees_the_store_as_it_began() {
+        on_file(writable, checks::a_read_unit_sees_the_store_as_it_began).await;
+    }
+
+    #[tokio::test]
+    async fn a_read_unit_keeps_a_stream_purged_after_it_began() {
+        on_file(
+            writable,
+            checks::a_read_unit_keeps_a_stream_purged_after_it_began,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_read_unit_on_a_read_only_store_sees_the_store_as_it_began() {
+        on_file(
+            read_only_store,
+            checks::a_read_unit_sees_the_store_as_it_began,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_read_unit_on_a_read_only_store_keeps_a_stream_purged_after_it_began() {
+        on_file(
+            read_only_store,
+            checks::a_read_unit_keeps_a_stream_purged_after_it_began,
+        )
+        .await;
+    }
+}
+
+/// A SQLite store whose read unit is not one moment, as `fault` says: the
+/// read checks must fail on it, so they are seen to force their
+/// interleaving through a second connection rather than pass by luck.
+struct Faulty {
+    store: SqliteStore,
+    fault: ReadFault,
+}
+
+#[derive(Clone, Copy)]
+enum ReadFault {
+    /// No transaction: each read sees its own moment.
+    Live,
+    /// A deferred `BEGIN` and nothing read: its moment is its first read's.
+    Unpinned,
+}
+
+/// [`Faulty`]'s read unit.
+enum FaultyRead<'s> {
+    Live(&'s mut SqliteConnection),
+    Unpinned(SqliteRead<'s>),
+}
+
+impl AsyncReadUnit for FaultyRead<'_> {
+    async fn covers(&mut self, domain: &str) -> Result<Vec<Cover>, StoreError> {
+        match self {
+            FaultyRead::Live(conn) => covers(conn, domain).await,
+            FaultyRead::Unpinned(reads) => reads.covers(domain).await,
+        }
+    }
+
+    async fn read_from(&mut self, stream: &Cover, from: u64) -> Result<Option<Slice>, StoreError> {
+        match self {
+            FaultyRead::Live(conn) => read_from(conn, stream, from, || {}).await,
+            FaultyRead::Unpinned(reads) => reads.read_from(stream, from).await,
+        }
+    }
+}
+
+impl AsyncReadStore for Faulty {
+    type Reads<'s> = FaultyRead<'s>;
+
+    async fn begin_read(&mut self) -> FaultyRead<'_> {
+        let conn = &mut self.store.conn;
+        match self.fault {
+            ReadFault::Live => FaultyRead::Live(conn),
+            ReadFault::Unpinned => FaultyRead::Unpinned(SqliteRead {
+                tx: conn.begin().await.map_err(unavailable),
+            }),
+        }
+    }
+}
+
+/// Whether `check` fails on a reader with `fault` and a writer on one file.
+async fn fails<F>(fault: ReadFault, check: fn((Faulty, SqliteStore)) -> F) -> bool
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let path = database();
+    let writer = SqliteStore::open(&path).await.unwrap();
+    let store = SqliteStore::open(&path).await.unwrap();
+    let failed = tokio::spawn(check((Faulty { store, fault }, writer)))
+        .await
+        .is_err();
+    remove(&path);
+    failed
+}
+
+#[tokio::test]
+async fn every_read_check_fails_a_read_unit_that_is_no_transaction() {
+    use annals::next::contract as checks;
+    assert!(
+        fails(
+            ReadFault::Live,
+            checks::a_read_unit_sees_the_store_as_it_began
+        )
+        .await
+    );
+    assert!(
+        fails(
+            ReadFault::Live,
+            checks::a_read_unit_keeps_a_stream_purged_after_it_began
+        )
+        .await
+    );
+}
+
+#[tokio::test]
+async fn the_read_checks_fail_a_read_unit_whose_moment_is_its_first_read() {
+    use annals::next::contract as checks;
+    assert!(
+        fails(
+            ReadFault::Unpinned,
+            checks::a_read_unit_sees_the_store_as_it_began
+        )
+        .await
+    );
+}
+
+#[tokio::test]
+async fn a_writer_waits_on_no_open_read_unit() {
+    // The writer waits on no lock at all: had the read unit taken the
+    // write lock, its unit of work would fail at once.
+    let path = database();
+    let stream = cover("tasks", 1);
+    let mut writable_reader = SqliteStore::open(&path).await.unwrap();
+    let mut read_only_reader = SqliteStore::open_existing(&path).await.unwrap().unwrap();
+    let mut first = writable_reader.begin_read().await;
+    let mut second = read_only_reader.begin_read().await;
+    let mut hasty = impatient(&path).await;
+    let mut unit = hasty.begin().await;
+    assert_eq!(unit.append(&stream, 0, &[page(0, 1)]).await, Ok(1));
+    unit.commit().await.unwrap();
+    assert_eq!(hasty.purge(&stream).await, Ok(1));
+    assert_eq!(first.covers("tasks").await, Ok(vec![]));
+    assert_eq!(second.read_from(&stream, 0).await, Ok(None));
+    drop((first, second));
+    drop((writable_reader, read_only_reader, hasty));
+    remove(&path);
+}
+
 // ------------------------------------------------------------------ Send
 
 /// Compiles only if `future` is `Send`, so a store can be opened on a
@@ -994,5 +1183,24 @@ fn every_purge_is_a_send_future() {
         let mut unit = store.begin().await;
         unit.purge(&stream).await?;
         unit.commit().await
+    }));
+}
+
+#[test]
+fn every_read_unit_is_a_send_future() {
+    let path = database();
+    let stream = cover("tasks", 1);
+    drop(send(async {
+        let mut store = SqliteStore::open_in_memory().await?;
+        let mut reads = store.begin_read().await;
+        reads.covers("tasks").await?;
+        reads.read_from(&stream, 0).await
+    }));
+    drop(send(async {
+        let Some(mut store) = SqliteStore::open_existing(&path).await? else {
+            return Ok(None);
+        };
+        let mut reads = store.begin_read().await;
+        reads.read_from(&stream, 0).await
     }));
 }

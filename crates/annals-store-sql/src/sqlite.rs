@@ -2,7 +2,8 @@
 //! run on sqlx, over one connection per database; the schema created by
 //! `migrations/sqlite/`. A unit of work is a `BEGIN IMMEDIATE` transaction;
 //! a read of more than one statement outside one runs in a deferred `BEGIN`
-//! of its own, so it reads one moment. A file is kept in WAL mode, so once
+//! of its own, so it reads one moment, and a read-only unit of work is a
+//! deferred `BEGIN` held open over many reads. A file is kept in WAL mode, so once
 //! it is made a reader waits on no writer.
 
 use std::future::Future;
@@ -14,7 +15,10 @@ use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
 use annals::next::v1::{Cover, EventPage, Snapshot, Uuid};
-use annals::next::{AsyncEventStore, AsyncPurge, AsyncStore, AsyncUnitOfWork, Slice, StoreError};
+use annals::next::{
+    AsyncEventStore, AsyncPurge, AsyncReadStore, AsyncReadUnit, AsyncStore, AsyncUnitOfWork, Slice,
+    StoreError,
+};
 use sea_query::{SelectStatement, SqliteQueryBuilder};
 use sea_query_binder::SqlxBinder;
 use sqlx::migrate::{MigrateError, Migration, Migrator};
@@ -547,6 +551,55 @@ impl AsyncPurge for SqliteUnit<'_> {
 impl AsyncUnitOfWork for SqliteUnit<'_> {
     async fn commit(self) -> Result<(), StoreError> {
         self.tx?.commit().await.map_err(unavailable)
+    }
+}
+
+impl AsyncReadStore for SqliteStore {
+    type Reads<'s> = SqliteRead<'s>;
+
+    /// A deferred `BEGIN`, which takes no lock, and a first read at once:
+    /// under WAL a read transaction's moment is its first read's, so the
+    /// unit's is its beginning, not whenever it is first asked. It runs on
+    /// a store opened by [`open_existing`](SqliteStore::open_existing),
+    /// and waits on no writer. A failure to begin is answered by every read
+    /// on the unit.
+    async fn begin_read(&mut self) -> SqliteRead<'_> {
+        SqliteRead {
+            tx: begin_read(&mut self.conn).await,
+        }
+    }
+}
+
+async fn begin_read(conn: &mut SqliteConnection) -> Result<Transaction<'_, Sqlite>, StoreError> {
+    let mut tx = conn.begin().await.map_err(unavailable)?;
+    // Any read fixes the moment; this one reads only the schema.
+    empty(&mut tx).await?;
+    Ok(tx)
+}
+
+/// A read-only unit of work: one SQLite read transaction, seeing the
+/// database as it began. Dropped, it ends, having written nothing.
+pub struct SqliteRead<'s> {
+    tx: Result<Transaction<'s, Sqlite>, StoreError>,
+}
+
+impl SqliteRead<'_> {
+    /// The transaction's connection, or why the transaction never began.
+    fn conn(&mut self) -> Result<&mut SqliteConnection, StoreError> {
+        match &mut self.tx {
+            Ok(tx) => Ok(&mut **tx),
+            Err(error) => Err(error.clone()),
+        }
+    }
+}
+
+impl AsyncReadUnit for SqliteRead<'_> {
+    async fn covers(&mut self, domain: &str) -> Result<Vec<Cover>, StoreError> {
+        covers(self.conn()?, domain).await
+    }
+
+    async fn read_from(&mut self, stream: &Cover, from: u64) -> Result<Option<Slice>, StoreError> {
+        read_from(self.conn()?, stream, from, || {}).await
     }
 }
 
