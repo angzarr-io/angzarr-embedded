@@ -6,7 +6,8 @@ use annals::next::v1::{Cover, EventPage, Snapshot, Uuid};
 use annals::next::StoreError;
 use prost::Message;
 use sea_query::{
-    Expr, Func, InsertStatement, OnConflict, Order, Query, SelectStatement, SimpleExpr,
+    Cond, Condition, DeleteStatement, Expr, Func, InsertStatement, OnConflict, Order, Query,
+    SelectStatement, SimpleExpr,
 };
 
 use crate::error::unavailable;
@@ -28,23 +29,36 @@ pub(crate) fn sequence_column(sequence: u64) -> i64 {
     i64::try_from(sequence).unwrap_or(i64::MAX)
 }
 
-/// `cover`'s rows in `table`, by its key columns.
-fn on_stream<D: Dialect>(
+/// Whether a row is `cover`'s, by its table's key columns.
+fn of_stream<D: Dialect>(
     cover: &Cover,
     domain: impl sea_query::IntoColumnRef,
     edition: impl sea_query::IntoColumnRef,
     root_column: impl sea_query::IntoColumnRef,
-) -> SelectStatement {
-    Query::select()
-        .and_where(Expr::col(domain).eq(cover.domain.clone()))
-        .and_where(Expr::col(edition).eq(D::edition(cover)))
-        .and_where(Expr::col(root_column).eq(root(cover)))
-        .to_owned()
+) -> Condition {
+    Cond::all()
+        .add(Expr::col(domain).eq(cover.domain.clone()))
+        .add(Expr::col(edition).eq(D::edition(cover)))
+        .add(Expr::col(root_column).eq(root(cover)))
+}
+
+fn event_of<D: Dialect>(cover: &Cover) -> Condition {
+    of_stream::<D>(cover, Events::Domain, Events::Edition, Events::Root)
+}
+
+fn snapshot_of_stream<D: Dialect>(cover: &Cover) -> Condition {
+    of_stream::<D>(
+        cover,
+        Snapshots::Domain,
+        Snapshots::Edition,
+        Snapshots::Root,
+    )
 }
 
 fn events_of<D: Dialect>(cover: &Cover) -> SelectStatement {
-    on_stream::<D>(cover, Events::Domain, Events::Edition, Events::Root)
+    Query::select()
         .from(Events::Table)
+        .cond_where(event_of::<D>(cover))
         .to_owned()
 }
 
@@ -135,15 +149,28 @@ pub(crate) fn domain_covers(domain: &str) -> SelectStatement {
 
 /// Row `(snapshot)`: the stream's newest snapshot.
 pub(crate) fn snapshot_of<D: Dialect>(cover: &Cover) -> SelectStatement {
-    on_stream::<D>(
-        cover,
-        Snapshots::Domain,
-        Snapshots::Edition,
-        Snapshots::Root,
-    )
-    .column(Snapshots::Snapshot)
-    .from(Snapshots::Table)
-    .to_owned()
+    Query::select()
+        .column(Snapshots::Snapshot)
+        .from(Snapshots::Table)
+        .cond_where(snapshot_of_stream::<D>(cover))
+        .to_owned()
+}
+
+/// Delete the stream's events, and with them the command ids recorded in
+/// their rows.
+pub(crate) fn delete_events<D: Dialect>(cover: &Cover) -> DeleteStatement {
+    Query::delete()
+        .from_table(Events::Table)
+        .cond_where(event_of::<D>(cover))
+        .to_owned()
+}
+
+/// Delete the stream's snapshot.
+pub(crate) fn delete_snapshot<D: Dialect>(cover: &Cover) -> DeleteStatement {
+    Query::delete()
+        .from_table(Snapshots::Table)
+        .cond_where(snapshot_of_stream::<D>(cover))
+        .to_owned()
 }
 
 /// Keep `snapshot` as the stream's newest, replacing the one before.

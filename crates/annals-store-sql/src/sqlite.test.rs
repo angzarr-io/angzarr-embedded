@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use annals::next::contract::{cover, page};
 use annals::next::v1::{Cover, Snapshot};
-use annals::next::{AsyncEventStore, AsyncStore, AsyncUnitOfWork, StoreError};
+use annals::next::{AsyncEventStore, AsyncPurge, AsyncStore, AsyncUnitOfWork, StoreError};
 use annals_diagnostic::Diagnostic;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection};
 use sqlx::{ConnectOptions, Connection};
@@ -17,6 +17,7 @@ use super::{into_wal, migrate, pause, read_only, SqliteStore, BUSY_TIMEOUT, MIGR
 use crate::{Damage, Integrity};
 
 annals::async_store_contract!(#[tokio::test], SqliteStore::open_in_memory().await.unwrap());
+annals::async_store_contract!(purge, #[tokio::test], SqliteStore::open_in_memory().await.unwrap());
 
 /// A path for a database file of this test run's own.
 fn database() -> std::path::PathBuf {
@@ -675,6 +676,222 @@ async fn a_check_that_cannot_run_is_a_failure_not_damage() {
     remove(&path);
 }
 
+// ------------------------------------------------------------------ purge
+
+fn snapshot(sequence: u64) -> Snapshot {
+    Snapshot {
+        sequence,
+        state: None,
+        rules_version: "v1".to_string(),
+    }
+}
+
+/// A store on `path` holding `stream` with two events and a snapshot, and
+/// a trigger refusing to delete any snapshot: a purge's second statement
+/// fails after its first has deleted the events.
+async fn refusing_to_delete_snapshots(path: &Path, stream: &Cover) -> SqliteStore {
+    let mut store = SqliteStore::open(path).await.unwrap();
+    store
+        .append(stream, 0, &[page(0, 1), page(1, 2)])
+        .await
+        .unwrap();
+    store.write_snapshot(stream, &snapshot(1)).await.unwrap();
+    let mut conn = raw(path).await;
+    sqlx::query(
+        "CREATE TRIGGER keep_snapshots BEFORE DELETE ON snapshots \
+         BEGIN SELECT RAISE(ABORT, 'snapshots are kept'); END",
+    )
+    .execute(&mut conn)
+    .await
+    .unwrap();
+    conn.close().await.unwrap();
+    store
+}
+
+/// `stream` as `refusing_to_delete_snapshots` left it: nothing deleted.
+async fn assert_whole(store: &mut SqliteStore, stream: &Cover, what: &str) {
+    assert_eq!(
+        store.read_from(stream, 0).await.unwrap().map(|s| s.pages),
+        Some(vec![page(0, 1), page(1, 2)]),
+        "{what}"
+    );
+    assert_eq!(
+        store
+            .find_command(stream, &page(0, 2).meta.unwrap().correlation_id.unwrap())
+            .await,
+        Ok(vec![page(1, 2)]),
+        "{what}: its command ids"
+    );
+    assert_eq!(
+        store.read_snapshot(stream).await,
+        Ok(Some(snapshot(1))),
+        "{what}"
+    );
+    assert_eq!(
+        store.covers("tasks").await,
+        Ok(vec![stream.clone()]),
+        "{what}"
+    );
+}
+
+#[tokio::test]
+async fn a_purge_that_fails_part_way_deletes_nothing() {
+    let path = database();
+    let stream = cover("tasks", 1);
+    let mut store = refusing_to_delete_snapshots(&path, &stream).await;
+    let purged = store.purge(&stream).await;
+    assert_eq!(
+        purged.as_ref().map_err(code),
+        Err(Some("annals-store-sql-unavailable")),
+        "{purged:?}"
+    );
+    assert_whole(&mut store, &stream, "after the failed purge").await;
+    drop(store);
+    remove(&path);
+}
+
+#[tokio::test]
+async fn a_purge_that_fails_part_way_in_a_unit_leaves_the_unit_as_it_was() {
+    // The unit is committed after the failure all the same: the events the
+    // purge deleted before failing are not deleted with it.
+    let path = database();
+    let stream = cover("tasks", 1);
+    let other = cover("tasks", 2);
+    let mut store = refusing_to_delete_snapshots(&path, &stream).await;
+    let mut unit = store.begin().await;
+    unit.append(&other, 0, &[page(0, 3)]).await.unwrap();
+    let purged = unit.purge(&stream).await;
+    assert_eq!(
+        purged.as_ref().map_err(code),
+        Err(Some("annals-store-sql-unavailable")),
+        "{purged:?}"
+    );
+    assert_eq!(
+        unit.read_from(&stream, 0)
+            .await
+            .unwrap()
+            .unwrap()
+            .next_sequence,
+        2,
+        "the unit still holds the stream"
+    );
+    unit.commit().await.unwrap();
+    assert_eq!(
+        store.read_from(&other, 0).await.unwrap().unwrap().pages,
+        [page(0, 3)],
+        "the unit's own append, kept"
+    );
+    store.purge(&other).await.unwrap();
+    assert_whole(&mut store, &stream, "after the unit committed").await;
+    drop(store);
+    remove(&path);
+}
+
+/// A second store on `path` whose connection waits on no lock: whatever it
+/// tries while another holds the write lock fails at once, rather than
+/// waiting its turn.
+async fn impatient(path: &Path) -> SqliteStore {
+    let conn = SqliteConnectOptions::new()
+        .filename(path)
+        .busy_timeout(Duration::ZERO)
+        .connect()
+        .await
+        .unwrap();
+    SqliteStore { conn }
+}
+
+#[tokio::test]
+async fn a_purge_racing_an_append_lands_after_it_and_purges_it() {
+    // The append's unit holds the write lock: a purge cannot land inside
+    // it. Issued while it is in flight, the purge waits, and deletes what
+    // the unit appended with the rest.
+    let path = database();
+    let stream = cover("tasks", 1);
+    let mut writer = SqliteStore::open(&path).await.unwrap();
+    writer.append(&stream, 0, &[page(0, 1)]).await.unwrap();
+    let mut purger = SqliteStore::open(&path).await.unwrap();
+    let mut unit = writer.begin().await;
+    unit.append(&stream, 1, &[page(1, 2)]).await.unwrap();
+
+    let mut hasty = impatient(&path).await;
+    let refused = hasty.purge(&stream).await;
+    assert_eq!(
+        refused.as_ref().map_err(code),
+        Err(Some("annals-store-sql-unavailable")),
+        "{refused:?}"
+    );
+
+    let (purged, committed) = tokio::join!(purger.purge(&stream), unit.commit());
+    committed.unwrap();
+    assert_eq!(purged, Ok(2), "appended, then purged");
+    assert_eq!(writer.read_from(&stream, 0).await, Ok(None));
+    assert_eq!(writer.covers("tasks").await, Ok(vec![]));
+    assert_eq!(
+        writer.append(&stream, 2, &[page(2, 3)]).await,
+        Err(StoreError::Conflict {
+            stream: stream.clone(),
+            expected: 2,
+            actual: 0
+        })
+    );
+    drop((writer, purger, hasty));
+    remove(&path);
+}
+
+#[tokio::test]
+async fn an_append_racing_a_purge_lands_after_it_on_a_new_stream() {
+    // The purge's unit holds the write lock: an append cannot land inside
+    // it, and a reader still sees the stream whole. Issued while it is in
+    // flight, the append's unit waits, then finds no stream, and starts
+    // one at sequence 0.
+    let path = database();
+    let stream = cover("tasks", 1);
+    let mut purger = SqliteStore::open(&path).await.unwrap();
+    purger
+        .append(&stream, 0, &[page(0, 1), page(1, 1)])
+        .await
+        .unwrap();
+    let mut writer = SqliteStore::open(&path).await.unwrap();
+    let mut unit = purger.begin().await;
+    assert_eq!(unit.purge(&stream).await, Ok(2));
+
+    let mut hasty = impatient(&path).await;
+    let refused = hasty.append(&stream, 2, &[page(2, 2)]).await;
+    assert_eq!(
+        refused.as_ref().map_err(code),
+        Err(Some("annals-store-sql-unavailable")),
+        "{refused:?}"
+    );
+    assert_eq!(
+        hasty
+            .read_from(&stream, 0)
+            .await
+            .unwrap()
+            .unwrap()
+            .next_sequence,
+        2,
+        "the purge not yet committed"
+    );
+
+    let (appended, committed) = tokio::join!(
+        async {
+            let mut racing = writer.begin().await;
+            let read = racing.read_from(&stream, 0).await;
+            let appended = racing.append(&stream, 0, &[page(0, 2)]).await;
+            racing.commit().await.unwrap();
+            (read, appended)
+        },
+        unit.commit()
+    );
+    committed.unwrap();
+    assert_eq!(appended, (Ok(None), Ok(1)), "purged, then appended");
+    let slice = writer.read_from(&stream, 0).await.unwrap().unwrap();
+    assert_eq!(slice.pages, [page(0, 2)]);
+    assert_eq!(writer.covers("tasks").await, Ok(vec![stream]));
+    drop((writer, purger, hasty));
+    remove(&path);
+}
+
 // ------------------------------------------------------------------ Send
 
 /// Compiles only if `future` is `Send`, so a store can be opened on a
@@ -692,5 +909,17 @@ fn every_open_is_a_send_future() {
     drop(send(async {
         let mut store = SqliteStore::open_in_memory().await?;
         store.integrity_check().await
+    }));
+}
+
+#[test]
+fn every_purge_is_a_send_future() {
+    let stream = cover("tasks", 1);
+    drop(send(async {
+        let mut store = SqliteStore::open_in_memory().await?;
+        store.purge(&stream).await?;
+        let mut unit = store.begin().await;
+        unit.purge(&stream).await?;
+        unit.commit().await
     }));
 }

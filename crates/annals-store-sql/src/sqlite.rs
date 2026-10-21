@@ -12,8 +12,8 @@ use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
 use annals::next::v1::{Cover, EventPage, Snapshot, Uuid};
-use annals::next::{AsyncEventStore, AsyncStore, AsyncUnitOfWork, Slice, StoreError};
-use sea_query::{InsertStatement, SelectStatement, SqliteQueryBuilder};
+use annals::next::{AsyncEventStore, AsyncPurge, AsyncStore, AsyncUnitOfWork, Slice, StoreError};
+use sea_query::{SelectStatement, SqliteQueryBuilder};
 use sea_query_binder::SqlxBinder;
 use sqlx::migrate::{MigrateError, Migration, Migrator};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection, SqliteRow};
@@ -442,6 +442,23 @@ impl AsyncEventStore for SqliteStore {
             statements::upsert_snapshot::<SqliteDialect>(stream, snapshot)?,
         )
         .await
+        .map(drop)
+    }
+}
+
+impl AsyncPurge for SqliteStore {
+    /// One `BEGIN IMMEDIATE` transaction, as a unit of work's: it waits
+    /// (up to [`BUSY_TIMEOUT`]) for a unit in flight to finish, so a purge
+    /// lands wholly before or wholly after any append.
+    async fn purge(&mut self, stream: &Cover) -> Result<u64, StoreError> {
+        let mut tx = self
+            .conn
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(unavailable)?;
+        let deleted = purge(&mut tx, stream).await?;
+        tx.commit().await.map_err(unavailable)?;
+        Ok(deleted)
     }
 }
 
@@ -514,6 +531,17 @@ impl AsyncEventStore for SqliteUnit<'_> {
     }
 }
 
+impl AsyncPurge for SqliteUnit<'_> {
+    /// Under a savepoint, so a purge that fails part-way leaves the unit as
+    /// it was, and a commit after it deletes nothing.
+    async fn purge(&mut self, stream: &Cover) -> Result<u64, StoreError> {
+        let mut savepoint = self.conn()?.begin().await.map_err(unavailable)?;
+        let deleted = purge(&mut savepoint, stream).await?;
+        savepoint.commit().await.map_err(unavailable)?;
+        Ok(deleted)
+    }
+}
+
 impl AsyncUnitOfWork for SqliteUnit<'_> {
     async fn commit(self) -> Result<(), StoreError> {
         self.tx?.commit().await.map_err(unavailable)
@@ -533,13 +561,17 @@ async fn fetch_all(
         .map_err(unavailable)
 }
 
-async fn execute(conn: &mut SqliteConnection, insert: InsertStatement) -> Result<(), StoreError> {
-    let (sql, values) = insert.build_sqlx(SqliteQueryBuilder);
-    sqlx::query_with(&sql, values)
+/// Run `statement`, answering how many rows it changed.
+async fn execute(
+    conn: &mut SqliteConnection,
+    statement: impl SqlxBinder,
+) -> Result<u64, StoreError> {
+    let (sql, values) = statement.build_sqlx(SqliteQueryBuilder);
+    let done = sqlx::query_with(&sql, values)
         .execute(conn)
         .await
         .map_err(unavailable)?;
-    Ok(())
+    Ok(done.rows_affected())
 }
 
 async fn length(conn: &mut SqliteConnection, stream: &Cover) -> Result<u64, StoreError> {
@@ -582,6 +614,18 @@ async fn append(
         .await?;
     }
     Ok(actual + pages.len() as u64)
+}
+
+/// Delete the stream's events (their command ids with them), then its
+/// snapshot, inside the caller's transaction: how many events it deleted.
+async fn purge(conn: &mut SqliteConnection, stream: &Cover) -> Result<u64, StoreError> {
+    let deleted = execute(
+        &mut *conn,
+        statements::delete_events::<SqliteDialect>(stream),
+    )
+    .await?;
+    execute(conn, statements::delete_snapshot::<SqliteDialect>(stream)).await?;
+    Ok(deleted)
 }
 
 async fn read_from(

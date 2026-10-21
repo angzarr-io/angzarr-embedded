@@ -11,7 +11,9 @@
 //!
 //! Every backend's store is held to annals' store contract
 //! (`annals::async_store_contract!`), so the kernel behaves alike over any of
-//! them and over `InMemoryStore`. Pages are stored as written and never
+//! them and over `InMemoryStore`. Every backend can purge a stream
+//! (`annals::next::AsyncPurge`, on the store and on its unit of work), and is
+//! held to the contract's purge section too. Pages are stored as written and never
 //! decoded except to read them back; the command id is copied into its own
 //! indexed column for the deduplication lookup.
 
