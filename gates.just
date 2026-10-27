@@ -298,10 +298,11 @@ _tests +packages:
                 [ "${rule%%=*}" = "$name" ] && features+=(--features "${rule#*=}")
             done
         done
-        # `cargo test --doc` refuses a package without a library.
+        # `cargo test --doc` refuses a package without a library (a proc-macro
+        # crate is one: its doc examples, compile_fail ones too, run).
         while IFS= read -r name; do doc+=(--package "$name"); done < <(cargo metadata --format-version 1 --no-deps \
             --offline --manifest-path "$root/Cargo.toml" | jq -r --args '.packages[] | select(.name as $n | $ARGS.positional
-            | index($n)) | select(any(.targets[]; .kind | index("lib"))) | .name' "$@")
+            | index($n)) | select(any(.targets[]; .kind | index("lib") or index("proc-macro"))) | .name' "$@")
     fi
     if [ "${#features[@]}" -gt 0 ] && [ -n "{{features_prepare}}" ]; then
         just --justfile "$root/justfile" {{features_prepare}}
