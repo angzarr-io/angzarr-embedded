@@ -19,6 +19,7 @@ Every error is localizable: a stable code and named args (see
 | [`annals-sim`](crates/annals-sim) | simulation parts on `annals`: per-entity dice, a folded tick scheduler, jobs as data, a parallel map, a Gherkin runner |
 | [`annals-log`](crates/annals-log) | a binary event-log format for `annals` streams: length-delimited protobuf (prost) |
 | [`annals-store-sql`](crates/annals-store-sql) | `annals::next`'s store port on SQL: backend-neutral sea-query statements, and each backend (`sqlite`) behind a feature, on sqlx with its migrations |
+| [`annals-macros`](crates/annals-macros) | markup over hand-written aggregates, process managers, sagas and projectors, generating their `annals::next` glue (a proposal: its expansion is stubbed) |
 | [`annals-catalog-check`](crates/annals-catalog-check) | test-only: every error code has a message, with exactly its args, in every shipped Fluent catalog |
 
 ```
@@ -59,10 +60,10 @@ tests build, aside):
   their source stays BSD-3-Clause, but the linked whole carries
   angzarr-proto's terms.
 - **BSD-3-Clause only:** `annals-diagnostic`, `annals-graph`,
-  `annals-yaml` and `annals-catalog-check`. `annals-yaml` and
-  `annals-catalog-check` reach angzarr-proto only through
-  dev-dependencies, so their tests link it but a binary built on them
-  does not.
+  `annals-yaml`, `annals-catalog-check` and `annals-macros`.
+  `annals-yaml`, `annals-catalog-check` and `annals-macros` reach
+  angzarr-proto only through dev-dependencies, so their tests link it but
+  a binary built on them does not.
 
 `just licence-check`, part of `just lint`, fails when these two lists stop
 matching `cargo tree`.

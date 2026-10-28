@@ -19,7 +19,7 @@ knows nothing about any application that uses it, so anything specific to
 one belongs in that application's repository, not here.
 
 Every crate has zero third-party dependencies, except annals,
-annals-log, annals-store-sql and annals-catalog-check. A crate may depend
+annals-log, annals-store-sql, annals-catalog-check and annals-macros. A crate may depend
 on another crate in this workspace, as annals-sim does on annals.
 
 annals-catalog-check is test-only: its one dev-dependency, `fluent-syntax`
@@ -36,6 +36,17 @@ angzarr's own prost types for `io.angzarr.v1`, whose build needs `protoc`),
 operates on angzarr's wire types directly rather than on parallel annals
 types: angzarr owns that contract, and annals is its in-process runtime.
 Every user of annals therefore builds angzarr-proto; this is accepted.
+
+annals-macros depends on `syn`, `quote` and `proc-macro2`, because it is a
+procedural macro crate that parses a whole impl (its methods' signatures,
+attributes and types): hand-rolling a Rust parser over `proc_macro` tokens
+would be a second, unchecked implementation of Rust's grammar. They are
+compile-time only, and already in the graph through prost-derive, so they
+add no crate: each is pinned with `=` to the version prost-derive resolves
+in Cargo.lock, and moves when that does. Nothing else in the workspace
+depends on them directly; the kernel (annals) never does. annals itself
+depends on annals-macros only as a dev-dependency, for its decorated
+aggregate test.
 
 annals-store-sql depends on `sea-query` and, behind each backend's feature,
 `sqlx` and `sea-query-binder`, because it is a SQL store: hand-rolling a

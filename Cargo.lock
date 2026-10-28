@@ -36,6 +36,7 @@ dependencies = [
  "angzarr-proto",
  "annals",
  "annals-diagnostic",
+ "annals-macros",
  "prost",
  "prost-types",
 ]
@@ -71,6 +72,18 @@ dependencies = [
  "annals",
  "annals-diagnostic",
  "prost",
+]
+
+[[package]]
+name = "annals-macros"
+version = "0.1.0"
+dependencies = [
+ "annals",
+ "annals-diagnostic",
+ "proc-macro2",
+ "prost",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]

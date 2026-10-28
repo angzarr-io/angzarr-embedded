@@ -78,6 +78,7 @@ fn typed_step<D: Domain>(
                 Failure::Rejected(rejection) => StepError::Rejected(Report::of(&rejection)),
                 Failure::Kernel(error) => StepError::Kernel(error),
                 Failure::Downstream { error, .. } => error,
+                Failure::Projection { .. } => unreachable!("a chain step runs no projector"),
             }
         })?;
     Ok((Box::new(stream), pages))
@@ -300,6 +301,88 @@ impl Registry {
         Ok(())
     }
 
+    /// Register the marked-up aggregate `D` (annals-macros' `#[aggregate]`)
+    /// with `factory`, which builds every fresh instance: `D::default` for
+    /// one with no configuration, or a closure over immutable reference
+    /// configuration (`registry.aggregate::<Wallet>(move || Wallet::with(config.clone()))`).
+    /// Replay starts from its output, and resuming from a snapshot builds
+    /// from it, then [restores](super::State::restore), so the configuration
+    /// survives. The factory is called once per stream and reads nothing
+    /// that changes.
+    ///
+    /// This is the whole registration of a marked-up aggregate, with no
+    /// error path: its rules are `()`, recorded under the fixed
+    /// [`MARKUP_RULES_VERSION`](super::markup::MARKUP_RULES_VERSION), and
+    /// its upcaster an empty one unless [`Aggregate::upcaster`] gives one.
+    /// What [`Registry::register`] would refuse (a domain registered twice,
+    /// a bad descriptor) is a bug in the composition root, which PANICS
+    /// there, at startup. A hand-written domain keeps `register`.
+    ///
+    /// It returns the registration, to give an upcaster; it derefs to the
+    /// registry, so registrations chain:
+    /// `registry.aggregate::<Wallet>(f).upcaster(u).aggregate::<Lamp>(g)`.
+    ///
+    /// **A proposal**: a stub whose body is `todo!()`.
+    pub fn aggregate<D>(
+        &mut self,
+        factory: impl Fn() -> D + Send + Sync + 'static,
+    ) -> Aggregate<'_, D>
+    where
+        D: Domain<State = D, Rules = ()>,
+    {
+        let _ = factory;
+        todo!("Registry::aggregate is a stub")
+    }
+
+    /// Register the marked-up process manager `P` (`#[process_manager]`)
+    /// with `factory`, which builds every fresh instance. A process manager
+    /// is a domain, registered as [`Registry::aggregate`] registers one
+    /// (the markup's rules version, an empty upcaster, a second
+    /// registration PANICS at startup), plus the two rules of
+    /// [`ProcessManager`](super::markup::ProcessManager): an input
+    /// addressed to it must name the instance its correlation names, and
+    /// only a starting input type may start an instance.
+    ///
+    /// **A proposal**: `todo!()` (the dispatch is the linked router's).
+    pub fn process_manager<P: super::markup::ProcessManager>(
+        &mut self,
+        factory: impl Fn() -> P + Send + Sync + 'static,
+    ) -> &mut Self {
+        let _ = factory;
+        todo!("Registry::process_manager is a stub")
+    }
+
+    /// Register `saga`, a marked-up saga (`#[saga]`). The router runs it
+    /// on each event of its source the chain records, and delivers its
+    /// commands to its target in the same chain. When the target refuses
+    /// one (and records nothing), the chain calls the saga's
+    /// [`on_refused`](super::markup::Saga::on_refused) and delivers the
+    /// fact it answers to the exact stream of the triggering event, as a
+    /// fact whose id is the refused command's: the source's handler for it
+    /// records what the refusal means, and the chain commits. A refusal
+    /// fact the source has no handler for is dead-lettered
+    /// (`annals-next-no-refusal-handler`), and the chain commits without
+    /// it. Registering one twice PANICS at startup.
+    ///
+    /// **A proposal**: `todo!()` (the dispatch is the linked router's).
+    pub fn saga<S: super::markup::Saga>(&mut self, saga: S) -> &mut Self {
+        let _ = saga;
+        todo!("Registry::saga is a stub")
+    }
+
+    /// Register `projector`, the ONE instance of a marked-up projector
+    /// (`#[projector]`) this process runs, holding its ports. The router
+    /// runs it after each commit that records its source's events, and
+    /// awaits it before the call returns: a failure is the caller's error
+    /// (the events stay committed), and its position does not advance
+    /// past the failing event. Registering one twice PANICS at startup.
+    ///
+    /// **A proposal**: `todo!()` (the dispatch is the linked router's).
+    pub fn projector<P: super::markup::AsyncProjector>(&mut self, projector: P) -> &mut Self {
+        let _ = projector;
+        todo!("Registry::projector is a stub")
+    }
+
     /// `domain`'s state descriptor, if registered: what [`check`](super::check)
     /// reads capabilities from.
     pub fn state(&self, domain: &str) -> Option<&StateDescriptor> {
@@ -401,3 +484,37 @@ impl Registry {
 #[cfg(test)]
 #[path = "registry.test.rs"]
 mod tests;
+
+/// A marked-up aggregate's registration, made by [`Registry::aggregate`]:
+/// already registered, with an empty upcaster, until
+/// [`Aggregate::upcaster`] replaces it. Derefs to the registry, so
+/// registrations chain.
+///
+/// **A proposal**: a stub.
+pub struct Aggregate<'r, D: Domain> {
+    registry: &'r mut Registry,
+    domain: std::marker::PhantomData<fn() -> D>,
+}
+
+impl<'r, D: Domain> Aggregate<'r, D> {
+    /// Read the aggregate's old events through `upcaster` (its domain must
+    /// be `D::NAME`; another panics, as a composition-root bug).
+    pub fn upcaster(self, upcaster: super::Upcaster) -> Aggregate<'r, D> {
+        let _ = (upcaster, self.domain);
+        todo!("Aggregate::upcaster is a stub")
+    }
+}
+
+impl<D: Domain> std::ops::Deref for Aggregate<'_, D> {
+    type Target = Registry;
+
+    fn deref(&self) -> &Registry {
+        self.registry
+    }
+}
+
+impl<D: Domain> std::ops::DerefMut for Aggregate<'_, D> {
+    fn deref_mut(&mut self) -> &mut Registry {
+        self.registry
+    }
+}

@@ -24,9 +24,12 @@ prost-types = "0.14"
 # The store contract (`annals::next::contract`), for a store's tests.
 contract = []
 
-# annals' own tests run the store contract against InMemoryStore.
+# annals' own tests run the store contract against InMemoryStore, and a
+# decorated aggregate (`next/decorated.test.rs`) through annals-macros, whose
+# expansion names `::annals`.
 [dev-dependencies]
 annals = { path = ".", features = ["contract"] }
+annals-macros = { path = "../annals-macros" }
 
 [lints]
 workspace = true
