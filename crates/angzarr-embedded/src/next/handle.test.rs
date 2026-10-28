@@ -815,19 +815,28 @@ fn a_policy_step_commits_its_position_with_its_events() {
     assert_eq!(position(store.inner(), "bookkeeping", &account), 3);
 }
 
-/// A step the store fails (here, its write) keeps every write before it
-/// and its policy's position: the call fails with the store's error, to be
-/// retried. `Kernel::resume` runs what is owed from each policy's position,
-/// and running it again finds nothing more.
+/// A step the store fails (here, its write) keeps every write before it,
+/// and writes nothing more: its policy's position stays where the last
+/// committed step put it. The account is opened with the policy registered,
+/// so the position past the opening is an ordinary step's. The call fails
+/// with the store's error, to be retried; `Kernel::resume` runs what is
+/// owed from each policy's position, and running it again finds nothing
+/// more.
 #[test]
 fn a_step_the_store_failed_is_resumed_by_position() {
-    let plain = registry();
     let mut registry = registry();
     registry.policy(Bookkeeping);
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry, &log);
     let store = Recording::new();
-    opened(&store, &plain, 1, 0);
+    opened(&store, &registry, 1, 0);
+    let account = cover("account", 1);
+    assert_eq!(
+        position(store.inner(), "bookkeeping", &account),
+        2,
+        "the opening's own ledger steps put it"
+    );
+    let before = store.writes().len();
     store.fail_write(1);
     let failure = kernel
         .handle::<Account, _, _>(&store, deposit(3, 25), &at(30), &mut ())
@@ -847,13 +856,28 @@ fn a_step_the_store_failed_is_resumed_by_position() {
         "{failure:?}"
     );
     assert_eq!(failure.recovery(), Recovery::Retry);
-    let account = cover("account", 1);
     assert_eq!(
         pages(store.inner(), &account).len(),
         3,
         "the deposit stands"
     );
-    assert_eq!(pages(store.inner(), &ledger_cover()), []);
+    assert_eq!(
+        pages(store.inner(), &ledger_cover()).len(),
+        2,
+        "the opening's two records; the deposit's step landed nothing"
+    );
+    let writes = store.writes();
+    assert_eq!(
+        writes[before..]
+            .iter()
+            .map(|w| (w.wrote.clone(), w.landed))
+            .collect::<Vec<_>>(),
+        [
+            (Some((account.clone(), 1)), true),
+            (Some((ledger_cover(), 1)), false),
+        ],
+        "the command's write, then the step's failed one, and nothing after it"
+    );
     assert_eq!(position(store.inner(), "bookkeeping", &account), 2);
 
     let resumed = kernel.resume(&store, &at(31), &mut ()).ready().unwrap();
@@ -867,7 +891,127 @@ fn a_step_the_store_failed_is_resumed_by_position() {
     assert_eq!(position(store.inner(), "bookkeeping", &account), 3);
     let again = kernel.resume(&store, &at(32), &mut ()).ready().unwrap();
     assert!(again.books().is_empty(), "nothing more owed");
-    assert_eq!(pages(store.inner(), &ledger_cover()).len(), 1);
+    assert_eq!(pages(store.inner(), &ledger_cover()).len(), 3);
+}
+
+/// Account events → a sweep of account 9, which holds nothing: a policy
+/// whose target decides no event.
+struct SweepNine;
+
+impl crate::next::Policy for SweepNine {
+    const NAME: &'static str = "sweep-nine";
+    type Source = Account;
+    type Target = Account;
+
+    fn on_event(
+        &self,
+        _: &crate::next::Any,
+        _: &crate::next::markup::PolicyContext,
+    ) -> Option<crate::next::markup::Commands<Account>> {
+        let root = cover("account", 9).root.unwrap();
+        Some(crate::next::markup::Commands::none().send(root, &AccountCmd::Sweep))
+    }
+}
+
+/// A policy step whose target decides no event writes no event, but still
+/// puts its policy's position past the trigger, alone: the trigger is
+/// handled, and nothing is owed.
+#[test]
+fn a_policy_step_that_decides_no_event_still_moves_its_position() {
+    let mut registry = registry();
+    registry.policy(SweepNine);
+    let log = MemoryDeadLetters::new();
+    let kernel = Kernel::new(&registry, &log);
+    let store = Recording::new();
+    let open = command(cover("account", 1), AccountCmd::Open.to_any()).id(1);
+    kernel
+        .handle::<Account, _, _>(&store, open, &at(30), &mut ())
+        .ready()
+        .unwrap();
+    let account = cover("account", 1);
+    assert_eq!(
+        streams(store.inner()),
+        [cover("account", 1)],
+        "the sweep wrote no event"
+    );
+    assert_eq!(
+        store.writes(),
+        [
+            crate::next::recording::WriteRecord {
+                wrote: Some((account.clone(), 1)),
+                positions: vec![],
+                landed: true,
+            },
+            crate::next::recording::WriteRecord {
+                wrote: None,
+                positions: vec![("sweep-nine".to_string(), account.clone(), 1)],
+                landed: true,
+            },
+        ],
+        "the command's write, then the step's position alone"
+    );
+    assert_eq!(position(store.inner(), "sweep-nine", &account), 1);
+    let resumed = kernel.resume(&store, &at(31), &mut ()).ready().unwrap();
+    assert!(resumed.books().is_empty(), "nothing owed");
+    assert_eq!(store.writes().len(), 2, "and nothing run again");
+}
+
+/// Account deposits → the ledger, answering its refusals: every refusal it
+/// is handed, kept.
+struct AnsweringBookkeeping(
+    std::sync::Arc<std::sync::Mutex<Vec<crate::next::markup::v1::Refusal>>>,
+);
+
+impl crate::next::Policy for AnsweringBookkeeping {
+    const NAME: &'static str = "answering-bookkeeping";
+    type Source = Account;
+    type Target = Ledger;
+    const ANSWERS_REFUSALS: bool = true;
+
+    fn on_event(
+        &self,
+        event: &crate::next::Any,
+        ctx: &crate::next::markup::PolicyContext,
+    ) -> Option<crate::next::markup::Commands<Ledger>> {
+        crate::next::Policy::on_event(&Bookkeeping, event, ctx)
+    }
+
+    fn on_refused(&self, refusal: &crate::next::markup::v1::Refusal) -> crate::next::Any {
+        self.0.lock().unwrap().push(refusal.clone());
+        crate::next::markup::__pass_through(refusal)
+    }
+}
+
+/// A refusal is handed to its policy with the triggering event: its
+/// stream, and its page as stored, at its own sequence (here 2, past the
+/// opening).
+#[test]
+fn a_refusal_carries_its_triggering_event() {
+    let plain = registry();
+    let mut registry = registry();
+    let refusals = std::sync::Arc::default();
+    registry.policy(AnsweringBookkeeping(std::sync::Arc::clone(&refusals)));
+    let log = MemoryDeadLetters::new();
+    let kernel = Kernel::new(&registry, &log);
+    let store = MemoryStore::new();
+    opened(&store, &plain, 1, 0);
+    kernel
+        .handle::<Account, _, _>(&store, deposit(3, LEDGER_LIMIT + 1), &at(30), &mut ())
+        .ready()
+        .unwrap();
+    let account = cover("account", 1);
+    let refusals = refusals.lock().unwrap();
+    let [refusal] = refusals.as_slice() else {
+        panic!("one refusal: {refusals:?}");
+    };
+    let event = refusal.event.clone().unwrap();
+    assert_eq!(event.cover, Some(account.clone()));
+    assert_eq!(
+        event.pages,
+        [pages(&store, &account)[2].clone()],
+        "the deposit's page, as stored"
+    );
+    assert_eq!(event.pages[0].sequence, 2);
 }
 
 /// A crash between a command's commit and its policy steps leaves them
