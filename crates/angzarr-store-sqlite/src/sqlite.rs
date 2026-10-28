@@ -14,27 +14,31 @@
 //! with the position it landed at.
 
 use std::future::Future;
-use std::marker::PhantomData;
+use std::ops::DerefMut;
 use std::path::Path;
 use std::pin::Pin;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
 use angzarr_ports::angzarr_proto::v1::{Cover, EventBook, EventPage, Snapshot};
 use angzarr_ports::{
-    ChangeToken, EventStore, Head, ListStreams, Outbox, OutboxEntry, PositionKey, PositionStore,
-    Purge, ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, Slice, SnapshotStore, StoreError,
-    StreamRef, Uuid, Watch, Write, Written,
+    Append, ChangeToken, EventStore, Head, ListStreams, Outbox, OutboxEntry, PositionKey,
+    PositionStore, Purge, ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, Slice,
+    SnapshotStore, StoreError, StreamRef, Uuid, Watch, Write, Written, EDITION_CREATED_TYPE_URL,
 };
+use prost::Message;
 use prost_types::Timestamp;
+use sea_query::SqliteQueryBuilder;
+use sea_query_binder::SqlxBinder;
 use sqlx::migrate::{MigrateError, Migration, Migrator};
-use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection};
-use sqlx::{ConnectOptions, Connection};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection, SqliteRow};
+use sqlx::{ConnectOptions, Connection, Database, Row, Sqlite, TransactionManager};
 
-use crate::error::{damaged, unavailable, unmigrated, Damage};
-use crate::{Dialect, Integrity};
+use crate::error::{damaged, unavailable, undecodable, unmigrated, Damage};
+use crate::{rows, statements, Dialect, Integrity};
 
 /// SQLite keeps NULLs distinct in a key, so the main timeline is `''`.
 pub struct SqliteDialect;
@@ -69,7 +73,47 @@ const WAL_ATTEMPTS: usize = 20;
 
 /// A store in one SQLite database: one handle, one connection.
 pub struct SqliteStore {
-    conn: SqliteConnection,
+    conn: Conn,
+}
+
+/// A handle's one connection, behind an async lock so the ports take
+/// `&self`: one call at a time runs on it, each holding it only for its own
+/// statements (a write's whole transaction, a read unit's life). With the
+/// count of statements sent through it.
+pub(crate) struct Conn {
+    lock: tokio::sync::Mutex<SqliteConnection>,
+    sent: AtomicU64,
+}
+
+impl From<SqliteConnection> for Conn {
+    fn from(conn: SqliteConnection) -> Conn {
+        Conn {
+            lock: tokio::sync::Mutex::new(conn),
+            sent: AtomicU64::new(0),
+        }
+    }
+}
+
+impl Conn {
+    /// The connection, the handle given up.
+    #[cfg(test)]
+    pub(crate) fn into_inner(self) -> SqliteConnection {
+        self.lock.into_inner()
+    }
+
+    /// The connection, for a caller holding the handle exclusively.
+    pub(crate) fn get_mut(&mut self) -> &mut SqliteConnection {
+        self.lock.get_mut()
+    }
+
+    /// The connection, once no other call holds it, with the count its
+    /// statements are added to.
+    async fn exec(&self) -> Exec<'_, tokio::sync::MutexGuard<'_, SqliteConnection>> {
+        Exec {
+            conn: self.lock.lock().await,
+            sent: &self.sent,
+        }
+    }
 }
 
 impl SqliteStore {
@@ -77,7 +121,7 @@ impl SqliteStore {
     /// `COMMIT` included): what a command costs in round trips, for its
     /// budget and benchmarks.
     pub fn round_trips(&self) -> u64 {
-        todo!("red: count the statements a handle sends")
+        self.conn.sent.load(Ordering::Relaxed)
     }
 
     /// The database at `path`, created if absent, in WAL mode, and migrated.
@@ -108,7 +152,7 @@ impl SqliteStore {
         if !matches!(schema, Schema::Current) {
             migrate(&mut conn).await?;
         }
-        Ok(SqliteStore { conn })
+        Ok(SqliteStore { conn: conn.into() })
     }
 
     /// The database at `path` opened read-only, or `None` if there is no
@@ -173,7 +217,7 @@ impl SqliteStore {
     /// (`angzarr-store-sqlite-unavailable`), not damage found.
     pub async fn integrity_check(&mut self) -> Result<Integrity, StoreError> {
         let reported: Vec<String> = match sqlx::query_scalar("PRAGMA integrity_check")
-            .fetch_all(&mut self.conn)
+            .fetch_all(self.conn.get_mut())
             .await
         {
             Ok(reported) => reported,
@@ -194,7 +238,7 @@ impl SqliteStore {
         let options = SqliteConnectOptions::from_str("sqlite::memory:").map_err(unavailable)?;
         let mut conn = options.connect().await.map_err(unavailable)?;
         migrate(&mut conn).await?;
-        Ok(SqliteStore { conn })
+        Ok(SqliteStore { conn: conn.into() })
     }
 }
 
@@ -228,7 +272,7 @@ async fn read_only(
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() || !empty(&mut conn).await? {
             return match schema(&mut conn).await? {
-                Schema::Current => Ok(Some(SqliteStore { conn })),
+                Schema::Current => Ok(Some(SqliteStore { conn: conn.into() })),
                 Schema::Pending(pending) => Err(unmigrated(pending)),
                 Schema::Refused(error) => Err(unavailable(error)),
             };
@@ -376,7 +420,51 @@ async fn migrate(conn: &mut SqliteConnection) -> Result<(), StoreError> {
         .await
         .map_err(unavailable)?;
     MIGRATOR.run_direct(&mut *tx).await.map_err(unavailable)?;
+    backfill(&mut tx).await?;
     tx.commit().await.map_err(unavailable)
+}
+
+/// An event row as stored: domain, edition, root, sequence, page.
+type StoredRow = (String, String, Vec<u8>, i64, Vec<u8>);
+
+/// Fill the events' correlation and time columns from their pages, once:
+/// what migration 0003 added, which SQL cannot fill (it decodes a page).
+/// Run under the migration's lock, the first time a store migrates the
+/// file past 0003, and marked done, so a reopen scans nothing again.
+async fn backfill(conn: &mut SqliteConnection) -> Result<(), StoreError> {
+    let done: i64 = sqlx::query_scalar(statements::BACKFILL_DONE)
+        .bind(statements::EVENTS_META_BACKFILL)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(unavailable)?;
+    if done != 0 {
+        return Ok(());
+    }
+    let unfilled: Vec<StoredRow> = sqlx::query_as(statements::UNFILLED)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(unavailable)?;
+    for (domain, edition, root, sequence, bytes) in unfilled {
+        let cover = rows::cover::<SqliteDialect>(&domain, edition.clone(), &root)?;
+        let page = rows::page(&cover, sequence, &bytes)?;
+        let (correlation_id, recorded_at) = statements::meta_columns(&page);
+        sqlx::query(statements::FILL)
+            .bind(domain)
+            .bind(edition)
+            .bind(root)
+            .bind(sequence)
+            .bind(correlation_id)
+            .bind(recorded_at)
+            .execute(&mut *conn)
+            .await
+            .map_err(unavailable)?;
+    }
+    sqlx::query(statements::BACKFILL_RAN)
+        .bind(statements::EVENTS_META_BACKFILL)
+        .execute(&mut *conn)
+        .await
+        .map_err(unavailable)?;
+    Ok(())
 }
 
 /// Move a file into WAL mode. WAL is the file's own, kept across
@@ -454,36 +542,390 @@ const SQLITE_NOTADB: i32 = 26;
 
 // ------------------------------------------------------------ the ports
 //
-// Every port and capability but editions (not implemented yet: the owner's
-// ruling, 2026-10-28; an edition stream reads as main's and takes no
-// write, as a stream never forked does). Each is a stub until the ports'
-// suite is green on it.
+// Every port and capability. Editions are per-stream forks only as far as
+// the base ports need them: an edition stream's first own event is its
+// creation (`meta.EditionCreated`), it reads main below its fork, then its
+// own; a write of anything else to an unforked one is refused. The
+// administration of editions (the `Editions` port: time-based forks,
+// listing, deletion and removal) is not implemented yet (the owner's
+// ruling, 2026-10-28): a follow-up.
 
-impl EventStore for SqliteStore {
-    /// One `BEGIN IMMEDIATE` transaction: the stream's length checked
-    /// against `expected` under the write lock, its pages inserted with the
-    /// commit position (raised once), the positions upserted and the outbox
-    /// entries kept, then committed. A write to a stream in any edition is
-    /// refused (`StoreError::EditionNotForked`): editions are not
-    /// implemented, so no stream is ever forked.
-    async fn write(&self, write: Write<'_>) -> Result<Written, StoreError> {
-        let _ = write;
-        todo!("red: EventStore::write on SQLite")
+/// A value bound to a statement's parameter.
+enum Value {
+    Text(String),
+    Blob(Vec<u8>),
+    Int(i64),
+    MaybeText(Option<String>),
+}
+
+/// The view's three parameters for `stream`: domain, root, edition column.
+fn view_of(stream: StreamRef<'_>) -> [Value; 3] {
+    [
+        Value::Text(stream.domain.to_string()),
+        Value::Blob(stream.root.as_bytes().to_vec()),
+        Value::Text(stream.edition.unwrap_or_default().to_string()),
+    ]
+}
+
+/// Statements run on one connection, each counted.
+struct Exec<'a, C> {
+    conn: C,
+    sent: &'a AtomicU64,
+}
+
+impl<C: DerefMut<Target = SqliteConnection>> Exec<'_, C> {
+    fn count(&self) {
+        self.sent.fetch_add(1, Ordering::Relaxed);
     }
 
+    async fn rows(
+        &mut self,
+        sql: &str,
+        values: impl IntoIterator<Item = Value>,
+    ) -> Result<Vec<SqliteRow>, StoreError> {
+        let mut query = sqlx::query(sql);
+        for value in values {
+            query = match value {
+                Value::Text(text) => query.bind(text),
+                Value::Blob(blob) => query.bind(blob),
+                Value::Int(int) => query.bind(int),
+                Value::MaybeText(text) => query.bind(text),
+            };
+        }
+        self.count();
+        query.fetch_all(&mut *self.conn).await.map_err(unavailable)
+    }
+
+    async fn execute(
+        &mut self,
+        sql: &str,
+        values: impl IntoIterator<Item = Value>,
+    ) -> Result<u64, StoreError> {
+        let mut query = sqlx::query(sql);
+        for value in values {
+            query = match value {
+                Value::Text(text) => query.bind(text),
+                Value::Blob(blob) => query.bind(blob),
+                Value::Int(int) => query.bind(int),
+                Value::MaybeText(text) => query.bind(text),
+            };
+        }
+        self.count();
+        let done = query.execute(&mut *self.conn).await.map_err(unavailable)?;
+        Ok(done.rows_affected())
+    }
+
+    async fn built(&mut self, statement: impl SqlxBinder) -> Result<Vec<SqliteRow>, StoreError> {
+        let (sql, values) = statement.build_sqlx(SqliteQueryBuilder);
+        self.count();
+        sqlx::query_with(&sql, values)
+            .fetch_all(&mut *self.conn)
+            .await
+            .map_err(unavailable)
+    }
+
+    async fn built_execute(&mut self, statement: impl SqlxBinder) -> Result<u64, StoreError> {
+        let (sql, values) = statement.build_sqlx(SqliteQueryBuilder);
+        self.count();
+        let done = sqlx::query_with(&sql, values)
+            .execute(&mut *self.conn)
+            .await
+            .map_err(unavailable)?;
+        Ok(done.rows_affected())
+    }
+
+    /// `(sequence, page)` rows as `stream`'s pages.
+    async fn pages(
+        &mut self,
+        stream: StreamRef<'_>,
+        sql: &str,
+        values: impl IntoIterator<Item = Value>,
+    ) -> Result<Vec<EventPage>, StoreError> {
+        let cover = stream.to_cover();
+        let mut pages = Vec::new();
+        for row in self.rows(sql, values).await? {
+            let sequence: i64 = row.try_get(0).map_err(unavailable)?;
+            let bytes: Vec<u8> = row.try_get(1).map_err(unavailable)?;
+            pages.push(rows::page(&cover, sequence, &bytes)?);
+        }
+        Ok(pages)
+    }
+
+    /// The stream's head as read in its edition: one past its last page,
+    /// and that page's instant.
+    async fn head(&mut self, stream: StreamRef<'_>) -> Result<Head, StoreError> {
+        let last = self
+            .pages(stream, statements::LAST, view_of(stream))
+            .await?;
+        Ok(head_after(last.last()))
+    }
+
+    /// The pages `from <= sequence < to`, with the stream's head.
+    async fn read(
+        &mut self,
+        stream: StreamRef<'_>,
+        from: u64,
+        to: Option<u64>,
+    ) -> Result<Slice, StoreError> {
+        let [domain, root, edition] = view_of(stream);
+        let to = to.map_or(i64::MAX, statements::sequence_column);
+        let range = [
+            domain,
+            root,
+            edition,
+            Value::Int(statements::sequence_column(from)),
+            Value::Int(to),
+        ];
+        let pages = self.pages(stream, statements::PAGES, range).await?;
+        let head = self.head(stream).await?;
+        Ok(Slice {
+            next_sequence: head.next_sequence,
+            last_recorded_at: head.last_recorded_at,
+            pages,
+        })
+    }
+
+    async fn find_command(
+        &mut self,
+        stream: StreamRef<'_>,
+        command_id: Uuid,
+    ) -> Result<Vec<EventPage>, StoreError> {
+        let [domain, root, edition] = view_of(stream);
+        let id = Value::Blob(command_id.as_bytes().to_vec());
+        self.pages(stream, statements::OF_COMMAND, [domain, root, edition, id])
+            .await
+    }
+
+    async fn covers(&mut self, domain: &str) -> Result<Vec<Cover>, StoreError> {
+        let mut covers = Vec::new();
+        for row in self
+            .rows(statements::COVERS, [Value::Text(domain.to_string())])
+            .await?
+        {
+            let edition: String = row.try_get(0).map_err(unavailable)?;
+            let root: Vec<u8> = row.try_get(1).map_err(unavailable)?;
+            covers.push(rows::cover::<SqliteDialect>(domain, edition, &root)?);
+        }
+        Ok(covers)
+    }
+
+    async fn read_snapshot(
+        &mut self,
+        stream: StreamRef<'_>,
+    ) -> Result<Option<Snapshot>, StoreError> {
+        let cover = stream.to_cover();
+        let rows = self
+            .built(statements::snapshot_of::<SqliteDialect>(&cover))
+            .await?;
+        let Some(row) = rows.first() else {
+            return Ok(None);
+        };
+        let bytes: Vec<u8> = row.try_get(0).map_err(unavailable)?;
+        rows::snapshot(&cover, &bytes).map(Some)
+    }
+
+    async fn commit_position(&mut self) -> Result<u64, StoreError> {
+        let rows = self.rows(statements::COMMIT_POSITION, []).await?;
+        let next: i64 = match rows.first() {
+            Some(row) => row.try_get(0).map_err(unavailable)?,
+            None => 0,
+        };
+        Ok(next.unsigned_abs())
+    }
+
+    /// The events of a write: checked against the stream as read in its
+    /// edition, then inserted at the commit position, raised once.
+    async fn append(&mut self, append: Append<'_>) -> Result<u64, StoreError> {
+        let Append {
+            stream,
+            expected,
+            pages,
+        } = append;
+        let actual = self.head(stream).await?.next_sequence;
+        let creates = pages.first().is_some_and(is_creation);
+        match stream.edition {
+            None if creates => return Err(StoreError::EditionNameRequired),
+            None => {}
+            Some(edition) => {
+                let own = [
+                    Value::Text(stream.domain.to_string()),
+                    Value::Text(edition.to_string()),
+                    Value::Blob(stream.root.as_bytes().to_vec()),
+                ];
+                let first: Option<i64> = self
+                    .rows(statements::OWN_FIRST, own)
+                    .await?
+                    .first()
+                    .map(|row| row.try_get(0))
+                    .transpose()
+                    .map_err(unavailable)?
+                    .flatten();
+                match (first.is_some(), creates) {
+                    (true, true) => return Err(StoreError::edition_already_forked(stream)),
+                    (false, false) if !pages.is_empty() => {
+                        return Err(StoreError::edition_not_forked(stream))
+                    }
+                    // A fork lands at its fork sequence: main's head, or
+                    // (the time-based option) any sequence below it.
+                    (false, true) if expected <= actual => {
+                        return self.insert(stream, expected, pages).await;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if expected != actual {
+            return Err(StoreError::conflict(stream, expected, actual));
+        }
+        self.insert(stream, expected, pages).await
+    }
+
+    /// `pages`, continuing the stream from `expected`, inserted at the
+    /// commit position, raised once: the stream's new length.
+    async fn insert(
+        &mut self,
+        stream: StreamRef<'_>,
+        expected: u64,
+        pages: &[EventPage],
+    ) -> Result<u64, StoreError> {
+        for (due, page) in (expected..).zip(pages) {
+            if page.sequence != due {
+                return Err(StoreError::discontinuous(stream, due, page.sequence));
+            }
+        }
+        if pages.is_empty() {
+            return Ok(expected);
+        }
+        let raised = self.rows(statements::RAISE_COMMIT_POSITION, []).await?;
+        let position: i64 = match raised.first() {
+            Some(row) => row.try_get(0).map_err(unavailable)?,
+            None => 0,
+        };
+        let cover = stream.to_cover();
+        self.built_execute(statements::insert_pages::<SqliteDialect>(
+            &cover, pages, position,
+        )?)
+        .await?;
+        Ok(expected + pages.len() as u64)
+    }
+
+    async fn put_position(&mut self, key: PositionKey<'_>, next: u64) -> Result<(), StoreError> {
+        let [domain, root, edition] = view_of(key.stream);
+        let values = [
+            domain,
+            edition,
+            root,
+            Value::Text(key.handler.to_string()),
+            Value::Int(statements::sequence_column(next)),
+        ];
+        self.execute(statements::PUT_POSITION, values)
+            .await
+            .map(drop)
+    }
+
+    async fn position(&mut self, key: PositionKey<'_>) -> Result<u64, StoreError> {
+        let [domain, root, edition] = view_of(key.stream);
+        let values = [domain, edition, root, Value::Text(key.handler.to_string())];
+        let rows = self.rows(statements::POSITION, values).await?;
+        let next: i64 = match rows.first() {
+            Some(row) => row.try_get(0).map_err(unavailable)?,
+            None => 0,
+        };
+        Ok(next.unsigned_abs())
+    }
+
+    async fn put_outbox(&mut self, entry: &OutboxEntry) -> Result<(), StoreError> {
+        let values = [
+            Value::Blob(entry.id.as_bytes().to_vec()),
+            Value::Text(entry.origin.clone()),
+            Value::Blob(entry.message.encode_to_vec()),
+            Value::MaybeText(entry.edition.clone()),
+        ];
+        self.execute(statements::PUT_OUTBOX, values).await.map(drop)
+    }
+}
+
+/// The head after `last`, a stream's last page: 0 and no instant for none.
+fn head_after(last: Option<&EventPage>) -> Head {
+    Head {
+        next_sequence: last.map_or(0, |page| page.sequence + 1),
+        last_recorded_at: last
+            .and_then(|page| page.meta.as_ref())
+            .and_then(|meta| meta.recorded_at),
+    }
+}
+
+/// Whether `page` is a stream's creation in its edition.
+fn is_creation(page: &EventPage) -> bool {
+    page.payload
+        .as_ref()
+        .is_some_and(|payload| payload.type_url == EDITION_CREATED_TYPE_URL)
+}
+
+impl EventStore for SqliteStore {
+    /// One `BEGIN IMMEDIATE` transaction, begun and committed inside the
+    /// call: the stream's length checked against `expected` under the write
+    /// lock, its pages inserted with the commit position (raised once), the
+    /// positions upserted and the outbox entries kept. Nothing is held open
+    /// after it returns; a failure lands nothing.
+    async fn write(&self, write: Write<'_>) -> Result<Written, StoreError> {
+        let Exec { mut conn, sent } = self.conn.exec().await;
+        sent.fetch_add(1, Ordering::Relaxed);
+        let tx = conn
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(unavailable)?;
+        let mut ex = Exec { conn: tx, sent };
+        let next_sequence = match write.events {
+            Some(append) => Some(ex.append(append).await?),
+            None => None,
+        };
+        for (key, next) in write.positions {
+            ex.put_position(*key, *next).await?;
+        }
+        for entry in write.outbox {
+            ex.put_outbox(entry).await?;
+        }
+        ex.count();
+        ex.conn.commit().await.map_err(unavailable)?;
+        Ok(Written { next_sequence })
+    }
+
+    /// One statement when the read runs to the end from 0, its last page
+    /// the head; otherwise the range and the head in one read transaction,
+    /// so they are one moment.
     async fn read(
         &self,
         stream: StreamRef<'_>,
         from: u64,
         to: Option<u64>,
     ) -> Result<Slice, StoreError> {
-        let _ = (stream, from, to);
-        todo!("red: EventStore::read on SQLite")
+        let mut ex = self.conn.exec().await;
+        if from == 0 && to.is_none() {
+            let [domain, root, edition] = view_of(stream);
+            let all = [domain, root, edition, Value::Int(0), Value::Int(i64::MAX)];
+            let pages = ex.pages(stream, statements::PAGES, all).await?;
+            let head = head_after(pages.last());
+            return Ok(Slice {
+                next_sequence: head.next_sequence,
+                last_recorded_at: head.last_recorded_at,
+                pages,
+            });
+        }
+        ex.count();
+        let tx = ex.conn.begin().await.map_err(unavailable)?;
+        let mut moment = Exec {
+            conn: tx,
+            sent: ex.sent,
+        };
+        let slice = moment.read(stream, from, to).await?;
+        moment.count();
+        moment.conn.commit().await.map_err(unavailable)?;
+        Ok(slice)
     }
 
     async fn head(&self, stream: StreamRef<'_>) -> Result<Head, StoreError> {
-        let _ = stream;
-        todo!("red: EventStore::head on SQLite")
+        self.conn.exec().await.head(stream).await
     }
 
     async fn find_command(
@@ -491,24 +933,25 @@ impl EventStore for SqliteStore {
         stream: StreamRef<'_>,
         command_id: Uuid,
     ) -> Result<Vec<EventPage>, StoreError> {
-        let _ = (stream, command_id);
-        todo!("red: EventStore::find_command on SQLite")
+        self.conn
+            .exec()
+            .await
+            .find_command(stream, command_id)
+            .await
     }
 
     async fn covers(&self, domain: &str) -> Result<Vec<Cover>, StoreError> {
-        let _ = domain;
-        todo!("red: EventStore::covers on SQLite")
+        self.conn.exec().await.covers(domain).await
     }
 
     async fn commit_position(&self) -> Result<u64, StoreError> {
-        todo!("red: EventStore::commit_position on SQLite")
+        self.conn.exec().await.commit_position().await
     }
 }
 
 impl SnapshotStore for SqliteStore {
     async fn read_snapshot(&self, stream: StreamRef<'_>) -> Result<Option<Snapshot>, StoreError> {
-        let _ = stream;
-        todo!("red: SnapshotStore::read_snapshot on SQLite")
+        self.conn.exec().await.read_snapshot(stream).await
     }
 
     async fn write_snapshot(
@@ -516,36 +959,83 @@ impl SnapshotStore for SqliteStore {
         stream: StreamRef<'_>,
         snapshot: &Snapshot,
     ) -> Result<(), StoreError> {
-        let _ = (stream, snapshot);
-        todo!("red: SnapshotStore::write_snapshot on SQLite")
+        let cover = stream.to_cover();
+        self.conn
+            .exec()
+            .await
+            .built_execute(statements::upsert_snapshot::<SqliteDialect>(
+                &cover, snapshot,
+            )?)
+            .await
+            .map(drop)
     }
 }
 
 impl PositionStore for SqliteStore {
     async fn position(&self, key: PositionKey<'_>) -> Result<u64, StoreError> {
-        let _ = key;
-        todo!("red: PositionStore::position on SQLite")
+        self.conn.exec().await.position(key).await
     }
 }
 
 impl Purge for SqliteStore {
     /// One `BEGIN IMMEDIATE` transaction, as a write's: a purge lands wholly
-    /// before or wholly after any write.
+    /// before or wholly after any write, or not at all.
     async fn purge(&self, stream: StreamRef<'_>) -> Result<u64, StoreError> {
-        let _ = stream;
-        todo!("red: Purge::purge on SQLite")
+        let Exec { mut conn, sent } = self.conn.exec().await;
+        sent.fetch_add(1, Ordering::Relaxed);
+        let tx = conn
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(unavailable)?;
+        let mut ex = Exec { conn: tx, sent };
+        let cover = stream.to_cover();
+        let deleted = ex
+            .built_execute(statements::delete_events::<SqliteDialect>(&cover))
+            .await?;
+        ex.built_execute(statements::delete_snapshot::<SqliteDialect>(&cover))
+            .await?;
+        let [domain, root, edition] = view_of(stream);
+        ex.execute(statements::DELETE_POSITIONS, [domain, edition, root])
+            .await?;
+        ex.count();
+        ex.conn.commit().await.map_err(unavailable)?;
+        Ok(deleted)
     }
 }
 
 impl Outbox for SqliteStore {
     async fn pending(&self, limit: usize) -> Result<Vec<OutboxEntry>, StoreError> {
-        let _ = limit;
-        todo!("red: Outbox::pending on SQLite")
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let rows = self
+            .conn
+            .exec()
+            .await
+            .rows(statements::PENDING, [Value::Int(limit)])
+            .await?;
+        let mut entries = Vec::new();
+        for row in rows {
+            let id: Vec<u8> = row.try_get(0).map_err(unavailable)?;
+            let message: Vec<u8> = row.try_get(2).map_err(unavailable)?;
+            entries.push(OutboxEntry {
+                id: rows::stream_root(&id)?,
+                origin: row.try_get(1).map_err(unavailable)?,
+                message: prost_types::Any::decode(message.as_slice())
+                    .map_err(|e| StoreError::Unavailable(undecodable(e)))?,
+                edition: row.try_get(3).map_err(unavailable)?,
+            });
+        }
+        Ok(entries)
     }
 
     async fn clear(&self, ids: &[Uuid]) -> Result<u64, StoreError> {
-        let _ = ids;
-        todo!("red: Outbox::clear on SQLite")
+        let mut ex = self.conn.exec().await;
+        let mut cleared = 0;
+        for id in ids {
+            cleared += ex
+                .execute(statements::CLEAR, [Value::Blob(id.as_bytes().to_vec())])
+                .await?;
+        }
+        Ok(cleared)
     }
 }
 
@@ -555,24 +1045,38 @@ impl ReadStore for SqliteStore {
     /// A deferred `BEGIN`, which takes no lock, and a first read at once:
     /// under WAL a read transaction's moment is its first read's. It runs
     /// on a store opened by [`open_existing`](SqliteStore::open_existing),
-    /// and waits on no writer.
+    /// and waits on no writer. The handle serves nothing else until the
+    /// unit is dropped.
     async fn begin_read(&self) -> Result<SqliteRead<'_>, StoreError> {
-        todo!("red: ReadStore::begin_read on SQLite")
+        let mut ex = self.conn.exec().await;
+        ex.count();
+        <Sqlite as Database>::TransactionManager::begin(&mut ex.conn, None)
+            .await
+            .map_err(unavailable)?;
+        let unit = SqliteRead { ex };
+        // Any read fixes the moment; this one reads only the schema.
+        let mut unit = unit;
+        unit.ex.count();
+        empty(&mut unit.ex.conn).await?;
+        Ok(unit)
     }
 }
 
 /// A read-only unit: one SQLite read transaction, seeing the database as
-/// it began. Dropped, it ends, having written nothing. Editions are not
-/// implemented, so an edition stream reads as main's, and no edition
-/// exists to be named (`StoreError::UnknownEdition`).
+/// it began. Dropped, it ends, having written nothing.
 pub struct SqliteRead<'s> {
-    _store: PhantomData<&'s SqliteStore>,
+    ex: Exec<'s, tokio::sync::MutexGuard<'s, SqliteConnection>>,
+}
+
+impl Drop for SqliteRead<'_> {
+    fn drop(&mut self) {
+        <Sqlite as Database>::TransactionManager::start_rollback(&mut self.ex.conn);
+    }
 }
 
 impl ReadUnit for SqliteRead<'_> {
     async fn covers(&mut self, domain: &str) -> Result<Vec<Cover>, StoreError> {
-        let _ = domain;
-        todo!("red: ReadUnit::covers on SQLite")
+        self.ex.covers(domain).await
     }
 
     async fn read(
@@ -581,16 +1085,14 @@ impl ReadUnit for SqliteRead<'_> {
         from: u64,
         to: Option<u64>,
     ) -> Result<Slice, StoreError> {
-        let _ = (stream, from, to);
-        todo!("red: ReadUnit::read on SQLite")
+        self.ex.read(stream, from, to).await
     }
 
     async fn read_snapshot(
         &mut self,
         stream: StreamRef<'_>,
     ) -> Result<Option<Snapshot>, StoreError> {
-        let _ = stream;
-        todo!("red: ReadUnit::read_snapshot on SQLite")
+        self.ex.read_snapshot(stream).await
     }
 }
 
@@ -602,36 +1104,125 @@ impl Watch for SqliteStore {
     /// no write lock, and runs on a store opened by
     /// [`open_existing`](SqliteStore::open_existing).
     async fn change_token(&self) -> Result<ChangeToken, StoreError> {
-        todo!("red: Watch::change_token on SQLite")
+        let rows = self
+            .conn
+            .exec()
+            .await
+            .rows(statements::CHANGE_TOKEN, [])
+            .await?;
+        let row = rows.first().ok_or_else(|| unavailable("no data version"))?;
+        let version: i64 = row.try_get(0).map_err(unavailable)?;
+        let changes: i64 = row.try_get(1).map_err(unavailable)?;
+        // Their bits as they are: a token is only compared for equality.
+        Ok(ChangeToken::new([version as u64, changes as u64]))
     }
 }
 
 impl ReadUntilTime for SqliteStore {
+    /// The prefix recorded at or before `until`, and the stream's head, in
+    /// one read transaction.
     async fn read_until_time(
         &self,
         stream: StreamRef<'_>,
         until: &Timestamp,
     ) -> Result<Slice, StoreError> {
-        let _ = (stream, until);
-        todo!("red: ReadUntilTime on SQLite (recorded_at column)")
+        let mut ex = self.conn.exec().await;
+        ex.count();
+        let tx = ex.conn.begin().await.map_err(unavailable)?;
+        let mut moment = Exec {
+            conn: tx,
+            sent: ex.sent,
+        };
+        let [domain, root, edition] = view_of(stream);
+        let by = Value::Int(statements::instant_column(until));
+        let pages = moment
+            .pages(stream, statements::UNTIL, [domain, root, edition, by])
+            .await?;
+        let head = moment.head(stream).await?;
+        moment.count();
+        moment.conn.commit().await.map_err(unavailable)?;
+        Ok(Slice {
+            next_sequence: head.next_sequence,
+            last_recorded_at: head.last_recorded_at,
+            pages,
+        })
     }
 }
 
 impl ReadByCorrelation for SqliteStore {
+    /// Every stream holding an event of the correlation in main or in the
+    /// edition, each read as `read` reads it in the edition, in one read
+    /// transaction: those with pages of it, one book each.
     async fn read_by_correlation(
         &self,
         domain: Option<&str>,
         edition: Option<&str>,
         correlation_id: Uuid,
     ) -> Result<Vec<EventBook>, StoreError> {
-        let _ = (domain, edition, correlation_id);
-        todo!("red: ReadByCorrelation on SQLite (correlation_id column)")
+        let mut ex = self.conn.exec().await;
+        ex.count();
+        let tx = ex.conn.begin().await.map_err(unavailable)?;
+        let mut moment = Exec {
+            conn: tx,
+            sent: ex.sent,
+        };
+        let correlation = || Value::Blob(correlation_id.as_bytes().to_vec());
+        let candidates = moment
+            .rows(
+                statements::CORRELATED_STREAMS,
+                [
+                    correlation(),
+                    Value::Text(edition.unwrap_or_default().to_string()),
+                    Value::MaybeText(domain.map(str::to_string)),
+                ],
+            )
+            .await?;
+        let mut books = Vec::new();
+        for row in candidates {
+            let stream_domain: String = row.try_get(0).map_err(unavailable)?;
+            let root: Vec<u8> = row.try_get(1).map_err(unavailable)?;
+            let stream = StreamRef {
+                domain: &stream_domain,
+                edition,
+                root: rows::stream_root(&root)?,
+            };
+            let [d, r, e] = view_of(stream);
+            let pages = moment
+                .pages(stream, statements::OF_CORRELATION, [d, r, e, correlation()])
+                .await?;
+            if pages.is_empty() {
+                continue;
+            }
+            let head = moment.head(stream).await?;
+            books.push(EventBook {
+                cover: Some(stream.to_cover()),
+                pages,
+                snapshot: None,
+                next_sequence: head.next_sequence,
+            });
+        }
+        moment.count();
+        moment.conn.commit().await.map_err(unavailable)?;
+        Ok(books)
     }
 }
 
 impl ListStreams for SqliteStore {
     async fn list_streams(&self) -> Result<Vec<Cover>, StoreError> {
-        todo!("red: ListStreams on SQLite")
+        let rows = self
+            .conn
+            .exec()
+            .await
+            .rows(statements::ALL_STREAMS, [])
+            .await?;
+        let mut covers = Vec::new();
+        for row in rows {
+            let domain: String = row.try_get(0).map_err(unavailable)?;
+            let edition: String = row.try_get(1).map_err(unavailable)?;
+            let root: Vec<u8> = row.try_get(2).map_err(unavailable)?;
+            covers.push(rows::cover::<SqliteDialect>(&domain, edition, &root)?);
+        }
+        Ok(covers)
     }
 }
 

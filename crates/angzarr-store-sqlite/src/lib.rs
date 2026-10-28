@@ -3,7 +3,7 @@
 //! on nothing of annals.
 //!
 //! [`SqliteStore`] implements every base port and every opt-in capability
-//! but editions: [`EventStore`](angzarr_ports::EventStore),
+//! but the edition administration: [`EventStore`](angzarr_ports::EventStore),
 //! [`SnapshotStore`](angzarr_ports::SnapshotStore),
 //! [`PositionStore`](angzarr_ports::PositionStore) (a step's one
 //! [`write`](angzarr_ports::EventStore::write) is a `BEGIN IMMEDIATE`
@@ -13,19 +13,26 @@
 //! [`ReadUntilTime`](angzarr_ports::ReadUntilTime),
 //! [`ReadByCorrelation`](angzarr_ports::ReadByCorrelation),
 //! [`ListStreams`](angzarr_ports::ListStreams) and
-//! [`Outbox`](angzarr_ports::Outbox). It is held to the whole conformance
-//! suite (`angzarr_ports::contract`) but its editions checks: editions
-//! are NOT IMPLEMENTED YET here (the owner's ruling, 2026-10-28: a
-//! follow-up; `MemoryStore` covers them meanwhile). No stream is ever
-//! forked: an edition stream reads as main's, a write to one is refused
-//! (`StoreError::EditionNotForked`), and no edition exists.
+//! [`Outbox`](angzarr_ports::Outbox). The handle's one connection is held
+//! behind an async lock, so every port takes `&self` and one call at a time
+//! runs on it.
 //!
-//! What a SQL backend would share is kept backend-neutral: the schema as
-//! sea-query identifiers (`schema`), every statement built from them
-//! (`statements`), and decoding stored rows (`rows`); only rendering,
-//! running, migrations and how a unit begins are SQLite's (`sqlite`).
-//! Pages are stored as written and never decoded except to read them back
-//! (and, once, to fill the columns a migration added: `migrations/sqlite/`).
+//! Editions are per-stream forks as far as the base ports need them: an
+//! edition stream's first own event is its creation (`meta.EditionCreated`,
+//! at main's head or below it), and it reads main's events below that, then
+//! its own; an edition stream with none of its own reads as main's, and
+//! anything else written to it first is refused
+//! (`StoreError::EditionNotForked`). The edition administration, the
+//! [`Editions`](angzarr_ports::Editions) port (listing, time-based forks,
+//! deletion and removal), is NOT IMPLEMENTED YET (the owner's ruling,
+//! 2026-10-28: a follow-up; `MemoryStore` covers it meanwhile), and the
+//! suite's checks of it are ignored here.
+//!
+//! The rows are written with sea-query from the schema's identifiers
+//! (`schema`, `statements`) and read with SQL over one condition, a stream
+//! as read in its edition; stored rows decode in `rows`. Pages are stored
+//! as written and never decoded except to read them back (and, once, to
+//! fill the columns migration 0003 added: `migrations/sqlite/`).
 
 // clippy::result_large_err: angzarr-ports' StoreError is over clippy's
 // 128-byte default, and the ports fix it, unboxed, as every method's error;
@@ -33,13 +40,8 @@
 #![allow(clippy::result_large_err)]
 
 mod error;
-// The statements, their schema and row decoding, which the ports' stubs do
-// not run yet: in use again once they are green.
-#[allow(dead_code)]
 mod rows;
-#[allow(dead_code)]
 mod schema;
-#[allow(dead_code)]
 mod statements;
 
 pub mod sqlite;

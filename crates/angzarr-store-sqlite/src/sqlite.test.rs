@@ -5,12 +5,12 @@
 //! damage, purges and reads racing writers, the commit position as stamped,
 //! change tokens, and `Send`.
 //!
-//! **Editions are NOT IMPLEMENTED YET** in this adapter (the owner's ruling,
-//! 2026-10-28): the suite's edition checks (three of the base section's,
-//! one of the read section's, and the `editions`, `editions_outbox` and
-//! `read_forks` sections) are present and ignored, a follow-up;
-//! `MemoryStore` covers them meanwhile. Meanwhile no stream is ever forked:
-//! an edition stream reads as main's, and a write to one is refused.
+//! **Editions are per-stream forks only** in this adapter: an edition
+//! stream is forked by a creation event as its first own event, at or below
+//! main's head, and reads main below the fork; any other first write to it
+//! is refused `EditionNotForked`. The edition administration (the
+//! `Editions` port) is not implemented: the suite's checks for it are
+//! present and ignored, and `MemoryStore` covers them meanwhile.
 
 use std::borrow::Cow;
 use std::path::Path;
@@ -381,10 +381,9 @@ async fn two_handles_writing_one_stream_at_once_land_one_and_refuse_the_other() 
 
 // ------------------------------------------------------------- editions
 
-/// Editions are not implemented yet in this adapter (owner ruling
-/// 2026-10-28), so no stream is ever forked: a write to an edition stream
-/// is outside input to an unforked stream, refused `EditionNotForked`,
-/// and nothing is written, in the edition or in main.
+/// A write to an edition stream that no creation event forked is outside
+/// input to an unforked stream, refused `EditionNotForked`, and nothing is
+/// written, in the edition or in main.
 #[tokio::test]
 async fn a_write_to_an_edition_stream_is_refused_not_forked() {
     let store = SqliteStore::open_in_memory().await.unwrap();
@@ -566,7 +565,7 @@ async fn a_read_only_file_in_a_read_only_directory_opens_for_reading() {
     let read = store.read(s, 0, None).await;
     let written = append(&store, s, 1, &[page(1, 2)]).await;
     drop(store);
-    writer.conn.close().await.unwrap();
+    writer.conn.into_inner().close().await.unwrap();
     mode(&dir, 0o755);
     mode(&path, 0o644);
     std::fs::remove_dir_all(&dir).unwrap();
@@ -1152,7 +1151,7 @@ async fn a_check_that_cannot_run_is_a_failure_not_damage() {
         .connect()
         .await
         .unwrap();
-    let checked = SqliteStore { conn }.integrity_check().await;
+    let checked = SqliteStore { conn: conn.into() }.integrity_check().await;
     assert_eq!(
         checked.as_ref().map_err(code),
         Err(Some("angzarr-store-sqlite-unavailable")),
@@ -1327,7 +1326,7 @@ async fn impatient(path: &Path) -> SqliteStore {
         .connect()
         .await
         .unwrap();
-    SqliteStore { conn }
+    SqliteStore { conn: conn.into() }
 }
 
 #[tokio::test]
@@ -1630,7 +1629,7 @@ mod position_on_file {
 /// domain and sequence order.
 async fn positions(store: &mut SqliteStore) -> Vec<(String, i64, i64)> {
     sqlx::query_as("SELECT domain, sequence, position FROM events ORDER BY domain, sequence")
-        .fetch_all(&mut store.conn)
+        .fetch_all(store.conn.get_mut())
         .await
         .unwrap()
 }
@@ -1831,4 +1830,65 @@ fn every_change_token_is_a_send_future() {
         };
         store.change_token().await.map(Some)
     }));
+}
+
+// ------------------------------------------------- forks and round trips
+
+/// A fork lands at its fork sequence, main's head or below it (the
+/// time-based option); past main's head it is a conflict. Once forked, a
+/// second creation is refused; main is never forked into; an empty write
+/// to an unforked edition stream checks main's head and writes nothing.
+#[tokio::test]
+async fn a_fork_lands_at_or_below_mains_head_once() {
+    use angzarr_ports::contract::created_page;
+    let store = SqliteStore::open_in_memory().await.unwrap();
+    let main = stream(1);
+    append(&store, main, 0, &[page(0, 1), page(1, 2)])
+        .await
+        .unwrap();
+    let late = edition_stream("tasks", 1, "late");
+    assert_eq!(
+        append(&store, late, 3, &[created_page(3, "late")]).await,
+        Err(StoreError::conflict(late, 3, 2)),
+        "past main's head"
+    );
+    assert_eq!(append(&store, late, 2, &[]).await, Ok(2), "an empty write");
+    assert_eq!(
+        append(&store, late, 1, &[]).await,
+        Err(StoreError::conflict(late, 1, 2))
+    );
+    let early = edition_stream("tasks", 1, "early");
+    assert_eq!(
+        append(&store, early, 1, &[created_page(1, "early")]).await,
+        Ok(2),
+        "below main's head"
+    );
+    assert_eq!(
+        pages(&store, early).await,
+        [page(0, 1), created_page(1, "early")],
+        "main below the fork, then its own"
+    );
+    assert_eq!(
+        append(&store, early, 2, &[created_page(2, "early")]).await,
+        Err(StoreError::edition_already_forked(early))
+    );
+    assert_eq!(
+        append(&store, main, 2, &[created_page(2, "main")]).await,
+        Err(StoreError::EditionNameRequired)
+    );
+    assert_eq!(append(&store, early, 2, &[page(2, 3)]).await, Ok(3));
+    assert_eq!(pages(&store, main).await, [page(0, 1), page(1, 2)]);
+}
+
+/// Every statement a handle sends is counted, `BEGIN` and `COMMIT`
+/// included: a write of one event to a stream is five (`BEGIN`, its head,
+/// the commit position, the insert, `COMMIT`); a read of it from 0 is one.
+#[tokio::test]
+async fn a_handle_counts_the_statements_it_sends() {
+    let store = SqliteStore::open_in_memory().await.unwrap();
+    assert_eq!(store.round_trips(), 0);
+    append(&store, stream(1), 0, &[page(0, 1)]).await.unwrap();
+    assert_eq!(store.round_trips(), 5);
+    store.read(stream(1), 0, None).await.unwrap();
+    assert_eq!(store.round_trips(), 6);
 }

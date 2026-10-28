@@ -1,21 +1,20 @@
-//! Every statement the store runs, backend-neutral: a backend renders them
-//! with its own query builder and runs them on its own driver.
+//! Every statement the store runs. The writes of rows are built with
+//! sea-query from the schema's identifiers (`schema`); the reads are SQL
+//! over one shared condition, [`view!`], with numbered parameters.
 
 use angzarr_ports::angzarr_proto::v1::event_meta::Causation;
-use angzarr_ports::angzarr_proto::v1::{Cover, EventPage, Snapshot, Uuid};
+use angzarr_ports::angzarr_proto::v1::{Cover, EventPage, Snapshot};
 use angzarr_ports::StoreError;
 use prost::Message;
-use sea_query::{
-    Cond, Condition, DeleteStatement, Expr, Func, InsertStatement, OnConflict, Order, Query,
-    SelectStatement, SimpleExpr, UpdateStatement,
-};
+use prost_types::Timestamp;
+use sea_query::{Cond, Condition, DeleteStatement, Expr, InsertStatement, OnConflict, Query};
 
 use crate::error::unavailable;
-use crate::schema::{CommitPosition, Events, Snapshots};
+use crate::schema::{Events, Snapshots};
 use crate::Dialect;
 
 /// The root's bytes: the key column every statement matches on.
-fn root(cover: &Cover) -> Vec<u8> {
+pub(crate) fn root(cover: &Cover) -> Vec<u8> {
     cover
         .root
         .as_ref()
@@ -27,6 +26,148 @@ fn root(cover: &Cover) -> Vec<u8> {
 /// stream, so they never reach the sign bit.
 pub(crate) fn sequence_column(sequence: u64) -> i64 {
     i64::try_from(sequence).unwrap_or(i64::MAX)
+}
+
+/// An instant as the `recorded_at` column keeps it: nanoseconds since the
+/// epoch, saturating at the column's range.
+pub(crate) fn instant_column(at: &Timestamp) -> i64 {
+    let nanos = i128::from(at.seconds) * 1_000_000_000 + i128::from(at.nanos);
+    i64::try_from(nanos).unwrap_or(if nanos < 0 { i64::MIN } else { i64::MAX })
+}
+
+/// The rows of one stream as read in its edition (parameters `?1` domain,
+/// `?2` root, `?3` the edition column's value, `''` for main): its own rows,
+/// and main's below its fork, the sequence of its first own row (its
+/// creation). A main stream, and an edition stream with no row of its own,
+/// is main's rows alone.
+macro_rules! view {
+    () => {
+        "domain = ?1 AND root = ?2 AND ((edition = '' AND sequence < \
+         COALESCE((SELECT MIN(f.sequence) FROM events AS f \
+         WHERE f.domain = ?1 AND f.edition = ?3 AND f.root = ?2 AND ?3 <> ''), \
+         9223372036854775807)) OR (?3 <> '' AND edition = ?3))"
+    };
+}
+
+/// Rows `(sequence, page)`: the stream's last page, as read in its edition.
+pub(crate) const LAST: &str = concat!(
+    "SELECT sequence, page FROM events WHERE ",
+    view!(),
+    " ORDER BY sequence DESC LIMIT 1"
+);
+
+/// Rows `(sequence, page)` with `?4 <= sequence < ?5`, in order.
+pub(crate) const PAGES: &str = concat!(
+    "SELECT sequence, page FROM events WHERE ",
+    view!(),
+    " AND sequence >= ?4 AND sequence < ?5 ORDER BY sequence"
+);
+
+/// Rows `(sequence, page)` the command `?4` caused: the dedup lookup.
+pub(crate) const OF_COMMAND: &str = concat!(
+    "SELECT sequence, page FROM events WHERE ",
+    view!(),
+    " AND command_id = ?4 ORDER BY sequence"
+);
+
+/// Rows `(sequence, page)` of the correlation `?4`.
+pub(crate) const OF_CORRELATION: &str = concat!(
+    "SELECT sequence, page FROM events WHERE ",
+    view!(),
+    " AND correlation_id = ?4 ORDER BY sequence"
+);
+
+/// Rows `(sequence, page)` recorded at or before `?4` (nanoseconds).
+pub(crate) const UNTIL: &str = concat!(
+    "SELECT sequence, page FROM events WHERE ",
+    view!(),
+    " AND recorded_at <= ?4 ORDER BY sequence"
+);
+
+/// Row `(MIN(sequence))`: the stream's own first sequence in its edition
+/// (`?2`), NULL while it has no row of its own there.
+pub(crate) const OWN_FIRST: &str =
+    "SELECT MIN(sequence) FROM events WHERE domain = ?1 AND edition = ?2 AND root = ?3";
+
+/// Rows `(edition, root)` of `?1`'s streams holding a row of their own,
+/// main first (`''` sorts first), then by edition, each by root.
+pub(crate) const COVERS: &str =
+    "SELECT DISTINCT edition, root FROM events WHERE domain = ?1 ORDER BY edition, root";
+
+/// Rows `(domain, edition, root)` of every stream holding a row, in order.
+pub(crate) const ALL_STREAMS: &str =
+    "SELECT DISTINCT domain, edition, root FROM events ORDER BY domain, edition, root";
+
+/// Rows `(domain, root)` with a row of correlation `?1` in main or in
+/// edition `?2`, of domain `?3` when it is not NULL.
+pub(crate) const CORRELATED_STREAMS: &str =
+    "SELECT DISTINCT domain, root FROM events WHERE correlation_id = ?1 \
+     AND (edition = '' OR edition = ?2) AND (?3 IS NULL OR domain = ?3) \
+     ORDER BY domain, root";
+
+/// Row `(next)`: the store's commit position, the next a write lands at.
+pub(crate) const COMMIT_POSITION: &str = "SELECT next FROM commit_position";
+
+/// Raise the commit position past a write's events: row `(position)`, the
+/// one they land at.
+pub(crate) const RAISE_COMMIT_POSITION: &str =
+    "UPDATE commit_position SET next = next + 1 RETURNING next - 1";
+
+/// Row `(next)`: a handler's position (`?4`) on a stream.
+pub(crate) const POSITION: &str = "SELECT next FROM positions \
+     WHERE domain = ?1 AND edition = ?2 AND root = ?3 AND handler = ?4";
+
+/// Put a handler's position on a stream: a plain upsert.
+pub(crate) const PUT_POSITION: &str =
+    "INSERT INTO positions (domain, edition, root, handler, next) VALUES (?1, ?2, ?3, ?4, ?5) \
+     ON CONFLICT (domain, edition, root, handler) DO UPDATE SET next = excluded.next";
+
+/// Delete every handler's position on a stream.
+pub(crate) const DELETE_POSITIONS: &str =
+    "DELETE FROM positions WHERE domain = ?1 AND edition = ?2 AND root = ?3";
+
+/// Keep an outbox entry, unless its id is pending already.
+pub(crate) const PUT_OUTBOX: &str =
+    "INSERT INTO outbox (id, origin, message, edition) VALUES (?1, ?2, ?3, ?4) \
+     ON CONFLICT (id) DO NOTHING";
+
+/// Rows `(id, origin, message, edition)`: the oldest `?1` pending entries.
+pub(crate) const PENDING: &str =
+    "SELECT id, origin, message, edition FROM outbox ORDER BY seq LIMIT ?1";
+
+/// Clear one pending entry by its id.
+pub(crate) const CLEAR: &str = "DELETE FROM outbox WHERE id = ?1";
+
+/// Row `(data_version, total_changes())`: what a change token is made of.
+pub(crate) const CHANGE_TOKEN: &str =
+    "SELECT data_version, total_changes() FROM pragma_data_version";
+
+/// Row `(done)`: whether the events' meta columns are filled.
+pub(crate) const BACKFILL_DONE: &str = "SELECT done FROM backfills WHERE name = ?1";
+
+/// Rows `(domain, edition, root, sequence, page)` with no meta columns.
+pub(crate) const UNFILLED: &str =
+    "SELECT domain, edition, root, sequence, page FROM events WHERE recorded_at IS NULL";
+
+/// Fill one event's meta columns.
+pub(crate) const FILL: &str = "UPDATE events SET correlation_id = ?5, recorded_at = ?6 \
+     WHERE domain = ?1 AND edition = ?2 AND root = ?3 AND sequence = ?4";
+
+/// Mark a backfill done.
+pub(crate) const BACKFILL_RAN: &str = "UPDATE backfills SET done = 1 WHERE name = ?1";
+
+/// The backfill of the events' correlation and time columns.
+pub(crate) const EVENTS_META_BACKFILL: &str = "events-meta-columns";
+
+/// The columns a page's metadata fills: its correlation id and instant.
+pub(crate) fn meta_columns(page: &EventPage) -> (Option<Vec<u8>>, Option<i64>) {
+    let meta = page.meta.as_ref();
+    (
+        meta.and_then(|m| m.correlation_id.as_ref())
+            .map(|id| id.value.to_vec()),
+        meta.and_then(|m| m.recorded_at.as_ref())
+            .map(instant_column),
+    )
 }
 
 /// Whether a row is `cover`'s, by its table's key columns.
@@ -55,85 +196,14 @@ fn snapshot_of_stream<D: Dialect>(cover: &Cover) -> Condition {
     )
 }
 
-fn events_of<D: Dialect>(cover: &Cover) -> SelectStatement {
-    Query::select()
-        .from(Events::Table)
-        .cond_where(event_of::<D>(cover))
-        .to_owned()
-}
-
-/// Row `(MAX(sequence))`: the stream's last sequence, NULL for no stream.
-/// Its pages run from 0 without a gap, so its length is one past it. A
-/// seek to the end of the stream in the primary key, not a count of its
-/// rows.
-pub(crate) fn stream_last<D: Dialect>(cover: &Cover) -> SelectStatement {
-    events_of::<D>(cover)
-        .expr(Func::max(Expr::col(Events::Sequence)))
-        .to_owned()
-}
-
-/// Row `(sequence, page)` for each of the stream's pages `filter` keeps, in
-/// sequence order.
-fn pages<D: Dialect>(cover: &Cover, filter: SimpleExpr) -> SelectStatement {
-    events_of::<D>(cover)
-        .columns([Events::Sequence, Events::Page])
-        .and_where(filter)
-        .order_by(Events::Sequence, Order::Asc)
-        .to_owned()
-}
-
-/// The stream's pages from `from` on.
-pub(crate) fn pages_from<D: Dialect>(cover: &Cover, from: u64) -> SelectStatement {
-    pages::<D>(
-        cover,
-        Expr::col(Events::Sequence).gte(sequence_column(from)),
-    )
-}
-
-/// The stream's page at `sequence`.
-pub(crate) fn page_at<D: Dialect>(cover: &Cover, sequence: u64) -> SelectStatement {
-    pages::<D>(
-        cover,
-        Expr::col(Events::Sequence).eq(sequence_column(sequence)),
-    )
-}
-
-/// The stream's pages `command_id` produced: the deduplication lookup.
-pub(crate) fn pages_of_command<D: Dialect>(cover: &Cover, command_id: &Uuid) -> SelectStatement {
-    pages::<D>(
-        cover,
-        Expr::col(Events::CommandId).eq(command_id.value.to_vec()),
-    )
-}
-
-/// The store's commit position: the one row of `commit_position`.
-pub(crate) fn commit_position() -> SelectStatement {
-    Query::select()
-        .column(CommitPosition::Next)
-        .from(CommitPosition::Table)
-        .to_owned()
-}
-
-/// Raise the commit position by one, past an append's events.
-pub(crate) fn raise_commit_position() -> UpdateStatement {
-    Query::update()
-        .table(CommitPosition::Table)
-        .value(CommitPosition::Next, Expr::col(CommitPosition::Next).add(1))
-        .to_owned()
-}
-
-/// One page, as the row it is stored as, stamped with the commit `position`
-/// it lands at.
-pub(crate) fn insert_page<D: Dialect>(
+/// `pages`, as the rows they are stored as, stamped with the commit
+/// `position` they land at: one statement.
+pub(crate) fn insert_pages<D: Dialect>(
     cover: &Cover,
-    page: &EventPage,
+    pages: &[EventPage],
     position: i64,
 ) -> Result<InsertStatement, StoreError> {
-    let command_id = match page.meta.as_ref().and_then(|m| m.causation.as_ref()) {
-        Some(Causation::CommandId(id)) => Some(id.value.to_vec()),
-        _ => None,
-    };
-    Ok(Query::insert()
+    let mut insert = Query::insert()
         .into_table(Events::Table)
         .columns([
             Events::Domain,
@@ -143,35 +213,36 @@ pub(crate) fn insert_page<D: Dialect>(
             Events::CommandId,
             Events::Page,
             Events::Position,
+            Events::CorrelationId,
+            Events::RecordedAt,
         ])
-        .values([
-            cover.domain.clone().into(),
-            D::edition(cover).into(),
-            root(cover).into(),
-            sequence_column(page.sequence).into(),
-            command_id.into(),
-            page.encode_to_vec().into(),
-            position.into(),
-        ])
-        .map_err(unavailable)?
-        .to_owned())
-}
-
-/// Row `(edition, root)` for each of `domain`'s streams: main timeline first
-/// (the dialect's main edition sorts first), then by edition, each by root.
-pub(crate) fn domain_covers(domain: &str) -> SelectStatement {
-    Query::select()
-        .distinct()
-        .columns([Events::Edition, Events::Root])
-        .from(Events::Table)
-        .and_where(Expr::col(Events::Domain).eq(domain))
-        .order_by(Events::Edition, Order::Asc)
-        .order_by(Events::Root, Order::Asc)
-        .to_owned()
+        .to_owned();
+    for page in pages {
+        let command_id = page
+            .meta
+            .as_ref()
+            .and_then(|m| m.causation.as_ref())
+            .map(|Causation::CommandId(id)| id.value.to_vec());
+        let (correlation_id, recorded_at) = meta_columns(page);
+        insert
+            .values([
+                cover.domain.clone().into(),
+                D::edition(cover).into(),
+                root(cover).into(),
+                sequence_column(page.sequence).into(),
+                command_id.into(),
+                page.encode_to_vec().into(),
+                position.into(),
+                correlation_id.into(),
+                recorded_at.into(),
+            ])
+            .map_err(unavailable)?;
+    }
+    Ok(insert)
 }
 
 /// Row `(snapshot)`: the stream's newest snapshot.
-pub(crate) fn snapshot_of<D: Dialect>(cover: &Cover) -> SelectStatement {
+pub(crate) fn snapshot_of<D: Dialect>(cover: &Cover) -> sea_query::SelectStatement {
     Query::select()
         .column(Snapshots::Snapshot)
         .from(Snapshots::Table)
@@ -179,8 +250,8 @@ pub(crate) fn snapshot_of<D: Dialect>(cover: &Cover) -> SelectStatement {
         .to_owned()
 }
 
-/// Delete the stream's events, and with them the command ids recorded in
-/// their rows.
+/// Delete the stream's own events, and with them the command ids recorded
+/// in their rows.
 pub(crate) fn delete_events<D: Dialect>(cover: &Cover) -> DeleteStatement {
     Query::delete()
         .from_table(Events::Table)
@@ -223,3 +294,7 @@ pub(crate) fn upsert_snapshot<D: Dialect>(
         )
         .to_owned())
 }
+
+#[cfg(test)]
+#[path = "statements.test.rs"]
+mod tests;

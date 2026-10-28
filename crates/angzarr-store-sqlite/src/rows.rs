@@ -1,6 +1,6 @@
 //! Stored values read back: what a backend's rows decode to.
 
-use angzarr_ports::angzarr_proto::v1::{Cover, EventPage, Snapshot, Uuid};
+use angzarr_ports::angzarr_proto::v1::{Cover, EventPage, Snapshot};
 use angzarr_ports::StoreError;
 use prost::Message;
 
@@ -31,12 +31,17 @@ pub(crate) fn cover<D: Dialect>(
     edition: String,
     root: &[u8],
 ) -> Result<Cover, StoreError> {
+    Ok(Cover {
+        domain: domain.to_string(),
+        root: Some(stream_root(root)?.into()),
+        edition: D::cover_edition(edition),
+    })
+}
+
+/// A stored root, as the ports key a stream by it.
+pub(crate) fn stream_root(root: &[u8]) -> Result<angzarr_ports::Uuid, StoreError> {
     let root: [u8; 16] = root
         .try_into()
         .map_err(|_| unavailable(format!("a stored root of {} bytes, not 16", root.len())))?;
-    Ok(Cover {
-        domain: domain.to_string(),
-        root: Some(Uuid::from_bytes(root)),
-        edition: D::cover_edition(edition),
-    })
+    Ok(angzarr_ports::Uuid::from_bytes(root))
 }

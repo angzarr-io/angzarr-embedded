@@ -32,6 +32,10 @@ exclude_re = [
     '''replace <impl Payload for std::convert::Infallible>::type_urls -> Vec<String> with vec!\[\]$''',
     '''replace <impl Project for \(\)>::project -> Vec<ProjectorFailure> with vec!\[\]$''',
     # angzarr-store-sqlite
+    # instant_column's saturation picks its end by the sign of a nanosecond
+    # count no i64 holds: it is never 0 there (0 converts), so `< 0` and
+    # `<= 0` choose alike.
+    'crates/angzarr-store-sqlite/src/statements\.rs:\d+:\d+: replace < with <= in instant_column$',
     # into_wal's busy guard. Taking a non-busy error for busy makes into_wal
     # run `BEGIN EXCLUSIVE` and try the move again: the same error comes back
     # on each try, or from `BEGIN EXCLUSIVE` itself, so the open still fails

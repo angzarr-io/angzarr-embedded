@@ -14,12 +14,8 @@ pub(crate) enum Events {
     CommandId,
     Page,
     Position,
-}
-
-#[derive(Iden)]
-pub(crate) enum CommitPosition {
-    Table,
-    Next,
+    CorrelationId,
+    RecordedAt,
 }
 
 #[derive(Iden)]
