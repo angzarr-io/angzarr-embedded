@@ -397,16 +397,6 @@ fn every_failure_says_how_to_recover() {
         ),
         (
             Recovery::Retry,
-            KernelError::Gap {
-                stream: stream.clone(),
-                gap: crate::next::Gap {
-                    expected: 0,
-                    found: 1,
-                },
-            },
-        ),
-        (
-            Recovery::Retry,
             KernelError::Store(StoreError::Conflict {
                 stream: stream.clone(),
                 expected: 0,
@@ -630,14 +620,15 @@ fn a_decision_for_another_stream_at_the_same_head_does_not_commit() {
     let log = crate::next::MemoryDeadLetters::new();
     let mut store = crate::next::InMemoryStore::new();
     let mut unit = store.begin();
-    let mut coordinator = crate::next::Coordinator::new(&mut unit, &registry);
+    let mut coordinator = crate::next::coordinator::steps::Coordinator::new(&mut unit, &registry);
     let identified = crate::next::check(
         command(cover("account", 1), AccountCmd::Open.to_any()),
         &registry,
     )
     .unwrap()
     .identify(&at(1));
-    let crate::next::Deduplicated::Novel(novel) = coordinator.deduplicate(identified).unwrap()
+    let crate::next::coordinator::Deduplicated::Novel(novel) =
+        coordinator.deduplicate(identified).unwrap()
     else {
         panic!("new");
     };

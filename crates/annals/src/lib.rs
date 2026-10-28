@@ -3,9 +3,8 @@
 //! A [`Domain`] says what its state, commands and events are, how a command is
 //! **decided** and how an event is **applied**. A [`Stream`] holds a domain's
 //! event log and the state folded from it. Nothing else holds state: every
-//! state is rebuilt by folding a log. A [`Projection`] folds streams into a
-//! read model; a [`policy::Policy`] carries one stream's events into another
-//! domain's streams as commands.
+//! state is rebuilt by folding a log. annals-sim and annals-log are built on
+//! this crate root; nothing else is.
 //!
 //! The rules the engine keeps:
 //!
@@ -29,14 +28,9 @@
 
 mod domain;
 pub mod next;
-pub mod policy;
-mod projection;
-mod store;
 mod stream;
 
 pub use domain::{Domain, Tx};
-pub use projection::{project, Projection};
-pub use store::{Conflict, EventStore, InMemoryStore};
 pub use stream::{Envelope, Header, ReplayError, Seq, Stream, StreamId};
 
 /// This crate's en-US Fluent catalog, its name first: what a dependent
@@ -52,15 +46,6 @@ pub fn diagnostic_samples() -> Vec<Box<dyn annals_diagnostic::Diagnostic>> {
     let root: Vec<Box<dyn annals_diagnostic::Diagnostic>> = vec![
         Box::new(ReplayError::OutOfSequence { index: 1, found: 2 }),
         Box::new(ReplayError::CauseNotEarlier { seq: 1, cause: 1 }),
-        Box::new(Conflict {
-            id: StreamId(7),
-            expected: 1,
-            actual: 3,
-        }),
-        Box::new(policy::Gap {
-            expected: 5,
-            found: 7,
-        }),
     ];
     root.into_iter().chain(next::diagnostic_samples()).collect()
 }

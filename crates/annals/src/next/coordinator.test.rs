@@ -316,10 +316,10 @@ mod pipeline {
     //! boundary by sending something that two adjacent steps would answer
     //! differently.
 
+    use super::super::{steps::Coordinator, Deduplicated};
     use crate::next::v1::{ConflictResolution, DeliveryOutcome, EventRef};
     use crate::next::{
-        check, pack, Coordinator, Deduplicated, Failure, InMemoryStore, KernelError, Malformed,
-        Payload, Recovery,
+        check, pack, Failure, InMemoryStore, KernelError, Malformed, Payload, Recovery,
     };
 
     use crate::next::toys::{
@@ -618,10 +618,9 @@ mod snapshot {
     //! under the current rules version and state type, and never one that
     //! hides part of a conflict window.
 
+    use super::super::{steps::Coordinator, Deduplicated};
     use crate::next::v1::{ConflictResolution, Snapshot};
-    use crate::next::{
-        check, pack, Coordinator, Deduplicated, EventStore, InMemoryStore, Payload, Stream,
-    };
+    use crate::next::{check, pack, EventStore, InMemoryStore, Payload, Stream};
 
     use crate::next::toys::{
         account, at, command, cover, opened, registry, root, set, shelf, Account, AccountCmd, Edit,

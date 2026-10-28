@@ -126,23 +126,26 @@ One command, end to end, in angzarr's normative order (`types.proto`, the
 so the order cannot be skipped or reordered:
 
 ```text
-CommandBook ─check──▶ Checked ─identify──▶ Identified ─Coordinator::deduplicate──▶ Deduplicated
+CommandBook ─check──▶ Checked ─identify──▶ Identified ─deduplicate──▶ Deduplicated
                                                          ├─ Duplicate { events }            (answer: DUPLICATE)
-                                                         └─ Novel ─Coordinator::load──▶ Contextual
+                                                         └─ Novel ─load──▶ Contextual
                                                                      ─decode::<D>──▶ Prepared<D> ─decide──▶ Decision<D>
 ```
 
 1. **Validate** (`check`): domain-blind, everything at once.
 2. **Identify** (`Checked::identify`): command id, correlation, causation.
-3. **Load, then deduplicate** (`Coordinator::deduplicate`): the conflict
+3. **Load, then deduplicate** (`deduplicate`): the conflict
    resolution, the snapshot and events are loaded **first**; then, does the
    stream already hold events with this command id? They are the answer.
-4. **Resolve** (`Coordinator::load`): the expected sequence stamped or
+4. **Resolve** (`load`): the expected sequence stamped or
    checked against the head step 3 loaded (STRICT's stale refusal is
    here), the window and nonce.
-5. **Decode, then decide or ingest** (`Contextual::decode`,
-   `Prepared::decide`): typed, upcast, strict; the body arm picks decide or
+5. **Decode, then decide or ingest** (`prepare`, `Prepared::decide`):
+   typed, upcast, strict; the body arm picks decide or
    ingest; the kernel stamps the events.
+
+Steps 3 to 5 are the kernel's own (`pub(crate)`): the chain runs them, and
+`Kernel::handle` is the one entry.
 
 **The load comes before the lookup**, so a concurrent commit of the same
 command cannot slip between them (see *Races* below). **Deduplication
@@ -283,27 +286,20 @@ head. Pinned by `a_retry_racing_its_original_commit_is_never_applied_twice`
 ## Step 4: load and conflict resolution
 
 ```rust
-pub struct Coordinator<'u, U> { /* the unit of work, the registry, the nonce counter */ }
-impl<'u, U: EventStore> Coordinator<'u, U> {
-    pub fn new(unit: &'u mut U, registry: &'u Registry) -> Self;
-    pub fn deduplicate(&mut self, command: Identified) -> Result<Deduplicated, StoreError>;
-    pub fn load(&mut self, command: Novel) -> Result<Contextual, KernelError>;
-}
-impl Contextual {                       // angzarr's ContextualCommand, in process
-    pub fn conflict_resolution(&self) -> ConflictResolution;   // never UNSPECIFIED
-    pub fn expected_sequence(&self) -> u64;                    // the book's, or the head
-    pub fn head(&self) -> u64;
-    pub fn snapshot(&self) -> Option<&Snapshot>;
-    pub fn pages(&self) -> &[EventPage];
-    pub fn window(&self) -> &[EventPage];                      // expected .. head
-    pub fn has_nonce(&self) -> bool;
-    pub fn decode<D: Domain>(self, registry: &Registry) -> Result<Prepared<D>, KernelError>;
+pub(crate) struct Contextual {          // angzarr's ContextualCommand, in process
+    resolution: ConflictResolution,     // never UNSPECIFIED
+    expected: u64,                      // the book's, or the head
+    head: u64,
+    snapshot: Option<Snapshot>,
+    pages: Vec<EventPage>,              // the window is expected .. head
+    nonce: Option<Nonce>,
+    /* the command, the last recorded_at */
 }
 ```
 
-The **in-process coordinator** is a struct over the application's unit of
-work, domain-blind like angzarr's: it sees covers, pages and the registry.
-There is no service and nothing is sent.
+The **in-process coordinator** is the chain's steps 3 and 4, over the
+application's unit of work, domain-blind like angzarr's: they see covers,
+pages and the registry. There is no service and nothing is sent.
 
 **The resolution** (`Registry::resolve`, angzarr's precedence, highest
 first): the book's `Handling.conflict_resolution`; the domain's
@@ -458,8 +454,7 @@ Every event carries angzarr's `EventMeta`, the same in both runtimes:
 
 **No trigger on a reaction's events**: a policy's command names its trigger
 (`CommandPage.causation_id`), its events name the command. The edge from
-trigger to command goes to tracing and logs, through the application's
-[`TriggerLog`](#dead-letters-a-logger). Readers find a reaction's events by
+trigger to command is the command's own causation, for tracing. Readers find a reaction's events by
 correlation and group them by `command_id`.
 
 **No actor**, anywhere: who did it belongs in the deployment's separate
@@ -505,7 +500,6 @@ pub trait Reaction {
     const NAME: &'static str;           // the component its command ids derive from
     fn targets(committed: &Committed<'_, Self::Source>) -> Vec<Self::TargetId>;   // event + state
     fn root(target: &Self::TargetId) -> Uuid;   // covered in the source's edition
-    fn position(target: &<Self::Target as Domain>::State) -> Position;
 }
 pub trait Policy: Reaction {
     fn command(target: &Self::TargetId, c: &Committed<'_, Self::Source>) -> <Self::Target as Domain>::Command;
@@ -513,7 +507,7 @@ pub trait Policy: Reaction {
 pub trait Projection<D: Domain> { fn project(&mut self, c: &Committed<'_, D>); }
 
 let routes = Routes::new().policy::<ListToDrawSystems>();   // built once, no store type
-let kernel = Kernel::new(&registry, &dead_letters);          // .limit(n), default 8; .triggers(&log)
+let kernel = Kernel::new(&registry, &dead_letters);          // .limit(n), default 8
 kernel.handle::<List, _, _>(unit, &routes, book, &sampled, &mut projections)?;   // -> Handled
 ```
 
@@ -538,19 +532,14 @@ kernel.handle::<List, _, _>(unit, &routes, book, &sampled, &mut projections)?;  
   the sync and the async handler alike.
 - **Depth limit** (`Kernel::limit`, default 8): `KernelError::ChainTooDeep`,
   the cycle check for a chain that may legitimately revisit a stream.
+- **Fan-out**: several policies routed for one source domain each run for
+  every event the chain stages in it, in the order they were registered,
+  in the one chain and unit of work.
 - **Targeting from the event**: `targets()` receives the committed event
   (and the state after it), so a policy may forward only some events to a
-  target. A target is owed exactly the events it was targeted for.
-- **Contiguity per target**: `orders_owed` (one fold of the source for all
-  targets, for a catch-up outside a chain, delivered by `Kernel::deliver`)
-  gives each order the source sequence of the order owed to the same target
-  before it (`Order::previous`). A delivery is placed against the target's
-  own `Position` (the last source sequence it holds, a fold of its own
-  stream, because apply never sees metadata): at or before it, a
-  redelivery; after it while the previous owed order is not yet held, a
-  `Gap` naming that one; otherwise the next. Sequences a target was never
-  owed are no gap. `Tracked<H>` keeps one position per cover. Within a
-  chain neither a redelivery nor a gap can happen.
+  target. A target is owed exactly the events it was targeted for, each
+  with its trigger, in the same chain, so a target is never behind its
+  source and there is no catch-up: a policy always runs inside the chain.
 - **Reactor re-runs always deduplicate** (see
   [below](#reactor-re-runs)).
 - **Propagating one aggregate into another** (hatpick's list into its draw
@@ -567,8 +556,8 @@ There is no switch (angzarr decision 13.4). A reaction's command id is
 UUIDv5(trigger, `Reaction::NAME`, index) and names nothing else: not a
 rules version, not the policy's code. So:
 
-- **A re-run deduplicates.** Re-delivering a trigger (a catch-up after a
-  reset, `orders_owed` then `Kernel::deliver`) re-derives the same ids, and
+- **A re-run deduplicates.** Re-delivering a trigger re-derives the same
+  ids, and
   every target answers DUPLICATE with the events the first run wrote, even
   if the policy would now decide differently (the "reused id with another
   payload" cost, applied to reactions).
@@ -611,8 +600,7 @@ the registry itself is not built yet, see *Not now*). A SQL store keeps it
 in a one-row table raised inside each append's transaction and stamps every
 event row with the position it landed at.
 
-**`covers`** enumerates a domain's streams: what a projector reads to
-catch up, with the store as the collection's scope (an application keeps
+**`covers`** enumerates a domain's streams: what a projector reads, with the store as the collection's scope (an application keeps
 one store per collection, as ctxloom keeps one per project). It promises no
 order across streams beyond its listing order; a projector numbers its own
 changes. **The store contract** (`annals::next::contract`, feature
@@ -814,22 +802,11 @@ indicates a problem, so an operator alerts on it. The line is built from
 angzarr's own `AngzarrDeadLetter`, so it says what an angzarr DLQ entry
 would. annals never answers PARKED.
 
-**Trigger edges go beside it.** No event records the edge from a trigger
+**Trigger edges are tracing.** No event records the edge from a trigger
 to the reaction command it set off (angzarr decision 13.3; angzarr sends it
-to OpenTelemetry, its backlog PS-6). annals has no tracing dependency, so
-the chain hands the application each reaction command's (`causation_id`,
-`command_id`, target cover) as it dispatches it, and the application logs
-or spans it:
-
-```rust
-pub trait TriggerLog: Send + Sync {
-    fn dispatched(&self, causation_id: &EventRef, command_id: &Uuid, target: &Cover) {}  // no-op
-}
-let kernel = Kernel::new(&registry, &dead_letters).triggers(&log);   // default: NoTriggerLog
-```
-
-It is called before the command is deduplicated or decided, so a chain
-that fails later has still reported the edges it dispatched.
+to OpenTelemetry, its backlog PS-6). In annals the edge is the reaction
+command's own causation (`Identified::causation_id`), and its derived id
+names the trigger; annals has no tracing dependency and reports it nowhere.
 
 ## Errors and recovery
 
@@ -840,7 +817,7 @@ that fails later has still reported the edges it dispatched.
 | `KernelError::Malformed` | step 1 refused the book | `Invalid` |
 | `KernelError::UnknownType` | a command or fact type the domain does not decode, after upcasting | `Invalid` |
 | `KernelError::InvalidPayload` | a command or fact that decodes but is not a valid domain value (`WireError`: a required field absent, an undefined enum value) | `Invalid` |
-| `KernelError::Stale`, `Unresolved`, `Gap` | re-read and re-issue; catch up | `Retry` |
+| `KernelError::Stale`, `Unresolved` | re-read and re-issue | `Retry` |
 | `StoreError::Conflict`, `Unavailable` | run again with the same command id (step 3 makes it safe) | `Retry` |
 | `IngestPanicked`, `Upcast`, `WrongDomain`, `ChainTooDeep`, `BeforeSnapshot`, `UnregisteredDomain` (a stored stream of a domain the application did not register; an incoming book for one is `Malformed`), `Replay(..)`, `StoreError::Discontinuous`, `Unreadable` | a bug or a misconfiguration | `Bug` |
 
@@ -874,7 +851,7 @@ type itself:
 annals' own types are the ones angzarr has no message for, because they
 are execution, not wire: `Checked`, `Identified`, `Contextual`, `Prepared`,
 `Envelope` (a checked, decoded page), `Stream`, `Tx`, `IngestCtx`, `Nonce`,
-`Rulebook`, `Registry`, `Routes`, `Chain`, `Kernel`.
+`Rulebook`, `Registry`, `Routes`, `Kernel`.
 
 ## Key signatures
 
@@ -882,23 +859,16 @@ are execution, not wire: `Checked`, `Identified`, `Contextual`, `Prepared`,
 // step 1-2
 pub fn check(book: CommandBook, registry: &Registry) -> Result<Checked, Malformed>;
 impl Checked { pub fn identify(self, sampled: &Sampled) -> Identified; }
-// step 3-5
-impl<U: EventStore> Coordinator<'_, U> {
-    pub fn deduplicate(&mut self, command: Identified) -> Result<Deduplicated, StoreError>;
-    pub fn load(&mut self, command: Novel) -> Result<Contextual, KernelError>;
-}
-impl Contextual { pub fn decode<D: Domain>(self, registry: &Registry) -> Result<Prepared<D>, KernelError>; }
-impl<D: Domain> Prepared<D> {
-    pub fn decide(&mut self, sampled: &Sampled, registry: &Registry, dead_letters: &dyn DeadLetterLog)
-        -> Result<Decision<D>, Failure<D::Rejection>>;
-}
+// step 3-5: the chain's own, pub(crate)
+async fn deduplicate(port, registry, command: Identified) -> Result<Deduplicated, KernelError>;
+fn load(command: Novel, nonces: &mut u64) -> Result<Contextual, KernelError>;
+fn prepare<D: Domain>(contextual: Contextual, staged, registry) -> Result<Prepared<D>, KernelError>;
+impl<D: Domain> Prepared<D> { fn decide(..) -> Result<Decision<D>, Failure<D::Rejection>>; }
 // the whole loop
 impl Kernel<'_> {
     pub fn handle<D: Domain, U: UnitOfWork, Ps: Project>(&self, unit: U, routes: &Routes,
         book: CommandBook, sampled: &Sampled, projections: &mut Ps) -> Result<Handled, Failure<D::Rejection>>;
     pub async fn handle_async<D: Domain, U: AsyncUnitOfWork, Ps: Project>(/* the same */);
-    pub fn deliver<P: Policy, U: UnitOfWork, Ps: Project>(&self, unit: U, routes: &Routes,
-        order: &Order<P>, sampled: &Sampled, projections: &mut Ps) -> Result<Handled, Failure<..>>;
 }
 // in memory, no store
 impl<D: Domain> Stream<D> {
@@ -1062,8 +1032,8 @@ form is angzarr's.
     chain is two levels.
 
 Decided: every annals user builds angzarr-proto (no feature gate; the
-workspace `CLAUDE.md` says so); there is no re-run switch; trigger edges go
-to the application's `TriggerLog`, beside the dead-letter log.
+workspace `CLAUDE.md` says so); there is no re-run switch; a trigger edge
+is the reaction command's own causation, for tracing.
 
 ## Not now
 
@@ -1072,7 +1042,7 @@ to the application's `TriggerLog`, beside the dead-letter log.
 | Hash chaining | Not asked for. Kept possible: immutable pages, upcast on read, deterministic meta, no personal data. | A tamper-evidence requirement. |
 | Generated `State` impls, and angzarr's golden conflict-unit parity suite run here | The generator is angzarr's backlog CR-1; until then a hand-written fixture stands in. | CR-1 landing: annals generates from the same markers and runs every fixture pair through `Units::overlaps`. |
 | Snapshot frequency and retention configuration | `write_snapshot` is the application's; the load and discard rules are specified. | Replay latency that matters. |
-| Persisted projections | Replay on read. | Read latency; `Tracked` is ready. |
+| Persisted projections | Replay on read. | Read latency: a projector's position goes to angzarr-ports' `PositionStore`. |
 | Edition registry, branching, read-through (EA-1 to EA-3) | The commit position an edition's create records is in the contract; the `Editions` port waits on the decision about the shared ports' shape (sync, async, or both). | That decision. |
 | Configuration that forbids a `Handling` override | No hatpick command needs it. | A command type whose resolution a client must not choose. |
 | A `!Send` async store port | No browser store exists. | A wasm adapter over IndexedDB. |
@@ -1152,16 +1122,14 @@ keeps the trigger as `causation_id`.
   the whole chain, the origin included, with the path**, and its retry
   runs again; a chain deeper than its limit is refused; a command to an
   edition is refused with nothing written, and a reaction's target is in
-  its source's edition; a book for another domain is refused; each reaction
-  command's trigger edge goes to the `TriggerLog`; a chain sees its own
-  staged events and streams; projections run after commit, a duplicate
+  its source's edition; a book for another domain is refused; a chain sees
+  its own staged events and streams; every policy on a source runs for each
+  of its events, in registration order, in one unit of work; a filtered
+  policy reaches its target only for the events it targets; projections run after commit, a duplicate
   runs none; the async handler has the same contract and a `Send` future;
-  a catch-up delivers each owed order once, in order, refusing a gap;
-  a target that comes back breaks the backlog; a policy book for an
-  unregistered target is a dead-lettered bug.
+  a policy book for an unregistered target is a dead-lettered bug.
 - **handlers.rs**: handlers receive the cover, sequence, meta and state
-  after; a position places next, redelivery and gap; a tracked handler
-  drops redeliveries and keeps the first gap until it advances.
+  after.
 - **store.rs**: append checks the expected length and continuity; a cover
   is (domain, edition, root); **`find_command` answers the dedup lookup from
   the events**, per stream; a unit of work lands at commit or not at all;

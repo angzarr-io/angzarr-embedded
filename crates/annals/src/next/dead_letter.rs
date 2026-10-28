@@ -15,16 +15,10 @@
 //! Every line starts with [`DEAD_LETTER_PREFIX`]: **anything arriving there
 //! almost certainly indicates a problem**, never business as usual, so an
 //! operator should alert on the prefix.
-//!
-//! Beside it, the [`TriggerLog`]: where the chain reports each reaction
-//! command it dispatches, the edge from its trigger to it that no event
-//! records (angzarr decision 13.3; angzarr sends it to OpenTelemetry, its
-//! backlog PS-6). annals has no tracing dependency, so the application logs
-//! or spans it.
 
 use std::sync::Mutex;
 
-use angzarr_proto::v1::{AngzarrDeadLetter, CommandBook, Cover, EventRef, Uuid};
+use angzarr_proto::v1::{AngzarrDeadLetter, CommandBook};
 
 /// The start of every dead-letter line.
 pub const DEAD_LETTER_PREFIX: &str = "DEAD LETTER (almost certainly a bug; \
@@ -79,21 +73,6 @@ pub(crate) fn write_dead_letter(
         ..AngzarrDeadLetter::default()
     }));
 }
-
-/// Where the chain reports each reaction command as it dispatches it: its
-/// own causation (the trigger), its command id and its target stream. The
-/// command's events name only the command, so this edge is for tracing and
-/// logs. Called before the command is deduplicated or decided, so a chain
-/// that fails later has reported the edges it dispatched. Ignored by
-/// default ([`NoTriggerLog`]).
-pub trait TriggerLog: Send + Sync {
-    fn dispatched(&self, _causation_id: &EventRef, _command_id: &Uuid, _target: &Cover) {}
-}
-
-/// The default [`TriggerLog`]: reports nowhere.
-pub struct NoTriggerLog;
-
-impl TriggerLog for NoTriggerLog {}
 
 /// Dead-letter lines kept in memory: for tests.
 #[derive(Default)]

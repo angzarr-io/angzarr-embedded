@@ -3,10 +3,7 @@
 use std::convert::Infallible;
 use std::fmt;
 
-use crate::{
-    project, Conflict, Domain, Envelope, EventStore, Header, InMemoryStore, Projection,
-    ReplayError, Stream, StreamId, Tx,
-};
+use crate::{Domain, Envelope, Header, ReplayError, Stream, StreamId, Tx};
 use annals_diagnostic::{Arg, Diagnostic};
 
 fn header(id: u64, domain: &str) -> Header {
@@ -454,59 +451,4 @@ fn rejecting_after_emitting_keeps_log_and_state_together_in_release() {
     // The event was applied, so it must be in the log too.
     assert_eq!(s.len(), 1);
     assert_eq!(*s.state(), 1);
-}
-
-// ---------------------------------------------------------------- store and projections
-
-#[test]
-fn the_store_holds_streams_and_refuses_stale_appends() {
-    let s = run(&[AccountCmd::Open, AccountCmd::Deposit(40)]);
-    let mut store = InMemoryStore::new();
-    store.append(s.header(), 0, s.events()).unwrap();
-    assert_eq!(
-        store.append(s.header(), 0, s.events()),
-        Err(Conflict {
-            id: StreamId(1),
-            expected: 0,
-            actual: 2
-        })
-    );
-    assert_eq!(
-        store
-            .append(s.header(), 0, s.events())
-            .unwrap_err()
-            .to_string(),
-        "stream 1 holds 2 events, not the 0 expected: someone else appended first"
-    );
-    let (h, events) = store.read(StreamId(1)).unwrap();
-    let replayed = Stream::<Account>::replay(h, events, &()).unwrap();
-    assert_eq!(replayed.state().cents, 40);
-    assert!(store.read(StreamId(99)).is_none());
-    assert_eq!(store.ids(), [StreamId(1)]);
-}
-
-#[derive(Default)]
-struct Turnover {
-    moved: i64,
-}
-
-impl Projection<AccountEvent> for Turnover {
-    fn on(&mut self, e: &Envelope<AccountEvent>) {
-        match e.event {
-            AccountEvent::Deposited(c) | AccountEvent::Withdrew(c) => self.moved += c,
-            AccountEvent::Opened => {}
-        }
-    }
-}
-
-#[test]
-fn a_projection_is_a_fold_of_its_own() {
-    let s = run(&[
-        AccountCmd::Open,
-        AccountCmd::Deposit(500),
-        AccountCmd::Withdraw(200),
-    ]);
-    let mut t = Turnover::default();
-    project(&mut t, s.events());
-    assert_eq!(t.moved, 700);
 }

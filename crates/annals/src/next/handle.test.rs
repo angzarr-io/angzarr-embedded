@@ -220,59 +220,6 @@ fn a_book_for_another_domain_is_refused() {
     );
 }
 
-/// Trigger edges, as the application's log would keep them.
-#[derive(Default)]
-struct Edges(std::sync::Mutex<Vec<(EventRef, crate::next::v1::Uuid, crate::next::v1::Cover)>>);
-
-impl crate::next::TriggerLog for Edges {
-    fn dispatched(
-        &self,
-        causation_id: &EventRef,
-        command_id: &crate::next::v1::Uuid,
-        target: &crate::next::v1::Cover,
-    ) {
-        self.0
-            .lock()
-            .unwrap()
-            .push((causation_id.clone(), command_id.clone(), target.clone()));
-    }
-}
-
-#[test]
-fn each_reaction_command_reports_its_trigger_edge() {
-    let registry = registry();
-    let log = MemoryDeadLetters::new();
-    let edges = Edges::default();
-    let kernel = Kernel::new(&registry, &log).triggers(&edges);
-    let mut store = InMemoryStore::new();
-    opened(&mut store, &registry, 1, 0);
-    let routes = Routes::new().policy::<Bookkeeping>();
-    kernel
-        .handle::<Account, _, _>(store.begin(), &routes, deposit(3, 25), &at(30), &mut ())
-        .unwrap();
-
-    let trigger = EventRef {
-        stream: Some(cover("account", 1)),
-        sequence: 2,
-    };
-    assert_eq!(
-        *edges.0.lock().unwrap(),
-        [(
-            trigger.clone(),
-            ids::reaction_command_id(&trigger, "bookkeeping", 0).unwrap(),
-            ledger_cover()
-        )],
-        "the edge no event records: the command's causation, its id, its target"
-    );
-
-    // The default reports nowhere, and the chain is the same.
-    let quiet = Kernel::new(&registry, &log);
-    quiet
-        .handle::<Account, _, _>(store.begin(), &routes, deposit(4, 5), &at(31), &mut ())
-        .unwrap();
-    assert_eq!(edges.0.lock().unwrap().len(), 1);
-}
-
 #[test]
 fn a_chain_that_comes_back_to_a_stream_sees_its_staged_events() {
     let registry = registry();
@@ -283,7 +230,7 @@ fn a_chain_that_comes_back_to_a_stream_sees_its_staged_events() {
     let routes = Routes::new().policy::<Bookkeeping>();
     let mut unit = store.begin();
     let sampled = at(30);
-    let mut chain = crate::next::Chain::new(&kernel, &mut unit, &routes, &sampled);
+    let mut chain = crate::next::handle::chain::Chain::new(&kernel, &mut unit, &routes, &sampled);
     assert_eq!(chain.state::<Ledger>(&ledger_cover()), None, "untouched");
 
     let first = crate::next::check(deposit(3, 25), &registry).unwrap();
@@ -480,99 +427,6 @@ fn account_stream(
     crate::next::Stream::replay(cover("account", 1), &pages, registry).unwrap()
 }
 
-#[test]
-fn a_catch_up_delivers_each_owed_order_once_and_in_order() {
-    use crate::next::{orders_owed, Handled, Position};
-    use std::collections::BTreeMap;
-
-    let registry = registry();
-    let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log);
-    let mut store = InMemoryStore::new();
-    opened(&mut store, &registry, 1, 25);
-    let routes = Routes::new();
-    let source = account_stream(&mut store, &registry);
-
-    let owed = orders_owed::<Bookkeeping>(&source, &registry, &BTreeMap::new()).unwrap();
-    let orders = &owed[&()];
-    assert_eq!(
-        orders
-            .iter()
-            .map(|o| o.trigger().sequence)
-            .collect::<Vec<_>>(),
-        [0, 1]
-    );
-    assert_eq!(orders[1].cover(), &ledger_cover());
-    assert_eq!(orders[1].index(), 0);
-    assert_eq!(orders[1].command().cents, 25);
-    assert_eq!(
-        orders[1].correlation_id(),
-        &crate::next::toys::command_id(2)
-    );
-    assert_eq!(orders[1].target(), &());
-
-    let skipped = kernel
-        .deliver(store.begin(), &routes, &orders[1], &at(40), &mut ())
-        .err()
-        .unwrap();
-    assert_eq!(
-        skipped,
-        Failure::Kernel(KernelError::Gap {
-            stream: ledger_cover(),
-            gap: crate::next::Gap {
-                expected: 0,
-                found: 1
-            }
-        })
-    );
-    assert_eq!(skipped.recovery(), Recovery::Retry);
-
-    for order in orders {
-        let handled = kernel
-            .deliver(store.begin(), &routes, order, &at(40), &mut ())
-            .unwrap();
-        assert_eq!(handled.books().len(), 1);
-    }
-    let ledger = store.read(&ledger_cover()).unwrap().unwrap();
-    assert_eq!(
-        payloads::<ledger::Recorded>(&[crate::next::v1::EventBook {
-            pages: ledger.pages.clone(),
-            ..Default::default()
-        }])
-        .len(),
-        2
-    );
-    let meta = ledger.pages[1].meta.clone().unwrap();
-    assert_eq!(
-        meta.causation,
-        Some(Causation::CommandId(
-            ids::reaction_command_id(orders[1].trigger(), "bookkeeping", 0).unwrap()
-        )),
-        "the same id the chain would derive"
-    );
-
-    // Delivered again: the target's position has passed it.
-    let again = kernel
-        .deliver(store.begin(), &routes, &orders[1], &at(41), &mut ())
-        .unwrap();
-    assert!(matches!(&again, Handled::Applied(r) if r.books().is_empty()));
-    assert_eq!(store.read(&ledger_cover()).unwrap().unwrap().pages.len(), 2);
-
-    // Nothing more is owed past the ledger's position.
-    let positions = BTreeMap::from([((), Position::at(1))]);
-    let owed = orders_owed::<Bookkeeping>(&source, &registry, &positions).unwrap();
-    assert!(owed.is_empty() || owed[&()].is_empty());
-    let positions = BTreeMap::from([((), Position::at(0))]);
-    let owed = orders_owed::<Bookkeeping>(&source, &registry, &positions).unwrap();
-    assert_eq!(
-        owed[&()]
-            .iter()
-            .map(|o| o.trigger().sequence)
-            .collect::<Vec<_>>(),
-        [1]
-    );
-}
-
 /// Account deposits → the ledger, and nothing else: a policy that targets
 /// from the event, so the ledger is owed only some of the account's events.
 struct DepositsOnly;
@@ -594,13 +448,6 @@ impl crate::next::Reaction for DepositsOnly {
     fn root((): &()) -> crate::next::v1::Uuid {
         ledger_root()
     }
-
-    fn position(target: &crate::next::toys::LedgerState) -> crate::next::Position {
-        match target.next_source {
-            0 => crate::next::Position::START,
-            next => crate::next::Position::at(next - 1),
-        }
-    }
 }
 
 impl crate::next::Policy for DepositsOnly {
@@ -617,59 +464,35 @@ impl crate::next::Policy for DepositsOnly {
 }
 
 #[test]
-fn a_filtered_policy_keeps_contiguity_per_target() {
-    use crate::next::Handled;
+fn a_filtered_policy_reaches_its_target_only_for_the_events_it_targets() {
     let registry = registry();
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry, &log);
     let mut store = InMemoryStore::new();
-    // 0: opened (not owed), 1: deposited 1; then 2: deposited 2.
-    opened(&mut store, &registry, 1, 1);
-    crate::next::toys::handle::<Account>(&mut store, &registry, deposit(3, 2), &at(20)).unwrap();
-    let source = account_stream(&mut store, &registry);
-    let owed = crate::next::orders_owed::<DepositsOnly>(
-        &source,
-        &registry,
-        &std::collections::BTreeMap::new(),
-    )
-    .unwrap();
-    let orders = &owed[&()];
-    assert_eq!(
-        orders
-            .iter()
-            .map(|o| (o.trigger().sequence, o.previous()))
-            .collect::<Vec<_>>(),
-        [(1, None), (2, Some(1))],
-        "only the deposits, each naming the one owed before it"
-    );
-    let routes = Routes::new();
-
-    let skipped = kernel
-        .deliver(store.begin(), &routes, &orders[1], &at(30), &mut ())
-        .err()
-        .unwrap();
-    assert_eq!(
-        skipped,
-        Failure::Kernel(KernelError::Gap {
-            stream: ledger_cover(),
-            gap: crate::next::Gap {
-                expected: 1,
-                found: 2
-            }
-        }),
-        "the gap is the target's own owed order, not sequence 0"
-    );
-
-    for order in orders {
+    let routes = Routes::new().policy::<DepositsOnly>();
+    for book in [
+        command(cover("account", 1), AccountCmd::Open.to_any()).id(1),
+        deposit(2, 5),
+        command(cover("account", 1), AccountCmd::Withdraw(2).to_any()).id(3),
+        deposit(4, 7),
+    ] {
         kernel
-            .deliver(store.begin(), &routes, order, &at(31), &mut ())
+            .handle::<Account, _, _>(store.begin(), &routes, book, &at(30), &mut ())
             .unwrap();
     }
-    assert_eq!(store.read(&ledger_cover()).unwrap().unwrap().pages.len(), 2);
-    let again = kernel
-        .deliver(store.begin(), &routes, &orders[0], &at(32), &mut ())
-        .unwrap();
-    assert!(matches!(&again, Handled::Applied(r) if r.books().is_empty()));
+    let pages = store.read(&ledger_cover()).unwrap().unwrap().pages;
+    let book = crate::next::v1::EventBook {
+        pages,
+        ..Default::default()
+    };
+    assert_eq!(
+        payloads::<ledger::Recorded>(&[book])
+            .iter()
+            .map(|r| (r.source_sequence, r.cents))
+            .collect::<Vec<_>>(),
+        [(1, 5), (3, 7)],
+        "the deposits, and only the deposits, in source order"
+    );
 }
 
 #[test]
@@ -721,53 +544,30 @@ fn a_policy_book_for_an_unregistered_target_is_a_dead_lettered_bug() {
         lines[0]
     );
     assert!(store.streams().is_empty());
-
-    let order_store = &mut InMemoryStore::new();
-    crate::next::toys::opened(order_store, &crate::next::toys::registry(), 1, 0);
-    let source = account_stream(order_store, &crate::next::toys::registry());
-    let owed = crate::next::orders_owed::<Bookkeeping>(
-        &source,
-        &crate::next::toys::registry(),
-        &std::collections::BTreeMap::new(),
-    )
-    .unwrap();
-    let refused = kernel
-        .deliver(store.begin(), &routes, &owed[&()][0], &at(31), &mut ())
-        .err()
-        .unwrap();
-    assert!(matches!(
-        refused,
-        Failure::Kernel(KernelError::Malformed(
-            crate::next::Malformed::UnknownDomain { .. }
-        ))
-    ));
-    assert_eq!(log.lines().len(), 2);
 }
 
 #[test]
 fn a_command_on_a_staged_stream_owes_only_its_own_events() {
     let registry = registry();
     let log = MemoryDeadLetters::new();
-    let edges = Edges::default();
-    let kernel = Kernel::new(&registry, &log).triggers(&edges);
+    let kernel = Kernel::new(&registry, &log);
     let mut store = InMemoryStore::new();
     opened(&mut store, &registry, 1, 0);
     let routes = Routes::new().policy::<Bookkeeping>();
     let mut unit = store.begin();
     let sampled = at(30);
-    let mut chain = crate::next::Chain::new(&kernel, &mut unit, &routes, &sampled);
+    let mut chain = crate::next::handle::chain::Chain::new(&kernel, &mut unit, &routes, &sampled);
     for n in [3, 4] {
         chain
             .execute::<Account>(crate::next::check(deposit(n, 1), &registry).unwrap())
             .unwrap();
     }
+    let recorded = chain.append().unwrap();
+    let ledger = recorded.events::<Ledger>(&ledger_cover()).unwrap();
     assert_eq!(
-        edges
-            .0
-            .lock()
-            .unwrap()
+        ledger
             .iter()
-            .map(|(trigger, ..)| trigger.sequence)
+            .map(|e| e.event().source_sequence)
             .collect::<Vec<_>>(),
         [2, 3],
         "each deposit's own event, once"
@@ -828,8 +628,6 @@ fn a_committed_event_names_its_stream() {
     };
     source.dispatch(1, &registry, &mut [&mut handler]).unwrap();
     assert_eq!(covers, [(cover("account", 1), 1)]);
-    assert_eq!(crate::next::Position::at(4).last(), Some(4));
-    assert_eq!(crate::next::Position::START.last(), None);
 }
 
 /// Two ledgers per account event: orders are indexed in target order.
@@ -849,10 +647,6 @@ impl crate::next::Reaction for TwoLedgers {
     fn root(n: &u8) -> crate::next::v1::Uuid {
         ids::compute_root("ledger", &n.to_string()).unwrap()
     }
-
-    fn position(_: &crate::next::toys::LedgerState) -> crate::next::Position {
-        crate::next::Position::START
-    }
 }
 
 impl crate::next::Policy for TwoLedgers {
@@ -865,59 +659,93 @@ impl crate::next::Policy for TwoLedgers {
 }
 
 #[test]
-fn a_triggers_orders_are_indexed_in_target_order() {
-    let registry = registry();
-    let mut store = InMemoryStore::new();
-    opened(&mut store, &registry, 1, 0);
-    let source = account_stream(&mut store, &registry);
-    let owed = crate::next::orders_owed::<TwoLedgers>(
-        &source,
-        &registry,
-        &std::collections::BTreeMap::new(),
-    )
-    .unwrap();
-    assert_eq!(owed[&0][0].index(), 0);
-    assert_eq!(owed[&1][0].index(), 1);
-    assert_ne!(owed[&0][0].cover(), owed[&1][0].cover());
-}
-
-#[test]
-fn a_target_that_holds_an_earlier_order_still_refuses_a_gap() {
+fn a_triggers_commands_are_indexed_in_target_order() {
     let registry = registry();
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry, &log);
     let mut store = InMemoryStore::new();
-    // 0: opened (not owed); 1, 2, 3: deposits, each owed.
-    opened(&mut store, &registry, 1, 1);
-    for (n, cents) in [(3, 2), (4, 3)] {
-        crate::next::toys::handle::<Account>(&mut store, &registry, deposit(n, cents), &at(20))
+    opened(&mut store, &registry, 1, 0);
+    let routes = Routes::new().policy::<TwoLedgers>();
+    kernel
+        .handle::<Account, _, _>(store.begin(), &routes, deposit(3, 5), &at(30), &mut ())
+        .unwrap();
+    let trigger = EventRef {
+        stream: Some(cover("account", 1)),
+        sequence: 2,
+    };
+    for index in [0u8, 1] {
+        let pages = store.read(&two_ledgers(index)).unwrap().unwrap().pages;
+        assert_eq!(
+            pages[0].meta.as_ref().unwrap().causation,
+            Some(Causation::CommandId(
+                ids::reaction_command_id(&trigger, "two-ledgers", u32::from(index)).unwrap()
+            )),
+            "target {index}'s command is the trigger's {index}th"
+        );
+    }
+}
+
+/// The `n`th of [`TwoLedgers`]' ledgers.
+fn two_ledgers(n: u8) -> crate::next::v1::Cover {
+    crate::next::v1::Cover {
+        domain: "ledger".to_string(),
+        root: Some(ids::compute_root("ledger", &n.to_string()).unwrap()),
+        edition: None,
+    }
+}
+
+/// Several reactions on one source domain, through the builder: each runs
+/// for every event the chain stages in that domain, in the order they were
+/// registered, and everything lands in one unit of work.
+#[test]
+fn every_reaction_on_a_source_runs_for_each_of_its_events_in_registration_order() {
+    let registry = registry();
+    let log = MemoryDeadLetters::new();
+    let kernel = Kernel::new(&registry, &log);
+    let mut store = InMemoryStore::new();
+    let routes = Routes::new().policy::<TwoLedgers>().policy::<Bookkeeping>();
+    let mut unit = store.begin();
+    let sampled = at(30);
+    let mut chain = crate::next::handle::chain::Chain::new(&kernel, &mut unit, &routes, &sampled);
+    let open = command(cover("account", 1), AccountCmd::Open.to_any()).id(1);
+    for book in [open, deposit(2, 5)] {
+        chain
+            .execute::<Account>(crate::next::check(book, &registry).unwrap())
             .unwrap();
     }
-    let source = account_stream(&mut store, &registry);
-    let owed = crate::next::orders_owed::<DepositsOnly>(
-        &source,
-        &registry,
-        &std::collections::BTreeMap::new(),
-    )
-    .unwrap();
-    let orders = &owed[&()];
-    let routes = Routes::new();
-    kernel
-        .deliver(store.begin(), &routes, &orders[0], &at(30), &mut ())
-        .unwrap();
-    assert_eq!(
-        kernel
-            .deliver(store.begin(), &routes, &orders[2], &at(31), &mut ())
-            .err(),
-        Some(Failure::Kernel(KernelError::Gap {
-            stream: ledger_cover(),
-            gap: crate::next::Gap {
-                expected: 2,
-                found: 3
-            }
-        })),
-        "holding 1, owed 2 before 3"
+    let recorded = chain.append().unwrap();
+    drop(unit);
+    assert!(
+        store.streams().is_empty(),
+        "all of it in the one unit of work, dropped uncommitted"
     );
+
+    assert_eq!(
+        recorded
+            .books()
+            .iter()
+            .map(|b| b.cover.clone().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            cover("account", 1),
+            two_ledgers(0),
+            two_ledgers(1),
+            ledger_cover()
+        ],
+        "first touched in registration order: TwoLedgers' targets, then Bookkeeping's"
+    );
+    for target in [two_ledgers(0), two_ledgers(1), ledger_cover()] {
+        assert_eq!(
+            recorded
+                .events::<Ledger>(&target)
+                .unwrap()
+                .iter()
+                .map(|e| e.event().source_sequence)
+                .collect::<Vec<_>>(),
+            [0, 1],
+            "{target:?} reached for each account event"
+        );
+    }
 }
 
 /// A domain named "account" that is not the account: a projection routed

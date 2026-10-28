@@ -69,8 +69,7 @@ impl Domain for Counter {
   are decided once and recorded in the events. Replaying a log never
   re-decides anything, so changing a random-number generator, fixing a dice
   bug or retuning a table never changes an old log.
-- **Deterministic.** Order is the log's order. Streams in a store are kept
-  in id order. Nothing iterates a hash map.
+- **Deterministic.** Order is the log's order. Nothing iterates a hash map.
 
 ## API
 
@@ -81,11 +80,7 @@ impl Domain for Counter {
 | `Stream<D>` | `new`, `execute`, `execute_caused`, `replay`, `state_at`, `visit_states`, `events`, `state` |
 | `Header` | stream id, domain name, schema version, rules version |
 | `Envelope<E>` | `seq`, `cause` (the earlier event it follows from), `event` |
-| `Projection<E>`, `project` | read models |
-| `policy::Policy`, `policy::backlog` | a stateless policy from a source domain to a target domain; the commands a target has not yet received, from its checkpoint |
-| `policy::Injected<E>`, `policy::admit`, `policy::Gap` | a source event carried into a target with its source seq; placing it against the target's checkpoint (next, redelivery, or a gap) |
-| `EventStore<E>`, `InMemoryStore<E>` | the storage port; appends use an expected length for optimistic concurrency |
-| `ReplayError`, `Conflict`, `policy::Gap` | why a log does not replay; why an append was refused; why a delivery was refused. All are `Diagnostic`s, with messages in `locales/en-US/annals.ftl` |
+| `ReplayError` | why a log does not replay: a `Diagnostic`, with messages in `locales/en-US/annals.ftl` |
 | `diagnostic_samples` | one value of every error, for catalog tests |
 
 ## Not yet
@@ -98,16 +93,15 @@ impl Domain for Counter {
   reaction trigger), every id a 16-byte
   `UUID`. One domain-blind parse (`check`) checks a book and yields a
   `Checked` with non-optional accessors; `identify` assigns its command id
-  and correlation; the in-process `Coordinator` loads the snapshot and
+  and correlation; the in-process coordinator loads the snapshot and
   events, then deduplicates by command id on the stream's events (load
   first, so a concurrent commit of the same command is never missed), and
   resolves the conflict resolution (COMMUTATIVE by default where the state declares
   conflict units, else STRICT); then the command or fact is decoded
   (upcast by type URL) and decided, or ingested with a read-only context.
   Policies run in the same atomic chain, targeting from the event (so a
-  policy may forward only some events; contiguity is kept per target), the dead-letter queue is a
-  logger, and each policy command's trigger edge goes to the application's
-  `TriggerLog`. It is implemented and tested; hatpick moves onto it before
+  policy may forward only some events), and the dead-letter queue is a
+  logger. It is implemented and tested; hatpick moves onto it before
   it replaces the root API. See `docs/design/audit.md`.
 
 - **Upcasting.** `Header::schema` is reserved and never read. Upcasting

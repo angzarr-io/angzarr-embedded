@@ -3,11 +3,11 @@
 //! angzarr's aggregate coordinator is a service that loads a stream, checks
 //! or stamps the command's expected sequence and hands a
 //! `ContextualCommand` to business code. annals has no service and sends
-//! nothing: the [`Coordinator`] is a struct over the application's unit of
-//! work, and it does the same steps in process, domain-blind (it sees
-//! `Cover`s, pages and the [`Registry`], never a domain's types):
+//! nothing: the chain does the same steps in process, through the
+//! application's unit of work, domain-blind (it sees `Cover`s, pages and
+//! the [`Registry`], never a domain's types):
 //!
-//! 3. [`Coordinator::deduplicate`]: **load the stream first** (resolve the
+//! 3. [`deduplicate`]: **load the stream first** (resolve the
 //!    conflict resolution: the book's, the command type's, the domain's,
 //!    else COMMUTATIVE where the state supports it and STRICT otherwise,
 //!    [`Registry::resolve`]; then the newest usable snapshot (under the
@@ -25,7 +25,7 @@
 //!    twice.) Before the sequence check, so a retry of an applied STRICT
 //!    command whose expected sequence is now stale is a duplicate, never
 //!    stale.
-//! 4. [`Coordinator::load`]: stamp an absent
+//! 4. [`load`]: stamp an absent
 //!    expected sequence with the head, or check a present one: under
 //!    STRICT it must be the head ([`KernelError::Stale`]); under
 //!    AGGREGATE_HANDLES and COMMUTATIVE the events from it to the head are
@@ -36,13 +36,13 @@
 //!
 //! Then the typed step, which needs `D`:
 //!
-//! 5. [`Contextual::decode`]: the snapshot's state (discarded, and the
+//! 5. Decode ([`prepare`]): the snapshot's state (discarded, and the
 //!    stream replayed, on a rules-version or state-type mismatch), the
 //!    events and the command's payload, each through the domain's upcaster
 //!    and decoded strictly; then [`Prepared::decide`] runs decide or ingest
 //!    and stamps the events.
 //!
-//! In a [`Chain`](super::Chain), steps 3 and 4 consult the chain's staged
+//! In a chain, steps 3 and 4 consult the chain's staged
 //! streams before the store, so a later step sees an earlier step's
 //! uncommitted events (and its command ids). A stream the chain already
 //! holds was loaded when the chain first touched it, so its lookup still
@@ -60,7 +60,7 @@ use super::domain::{Conflicts, Decision, Domain, IngestCtx, State, Tx};
 use super::error::{Failure, KernelError, PayloadError, StoreError};
 use super::payload::Payload;
 use super::registry::Registry;
-use super::store::{block, produced_by, EventStore, Port, SyncPort};
+use super::store::{produced_by, Port};
 use super::stream::{Envelope, Stream};
 
 /// The in-process conflict nonce (angzarr's `ContextualCommand.conflict_nonce`):
@@ -76,46 +76,24 @@ use super::stream::{Envelope, Stream};
 #[derive(PartialEq, Eq, Debug)]
 pub struct Nonce(pub(crate) u64);
 
-/// Steps 3 and 4 over the application's unit of work.
-pub struct Coordinator<'u, U> {
-    unit: &'u mut U,
-    registry: &'u Registry,
-    /// The next [`Nonce`].
-    nonces: u64,
-}
-
 /// What deduplication found.
-pub enum Deduplicated {
+pub(crate) enum Deduplicated {
     /// The stream holds this command's events already: they are the
     /// answer (angzarr's DUPLICATE), in sequence order, in an `EventBook`
     /// for the addressed stream.
-    Duplicate {
-        command: Identified,
-        events: EventBook,
-    },
-    /// Nothing found: the command goes on to [`Coordinator::load`]. A
+    Duplicate { events: EventBook },
+    /// Nothing found: the command goes on to [`load`]. A
     /// command whose earlier decision emitted nothing lands here again (an
     /// accepted cost: it is decided again, against the stream as it is
     /// now).
-    Novel(Novel),
+    Novel(Box<Novel>),
 }
 
 /// An [`Identified`] command that deduplication did not find, with the
-/// stream it loaded first: the only thing [`Coordinator::load`] takes.
-pub struct Novel {
+/// stream it loaded first: the only thing [`load`] takes.
+pub(crate) struct Novel {
     command: Identified,
     loaded: Loaded,
-}
-
-impl Novel {
-    pub fn command(&self) -> &Identified {
-        &self.command
-    }
-
-    /// The stream's next sequence when it was loaded.
-    pub fn head(&self) -> u64 {
-        self.loaded.head
-    }
 }
 
 /// What step 3 read, before its lookup: the resolution, the snapshot, the
@@ -128,39 +106,10 @@ pub(crate) struct Loaded {
     last_recorded_at: Option<Timestamp>,
 }
 
-impl<'u, U: EventStore> Coordinator<'u, U> {
-    pub fn new(unit: &'u mut U, registry: &'u Registry) -> Coordinator<'u, U> {
-        Coordinator {
-            unit,
-            registry,
-            nonces: 0,
-        }
-    }
-
-    /// Step 3: load the stream (the resolution, the snapshot and the events
-    /// after it), then look the command id up on it
-    /// ([`EventStore::find_command`], over the index on (stream,
-    /// command_id)). Load first: see the module docs.
-    pub fn deduplicate(&mut self, command: Identified) -> Result<Deduplicated, KernelError> {
-        block(deduplicate(
-            &mut SyncPort(self.unit),
-            self.registry,
-            command,
-        ))
-    }
-
-    /// Step 4: stamp or check the expected sequence against the head step 3
-    /// loaded (see the module docs). STRICT's stale command is refused
-    /// here, before anything is decoded.
-    pub fn load(&mut self, command: Novel) -> Result<Contextual, KernelError> {
-        load(command, &mut self.nonces)
-    }
-}
-
 /// A command with its stream's history and its handling resolved: angzarr's
 /// `ContextualCommand`, in process. Domain-blind still: the history is
 /// pages.
-pub struct Contextual {
+pub(crate) struct Contextual {
     pub(crate) command: Identified,
     /// Never UNSPECIFIED.
     pub(crate) resolution: ConflictResolution,
@@ -184,52 +133,9 @@ impl Contextual {
         &self.command
     }
 
-    /// The resolved conflict resolution: never UNSPECIFIED.
-    pub fn conflict_resolution(&self) -> ConflictResolution {
-        self.resolution
-    }
-
-    /// The resolved expected sequence: the book's, or the head.
-    pub fn expected_sequence(&self) -> u64 {
-        self.expected
-    }
-
     /// The stream's next sequence.
     pub fn head(&self) -> u64 {
         self.head
-    }
-
-    pub fn snapshot(&self) -> Option<&Snapshot> {
-        self.snapshot.as_ref()
-    }
-
-    /// The events loaded, after the snapshot.
-    pub fn pages(&self) -> &[EventPage] {
-        &self.pages
-    }
-
-    /// The events from the expected sequence to the head: empty under
-    /// STRICT and for a stamped command.
-    pub fn window(&self) -> &[EventPage] {
-        let start = self.pages.partition_point(|p| p.sequence < self.expected);
-        &self.pages[start..]
-    }
-
-    /// Whether a nonce was minted (AGGREGATE_HANDLES or COMMUTATIVE, even
-    /// for an empty window).
-    pub fn has_nonce(&self) -> bool {
-        self.nonce.is_some()
-    }
-
-    /// Step 5's first half, typed: the stream as `D` (from the snapshot if
-    /// [`usable`](Registry::snapshot_usable), else from 0 after discarding
-    /// it), every event and the command's payload through `D`'s upcaster
-    /// and decoded strictly. A command or fact type `D` does not decode is
-    /// [`KernelError::UnknownType`], naming its type URL; a stored event,
-    /// [`StoreError::Unreadable`]; a cover of another domain,
-    /// [`KernelError::WrongDomain`].
-    pub fn decode<D: Domain>(self, registry: &Registry) -> Result<Prepared<D>, KernelError> {
-        prepare(self, None, registry)
     }
 }
 
@@ -241,7 +147,7 @@ pub(crate) enum Input<D: Domain> {
 
 /// A command ready for business code: its stream at the head, its decoded
 /// input, and its resolved handling.
-pub struct Prepared<D: Domain> {
+pub(crate) struct Prepared<D: Domain> {
     pub(crate) command: Identified,
     pub(crate) input: Input<D>,
     pub(crate) stream: Stream<D>,
@@ -251,15 +157,6 @@ pub struct Prepared<D: Domain> {
 }
 
 impl<D: Domain> Prepared<D> {
-    pub fn command(&self) -> &Identified {
-        &self.command
-    }
-
-    /// The stream at the head.
-    pub fn stream(&self) -> &Stream<D> {
-        &self.stream
-    }
-
     /// Step 5's second half: the body arm picks the pipeline.
     ///
     /// - A command is decided in a staging [`Tx`](super::Tx), against the
@@ -330,8 +227,8 @@ pub(crate) async fn deduplicate<P: Port>(
         .await
         .map_err(KernelError::Store)?
     {
-        Some(events) => Ok(Deduplicated::Duplicate { command, events }),
-        None => Ok(Deduplicated::Novel(Novel { command, loaded })),
+        Some(events) => Ok(Deduplicated::Duplicate { events }),
+        None => Ok(Deduplicated::Novel(Box::new(Novel { command, loaded }))),
     }
 }
 
@@ -356,13 +253,6 @@ pub(crate) async fn find_duplicate<P: Port>(
             pages,
             next_sequence,
         }))
-}
-
-/// A command and the stream loaded for it, as step 4's input, without a
-/// lookup: for a caller that runs its own (a delivery, whose chain looks
-/// the command up once it has placed it).
-pub(crate) fn novel(command: Identified, loaded: Loaded) -> Novel {
-    Novel { command, loaded }
 }
 
 /// The command's resolution ([`Registry::resolve`]): never UNSPECIFIED.
@@ -711,6 +601,10 @@ pub(crate) fn run_step<D: Domain>(
         .map_err(Failure::Kernel)?;
     Ok((stream, pages))
 }
+
+#[cfg(test)]
+#[path = "steps.test.rs"]
+pub(crate) mod steps;
 
 #[cfg(test)]
 #[path = "coordinator.test.rs"]

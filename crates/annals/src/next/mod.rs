@@ -29,18 +29,17 @@
 //!    correlation (given, else the command id; a reaction's trigger's) and,
 //!    for a reaction, the command's own causation (its trigger: transport
 //!    and trace metadata, never stamped on its events). An [`Identified`].
-//! 3. **Load, then deduplicate** ([`Coordinator::deduplicate`]): the
+//! 3. **Load, then deduplicate**: the
 //!    snapshot and newer events are loaded first; then, does the addressed
 //!    stream already hold events with this command id? Answered
 //!    [`Handled::Duplicate`] with them, and nothing below runs. (Loading
 //!    first closes the race in which a retry's lookup misses an original
 //!    that commits before the retry loads.)
-//! 4. **Resolve** ([`Coordinator::load`]): the expected sequence stamped or
+//! 4. **Resolve**: the expected sequence stamped or
 //!    checked, against the head step 3 loaded, under the resolved
 //!    [`ConflictResolution`](v1::ConflictResolution) (STRICT refuses a stale
-//!    one here); the window and a [`Nonce`] otherwise. A [`Contextual`].
-//! 5. **Decode, then decide or ingest** ([`Contextual::decode`],
-//!    [`Prepared::decide`]): the snapshot (discarded on a rules-version or
+//!    one here); the window and a [`Nonce`] otherwise.
+//! 5. **Decode, then decide or ingest**: the snapshot (discarded on a rules-version or
 //!    state-type mismatch), the events and the command, each upcast by type
 //!    URL; then the body arm picks the pipeline: a command is decided
 //!    ([`Domain::decide`], fallible, staging in a [`Tx`]), a fact ingested
@@ -51,15 +50,15 @@
 //! Each step's output type is the next step's only input, so the order
 //! cannot be skipped or reordered.
 //!
-//! Then, in the same [`Chain`]: every [`Policy`] routed for the source's
+//! Then, in the same chain: every [`Policy`] routed for the source's
 //! domain runs on the staged events, and its commands take the same five
 //! steps in their targets, depth first. Once the whole chain has
 //! succeeded, every staged stream is appended through the application's
 //! unit of work, each checked against the length it was loaded at, and the
 //! unit committed; any failure anywhere fails it all ([`Failure`], with the
 //! path to the failing [`Step`]). [`Projection`]s run on committed events
-//! only. Each policy command's trigger edge, which no event records, goes
-//! to the application's [`TriggerLog`] as the chain dispatches it.
+//! only. A policy command's trigger edge, which no event records, is the
+//! command's own causation, for tracing.
 
 // A failure names the path to the step that failed and carries reports, so
 // it is large; failures are the cold path, and unboxed variants keep them
@@ -101,11 +100,8 @@ mod decorated;
 
 pub use check::{check, Body, Checked, Identified, Malformed, Sampled};
 pub use conflict::{Key, UnitPath, Units};
-pub use coordinator::{Contextual, Coordinator, Deduplicated, Nonce, Novel, Prepared};
-pub use dead_letter::{
-    dead_letter_line, DeadLetterLog, MemoryDeadLetters, NoTriggerLog, TriggerLog,
-    DEAD_LETTER_PREFIX,
-};
+pub use coordinator::Nonce;
+pub use dead_letter::{dead_letter_line, DeadLetterLog, MemoryDeadLetters, DEAD_LETTER_PREFIX};
 pub use domain::{Conflicts, Decision, Domain, IngestCtx, State, Tx};
 pub use error::{
     ChainProblem, Failure, KernelError, PayloadError, Recovery, ReplayError, Step, StepError,
@@ -113,14 +109,13 @@ pub use error::{
 };
 pub use fixture::{assert_replay_fixtures, check_replay_fixtures, ReplayFixture};
 pub use handle::{
-    Chain, Handled, Kernel, Project, ProjectionRoute, ProjectorFailure, Recorded, Routes,
+    Handled, Kernel, Project, ProjectionRoute, ProjectorFailure, Recorded, Routes,
     DEFAULT_DEPTH_LIMIT,
 };
-pub use handler::{Admit, Committed, Gap, Handler, Position, Tracked};
+pub use handler::{Committed, Handler};
 pub use payload::{decode_as, pack, type_name, Decoder, Payload};
 pub use reaction::{
-    orders_owed, policy, projection, target_cover, Backlog, Order, Policy, Projection, Projector,
-    Reaction, Reactor,
+    policy, projection, target_cover, Order, Policy, Projection, Projector, Reaction, Reactor,
 };
 pub use registry::{Aggregate, Misconfigured, Registry};
 pub use store::{
@@ -165,11 +160,11 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn annals_diagnostic::Diagnostic>
         root: Some(v1::Uuid::from_bytes([7; 16])),
         edition: Some("what-if".to_string()),
     };
-    let gap = Gap {
-        expected: 3,
-        found: 5,
+    let missing = WireError::Missing {
+        message: "toy.v1.Deposited",
+        field: "at",
     };
-    let report = || Report::of(&gap);
+    let report = || Report::of(&missing);
     let domain = || "account".to_string();
     let malformed = [
         Malformed::NoCover,
@@ -231,10 +226,6 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn annals_diagnostic::Diagnostic>
             stream: stream(),
             command_id: v1::Uuid::from_bytes([1; 16]),
         },
-        KernelError::Gap {
-            stream: stream(),
-            gap: gap.clone(),
-        },
         KernelError::WrongDomain {
             stream: stream(),
             expected: "ledger",
@@ -287,10 +278,6 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn annals_diagnostic::Diagnostic>
         },
         StoreError::UnknownEdition { stream: stream() },
     ];
-    let missing = WireError::Missing {
-        message: "toy.v1.Deposited",
-        field: "at",
-    };
     let payload = [
         PayloadError::Invalid {
             type_url: "/toy.v1.Deposited".to_string(),
@@ -354,18 +341,17 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn annals_diagnostic::Diagnostic>
         source: "toy.v0.Credited".to_string(),
         error: report(),
     }));
-    samples.push(Box::new(Failure::<Gap>::Downstream {
+    samples.push(Box::new(Failure::<WireError>::Downstream {
         path: Vec::new(),
         error: StepError::Kernel(KernelError::ChainTooDeep { limit: 8 }),
     }));
-    samples.push(Box::new(Failure::<Gap>::Projection {
+    samples.push(Box::new(Failure::<WireError>::Projection {
         committed: Vec::new(),
         failures: vec![("balances", report())],
     }));
-    samples.push(Box::new(markup::Rejection::<Gap>::NoInstance {
+    samples.push(Box::new(markup::Rejection::<WireError>::NoInstance {
         stream: stream(),
     }));
-    samples.push(Box::new(gap));
     samples.push(Box::new(missing));
     samples.push(Box::new(WireError::UnknownEnum {
         message: "toy.v1.Closed",

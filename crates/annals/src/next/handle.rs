@@ -6,7 +6,7 @@
 //! then synchronously runs the policies reacting to its events, whose
 //! commands take the same five steps in their targets, whose events set off
 //! their own policies, and so on down the chain. Every event stays **staged
-//! in memory**, in a [`Chain`], across every stream involved; a later step
+//! in memory**, in the chain, across every stream involved; a later step
 //! sees the staged state (and command ids) of any stream an earlier step
 //! touched, the originating stream included. Nothing is appended until the
 //! whole chain has succeeded.
@@ -15,7 +15,7 @@
 //!   command's events on its stream, the answer is [`Handled::Duplicate`]
 //!   with them; nothing runs, nothing is written.
 //! - **Any failure fails it all.** A policy's command rejected, a malformed
-//!   policy book, a panicking ingest, a gap, the depth limit: the failure
+//!   policy book, a panicking ingest, the depth limit: the failure
 //!   goes back to the caller with the path to the step that failed
 //!   ([`Failure::Downstream`]), and nothing is appended anywhere, the
 //!   originating command's events included. What angzarr would dead-letter
@@ -39,8 +39,7 @@
 //! inside the write side's consistency boundary because it is the in-process
 //! runtime: one process, one transaction, no bus, no outbox and no retry
 //! loop. A reaction that must cross a process or a service boundary is not
-//! one of these; it reads the committed log (a [`Position`](super::Position)
-//! per stream, [`orders_owed`](super::orders_owed)) instead.
+//! one of these: that is angzarr's.
 //!
 //! Which policies run is a [`Routes`] table, keyed by source domain, so a
 //! chain can come back to a stream it already touched (A → B → A); a
@@ -56,17 +55,17 @@ use angzarr_proto::v1::{
 
 use super::check::{check, Checked, Sampled};
 use super::coordinator::{
-    deduplicate, expect, find_duplicate, load, novel, prepare, read, resolution, run_step,
-    unknown_domain, Contextual, Deduplicated,
+    deduplicate, expect, find_duplicate, load, resolution, run_step, unknown_domain, Contextual,
+    Deduplicated,
 };
-use super::dead_letter::{DeadLetterLog, NoTriggerLog, TriggerLog};
+use super::dead_letter::DeadLetterLog;
 use super::domain::Domain;
 use super::error::{Failure, KernelError, Step, StepError};
-use super::handler::{Admit, Gap, Handler, Position};
+use super::handler::Handler;
 use super::markup::ProjectionContext;
-use super::reaction::{policy, projection, Order, Policy, Projection};
+use super::reaction::{policy, projection, Policy, Projection};
 use super::registry::Registry;
-use super::store::{block, AsyncPort, AsyncUnitOfWork, EventStore, Port, SyncPort, UnitOfWork};
+use super::store::{block, AsyncPort, AsyncUnitOfWork, Port, SyncPort, UnitOfWork};
 use super::stream::{Envelope, Stream};
 use annals_diagnostic::Report;
 
@@ -80,7 +79,6 @@ pub const DEFAULT_DEPTH_LIMIT: usize = 8;
 pub struct Kernel<'k> {
     registry: &'k Registry,
     dead_letters: &'k dyn DeadLetterLog,
-    triggers: &'k dyn TriggerLog,
     limit: usize,
 }
 
@@ -139,15 +137,8 @@ impl<'k> Kernel<'k> {
         Kernel {
             registry,
             dead_letters,
-            triggers: &NoTriggerLog,
             limit: DEFAULT_DEPTH_LIMIT,
         }
-    }
-
-    /// Report each reaction command the chain dispatches to `triggers`.
-    pub fn triggers(mut self, triggers: &'k dyn TriggerLog) -> Kernel<'k> {
-        self.triggers = triggers;
-        self
     }
 
     /// Chains at most `limit` reaction steps deep.
@@ -162,7 +153,7 @@ impl<'k> Kernel<'k> {
 
     /// Handle one book for the `D` stream it names, with every reaction it
     /// sets off, as one atomic chain: [`check`](super::check) it,
-    /// [`Chain::execute`] it, [`Chain::append`] everything staged,
+    /// run it and its reactions, append everything staged,
     /// [`UnitOfWork::commit`], then run `projections`. Returns what the
     /// chain recorded, or the duplicate's events. On any failure nothing is
     /// committed and no projection runs. A cover of another domain than
@@ -296,59 +287,6 @@ impl<'k> Kernel<'k> {
         failures
     }
 
-    /// Deliver one owed order outside a chain (a catch-up from
-    /// [`orders_owed`](super::orders_owed)): the target's
-    /// [`Reaction::position`](super::Reaction::position) places the source
-    /// event first (a redelivery runs nothing and answers
-    /// [`Handled::Applied`] with nothing recorded; a gap is
-    /// [`KernelError::Gap`]); then the order runs as a chain of its own,
-    /// with the derived command id, so a delivery that already landed is
-    /// answered DUPLICATE.
-    pub fn deliver<P, U, Ps>(
-        &self,
-        unit: U,
-        routes: &Routes,
-        order: &Order<P>,
-        sampled: &Sampled,
-        projections: &mut Ps,
-    ) -> Result<Handled, Failure<<P::Target as Domain>::Rejection>>
-    where
-        P: Policy,
-        U: UnitOfWork,
-        Ps: Project,
-    {
-        let kernel = Failure::Kernel;
-        let checked = order
-            .check_logged(self.registry, self.dead_letters)
-            .map_err(|m| kernel(KernelError::Malformed(m)))?;
-        let mut unit = unit;
-        let mut port = SyncPort(&mut unit);
-        let mut run = Run::new(self, routes, sampled);
-        let identified = checked.clone().identify(sampled);
-        let loaded = block(read(&mut port, self.registry, &identified)).map_err(kernel)?;
-        let contextual = load(novel(identified, loaded), &mut run.nonces).map_err(kernel)?;
-        let head = contextual.head();
-        let target = prepare::<P::Target>(contextual, None, self.registry)
-            .map_err(kernel)?
-            .into_stream();
-        match place(P::position(target.state()), order) {
-            Ok(Admit::Next) => {}
-            Ok(Admit::Redelivery) => return Ok(Handled::Applied(Recorded::default())),
-            Err(gap) => {
-                return Err(kernel(KernelError::Gap {
-                    stream: order.cover().clone(),
-                    gap,
-                }))
-            }
-        }
-        run.stage(order.cover().clone(), head, Box::new(target), Vec::new());
-        let handled = block(run.finish::<P::Target, _>(&mut port, checked))?;
-        if let Handled::Applied(_) = handled {
-            unit.commit().map_err(|e| kernel(KernelError::Store(e)))?;
-        }
-        Ok(self.project(handled, projections))
-    }
-
     /// Step 1 for a `D` stream: the book checked, and naming a `D` stream.
     fn check<D: Domain>(&self, book: CommandBook) -> Result<Checked, Failure<D::Rejection>> {
         let checked =
@@ -468,19 +406,11 @@ struct Staged {
 /// command to the step running now, and what the application sampled for
 /// the whole chain (one instant; one minted command id, for the
 /// originating command only).
-pub struct Chain<'u, U> {
-    unit: &'u mut U,
-    run: Run<'u>,
-}
-
-/// A chain's state, apart from its unit of work, so the same chain runs
-/// over the sync and the async port.
 struct Run<'u> {
     registry: &'u Registry,
     routes: &'u Routes,
     sampled: &'u Sampled,
     dead_letters: &'u dyn DeadLetterLog,
-    triggers: &'u dyn TriggerLog,
     /// Looked up only; the order streams are appended in is `order`.
     staged: HashMap<Cover, Staged>,
     order: Vec<Cover>,
@@ -488,67 +418,6 @@ struct Run<'u> {
     limit: usize,
     /// Mints each delivery's [`Nonce`](super::Nonce).
     nonces: u64,
-}
-
-impl<'u, U> Chain<'u, U> {
-    /// An empty chain over `unit`.
-    pub fn new(
-        kernel: &Kernel<'u>,
-        unit: &'u mut U,
-        routes: &'u Routes,
-        sampled: &'u Sampled,
-    ) -> Chain<'u, U> {
-        Chain {
-            unit,
-            run: Run::new(kernel, routes, sampled),
-        }
-    }
-
-    /// `stream`'s state as the chain has it, staged events folded in, if
-    /// the chain has touched it and it is a `D` stream.
-    pub fn state<D: Domain>(&self, stream: &Cover) -> Option<&D::State> {
-        let staged = self.run.staged.get(stream)?.stream.as_ref()?;
-        staged.downcast_ref::<Stream<D>>().map(Stream::state)
-    }
-
-    /// The path from the originating command to the step running now.
-    pub fn path(&self) -> &[Step] {
-        &self.run.path
-    }
-
-    /// Run a checked command through steps 2 to 5 in the stream it names
-    /// (deduplicating against the store and the chain's staged events;
-    /// loading from the store the first time the chain touches the stream,
-    /// from the staged copy after), stage its events, then run the routes
-    /// for `D` on them, depth first. The chain's first `execute` is the
-    /// originating command (a client's command or fact); a route's are the
-    /// rest, always policy commands. `Some`: step 3 found the command's
-    /// events, which are the answer, and nothing was staged.
-    pub fn execute<D>(
-        &mut self,
-        command: Checked,
-    ) -> Result<Option<EventBook>, Failure<D::Rejection>>
-    where
-        D: Domain,
-        U: EventStore,
-    {
-        block(
-            self.run
-                .execute::<D, _>(&mut SyncPort(&mut *self.unit), command),
-        )
-    }
-
-    /// The whole chain succeeded: append every staged stream through the
-    /// unit of work, in the order first touched, each expecting the length
-    /// it was loaded at. A conflict on any stream is a
-    /// [`StoreError::Conflict`](super::StoreError::Conflict) naming it; the
-    /// caller then drops the unit of work uncommitted.
-    pub fn append(self) -> Result<Recorded, KernelError>
-    where
-        U: UnitOfWork,
-    {
-        block(self.run.append(&mut SyncPort(self.unit)))
-    }
 }
 
 /// What step 4 found for a command in a chain.
@@ -565,7 +434,6 @@ impl<'u> Run<'u> {
             routes,
             sampled,
             dead_letters: kernel.dead_letters,
-            triggers: kernel.triggers,
             staged: HashMap::new(),
             order: Vec::new(),
             path: Vec::new(),
@@ -599,9 +467,9 @@ impl<'u> Run<'u> {
         let Some(staged_pages) = self.staged.get(&cover).map(|s| &s.pages) else {
             // Not yet in the chain: load, then look up (step 3), then step 4.
             return match deduplicate(port, self.registry, command).await? {
-                Deduplicated::Duplicate { events, .. } => Ok(Found::Duplicate(events)),
+                Deduplicated::Duplicate { events } => Ok(Found::Duplicate(events)),
                 Deduplicated::Novel(novel) => {
-                    let contextual = load(novel, &mut self.nonces)?;
+                    let contextual = load(*novel, &mut self.nonces)?;
                     Ok(Found::Novel(Box::new(contextual), None))
                 }
             };
@@ -661,7 +529,12 @@ impl<'u> Run<'u> {
         }
     }
 
-    /// See [`Chain::execute`].
+    /// Run a checked command through steps 2 to 5 in the stream it names
+    /// (deduplicating against the store and the chain's staged events;
+    /// loading from the store the first time the chain touches the stream,
+    /// from the staged copy after), stage its events, then run the routes
+    /// for `D` on them, depth first. `Some`: step 3 found the command's
+    /// events, which are the answer, and nothing was staged.
     async fn execute<D: Domain, P: Port>(
         &mut self,
         port: &mut P,
@@ -739,10 +612,6 @@ impl<'u> Run<'u> {
                 ));
             }
             let command = command.identify(self.sampled);
-            if let Some(trigger) = command.causation_id() {
-                self.triggers
-                    .dispatched(trigger, command.command_id(), command.cover());
-            }
             let (contextual, staged) = match self.find(port, command).await {
                 Ok(Found::Duplicate(_)) => continue,
                 Ok(Found::Novel(contextual, staged)) => (contextual, staged),
@@ -768,7 +637,11 @@ impl<'u> Run<'u> {
         Ok(())
     }
 
-    /// See [`Chain::append`].
+    /// The whole chain succeeded: append every staged stream through the
+    /// unit of work, in the order first touched, each expecting the length
+    /// it was loaded at. A conflict on any stream is a
+    /// [`StoreError::Conflict`](super::StoreError::Conflict) naming it; the
+    /// caller then drops the unit of work uncommitted.
     async fn append<P: Port>(mut self, port: &mut P) -> Result<Recorded, KernelError> {
         let mut recorded = Recorded::default();
         for cover in std::mem::take(&mut self.order) {
@@ -910,24 +783,9 @@ impl<D: Domain, P: Projection<D>> Project for ProjectionRoute<'_, D, P> {
     }
 }
 
-/// Where `order` falls against its target's `position`, per target: at or
-/// before the last source sequence it holds, a redelivery; past it while
-/// the order owed before this one ([`Order::previous`]) is not yet held, a
-/// gap naming that one; otherwise the next. Sequences the target was never
-/// owed (a filtered policy) are no gap.
-fn place<P: Policy>(position: Position, order: &Order<P>) -> Result<Admit, Gap> {
-    let sequence = order.trigger().sequence;
-    if position.last().is_some_and(|last| sequence <= last) {
-        return Ok(Admit::Redelivery);
-    }
-    match order.previous() {
-        Some(previous) if position.last().is_none_or(|last| last < previous) => Err(Gap {
-            expected: previous,
-            found: sequence,
-        }),
-        _ => Ok(Admit::Next),
-    }
-}
+#[cfg(test)]
+#[path = "chain.test.rs"]
+pub(crate) mod chain;
 
 #[cfg(test)]
 #[path = "handle.test.rs"]

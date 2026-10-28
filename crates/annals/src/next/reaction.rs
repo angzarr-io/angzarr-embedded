@@ -1,9 +1,8 @@
 //! Reactions to committed events: policies and projections, over one base.
 //!
 //! Every kind takes the same input, a [`Committed`] event (the stream, the
-//! sequence, the metadata, the payload, the state just after it), under the
-//! same [`Position`] contract (next, redelivery, gap), and runs through the
-//! same dispatch: each becomes a [`Handler`] of its source.
+//! sequence, the metadata, the payload, the state just after it), and runs
+//! through the same dispatch: each becomes a [`Handler`] of its source.
 //!
 //! - [`Policy`] (Event Storming's term; an *automation* in Event
 //!   Modeling): event → **commands** to target streams. A command goes
@@ -36,18 +35,7 @@
 //! forwards content changes to its draw systems and keeps its invites to
 //! itself. A target's owed orders are the source events it was targeted
 //! for, in source order.
-//!
-//! **Contiguity is per target.** Each [`Order`] names the source sequence
-//! of the order owed to the same target just before it
-//! ([`Order::previous`]), so a delivery outside a chain is placed against
-//! the target's own [`Position`] (the last source sequence it holds, a fold
-//! of its own stream): at or before it, a redelivery; after it while the
-//! previous owed order is not yet held, a [`Gap`](super::Gap) (deliver that
-//! one first); otherwise the next. Sequences a target was never owed are no
-//! gap. Inside a chain every order is delivered with its trigger, so
-//! neither can happen there.
 
-use std::collections::BTreeMap;
 use std::marker::PhantomData;
 
 use angzarr_proto::v1::{command_page, Command, CommandBook, CommandPage, Cover, EventRef, Uuid};
@@ -55,17 +43,15 @@ use angzarr_proto::v1::{command_page, Command, CommandBook, CommandPage, Cover, 
 use super::check::{check_reaction, Checked, Malformed};
 use super::dead_letter::{write_dead_letter, DeadLetterLog};
 use super::domain::Domain;
-use super::error::KernelError;
-use super::handler::{Committed, Handler, Position};
+use super::handler::{Committed, Handler};
 use super::payload::Payload;
 use super::registry::Registry;
-use super::stream::Stream;
 
 // ---------------------------------------------------------------- the base
 
 /// What a policy is over: a source, a target domain, and the targets each
 /// source event is owed to. Stateless: live targets are a fold of the
-/// source, and each target's position a fold of the target.
+/// source.
 pub trait Reaction {
     type Source: Domain;
     type Target: Domain;
@@ -96,13 +82,6 @@ pub trait Reaction {
     /// Its cover is `(Target::NAME, the source's edition, root)`: see
     /// [`target_cover`].
     fn root(target: &Self::TargetId) -> Uuid;
-
-    /// The last source sequence `target` holds, read off its fold. The
-    /// source sequence travels in the command's payload for this, since
-    /// `apply` never sees metadata. [`Position::START`] means the target has
-    /// not been created: every delivery goes to its decide, which creates
-    /// it or refuses.
-    fn position(target: &<Self::Target as Domain>::State) -> Position;
 }
 
 /// Event → commands. Each command is decided by its target and may be
@@ -119,9 +98,7 @@ pub trait Policy: Reaction {
 }
 
 /// Event → read model. Produces nothing. Read models are replayed from the
-/// stream on every read for now ([`Stream::dispatch`] from 0); a stored
-/// read model would keep a [`Position`] per stream (see
-/// [`Tracked`](super::Tracked)).
+/// stream on every read ([`Stream::dispatch`](super::Stream::dispatch) from 0).
 pub trait Projection<D: Domain> {
     fn project(&mut self, committed: &Committed<'_, D>);
 }
@@ -137,9 +114,6 @@ pub struct Order<P: Policy> {
     pub(crate) trigger: EventRef,
     pub(crate) index: u32,
     pub(crate) correlation_id: Uuid,
-    /// The source sequence of the order owed to the same target just before
-    /// this one, if known: `None` for the first one, and inside a chain.
-    pub(crate) previous: Option<u64>,
 }
 
 impl<P: Policy> Order<P> {
@@ -170,13 +144,6 @@ impl<P: Policy> Order<P> {
     /// The trigger's correlation, which the command keeps.
     pub fn correlation_id(&self) -> &Uuid {
         &self.correlation_id
-    }
-
-    /// The source sequence of the order owed to this target just before
-    /// this one ([`orders_owed`] sets it; `None` for a target's first order
-    /// and inside a chain): what a delivery must find the target holding.
-    pub fn previous(&self) -> Option<u64> {
-        self.previous
     }
 
     /// The order as a book, checked through the kernel's reaction entry:
@@ -220,9 +187,6 @@ impl<P: Policy> Order<P> {
         }
     }
 }
-
-/// Everything owed, by target, each target's in source order.
-pub type Backlog<P> = BTreeMap<<P as Reaction>::TargetId, Vec<Order<P>>>;
 
 /// A policy as a [`Handler`] of its source: each committed event becomes
 /// one [`Order`] per target, handed to `sink` in target order.
@@ -271,7 +235,7 @@ pub fn target_cover<R: Reaction>(source: &Cover, target: &R::TargetId) -> Cover 
     }
 }
 
-/// The one mechanism under the reactor, the chain and the backlog: what `P`
+/// The one mechanism under the reactor and the chain: what `P`
 /// owes for `committed`, one order per target, the `index`th target's
 /// order index `index`.
 fn owe<P: Policy>(committed: &Committed<'_, P::Source>) -> Vec<Order<P>> {
@@ -283,36 +247,7 @@ fn owe<P: Policy>(committed: &Committed<'_, P::Source>) -> Vec<Order<P>> {
             trigger: committed.event_ref(),
             index,
             correlation_id: committed.envelope.correlation_id().clone(),
-            previous: None,
             target,
         })
         .collect()
-}
-
-/// Every order a policy owes every target, from each target's position (a
-/// target absent from `positions` is owed everything it was targeted for),
-/// in one fold of the source, grouped by target, each group in source
-/// order, each order naming the one owed to its target before it
-/// ([`Order::previous`]), whether that one is still owed or already held.
-pub fn orders_owed<P: Policy>(
-    source: &Stream<P::Source>,
-    registry: &Registry,
-    positions: &BTreeMap<P::TargetId, Position>,
-) -> Result<Backlog<P>, KernelError> {
-    let mut backlog = Backlog::<P>::new();
-    let mut last: BTreeMap<P::TargetId, u64> = BTreeMap::new();
-    let mut owing = |committed: &Committed<'_, P::Source>| {
-        let sequence = committed.sequence();
-        for mut order in owe::<P>(committed) {
-            order.previous = last.insert(order.target.clone(), sequence);
-            if positions
-                .get(&order.target)
-                .is_none_or(|p| sequence >= p.next())
-            {
-                backlog.entry(order.target.clone()).or_default().push(order);
-            }
-        }
-    };
-    source.dispatch(source.first(), registry, &mut [&mut owing])?;
-    Ok(backlog)
 }

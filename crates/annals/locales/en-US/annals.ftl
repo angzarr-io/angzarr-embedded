@@ -5,14 +5,6 @@
 annals-replay-out-of-sequence = event { $index } claims sequence number { $found }, not { $index }
 annals-replay-cause-not-earlier = event { $seq } names event { $cause } as its cause, which is not earlier
 
-annals-store-conflict =
-    stream { $stream } holds { $actual ->
-        [one] one event
-       *[other] { $actual } events
-    }, not the { $expected } expected: someone else appended first
-
-annals-policy-gap = source event { $found } skips ahead of event { $expected }, the next expected
-
 ## The audited kernel, annals::next. $stream names a stream as domain/root,
 ## with @edition outside the main timeline.
 
@@ -68,7 +60,6 @@ annals-next-unknown-type = stream { $stream }'s domain does not decode the type 
 annals-next-invalid-payload = a { $type_url } for stream { $stream } is not a valid value: { $reason }
 annals-next-upcast = upcasting a payload for stream { $stream } failed: { $error }
 annals-next-ingest-panicked = ingesting fact { $command_id } into stream { $stream } panicked: a bug
-annals-next-gap = a delivery to stream { $stream } skips ahead to { $found } from { $expected }, the next due
 annals-next-wrong-domain = stream { $stream } was given to the { $expected } domain's code
 annals-next-chain-too-deep = the command chain went deeper than its limit of { $limit }
 annals-next-too-many-steps = the decision on stream { $stream } ran more than its limit of { $limit } continuation steps
@@ -108,4 +99,3 @@ annals-next-misconfigured-bad-state-descriptor = domain "{ $domain }"'s state de
 annals-next-misconfigured-unsupported-resolution = domain "{ $domain }" is configured { $resolution }, which its state does not support
 annals-next-misconfigured-unsupported-command-resolution = domain "{ $domain }" configures { $command_type } { $resolution }, which its state does not support
 
-annals-next-position-gap = event { $found } came where { $expected } was due: catch up first

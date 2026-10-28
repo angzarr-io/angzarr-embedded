@@ -24,8 +24,7 @@ use crate::next::v1::{
 };
 use crate::next::{
     ids, pack, Any, Committed, Decoder, Domain, IngestCtx, Key, Payload, PayloadError, Policy,
-    Position, Reaction, Registry, Rulebook, Sampled, State, Timestamp, Tx, UnitPath, Units,
-    Upcaster,
+    Reaction, Registry, Rulebook, Sampled, State, Timestamp, Tx, UnitPath, Units, Upcaster,
 };
 use annals_diagnostic::{Arg, Diagnostic, Report};
 
@@ -1118,13 +1117,6 @@ impl Reaction for Bookkeeping {
 
     fn root((): &()) -> Uuid {
         ledger_root()
-    }
-
-    fn position(target: &LedgerState) -> Position {
-        match target.next_source {
-            0 => Position::START,
-            next => Position::at(next - 1),
-        }
     }
 }
 

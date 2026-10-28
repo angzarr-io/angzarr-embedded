@@ -93,7 +93,7 @@ mod tx {
     use crate::next::v1::{ConflictResolution, StateDescriptor, StateOptions, Uuid};
     use crate::next::{
         ids, pack, Committed, Decoder, Domain, InMemoryStore, IngestCtx, Kernel, MemoryDeadLetters,
-        Payload, PayloadError, Policy, Position, Reaction, Registry, Rulebook, State, Tx, Upcaster,
+        Payload, PayloadError, Policy, Reaction, Registry, Rulebook, State, Tx, Upcaster,
     };
 
     use crate::next::toys::{at, command, cover, fees, opened, Account, AccountCmd, Edit};
@@ -317,10 +317,6 @@ mod tx {
         fn root((): &()) -> Uuid {
             probe_root()
         }
-
-        fn position(_: &ProbeState) -> Position {
-            Position::START
-        }
     }
 
     impl Policy for Probing {
@@ -427,10 +423,6 @@ mod tx {
         fn root((): &()) -> Uuid {
             crate::next::toys::ledger_root()
         }
-
-        fn position(_: &crate::next::toys::LedgerState) -> Position {
-            Position::START
-        }
     }
 
     impl Policy for ProbeToLedger {
@@ -462,7 +454,8 @@ mod tx {
         let kernel = Kernel::new(&registry, &log).limit(2);
         let mut unit = store.begin();
         let sampled = at(50);
-        let mut chain = crate::next::Chain::new(&kernel, &mut unit, &routes, &sampled);
+        let mut chain =
+            crate::next::handle::chain::Chain::new(&kernel, &mut unit, &routes, &sampled);
         chain
             .execute::<Account>(crate::next::check(deposit(), &registry).unwrap())
             .unwrap();
@@ -500,8 +493,9 @@ mod tx {
 
     #[test]
     fn a_nonce_acknowledges_only_the_delivery_it_was_issued_for() {
+        use crate::next::coordinator::{steps::Coordinator, Deduplicated};
         use crate::next::v1::ConflictResolution;
-        use crate::next::{check, Coordinator, Deduplicated, Failure, KernelError};
+        use crate::next::{check, Failure, KernelError};
 
         let registry = registry();
         let log = MemoryDeadLetters::new();

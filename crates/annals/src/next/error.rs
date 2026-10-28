@@ -17,7 +17,6 @@ use angzarr_proto::v1::{Cover, EventBook, EventRef, Uuid};
 use annals_diagnostic::{Arg, Diagnostic, Report};
 
 use super::check::Malformed;
-use super::handler::Gap;
 
 /// Why a command did not commit.
 #[derive(Clone, PartialEq, Debug)]
@@ -113,11 +112,6 @@ pub enum KernelError {
     IngestPanicked {
         stream: Cover,
         command_id: Uuid,
-    },
-    /// A delivery to `stream` skipped ahead of its position.
-    Gap {
-        stream: Cover,
-        gap: Gap,
     },
     /// A book or a log for `stream` was given to an `expected` domain's
     /// code.
@@ -314,9 +308,7 @@ impl KernelError {
             KernelError::Malformed(_)
             | KernelError::UnknownType { .. }
             | KernelError::InvalidPayload { .. } => Recovery::Invalid,
-            KernelError::Stale { .. }
-            | KernelError::Unresolved { .. }
-            | KernelError::Gap { .. } => Recovery::Retry,
+            KernelError::Stale { .. } | KernelError::Unresolved { .. } => Recovery::Retry,
             KernelError::Store(error) => error.recovery(),
             KernelError::Upcast { .. }
             | KernelError::IngestPanicked { .. }
@@ -484,13 +476,6 @@ impl fmt::Display for KernelError {
                 "ingesting fact {command_id} into stream {} panicked: a bug",
                 cover_text(stream)
             ),
-            KernelError::Gap { stream, gap } => write!(
-                f,
-                "a delivery to stream {} skips ahead to {} from {}, the next due",
-                cover_text(stream),
-                gap.found,
-                gap.expected
-            ),
             KernelError::WrongDomain { stream, expected } => write!(
                 f,
                 "stream {} was given to the {expected} domain's code",
@@ -529,7 +514,6 @@ impl Diagnostic for KernelError {
             KernelError::InvalidPayload { .. } => "annals-next-invalid-payload",
             KernelError::Upcast { .. } => "annals-next-upcast",
             KernelError::IngestPanicked { .. } => "annals-next-ingest-panicked",
-            KernelError::Gap { .. } => "annals-next-gap",
             KernelError::WrongDomain { .. } => "annals-next-wrong-domain",
             KernelError::ChainTooDeep { .. } => "annals-next-chain-too-deep",
             KernelError::TooManySteps { .. } => "annals-next-too-many-steps",
@@ -582,11 +566,6 @@ impl Diagnostic for KernelError {
             } => vec![
                 ("stream", stream(s)),
                 ("command_id", command_id.to_string().into()),
-            ],
-            KernelError::Gap { stream: s, gap } => vec![
-                ("stream", stream(s)),
-                ("expected", gap.expected.into()),
-                ("found", gap.found.into()),
             ],
             KernelError::WrongDomain {
                 stream: s,
