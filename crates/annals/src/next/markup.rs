@@ -593,8 +593,8 @@ impl<C> CommandRefused<C> {
     }
 }
 
-/// What a TRANSLATING saga's callback reads (`#[on_refused(C)]` on a
-/// `#[saga(.., translate(C))]`): angzarr's `Refusal { event, command,
+/// What a saga's translating callback reads (`#[on_refused(C)]` on the
+/// saga's impl): angzarr's `Refusal { event, command,
 /// response }`, the command decoded. The callback returns a fact of the
 /// saga's source domain, so the source never refers to the target's
 /// types.
@@ -654,12 +654,15 @@ impl<C> Refusal<C> {
 /// refused command's id ([`Saga::on_refused`]). By default the generated
 /// code passes it through as angzarr's `CommandRefused { command,
 /// refusal, trigger }`, which the source handles in `#[on_refused(C)]`;
-/// for the commands the saga's markup selects for TRANSLATE
-/// (`#[saga(.., translate(C, ..))]`), its own `#[on_refused(C)]` callback
-/// returns a domestic fact instead. The mode is chosen in the markup, at
-/// compile time (angzarr-cli's refusal switch; annals' scaffold writes the
-/// attribute): nothing about it is visible at run time beyond which fact
-/// arrives.
+/// for each command the saga has its own `#[on_refused(C)]` callback for,
+/// TRANSLATE: the callback returns a domestic fact instead. The callback's
+/// presence is the selection, fixed at compile time (angzarr-cli's refusal
+/// switch: annals' scaffold writes the callback stub, or does not), and
+/// nothing about it is visible at run time beyond which fact arrives.
+/// Deleting a callback silently reverts its command to pass-through: a
+/// run-time dead letter if the source has no handler for it (a trade-off
+/// the owner accepted; RULED 2026-10-28, revised 2026-10-28 from a
+/// `translate(..)` argument).
 ///
 /// **A proposal**: the macro emits it with empty constants and a stub
 /// `on_refused`; the dispatch is the linked angzarr-router's (blocked).
@@ -673,7 +676,8 @@ pub trait Saga: Send + Sync + 'static {
     type Target: Domain;
     /// The events it reacts to, in marker order.
     const REACTS: &'static [TypeName];
-    /// The commands selected for translate, in order.
+    /// The commands it translates: those its `#[on_refused]` callbacks
+    /// name, in marker order.
     const TRANSLATES: &'static [TypeName];
 
     /// angzarr's `SagaService.OnRefused`: the refusal fact's payload for
