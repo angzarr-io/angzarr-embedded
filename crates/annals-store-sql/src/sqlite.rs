@@ -534,7 +534,10 @@ impl AsyncStore for SqliteStore {
 }
 
 /// A unit of work: one SQLite transaction, committed by
-/// [`AsyncUnitOfWork::commit`] and rolled back if dropped.
+/// [`AsyncUnitOfWork::commit`] and rolled back if dropped. The store keeps
+/// no edition registry, so, like a read unit, it works on main alone: it
+/// refuses a stream in any edition (`StoreError::UnknownEdition`) and
+/// lists none.
 pub struct SqliteUnit<'s> {
     tx: Result<Transaction<'s, Sqlite>, StoreError>,
 }
@@ -556,11 +559,11 @@ impl AsyncEventStore for SqliteUnit<'_> {
         expected: u64,
         pages: &[EventPage],
     ) -> Result<u64, StoreError> {
-        append(self.conn()?, stream, expected, pages).await
+        append(self.conn()?, main_only(stream)?, expected, pages).await
     }
 
     async fn read_from(&mut self, stream: &Cover, from: u64) -> Result<Option<Slice>, StoreError> {
-        read_from(self.conn()?, stream, from, || {}).await
+        read_from(self.conn()?, main_only(stream)?, from, || {}).await
     }
 
     async fn find_command(
@@ -568,6 +571,7 @@ impl AsyncEventStore for SqliteUnit<'_> {
         stream: &Cover,
         command_id: &Uuid,
     ) -> Result<Vec<EventPage>, StoreError> {
+        let stream = main_only(stream)?;
         select_pages(
             self.conn()?,
             stream,
@@ -577,11 +581,13 @@ impl AsyncEventStore for SqliteUnit<'_> {
     }
 
     async fn covers(&mut self, domain: &str) -> Result<Vec<Cover>, StoreError> {
-        covers(self.conn()?, domain).await
+        let mut covers = covers(self.conn()?, domain).await?;
+        covers.retain(|c| c.edition.is_none());
+        Ok(covers)
     }
 
     async fn read_snapshot(&mut self, stream: &Cover) -> Result<Option<Snapshot>, StoreError> {
-        read_snapshot(self.conn()?, stream).await
+        read_snapshot(self.conn()?, main_only(stream)?).await
     }
 
     /// Inside the unit's transaction: it lands at commit.
@@ -592,7 +598,7 @@ impl AsyncEventStore for SqliteUnit<'_> {
     ) -> Result<(), StoreError> {
         execute(
             self.conn()?,
-            statements::upsert_snapshot::<SqliteDialect>(stream, snapshot)?,
+            statements::upsert_snapshot::<SqliteDialect>(main_only(stream)?, snapshot)?,
         )
         .await
         .map(drop)
@@ -666,12 +672,19 @@ impl AsyncReadUnit for SqliteRead<'_> {
     }
 
     async fn read_from(&mut self, stream: &Cover, from: u64) -> Result<Option<Slice>, StoreError> {
-        if stream.edition.is_some() {
-            return Err(StoreError::UnknownEdition {
-                stream: stream.clone(),
-            });
-        }
-        read_from(self.conn()?, stream, from, || {}).await
+        read_from(self.conn()?, main_only(stream)?, from, || {}).await
+    }
+}
+
+/// `stream`, refused unless it is on the main timeline: the store keeps no
+/// edition registry, so it has created no edition, and its units (read-only
+/// or not) refuse a stream in any (`StoreError::UnknownEdition`).
+fn main_only(stream: &Cover) -> Result<&Cover, StoreError> {
+    match stream.edition {
+        Some(_) => Err(StoreError::UnknownEdition {
+            stream: stream.clone(),
+        }),
+        None => Ok(stream),
     }
 }
 

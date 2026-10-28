@@ -51,6 +51,9 @@
 //! the store never created is refused ([`StoreError::UnknownEdition`],
 //! angzarr's EA-2): such a stream is neither read nor listed. A store with
 //! no edition registry has created none, so its read units read main alone.
+//! Its units of work likewise: a command naming an edition is refused, and
+//! never given a stream of its own with no main history. The store's own
+//! operations, outside any unit, take any edition.
 //!
 //! **Watching** is opt-in as well: a store that can say cheaply whether
 //! anything was committed implements [`Watch`] (or [`AsyncWatch`]), whose
@@ -701,6 +704,19 @@ impl ReadStore for InMemoryStore {
     }
 }
 
+/// `stream`, refused unless it is on the main timeline: an
+/// [`InMemoryStore`] keeps no edition registry, so it has created no
+/// edition, and its units (read-only or not) refuse a stream in any
+/// ([`StoreError::UnknownEdition`]).
+fn main_only(stream: &Cover) -> Result<&Cover, StoreError> {
+    match stream.edition {
+        Some(_) => Err(StoreError::UnknownEdition {
+            stream: stream.clone(),
+        }),
+        None => Ok(stream),
+    }
+}
+
 /// A read-only unit of work over an [`InMemoryStore`]: it borrows the store,
 /// so the store cannot change under it. The store keeps no edition
 /// registry, so it has created no edition: the unit reads and lists main
@@ -716,16 +732,13 @@ impl ReadUnit for InMemoryRead<'_> {
     }
 
     fn read_from(&mut self, stream: &Cover, from: u64) -> Result<Option<Slice>, StoreError> {
-        if stream.edition.is_some() {
-            return Err(StoreError::UnknownEdition {
-                stream: stream.clone(),
-            });
-        }
-        Ok(self.0.slice_from(stream, from))
+        Ok(self.0.slice_from(main_only(stream)?, from))
     }
 }
 
 /// A unit of work over an [`InMemoryStore`]. See [`InMemoryStore::begin`].
+/// Like the store's read units, it works on main alone: it refuses a
+/// stream in any edition ([`StoreError::UnknownEdition`]) and lists none.
 pub struct InMemoryTx<'s> {
     store: &'s mut InMemoryStore,
     pending: BTreeMap<Key, Held>,
@@ -764,7 +777,7 @@ impl EventStore for InMemoryTx<'_> {
         expected: u64,
         pages: &[EventPage],
     ) -> Result<u64, StoreError> {
-        let length = self.pages(stream).len() as u64;
+        let length = self.pages(main_only(stream)?).len() as u64;
         check_append(stream, length, expected, pages)?;
         if !pages.is_empty() {
             let held = self.pending.entry(key(stream)).or_insert_with(|| Held {
@@ -777,7 +790,7 @@ impl EventStore for InMemoryTx<'_> {
     }
 
     fn read_from(&mut self, stream: &Cover, from: u64) -> Result<Option<Slice>, StoreError> {
-        let k = key(stream);
+        let k = key(main_only(stream)?);
         if self.stored(&k).is_none() && !self.pending.contains_key(&k) {
             return Ok(None);
         }
@@ -789,7 +802,7 @@ impl EventStore for InMemoryTx<'_> {
         stream: &Cover,
         command_id: &Uuid,
     ) -> Result<Vec<EventPage>, StoreError> {
-        let mut pages = self.pages(stream);
+        let mut pages = self.pages(main_only(stream)?);
         pages.retain(|p| produced_by(p, command_id));
         Ok(pages)
     }
@@ -802,14 +815,14 @@ impl EventStore for InMemoryTx<'_> {
             .filter(|(k, _)| !self.purged.contains(*k))
             .chain(&self.pending);
         let covers: BTreeMap<&Key, &Cover> = held
-            .filter(|(k, _)| k.0 == domain)
+            .filter(|(k, _)| k.0 == domain && k.1.is_none())
             .map(|(k, held)| (k, &held.stream))
             .collect();
         Ok(covers.into_values().cloned().collect())
     }
 
     fn read_snapshot(&mut self, stream: &Cover) -> Result<Option<Snapshot>, StoreError> {
-        let k = key(stream);
+        let k = key(main_only(stream)?);
         if let Some(snapshot) = self.snapshots.get(&k) {
             return Ok(Some(snapshot.clone()));
         }
@@ -821,7 +834,8 @@ impl EventStore for InMemoryTx<'_> {
 
     /// Held till commit, as an append is.
     fn write_snapshot(&mut self, stream: &Cover, snapshot: &Snapshot) -> Result<(), StoreError> {
-        self.snapshots.insert(key(stream), snapshot.clone());
+        self.snapshots
+            .insert(key(main_only(stream)?), snapshot.clone());
         Ok(())
     }
 }
