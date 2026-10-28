@@ -361,8 +361,10 @@ impl Registry {
     /// fact whose id is the refused command's: the source's handler for it
     /// records what the refusal means, and the chain commits. A refusal
     /// fact the source has no handler for is dead-lettered
-    /// (`annals-next-no-refusal-handler`), and the chain commits without
-    /// it. Registering one twice PANICS at startup.
+    /// and alerted (`annals-next-no-refusal-handler`), the chain commits
+    /// without it, and the call returns Ok, as on distributed angzarr
+    /// (RULED by the owner, 2026-10-28). Registering one twice PANICS at
+    /// startup.
     ///
     /// **A proposal**: `todo!()` (the dispatch is the linked router's).
     pub fn saga<S: super::markup::Saga>(&mut self, saga: S) -> &mut Self {

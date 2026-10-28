@@ -413,6 +413,10 @@ pub const MARKUP_RULES_VERSION: &str = "markup-1";
 ///   a business refusal, so a saga's refused command yields its refusal
 ///   fact like any other), recording nothing.
 ///
+/// A process manager whose `STARTS` is empty can never start an instance;
+/// annals does not refuse one (no compile error, no check): the warning is
+/// angzarr-cli's (RULED by the owner, 2026-10-28).
+///
 /// **A proposal**: the macro emits it with `STARTS` empty; the dispatch is
 /// the linked angzarr-router's (blocked).
 pub trait ProcessManager: Domain<State = Self, Rules = ()> {
@@ -486,7 +490,7 @@ impl TypedRefusal {
 /// - [`Rejection::Typed`]: a handler with `refuses` refused with one of
 ///   its listed objects.
 ///
-/// Either way the refusing domain records nothing.
+/// Either way the refusing domain records nothing. (RULED by the owner, 2026-10-28.)
 #[derive(Clone, PartialEq, Debug)]
 pub enum Rejection<R> {
     Message(R),
@@ -677,15 +681,16 @@ pub trait Saga: Send + Sync + 'static {
     /// { command, refusal, trigger }`, `refusal` the response's object
     /// still packed, `trigger` the triggering event's `EventRef`. Translate:
     /// the callback's domestic fact. The chain addresses it to the
-    /// trigger's stream and stamps its identity.
+    /// trigger's stream and stamps its identity. (RULED by the owner, 2026-10-28: the payload as
+    /// `Any`, not angzarr's `OnRefusedResponse` book.)
     fn on_refused(&self, refusal: &v1::Refusal) -> Any;
 }
 
 /// What a saga's `#[reacts(E)]` handler returns: commands for its target
 /// `T`, each with the root of the stream it is for. For a process manager
 /// that is the trigger's correlation ([`ReactionContext::correlation_id`]);
-/// any other root is a saga bug. Each command's type must be one `T`
-/// decides ([`Decides`]).
+/// any other root is a saga bug (RULED by the owner, 2026-10-28). Each command's type must be one
+/// `T` decides ([`Decides`]).
 ///
 /// **A proposal**: its bodies are `todo!()`.
 pub struct Commands<T: Domain> {
@@ -816,7 +821,7 @@ pub mod v1 {
 /// one instance per process, run after commit and awaited before the call
 /// returns. A failure is the caller's error,
 /// [`Failure::Projection`](super::Failure::Projection), carrying what was
-/// committed: the events stay committed. Projectors run on the async
+/// committed: the events stay committed (RULED by the owner, 2026-10-28). Projectors run on the async
 /// command path, the only one (async everywhere), so there is no guard
 /// against blocking on a synchronous one. Registered with
 /// [`Registry::projector`](super::Registry::projector).

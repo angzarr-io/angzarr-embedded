@@ -1884,6 +1884,21 @@ mod beside {
 // markup selects translate, its callback's domestic fact, `HoldLost`. The
 // dispatch is the linked angzarr-router's, blocked until the router is on
 // io.angzarr.v1: these pin the markup and the contract.
+//
+// RULED by the owner, 2026-10-28, and pinned below: (1) the translate
+// selection is the saga attribute, and a callback for a command not
+// selected does not compile; (2) typed refusals as `Refuses<Self, Cmd>` in
+// `markup::Rejection<R>`, the objects `Diagnostic`s; (3) one marker,
+// `#[on_refused]`, for the source's handler and the saga's callback; (4)
+// annals does not check that a PM declares a starting input (angzarr-cli
+// warns), so nothing here pins it; (5) `Failure::Projection` with the
+// committed books, `Recovery::Retry`; (6) a refusal with no handler: the
+// chain commits, the fact is dead-lettered and alerted, the call is Ok;
+// (7) the new error codes pinned as strings until their variants exist;
+// (8) `Saga::on_refused` answers the fact's payload as `Any`; (9) a
+// `CommandRefused` from outside the chain is accepted when its trigger
+// names the receiving stream; (10) a saga names a PM target's root with
+// the correlation.
 
 /// A buy-in: a process across the wallet, keyed by its correlation.
 #[derive(Clone, Default, PartialEq, Debug)]
@@ -2235,7 +2250,7 @@ mod process_manager {
 
     /// A command that is not a starting one, for a correlation with no
     /// instance, is refused (`PM_NO_INSTANCE`, a business refusal) and
-    /// records nothing.
+    /// records nothing. Its code is pinned as a string (RULED, 7).
     #[test]
     fn a_non_starting_command_for_no_instance_is_refused() {
         let registry = buy_ins();
@@ -2279,7 +2294,8 @@ mod process_manager {
     }
 
     /// A command whose correlation is set to anything but its cover's root
-    /// names no instance: malformed.
+    /// names no instance: malformed. Its code is pinned as a string
+    /// (RULED, 7).
     #[test]
     fn a_correlation_other_than_the_root_is_malformed() {
         let registry = buy_ins();
@@ -2413,7 +2429,7 @@ mod typed_refusals {
     use super::*;
 
     /// A handler with `refuses` refuses with one of its typed objects, as
-    /// the caller receives it; the wallet records nothing.
+    /// the caller receives it; the wallet records nothing (RULED, 2).
     #[test]
     fn a_typed_refusal_carries_its_object_and_records_nothing() {
         let registry = registry();
@@ -2531,7 +2547,8 @@ mod saga_refusals {
     /// Pass-through (the default): the generated `on_refused` answers
     /// angzarr's `CommandRefused { command, refusal, trigger }`, the
     /// refused command as sent, its typed object still packed, the trigger
-    /// the triggering event; the message stays behind.
+    /// the triggering event; the message stays behind. The answer is the
+    /// fact's payload, as `Any` (RULED, 8).
     #[test]
     fn pass_through_builds_command_refused_for_the_source() {
         let refusal = hold_refusal(&correlation(1), 30, insufficient(20));
@@ -2547,7 +2564,7 @@ mod saga_refusals {
     }
 
     /// Translate (selected in the markup): the callback reads the typed
-    /// object and answers the source's own fact.
+    /// object and answers the source's own fact (RULED, 1 and 3).
     #[test]
     fn translate_answers_the_callbacks_domestic_fact() {
         let refusal = hold_refusal(&correlation(1), 30, insufficient(20));
@@ -2576,7 +2593,8 @@ mod saga_refusals {
     /// The source's `#[on_refused(Hold)]` is chosen by the refused
     /// command's type, and reads the typed object: a `CommandRefused` of a
     /// hold, delivered to the buy-in its trigger names, records the
-    /// failure.
+    /// failure. Delivered from outside the chain, it is accepted because
+    /// its trigger names the receiving stream (RULED, 9).
     #[test]
     fn on_refused_dispatches_by_the_refused_commands_type() {
         let registry = buy_ins();
@@ -2606,7 +2624,7 @@ mod saga_refusals {
     }
 
     /// A refusal fact is accepted only by the exact stream its trigger
-    /// names: delivered anywhere else, it is malformed.
+    /// names: delivered anywhere else, it is malformed (RULED, 7 and 9).
     #[test]
     fn a_refusal_fact_for_another_stream_is_malformed() {
         let registry = buy_ins();
@@ -2644,7 +2662,8 @@ mod refusal_flow {
 
     /// A saga's command the target accepts flows on: the buy-in's hold is
     /// recorded on the wallet, and the wallet's saga records it back on
-    /// the buy-in of its correlation, all in one chain.
+    /// the buy-in of its correlation, all in one chain: the saga names the
+    /// buy-in's root with the correlation (RULED, 10).
     #[test]
     fn an_accepted_command_flows_through_both_sagas() {
         let (registry, mut store) = funded(false, 50);
@@ -2747,7 +2766,8 @@ mod refusal_flow {
     /// A refusal with no path: a hold on the wallet outside any buy-in is
     /// recorded, the wallet's saga sends `RecordHeld` to a correlation with
     /// no buy-in, which refuses it, and the wallet handles no refusal of
-    /// `RecordHeld`. The fact is dead-lettered; the hold stays committed.
+    /// `RecordHeld`. The chain commits (the hold stays committed), the
+    /// fact is dead-lettered, and the call is Ok (RULED, 6).
     #[test]
     fn a_refusal_with_no_handler_is_dead_lettered() {
         let (registry, mut store) = funded(false, 50);
@@ -2912,7 +2932,8 @@ mod projector {
 
     /// A failure is the caller's ERROR, raised after the commit: a
     /// `Failure::Projection` naming the projector and carrying what the
-    /// chain committed, and those events stay committed.
+    /// chain committed, and those events stay committed; its recovery is
+    /// a retry (RULED, 5).
     #[test]
     fn a_failure_is_the_callers_error_and_the_events_stay_committed() {
         use ::annals::next::EventStore;
@@ -2941,6 +2962,15 @@ mod projector {
         );
         let stored = store.read(wallet().cover()).unwrap().expect("the stream");
         assert_eq!(stored.pages.len(), 2, "and they stay committed");
+        assert_eq!(
+            Failure::<Rejection<Refused>>::Projection {
+                committed,
+                projector,
+                error,
+            }
+            .recovery(),
+            Recovery::Retry
+        );
     }
 
     #[test]

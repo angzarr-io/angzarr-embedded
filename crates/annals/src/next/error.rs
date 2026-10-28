@@ -37,7 +37,9 @@ pub enum Failure<R> {
     /// after the commit and awaited) failed with `error`. `committed` is
     /// what the chain appended, every stream's book: those events stay
     /// committed, and the projector's position does not pass the failing
-    /// event, so catch-up retries it.
+    /// event, so catch-up retries it. Its recovery is
+    /// [`Recovery::Retry`]: a retry is answered DUPLICATE. (RULED by the
+    /// owner, 2026-10-28.)
     Projection {
         committed: Vec<EventBook>,
         projector: &'static str,
