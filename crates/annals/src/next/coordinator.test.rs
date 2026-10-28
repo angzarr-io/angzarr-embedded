@@ -727,6 +727,37 @@ mod snapshot {
         );
     }
 
+    /// A snapshot at or past the head claims events the stream does not
+    /// hold (one a purge left, or one written ahead of its events): not
+    /// used, and the stream is read from its events. Used, the stream
+    /// would resume past its head, its next events would not run on from
+    /// it, and every later command on it would fail.
+    #[test]
+    fn a_snapshot_at_or_past_the_head_is_not_used() {
+        use crate::next::toys::handle;
+        let registry = registry();
+        for sequence in [2, 5] {
+            let mut store = InMemoryStore::new();
+            opened(&mut store, &registry, 1, 100);
+            let ahead = Snapshot {
+                sequence,
+                ..poisoned("v2", 999)
+            };
+            store.write_snapshot(&cover("account", 1), &ahead).unwrap();
+            assert_eq!(
+                load(&mut store, None),
+                (None, 100),
+                "a snapshot at {sequence}, the head at 2: read from the events"
+            );
+            for (n, head) in [(3, 3), (4, 4)] {
+                let deposit = command(cover("account", 1), AccountCmd::Deposit(1).to_any()).id(n);
+                let handled = handle::<Account>(&mut store, &registry, deposit, &at(20))
+                    .unwrap_or_else(|e| panic!("a snapshot at {sequence}, command {n}: {e}"));
+                assert_eq!(handled.books()[0].next_sequence, head);
+            }
+        }
+    }
+
     #[test]
     fn a_stream_snapshots_under_the_current_rules_version() {
         let registry = registry();

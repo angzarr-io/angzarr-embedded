@@ -880,3 +880,7 @@ async fn read_snapshot(
 #[cfg(test)]
 #[path = "sqlite.test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "sqlite_kernel.test.rs"]
+mod kernel_tests;
