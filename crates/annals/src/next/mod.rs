@@ -93,6 +93,11 @@ pub(crate) mod toys;
 #[path = "decorated.test.rs"]
 mod decorated;
 
+// The kernel over the shared SQLite adapter.
+#[cfg(test)]
+#[path = "sqlite.test.rs"]
+mod sqlite;
+
 // A store recording each write, and failing what a test says.
 #[cfg(test)]
 #[path = "recording.test.rs"]

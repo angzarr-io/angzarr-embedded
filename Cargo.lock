@@ -58,11 +58,13 @@ version = "0.1.0"
 dependencies = [
  "angzarr-ports",
  "angzarr-proto",
+ "angzarr-store-sqlite",
  "annals",
  "annals-diagnostic",
  "annals-macros",
  "prost",
  "prost-types",
+ "tokio",
 ]
 
 [[package]]

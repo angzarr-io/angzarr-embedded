@@ -25,13 +25,16 @@ prost-types = "0.14"
 # types.
 angzarr-ports = { git = "https://github.com/angzarr-io/angzarr-project", rev = "4be6a684d46110909811c0e30cf5a135d7134e6a" }
 
-# The kernel's tests run on angzarr-ports' MemoryStore, and a decorated
+# The kernel's tests run on angzarr-ports' MemoryStore and, on a tokio
+# runtime, on the shared SQLite adapter (sqlite.test.rs); and a decorated
 # aggregate (`next/decorated.test.rs`) through annals-macros, whose expansion
 # names `::annals`.
 [dev-dependencies]
 annals = { path = "." }
 angzarr-ports = { git = "https://github.com/angzarr-io/angzarr-project", rev = "4be6a684d46110909811c0e30cf5a135d7134e6a", features = ["memory"] }
 annals-macros = { path = "../annals-macros" }
+angzarr-store-sqlite = { path = "../angzarr-store-sqlite" }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
 
 [lints]
 workspace = true
