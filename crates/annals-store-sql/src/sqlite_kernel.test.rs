@@ -4,15 +4,15 @@
 
 use std::fmt;
 
-use annals::next::contract::cover;
+use annals::next::contract::{cover, cover_in};
 use annals::next::v1::{
     command_page, Command, CommandBook, CommandPage, ConflictResolution, Cover, Snapshot,
     StateDescriptor, StateOptions, Uuid,
 };
 use annals::next::{
     pack, Any, AsyncEventStore, AsyncStore, Domain, Failure, Handled, IngestCtx, Kernel,
-    MemoryDeadLetters, Payload, PayloadError, Registry, Routes, Rulebook, Sampled, State, Stream,
-    Timestamp, Tx, Upcaster,
+    KernelError, MemoryDeadLetters, Payload, PayloadError, Registry, Routes, Rulebook, Sampled,
+    State, StoreError, Stream, Timestamp, Tx, Upcaster,
 };
 use annals_diagnostic::{Arg, Diagnostic, Report};
 
@@ -223,4 +223,29 @@ async fn a_snapshot_at_or_past_the_head_is_not_used() {
         }
         assert_eq!(count(&mut store, &registry, &stream).await, 22);
     }
+}
+
+/// No edition registry exists yet, so the store's units have created no
+/// edition: a command naming one is refused, as a read naming one is,
+/// rather than given a stream of its own with no main history. (`annals`'
+/// own `a_command_to_an_edition_is_refused_and_writes_nothing` holds the
+/// in-memory store to the same.)
+#[tokio::test]
+async fn a_command_to_an_edition_is_refused_and_writes_nothing() {
+    let registry = registry();
+    let mut store = SqliteStore::open_in_memory().await.unwrap();
+    let stream = cover_in("tally", 1, "what-if");
+    let failure = handle(&mut store, &registry, add(stream.clone(), 1, 1))
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        matches!(
+            &failure,
+            Failure::Kernel(KernelError::Store(StoreError::UnknownEdition { stream: s }))
+                if *s == stream
+        ),
+        "{failure:?}"
+    );
+    assert_eq!(store.covers("tally").await, Ok(vec![]), "nothing written");
 }

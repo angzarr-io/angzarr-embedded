@@ -46,6 +46,9 @@ enum Bug {
     UnitSeesNoSnapshot,
     /// Its unit of work discards a snapshot written through it.
     UnitDropsTheSnapshot,
+    /// Its unit of work takes a stream in any edition, as the store's own
+    /// appends do.
+    UnitTakesAnyEdition,
     /// Its commit position never moves, whatever is committed.
     PositionStandsStill,
 }
@@ -307,7 +310,7 @@ impl Store for Broken<InMemoryStore> {
         };
         match self.bug {
             Bug::UnitWritesThrough => loose(&mut self.inner, true),
-            Bug::UnitIsBlind => loose(&mut self.inner, false),
+            Bug::UnitIsBlind | Bug::UnitTakesAnyEdition => loose(&mut self.inner, false),
             bug => BrokenUnit::Tx(Broken {
                 empty: self.empty.clone(),
                 inner: self.inner.begin(),
@@ -438,6 +441,14 @@ fn the_unit_snapshot_check_fails_a_unit_that_drops_its_snapshot() {
 }
 
 #[test]
+fn the_unit_edition_check_fails_a_unit_that_takes_any_edition() {
+    fails_on!(
+        a_unit_of_work_refuses_an_edition_never_created,
+        UnitTakesAnyEdition,
+    );
+}
+
+#[test]
 fn the_commit_position_check_fails_a_position_that_stands_still() {
     fails_on!(
         the_commit_position_rises_with_every_commit,
@@ -464,5 +475,6 @@ fn a_broken_store_with_no_bug_passes_every_check() {
     block(a_unit_of_work_writes_its_snapshot_at_commit_or_not_at_all(
         fresh(),
     ));
+    block(a_unit_of_work_refuses_an_edition_never_created(fresh()));
     block(the_commit_position_rises_with_every_commit(fresh()));
 }

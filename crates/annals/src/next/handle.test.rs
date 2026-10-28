@@ -158,24 +158,40 @@ fn a_chain_deeper_than_its_limit_is_refused() {
     assert_eq!(failure.recovery(), Recovery::Bug);
 }
 
+/// No edition registry exists yet, so the store's units have created no
+/// edition: a command naming one is refused, as a read naming one is,
+/// rather than given a stream of its own with no main history.
 #[test]
-fn a_chain_in_an_edition_stays_in_it() {
+fn a_command_to_an_edition_is_refused_and_writes_nothing() {
     let registry = registry();
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry, &log);
     let mut store = InMemoryStore::new();
     let routes = Routes::new().policy::<Bookkeeping>();
-    let open = command(cover_in("account", 1, "what-if"), AccountCmd::Open.to_any());
-    let handled = kernel
+    let stream = cover_in("account", 1, "what-if");
+    let open = command(stream.clone(), AccountCmd::Open.to_any());
+    let failure = kernel
         .handle::<Account, _, _>(store.begin(), &routes, open, &at(30), &mut ())
+        .err()
         .unwrap();
-    for book in handled.books() {
-        assert_eq!(
-            book.cover.unwrap().edition.as_deref(),
-            Some("what-if"),
-            "a reaction never crosses timelines"
-        );
-    }
+    assert_eq!(
+        failure,
+        Failure::Kernel(KernelError::Store(
+            crate::next::StoreError::UnknownEdition { stream }
+        ))
+    );
+    assert_eq!(failure.recovery(), Recovery::Invalid);
+    assert_eq!(store.streams(), [], "nothing written");
+}
+
+#[test]
+fn a_reaction_targets_its_sources_edition() {
+    let target = crate::next::target_cover::<Bookkeeping>(&cover_in("account", 1, "what-if"), &());
+    assert_eq!(
+        target.edition.as_deref(),
+        Some("what-if"),
+        "a reaction never crosses timelines"
+    );
 }
 
 #[test]

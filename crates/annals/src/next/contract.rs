@@ -395,6 +395,76 @@ pub async fn a_unit_of_work_writes_its_snapshot_at_commit_or_not_at_all<S: Async
     );
 }
 
+/// A unit of work refuses a stream in an edition its store never created,
+/// as a read unit does (angzarr's EA-2): nothing is read or written there,
+/// a misspelt edition never gets storage, and no such stream is listed. A
+/// store with no edition registry has created none, so its units refuse
+/// every edition, and a command naming one is refused; main is always
+/// served.
+pub async fn a_unit_of_work_refuses_an_edition_never_created<S: AsyncStore>(mut store: S) {
+    let main = cover("account", 1);
+    let edition = cover_in("account", 1, "what-if");
+    let misspelt = cover_in("account", 2, "wat-if");
+    store.append(&main, 0, &[page(0, 1)]).await.unwrap();
+    // Written outside any unit, as a store's own appends take any edition.
+    store.append(&edition, 0, &[page(0, 2)]).await.unwrap();
+    store.write_snapshot(&edition, &snapshot(0)).await.unwrap();
+    let refused = Some(StoreError::UnknownEdition {
+        stream: edition.clone(),
+    });
+    let mut unit = store.begin().await;
+    assert_eq!(unit.read_from(&edition, 0).await.err(), refused, "a read");
+    assert_eq!(
+        unit.read_snapshot(&edition).await.err(),
+        refused,
+        "a snapshot's read"
+    );
+    assert_eq!(
+        unit.find_command(&edition, &command(2)).await.err(),
+        refused,
+        "a command's lookup"
+    );
+    assert_eq!(
+        unit.append(&edition, 1, &[page(1, 3)]).await.err(),
+        refused,
+        "an append"
+    );
+    assert_eq!(
+        unit.write_snapshot(&edition, &snapshot(1)).await.err(),
+        refused,
+        "a snapshot's write"
+    );
+    assert_eq!(
+        unit.append(&misspelt, 0, &[page(0, 3)]).await.err(),
+        Some(StoreError::UnknownEdition {
+            stream: misspelt.clone()
+        }),
+        "no such stream either: refused, not created"
+    );
+    assert_eq!(
+        unit.covers("account").await,
+        Ok(vec![main.clone()]),
+        "not listed"
+    );
+    assert_eq!(
+        unit.append(&main, 1, &[page(1, 3)]).await,
+        Ok(2),
+        "main is always served"
+    );
+    unit.commit().await.unwrap();
+    assert_eq!(
+        store.read_from(&edition, 0).await.unwrap().map(|s| s.pages),
+        Some(vec![page(0, 2)]),
+        "nothing appended there"
+    );
+    assert_eq!(
+        store.read_snapshot(&edition).await,
+        Ok(Some(snapshot(0))),
+        "no snapshot written there"
+    );
+    assert_eq!(store.read_from(&misspelt, 0).await, Ok(None));
+}
+
 pub async fn the_commit_position_rises_with_every_commit<S: AsyncStore>(mut store: S) {
     let empty = store.commit_position().await.unwrap();
     store
@@ -916,6 +986,7 @@ macro_rules! store_contract {
             a_read_past_the_end_is_empty_but_knows_the_end,
             a_store_keeps_the_newest_snapshot_per_stream,
             a_unit_of_work_writes_its_snapshot_at_commit_or_not_at_all,
+            a_unit_of_work_refuses_an_edition_never_created,
             the_commit_position_rises_with_every_commit,
         );
     };
@@ -983,6 +1054,7 @@ macro_rules! async_store_contract {
             a_read_past_the_end_is_empty_but_knows_the_end,
             a_store_keeps_the_newest_snapshot_per_stream,
             a_unit_of_work_writes_its_snapshot_at_commit_or_not_at_all,
+            a_unit_of_work_refuses_an_edition_never_created,
             the_commit_position_rises_with_every_commit,
         );
     };
