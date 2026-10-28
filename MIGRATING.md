@@ -181,3 +181,25 @@ refusal once: `rm .gates`, try a commit, and see `FAIL gates: .gates was
 missing`; the link is back, so the next commit goes through. Update
 ctxloom-rs's CLAUDE.md hook section to say the gates are shared, as annals'
 CLAUDE.md does (*The pre-commit gates are shared*).
+
+# Picking up red tests on branches
+
+The gates now allow a commit with failing tests on any branch but the
+default one (warned `RED  tests: ... cannot merge into <default> until they
+pass`), refuse it on the default branch, and add three hooks keeping red
+tests out of it: pre-merge-commit (a merge commit is tested as a commit is),
+pre-push (a push to the remote's default branch runs the whole workspace's
+tests on the pushed commit) and post-merge (a fast-forward of the default
+branch to local work, which no hook can refuse, is tested just after and the
+way back named). Nothing in a consumer's justfile changes. Each clone runs,
+once:
+
+```sh
+lefthook install          # or: just hooks-install
+```
+
+lefthook installs a hook only for the hooks its config names when it is run,
+and does not notice new ones in an `extends` file, so until then only
+pre-commit's new rule applies. With a remote, record its default branch
+(`git remote set-head origin --auto`): without origin/HEAD the default
+branch is the first of init.defaultBranch, main and master that is a branch.

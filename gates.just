@@ -2,6 +2,12 @@
 # that uses them. Each gate prints one line on a pass and, on a failure, the
 # extract worth reading plus its full log in target/logs/<gate>.log.
 #
+# Red tests are allowed on a branch and kept out of the default branch: a
+# commit off it may carry failing tests (`test-commit`, `mutants-staged`),
+# and the pre-merge-commit, pre-push and post-merge hooks (`test-commit`,
+# `push-check`, `merge-check`) keep them from reaching it. Every other gate
+# refuses on every branch.
+#
 # A consumer links its checkout to this repository's (`.gates`, gitignored,
 # made by its `gates-link` recipe from its one `gates_dir` variable) and
 # imports this file, optionally, so its bootstrap recipes still run without
@@ -210,6 +216,35 @@ test-staged: (_require-nextest "test-staged")
     done < <(git -C "$root" diff --cached --name-only --no-renames -z HEAD)
     echo "ok   test-staged (nothing to test: no staged change is in a crate or a workspace-wide file)"
 
+# The tests of a commit: lefthook's pre-commit `tests` step, and its
+# pre-merge-commit one. `test-staged`, under the red-on-branches rule: red
+# tests (a failing test, nextest's 100, or a failing doc test, `_tests`' 102)
+# are committed on any branch but the default one (`_red-allowed`), with a
+# warning that the branch cannot merge until they pass, and refused on the
+# default branch. Red tests are a step on the way and belong on a branch;
+# `push-check` and `merge-check` keep them out of the default branch. Any
+# other failure (the tests do not build, a tool is missing) is refused on
+# every branch, as every other gate's is. There is no way to skip it.
+[no-exit-message]
+test-commit:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rc=0
+    just --justfile '{{gates_root}}/justfile' test-staged || rc=$?
+    case "$rc" in
+        0) exit 0 ;;
+        100|102) ;;
+        *) exit "$rc" ;;
+    esac
+    if where=$(just --justfile '{{gates_root}}/justfile' _red-allowed); then
+        IFS=$'\t' read -r branch default <<< "$where"
+        echo "RED  tests: red tests committed on $branch, which is allowed off the default branch;" \
+            "$branch cannot merge into $default (or be pushed to it) until they pass"
+        exit 0
+    fi
+    echo "FAIL tests: red tests cannot be committed here: $where. Commit them on a branch." >&2
+    exit "$rc"
+
 # Inside the staged tree: map the staged paths to crates through cargo
 # metadata, close over workspace dependents, and test them.
 [no-exit-message]
@@ -273,7 +308,8 @@ _test-affected:
 # packages selected (all of them for --workspace), after `features_prepare`.
 # The tests are built first by cargo, whose short messages nextest has no
 # form of. Exits 101 if they did not build, else with nextest's code if it
-# failed (100: a test failed), else the doc tests'.
+# failed (100: a test failed), else 102 if a doc test failed. 100 and 102 are
+# red tests, which `test-commit` allows off the default branch; 101 is not.
 [positional-arguments]
 [no-exit-message]
 _tests +packages:
@@ -310,9 +346,11 @@ _tests +packages:
     rc=0
     cargo nextest run --manifest-path "$root/Cargo.toml" --no-fail-fast --no-tests=pass "${terse[@]}" \
         "${selection[@]}" "${features[@]}" || rc=$?
-    # After a failed test, the doc tests would only bury it.
+    # After a failed test, the doc tests would only bury it. Everything they
+    # need was built above, so their failing is a red doc test (one that does
+    # not compile included), not a build failure: 102, not cargo's 101.
     if [ "$rc" -eq 0 ] && [ "${#doc[@]}" -gt 0 ]; then
-        cargo test --manifest-path "$root/Cargo.toml" --doc "${cargo_terse[@]}" "${doc[@]}" "${features[@]}" || rc=$?
+        cargo test --manifest-path "$root/Cargo.toml" --doc "${cargo_terse[@]}" "${doc[@]}" "${features[@]}" || rc=102
     fi
     exit "$rc"
 
@@ -337,6 +375,14 @@ _require-nextest gate:
 # the consumer's .cargo/mutants.toml. A missing cargo-mutants (`cargo install
 # cargo-mutants --locked`) fails rather than skipping: a mutation run that
 # passes by not running tested nothing.
+#
+# Off the default branch (`_red-allowed`), a red commit passes it: when the
+# staged tree's tests fail unmutated (cargo-mutants' baseline, exit 4), no
+# mutant can be judged, since every one would be "caught" by a test that
+# fails anyway. The commit that turns those tests green changes the code they
+# test (a red commit's stubs are what it replaces), so that code is mutated
+# then, against passing tests. Every other failure, and a red baseline on the
+# default branch, is refused.
 [no-exit-message]
 mutants-staged:
     #!/usr/bin/env bash
@@ -350,7 +396,16 @@ mutants-staged:
         echo "ok   mutants-staged (no mutants: the staged change touches no Rust source)"
         exit 0
     fi
-    exec just --justfile '{{gates_root}}/justfile' _staged-tree _mutants-affected
+    rc=0
+    just --justfile '{{gates_root}}/justfile' _staged-tree _mutants-affected || rc=$?
+    [ "$rc" -eq 4 ] || exit "$rc"
+    if where=$(just --justfile '{{gates_root}}/justfile' _red-allowed); then
+        IFS=$'\t' read -r branch default <<< "$where"
+        echo "RED  mutants-staged: not judged, the tests are red; allowed on $branch, which cannot merge into $default until they pass"
+        exit 0
+    fi
+    echo "FAIL mutants-staged: red tests cannot be committed here: $where" >&2
+    exit 1
 
 # Inside the staged tree: `_mutants-judge`, run as the gate.
 [no-exit-message]
@@ -432,7 +487,9 @@ _mutants-judge:
         4)
             verdict "the staged tree's tests fail unmutated (cargo-mutants baseline); fix them first" \
                 "baseline log: target/logs/mutants-staged/mutants.out/log/baseline.log"
-            exit 1 ;;
+            # cargo-mutants' own code for it: `mutants-staged` allows it off
+            # the default branch.
+            exit 4 ;;
         *)
             verdict "cargo mutants failed before a verdict (exit $rc)"
             exit 1 ;;
@@ -470,18 +527,32 @@ _mutants-judge:
 # worktree with `git diff --cached` applied on top, so the recipe sees what the
 # commit will contain and nothing else (no unstaged edit, no untracked file),
 # and nothing here writes the working tree, the index or the stash.
-#
-# The worktree is at `staged_tree`. Its name is fixed per checkout and the run
-# holds a lock, so builds reuse one target dir (target/staged) across
-# commits. It gets its own `.gates` link, to the same gates checkout. Gate
-# logs go to this checkout's target/logs (GATE_LOG_DIR), not the throwaway
-# tree's.
 [positional-arguments]
 [no-exit-message]
 _staged-tree +recipe:
+    @just --justfile '{{gates_root}}/justfile' _scratch-tree staged "$@"
+
+# Run a recipe of a commit's tree, checked out alone in the throwaway
+# worktree: what `push-check` and `merge-check` test.
+[positional-arguments]
+[no-exit-message]
+_commit-tree commit +recipe:
+    @just --justfile '{{gates_root}}/justfile' _scratch-tree "$@"
+
+# The throwaway worktree of `_staged-tree` (`source` is `staged`) and
+# `_commit-tree` (`source` is the commit). It is at `staged_tree`. Its name is
+# fixed per checkout and the run holds a lock, so builds reuse one target dir
+# (target/staged) across commits. It gets its own `.gates` link, to the same
+# gates checkout. Gate logs go to this checkout's target/logs (GATE_LOG_DIR),
+# not the throwaway tree's.
+[positional-arguments]
+[no-exit-message]
+_scratch-tree source +recipe:
     #!/usr/bin/env bash
     set -euo pipefail
     top='{{gates_root}}'
+    source=$1
+    shift
     # git exports GIT_INDEX_FILE (and, under some commits, GIT_DIR and friends)
     # into a hook. Reading the staged change needs it: under `git commit -a` it
     # is git's temporary index, holding exactly what will be committed. Every
@@ -504,11 +575,20 @@ _staged-tree +recipe:
     }
     trap 'remove_tree; rm -rf "$scratch"' EXIT
     remove_tree
-    git diff --cached --binary --full-index --no-color --no-ext-diff --no-textconv \
-        --no-renames --src-prefix=a/ --dst-prefix=b/ HEAD > "$scratch/staged.patch"
+    base=HEAD
+    if [ "$source" = staged ]; then
+        git diff --cached --binary --full-index --no-color --no-ext-diff --no-textconv \
+            --no-renames --src-prefix=a/ --dst-prefix=b/ HEAD > "$scratch/staged.patch"
+    else
+        base=$(git -C "$top" rev-parse --verify --quiet "$source^{commit}") || {
+            echo "_scratch-tree: $source is not a commit" >&2
+            exit 1
+        }
+        : > "$scratch/staged.patch"
+    fi
     # --no-checkout, then read-tree: a checkout would run post-checkout hooks
     # for a tree nobody works in.
-    "${scrub[@]}" git -C "$top" worktree add --quiet --detach --no-checkout "$tree" HEAD
+    "${scrub[@]}" git -C "$top" worktree add --quiet --detach --no-checkout "$tree" "$base"
     "${scrub[@]}" git -C "$tree" read-tree -u --reset HEAD
     # --index, so the recipe's `git diff --cached HEAD` is the staged change.
     if [ -s "$scratch/staged.patch" ]; then
@@ -517,6 +597,147 @@ _staged-tree +recipe:
     ln -sfn "$gates" "$tree/.gates"
     cd "$tree"
     "${scrub[@]}" "CARGO_TARGET_DIR=$top/target/staged" "GATE_LOG_DIR=$top/target/logs" just --justfile "$tree/justfile" "$@"
+
+# The red-on-branches rule: red tests may be committed on any branch but the
+# default one, and never reach it. `test-commit` and `mutants-staged` allow
+# them off it; `push-check` (pre-push) refuses a push to it, and
+# `merge-check` (post-merge) reports a fast-forward of it, whose tests fail.
+# A merge commit into it is `test-commit`'s (pre-merge-commit).
+
+# The default branch: <remote>/HEAD when the remote has one (`git remote
+# set-head origin --auto` records it), else the first local branch of
+# init.defaultBranch, main and master, which covers a repository with no
+# remote. Exits 1, printing nothing, when there is none of them: the callers
+# then treat every branch as the default one.
+[no-exit-message]
+_default-branch remote="origin":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{gates_root}}'
+    remote='{{remote}}'
+    if head=$(git symbolic-ref --quiet --short "refs/remotes/$remote/HEAD" 2>/dev/null); then
+        echo "${head#"$remote"/}"
+        exit 0
+    fi
+    for name in "$(git config --get init.defaultBranch || true)" main master; do
+        if [ -n "$name" ] && git rev-parse --verify --quiet "refs/heads/$name^{commit}" > /dev/null; then
+            echo "$name"
+            exit 0
+        fi
+    done
+    exit 1
+
+# Whether the commit being made lands off the default branch, where red tests
+# are allowed: exits 0 printing "<branch>\t<default>" if so, else exits 1
+# printing why not. A rebase's commit lands on the branch being rebased.
+# Whatever cannot be told (a detached HEAD, no default branch found) is
+# treated as the default branch: the strict side.
+[no-exit-message]
+_red-allowed:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{gates_root}}'
+    branch=$(git symbolic-ref --quiet --short HEAD) || branch=
+    if [ -z "$branch" ]; then
+        for state in rebase-merge rebase-apply; do
+            file=$(git rev-parse --git-path "$state/head-name")
+            if [ -f "$file" ]; then branch=$(sed 's|^refs/heads/||' "$file"); fi
+        done
+    fi
+    if [ -z "$branch" ]; then
+        echo "HEAD is detached, so the branch the commit lands on is unknown"
+        exit 1
+    fi
+    if ! default=$(just --justfile '{{gates_root}}/justfile' _default-branch); then
+        echo "no default branch was found (no origin/HEAD, and none of init.defaultBranch, main or master is a branch)," \
+            "so $branch is held to it"
+        exit 1
+    fi
+    if [ "$branch" = "$default" ]; then
+        echo "$branch is the default branch"
+        exit 1
+    fi
+    printf '%s\t%s\n' "$branch" "$default"
+
+# lefthook's pre-push step, given the remote's name and git's pushed refs on
+# stdin: refuse a push to the remote's default branch (`_default-branch
+# <remote>`) unless the whole workspace's tests pass on the commit pushed,
+# tested alone in the throwaway tree (`_commit-tree`). Pushes to other
+# branches, red ones included, and deletions go through. When the remote's
+# default branch is unknown, every pushed branch is held to it. `lefthook`
+# is what lefthook.yml passes to stop lefthook skipping it, and is ignored.
+[positional-arguments]
+[no-exit-message]
+push-check remote *lefthook:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    root='{{gates_root}}'
+    remote=$1
+    default=$(just --justfile "$root/justfile" _default-branch "$remote") || default=
+    tested=0
+    while read -r local_ref local_sha remote_ref _; do
+        [ -n "${local_sha:-}" ] || continue
+        [ "${local_sha//0/}" = "" ] && continue  # a deletion
+        if [ -n "$default" ] && [ "$remote_ref" != "refs/heads/$default" ]; then continue; fi
+        target=${remote_ref#refs/heads/}
+        just --justfile "$root/justfile" _require-nextest push-check
+        rc=0
+        just --justfile "$root/justfile" _commit-tree "$local_sha" _test-workspace push-check \
+            "$(git -C "$root" rev-parse --short "$local_sha") to $remote/$target" || rc=$?
+        if [ "$rc" -ne 0 ]; then
+            if [ -z "$default" ]; then
+                echo "No default branch of $remote was found, so $target is held to it (git remote set-head $remote --auto)." >&2
+            fi
+            echo "FAIL push-check: $local_ref cannot be pushed to $remote/$target: its tests do not pass. Make them pass on a branch first." >&2
+            exit 1
+        fi
+        tested=1
+    done
+    [ "$tested" = 1 ] || echo "ok   push-check (no push to $remote/${default:-?}: nothing to test)"
+
+# Inside a commit's tree (`_commit-tree`): every test of the workspace, as
+# the gate named.
+[positional-arguments]
+[no-exit-message]
+_test-workspace gate scope:
+    @just --justfile '{{gates_root}}/justfile' _run "$1" "$2" tests just --justfile '{{gates_root}}/justfile' _tests --workspace
+
+# lefthook's post-merge step. A fast-forward runs no hook git has, so no
+# hook can refuse one; this checks the default branch just after one. When a
+# merge fast-forwarded the default branch to local work (commits no
+# remote-tracking branch holds: a pull brings commits its pusher's
+# `push-check` tested), the whole workspace's tests run on the new HEAD, and
+# on a failure the way back is named. A merge commit was `test-commit`'s
+# (pre-merge-commit), and a squash merge commits through pre-commit.
+[positional-arguments]
+[no-exit-message]
+merge-check squash="0":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    root='{{gates_root}}'
+    cd "$root"
+    [ "${1:-0}" = 1 ] && exit 0
+    branch=$(git symbolic-ref --quiet --short HEAD) || exit 0
+    default=$(just --justfile "$root/justfile" _default-branch) || default=$branch
+    [ "$branch" = "$default" ] || exit 0
+    orig=$(git rev-parse --verify --quiet ORIG_HEAD) || exit 0
+    head=$(git rev-parse HEAD)
+    [ "$orig" != "$head" ] || exit 0
+    # A merge commit on top of ORIG_HEAD: pre-merge-commit tested it.
+    [ "$(git rev-parse --verify --quiet HEAD^2 || true)" != "" ] && [ "$(git rev-parse HEAD^1)" = "$orig" ] && exit 0
+    if [ -n "$(git for-each-ref --contains HEAD refs/remotes)" ]; then
+        echo "ok   merge-check (fast-forward to commits a remote holds)"
+        exit 0
+    fi
+    just --justfile "$root/justfile" _require-nextest merge-check
+    rc=0
+    just --justfile "$root/justfile" _commit-tree "$head" _test-workspace merge-check \
+        "fast-forward of $branch to $(git rev-parse --short "$head")" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        echo "FAIL merge-check: $branch was fast-forwarded to commits whose tests fail, and no hook can refuse a fast-forward." >&2
+        echo "Undo it: git reset --keep $orig   (then merge once the tests pass)" >&2
+        exit 1
+    fi
 
 # Run one gate: `command` with all its output to <GATE_LOG_DIR>/<gate>.log
 # (default target/logs), timed. A pass prints `ok   <gate> (<scope>)
@@ -596,7 +817,8 @@ _extract-tests log rc:
     set -euo pipefail
     case "$2" in
         100) echo "tests failed: $(grep -m1 -E '^ *Summary \[' "$1" | sed 's/^.*\] *//')" ;;
-        101) echo "the tests did not build ($(grep -cE '^[^ ]+:[0-9]+:[0-9]+: error' "$1" || true) errors), or a doc test failed" ;;
+        101) echo "the tests did not build ($(grep -cE '^[^ ]+:[0-9]+:[0-9]+: error' "$1" || true) errors)" ;;
+        102) echo "doc tests failed: $(grep -m1 -E '^test result: FAILED' "$1" || echo 'see the log')" ;;
         *) echo "the test run failed (exit $2)" ;;
     esac
     cat "$1"
