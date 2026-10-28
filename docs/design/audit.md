@@ -618,11 +618,23 @@ pub trait EventStore {
     fn write_snapshot(&mut self, stream: &Cover, snapshot: &Snapshot) -> Result<(), StoreError>;
 }
 pub trait UnitOfWork: EventStore { fn commit(self) -> Result<(), StoreError>; }
-pub trait Store: EventStore { type Unit<'s>: UnitOfWork + Send where Self: 's; fn begin(&mut self) -> Self::Unit<'_>; }
-pub trait AsyncStore: AsyncEventStore { type Unit<'s>: AsyncUnitOfWork + Send where Self: 's; fn begin(&mut self) -> impl Future<Output = Self::Unit<'_>> + Send; }
+pub trait Store: EventStore { type Unit<'s>: UnitOfWork + Send where Self: 's; fn begin(&mut self) -> Self::Unit<'_>; fn commit_position(&mut self) -> Result<u64, StoreError>; }
+pub trait AsyncStore: AsyncEventStore { type Unit<'s>: AsyncUnitOfWork + Send where Self: 's; fn begin(&mut self) -> impl Future<Output = Self::Unit<'_>> + Send; fn commit_position(&mut self) -> impl Future<Output = Result<u64, StoreError>> + Send; }
 pub struct Slice { pub stream: Cover, pub next_sequence: u64, pub last_recorded_at: Option<Timestamp>, pub pages: Vec<EventPage> }
 // AsyncEventStore / AsyncUnitOfWork: the same, Send futures; Ready<S> serves a sync store async.
 ```
+
+**`commit_position`** is the store's commit position: global (one for the
+whole store, every stream and every handle on its database) and monotonic.
+Every event committed before it is answered lies below it and every event
+committed after it at or above it, so it rises with every commit that
+appends an event and never falls, a purge included. It is commit order, not
+`recorded_at`: an event sampled before the position was read but committed
+after lies above it. It is what an edition's create records, so the edition
+reads exactly main's events committed before the create (angzarr's EA-3;
+the registry itself is not built yet, see *Not now*). A SQL store keeps it
+in a one-row table raised inside each append's transaction and stamps every
+event row with the position it landed at.
 
 **`covers`** enumerates a domain's streams: what a projector reads to
 catch up, with the store as the collection's scope (an application keeps
@@ -642,7 +654,9 @@ store calls each read check with its pair itself. A store that answers a
 change token (below) also runs the opt-in watch section:
 `store_contract!(watch, fresh_store, fresh_pair)`, or
 `async_store_contract!(watch, #[tokio::test], fresh_store)` with the pair
-check called by the store's tests.
+check called by the store's tests. The commit position is held to a check
+in the base section and one in the purge section, and a store with two
+handles on one database calls the two-handle check itself.
 
 **Opaque.** A store holds angzarr's pages as written and never decodes a
 payload; upcasting is the kernel's, on every read. The Postgres shape:
@@ -1061,7 +1075,7 @@ to the application's `TriggerLog`, beside the dead-letter log.
 | Generated `State` impls, and angzarr's golden conflict-unit parity suite run here | The generator is angzarr's backlog CR-1; until then a hand-written fixture stands in. | CR-1 landing: annals generates from the same markers and runs every fixture pair through `Units::overlaps`. |
 | Snapshot frequency and retention configuration | `write_snapshot` is the application's; the load and discard rules are specified. | Replay latency that matters. |
 | Persisted projections | Replay on read. | Read latency; `Tracked` is ready. |
-| Edition registry, branching, read-through | hatpick uses only main. | A what-if feature in hatpick. |
+| Edition registry, branching, read-through (EA-1 to EA-3) | The commit position an edition's create records is in the contract; the `Editions` port waits on the decision about the shared ports' shape (sync, async, or both). | That decision. |
 | Process managers (stateful reactors writing their own events) | hatpick needs none; the metadata (`causation.triggering_event`) and the store lookup (`find_triggered`) are ready. | A workflow that must remember across triggers. |
 | Configuration that forbids a `Handling` override | No hatpick command needs it. | A command type whose resolution a client must not choose. |
 | A `!Send` async store port | No browser store exists. | A wasm adapter over IndexedDB. |
@@ -1155,16 +1169,19 @@ keeps the trigger as `causation_id`.
   the events**, per stream; a unit of work lands at commit or not at all;
   the async port has the same contract; a unit of work checks and reads
   its pending appends; an empty append creates nothing; a store keeps the
-  newest snapshot per stream. The opt-in purge section: **a purge deletes
+  newest snapshot per stream; the commit position rises with every commit,
+  and is the store's across handles. The opt-in purge section: **a purge deletes
   a stream's events, snapshot and command ids**, and no other stream's; it
   deletes a snapshot with no events; a purged stream starts again from
   nothing, a stale append refused; a purge in a unit of work lands at
-  commit or not at all; a unit purges its own appends and appends after.
+  commit or not at all; a unit purges its own appends and appends after;
+  a purge never lowers the commit position.
   **Every check fails a store broken in the way it exists to catch** (an
   in-memory store with one bug: a gap accepted, an edition ignored, a unit
   blind to its own appends or writing through, an empty append that creates
   a stream, a past-the-end read that forgets the end, the first snapshot
-  kept), and passes the same store with none.
+  kept, a commit position that stands still, counts events, or is the
+  handle's), and passes the same store with none.
 - **replay.rs**: replay folds each event with the rules it names, and
   refuses a log that does not hold together (sequence, metadata, instant,
   rules, domain, a process event's trigger); a stream resumes from a

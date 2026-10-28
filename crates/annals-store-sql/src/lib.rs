@@ -18,6 +18,9 @@
 //! each, held to the contract's read section, and answers each read outside
 //! a unit as one moment. Every backend answers a change token
 //! (`annals::next::AsyncWatch`), held to the contract's watch section.
+//! Every backend keeps the store's commit position
+//! (`annals::next::AsyncStore::commit_position`), raised inside each
+//! append's transaction, and stamps every event row with it.
 //! Pages are stored as written and never
 //! decoded except to read them back; the command id is copied into its own
 //! indexed column for the deduplication lookup.

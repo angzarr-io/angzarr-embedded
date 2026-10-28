@@ -7,11 +7,11 @@ use annals::next::StoreError;
 use prost::Message;
 use sea_query::{
     Cond, Condition, DeleteStatement, Expr, Func, InsertStatement, OnConflict, Order, Query,
-    SelectStatement, SimpleExpr,
+    SelectStatement, SimpleExpr, UpdateStatement,
 };
 
 use crate::error::unavailable;
-use crate::schema::{Events, Snapshots};
+use crate::schema::{CommitPosition, Events, Snapshots};
 use crate::Dialect;
 
 /// The root's bytes: the key column every statement matches on.
@@ -103,10 +103,28 @@ pub(crate) fn pages_of_command<D: Dialect>(cover: &Cover, command_id: &Uuid) -> 
     )
 }
 
-/// One page, as the row it is stored as.
+/// The store's commit position: the one row of `commit_position`.
+pub(crate) fn commit_position() -> SelectStatement {
+    Query::select()
+        .column(CommitPosition::Next)
+        .from(CommitPosition::Table)
+        .to_owned()
+}
+
+/// Raise the commit position by one, past an append's events.
+pub(crate) fn raise_commit_position() -> UpdateStatement {
+    Query::update()
+        .table(CommitPosition::Table)
+        .value(CommitPosition::Next, Expr::col(CommitPosition::Next).add(1))
+        .to_owned()
+}
+
+/// One page, as the row it is stored as, stamped with the commit `position`
+/// it lands at.
 pub(crate) fn insert_page<D: Dialect>(
     cover: &Cover,
     page: &EventPage,
+    position: i64,
 ) -> Result<InsertStatement, StoreError> {
     let command_id = match page.meta.as_ref().and_then(|m| m.causation.as_ref()) {
         Some(Causation::CommandId(id)) => Some(id.value.to_vec()),
@@ -121,6 +139,7 @@ pub(crate) fn insert_page<D: Dialect>(
             Events::Sequence,
             Events::CommandId,
             Events::Page,
+            Events::Position,
         ])
         .values([
             cover.domain.clone().into(),
@@ -129,6 +148,7 @@ pub(crate) fn insert_page<D: Dialect>(
             sequence_column(page.sequence).into(),
             command_id.into(),
             page.encode_to_vec().into(),
+            position.into(),
         ])
         .map_err(unavailable)?
         .to_owned())

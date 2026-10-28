@@ -180,9 +180,10 @@ pub trait Store: EventStore {
     /// committed after it at or above it, so it rises with every commit
     /// that appends an event, through any handle, and never falls, a purge
     /// included. Commit order, not `recorded_at`: an event sampled before
-    /// it was read but committed after lies above it. What an edition's
-    /// create records, so the edition reads exactly main's events
-    /// committed before it (angzarr's EA-3).
+    /// it was read but committed after lies above it. It is the
+    /// divergence an edition's create records, so the edition reads
+    /// exactly main's events committed before it (angzarr's EA-3; annals
+    /// has no edition registry yet).
     fn commit_position(&mut self) -> Result<u64, StoreError>;
 }
 
@@ -559,6 +560,10 @@ pub struct InMemoryStore {
     snapshots: BTreeMap<Key, Snapshot>,
     /// How many times something was committed: its [`ChangeToken`].
     commits: u64,
+    /// How many appends of at least one event have landed: its
+    /// [`Store::commit_position`]. Each landed at the position it found,
+    /// so every event lies below the count after it; a purge leaves it.
+    position: u64,
 }
 
 impl InMemoryStore {
@@ -626,6 +631,7 @@ impl EventStore for InMemoryStore {
         });
         held.pages.extend_from_slice(pages);
         let length = held.pages.len() as u64;
+        self.position += 1;
         self.committed();
         Ok(length)
     }
@@ -829,8 +835,10 @@ impl Store for InMemoryStore {
         InMemoryStore::begin(self)
     }
 
+    /// How many appends of at least one event have landed, a unit of
+    /// work's each counted at its commit.
     fn commit_position(&mut self) -> Result<u64, StoreError> {
-        todo!("InMemoryStore::commit_position is a stub")
+        Ok(self.position)
     }
 }
 

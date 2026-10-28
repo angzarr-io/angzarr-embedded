@@ -13,6 +13,13 @@ pub(crate) enum Events {
     Sequence,
     CommandId,
     Page,
+    Position,
+}
+
+#[derive(Iden)]
+pub(crate) enum CommitPosition {
+    Table,
+    Next,
 }
 
 #[derive(Iden)]

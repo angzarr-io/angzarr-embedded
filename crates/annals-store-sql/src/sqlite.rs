@@ -5,7 +5,9 @@
 //! of its own, so it reads one moment, and a read-only unit of work is a
 //! deferred `BEGIN` held open over many reads. A file is kept in WAL mode, so once
 //! it is made a reader waits on no writer. A change token is the
-//! connection's `PRAGMA data_version` with its `total_changes()`.
+//! connection's `PRAGMA data_version` with its `total_changes()`. The commit
+//! position is a one-row table raised inside each append's transaction, and
+//! every event row is stamped with the position it landed at.
 
 use std::future::Future;
 use std::path::Path;
@@ -485,8 +487,11 @@ impl AsyncStore for SqliteStore {
         }
     }
 
+    /// The one row of `commit_position`, read on its own: the last
+    /// committed state. A read, so it runs on a store opened by
+    /// [`open_existing`](SqliteStore::open_existing) and waits on no writer.
     async fn commit_position(&mut self) -> Result<u64, StoreError> {
-        todo!("SqliteStore::commit_position is a stub")
+        commit_position(&mut self.conn).await.map(i64::unsigned_abs)
     }
 }
 
@@ -693,14 +698,31 @@ async fn append(
             });
         }
     }
+    if pages.is_empty() {
+        return Ok(actual);
+    }
+    // Inside the append's write transaction: SQLite runs one writer at a
+    // time, so the position read here is the one these events land at, in
+    // commit order.
+    let position = commit_position(conn).await?;
+    execute(&mut *conn, statements::raise_commit_position()).await?;
     for page in pages {
         execute(
             &mut *conn,
-            statements::insert_page::<SqliteDialect>(stream, page)?,
+            statements::insert_page::<SqliteDialect>(stream, page, position)?,
         )
         .await?;
     }
     Ok(actual + pages.len() as u64)
+}
+
+/// The store's commit position, as its column holds it.
+async fn commit_position(conn: &mut SqliteConnection) -> Result<i64, StoreError> {
+    let rows = fetch_all(conn, statements::commit_position()).await?;
+    match rows.first() {
+        Some(row) => row.try_get(0).map_err(unavailable),
+        None => Ok(0),
+    }
 }
 
 /// Delete the stream's events (their command ids with them), then its
