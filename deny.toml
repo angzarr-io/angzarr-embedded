@@ -6,8 +6,7 @@
 # and has no open RustSec advisory.
 
 [graph]
-# Every feature, so annals-store-sql's sqlite backend (sqlx and its tree) is
-# judged too, not only the default build.
+# Every feature, judged, not only the default build.
 all-features = true
 
 [advisories]
@@ -32,23 +31,27 @@ allow = [
   "Zlib",
 ]
 confidence-threshold = 0.9
-# The one copyleft licence in the graph, allowed for that crate only:
-# angzarr-proto, angzarr's wire types, which annals' kernel operates on
-# directly (CLAUDE.md, *Few dependencies*; docs/design/audit.md, *Layering*).
-# It is AGPL-3.0-only, so a build that links any crate carrying it is
-# subject to the AGPL. In normal builds those crates are:
-#   `annals`, `annals-store-sql`
+# The one copyleft licence in the graph, allowed for angzarr's two crates
+# only: angzarr-proto, angzarr's wire types, which annals' kernel operates
+# on directly, and angzarr-ports, the shared store contract annals' kernel
+# and angzarr-store-sqlite implement and use (CLAUDE.md, *Few
+# dependencies*; docs/design/audit.md, *Layering*). Both are AGPL-3.0-only,
+# so a build that links any crate carrying them is subject to the AGPL.
+# In normal builds those crates are:
+#   `annals`, `angzarr-store-sqlite`
 # and the rest (annals-diagnostic, annals-graph, annals-yaml,
 # annals-catalog-check) are BSD-3-Clause only (README, *Licence*;
 # `just licence-check` holds both to `cargo tree`). Accepted with the
 # dependency; any other copyleft crate fails here.
 exceptions = [
   { crate = "angzarr-proto", allow = ["AGPL-3.0-only"] },
+  { crate = "angzarr-ports", allow = ["AGPL-3.0-only"] },
 ]
 
 [licenses.private]
-# Not ignored: annals' own crates are `publish = false`, and so is
-# angzarr-proto, whose licence is exactly what must be checked.
+# Not ignored: annals' own crates are `publish = false`, and so are
+# angzarr-proto and angzarr-ports, whose licences are exactly what must be
+# checked.
 ignore = false
 
 [bans]
@@ -64,6 +67,7 @@ unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = [
-  # angzarr's wire contract (angzarr-proto), pinned by rev in crates/annals.
+  # angzarr's wire contract (angzarr-proto) and store contract
+  # (angzarr-ports), pinned by one rev of its spec line.
   "https://github.com/angzarr-io/angzarr-project",
 ]

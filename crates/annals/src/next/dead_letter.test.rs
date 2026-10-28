@@ -1,6 +1,6 @@
 //! annals' dead-letter queue is a logger whose every line warns that it
 //! almost certainly indicates a problem.
-
+use crate::next::toys::prelude::*;
 use crate::next::v1::{angzarr_dead_letter, AngzarrDeadLetter, ComponentKind};
 use crate::next::{
     check, dead_letter_line, pack, DeadLetterLog, Failure, Kernel, KernelError, MemoryDeadLetters,
@@ -53,7 +53,7 @@ fn a_panicking_ingest_aborts_the_chain_and_is_logged() {
     let registry = registry();
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry, &log);
-    let mut store = crate::next::InMemoryStore::new();
+    let store = MemoryStore::new();
     let routes = Routes::new();
 
     let bad = fact(
@@ -62,7 +62,8 @@ fn a_panicking_ingest_aborts_the_chain_and_is_logged() {
         "pi_bad",
     );
     let failure = kernel
-        .handle::<Account, _, _>(store.begin(), &routes, bad, &at(30), &mut ())
+        .handle::<Account, _, _>(&store, &routes, bad, &at(30), &mut ())
+        .ready()
         .err()
         .expect("a bug, never a business rejection");
     assert!(matches!(
@@ -70,7 +71,7 @@ fn a_panicking_ingest_aborts_the_chain_and_is_logged() {
         Failure::Kernel(KernelError::IngestPanicked { .. })
     ));
     assert_eq!(failure.recovery(), crate::next::Recovery::Bug);
-    assert!(store.streams().is_empty(), "nothing written");
+    assert!(streams(&store).is_empty(), "nothing written");
     let lines = log.lines();
     assert_eq!(lines.len(), 1);
     assert!(lines[0].starts_with(DEAD_LETTER_PREFIX));

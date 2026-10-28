@@ -8,11 +8,14 @@
 //! ([`Failure::Rejected`], [`Failure::Kernel`], [`StepError`],
 //! [`KernelError::Malformed`], [`KernelError::Replay`],
 //! [`KernelError::Store`], [`UpcastError::Payload`]) is that error's
-//! diagnostic. Every error about a payload names its type URL; a stream is
+//! diagnostic. The store's errors are angzarr-ports' `StoreError`, shared
+//! with angzarr: [`KernelError::Store`] forwards its `angzarr-ports-*` code
+//! and args unchanged, and annals' catalog holds their messages. Every error about a payload names its type URL; a stream is
 //! named as `domain/root`, with `@edition` outside the main timeline.
 
 use std::fmt;
 
+use angzarr_ports::StoreError;
 use angzarr_proto::v1::{Cover, EventBook, EventRef, Uuid};
 use annals_diagnostic::{Arg, Diagnostic, Report};
 
@@ -145,7 +148,17 @@ pub enum KernelError {
     UnregisteredDomain {
         domain: String,
     },
+    /// Event `sequence` of `stream` is stored but cannot be replayed as a
+    /// current event: a payload type nothing upcasts or decodes (replay is
+    /// strict), or bytes that do not decode as it. `reason` names what
+    /// could not be read (the type URL). A bug or a missing upcaster.
+    Unreadable {
+        stream: Cover,
+        sequence: u64,
+        reason: Report,
+    },
     Replay(ReplayError),
+    /// The store's own error, angzarr-ports' (codes `angzarr-ports-*`).
     Store(StoreError),
 }
 
@@ -167,46 +180,6 @@ pub enum ReplayError {
     },
     /// Event `sequence` was decided under rules the rulebook does not hold.
     UnknownRules { sequence: u64, version: String },
-}
-
-/// Why a store refused or failed an append or a read. A conflict and an
-/// infrastructure failure are different answers: a conflict means "re-read
-/// and run again"; `Unavailable` means "the store could not say".
-#[derive(Clone, PartialEq, Debug)]
-pub enum StoreError {
-    /// Someone else appended first: the stream is at `actual`, not
-    /// `expected`. Nothing was appended. Running the command again starts
-    /// at the deduplication lookup, which finds the winner's events if it
-    /// was this same command.
-    Conflict {
-        stream: Cover,
-        expected: u64,
-        actual: u64,
-    },
-    /// The pages do not continue the stream: sequence `found` where
-    /// `expected` was due. A caller bug; nothing was appended.
-    Discontinuous {
-        stream: Cover,
-        expected: u64,
-        found: u64,
-    },
-    /// The store failed: I/O, a timeout, a dropped connection. The adapter's
-    /// own error, as a report. An append may or may not have landed.
-    Unavailable(Report),
-    /// The store holds event `sequence` of `stream` but it cannot be given
-    /// back as a current event: a payload type nothing upcasts or decodes
-    /// (strict replay), bytes that do not decode, metadata that is
-    /// incomplete. A report naming what could not be read (the type URL).
-    Unreadable {
-        stream: Cover,
-        sequence: u64,
-        reason: Report,
-    },
-    /// A read-only unit was given a stream in an edition its store never
-    /// created: angzarr's NOT_FOUND, for a query or subscription naming one
-    /// (EA-2). Nothing was read. The store's read units are where it is
-    /// refused; a store with no edition registry has created none.
-    UnknownEdition { stream: Cover },
 }
 
 /// A payload that is not one of the types a domain decodes.
@@ -309,7 +282,7 @@ impl KernelError {
             | KernelError::UnknownType { .. }
             | KernelError::InvalidPayload { .. } => Recovery::Invalid,
             KernelError::Stale { .. } | KernelError::Unresolved { .. } => Recovery::Retry,
-            KernelError::Store(error) => error.recovery(),
+            KernelError::Store(error) => store_recovery(error),
             KernelError::Upcast { .. }
             | KernelError::IngestPanicked { .. }
             | KernelError::WrongDomain { .. }
@@ -317,17 +290,8 @@ impl KernelError {
             | KernelError::TooManySteps { .. }
             | KernelError::BeforeSnapshot { .. }
             | KernelError::UnregisteredDomain { .. }
+            | KernelError::Unreadable { .. }
             | KernelError::Replay(_) => Recovery::Bug,
-        }
-    }
-}
-
-impl StoreError {
-    pub fn recovery(&self) -> Recovery {
-        match self {
-            StoreError::Conflict { .. } | StoreError::Unavailable(_) => Recovery::Retry,
-            StoreError::Discontinuous { .. } | StoreError::Unreadable { .. } => Recovery::Bug,
-            StoreError::UnknownEdition { .. } => Recovery::Invalid,
         }
     }
 }
@@ -499,6 +463,15 @@ impl fmt::Display for KernelError {
                 "a stored {domain} stream was read, but no domain \"{domain}\" is registered"
             ),
             KernelError::Replay(error) => error.fmt(f),
+            KernelError::Unreadable {
+                stream,
+                sequence,
+                reason,
+            } => write!(
+                f,
+                "event {sequence} of stream {} cannot be replayed: {reason}",
+                cover_text(stream)
+            ),
             KernelError::Store(error) => error.fmt(f),
         }
     }
@@ -520,6 +493,7 @@ impl Diagnostic for KernelError {
             KernelError::BeforeSnapshot { .. } => "annals-next-before-snapshot",
             KernelError::UnregisteredDomain { .. } => "annals-next-unregistered-domain",
             KernelError::Replay(error) => error.code(),
+            KernelError::Unreadable { .. } => "annals-next-unreadable",
             KernelError::Store(error) => error.code(),
         }
     }
@@ -584,7 +558,16 @@ impl Diagnostic for KernelError {
                 vec![("domain", domain.as_str().into())]
             }
             KernelError::Replay(error) => error.args(),
-            KernelError::Store(error) => error.args(),
+            KernelError::Unreadable {
+                stream: s,
+                sequence,
+                reason,
+            } => vec![
+                ("stream", stream(s)),
+                ("sequence", (*sequence).into()),
+                ("reason", Arg::nested(reason)),
+            ],
+            KernelError::Store(error) => store_args(error),
         }
     }
 }
@@ -651,90 +634,29 @@ impl Diagnostic for ReplayError {
 
 // ---------------------------------------------------------------- StoreError
 
-impl fmt::Display for StoreError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            StoreError::Conflict {
-                stream,
-                expected,
-                actual,
-            } => write!(
-                f,
-                "stream {} holds {actual} events, not the {expected} expected: someone else appended first",
-                cover_text(stream)
-            ),
-            StoreError::Discontinuous {
-                stream,
-                expected,
-                found,
-            } => write!(
-                f,
-                "an append to stream {} gives sequence {found} where {expected} was due",
-                cover_text(stream)
-            ),
-            StoreError::Unavailable(error) => write!(f, "the store is unavailable: {error}"),
-            StoreError::Unreadable {
-                stream,
-                sequence,
-                reason,
-            } => write!(
-                f,
-                "event {sequence} of stream {} cannot be read: {reason}",
-                cover_text(stream)
-            ),
-            StoreError::UnknownEdition { stream } => write!(
-                f,
-                "stream {} names an edition that was never created",
-                cover_text(stream)
-            ),
-        }
-    }
+/// What to do about a store's error: angzarr-ports' [`Recovery`]
+/// (`angzarr_ports::Recovery`), one to one (`Retry`, `Invalid`, `Bug`).
+pub(crate) fn store_recovery(error: &StoreError) -> Recovery {
+    let _ = error;
+    todo!("red: map angzarr-ports' Recovery onto annals'")
 }
 
-impl Diagnostic for StoreError {
-    fn code(&self) -> &'static str {
-        match self {
-            StoreError::Conflict { .. } => "annals-next-store-conflict",
-            StoreError::Discontinuous { .. } => "annals-next-store-discontinuous",
-            StoreError::Unavailable(_) => "annals-next-store-unavailable",
-            StoreError::Unreadable { .. } => "annals-next-store-unreadable",
-            StoreError::UnknownEdition { .. } => "annals-next-store-unknown-edition",
-        }
-    }
+/// A store error's args as annals' diagnostics carry them: angzarr-ports'
+/// args by name, unchanged (`StoreError::args`), a `Uint` as a `Uint`, a
+/// `Str` as a `Str`, and a wrapped `Cause` (the adapter's own code and
+/// English) as a nested report under that code.
+pub(crate) fn store_args(error: &StoreError) -> Vec<(&'static str, Arg)> {
+    let _ = error;
+    todo!("red: forward angzarr-ports' args")
+}
 
-    fn args(&self) -> Vec<(&'static str, Arg)> {
-        match self {
-            StoreError::Conflict {
-                stream: s,
-                expected,
-                actual,
-            } => vec![
-                ("stream", stream(s)),
-                ("expected", (*expected).into()),
-                ("actual", (*actual).into()),
-            ],
-            StoreError::Discontinuous {
-                stream: s,
-                expected,
-                found,
-            } => vec![
-                ("stream", stream(s)),
-                ("expected", (*expected).into()),
-                ("found", (*found).into()),
-            ],
-            StoreError::Unavailable(error) => vec![("error", Arg::nested(error))],
-            StoreError::Unreadable {
-                stream: s,
-                sequence,
-                reason,
-            } => vec![
-                ("stream", stream(s)),
-                ("sequence", (*sequence).into()),
-                ("reason", Arg::nested(reason)),
-            ],
-            StoreError::UnknownEdition { stream: s } => vec![("stream", stream(s))],
-        }
-    }
+/// A stored page the kernel cannot give back as a current event: its
+/// payload upcasts or decodes as nothing the domain knows, or its bytes do
+/// not decode as that type. The kernel's, never the store's (angzarr-ports'
+/// `StoreError::Unreadable` is the store's: bytes it cannot return).
+pub(crate) fn unreadable(stream: &Cover, sequence: u64, reason: Report) -> KernelError {
+    let _ = (stream, sequence, reason);
+    todo!("red: KernelError::Unreadable")
 }
 
 // ---------------------------------------------------------------- payloads

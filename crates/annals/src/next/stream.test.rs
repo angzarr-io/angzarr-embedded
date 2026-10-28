@@ -1,13 +1,14 @@
 //! Replay is strict and checked: every page's sequence, metadata,
 //! instant and rules; snapshots resume it; golden fixtures pin it; and every
 //! failure says how to recover.
-
+use crate::next::toys::prelude::*;
 use crate::next::v1::event_meta::Causation;
 use crate::next::v1::{EventMeta, EventPage, Snapshot};
 use crate::next::{
     assert_replay_fixtures, check_replay_fixtures, pack, Committed, Failure, KernelError,
     Malformed, Recovery, ReplayError, ReplayFixture, StepError, StoreError, Stream,
 };
+use angzarr_ports::Cause;
 use annals_diagnostic::Report;
 
 use crate::next::toys::{
@@ -199,7 +200,7 @@ fn a_stream_resumes_from_a_snapshot_and_dispatches_only_after_it() {
         .err()
         .unwrap();
     assert!(
-        matches!(&error, KernelError::Store(StoreError::Unreadable { sequence: 1, reason, .. })
+        matches!(&error, KernelError::Unreadable { sequence: 1, reason, .. }
             if format!("{reason:?}").contains("toy.shelf.v1.ShelfState")),
         "{error:?}"
     );
@@ -212,7 +213,7 @@ fn a_stream_resumes_from_a_snapshot_and_dispatches_only_after_it() {
     };
     assert!(matches!(
         Stream::<Account>::resume(cover("account", 1), &garbled, None, &[], &registry),
-        Err(KernelError::Store(StoreError::Unreadable { .. }))
+        Err(KernelError::Unreadable { .. })
     ));
 }
 
@@ -398,19 +399,25 @@ fn every_failure_says_how_to_recover() {
         (
             Recovery::Retry,
             KernelError::Store(StoreError::Conflict {
-                stream: stream.clone(),
+                stream: Box::new(stream.clone()),
                 expected: 0,
                 actual: 1,
             }),
         ),
         (
             Recovery::Retry,
-            KernelError::Store(StoreError::Unavailable(Report::new("x-down", "down"))),
+            KernelError::Store(StoreError::Unavailable(Cause::new("x-down", "down"))),
+        ),
+        (
+            Recovery::Invalid,
+            KernelError::Store(StoreError::MalformedStream {
+                stream: Box::new(stream.clone()),
+            }),
         ),
         (
             Recovery::Bug,
             KernelError::Store(StoreError::Discontinuous {
-                stream: stream.clone(),
+                stream: Box::new(stream.clone()),
                 expected: 0,
                 found: 1,
             }),
@@ -418,10 +425,18 @@ fn every_failure_says_how_to_recover() {
         (
             Recovery::Bug,
             KernelError::Store(StoreError::Unreadable {
+                stream: Box::new(stream.clone()),
+                sequence: 0,
+                reason: Cause::new("x-bad", "bad"),
+            }),
+        ),
+        (
+            Recovery::Bug,
+            KernelError::Unreadable {
                 stream: stream.clone(),
                 sequence: 0,
                 reason: Report::new("x-bad", "bad"),
-            }),
+            },
         ),
         (
             Recovery::Bug,
@@ -553,10 +568,76 @@ fn errors_render_their_english_and_wrappers_their_cause() {
     assert_eq!(replay.code(), "annals-next-replay-recorded-backwards");
     assert!(replay.to_string().starts_with("event 3"));
     assert_eq!(replay.args().len(), 1);
-    let store = KernelError::Store(StoreError::Unavailable(Report::new("x-down", "down")));
-    assert_eq!(store.code(), "annals-next-store-unavailable");
+    let store = KernelError::Store(StoreError::Unavailable(Cause::new("x-down", "down")));
+    assert_eq!(store.code(), "angzarr-ports-store-unavailable");
     assert_eq!(store.to_string(), "the store is unavailable: down");
     assert_eq!(store.args().len(), 1);
+}
+
+/// The store's errors are angzarr-ports': the kernel forwards each one's
+/// code and args unchanged (the codes ruled `angzarr-ports-*`), an arg a
+/// `Uint` or `Str` as itself, and a wrapped `Cause` as a report nested
+/// under the adapter's own code, with its English and no args.
+#[test]
+fn a_store_error_keeps_its_angzarr_ports_code_and_args() {
+    use annals_diagnostic::{Arg, Diagnostic};
+    let stream = cover("account", 1);
+    let conflict = KernelError::Store(StoreError::Conflict {
+        stream: Box::new(stream.clone()),
+        expected: 1,
+        actual: 2,
+    });
+    assert_eq!(conflict.code(), "angzarr-ports-store-conflict");
+    let args = conflict.args();
+    let names: Vec<&str> = args.iter().map(|(name, _)| *name).collect();
+    assert_eq!(names, ["stream", "expected", "actual"]);
+    assert!(matches!(&args[0].1, Arg::Str(s) if *s == format!("account/{}", root(1))));
+    assert!(matches!(args[1].1, Arg::Uint(1)));
+    assert!(matches!(args[2].1, Arg::Uint(2)));
+
+    let not_forked = KernelError::Store(StoreError::EditionNotForked {
+        stream: Box::new(crate::next::toys::cover_in("account", 1, "what-if")),
+    });
+    assert_eq!(not_forked.code(), "angzarr-ports-store-edition-not-forked");
+    assert_eq!(not_forked.args().len(), 1);
+
+    let down = KernelError::Store(StoreError::Unavailable(Cause::new(
+        "angzarr-store-sqlite-unavailable",
+        "the database failed: disk I/O error",
+    )));
+    let args = down.args();
+    assert_eq!(args.len(), 1);
+    let ("cause", Arg::Nested(cause)) = &args[0] else {
+        panic!("a nested cause: {args:?}");
+    };
+    assert_eq!(cause.code(), "angzarr-store-sqlite-unavailable");
+    assert_eq!(cause.to_string(), "the database failed: disk I/O error");
+    assert!(cause.args().is_empty());
+}
+
+/// A stored event the kernel cannot replay is the kernel's own error, not
+/// the store's: angzarr-ports' `Unreadable` is bytes a store cannot give
+/// back, never an upcasting or decoding failure.
+#[test]
+fn an_event_the_kernel_cannot_replay_is_its_own_error() {
+    use annals_diagnostic::Diagnostic;
+    let unreadable = KernelError::Unreadable {
+        stream: cover("account", 1),
+        sequence: 4,
+        reason: Report::new("x-bad", "bad"),
+    };
+    assert_eq!(unreadable.code(), "annals-next-unreadable");
+    assert_eq!(
+        unreadable
+            .args()
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>(),
+        ["stream", "sequence", "reason"]
+    );
+    assert!(unreadable
+        .to_string()
+        .starts_with("event 4 of stream account/"));
 }
 
 #[test]
@@ -594,9 +675,9 @@ fn a_domain_the_registry_lacks_cannot_be_replayed_or_snapshotted() {
 #[test]
 fn a_facts_events_read_back_with_its_origin() {
     let registry = registry();
-    let mut store = crate::next::InMemoryStore::new();
+    let store = MemoryStore::new();
     crate::next::toys::handle::<Account>(
-        &mut store,
+        &store,
         &registry,
         crate::next::toys::fact(
             cover("account", 1),
@@ -606,8 +687,7 @@ fn a_facts_events_read_back_with_its_origin() {
         &at(5),
     )
     .unwrap();
-    use crate::next::EventStore;
-    let pages = store.read(&cover("account", 1)).unwrap().unwrap().pages;
+    let pages = pages(&store, &cover("account", 1));
     let stream = Stream::<Account>::replay(cover("account", 1), &pages, &registry).unwrap();
     assert_eq!(stream.events()[0].fact().unwrap().external_id, "pi_r");
     assert!(!stream.is_empty());
@@ -618,9 +698,8 @@ fn a_facts_events_read_back_with_its_origin() {
 fn a_decision_for_another_stream_at_the_same_head_does_not_commit() {
     let registry = registry();
     let log = crate::next::MemoryDeadLetters::new();
-    let mut store = crate::next::InMemoryStore::new();
-    let mut unit = store.begin();
-    let mut coordinator = crate::next::coordinator::steps::Coordinator::new(&mut unit, &registry);
+    let store = MemoryStore::new();
+    let mut coordinator = crate::next::coordinator::steps::Coordinator::new(&store, &registry);
     let identified = crate::next::check(
         command(cover("account", 1), AccountCmd::Open.to_any()),
         &registry,

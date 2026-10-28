@@ -14,9 +14,9 @@ import 'gates/gates.just'
 # by the longest prefix its file matches; one matching none fails the gate,
 # so a new crate gets a threshold before it gets code. Every crate is
 # hand-written library code whose behaviour its tests reach in-process
-# (annals-store-sql's SQLite backend included), so every crate is held to the
+# (angzarr-store-sqlite's SQLite included), so every crate is held to the
 # same bar.
-mutation_thresholds := "crates/annals=90 crates/annals-catalog-check=90 crates/annals-diagnostic=90 crates/annals-graph=90 crates/annals-macros=90 crates/annals-store-sql=90 crates/annals-yaml=90"
+mutation_thresholds := "crates/annals=90 crates/annals-catalog-check=90 crates/annals-diagnostic=90 crates/annals-graph=90 crates/annals-macros=90 crates/annals-yaml=90 crates/angzarr-store-sqlite=90"
 
 # Staged paths outside any crate that test the whole workspace.
 workspace_wide := "Cargo.toml Cargo.lock rust-toolchain.toml .cargo/config.toml .cargo/config"
@@ -48,10 +48,7 @@ build:
 lint:
     @just _run lint workspace cargo just _lint
 
-# Clippy, warnings denied, over the workspace; then
-# annals-store-sql's library alone, with no backend: in the workspace run its
-# own dev-dependency turns `sqlite` on, which would hide what the default
-# build leaves unused.
+# Clippy, warnings denied, over the workspace.
 [no-exit-message]
 _lint:
     #!/usr/bin/env bash
@@ -59,7 +56,6 @@ _lint:
     terse=(-q --message-format=short)
     [ "${VERBOSE:-}" = 1 ] && terse=()
     cargo clippy "${terse[@]}" --workspace --all-targets -- -D warnings
-    cargo clippy "${terse[@]}" --package annals-store-sql --lib -- -D warnings
     just licence-check
 
 # Hold the README's *Licence* lists and deny.toml's comment to `cargo tree`:
@@ -69,12 +65,14 @@ _lint:
 licence-check:
     #!/usr/bin/env bash
     set -euo pipefail
-    names() { grep -o '`annals[a-z-]*`' | tr -d '`' | sort -u; }
+    names() { grep -oE '`(annals|angzarr)[a-z-]*`' | tr -d '`' | sort -u; }
     # A README bullet: from the line starting it to the next bullet or blank.
     bullet() { awk -v h="$1" 'index($0, h) == 1 { f = 1; print; next } f && /^(- |$)/ { exit } f' README.md; }
-    actual=$(cargo tree -q --workspace --all-features -e normal,build -i angzarr-proto --prefix none --format '{p}' \
-        | awk '{ print $1 }' | grep -v '^angzarr-proto$' | sort -u)
     members=$(cargo metadata -q --no-deps --format-version 1 | jq -r '.packages[].name' | sort -u)
+    # The workspace's crates that carry it (angzarr-ports, angzarr's own,
+    # carries it too, and is no member).
+    actual=$(comm -12 <(cargo tree -q --workspace --all-features -e normal,build -i angzarr-proto --prefix none --format '{p}' \
+        | awk '{ print $1 }' | sort -u) <(echo "$members"))
     bsd=$(comm -23 <(echo "$members") <(echo "$actual"))
     fail=0
     check() {

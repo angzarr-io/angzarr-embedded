@@ -1,10 +1,10 @@
 //! Upcasting by type URL, for events and (discouraged) commands, with the
 //! router's semantics and strict decoding.
-
+use crate::next::toys::prelude::*;
 use crate::next::v1::{EventMeta, EventPage, UpcastRequest};
 use crate::next::{
-    pack, ChainProblem, EventStore, Failure, InMemoryStore, KernelError, Registry, StoreError,
-    Stream, UpcastChainError, Upcaster,
+    pack, ChainProblem, EventStore, Failure, KernelError, Registry, Stream, UpcastChainError,
+    Upcaster,
 };
 
 use crate::next::toys::{
@@ -75,10 +75,13 @@ fn old_events_replay_through_the_upcaster() {
     assert_eq!(stream.state().cents, 300);
     assert_eq!(stream.events()[1].event(), &AccountEvent::Deposited(300));
 
-    let mut store = InMemoryStore::new();
-    store.append(&cover("account", 1), 0, &log).unwrap();
+    let store = MemoryStore::new();
+    store
+        .write(Write::append(sref(&cover("account", 1)), 0, &log))
+        .ready()
+        .unwrap();
     assert_eq!(
-        store.read(&cover("account", 1)).unwrap().unwrap().pages,
+        pages(&store, &cover("account", 1)),
         log,
         "the store keeps what was written"
     );
@@ -90,11 +93,11 @@ fn an_unknown_event_type_fails_replay_naming_it() {
     let error = Stream::<Account>::replay(cover("account", 1), &log, &registry())
         .err()
         .unwrap();
-    let KernelError::Store(StoreError::Unreadable {
+    let KernelError::Unreadable {
         stream,
         sequence,
         reason,
-    }) = error
+    } = error
     else {
         panic!("never skipped: {error:?}");
     };
@@ -105,15 +108,15 @@ fn an_unknown_event_type_fails_replay_naming_it() {
 #[test]
 fn an_old_command_is_upcast_then_decided() {
     let registry = registry_with_upcasters();
-    let mut store = InMemoryStore::new();
-    opened(&mut store, &registry, 1, 0);
+    let store = MemoryStore::new();
+    opened(&store, &registry, 1, 0);
 
     let old = command(
         cover("account", 1),
         pack(&account::cmd::v0::Credit { euros: 2 }),
     )
     .id(5);
-    let handled = handle::<Account>(&mut store, &registry, old, &at(20)).unwrap();
+    let handled = handle::<Account>(&store, &registry, old, &at(20)).unwrap();
     assert_eq!(
         payloads::<AccountEvent>(&handled.books()),
         [AccountEvent::Deposited(200)]
@@ -126,7 +129,7 @@ fn an_old_command_is_upcast_then_decided() {
     )
     .id(6);
     assert_eq!(
-        handle::<Account>(&mut store, &without, old, &at(21))
+        handle::<Account>(&store, &without, old, &at(21))
             .err()
             .unwrap(),
         Failure::Kernel(KernelError::UnknownType {
@@ -260,9 +263,9 @@ fn an_upcast_rule_reports_its_own_failure_and_bytes_it_cannot_read() {
         registry.register::<Account>(fees(), refusing).unwrap();
         registry
     };
-    let mut store = InMemoryStore::new();
+    let store = MemoryStore::new();
     let failure = handle::<Account>(
-        &mut store,
+        &store,
         &registry,
         command(cover("account", 1), old.clone()),
         &at(1),

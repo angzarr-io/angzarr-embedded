@@ -19,16 +19,18 @@ annals-diagnostic = { path = "../annals-diagnostic" }
 angzarr-proto = { git = "https://github.com/angzarr-io/angzarr-project", rev = "4be6a684d46110909811c0e30cf5a135d7134e6a" }
 prost = "0.14"
 prost-types = "0.14"
+# angzarr's shared storage contract (one async trait set, its errors and
+# codes): annals' store ports are these, pinned with angzarr-proto at the
+# same rev of angzarr-project's spec line, so both share one set of wire
+# types.
+angzarr-ports = { git = "https://github.com/angzarr-io/angzarr-project", rev = "4be6a684d46110909811c0e30cf5a135d7134e6a" }
 
-[features]
-# The store contract (`annals::next::contract`), for a store's tests.
-contract = []
-
-# annals' own tests run the store contract against InMemoryStore, and a
-# decorated aggregate (`next/decorated.test.rs`) through annals-macros, whose
-# expansion names `::annals`.
+# The kernel's tests run on angzarr-ports' MemoryStore, and a decorated
+# aggregate (`next/decorated.test.rs`) through annals-macros, whose expansion
+# names `::annals`.
 [dev-dependencies]
-annals = { path = ".", features = ["contract"] }
+annals = { path = "." }
+angzarr-ports = { git = "https://github.com/angzarr-io/angzarr-project", rev = "4be6a684d46110909811c0e30cf5a135d7134e6a", features = ["memory"] }
 annals-macros = { path = "../annals-macros" }
 
 [lints]

@@ -23,7 +23,7 @@
 //! consequence to whoever decodes. annals keeps that, and makes the decode
 //! strict: after upcasting, a type the domain does not decode is refused
 //! naming its type URL ([`KernelError::UnknownType`](super::KernelError::UnknownType)
-//! for a command, [`StoreError::Unreadable`](super::StoreError::Unreadable)
+//! for a command, [`KernelError::Unreadable`](super::KernelError::Unreadable)
 //! for an event), never skipped. Typed rules ([`Upcaster::rule`]) record
 //! their target type too, so [`Registry::check`](super::Registry::check)
 //! can refuse a chain that cannot finish (a duplicate source, rules out of

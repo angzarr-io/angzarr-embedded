@@ -1,10 +1,8 @@
 //! Conflict resolution: all three strategies, COMMUTATIVE the default where
 //! the state declares conflict units, STRICT otherwise.
-
+use crate::next::toys::prelude::*;
 use crate::next::v1::ConflictResolution;
-use crate::next::{
-    Failure, Handled, InMemoryStore, KernelError, Key, Payload, Recovery, UnitPath, Units,
-};
+use crate::next::{Failure, Handled, KernelError, Key, Payload, Recovery, UnitPath, Units};
 
 use crate::next::toys::{
     at, command, cover, handle, opened, payloads, registry, set, shelf, Account, AccountCmd, Edit,
@@ -12,7 +10,7 @@ use crate::next::toys::{
 };
 
 /// A shelf (stream 3) with items a = 1 then b = 2: sequences 0 and 1.
-fn shelf_a_b(store: &mut InMemoryStore) {
+fn shelf_a_b(store: &MemoryStore) {
     let registry = registry();
     handle::<Shelf>(
         store,
@@ -45,15 +43,15 @@ fn stale(expected: u64, actual: u64) -> Failure<std::convert::Infallible> {
 #[test]
 fn commutative_is_the_default_for_a_state_with_conflict_units() {
     let registry = registry();
-    let mut store = InMemoryStore::new();
-    shelf_a_b(&mut store);
+    let store = MemoryStore::new();
+    shelf_a_b(&store);
 
     // Issued when only a existed (expected 1), no resolution asked for: the
     // window changed items[b], the command changes items[a]. Disjoint.
     let disjoint = command(cover("shelf", 3), set("a", 5))
         .id(3)
         .expecting(1, ConflictResolution::Unspecified);
-    let handled = handle::<Shelf>(&mut store, &registry, disjoint, &at(3)).unwrap();
+    let handled = handle::<Shelf>(&store, &registry, disjoint, &at(3)).unwrap();
     assert_eq!(
         shelf_events(&handled),
         [ShelfEvent::WasSet(shelf::WasSet {
@@ -68,7 +66,7 @@ fn commutative_is_the_default_for_a_state_with_conflict_units() {
     let overlapping = command(cover("shelf", 3), set("b", 7))
         .id(4)
         .expecting(1, ConflictResolution::Unspecified);
-    let failure = handle::<Shelf>(&mut store, &registry, overlapping, &at(4))
+    let failure = handle::<Shelf>(&store, &registry, overlapping, &at(4))
         .err()
         .unwrap();
     assert_eq!(failure, stale(1, 3));
@@ -78,14 +76,14 @@ fn commutative_is_the_default_for_a_state_with_conflict_units() {
 #[test]
 fn strict_is_the_default_for_a_state_without_conflict_units() {
     let registry = registry();
-    let mut store = InMemoryStore::new();
-    opened(&mut store, &registry, 1, 100);
+    let store = MemoryStore::new();
+    opened(&store, &registry, 1, 100);
 
     let behind = command(cover("account", 1), AccountCmd::Deposit(1).to_any())
         .id(3)
         .expecting(1, ConflictResolution::Unspecified);
     assert_eq!(
-        handle::<Account>(&mut store, &registry, behind, &at(20))
+        handle::<Account>(&store, &registry, behind, &at(20))
             .err()
             .unwrap(),
         Failure::Kernel(KernelError::Stale {
@@ -100,8 +98,8 @@ fn strict_is_the_default_for_a_state_without_conflict_units() {
 #[test]
 fn a_command_type_configured_strict_is_strict() {
     let registry = registry();
-    let mut store = InMemoryStore::new();
-    shelf_a_b(&mut store);
+    let store = MemoryStore::new();
+    shelf_a_b(&store);
     let note = command(
         cover("shelf", 3),
         ShelfCmd::Note("restock".to_string()).to_any(),
@@ -109,7 +107,7 @@ fn a_command_type_configured_strict_is_strict() {
     .id(3)
     .expecting(1, ConflictResolution::Unspecified);
     assert_eq!(
-        handle::<Shelf>(&mut store, &registry, note, &at(3))
+        handle::<Shelf>(&store, &registry, note, &at(3))
             .err()
             .unwrap(),
         stale(1, 2),
@@ -120,21 +118,21 @@ fn a_command_type_configured_strict_is_strict() {
 #[test]
 fn an_unmarked_field_conflicts_with_everything() {
     let registry = registry();
-    let mut store = InMemoryStore::new();
-    shelf_a_b(&mut store);
+    let store = MemoryStore::new();
+    shelf_a_b(&store);
     let note = command(
         cover("shelf", 3),
         ShelfCmd::Note("restock".to_string()).to_any(),
     )
     .id(3);
-    handle::<Shelf>(&mut store, &registry, note, &at(3)).unwrap();
+    handle::<Shelf>(&store, &registry, note, &at(3)).unwrap();
 
     // Behind the note: the window changed `notes`, which carries no marker.
     let behind = command(cover("shelf", 3), set("c", 1))
         .id(4)
         .expecting(2, ConflictResolution::Commutative);
     assert_eq!(
-        handle::<Shelf>(&mut store, &registry, behind, &at(4))
+        handle::<Shelf>(&store, &registry, behind, &at(4))
             .err()
             .unwrap(),
         stale(2, 3),
@@ -145,11 +143,11 @@ fn an_unmarked_field_conflicts_with_everything() {
 #[test]
 fn aggregate_handles_demands_the_nonce_back() {
     let registry = registry();
-    let mut store = InMemoryStore::new();
-    shelf_a_b(&mut store);
+    let store = MemoryStore::new();
+    shelf_a_b(&store);
 
     let handled = handle::<Shelf>(
-        &mut store,
+        &store,
         &registry,
         command(cover("shelf", 3), set("b", 7))
             .id(3)
@@ -173,7 +171,7 @@ fn aggregate_handles_demands_the_nonce_back() {
         resolve: false,
     };
     let failure = handle::<Shelf>(
-        &mut store,
+        &store,
         &registry,
         command(cover("shelf", 3), crate::next::pack(&unresolved))
             .id(4)
@@ -197,8 +195,8 @@ fn aggregate_handles_demands_the_nonce_back() {
 #[test]
 fn an_expected_sequence_past_the_head_is_stale() {
     let registry = registry();
-    let mut store = InMemoryStore::new();
-    shelf_a_b(&mut store);
+    let store = MemoryStore::new();
+    shelf_a_b(&store);
     for (n, resolution) in [
         ConflictResolution::Strict,
         ConflictResolution::AggregateHandles,
@@ -211,7 +209,7 @@ fn an_expected_sequence_past_the_head_is_stale() {
             .id(10 + n as u128)
             .expecting(5, resolution);
         assert_eq!(
-            handle::<Shelf>(&mut store, &registry, ahead, &at(5))
+            handle::<Shelf>(&store, &registry, ahead, &at(5))
                 .err()
                 .unwrap(),
             stale(5, 2),
@@ -293,14 +291,14 @@ fn a_state_without_conflict_units_changes_everything() {
 #[test]
 fn a_fact_keeps_its_sent_correlation() {
     let registry = registry();
-    let mut store = InMemoryStore::new();
+    let store = MemoryStore::new();
     let payment = crate::next::toys::fact(
         cover("account", 1),
         crate::next::toys::AccountFact::PaymentReceived(5).to_any(),
         "pi_c",
     )
     .correlated(4);
-    let handled = handle::<Account>(&mut store, &registry, payment, &at(1)).unwrap();
+    let handled = handle::<Account>(&store, &registry, payment, &at(1)).unwrap();
     assert_eq!(
         handled.books()[0].pages[0]
             .meta
@@ -334,10 +332,10 @@ fn an_old_command_type_has_its_current_types_resolution() {
                 .rule::<OldNote, shelf::Note>(|old| Ok(shelf::Note { note: old.text })),
         )
         .unwrap();
-    let mut store = InMemoryStore::new();
+    let store = MemoryStore::new();
     for (n, item) in [(1, "a"), (2, "b")] {
         handle::<Shelf>(
-            &mut store,
+            &store,
             &registry,
             command(cover("shelf", 3), set(item, 1)).id(n),
             &at(n as i64),
@@ -351,7 +349,7 @@ fn an_old_command_type_has_its_current_types_resolution() {
     };
     assert_eq!(
         handle::<Shelf>(
-            &mut store,
+            &store,
             &registry,
             command(cover("shelf", 3), old())
                 .id(3)
@@ -364,7 +362,7 @@ fn an_old_command_type_has_its_current_types_resolution() {
         "configured STRICT by its current type, though sent as v0"
     );
     let handled = handle::<Shelf>(
-        &mut store,
+        &store,
         &registry,
         command(cover("shelf", 3), old()).id(4),
         &at(4),
@@ -387,7 +385,7 @@ fn an_old_command_type_has_its_current_types_resolution() {
         .unwrap();
     assert!(matches!(
         handle::<Shelf>(
-            &mut store,
+            &store,
             &failing,
             command(cover("shelf", 3), old()).id(5),
             &at(5)
@@ -501,16 +499,16 @@ fn a_commutative_command_at_the_head_has_no_window_whatever_its_units() {
             Upcaster::new("tally-upcaster", "tally"),
         )
         .unwrap();
-    let mut store = InMemoryStore::new();
+    let store = MemoryStore::new();
     let count = |n: u128| command(cover("tally", 1), crate::next::pack(&tally::Count {})).id(n);
     for n in 1..=2 {
         assert!(
-            handle::<tally::Counter>(&mut store, &registry, count(n), &at(n as i64)).is_ok(),
+            handle::<tally::Counter>(&store, &registry, count(n), &at(n as i64)).is_ok(),
             "stamped at the head: nothing between, nothing to overlap"
         );
     }
     assert!(handle::<tally::Counter>(
-        &mut store,
+        &store,
         &registry,
         count(3).expecting(2, ConflictResolution::Commutative),
         &at(3),
@@ -518,7 +516,7 @@ fn a_commutative_command_at_the_head_has_no_window_whatever_its_units() {
     .is_ok());
     assert_eq!(
         handle::<tally::Counter>(
-            &mut store,
+            &store,
             &registry,
             count(4).expecting(1, ConflictResolution::Commutative),
             &at(4),

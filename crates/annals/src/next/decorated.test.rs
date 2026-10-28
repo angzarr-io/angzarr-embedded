@@ -43,6 +43,7 @@ use ::annals::next::markup::{
     PolicyContext, ProcessManager, ProjectionContext, Record, Refusal, Refuses, Refusing,
     Rejection, TypeName, MARKUP_RULES_VERSION, STEP_LIMIT,
 };
+use ::annals::next::v1::event_meta::Causation;
 use ::annals::next::v1::{
     command_page, Command, CommandBook, CommandPage, ConflictResolution, Cover, EventBook,
     EventPage, EventRef, Fact, FactOrigin, StateDescriptor, StateOptions, Uuid,
@@ -2242,7 +2243,7 @@ fn fact_to(cover: Cover, payload: Any, external_id: &str) -> CommandBook {
 /// on the async path, as an application does; `log` gets the dead
 /// letters.
 fn handle_in<D: Domain>(
-    store: &mut ::annals::next::InMemoryStore,
+    store: &Mem,
     registry: &Registry,
     log: &MemoryDeadLetters,
     n: u8,
@@ -2253,8 +2254,8 @@ fn handle_in<D: Domain>(
         command_id: Uuid::from_bytes([0x70 | n; 16]),
     };
     ready(
-        ::annals::next::Kernel::new(registry, log).handle_async::<D, _, _>(
-            ::annals::next::Ready(store.begin()),
+        ::annals::next::Kernel::new(registry, log).handle::<D, _, _>(
+            store,
             &::annals::next::Routes::new(),
             book,
             &sampled,
@@ -2264,14 +2265,19 @@ fn handle_in<D: Domain>(
 }
 
 /// The stored pages of the stream at `cover`; `None` when it has none.
-fn pages(store: &mut ::annals::next::InMemoryStore, cover: &Cover) -> Option<Vec<EventPage>> {
+fn pages(store: &Mem, cover: &Cover) -> Option<Vec<EventPage>> {
     use ::annals::next::EventStore;
-    store.read(cover).unwrap().map(|slice| slice.pages)
+    let stream = ::annals::next::StreamRef::try_from(cover).unwrap();
+    let slice = ready(store.read(stream, 0, None)).unwrap();
+    (slice.next_sequence > 0).then_some(slice.pages)
 }
+
+/// The store the decorated domains run on: angzarr-ports' in memory.
+type Mem = ::annals::next::angzarr_ports::memory::MemoryStore;
 
 /// The type names of the events the buy-in of correlation `c` recorded;
 /// `None` when it has no stream.
-fn buy_in_events(store: &mut ::annals::next::InMemoryStore, c: &Uuid) -> Option<Vec<String>> {
+fn buy_in_events(store: &Mem, c: &Uuid) -> Option<Vec<String>> {
     pages(store, &buy_in_cover(c)).map(|pages| {
         pages
             .iter()
@@ -2290,6 +2296,35 @@ fn buy_ins() -> Registry {
     let mut registry = registry();
     registry.process_manager::<BuyIn>(BuyIn::default);
     registry
+}
+
+/// The wallet, the buy-in, both policies (`translating` picks the buy-in
+/// policy's mode).
+fn flows(translating: bool) -> Registry {
+    let mut registry = buy_ins();
+    registry.policy(WalletBuyIn);
+    match translating {
+        true => registry.policy(TranslatingBuyInWallet),
+        false => registry.policy(BuyInWallet),
+    };
+    registry
+}
+
+/// `flows`, a store, and a wallet at [`root`] opened with `bonus`
+/// (command 1, in a correlation of its own).
+fn funded(translating: bool, bonus: i64) -> (Registry, Mem) {
+    let registry = flows(translating);
+    let store = Mem::new();
+    let log = MemoryDeadLetters::new();
+    handle_in::<Wallet>(
+        &store,
+        &registry,
+        &log,
+        1,
+        send("wallet", 1, any(Open { bonus }), Some(correlation(15))),
+    )
+    .unwrap();
+    (registry, store)
 }
 
 /// StartBuyIn for `cents` from the wallet at [`root`], as command `n` to
@@ -2314,17 +2349,16 @@ mod process_manager {
     #[test]
     fn a_starting_command_starts_an_instance_at_its_correlation() {
         let registry = buy_ins();
-        let mut store = ::annals::next::InMemoryStore::new();
+        let store = Mem::new();
         let log = MemoryDeadLetters::new();
-        let started =
-            handle_in::<BuyIn>(&mut store, &registry, &log, 2, start(&correlation(1), 2, 0));
+        let started = handle_in::<BuyIn>(&store, &registry, &log, 2, start(&correlation(1), 2, 0));
         assert!(
             started.is_ok(),
             "{:?}",
             started.err().map(|e| e.to_string())
         );
         assert_eq!(
-            buy_in_events(&mut store, &correlation(1)).map(|names| names[0].clone()),
+            buy_in_events(&store, &correlation(1)).map(|names| names[0].clone()),
             Some("toy.buyin.v1.BuyInStarted".to_string())
         );
     }
@@ -2335,7 +2369,7 @@ mod process_manager {
     #[test]
     fn a_non_starting_command_for_no_instance_is_refused() {
         let registry = buy_ins();
-        let mut store = ::annals::next::InMemoryStore::new();
+        let store = Mem::new();
         let log = MemoryDeadLetters::new();
         let held = command_to(
             buy_in_cover(&correlation(2)),
@@ -2343,12 +2377,12 @@ mod process_manager {
             any(RecordHeld { cents: 5 }),
             Some(correlation(2)),
         );
-        let Err(refused) = handle_in::<BuyIn>(&mut store, &registry, &log, 2, held) else {
+        let Err(refused) = handle_in::<BuyIn>(&store, &registry, &log, 2, held) else {
             panic!("a command for no instance is refused");
         };
         assert_eq!(refused.code(), "annals-next-pm-no-instance");
         assert_eq!(refused.recovery(), Recovery::Business);
-        assert_eq!(buy_in_events(&mut store, &correlation(2)), None);
+        assert_eq!(buy_in_events(&store, &correlation(2)), None);
     }
 
     /// A fact that is not a starting one, for a correlation with no
@@ -2357,20 +2391,20 @@ mod process_manager {
     #[test]
     fn a_non_starting_fact_for_no_instance_is_skipped() {
         let registry = buy_ins();
-        let mut store = ::annals::next::InMemoryStore::new();
+        let store = Mem::new();
         let log = MemoryDeadLetters::new();
         let expired = fact_to(
             buy_in_cover(&correlation(3)),
             any(BuyInExpired {}),
             "timeout-3",
         );
-        let skipped = handle_in::<BuyIn>(&mut store, &registry, &log, 2, expired);
+        let skipped = handle_in::<BuyIn>(&store, &registry, &log, 2, expired);
         assert!(
             matches!(skipped, Ok(Handled::Applied(_))),
             "{:?}",
             skipped.err().map(|e| e.to_string())
         );
-        assert_eq!(buy_in_events(&mut store, &correlation(3)), None);
+        assert_eq!(buy_in_events(&store, &correlation(3)), None);
         assert!(log.lines().is_empty());
     }
 
@@ -2379,11 +2413,11 @@ mod process_manager {
     #[test]
     fn a_correlation_other_than_the_root_is_malformed() {
         let registry = buy_ins();
-        let mut store = ::annals::next::InMemoryStore::new();
+        let store = Mem::new();
         let log = MemoryDeadLetters::new();
         let mut astray = start(&correlation(4), 2, 0);
         astray.page.as_mut().unwrap().correlation_id = Some(correlation(5));
-        let Err(refused) = handle_in::<BuyIn>(&mut store, &registry, &log, 2, astray) else {
+        let Err(refused) = handle_in::<BuyIn>(&store, &registry, &log, 2, astray) else {
             panic!("a correlation that is not the root is malformed");
         };
         assert_eq!(refused.code(), "annals-next-malformed-root-not-correlation");
@@ -2395,12 +2429,12 @@ mod process_manager {
     #[test]
     fn an_unset_correlation_is_given_the_root() {
         let registry = buy_ins();
-        let mut store = ::annals::next::InMemoryStore::new();
+        let store = Mem::new();
         let log = MemoryDeadLetters::new();
         let mut unset = start(&correlation(6), 2, 0);
         unset.page.as_mut().unwrap().correlation_id = None;
-        handle_in::<BuyIn>(&mut store, &registry, &log, 2, unset).unwrap();
-        let pages = pages(&mut store, &buy_in_cover(&correlation(6))).expect("the buy-in");
+        handle_in::<BuyIn>(&store, &registry, &log, 2, unset).unwrap();
+        let pages = pages(&store, &buy_in_cover(&correlation(6))).expect("the buy-in");
         assert_eq!(
             pages[0]
                 .meta
@@ -2415,16 +2449,16 @@ mod process_manager {
     #[test]
     fn a_facts_origin_reaches_its_handler() {
         let registry = buy_ins();
-        let mut store = ::annals::next::InMemoryStore::new();
+        let store = Mem::new();
         let log = MemoryDeadLetters::new();
-        handle_in::<BuyIn>(&mut store, &registry, &log, 2, start(&correlation(7), 2, 0)).unwrap();
+        handle_in::<BuyIn>(&store, &registry, &log, 2, start(&correlation(7), 2, 0)).unwrap();
         let expired = fact_to(
             buy_in_cover(&correlation(7)),
             any(BuyInExpired {}),
             "timeout-7",
         );
         let Ok(Handled::Applied(recorded)) =
-            handle_in::<BuyIn>(&mut store, &registry, &log, 3, expired)
+            handle_in::<BuyIn>(&store, &registry, &log, 3, expired)
         else {
             panic!("the timeout is applied");
         };
@@ -2444,18 +2478,18 @@ mod process_manager {
     #[test]
     fn a_non_starting_command_is_decided_by_an_instance() {
         let registry = buy_ins();
-        let mut store = ::annals::next::InMemoryStore::new();
+        let store = Mem::new();
         let log = MemoryDeadLetters::new();
-        handle_in::<BuyIn>(&mut store, &registry, &log, 2, start(&correlation(9), 2, 0)).unwrap();
+        handle_in::<BuyIn>(&store, &registry, &log, 2, start(&correlation(9), 2, 0)).unwrap();
         let held = command_to(
             buy_in_cover(&correlation(9)),
             3,
             any(RecordHeld { cents: 5 }),
             Some(correlation(9)),
         );
-        handle_in::<BuyIn>(&mut store, &registry, &log, 3, held).unwrap();
+        handle_in::<BuyIn>(&store, &registry, &log, 3, held).unwrap();
         assert_eq!(
-            buy_in_events(&mut store, &correlation(9)),
+            buy_in_events(&store, &correlation(9)),
             buy_in(&["BuyInStarted", "BuyInHeld"])
         );
     }
@@ -2465,14 +2499,13 @@ mod process_manager {
     #[test]
     fn a_command_sent_again_is_a_duplicate() {
         let registry = buy_ins();
-        let mut store = ::annals::next::InMemoryStore::new();
+        let store = Mem::new();
         let log = MemoryDeadLetters::new();
-        handle_in::<BuyIn>(&mut store, &registry, &log, 2, start(&correlation(8), 2, 0)).unwrap();
-        let again =
-            handle_in::<BuyIn>(&mut store, &registry, &log, 3, start(&correlation(8), 2, 0));
+        handle_in::<BuyIn>(&store, &registry, &log, 2, start(&correlation(8), 2, 0)).unwrap();
+        let again = handle_in::<BuyIn>(&store, &registry, &log, 3, start(&correlation(8), 2, 0));
         assert!(matches!(again, Ok(Handled::Duplicate(_))));
         assert_eq!(
-            buy_in_events(&mut store, &correlation(8)),
+            buy_in_events(&store, &correlation(8)),
             buy_in(&["BuyInStarted"])
         );
     }
@@ -2750,19 +2783,12 @@ mod policy_refusals {
     #[test]
     fn on_refused_dispatches_by_the_refused_commands_type() {
         let registry = buy_ins();
-        let mut store = ::annals::next::InMemoryStore::new();
+        let store = Mem::new();
         let log = MemoryDeadLetters::new();
-        handle_in::<BuyIn>(
-            &mut store,
-            &registry,
-            &log,
-            2,
-            start(&correlation(2), 2, 30),
-        )
-        .unwrap();
+        handle_in::<BuyIn>(&store, &registry, &log, 2, start(&correlation(2), 2, 30)).unwrap();
         let refused = BuyInWallet.on_refused(&hold_refusal(&correlation(2), 30, insufficient(20)));
         handle_in::<BuyIn>(
-            &mut store,
+            &store,
             &registry,
             &log,
             3,
@@ -2770,10 +2796,10 @@ mod policy_refusals {
         )
         .unwrap();
         assert_eq!(
-            buy_in_events(&mut store, &correlation(2)),
+            buy_in_events(&store, &correlation(2)),
             buy_in(&["BuyInStarted", "BuyInFailed"])
         );
-        let pages = pages(&mut store, &buy_in_cover(&correlation(2))).expect("the buy-in");
+        let pages = pages(&store, &buy_in_cover(&correlation(2))).expect("the buy-in");
         assert_eq!(
             pages[1].payload,
             Some(any(BuyInFailed { short: 20 })),
@@ -2787,16 +2813,9 @@ mod policy_refusals {
     #[test]
     fn a_refusal_with_no_handler_is_the_refused_commands_unknown_type() {
         let registry = buy_ins();
-        let mut store = ::annals::next::InMemoryStore::new();
+        let store = Mem::new();
         let log = MemoryDeadLetters::new();
-        handle_in::<BuyIn>(
-            &mut store,
-            &registry,
-            &log,
-            2,
-            start(&correlation(8), 2, 30),
-        )
-        .unwrap();
+        handle_in::<BuyIn>(&store, &registry, &log, 2, start(&correlation(8), 2, 30)).unwrap();
         let mut refusal = hold_refusal(&correlation(8), 30, insufficient(20));
         refusal.command = Some(send(
             "wallet",
@@ -2806,7 +2825,7 @@ mod policy_refusals {
         ));
         let refused = BuyInWallet.on_refused(&refusal);
         let unhandled = handle_in::<BuyIn>(
-            &mut store,
+            &store,
             &registry,
             &log,
             3,
@@ -2842,20 +2861,13 @@ mod policy_refusals {
     #[test]
     fn a_refusal_fact_for_another_stream_is_malformed() {
         let registry = buy_ins();
-        let mut store = ::annals::next::InMemoryStore::new();
+        let store = Mem::new();
         let log = MemoryDeadLetters::new();
-        handle_in::<BuyIn>(
-            &mut store,
-            &registry,
-            &log,
-            2,
-            start(&correlation(3), 2, 30),
-        )
-        .unwrap();
+        handle_in::<BuyIn>(&store, &registry, &log, 2, start(&correlation(3), 2, 30)).unwrap();
         let elsewhere =
             BuyInWallet.on_refused(&hold_refusal(&correlation(4), 30, insufficient(20)));
         let Err(refused) = handle_in::<BuyIn>(
-            &mut store,
+            &store,
             &registry,
             &log,
             3,
@@ -2865,9 +2877,207 @@ mod policy_refusals {
         };
         assert_eq!(refused.code(), "annals-next-malformed-refusal-misaddressed");
         assert_eq!(
-            buy_in_events(&mut store, &correlation(3)),
+            buy_in_events(&store, &correlation(3)),
             buy_in(&["BuyInStarted"])
         );
+    }
+}
+
+/// Handle `book` (sampled at `n` seconds): its own step, then every policy
+/// step it sets off, each committed on its own, waiting for the chain to
+/// settle, as an application does; `log` gets the dead letters.
+fn settle_in<D: Domain>(
+    store: &Mem,
+    registry: &Registry,
+    log: &MemoryDeadLetters,
+    n: u8,
+    book: CommandBook,
+) -> Result<::annals::next::Recorded, Failure<D::Rejection>> {
+    let sampled = Sampled {
+        now: at(i64::from(n)),
+        command_id: Uuid::from_bytes([0x70 | n; 16]),
+    };
+    let handled = ready(
+        ::annals::next::Kernel::new(registry, log).handle::<D, _, _>(
+            store,
+            &::annals::next::Routes::new(),
+            book,
+            &sampled,
+            &mut (),
+        ),
+    )?;
+    match handled {
+        Handled::Applied(recorded) => Ok(recorded),
+        Handled::Duplicate(_) => Ok(::annals::next::Recorded::default()),
+    }
+}
+
+/// The covers of the steps `settled` committed, in commit order, each
+/// with the type names of its events.
+fn steps(settled: &::annals::next::Recorded) -> Vec<(String, Vec<String>)> {
+    settled
+        .steps()
+        .iter()
+        .map(|book| {
+            (
+                book.cover.as_ref().unwrap().domain.clone(),
+                book.pages
+                    .iter()
+                    .map(|p| type_name(&p.payload.as_ref().unwrap().type_url).to_string())
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+mod refusal_flow {
+    use super::*;
+
+    /// A policy's command the target accepts flows on, each step committed
+    /// on its own, in order: the buy-in's start, then the hold the buy-in's
+    /// policy sends the wallet, then the record the wallet's policy sends back
+    /// to the buy-in of its correlation (the policy names the buy-in's root
+    /// with the correlation).
+    #[test]
+    fn an_accepted_command_flows_through_both_policies_step_by_step() {
+        let (registry, store) = funded(false, 50);
+        let log = MemoryDeadLetters::new();
+        let settled =
+            settle_in::<BuyIn>(&store, &registry, &log, 2, start(&correlation(1), 2, 30)).unwrap();
+        assert_eq!(
+            steps(&settled),
+            [
+                ("buyin", "toy.buyin.v1.BuyInStarted"),
+                ("wallet", "toy.wallet.v1.Held"),
+                ("buyin", "toy.buyin.v1.BuyInHeld"),
+            ]
+            .map(|(domain, event)| (domain.to_string(), vec![event.to_string()]))
+        );
+        assert_eq!(
+            buy_in_events(&store, &correlation(1)),
+            buy_in(&["BuyInStarted", "BuyInHeld"])
+        );
+    }
+
+    /// Pass-through: the buy-in's start is committed first; the wallet
+    /// refuses the hold and records nothing; the policy's `CommandRefused`
+    /// reaches the buy-in's `#[on_refused(Hold)]` as a step of its own,
+    /// which records the failure.
+    #[test]
+    fn a_refused_command_reaches_the_sources_on_refused_handler() {
+        let (registry, store) = funded(false, 10);
+        let log = MemoryDeadLetters::new();
+        let settled = settle_in::<BuyIn>(&store, &registry, &log, 2, start(&correlation(2), 2, 30));
+        let Ok(settled) = settled else {
+            panic!("{:?}", settled.err().map(|e| e.to_string()));
+        };
+        assert_eq!(
+            steps(&settled),
+            [
+                ("buyin", "toy.buyin.v1.BuyInStarted"),
+                ("buyin", "toy.buyin.v1.BuyInFailed"),
+            ]
+            .map(|(domain, event)| (domain.to_string(), vec![event.to_string()]))
+        );
+        assert_eq!(
+            pages(&store, wallet().cover()).map(|p| p.len()),
+            Some(2),
+            "the wallet recorded nothing of the hold"
+        );
+    }
+
+    /// The refusal fact's id is the refused command's id, and its origin's
+    /// external id that id's canonical text.
+    #[test]
+    fn the_refusal_facts_id_is_the_refused_commands() {
+        let (registry, store) = funded(false, 10);
+        let log = MemoryDeadLetters::new();
+        settle_in::<BuyIn>(&store, &registry, &log, 2, start(&correlation(3), 2, 30)).unwrap();
+        let pages = pages(&store, &buy_in_cover(&correlation(3))).expect("the buy-in");
+        let hold_id =
+            ::annals::next::ids::reaction_command_id(&trigger(&correlation(3)), "buyin-wallet", 0)
+                .unwrap();
+        let meta = pages[1].meta.clone().expect("meta");
+        assert_eq!(meta.causation, Some(Causation::CommandId(hold_id.clone())));
+        assert_eq!(
+            meta.fact.map(|origin| origin.external_id),
+            Some(hold_id.to_string())
+        );
+    }
+
+    /// Translate: the policy's callback hands the buy-in its own fact,
+    /// which its `#[handles_fact(HoldLost)]` records, as its own step.
+    #[test]
+    fn translate_delivers_the_callbacks_domestic_fact() {
+        let (registry, store) = funded(true, 10);
+        let log = MemoryDeadLetters::new();
+        let settled =
+            settle_in::<BuyIn>(&store, &registry, &log, 2, start(&correlation(4), 2, 30)).unwrap();
+        assert_eq!(
+            steps(&settled).last(),
+            Some(&(
+                "buyin".to_string(),
+                vec!["toy.buyin.v1.HoldWasLost".to_string()]
+            ))
+        );
+        assert_eq!(
+            buy_in_events(&store, &correlation(4)),
+            buy_in(&["BuyInStarted", "HoldWasLost"])
+        );
+    }
+
+    /// A refusal with no path: a hold on the wallet outside any buy-in is
+    /// committed, the wallet's policy sends `RecordHeld` to a correlation
+    /// with no buy-in, which refuses it, and the wallet handles no refusal
+    /// of `RecordHeld`. The hold stays committed, the fact is
+    /// dead-lettered, and the call is Ok.
+    #[test]
+    fn a_refusal_with_no_handler_is_dead_lettered() {
+        let (registry, store) = funded(false, 50);
+        let log = MemoryDeadLetters::new();
+        let settled = settle_in::<Wallet>(
+            &store,
+            &registry,
+            &log,
+            2,
+            send("wallet", 2, any(Hold { cents: 5 }), Some(correlation(5))),
+        );
+        let Ok(settled) = settled else {
+            panic!("{:?}", settled.err().map(|e| e.to_string()));
+        };
+        assert_eq!(
+            steps(&settled),
+            [("wallet".to_string(), vec!["toy.wallet.v1.Held".to_string()])]
+        );
+        let lines = log.lines();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains(" to wallet "), "{lines:?}");
+    }
+
+    /// A step that fails mid-way keeps the commits before it: no rollback.
+    /// The wallet's policy sends to the buy-in, which this registry lacks:
+    /// the call is an error, the hold stays committed, and the policy's
+    /// malformed command is dead-lettered.
+    #[test]
+    fn a_failing_step_keeps_the_commits_before_it() {
+        let mut registry = registry();
+        registry.policy(WalletBuyIn);
+        let (_, store) = funded(false, 50);
+        let log = MemoryDeadLetters::new();
+        let settled = settle_in::<Wallet>(
+            &store,
+            &registry,
+            &log,
+            2,
+            send("wallet", 2, any(Hold { cents: 5 }), Some(correlation(6))),
+        );
+        assert!(settled.is_err(), "the policy's step failed");
+        assert_eq!(
+            pages(&store, wallet().cover()).and_then(|p| p.last().and_then(|p| p.payload.clone())),
+            Some(any(Held { cents: 5 })),
+            "the hold stays committed"
+        );
+        assert_eq!(log.lines().len(), 1, "{:?}", log.lines());
     }
 }
 
@@ -2997,7 +3207,7 @@ fn ready<F: std::future::Future>(f: F) -> F::Output {
 /// Handle `payload` as command `n` to the wallet at `root`, on the async
 /// path, awaited.
 fn handle_async(
-    store: &mut ::annals::next::InMemoryStore,
+    store: &Mem,
     registry: &Registry,
     n: u8,
     payload: Any,
@@ -3011,8 +3221,8 @@ fn handle_async(
     book.cover.as_mut().unwrap().root = Some(root);
     let log = MemoryDeadLetters::new();
     ready(
-        ::annals::next::Kernel::new(registry, &log).handle_async::<Wallet, _, _>(
-            ::annals::next::Ready(store.begin()),
+        ::annals::next::Kernel::new(registry, &log).handle::<Wallet, _, _>(
+            store,
             &::annals::next::Routes::new(),
             book,
             &sampled,
@@ -3039,8 +3249,8 @@ mod projector {
     fn it_runs_after_commit_and_is_awaited_before_the_call_returns() {
         let port = BalancePort::default();
         let registry = projected(&port);
-        let mut store = ::annals::next::InMemoryStore::new();
-        handle_async(&mut store, &registry, 1, any(Open { bonus: 5 }), root()).unwrap();
+        let store = Mem::new();
+        handle_async(&store, &registry, 1, any(Open { bonus: 5 }), root()).unwrap();
         assert_eq!(*port.lines.lock().unwrap(), [(1, 5)]);
     }
 
@@ -3050,10 +3260,10 @@ mod projector {
     fn one_instance_serves_every_stream() {
         let port = BalancePort::default();
         let registry = projected(&port);
-        let mut store = ::annals::next::InMemoryStore::new();
-        handle_async(&mut store, &registry, 1, any(Open { bonus: 5 }), root()).unwrap();
+        let store = Mem::new();
+        handle_async(&store, &registry, 1, any(Open { bonus: 5 }), root()).unwrap();
         let other = Uuid::from_bytes([0x0b; 16]);
-        handle_async(&mut store, &registry, 2, any(Open { bonus: 7 }), other).unwrap();
+        handle_async(&store, &registry, 2, any(Open { bonus: 7 }), other).unwrap();
         assert_eq!(*port.lines.lock().unwrap(), [(1, 5), (2, 7)]);
     }
 
@@ -3062,9 +3272,9 @@ mod projector {
     fn an_unmarked_event_is_skipped() {
         let port = BalancePort::default();
         let registry = projected(&port);
-        let mut store = ::annals::next::InMemoryStore::new();
-        handle_async(&mut store, &registry, 1, any(Open { bonus: 5 }), root()).unwrap();
-        handle_async(&mut store, &registry, 2, any(Withdraw { cents: 5 }), root()).unwrap();
+        let store = Mem::new();
+        handle_async(&store, &registry, 1, any(Open { bonus: 5 }), root()).unwrap();
+        handle_async(&store, &registry, 2, any(Withdraw { cents: 5 }), root()).unwrap();
         assert_eq!(*port.lines.lock().unwrap(), [(1, 5)]);
     }
 
@@ -3074,12 +3284,11 @@ mod projector {
     /// a retry.
     #[test]
     fn a_failure_is_the_callers_error_and_the_events_stay_committed() {
-        use ::annals::next::EventStore;
         let port = BalancePort::default();
         port.fail.store(true, std::sync::atomic::Ordering::SeqCst);
         let registry = projected(&port);
-        let mut store = ::annals::next::InMemoryStore::new();
-        let failed = handle_async(&mut store, &registry, 1, any(Open { bonus: 5 }), root());
+        let store = Mem::new();
+        let failed = handle_async(&store, &registry, 1, any(Open { bonus: 5 }), root());
         let Err(Failure::Projection {
             committed,
             failures,
@@ -3098,8 +3307,8 @@ mod projector {
             [2],
             "the wallet's book: Opened and Deposited"
         );
-        let stored = store.read(wallet().cover()).unwrap().expect("the stream");
-        assert_eq!(stored.pages.len(), 2, "and they stay committed");
+        let stored = pages(&store, wallet().cover()).expect("the stream");
+        assert_eq!(stored.len(), 2, "and they stay committed");
         assert_eq!(
             Failure::<Rejection<Refused>>::Projection {
                 committed,
@@ -3124,8 +3333,8 @@ mod projector {
             .projector(Trail {
                 port: trail.clone(),
             });
-        let mut store = ::annals::next::InMemoryStore::new();
-        handle_async(&mut store, &registry, 1, any(Open { bonus: 5 }), root()).unwrap();
+        let store = Mem::new();
+        handle_async(&store, &registry, 1, any(Open { bonus: 5 }), root()).unwrap();
         assert_eq!(*port.lines.lock().unwrap(), [(1, 5)]);
         assert_eq!(*audit.seen.lock().unwrap(), ["Opened", "Deposited"]);
         assert_eq!(*trail.seen.lock().unwrap(), ["Opened", "Deposited"]);
@@ -3148,8 +3357,8 @@ mod projector {
             .projector(Trail {
                 port: trail.clone(),
             });
-        let mut store = ::annals::next::InMemoryStore::new();
-        let failed = handle_async(&mut store, &registry, 1, any(Open { bonus: 5 }), root());
+        let store = Mem::new();
+        let failed = handle_async(&store, &registry, 1, any(Open { bonus: 5 }), root());
         let Err(Failure::Projection { failures, .. }) = failed else {
             panic!("the failures are the caller's Failure::Projection");
         };

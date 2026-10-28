@@ -2,10 +2,11 @@
 
 Annals is a deterministic application engine on CQRS/ES: small Rust
 crates, knowing nothing of the applications that use them. All but annals,
-annals-store-sql, annals-macros (and the test-only annals-catalog-check)
+angzarr-store-sqlite, annals-macros (and the test-only annals-catalog-check)
 have zero third-party dependencies; annals depends on angzarr's wire types
 (angzarr-proto, prost, prost-types), which its kernel operates on directly,
-and annals-store-sql on sea-query and sqlx.
+and on angzarr's shared store contract (angzarr-ports), and
+angzarr-store-sqlite on angzarr-ports, sea-query and sqlx.
 Every error is localizable: a stable code and named args (see
 `annals-diagnostic`), with an en-US Fluent catalog per crate under
 `crates/<crate>/locales/`.
@@ -16,7 +17,7 @@ Every error is localizable: a stable code and named args (see
 | [`annals-diagnostic`](crates/annals-diagnostic) | localizable errors: every error has a stable code and named args for a Fluent catalog |
 | [`annals-graph`](crates/annals-graph) | typed-id graph with tags, queries and Dijkstra search |
 | [`annals-yaml`](crates/annals-yaml) | a strict YAML subset, read and written; versioned documents with registered migrations |
-| [`annals-store-sql`](crates/annals-store-sql) | `annals::next`'s store port on SQL: backend-neutral sea-query statements, and each backend (`sqlite`) behind a feature, on sqlx with its migrations |
+| [`angzarr-store-sqlite`](crates/angzarr-store-sqlite) | angzarr-ports on SQLite, the one SQLite adapter annals and angzarr share: a leaf (nothing of annals), sea-query statements on sqlx, with its migrations; held to the ports' conformance suite |
 | [`annals-macros`](crates/annals-macros) | markup over hand-written aggregates, process managers, policies and projectors, generating their `annals::next` glue |
 | [`annals-catalog-check`](crates/annals-catalog-check) | test-only: every error code has a message, with exactly its args, in every shipped Fluent catalog |
 
@@ -48,7 +49,8 @@ which is AGPL-3.0-only. In a normal build (dev-dependencies, which only
 tests build, aside):
 
 - **Carry angzarr-proto:** `annals`, which depends on it directly, and
-  `annals-store-sql`, which depends on `annals`. A binary that links any of these is effectively AGPL-3.0-only:
+  `angzarr-store-sqlite`, which depends on angzarr-ports (AGPL-3.0-only
+  too). A binary that links any of these is effectively AGPL-3.0-only:
   their source stays BSD-3-Clause, but the linked whole carries
   angzarr-proto's terms.
 - **BSD-3-Clause only:** `annals-diagnostic`, `annals-graph`,

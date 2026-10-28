@@ -11,7 +11,7 @@ use super::check::{check, Malformed, Sampled};
 use super::coordinator::{decide_on, decode_input, expect, resolution};
 use super::dead_letter::DeadLetterLog;
 use super::domain::{Decision, Domain, State};
-use super::error::{Failure, KernelError, PayloadError, ReplayError, StoreError};
+use super::error::{unreadable, Failure, KernelError, PayloadError, ReplayError};
 use super::handler::{Committed, Handler};
 use super::payload::{pack, type_name, Payload};
 use super::registry::Registry;
@@ -109,8 +109,7 @@ impl<E> Envelope<E> {
     /// A stored page of `stream`, read back: its meta checked complete
     /// ([`ReplayError::IncompleteMeta`](super::ReplayError::IncompleteMeta) otherwise), its payload run through
     /// `upcaster` and decoded as `E`. A type nothing upcasts or decodes is
-    /// [`StoreError::Unreadable`](super::StoreError::Unreadable) naming its type
-    /// URL: replay is strict.
+    /// [`KernelError::Unreadable`] naming its type URL: replay is strict.
     pub fn decode(
         stream: &Cover,
         page: &EventPage,
@@ -122,13 +121,7 @@ impl<E> Envelope<E> {
         let sequence = page.sequence;
         let meta = Envelope::stamped(sequence, page.meta.clone().unwrap_or_default(), ())
             .map_err(KernelError::Replay)?;
-        let unreadable = |reason: Report| {
-            KernelError::Store(StoreError::Unreadable {
-                stream: stream.clone(),
-                sequence,
-                reason,
-            })
-        };
+        let unreadable = |reason: Report| unreadable(stream, sequence, reason);
         let payload = upcaster
             .upcast_event(&page.payload.clone().unwrap_or_default())
             .map_err(|e| unreadable(Report::of(&e)))?;
@@ -484,13 +477,7 @@ impl<D: Domain> Stream<D> {
                 type_url: any.type_url.clone(),
             })
         }
-        .map_err(|e| {
-            KernelError::Store(StoreError::Unreadable {
-                stream: cover.clone(),
-                sequence: snapshot.sequence,
-                reason: Report::of(&e),
-            })
-        })?;
+        .map_err(|e| unreadable(&cover, snapshot.sequence, Report::of(&e)))?;
         let mut stream = Stream {
             cover,
             first: snapshot.sequence + 1,

@@ -47,14 +47,14 @@
 //! Each step's output type is the next step's only input, so the order
 //! cannot be skipped or reordered.
 //!
-//! Then, in the same chain: every [`Policy`] routed for the source's
-//! domain runs on the staged events, and its commands take the same five
-//! steps in their targets, depth first. Once the whole chain has
-//! succeeded, every staged stream is appended through the application's
-//! unit of work, each checked against the length it was loaded at, and the
-//! unit committed; any failure anywhere fails it all ([`Failure`], with the
-//! path to the failing [`Step`]). [`Projection`]s run on committed events
-//! only. A policy command's trigger edge, which no event records, is the
+//! Each step is ONE atomic write to the store (no unit of work): one
+//! stream's events at the length it was loaded at, with the step's
+//! positions. Then every [`Policy`] for the source's domain runs on the
+//! written events, each of its commands a step of its own in its target,
+//! depth first, with the policy's position written with it; a step that
+//! fails keeps every write before it ([`Failure`], with the path to the
+//! failing [`Step`]), and what is owed is resumed by position
+//! ([`Kernel::resume`]). [`Projection`]s run on written events only. A policy command's trigger edge, which no event records, is the
 //! command's own causation, for tracing.
 
 // A failure names the path to the step that failed and carries reports, so
@@ -64,8 +64,6 @@
 
 mod check;
 mod conflict;
-#[cfg(feature = "contract")]
-pub mod contract;
 mod coordinator;
 mod dead_letter;
 mod domain;
@@ -95,6 +93,13 @@ pub(crate) mod toys;
 #[path = "decorated.test.rs"]
 mod decorated;
 
+// A store recording each write, and failing what a test says.
+#[cfg(test)]
+#[path = "recording.test.rs"]
+pub(crate) mod recording;
+
+/// angzarr's shared storage contract, as annals uses it.
+pub use angzarr_ports;
 pub use check::{check, Body, Checked, Identified, Malformed, Sampled};
 pub use conflict::{Key, UnitPath, Units};
 pub use coordinator::Nonce;
@@ -102,7 +107,7 @@ pub use dead_letter::{dead_letter_line, DeadLetterLog, MemoryDeadLetters, DEAD_L
 pub use domain::{Conflicts, Decision, Domain, IngestCtx, State, Tx};
 pub use error::{
     ChainProblem, Failure, KernelError, PayloadError, Recovery, ReplayError, Step, StepError,
-    StoreError, UpcastChainError, UpcastError,
+    UpcastChainError, UpcastError,
 };
 pub use fixture::{assert_replay_fixtures, check_replay_fixtures, ReplayFixture};
 pub use handle::{
@@ -116,9 +121,9 @@ pub use policy::{
 };
 pub use registry::{Aggregate, Misconfigured, Registry};
 pub use store::{
-    AsyncEventStore, AsyncPurge, AsyncReadStore, AsyncReadUnit, AsyncStore, AsyncUnitOfWork,
-    AsyncWatch, ChangeToken, EventStore, InMemoryRead, InMemoryStore, InMemoryTx, Purge, ReadStore,
-    ReadUnit, Ready, Slice, Store, UnitOfWork, Watch,
+    Append, ChangeToken, EventStore, Head, ListStreams, Outbox, OutboxEntry, PositionKey,
+    PositionStore, Purge, ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, Slice,
+    SnapshotStore, Store, StoreError, StreamRef, Watch, Write, Written,
 };
 pub use stream::{Envelope, Executed, Stream};
 pub use upcast::{UpcastFn, Upcaster};
@@ -149,6 +154,7 @@ pub fn not_before(floor: Option<&Timestamp>, now: Timestamp) -> Timestamp {
 /// One value of every error `next` defines, each code once, for the
 /// catalog parity test ([`crate::diagnostic_samples`]).
 pub(crate) fn diagnostic_samples() -> Vec<Box<dyn annals_diagnostic::Diagnostic>> {
+    use angzarr_ports::Cause;
     use annals_diagnostic::Report;
     use v1::ConflictResolution;
 
@@ -237,6 +243,13 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn annals_diagnostic::Diagnostic>
             first: 10,
         },
         KernelError::UnregisteredDomain { domain: domain() },
+        KernelError::Unreadable {
+            stream: stream(),
+            sequence: 0,
+            reason: Report::of(&PayloadError::UnknownType {
+                type_url: "/toy.v9.Bonus".to_string(),
+            }),
+        },
     ];
     let replay = [
         ReplayError::OutOfSequence { index: 1, found: 2 },
@@ -254,27 +267,40 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn annals_diagnostic::Diagnostic>
             version: "v0".to_string(),
         },
     ];
+    // The store's errors are angzarr-ports': forwarded under their own
+    // codes, every one a step's reads and write can meet (an edition's
+    // creation, deletion and removal are the application's).
+    let boxed = || Box::new(stream());
     let store = [
         StoreError::Conflict {
-            stream: stream(),
+            stream: boxed(),
             expected: 1,
             actual: 2,
         },
         StoreError::Discontinuous {
-            stream: stream(),
+            stream: boxed(),
             expected: 2,
             found: 3,
         },
-        StoreError::Unavailable(report()),
+        StoreError::MalformedStream { stream: boxed() },
+        StoreError::Unavailable(Cause::new(
+            "angzarr-store-sqlite-unavailable",
+            "the database failed: disk I/O error",
+        )),
         StoreError::Unreadable {
-            stream: stream(),
+            stream: boxed(),
             sequence: 0,
-            reason: Report::of(&PayloadError::UnknownType {
-                type_url: "/toy.v9.Bonus".to_string(),
-            }),
+            reason: Cause::new(
+                "angzarr-store-sqlite-undecodable",
+                "a stored value does not decode: buffer underflow",
+            ),
         },
-        StoreError::UnknownEdition { stream: stream() },
-    ];
+        StoreError::EditionNotForked { stream: boxed() },
+        StoreError::EditionNotFound {
+            name: "what-if".to_string(),
+        },
+    ]
+    .map(KernelError::Store);
     let payload = [
         PayloadError::Invalid {
             type_url: "/toy.v1.Deposited".to_string(),

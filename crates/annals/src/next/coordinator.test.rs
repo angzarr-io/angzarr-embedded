@@ -1,9 +1,11 @@
+#[allow(unused_imports)]
+use crate::next::toys::prelude::*;
 mod dedup {
     //! Step 3: deduplication by `command_id` on the events, with its accepted
     //! costs. No claims, no fingerprints, no commands table.
-
+    use crate::next::toys::prelude::*;
     use crate::next::v1::DeliveryOutcome;
-    use crate::next::{Failure, Handled, InMemoryStore, Payload};
+    use crate::next::{Failure, Handled, Payload};
 
     use crate::next::toys::{
         at, command, cover, fact, handle, opened, payloads, registry, AccountCmd, AccountEvent,
@@ -17,15 +19,15 @@ mod dedup {
     #[test]
     fn a_retried_command_is_a_duplicate_answered_with_its_events() {
         let registry = registry();
-        let mut store = InMemoryStore::new();
-        opened(&mut store, &registry, 1, 100);
+        let store = MemoryStore::new();
+        opened(&store, &registry, 1, 100);
 
         let first =
-            handle::<crate::next::toys::Account>(&mut store, &registry, deposit(3, 25), &at(20))
+            handle::<crate::next::toys::Account>(&store, &registry, deposit(3, 25), &at(20))
                 .unwrap();
         assert_eq!(first.outcome().delivery, DeliveryOutcome::Applied as i32);
         let retry =
-            handle::<crate::next::toys::Account>(&mut store, &registry, deposit(3, 25), &at(21))
+            handle::<crate::next::toys::Account>(&store, &registry, deposit(3, 25), &at(21))
                 .unwrap();
         assert_eq!(retry.outcome().delivery, DeliveryOutcome::Duplicate as i32);
         assert!(matches!(retry, Handled::Duplicate(_)));
@@ -49,13 +51,13 @@ mod dedup {
     #[test]
     fn a_zero_event_decision_is_decided_again() {
         let registry = registry();
-        let mut store = InMemoryStore::new();
-        opened(&mut store, &registry, 1, 0);
+        let store = MemoryStore::new();
+        opened(&store, &registry, 1, 0);
 
         // A sweep of an empty account withdraws nothing: applied, no events.
         let sweep = || command(cover("account", 1), AccountCmd::Sweep.to_any()).id(7);
         let first =
-            handle::<crate::next::toys::Account>(&mut store, &registry, sweep(), &at(20)).unwrap();
+            handle::<crate::next::toys::Account>(&store, &registry, sweep(), &at(20)).unwrap();
         assert_eq!(first.outcome().delivery, DeliveryOutcome::Applied as i32);
         assert!(payloads::<AccountEvent>(&first.books()).is_empty());
 
@@ -65,9 +67,9 @@ mod dedup {
             AccountFact::PaymentReceived(50).to_any(),
             "pi_1",
         );
-        handle::<crate::next::toys::Account>(&mut store, &registry, payment, &at(21)).unwrap();
+        handle::<crate::next::toys::Account>(&store, &registry, payment, &at(21)).unwrap();
         let again =
-            handle::<crate::next::toys::Account>(&mut store, &registry, sweep(), &at(22)).unwrap();
+            handle::<crate::next::toys::Account>(&store, &registry, sweep(), &at(22)).unwrap();
         assert_eq!(
             again.outcome().delivery,
             DeliveryOutcome::Applied as i32,
@@ -82,19 +84,18 @@ mod dedup {
 
     #[test]
     fn a_creating_command_redelivered_after_a_purge_creates_its_stream_again() {
-        use crate::next::{EventStore, Purge};
         let registry = registry();
-        let mut store = InMemoryStore::new();
+        let store = MemoryStore::new();
         let stream = cover("account", 1);
         let open = || command(stream.clone(), AccountCmd::Open.to_any()).id(5);
-        handle::<crate::next::toys::Account>(&mut store, &registry, open(), &at(20)).unwrap();
+        handle::<crate::next::toys::Account>(&store, &registry, open(), &at(20)).unwrap();
         let retry =
-            handle::<crate::next::toys::Account>(&mut store, &registry, open(), &at(21)).unwrap();
+            handle::<crate::next::toys::Account>(&store, &registry, open(), &at(21)).unwrap();
         assert_eq!(retry.outcome().delivery, DeliveryOutcome::Duplicate as i32);
 
-        assert_eq!(store.purge(&stream), Ok(1));
+        assert_eq!(store.purge(sref(&stream)).ready(), Ok(1));
         let again =
-            handle::<crate::next::toys::Account>(&mut store, &registry, open(), &at(22)).unwrap();
+            handle::<crate::next::toys::Account>(&store, &registry, open(), &at(22)).unwrap();
         assert_eq!(
             again.outcome().delivery,
             DeliveryOutcome::Applied as i32,
@@ -104,7 +105,7 @@ mod dedup {
             payloads::<AccountEvent>(&again.books()),
             [AccountEvent::Opened]
         );
-        let slice = store.read(&stream).unwrap().unwrap();
+        let slice = slice(&store, &stream);
         assert_eq!(slice.next_sequence, 1, "a new stream, from sequence 0");
         assert_eq!(slice.last_recorded_at.unwrap().seconds, 22);
     }
@@ -112,13 +113,12 @@ mod dedup {
     #[test]
     fn a_reused_command_id_with_another_payload_is_answered_with_the_first() {
         let registry = registry();
-        let mut store = InMemoryStore::new();
-        opened(&mut store, &registry, 1, 100);
+        let store = MemoryStore::new();
+        opened(&store, &registry, 1, 100);
 
-        handle::<crate::next::toys::Account>(&mut store, &registry, deposit(3, 25), &at(20))
-            .unwrap();
+        handle::<crate::next::toys::Account>(&store, &registry, deposit(3, 25), &at(20)).unwrap();
         let reused =
-            handle::<crate::next::toys::Account>(&mut store, &registry, deposit(3, 999), &at(21))
+            handle::<crate::next::toys::Account>(&store, &registry, deposit(3, 999), &at(21))
                 .unwrap();
         assert_eq!(
             reused.outcome().delivery,
@@ -134,23 +134,22 @@ mod dedup {
     #[test]
     fn the_same_command_id_to_another_stream_is_another_command() {
         let registry = registry();
-        let mut store = InMemoryStore::new();
-        opened(&mut store, &registry, 1, 100);
-        opened(&mut store, &registry, 2, 100);
+        let store = MemoryStore::new();
+        opened(&store, &registry, 1, 100);
+        opened(&store, &registry, 2, 100);
 
-        handle::<crate::next::toys::Account>(&mut store, &registry, deposit(3, 25), &at(20))
-            .unwrap();
+        handle::<crate::next::toys::Account>(&store, &registry, deposit(3, 25), &at(20)).unwrap();
         let other = command(cover("account", 2), AccountCmd::Deposit(25).to_any()).id(3);
         let applied =
-            handle::<crate::next::toys::Account>(&mut store, &registry, other, &at(21)).unwrap();
+            handle::<crate::next::toys::Account>(&store, &registry, other, &at(21)).unwrap();
         assert_eq!(applied.outcome().delivery, DeliveryOutcome::Applied as i32);
     }
 
     #[test]
     fn a_redelivered_fact_is_a_duplicate() {
         let registry = registry();
-        let mut store = InMemoryStore::new();
-        opened(&mut store, &registry, 1, 0);
+        let store = MemoryStore::new();
+        opened(&store, &registry, 1, 0);
         let payment = || {
             fact(
                 cover("account", 1),
@@ -159,9 +158,9 @@ mod dedup {
             )
         };
 
-        handle::<crate::next::toys::Account>(&mut store, &registry, payment(), &at(20)).unwrap();
-        let again = handle::<crate::next::toys::Account>(&mut store, &registry, payment(), &at(21))
-            .unwrap();
+        handle::<crate::next::toys::Account>(&store, &registry, payment(), &at(20)).unwrap();
+        let again =
+            handle::<crate::next::toys::Account>(&store, &registry, payment(), &at(21)).unwrap();
         assert_eq!(again.outcome().delivery, DeliveryOutcome::Duplicate as i32);
         let meta = again.books()[0].pages[0].meta.clone().unwrap();
         assert_eq!(
@@ -176,89 +175,110 @@ mod dedup {
     #[test]
     fn a_rejection_leaves_nothing_and_a_retry_runs_again() {
         let registry = registry();
-        let mut store = InMemoryStore::new();
+        let store = MemoryStore::new();
         let early = || command(cover("account", 1), AccountCmd::Deposit(5).to_any()).id(4);
 
-        let refused = handle::<crate::next::toys::Account>(&mut store, &registry, early(), &at(5));
+        let refused = handle::<crate::next::toys::Account>(&store, &registry, early(), &at(5));
         assert!(matches!(
             refused,
             Err(Failure::Rejected(crate::next::toys::Refused::NotOpen))
         ));
-        assert!(store.streams().is_empty());
+        assert!(streams(&store).is_empty());
 
-        opened(&mut store, &registry, 1, 0);
+        opened(&store, &registry, 1, 0);
         let retried =
-            handle::<crate::next::toys::Account>(&mut store, &registry, early(), &at(20)).unwrap();
+            handle::<crate::next::toys::Account>(&store, &registry, early(), &at(20)).unwrap();
         assert_eq!(retried.outcome().delivery, DeliveryOutcome::Applied as i32);
     }
 
-    /// A unit of work that plays READ COMMITTED with a concurrent commit: the
-    /// store already holds the original delivery's events, but the first read
-    /// this unit makes (whichever it is) sees the stream as it was before them;
-    /// every later read, and every append, sees the store as it is.
-    struct CommitLandsAfterFirstRead<'s> {
-        store: &'s mut InMemoryStore,
+    /// A store that plays READ COMMITTED with a concurrent commit: it
+    /// already holds the original delivery's events, but the first read
+    /// made of it (whichever it is) sees the stream as it was before them;
+    /// every later read, and every write, sees the store as it is.
+    struct CommitLandsAfterFirstRead {
+        store: MemoryStore,
         /// The stream's length before the original commit.
         before: u64,
-        seen: bool,
+        seen: std::sync::atomic::AtomicBool,
     }
 
-    impl CommitLandsAfterFirstRead<'_> {
-        fn first_read(&mut self) -> bool {
-            !std::mem::replace(&mut self.seen, true)
+    impl CommitLandsAfterFirstRead {
+        fn first_read(&self) -> bool {
+            !self.seen.swap(true, std::sync::atomic::Ordering::SeqCst)
         }
     }
 
-    impl crate::next::EventStore for CommitLandsAfterFirstRead<'_> {
-        fn append(
-            &mut self,
-            stream: &crate::next::v1::Cover,
-            expected: u64,
-            pages: &[crate::next::v1::EventPage],
-        ) -> Result<u64, crate::next::StoreError> {
-            self.store.append(stream, expected, pages)
+    impl crate::next::EventStore for CommitLandsAfterFirstRead {
+        async fn write(
+            &self,
+            write: crate::next::Write<'_>,
+        ) -> Result<crate::next::Written, crate::next::StoreError> {
+            self.store.write(write).await
         }
 
-        fn read_from(
-            &mut self,
-            stream: &crate::next::v1::Cover,
+        async fn read(
+            &self,
+            stream: crate::next::StreamRef<'_>,
             from: u64,
-        ) -> Result<Option<crate::next::Slice>, crate::next::StoreError> {
+            to: Option<u64>,
+        ) -> Result<crate::next::Slice, crate::next::StoreError> {
             let early = self.first_read();
-            let mut slice = self.store.read_from(stream, from)?;
+            let mut slice = self.store.read(stream, from, to).await?;
             if early {
-                if let Some(slice) = slice.as_mut() {
-                    slice.pages.retain(|p| p.sequence < self.before);
-                    slice.next_sequence = self.before;
-                }
+                slice.pages.retain(|p| p.sequence < self.before);
+                slice.next_sequence = self.before;
             }
             Ok(slice)
         }
 
-        fn find_command(
-            &mut self,
-            stream: &crate::next::v1::Cover,
-            command_id: &crate::next::v1::Uuid,
+        async fn find_command(
+            &self,
+            stream: crate::next::StreamRef<'_>,
+            command_id: angzarr_ports::Uuid,
         ) -> Result<Vec<crate::next::v1::EventPage>, crate::next::StoreError> {
             let early = self.first_read();
-            let mut pages = self.store.find_command(stream, command_id)?;
+            let mut pages = self.store.find_command(stream, command_id).await?;
             if early {
                 pages.retain(|p| p.sequence < self.before);
             }
             Ok(pages)
         }
 
-        fn covers(
-            &mut self,
+        async fn covers(
+            &self,
             domain: &str,
         ) -> Result<Vec<crate::next::v1::Cover>, crate::next::StoreError> {
-            self.store.covers(domain)
+            self.store.covers(domain).await
+        }
+
+        async fn commit_position(&self) -> Result<u64, crate::next::StoreError> {
+            self.store.commit_position().await
         }
     }
 
-    impl crate::next::UnitOfWork for CommitLandsAfterFirstRead<'_> {
-        fn commit(self) -> Result<(), crate::next::StoreError> {
-            Ok(())
+    impl crate::next::SnapshotStore for CommitLandsAfterFirstRead {
+        async fn read_snapshot(
+            &self,
+            stream: crate::next::StreamRef<'_>,
+        ) -> Result<Option<crate::next::v1::Snapshot>, crate::next::StoreError> {
+            self.store.read_snapshot(stream).await
+        }
+
+        async fn write_snapshot(
+            &self,
+            stream: crate::next::StreamRef<'_>,
+            snapshot: &crate::next::v1::Snapshot,
+        ) -> Result<(), crate::next::StoreError> {
+            self.store.write_snapshot(stream, snapshot).await
+        }
+    }
+
+    impl crate::next::PositionStore for CommitLandsAfterFirstRead {
+        async fn position(
+            &self,
+            key: crate::next::PositionKey<'_>,
+        ) -> Result<u64, crate::next::StoreError> {
+            self.store.position(key).await
         }
     }
 
@@ -268,44 +288,34 @@ mod dedup {
         // that commits between the retry's two reads is seen by the lookup.
         // (Looked up first, the retry would find nothing, then load the head
         // after the original's events and append again.)
-        use crate::next::EventStore;
         let registry = registry();
-        let mut store = InMemoryStore::new();
-        opened(&mut store, &registry, 1, 100);
-        let before = store
-            .read(&cover("account", 1))
-            .unwrap()
-            .unwrap()
-            .next_sequence;
-        handle::<crate::next::toys::Account>(&mut store, &registry, deposit(3, 25), &at(20))
-            .unwrap();
+        let store = MemoryStore::new();
+        opened(&store, &registry, 1, 100);
+        let before = pages(&store, &cover("account", 1)).len() as u64;
+        handle::<crate::next::toys::Account>(&store, &registry, deposit(3, 25), &at(20)).unwrap();
 
         let log = crate::next::MemoryDeadLetters::new();
         let kernel = crate::next::Kernel::new(&registry, &log);
         let racing = CommitLandsAfterFirstRead {
-            store: &mut store,
+            store: store.clone(),
             before,
-            seen: false,
+            seen: std::sync::atomic::AtomicBool::new(false),
         };
         let retry = kernel
             .handle::<crate::next::toys::Account, _, _>(
-                racing,
+                &racing,
                 &crate::next::Routes::new(),
                 deposit(3, 25),
                 &at(21),
                 &mut (),
             )
+            .ready()
             .unwrap();
         assert!(
             matches!(retry, Handled::Duplicate(_)),
             "found, not re-applied"
         );
-        let deposits = store
-            .read(&cover("account", 1))
-            .unwrap()
-            .unwrap()
-            .pages
-            .len() as u64;
+        let deposits = pages(&store, &cover("account", 1)).len() as u64;
         assert_eq!(deposits, before + 1, "the deposit is on the stream once");
     }
 }
@@ -315,12 +325,11 @@ mod pipeline {
     //! resolve → decode (and upcast) → decide or ingest. Each test pins one
     //! boundary by sending something that two adjacent steps would answer
     //! differently.
+    use crate::next::toys::prelude::*;
 
     use super::super::{steps::Coordinator, Deduplicated};
     use crate::next::v1::{ConflictResolution, DeliveryOutcome, EventRef};
-    use crate::next::{
-        check, pack, Failure, InMemoryStore, KernelError, Malformed, Payload, Recovery,
-    };
+    use crate::next::{check, pack, Failure, KernelError, Malformed, Payload, Recovery};
 
     use crate::next::toys::{
         account, at, command, cover, handle, opened, registry, Account, AccountCmd, Edit,
@@ -333,15 +342,15 @@ mod pipeline {
     #[test]
     fn an_applied_strict_retry_is_a_duplicate_never_stale() {
         let registry = registry();
-        let mut store = InMemoryStore::new();
-        opened(&mut store, &registry, 1, 100);
+        let store = MemoryStore::new();
+        opened(&store, &registry, 1, 100);
 
         let at_head = || deposit(3).expecting(2, ConflictResolution::Strict);
-        handle::<Account>(&mut store, &registry, at_head(), &at(20)).unwrap();
-        handle::<Account>(&mut store, &registry, deposit(4), &at(21)).unwrap();
+        handle::<Account>(&store, &registry, at_head(), &at(20)).unwrap();
+        handle::<Account>(&store, &registry, deposit(4), &at(21)).unwrap();
 
         // The stream is at 4 now; the retry still expects 2.
-        let retry = handle::<Account>(&mut store, &registry, at_head(), &at(22)).unwrap();
+        let retry = handle::<Account>(&store, &registry, at_head(), &at(22)).unwrap();
         assert_eq!(
             retry.outcome().delivery,
             DeliveryOutcome::Duplicate as i32,
@@ -350,7 +359,7 @@ mod pipeline {
 
         // A new command expecting 2 is stale, as STRICT says.
         let stale = handle::<Account>(
-            &mut store,
+            &store,
             &registry,
             deposit(5).expecting(2, ConflictResolution::Strict),
             &at(23),
@@ -371,15 +380,15 @@ mod pipeline {
     #[test]
     fn a_malformed_retry_of_an_applied_command_is_still_malformed() {
         let registry = registry();
-        let mut store = InMemoryStore::new();
-        opened(&mut store, &registry, 1, 100);
-        handle::<Account>(&mut store, &registry, deposit(3), &at(20)).unwrap();
+        let store = MemoryStore::new();
+        opened(&store, &registry, 1, 100);
+        handle::<Account>(&store, &registry, deposit(3), &at(20)).unwrap();
 
         let forged = deposit(3).caused_by(EventRef {
             stream: Some(cover("account", 1)),
             sequence: 0,
         });
-        let refused = handle::<Account>(&mut store, &registry, forged, &at(21))
+        let refused = handle::<Account>(&store, &registry, forged, &at(21))
             .err()
             .unwrap();
         assert_eq!(
@@ -393,11 +402,11 @@ mod pipeline {
     #[test]
     fn an_unknown_command_type_is_refused_at_decode() {
         let registry = registry();
-        let mut store = InMemoryStore::new();
-        opened(&mut store, &registry, 1, 100);
+        let store = MemoryStore::new();
+        opened(&store, &registry, 1, 100);
         let unknown = || command(cover("account", 1), pack(&account::v9::Bonus { cents: 1 }));
 
-        let refused = handle::<Account>(&mut store, &registry, unknown().id(8), &at(20))
+        let refused = handle::<Account>(&store, &registry, unknown().id(8), &at(20))
             .err()
             .unwrap();
         assert_eq!(
@@ -412,7 +421,7 @@ mod pipeline {
 
         // Stale and undecodable: STRICT's check comes first.
         let stale = handle::<Account>(
-            &mut store,
+            &store,
             &registry,
             unknown().id(9).expecting(1, ConflictResolution::Strict),
             &at(21),
@@ -425,7 +434,7 @@ mod pipeline {
         // payload never decoded (and never compared: a reused id goes
         // undetected).
         let dup = handle::<Account>(
-            &mut store,
+            &store,
             &registry,
             command(cover("account", 1), pack(&account::v9::Bonus { cents: 1 })).id(2),
             &at(22),
@@ -437,10 +446,9 @@ mod pipeline {
     #[test]
     fn the_coordinator_runs_dedup_then_load_then_decode() {
         let registry = registry();
-        let mut store = InMemoryStore::new();
-        opened(&mut store, &registry, 1, 100);
-        let mut unit = store.begin();
-        let mut coordinator = Coordinator::new(&mut unit, &registry);
+        let store = MemoryStore::new();
+        opened(&store, &registry, 1, 100);
+        let mut coordinator = Coordinator::new(&store, &registry);
 
         // An applied command: step 3 answers it.
         let applied = check(deposit(2), &registry).unwrap().identify(&at(30));
@@ -470,18 +478,17 @@ mod pipeline {
     fn the_coordinator_hands_a_windowed_command_its_window_and_a_nonce() {
         use crate::next::toys::{set, Shelf};
         let registry = registry();
-        let mut store = InMemoryStore::new();
+        let store = MemoryStore::new();
         for (n, item) in ["a", "b", "c"].into_iter().enumerate() {
             handle::<Shelf>(
-                &mut store,
+                &store,
                 &registry,
                 command(cover("shelf", 3), set(item, 1)).id(n as u128 + 1),
                 &at(n as i64),
             )
             .unwrap();
         }
-        let mut unit = store.begin();
-        let mut coordinator = Coordinator::new(&mut unit, &registry);
+        let mut coordinator = Coordinator::new(&store, &registry);
         let book = command(cover("shelf", 3), set("d", 1))
             .id(9)
             .expecting(1, ConflictResolution::AggregateHandles);
@@ -523,10 +530,9 @@ mod pipeline {
     fn the_coordinators_decision_commits_to_its_stream() {
         let registry = registry();
         let log = crate::next::MemoryDeadLetters::new();
-        let mut store = InMemoryStore::new();
-        opened(&mut store, &registry, 1, 100);
-        let mut unit = store.begin();
-        let mut coordinator = Coordinator::new(&mut unit, &registry);
+        let store = MemoryStore::new();
+        opened(&store, &registry, 1, 100);
+        let mut coordinator = Coordinator::new(&store, &registry);
         let identified = check(deposit(3), &registry).unwrap().identify(&at(30));
         let Deduplicated::Novel(novel) = coordinator.deduplicate(identified).unwrap() else {
             panic!("never applied");
@@ -552,7 +558,7 @@ mod pipeline {
         assert_eq!(stream.state().cents, 105);
 
         // A decision against the old head no longer commits.
-        let mut again = Coordinator::new(&mut unit, &registry);
+        let mut again = Coordinator::new(&store, &registry);
         let identified = check(deposit(4), &registry).unwrap().identify(&at(31));
         let Deduplicated::Novel(novel) = again.deduplicate(identified).unwrap() else {
             panic!("never applied");
@@ -572,16 +578,14 @@ mod pipeline {
             })
         );
 
-        drop(unit);
-        opened(&mut store, &registry, 2, 0);
-        let mut unit = store.begin();
+        opened(&store, &registry, 2, 0);
         let sweep = check(
             command(cover("account", 2), AccountCmd::Sweep.to_any()).id(5),
             &registry,
         )
         .unwrap()
         .identify(&at(32));
-        let mut empty = Coordinator::new(&mut unit, &registry);
+        let mut empty = Coordinator::new(&store, &registry);
         let Deduplicated::Novel(novel) = empty.deduplicate(sweep).unwrap() else {
             panic!("never applied");
         };
@@ -594,7 +598,7 @@ mod pipeline {
         assert!(decision.is_empty(), "a sweep of nothing withdraws nothing");
 
         // A cover of another domain than the one decoded for.
-        let mut wrong = Coordinator::new(&mut unit, &registry);
+        let mut wrong = Coordinator::new(&store, &registry);
         let identified = check(deposit(6), &registry).unwrap().identify(&at(33));
         let Deduplicated::Novel(novel) = wrong.deduplicate(identified).unwrap() else {
             panic!("never applied");
@@ -617,10 +621,11 @@ mod snapshot {
     //! Snapshots: a framework optimisation, never business data. Used only
     //! under the current rules version and state type, and never one that
     //! hides part of a conflict window.
+    use crate::next::toys::prelude::*;
 
     use super::super::{steps::Coordinator, Deduplicated};
     use crate::next::v1::{ConflictResolution, Snapshot};
-    use crate::next::{check, pack, EventStore, InMemoryStore, Payload, Stream};
+    use crate::next::{check, pack, Payload, Stream};
 
     use crate::next::toys::{
         account, at, command, cover, opened, registry, root, set, shelf, Account, AccountCmd, Edit,
@@ -644,7 +649,7 @@ mod snapshot {
     /// Load (steps 2 to 5) a deposit for account 1, expecting `expected` under
     /// `resolution` if given.
     fn load(
-        store: &mut InMemoryStore,
+        store: &MemoryStore,
         expected: Option<(u64, ConflictResolution)>,
     ) -> (Option<u64>, i64) {
         let registry = registry();
@@ -652,8 +657,7 @@ mod snapshot {
         if let Some((sequence, resolution)) = expected {
             book = book.expecting(sequence, resolution);
         }
-        let mut unit = store.begin();
-        let mut coordinator = Coordinator::new(&mut unit, &registry);
+        let mut coordinator = Coordinator::new(store, &registry);
         let identified = check(book, &registry).unwrap().identify(&at(30));
         let Deduplicated::Novel(novel) = coordinator.deduplicate(identified).unwrap() else {
             panic!("never applied");
@@ -667,23 +671,25 @@ mod snapshot {
     #[test]
     fn a_snapshot_under_another_rules_version_is_discarded() {
         let registry = registry();
-        let mut store = InMemoryStore::new();
-        opened(&mut store, &registry, 1, 100);
+        let store = MemoryStore::new();
+        opened(&store, &registry, 1, 100);
 
         store
-            .write_snapshot(&cover("account", 1), &poisoned("v1", 999))
+            .write_snapshot(sref(&cover("account", 1)), &poisoned("v1", 999))
+            .ready()
             .unwrap();
         assert_eq!(
-            load(&mut store, None),
+            load(&store, None),
             (None, 100),
             "folded under v1, the current rules are v2: replayed from 0"
         );
 
         store
-            .write_snapshot(&cover("account", 1), &poisoned("v2", 999))
+            .write_snapshot(sref(&cover("account", 1)), &poisoned("v2", 999))
+            .ready()
             .unwrap();
         assert_eq!(
-            load(&mut store, None),
+            load(&store, None),
             (Some(1), 999),
             "a current one is used (and here shows its poison)"
         );
@@ -692,35 +698,37 @@ mod snapshot {
     #[test]
     fn a_snapshot_of_another_state_type_is_discarded() {
         let registry = registry();
-        let mut store = InMemoryStore::new();
-        opened(&mut store, &registry, 1, 100);
+        let store = MemoryStore::new();
+        opened(&store, &registry, 1, 100);
         let foreign = Snapshot {
             sequence: 1,
             state: Some(pack(&shelf::ShelfState::default())),
             rules_version: "v2".to_string(),
         };
         store
-            .write_snapshot(&cover("account", 1), &foreign)
+            .write_snapshot(sref(&cover("account", 1)), &foreign)
+            .ready()
             .unwrap();
-        assert_eq!(load(&mut store, None), (None, 100));
+        assert_eq!(load(&store, None), (None, 100));
     }
 
     #[test]
     fn a_snapshot_never_hides_part_of_the_window() {
         let registry = registry();
-        let mut store = InMemoryStore::new();
-        opened(&mut store, &registry, 1, 100);
+        let store = MemoryStore::new();
+        opened(&store, &registry, 1, 100);
         store
-            .write_snapshot(&cover("account", 1), &poisoned("v2", 999))
+            .write_snapshot(sref(&cover("account", 1)), &poisoned("v2", 999))
+            .ready()
             .unwrap();
 
         assert_eq!(
-            load(&mut store, Some((1, ConflictResolution::AggregateHandles))),
+            load(&store, Some((1, ConflictResolution::AggregateHandles))),
             (None, 100),
             "the snapshot (at 1) would fold the window (from 1): not used"
         );
         assert_eq!(
-            load(&mut store, Some((2, ConflictResolution::AggregateHandles))),
+            load(&store, Some((2, ConflictResolution::AggregateHandles))),
             (Some(1), 999),
             "at or below expected-1, it is"
         );
@@ -736,21 +744,24 @@ mod snapshot {
         use crate::next::toys::handle;
         let registry = registry();
         for sequence in [2, 5] {
-            let mut store = InMemoryStore::new();
-            opened(&mut store, &registry, 1, 100);
+            let store = MemoryStore::new();
+            opened(&store, &registry, 1, 100);
             let ahead = Snapshot {
                 sequence,
                 ..poisoned("v2", 999)
             };
-            store.write_snapshot(&cover("account", 1), &ahead).unwrap();
+            store
+                .write_snapshot(sref(&cover("account", 1)), &ahead)
+                .ready()
+                .unwrap();
             assert_eq!(
-                load(&mut store, None),
+                load(&store, None),
                 (None, 100),
                 "a snapshot at {sequence}, the head at 2: read from the events"
             );
             for (n, head) in [(3, 3), (4, 4)] {
                 let deposit = command(cover("account", 1), AccountCmd::Deposit(1).to_any()).id(n);
-                let handled = handle::<Account>(&mut store, &registry, deposit, &at(20))
+                let handled = handle::<Account>(&store, &registry, deposit, &at(20))
                     .unwrap_or_else(|e| panic!("a snapshot at {sequence}, command {n}: {e}"));
                 assert_eq!(handled.books()[0].next_sequence, head);
             }
@@ -834,7 +845,7 @@ mod snapshot {
 
     #[test]
     fn a_snapshot_whose_wire_form_is_not_a_valid_state_is_unreadable() {
-        use crate::next::{KernelError, StoreError};
+        use crate::next::KernelError;
         use annals_diagnostic::Diagnostic;
         let snapshot = Snapshot {
             sequence: 0,
@@ -853,7 +864,7 @@ mod snapshot {
         )
         .err()
         .expect("a negative total is not a ledger");
-        let KernelError::Store(StoreError::Unreadable { reason, .. }) = error else {
+        let KernelError::Unreadable { reason, .. } = error else {
             panic!("expected an unreadable snapshot, got {error:?}");
         };
         assert_eq!(reason.code(), "annals-next-payload-invalid");

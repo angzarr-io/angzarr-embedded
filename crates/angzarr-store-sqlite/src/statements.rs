@@ -1,9 +1,9 @@
 //! Every statement the store runs, backend-neutral: a backend renders them
 //! with its own query builder and runs them on its own driver.
 
-use annals::next::v1::event_meta::Causation;
-use annals::next::v1::{Cover, EventPage, Snapshot, Uuid};
-use annals::next::StoreError;
+use angzarr_ports::angzarr_proto::v1::event_meta::Causation;
+use angzarr_ports::angzarr_proto::v1::{Cover, EventPage, Snapshot, Uuid};
+use angzarr_ports::StoreError;
 use prost::Message;
 use sea_query::{
     Cond, Condition, DeleteStatement, Expr, Func, InsertStatement, OnConflict, Order, Query,

@@ -9,22 +9,23 @@ use crate::next::check::Identified;
 use crate::next::domain::Domain;
 use crate::next::error::KernelError;
 use crate::next::registry::Registry;
-use crate::next::store::{block, EventStore, SyncPort};
+use crate::next::store::{Store, StorePort};
 use crate::next::stream::Stream;
+use crate::next::toys::ready;
 
 use super::{deduplicate, load, prepare, Contextual, Deduplicated, Novel, Prepared};
 
-/// Steps 3 and 4 over a unit of work.
-pub struct Coordinator<'u, U> {
-    unit: &'u mut U,
-    registry: &'u Registry,
+/// Steps 3 and 4 over a store.
+pub struct Coordinator<'s, S> {
+    store: &'s S,
+    registry: &'s Registry,
     nonces: u64,
 }
 
-impl<'u, U: EventStore> Coordinator<'u, U> {
-    pub fn new(unit: &'u mut U, registry: &'u Registry) -> Coordinator<'u, U> {
+impl<'s, S: Store> Coordinator<'s, S> {
+    pub fn new(store: &'s S, registry: &'s Registry) -> Coordinator<'s, S> {
         Coordinator {
-            unit,
+            store,
             registry,
             nonces: 0,
         }
@@ -32,8 +33,8 @@ impl<'u, U: EventStore> Coordinator<'u, U> {
 
     /// Step 3: load, then look the command id up.
     pub fn deduplicate(&mut self, command: Identified) -> Result<Deduplicated, KernelError> {
-        block(deduplicate(
-            &mut SyncPort(self.unit),
+        ready(deduplicate(
+            &mut StorePort(self.store),
             self.registry,
             command,
         ))

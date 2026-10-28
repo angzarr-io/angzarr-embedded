@@ -1,7 +1,7 @@
 //! Stored values read back: what a backend's rows decode to.
 
-use annals::next::v1::{Cover, EventPage, Snapshot, Uuid};
-use annals::next::StoreError;
+use angzarr_ports::angzarr_proto::v1::{Cover, EventPage, Snapshot, Uuid};
+use angzarr_ports::StoreError;
 use prost::Message;
 
 use crate::error::{unavailable, undecodable};
@@ -10,7 +10,7 @@ use crate::Dialect;
 /// A page's stored bytes, decoded; `sequence` names it if they do not.
 pub(crate) fn page(cover: &Cover, sequence: i64, bytes: &[u8]) -> Result<EventPage, StoreError> {
     EventPage::decode(bytes).map_err(|e| StoreError::Unreadable {
-        stream: cover.clone(),
+        stream: Box::new(cover.clone()),
         sequence: sequence.unsigned_abs(),
         reason: undecodable(e),
     })
@@ -19,7 +19,7 @@ pub(crate) fn page(cover: &Cover, sequence: i64, bytes: &[u8]) -> Result<EventPa
 /// A snapshot's stored bytes, decoded.
 pub(crate) fn snapshot(cover: &Cover, bytes: &[u8]) -> Result<Snapshot, StoreError> {
     Snapshot::decode(bytes).map_err(|e| StoreError::Unreadable {
-        stream: cover.clone(),
+        stream: Box::new(cover.clone()),
         sequence: 0,
         reason: undecodable(e),
     })

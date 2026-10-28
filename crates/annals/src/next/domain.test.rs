@@ -1,9 +1,11 @@
+#[allow(unused_imports)]
+use crate::next::toys::prelude::*;
 mod ingest {
     //! Facts: ingested, never decided and never refused, with a read-only
     //! context.
-
+    use crate::next::toys::prelude::*;
     use crate::next::v1::CommandBook;
-    use crate::next::{ids, InMemoryStore, Payload};
+    use crate::next::{ids, Payload};
 
     use crate::next::toys::{
         account, at, command, cover, fact, handle, opened, payloads, registry, Account, AccountCmd,
@@ -21,11 +23,10 @@ mod ingest {
     #[test]
     fn ingest_gets_a_read_only_context() {
         let registry = registry();
-        let mut store = InMemoryStore::new();
-        opened(&mut store, &registry, 1, 0);
+        let store = MemoryStore::new();
+        opened(&store, &registry, 1, 0);
 
-        let handled =
-            handle::<Account>(&mut store, &registry, payment(70, "pi_7"), &at(40)).unwrap();
+        let handled = handle::<Account>(&store, &registry, payment(70, "pi_7"), &at(40)).unwrap();
         assert_eq!(
             payloads::<AccountEvent>(&handled.books()),
             [AccountEvent::Received(account::Received {
@@ -50,11 +51,10 @@ mod ingest {
     #[test]
     fn a_fact_is_never_refused() {
         let registry = registry();
-        let mut store = InMemoryStore::new();
+        let store = MemoryStore::new();
 
         // The account was never opened: a Deposit command would be refused.
-        let handled =
-            handle::<Account>(&mut store, &registry, payment(70, "pi_8"), &at(40)).unwrap();
+        let handled = handle::<Account>(&store, &registry, payment(70, "pi_8"), &at(40)).unwrap();
         let [AccountEvent::Received(received)] = &payloads::<AccountEvent>(&handled.books())[..]
         else {
             panic!("one event");
@@ -62,7 +62,7 @@ mod ingest {
         assert!(!received.matched, "recorded as unmatched");
         assert!(
             handle::<Account>(
-                &mut store,
+                &store,
                 &registry,
                 command(cover("account", 1), AccountCmd::Deposit(70).to_any()),
                 &at(41)
@@ -75,10 +75,9 @@ mod ingest {
     #[test]
     fn a_fact_is_stamped_at_the_head() {
         let registry = registry();
-        let mut store = InMemoryStore::new();
-        opened(&mut store, &registry, 1, 0);
-        let handled =
-            handle::<Account>(&mut store, &registry, payment(1, "pi_9"), &at(40)).unwrap();
+        let store = MemoryStore::new();
+        opened(&store, &registry, 1, 0);
+        let handled = handle::<Account>(&store, &registry, payment(1, "pi_9"), &at(40)).unwrap();
         assert_eq!(handled.books()[0].pages[0].sequence, 2);
     }
 }
@@ -87,13 +86,14 @@ mod tx {
     //! What a decide reads through its `Tx`: a probe domain records every
     //! accessor into its event, reached as a policy's target so it has a
     //! causation too.
+    use crate::next::toys::prelude::*;
 
     use std::convert::Infallible;
 
     use crate::next::v1::{ConflictResolution, StateDescriptor, StateOptions, Uuid};
     use crate::next::{
-        ids, pack, Committed, Decoder, Domain, InMemoryStore, IngestCtx, Kernel, MemoryDeadLetters,
-        Payload, PayloadError, Policy, Registry, Rulebook, State, Tx, Upcaster,
+        ids, pack, Committed, Decoder, Domain, IngestCtx, Kernel, MemoryDeadLetters, Payload,
+        PayloadError, Policy, Registry, Rulebook, State, Tx, Upcaster,
     };
 
     use crate::next::toys::{at, command, cover, fees, opened, Account, AccountCmd, Edit};
@@ -354,14 +354,15 @@ mod tx {
         let registry = registry();
         let log = MemoryDeadLetters::new();
         let kernel = Kernel::new(&registry, &log);
-        let mut store = InMemoryStore::new();
-        opened(&mut store, &registry, 1, 0);
+        let store = MemoryStore::new();
+        opened(&store, &registry, 1, 0);
         let routes = crate::next::Routes::new().policy::<Probing>();
         let book = command(cover("account", 1), AccountCmd::Deposit(5).to_any())
             .id(3)
             .correlated(6);
         let handled = kernel
-            .handle::<Account, _, _>(store.begin(), &routes, book, &at(50), &mut ())
+            .handle::<Account, _, _>(&store, &routes, book, &at(50), &mut ())
+            .ready()
             .unwrap();
         let trigger = crate::next::v1::EventRef {
             stream: Some(cover("account", 1)),
@@ -392,7 +393,8 @@ mod tx {
         // Again: the probe stream is at 2 now, and decide sees its state.
         let book = command(cover("account", 1), AccountCmd::Deposit(5).to_any()).id(4);
         let handled = kernel
-            .handle::<Account, _, _>(store.begin(), &routes, book, &at(51), &mut ())
+            .handle::<Account, _, _>(&store, &routes, book, &at(51), &mut ())
+            .ready()
             .unwrap();
         let probed = &probes(&handled.books())[0];
         assert_eq!((probed.first, probed.next), (2, 3));
@@ -430,6 +432,9 @@ mod tx {
         }
     }
 
+    /// A chain two steps deep, each step committed: within the limit it
+    /// settles; one shallower, the step past it fails with the path to it,
+    /// and the steps before it stand.
     #[test]
     fn a_two_deep_chain_keeps_the_path_to_the_step_running_and_its_limit() {
         let mut registry = registry();
@@ -440,39 +445,45 @@ mod tx {
             )
             .unwrap();
         let log = MemoryDeadLetters::new();
-        let mut store = InMemoryStore::new();
-        opened(&mut store, &registry, 1, 0);
+        let store = MemoryStore::new();
+        opened(&store, &registry, 1, 0);
         let routes = crate::next::Routes::new()
             .policy::<Probing>()
             .policy::<ProbeToLedger>();
         let deposit = || command(cover("account", 1), AccountCmd::Deposit(5).to_any()).id(3);
 
         let kernel = Kernel::new(&registry, &log).limit(2);
-        let mut unit = store.begin();
-        let sampled = at(50);
-        let mut chain =
-            crate::next::handle::chain::Chain::new(&kernel, &mut unit, &routes, &sampled);
-        chain
-            .execute::<Account>(crate::next::check(deposit(), &registry).unwrap())
+        kernel
+            .handle::<Account, _, _>(&store, &routes, deposit(), &at(50), &mut ())
+            .ready()
             .unwrap();
-        let path = chain.path();
-        assert_eq!(path.len(), 2, "the probe step, then the second ledger step");
-        assert_eq!(path[0].stream.domain, "probe");
-        assert_eq!(path[1].stream.domain, "ledger");
-        assert_eq!(path[1].cause.sequence, 1, "the second sibling");
+        let probe = crate::next::v1::Cover {
+            domain: "probe".to_string(),
+            root: Some(probe_root()),
+            edition: None,
+        };
         assert_eq!(
-            chain
-                .state::<crate::next::toys::Ledger>(&path[1].stream)
-                .unwrap()
-                .total,
-            2
+            pages(&store, &probe).len(),
+            2,
+            "the probe step's two events"
         );
-        drop(chain);
-        drop(unit);
+        let ledger = crate::next::v1::Cover {
+            domain: "ledger".to_string(),
+            root: Some(crate::next::toys::ledger_root()),
+            edition: None,
+        };
+        assert_eq!(
+            pages(&store, &ledger).len(),
+            2,
+            "then the ledger, once per probe event"
+        );
 
+        let store = MemoryStore::new();
+        opened(&store, &registry, 1, 0);
         let shallow = Kernel::new(&registry, &log).limit(1);
         let failure = shallow
-            .handle::<Account, _, _>(store.begin(), &routes, deposit(), &at(50), &mut ())
+            .handle::<Account, _, _>(&store, &routes, deposit(), &at(50), &mut ())
+            .ready()
             .err()
             .unwrap();
         assert!(matches!(
@@ -483,7 +494,15 @@ mod tx {
                     limit: 1
                 }),
             } if path.len() == 2
+                && path[0].stream.domain == "probe"
+                && path[1].stream.domain == "ledger"
+                && path[1].cause.sequence == 0
         ));
+        assert_eq!(
+            streams(&store).len(),
+            2,
+            "the account's and the probe's commits stand; no ledger step ran"
+        );
         assert_eq!(shallow.registry().domains().count(), 3);
     }
 
@@ -495,9 +514,8 @@ mod tx {
 
         let registry = registry();
         let log = MemoryDeadLetters::new();
-        let mut store = InMemoryStore::new();
-        let mut unit = store.begin();
-        let mut coordinator = Coordinator::new(&mut unit, &registry);
+        let store = MemoryStore::new();
+        let mut coordinator = Coordinator::new(&store, &registry);
         let mut probe = |n: u128, stash: u32| {
             let book = command(cover("probe", 1), Probe { stash }.to_any())
                 .id(n)
@@ -537,4 +555,15 @@ mod tx {
         let mut honest = probe(3, 0);
         assert!(honest.decide(&at(60), &registry, &log).is_ok());
     }
+}
+
+/// A hand-written domain's rejection carries no typed refusal object:
+/// `Domain::refusal`'s default.
+#[test]
+fn a_hand_written_rejection_has_no_typed_refusal_object() {
+    use crate::next::toys::{Account, Refused};
+    assert_eq!(
+        <Account as crate::next::Domain>::refusal(&Refused::NotOpen),
+        None
+    );
 }

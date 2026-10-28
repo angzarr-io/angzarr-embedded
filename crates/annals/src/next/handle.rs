@@ -48,6 +48,7 @@
 
 use std::any::Any as AnyType;
 use std::collections::{BTreeMap, HashMap};
+use std::convert::Infallible;
 
 use angzarr_proto::v1::{
     self as v1, CommandBook, Cover, DeliveryOutcome, EventBook, EventPage, Outcome,
@@ -65,7 +66,7 @@ use super::handler::Handler;
 use super::markup::ProjectionContext;
 use super::policy::{policy, projection, Policy, Projection};
 use super::registry::Registry;
-use super::store::{block, AsyncPort, AsyncUnitOfWork, Port, SyncPort, UnitOfWork};
+use super::store::{Port, Store, StorePort};
 use super::stream::{Envelope, Stream};
 use annals_diagnostic::Report;
 
@@ -151,16 +152,43 @@ impl<'k> Kernel<'k> {
         self.registry
     }
 
-    /// Handle one book for the `D` stream it names, with every reaction it
-    /// sets off, as one atomic chain: [`check`](super::check) it,
-    /// run it and its reactions, append everything staged,
-    /// [`UnitOfWork::commit`], then run `projections`. Returns what the
-    /// chain recorded, or the duplicate's events. On any failure nothing is
-    /// committed and no projection runs. A cover of another domain than
-    /// `D` is [`KernelError::WrongDomain`].
-    pub fn handle<D, U, Ps>(
+    /// Handle one book for the `D` stream it names, then every policy step
+    /// it sets off, and wait for the chain to settle. Each step is ONE
+    /// atomic write to `store` (no unit of work): one stream's events, with
+    /// the step's positions.
+    ///
+    /// 1. The command: [`check`](super::check) it, load its stream,
+    ///    deduplicate, decide, write its events.
+    /// 2. Then, for each event that write recorded, each policy for its
+    ///    domain (the [`Routes`]' hand-written ones, then the registry's
+    ///    marked-up ones, each in the order registered) and each of its
+    ///    targets in order: one step on the target's stream, deduplicated
+    ///    by the derived command id, its events written with the policy's
+    ///    position on the source stream (put once the trigger's last target
+    ///    lands). A marked-up policy's command its target refuses is no
+    ///    failure: the policy's refusal fact goes to the stream of the
+    ///    triggering event, as a step of its own, with the refused
+    ///    command's id. Depth first, to the chain's limit.
+    ///
+    /// A step that fails keeps every write before it: nothing is rolled
+    /// back. The answer is the failure, with the path to the step
+    /// ([`Failure::Downstream`]); a rejected step is also dead-lettered and
+    /// its position moves past it, while a step the store failed (or a
+    /// bug) keeps its position, so [`Kernel::resume`] runs it again. The
+    /// command's own failure writes nothing; a refused write and a lost
+    /// race are [`KernelError::Store`].
+    ///
+    /// A duplicate answers [`Handled::Duplicate`], and first settles what
+    /// its stream still owes its policies (by their positions), so a retry
+    /// after a crash finishes the chain. Projections run on every step's
+    /// events once written; a marked-up projector's failure is the
+    /// caller's [`Failure::Projection`], the events staying written. A
+    /// cover of another domain than `D` is [`KernelError::WrongDomain`].
+    /// Deciding stays synchronous and pure; the future is `Send` whenever
+    /// the store's are.
+    pub async fn handle<D, S, Ps>(
         &self,
-        unit: U,
+        store: &S,
         routes: &Routes,
         book: CommandBook,
         sampled: &Sampled,
@@ -168,51 +196,13 @@ impl<'k> Kernel<'k> {
     ) -> Result<Handled, Failure<D::Rejection>>
     where
         D: Domain,
-        U: UnitOfWork,
+        S: Store,
         Ps: Project,
     {
         let checked = self.check::<D>(book)?;
-        let mut unit = unit;
-        let handled =
-            block(self.chain::<D, _>(&mut SyncPort(&mut unit), routes, sampled, checked))?;
-        if let Handled::Applied(_) = handled {
-            unit.commit()
-                .map_err(|e| Failure::Kernel(KernelError::Store(e)))?;
-        }
-        Ok(self.project(handled, projections))
-    }
-
-    /// [`Kernel::handle`], over the async ports: the store's reads, appends
-    /// and commit are awaited; deciding stays synchronous and pure. After
-    /// the commit and `projections`, every marked-up projector
-    /// ([`Registry::projector`]) runs on the committed events of its
-    /// source, awaited before this returns: any failure is
-    /// [`Failure::Projection`], with every failing projector and what was
-    /// committed, and does not stop the other projectors. (The synchronous
-    /// [`Kernel::handle`] runs none: the async path is the one path.)
-    pub async fn handle_async<D, U, Ps>(
-        &self,
-        unit: U,
-        routes: &Routes,
-        book: CommandBook,
-        sampled: &Sampled,
-        projections: &mut Ps,
-    ) -> Result<Handled, Failure<D::Rejection>>
-    where
-        D: Domain,
-        U: AsyncUnitOfWork,
-        Ps: Project,
-    {
-        let checked = self.check::<D>(book)?;
-        let mut unit = unit;
         let handled = self
-            .chain::<D, _>(&mut AsyncPort(&mut unit), routes, sampled, checked)
+            .chain::<D, _>(&mut StorePort(store), routes, sampled, checked)
             .await?;
-        if let Handled::Applied(_) = handled {
-            unit.commit()
-                .await
-                .map_err(|e| Failure::Kernel(KernelError::Store(e)))?;
-        }
         let handled = self.project(handled, projections);
         let committed = match &handled {
             Handled::Applied(recorded) => recorded.books.clone(),
@@ -226,6 +216,28 @@ impl<'k> Kernel<'k> {
             });
         }
         Ok(handled)
+    }
+
+    /// Run every policy step still owed, by position: for each policy in
+    /// `routes` and each stream of its source domain, the events from the
+    /// policy's position on, each step as [`Kernel::handle`] runs them
+    /// (deduplicated, so a step that landed before a crash is not repeated;
+    /// one write each, its position written with it). What
+    /// an application runs at start, after a crash, or after adding a
+    /// policy to a domain with history. Returns what the steps recorded.
+    pub async fn resume<S, Ps>(
+        &self,
+        store: &S,
+        routes: &Routes,
+        sampled: &Sampled,
+        projections: &mut Ps,
+    ) -> Result<Recorded, Failure<Infallible>>
+    where
+        S: Store,
+        Ps: Project,
+    {
+        let _ = (store, routes, sampled, projections);
+        todo!("red: resume every policy from its position")
     }
 
     /// Every marked-up projector over the `committed` events of its
@@ -340,7 +352,7 @@ type Owed = Result<Vec<(Step, Checked)>, (Vec<Step>, StepError)>;
 
 /// Which policies react to which source domain, in the order registered.
 /// Built once at start-up, independent of any store, and shared by every
-/// command, sync or async.
+/// command.
 #[derive(Default)]
 pub struct Routes {
     by_source: BTreeMap<&'static str, Vec<Route>>,
@@ -402,7 +414,7 @@ struct Staged {
 }
 
 /// A command chain in progress: every stream it has touched, loaded once
-/// from the unit of work and staged since, the path from the originating
+/// from the store and staged since, the path from the originating
 /// command to the step running now, and what the application sampled for
 /// the whole chain (one instant; one minted command id, for the
 /// originating command only).
@@ -637,11 +649,9 @@ impl<'u> Run<'u> {
         Ok(())
     }
 
-    /// The whole chain succeeded: append every staged stream through the
-    /// unit of work, in the order first touched, each expecting the length
-    /// it was loaded at. A conflict on any stream is a
-    /// [`StoreError::Conflict`](super::StoreError::Conflict) naming it; the
-    /// caller then drops the unit of work uncommitted.
+    /// Write every staged stream, in the order first touched, each
+    /// expecting the length it was loaded at. A conflict on any stream is a
+    /// [`StoreError::Conflict`](super::StoreError::Conflict) naming it.
     async fn append<P: Port>(mut self, port: &mut P) -> Result<Recorded, KernelError> {
         let mut recorded = Recorded::default();
         for cover in std::mem::take(&mut self.order) {
@@ -649,7 +659,7 @@ impl<'u> Run<'u> {
                 continue;
             };
             if !staged.pages.is_empty() {
-                port.append(&cover, staged.loaded_at, &staged.pages)
+                port.write(&cover, staged.loaded_at, &staged.pages, &[])
                     .await
                     .map_err(KernelError::Store)?;
             }
@@ -680,9 +690,19 @@ pub struct Recorded {
     streams: Vec<(Cover, u64, Box<dyn AnyType + Send>)>,
     /// Projections that failed after the commit.
     projector_failures: Vec<ProjectorFailure>,
+    /// Each step's events, one book per step that wrote any, in the order
+    /// written.
+    steps: Vec<EventBook>,
 }
 
 impl Recorded {
+    /// Each committed step's events, one book per step (a step that wrote
+    /// no event is not listed), in the order written: the command's first,
+    /// then each policy step's and refusal fact's.
+    pub fn steps(&self) -> &[EventBook] {
+        &self.steps
+    }
+
     /// What the chain appended, as `EventBook`s: every page with its
     /// `EventMeta`.
     pub fn books(&self) -> &[EventBook] {
@@ -782,10 +802,6 @@ impl<D: Domain, P: Projection<D>> Project for ProjectionRoute<'_, D, P> {
         failures
     }
 }
-
-#[cfg(test)]
-#[path = "chain.test.rs"]
-pub(crate) mod chain;
 
 #[cfg(test)]
 #[path = "handle.test.rs"]

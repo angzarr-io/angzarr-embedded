@@ -14,6 +14,16 @@ pub mod next;
 /// `crates/annals/locales/en-US/annals.ftl`.
 pub const EN_US: (&str, &str) = ("annals", include_str!("../locales/en-US/annals.ftl"));
 
+/// angzarr-ports' en-US Fluent catalog, its name first: the messages for
+/// the store's errors, which annals forwards under angzarr-ports' own
+/// codes ([`next::KernelError::Store`]). angzarr-ports ships no catalog, so
+/// the runtime that surfaces its errors carries one. The text of
+/// `crates/annals/locales/en-US/angzarr-ports.ftl`.
+pub const ANGZARR_PORTS_EN_US: (&str, &str) = (
+    "angzarr-ports",
+    include_str!("../locales/en-US/angzarr-ports.ftl"),
+);
+
 /// One value of every error this crate defines, each variant once, for the
 /// catalog parity test: each one's code must have a message in every locale,
 /// using exactly its args. Its messages are in

@@ -19,8 +19,8 @@ knows nothing about any application that uses it, so anything specific to
 one belongs in that application's repository, not here.
 
 Every crate has zero third-party dependencies, except annals,
-annals-store-sql, annals-catalog-check and annals-macros. A crate may depend
-on another crate in this workspace, as annals-store-sql does on annals.
+angzarr-store-sqlite, annals-catalog-check and annals-macros. A crate may
+depend on another crate in this workspace, as annals-catalog-check does.
 
 annals-catalog-check is test-only: its one dev-dependency, `fluent-syntax`
 (Apache-2.0 OR MIT), parses the Fluent catalogs for the parity test.
@@ -32,6 +32,10 @@ angzarr's own prost types for `io.angzarr.v1`, whose build needs `protoc`),
 operates on angzarr's wire types directly rather than on parallel annals
 types: angzarr owns that contract, and annals is its in-process runtime.
 Every user of annals therefore builds angzarr-proto; this is accepted.
+annals also depends on `angzarr-ports`, pinned at the same rev of
+angzarr-project's spec line: angzarr's shared store contract (one async
+trait set, its errors and codes, its conformance suite), which annals'
+kernel runs on and has no store traits of its own beside.
 
 annals-macros depends on `syn`, `quote` and `proc-macro2`, because it is a
 procedural macro crate that parses a whole impl (its methods' signatures,
@@ -44,13 +48,14 @@ depends on them directly; the kernel (annals) never does. annals itself
 depends on annals-macros only as a dev-dependency, for its decorated
 aggregate test.
 
-annals-store-sql depends on `sea-query` and, behind each backend's feature,
-`sqlx` and `sea-query-binder`, because it is a SQL store: hand-rolling a
-query builder or a driver would be a second, unchecked implementation of each
-database's dialect. Its statements are backend-neutral; only rendering,
-running, migrations and the dialect differ per backend. It lives here for
-now: angzarr core's own SQL storage is older, and this crate moves to angzarr
-core when that storage is brought onto it.
+angzarr-store-sqlite depends on `angzarr-ports`, `sea-query`, `sqlx` and
+`sea-query-binder`, because it is a SQL store: hand-rolling a query builder
+or a driver would be a second, unchecked implementation of the dialect. It
+is the one SQLite adapter annals and angzarr share (plan ruling 10), so it
+is a LEAF: it depends on nothing of annals (its own test,
+`a_store_depends_on_nothing_of_annals`, holds it to that), and its errors
+follow angzarr-ports' style rather than `annals_diagnostic`'s. It lives here
+for the POC, beside its first user; it can move to angzarr-project unchanged.
 
 Protobuf code lives in annals (angzarr's types); every other crate stays
 dependency-free except as above.
@@ -69,6 +74,14 @@ an English `Display` as the fallback. The game client renders the localized
 text from Fluent catalogs; Annals renders nothing. The trait lives in its own
 crate, annals-diagnostic, not in annals, so annals-yaml and annals-graph get
 it without depending on the event-sourcing kernel.
+
+Two exceptions, angzarr's: angzarr-ports' `StoreError` and
+angzarr-store-sqlite's errors have `code()`, args and English in the same
+style without the trait (they depend on no annals crate). annals forwards a
+`StoreError` under its own `angzarr-ports-*` code through
+`KernelError::Store`, and carries angzarr-ports' catalog
+(`crates/annals/locales/en-US/angzarr-ports.ftl`, exported as
+`annals::ANGZARR_PORTS_EN_US`); the catalog check wraps the adapter's.
 
 - **Codes are stable and never reused.** Kebab-case, starting with the
   crate's name (`annals-yaml-too-new`), and a valid Fluent message id. A code
@@ -157,9 +170,7 @@ failing gate is a finding: fix the cause and commit again; never
    as it was, and named. `just fmt-check` is CI's check.
 2. **secrets**: gitleaks over the staged changes (`.gitleaks.toml`). A fake
    secret in a test ends its line with `gitleaks:allow`.
-3. **clippy**: `just lint`: clippy over the workspace, and annals-store-sql's
-   library with no backend, which the workspace run cannot see (its own
-   dev-dependency turns `sqlite` on).
+3. **clippy**: `just lint`: clippy over the workspace.
 4. **deps**: `just lint-deps`. A new licence, git source or advisory ignore
    is a change to `deny.toml`, with its reason.
 5. **tests**: `just test-commit` runs `just test-staged`, which tests the

@@ -3,15 +3,20 @@
 //! goes unsampled.
 //!
 //! The errors come from each crate's `diagnostic_samples()`, one value of
-//! every variant. A variant added without a sample is caught by reading the
-//! crates' sources: every code literal there (`"annals-..."`) must be the
-//! code of some sample. The catalogs are every
-//! `crates/<crate>/locales/<locale>/<crate>.ftl`; each crate's en-US one is
-//! also its exported `EN_US`, which must be that file.
+//! every variant (angzarr-store-sqlite's, which depends on no diagnostics
+//! crate, through [`Ported`]). A variant added without a sample is caught by
+//! reading the crates' sources: every code literal there (`"annals-..."`)
+//! must be the code of some sample. The catalogs are every
+//! `crates/<crate>/locales/<locale>/<crate>.ftl`, plus those a crate
+//! carries for codes not its own ([`CARRIED`]: annals carries
+//! angzarr-ports', whose errors it forwards under their own codes); each
+//! crate's en-US one is also its exported `EN_US`, which must be that file.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+use std::fmt;
 
 use annals_diagnostic::{Arg, Diagnostic};
 use fluent_syntax::ast::{Entry, Expression, InlineExpression, Pattern, PatternElement};
@@ -21,7 +26,7 @@ fn samples() -> Vec<(&'static str, Vec<Box<dyn Diagnostic>>)> {
     vec![
         ("annals", annals::diagnostic_samples()),
         ("annals-graph", annals_graph::diagnostic_samples()),
-        ("annals-store-sql", annals_store_sql::diagnostic_samples()),
+        ("angzarr-store-sqlite", sqlite_samples()),
         ("annals-yaml", annals_yaml::diagnostic_samples()),
     ]
 }
@@ -31,9 +36,76 @@ fn exported() -> Vec<(&'static str, &'static str)> {
     vec![
         annals::EN_US,
         annals_graph::EN_US,
-        annals_store_sql::EN_US,
+        angzarr_store_sqlite::EN_US,
         annals_yaml::EN_US,
     ]
+}
+
+/// Catalogs a crate carries for another's codes: (whose codes, the crate
+/// carrying them, in its own `locales/<locale>/`, named for the codes'
+/// owner). angzarr-ports ships no catalog; annals, which forwards its
+/// errors under their own codes, carries one.
+const CARRIED: &[(&str, &str)] = &[("angzarr-ports", "annals")];
+
+/// An error of a crate in angzarr-ports' style (a code, args in
+/// angzarr-ports' `Arg`, an English `Display`), as a [`Diagnostic`].
+#[derive(Clone, Debug)]
+struct Ported {
+    code: &'static str,
+    english: String,
+    args: Vec<(&'static str, angzarr_ports::Arg)>,
+}
+
+impl fmt::Display for Ported {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.english)
+    }
+}
+
+impl Diagnostic for Ported {
+    fn code(&self) -> &'static str {
+        self.code
+    }
+
+    fn args(&self) -> Vec<(&'static str, Arg)> {
+        self.args
+            .iter()
+            .map(|(name, arg)| {
+                let arg = match arg {
+                    angzarr_ports::Arg::Uint(n) => Arg::Uint(*n),
+                    angzarr_ports::Arg::Str(s) => Arg::Str(s.clone()),
+                    angzarr_ports::Arg::Cause(cause) => Arg::nested(&Ported {
+                        code: cause.code,
+                        english: cause.message.clone(),
+                        args: Vec::new(),
+                    }),
+                };
+                (*name, arg)
+            })
+            .collect()
+    }
+}
+
+/// angzarr-store-sqlite's errors: every cause it puts in a store error
+/// (a code and English, no args), and a damage report.
+fn sqlite_samples() -> Vec<Box<dyn Diagnostic>> {
+    let mut samples: Vec<Box<dyn Diagnostic>> = angzarr_store_sqlite::causes()
+        .into_iter()
+        .map(|cause| -> Box<dyn Diagnostic> {
+            Box::new(Ported {
+                code: cause.code,
+                english: cause.message,
+                args: Vec::new(),
+            })
+        })
+        .collect();
+    let damage = angzarr_store_sqlite::damage_sample();
+    samples.push(Box::new(Ported {
+        code: damage.code(),
+        english: damage.to_string(),
+        args: damage.args(),
+    }));
+    samples
 }
 
 /// Crates that define no codes of their own.
@@ -167,6 +239,7 @@ fn read_catalog(path: &Path, problems: &mut Vec<String>) -> Catalog {
 /// Every catalog: crate, then locale.
 fn catalogs(problems: &mut Vec<String>) -> BTreeMap<String, BTreeMap<String, Catalog>> {
     let mut out = BTreeMap::new();
+    let mut carried_catalogs: BTreeMap<String, BTreeMap<String, Catalog>> = BTreeMap::new();
     for krate in fs::read_dir(crates_dir()).unwrap() {
         let krate = krate.unwrap().path();
         let name = krate.file_name().unwrap().to_string_lossy().into_owned();
@@ -180,7 +253,16 @@ fn catalogs(problems: &mut Vec<String>) -> BTreeMap<String, BTreeMap<String, Cat
             let file = locale.join(format!("{name}.ftl"));
             for other in fs::read_dir(&locale).unwrap() {
                 let other = other.unwrap().path();
-                if other != file {
+                let carried = CARRIED.iter().find(|(owner, carrier)| {
+                    *carrier == name && other == locale.join(format!("{owner}.ftl"))
+                });
+                if let Some((owner, _)) = carried {
+                    let catalog = read_catalog(&other, problems);
+                    carried_catalogs
+                        .entry(owner.to_string())
+                        .or_default()
+                        .insert(tag.clone(), catalog);
+                } else if other != file {
                     problems.push(format!("{}: not {name}.ftl", other.display()));
                 }
             }
@@ -192,6 +274,7 @@ fn catalogs(problems: &mut Vec<String>) -> BTreeMap<String, BTreeMap<String, Cat
         }
         out.insert(name, by_locale);
     }
+    out.extend(carried_catalogs);
     out
 }
 
@@ -227,6 +310,12 @@ fn check(
     seen: &mut BTreeMap<String, String>,
 ) {
     let code = d.code();
+    // A code a crate forwards under its owner's prefix is checked against
+    // the catalog the crate carries for that owner.
+    let krate = match owner(code, catalogs.keys().map(String::as_str)) {
+        Some(owner) if CARRIED.contains(&(owner, krate)) => owner,
+        _ => krate,
+    };
     let english = d.to_string();
     if english.trim().is_empty() {
         problems.push(format!("{code}: empty English Display"));
@@ -406,6 +495,16 @@ fn every_checked_crate_exports_its_en_us_catalog() {
             fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
         assert_eq!(text, file, "{name}::EN_US is not {}", path.display());
     }
+}
+
+/// A carried catalog is exported by its carrier, under its owner's name.
+#[test]
+fn annals_exports_the_angzarr_ports_catalog_it_carries() {
+    let (name, text) = annals::ANGZARR_PORTS_EN_US;
+    assert_eq!(name, "angzarr-ports");
+    let path = crates_dir().join("annals/locales/en-US/angzarr-ports.ftl");
+    let file = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    assert_eq!(text, file);
 }
 
 #[test]

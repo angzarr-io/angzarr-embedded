@@ -31,13 +31,13 @@ exclude_re = [
     # changes nothing.
     '''replace <impl Payload for std::convert::Infallible>::type_urls -> Vec<String> with vec!\[\]$''',
     '''replace <impl Project for \(\)>::project -> Vec<ProjectorFailure> with vec!\[\]$''',
-    # annals-store-sql
+    # angzarr-store-sqlite
     # into_wal's busy guard. Taking a non-busy error for busy makes into_wal
     # run `BEGIN EXCLUSIVE` and try the move again: the same error comes back
     # on each try, or from `BEGIN EXCLUSIVE` itself, so the open still fails
     # with that error, only later. No test can tell the two apart.
-    'crates/annals-store-sql/src/sqlite\.rs:\d+:\d+: replace match guard busy\(&error\) with true in into_wal$',
-    'crates/annals-store-sql/src/sqlite\.rs:\d+:\d+: replace busy -> bool with true$',
+    'crates/angzarr-store-sqlite/src/sqlite\.rs:\d+:\d+: replace match guard busy\(&error\) with true in into_wal$',
+    'crates/angzarr-store-sqlite/src/sqlite\.rs:\d+:\d+: replace busy -> bool with true$',
     # annals-yaml
     # update_to's last check, that the edits reached the target, cannot fail:
     # reach returns Ok only once each differing entry is set and each edit

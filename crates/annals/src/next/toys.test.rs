@@ -16,16 +16,19 @@ use std::convert::Infallible;
 use std::fmt;
 use std::future::Future;
 use std::pin::pin;
-use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+use std::task::{Context, Poll, Waker};
+
+pub use angzarr_ports::memory::MemoryStore;
 
 use crate::next::v1::{
-    command_page, Command, CommandBook, CommandPage, ConflictResolution, Cover, EventRef, Fact,
-    FactOrigin, Handling, StateDescriptor, StateOptions, Uuid,
+    command_page, Command, CommandBook, CommandPage, ConflictResolution, Cover, EventPage,
+    EventRef, Fact, FactOrigin, Handling, StateDescriptor, StateOptions, Uuid,
 };
 use crate::next::{
     ids, pack, Any, Committed, Decoder, Domain, IngestCtx, Key, Payload, PayloadError, Policy,
     Registry, Rulebook, Sampled, State, Timestamp, Tx, UnitPath, Units, Upcaster,
 };
+use crate::next::{EventStore, ListStreams, PositionKey, PositionStore, Store, StreamRef};
 use annals_diagnostic::{Arg, Diagnostic, Report};
 
 /// A message under `package`, with its `prost::Name`.
@@ -1136,7 +1139,7 @@ impl Policy for Bookkeeping {
 /// Handle `book` through the kernel over `store`, with no policies and no
 /// projections, logging dead letters to nowhere the test reads.
 pub fn handle<D: Domain>(
-    store: &mut crate::next::InMemoryStore,
+    store: &impl Store,
     registry: &Registry,
     book: CommandBook,
     sampled: &Sampled,
@@ -1144,7 +1147,39 @@ pub fn handle<D: Domain>(
     let log = crate::next::MemoryDeadLetters::new();
     let kernel = crate::next::Kernel::new(registry, &log);
     let routes = crate::next::Routes::new();
-    kernel.handle::<D, _, _>(store.begin(), &routes, book, sampled, &mut ())
+    kernel
+        .handle::<D, _, _>(store, &routes, book, sampled, &mut ())
+        .ready()
+}
+
+/// `stream`'s pages as stored: empty for no such stream.
+pub fn pages(store: &impl EventStore, stream: &Cover) -> Vec<EventPage> {
+    let stream = StreamRef::try_from(stream).expect("a well-formed cover");
+    store.read(stream, 0, None).ready().unwrap().pages
+}
+
+/// `stream` as the ports key it.
+pub fn sref(stream: &Cover) -> StreamRef<'_> {
+    StreamRef::try_from(stream).expect("a well-formed cover")
+}
+
+/// `stream` as stored, with its head: empty at 0 for no such stream.
+pub fn slice(store: &impl EventStore, stream: &Cover) -> crate::next::Slice {
+    store.read(sref(stream), 0, None).ready().unwrap()
+}
+
+/// Every stream holding an event, in every domain, in the ports' order.
+pub fn streams(store: &MemoryStore) -> Vec<Cover> {
+    store.list_streams().ready().unwrap()
+}
+
+/// `handler`'s position on `stream`.
+pub fn position(store: &impl PositionStore, handler: &str, stream: &Cover) -> u64 {
+    let stream = StreamRef::try_from(stream).expect("a well-formed cover");
+    store
+        .position(PositionKey { handler, stream })
+        .ready()
+        .unwrap()
 }
 
 /// Every payload in `books`, decoded as `E`, in order.
@@ -1158,7 +1193,7 @@ pub fn payloads<E: Payload>(books: &[crate::next::v1::EventBook]) -> Vec<E> {
 
 /// An open account `n` holding `cents`, through the kernel: commands 1 and
 /// 2 (open, then deposit) at seconds 10 and 11.
-pub fn opened(store: &mut crate::next::InMemoryStore, registry: &Registry, n: u128, cents: i64) {
+pub fn opened(store: &impl Store, registry: &Registry, n: u128, cents: i64) {
     handle::<Account>(
         store,
         registry,
@@ -1176,18 +1211,26 @@ pub fn opened(store: &mut crate::next::InMemoryStore, registry: &Registry, n: u1
 }
 
 /// Poll a future to completion with a waker that does nothing: enough for
-/// futures that are ready at once.
+/// futures that are ready at once, as `MemoryStore`'s are.
 pub fn ready<F: Future>(f: F) -> F::Output {
-    fn noop(_: *const ()) {}
-    fn clone(p: *const ()) -> RawWaker {
-        RawWaker::new(p, &VTABLE)
-    }
-    static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, noop, noop, noop);
-    // SAFETY: every vtable function ignores the data pointer.
-    let waker = unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) };
-    let mut f = pin!(f);
-    match f.as_mut().poll(&mut Context::from_waker(&waker)) {
+    match pin!(f).poll(&mut Context::from_waker(Waker::noop())) {
         Poll::Ready(out) => out,
         Poll::Pending => panic!("not ready at once"),
     }
+}
+
+/// [`ready`], as a method: `kernel.handle(..).ready()`.
+pub trait Ready: Future + Sized {
+    fn ready(self) -> Self::Output {
+        ready(self)
+    }
+}
+
+impl<F: Future> Ready for F {}
+
+/// What every kernel test over a store uses: the store, the helpers that
+/// read it, and the ports' traits, so their methods are in scope.
+pub mod prelude {
+    pub use super::{pages, position, slice, sref, streams, MemoryStore, Ready};
+    pub use crate::next::{EventStore, PositionStore, Purge, SnapshotStore, Write};
 }

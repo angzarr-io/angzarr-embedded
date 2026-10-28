@@ -69,15 +69,7 @@ annals-next-replay-incomplete-meta = event { $sequence }'s metadata lacks a well
 annals-next-replay-wrong-domain = a { $found } log was given to the { $expected } domain's code
 annals-next-replay-unknown-rules = event { $sequence } was decided under rules { $version }, which the rulebook does not hold
 
-annals-next-store-conflict =
-    stream { $stream } holds { $actual ->
-        [one] one event
-       *[other] { $actual } events
-    }, not the { $expected } expected: someone else appended first
-annals-next-store-discontinuous = an append to stream { $stream } gives sequence { $found } where { $expected } was due
-annals-next-store-unavailable = the store is unavailable: { $error }
-annals-next-store-unreadable = event { $sequence } of stream { $stream } cannot be read: { $reason }
-annals-next-store-unknown-edition = stream { $stream } names an edition that was never created
+annals-next-unreadable = event { $sequence } of stream { $stream } cannot be replayed: { $reason }
 
 annals-next-payload-unknown-type = no decoder for the type { $type_url }
 annals-next-payload-decode = a payload of type { $type_url } does not decode

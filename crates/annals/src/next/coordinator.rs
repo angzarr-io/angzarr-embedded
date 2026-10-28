@@ -3,8 +3,8 @@
 //! angzarr's aggregate coordinator is a service that loads a stream, checks
 //! or stamps the command's expected sequence and hands a
 //! `ContextualCommand` to business code. annals has no service and sends
-//! nothing: the chain does the same steps in process, through the
-//! application's unit of work, domain-blind (it sees `Cover`s, pages and
+//! nothing: the chain does the same steps in process, through the store,
+//! domain-blind (it sees `Cover`s, pages and
 //! the [`Registry`], never a domain's types):
 //!
 //! 3. [`deduplicate`]: **load the stream first** (resolve the
@@ -57,9 +57,10 @@ use prost_types::Timestamp;
 use super::check::{Body, Identified, Malformed, Sampled};
 use super::dead_letter::{write_dead_letter, DeadLetterLog};
 use super::domain::{Conflicts, Decision, Domain, IngestCtx, State, Tx};
-use super::error::{Failure, KernelError, PayloadError, StoreError};
+use super::error::{Failure, KernelError, PayloadError};
 use super::payload::Payload;
 use super::registry::Registry;
+use super::store::StoreError;
 use super::store::{produced_by, Port};
 use super::stream::{Envelope, Stream};
 
