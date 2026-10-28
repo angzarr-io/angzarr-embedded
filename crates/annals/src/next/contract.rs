@@ -30,7 +30,9 @@
 //! async store calls each check itself with its pair (as annals-store-sql's
 //! tests do), so it can remove whatever the pair made once the check is
 //! done: two handles on one store are two connections to one database,
-//! which a test makes on a file.
+//! which a test makes on a file. The read section is also where a read
+//! unit's refusal of an edition never created is checked, once
+//! ([`a_read_unit_refuses_an_edition_never_created`]).
 //!
 //! A store that answers a change token ([`AsyncWatch`](super::AsyncWatch),
 //! or [`Watch`](super::Watch) through `Ready`) also runs the watch checks,
@@ -702,6 +704,49 @@ pub async fn the_commit_position_counts_every_handles_commits<R, W>(
     );
 }
 
+/// A read unit refuses a stream in an edition its store never created
+/// (angzarr's EA-2: a query or subscription naming one is refused): the
+/// store's read units are where that is enforced, once. Such a stream is
+/// neither read nor listed. A store with no edition registry has created
+/// none, so its read units refuse every edition; main is always read.
+pub async fn a_read_unit_refuses_an_edition_never_created<R, W>((mut reader, mut writer): (R, W))
+where
+    R: AsyncReadStore,
+    W: AsyncEventStore,
+{
+    let main = cover("account", 1);
+    let edition = cover_in("account", 1, "what-if");
+    writer.append(&main, 0, &[page(0, 1)]).await.unwrap();
+    // Written outside any unit, as a store's own appends take any edition.
+    writer.append(&edition, 0, &[page(0, 2)]).await.unwrap();
+    let mut reads = reader.begin_read().await;
+    assert_eq!(
+        reads.read_from(&edition, 0).await,
+        Err(StoreError::UnknownEdition {
+            stream: edition.clone()
+        }),
+        "a stream it holds, in an edition never created"
+    );
+    let misspelt = cover_in("account", 2, "wat-if");
+    assert_eq!(
+        reads.read_from(&misspelt, 0).await,
+        Err(StoreError::UnknownEdition {
+            stream: misspelt.clone()
+        }),
+        "no such stream either: refused, not None"
+    );
+    assert_eq!(
+        reads.covers("account").await,
+        Ok(vec![main.clone()]),
+        "not listed"
+    );
+    assert_eq!(
+        reads.read_from(&main, 0).await.unwrap().map(|s| s.pages),
+        Some(vec![page(0, 1)]),
+        "main is always read"
+    );
+}
+
 // ----------------------------------------------------- watch (opt-in)
 
 /// `watcher`'s token now, asked twice: nothing committed in between, so the
@@ -802,6 +847,7 @@ macro_rules! store_contract {
         $crate::store_contract!(@pair $pair;
             a_read_unit_sees_the_store_as_it_began,
             a_read_unit_keeps_a_stream_purged_after_it_began,
+            a_read_unit_refuses_an_edition_never_created,
         );
     };
     (purge, $fresh:expr) => {

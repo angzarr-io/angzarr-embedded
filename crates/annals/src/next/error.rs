@@ -194,6 +194,11 @@ pub enum StoreError {
         sequence: u64,
         reason: Report,
     },
+    /// A read-only unit was given a stream in an edition its store never
+    /// created: angzarr's NOT_FOUND, for a query or subscription naming one
+    /// (EA-2). Nothing was read. The store's read units are where it is
+    /// refused; a store with no edition registry has created none.
+    UnknownEdition { stream: Cover },
 }
 
 /// A payload that is not one of the types a domain decodes.
@@ -314,6 +319,7 @@ impl StoreError {
         match self {
             StoreError::Conflict { .. } | StoreError::Unavailable(_) => Recovery::Retry,
             StoreError::Discontinuous { .. } | StoreError::Unreadable { .. } => Recovery::Bug,
+            StoreError::UnknownEdition { .. } => Recovery::Invalid,
         }
     }
 }
@@ -659,6 +665,11 @@ impl fmt::Display for StoreError {
                 "event {sequence} of stream {} cannot be read: {reason}",
                 cover_text(stream)
             ),
+            StoreError::UnknownEdition { stream } => write!(
+                f,
+                "stream {} names an edition that was never created",
+                cover_text(stream)
+            ),
         }
     }
 }
@@ -670,6 +681,7 @@ impl Diagnostic for StoreError {
             StoreError::Discontinuous { .. } => "annals-next-store-discontinuous",
             StoreError::Unavailable(_) => "annals-next-store-unavailable",
             StoreError::Unreadable { .. } => "annals-next-store-unreadable",
+            StoreError::UnknownEdition { .. } => "annals-next-store-unknown-edition",
         }
     }
 
@@ -703,6 +715,7 @@ impl Diagnostic for StoreError {
                 ("sequence", (*sequence).into()),
                 ("reason", Arg::nested(reason)),
             ],
+            StoreError::UnknownEdition { stream: s } => vec![("stream", stream(s))],
         }
     }
 }

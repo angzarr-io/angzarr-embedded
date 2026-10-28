@@ -275,6 +275,12 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn annals_diagnostic::Diagnostic>
                 type_url: "/toy.v9.Bonus".to_string(),
             }),
         },
+        StoreError::UnknownEdition {
+            stream: v1::Cover {
+                edition: Some("what-if".to_string()),
+                ..stream()
+            },
+        },
     ];
     let missing = WireError::Missing {
         message: "toy.v1.Deposited",

@@ -370,8 +370,12 @@ enum Reading {
     /// From a copy of the store taken as the unit began: one moment.
     AsItBegan,
     /// Through to the store, each read seeing whatever is there by then:
-    /// not one moment, so every read check must fail on it.
+    /// not one moment, so every moment check must fail on it.
     Live,
+    /// From a copy taken as the unit began, but through the copy's own
+    /// reads rather than a read unit's: one moment, and blind to whether
+    /// an edition was ever created, so the refusal check must fail on it.
+    Lax,
 }
 
 /// A handle on an [`InMemoryStore`] shared with other handles: a second
@@ -435,17 +439,22 @@ impl crate::next::Purge for Shared {
     }
 }
 
-/// A [`Shared`] handle's read unit.
+/// A [`Shared`] handle's read unit: an [`InMemoryRead`](crate::next::InMemoryRead)
+/// on a copy of the store as it began, or on the store itself, read by
+/// read, or (lax) the copy's own reads.
 enum SharedReads<'s> {
     AsItBegan(InMemoryStore),
     Live(&'s Shared),
+    Lax(InMemoryStore),
 }
 
 impl crate::next::ReadUnit for SharedReads<'_> {
     fn covers(&mut self, domain: &str) -> Result<Vec<crate::next::v1::Cover>, StoreError> {
+        use crate::next::ReadStore;
         match self {
-            SharedReads::AsItBegan(copy) => copy.covers(domain),
-            SharedReads::Live(shared) => shared.with(|s| s.covers(domain)),
+            SharedReads::AsItBegan(copy) => copy.begin_read().covers(domain),
+            SharedReads::Live(shared) => shared.with(|s| s.begin_read().covers(domain)),
+            SharedReads::Lax(copy) => copy.covers(domain),
         }
     }
 
@@ -454,9 +463,11 @@ impl crate::next::ReadUnit for SharedReads<'_> {
         stream: &crate::next::v1::Cover,
         from: u64,
     ) -> Result<Option<crate::next::Slice>, StoreError> {
+        use crate::next::ReadStore;
         match self {
-            SharedReads::AsItBegan(copy) => copy.read_from(stream, from),
-            SharedReads::Live(shared) => shared.with(|s| s.read_from(stream, from)),
+            SharedReads::AsItBegan(copy) => copy.begin_read().read_from(stream, from),
+            SharedReads::Live(shared) => shared.with(|s| s.begin_read().read_from(stream, from)),
+            SharedReads::Lax(copy) => copy.read_from(stream, from),
         }
     }
 }
@@ -465,16 +476,20 @@ impl crate::next::ReadStore for Shared {
     type Reads<'s> = SharedReads<'s>;
 
     fn begin_read(&mut self) -> SharedReads<'_> {
-        match self.reading {
-            Reading::Live => SharedReads::Live(self),
-            Reading::AsItBegan => SharedReads::AsItBegan(self.with(|store| {
+        let copy = || {
+            self.with(|store| {
                 let mut copy = InMemoryStore::new();
                 for stream in store.streams() {
                     let pages = store.read(&stream).unwrap().unwrap().pages;
                     copy.append(&stream, 0, &pages).unwrap();
                 }
                 copy
-            })),
+            })
+        };
+        match self.reading {
+            Reading::Live => SharedReads::Live(self),
+            Reading::AsItBegan => SharedReads::AsItBegan(copy()),
+            Reading::Lax => SharedReads::Lax(copy()),
         }
     }
 }
@@ -495,6 +510,22 @@ fn every_read_check_fails_a_store_whose_read_unit_reads_live() {
     ))));
     assert!(fails(|pair| block(
         a_read_unit_keeps_a_stream_purged_after_it_began(pair)
+    )));
+}
+
+#[test]
+fn the_refusal_check_fails_a_read_unit_blind_to_editions() {
+    use crate::next::contract::*;
+    let check = |reading, check: fn((Ready<Shared>, Ready<Shared>))| {
+        let (reader, writer) = shared(reading);
+        std::panic::catch_unwind(|| check((Ready(reader), Ready(writer)))).is_err()
+    };
+    assert!(check(Reading::Lax, |pair| block(
+        a_read_unit_refuses_an_edition_never_created(pair)
+    )));
+    // One moment all the same: the refusal is all it gets wrong.
+    assert!(!check(Reading::Lax, |pair| block(
+        a_read_unit_sees_the_store_as_it_began(pair)
     )));
 }
 

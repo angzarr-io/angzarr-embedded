@@ -1008,6 +1008,24 @@ mod read_contract {
     }
 
     #[tokio::test]
+    async fn a_read_unit_refuses_an_edition_never_created() {
+        on_file(
+            writable,
+            checks::a_read_unit_refuses_an_edition_never_created,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_read_only_stores_read_unit_refuses_an_edition_never_created() {
+        on_file(
+            read_only_store,
+            checks::a_read_unit_refuses_an_edition_never_created,
+        )
+        .await;
+    }
+
+    #[tokio::test]
     async fn a_read_unit_keeps_a_stream_purged_after_it_began() {
         on_file(
             writable,

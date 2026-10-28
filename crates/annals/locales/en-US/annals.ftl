@@ -82,6 +82,7 @@ annals-next-store-conflict =
 annals-next-store-discontinuous = an append to stream { $stream } gives sequence { $found } where { $expected } was due
 annals-next-store-unavailable = the store is unavailable: { $error }
 annals-next-store-unreadable = event { $sequence } of stream { $stream } cannot be read: { $reason }
+annals-next-store-unknown-edition = stream { $stream } names an edition that was never created
 
 annals-next-payload-unknown-type = no decoder for the type { $type_url }
 annals-next-payload-decode = a payload of type { $type_url } does not decode
