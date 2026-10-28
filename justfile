@@ -56,7 +56,8 @@ build: gen
     exec just _run build workspace cargo \
         cargo build "${terse[@]}" --release --workspace --all-targets --features annals-log/codegen-check
 
-# Lint the protobuf schema and the Rust: the pre-commit clippy gate.
+# Lint the protobuf schema and the Rust, and check the licence lists: the
+# pre-commit clippy gate.
 [no-exit-message]
 lint: gen
     @just _run lint workspace cargo just _lint
@@ -74,6 +75,34 @@ _lint:
     buf lint
     cargo clippy "${terse[@]}" --workspace --all-targets --features annals-log/codegen-check -- -D warnings
     cargo clippy "${terse[@]}" --package annals-store-sql --lib -- -D warnings
+    just licence-check
+
+# Hold the README's *Licence* lists and deny.toml's comment to `cargo tree`:
+# the crates that carry angzarr-proto (AGPL-3.0-only) in a normal build, with
+# every feature on, and the rest of the workspace as BSD-3-Clause only.
+[no-exit-message]
+licence-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    names() { grep -o '`annals[a-z-]*`' | tr -d '`' | sort -u; }
+    # A README bullet: from the line starting it to the next bullet or blank.
+    bullet() { awk -v h="$1" 'index($0, h) == 1 { f = 1; print; next } f && /^(- |$)/ { exit } f' README.md; }
+    actual=$(cargo tree -q --workspace --all-features -e normal,build -i angzarr-proto --prefix none --format '{p}' \
+        | awk '{ print $1 }' | grep -v '^angzarr-proto$' | sort -u)
+    members=$(cargo metadata -q --no-deps --format-version 1 | jq -r '.packages[].name' | sort -u)
+    bsd=$(comm -23 <(echo "$members") <(echo "$actual"))
+    fail=0
+    check() {
+        if [ "$2" != "$3" ]; then
+            echo "FAIL licence-check: $1 lists" $2 "but cargo tree says" $3 >&2
+            fail=1
+        fi
+    }
+    check "README's carry-angzarr-proto bullet" "$(bullet '- **Carry angzarr-proto:**' | names)" "$actual"
+    check "README's BSD-3-Clause-only bullet" "$(bullet '- **BSD-3-Clause only:**' | names)" "$bsd"
+    check "deny.toml's comment" "$(grep -A1 'In normal builds those crates are:' deny.toml | tail -n1 | names)" "$actual"
+    [ "$fail" = 0 ] && echo "licence-check: angzarr-proto in" $actual"; BSD-3-Clause only:" $bsd
+    exit "$fail"
 
 # Check the schema for wire-breaking changes against main.
 breaking:

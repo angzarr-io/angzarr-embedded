@@ -35,9 +35,13 @@ confidence-threshold = 0.9
 # The one copyleft licence in the graph, allowed for that crate only:
 # angzarr-proto, angzarr's wire types, which annals' kernel operates on
 # directly (CLAUDE.md, *Few dependencies*; docs/design/audit.md, *Layering*).
-# It is AGPL-3.0-only, so every build that links annals is subject to the
-# AGPL (README, *Licence*). Accepted with the dependency; any other copyleft
-# crate fails here.
+# It is AGPL-3.0-only, so a build that links any crate carrying it is
+# subject to the AGPL. In normal builds those crates are:
+#   `annals`, `annals-log`, `annals-sim`, `annals-store-sql`
+# and the rest (annals-diagnostic, annals-graph, annals-yaml,
+# annals-catalog-check) are BSD-3-Clause only (README, *Licence*;
+# `just licence-check` holds both to `cargo tree`). Accepted with the
+# dependency; any other copyleft crate fails here.
 exceptions = [
   { crate = "angzarr-proto", allow = ["AGPL-3.0-only"] },
 ]

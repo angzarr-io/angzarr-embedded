@@ -49,7 +49,20 @@ its config is `.cargo/mutants.toml`.
 
 Annals is licensed under the [BSD 3-Clause License](LICENSE) (BSD-3-Clause).
 
-Annals depends on `angzarr-proto`, angzarr's wire types, which is
-AGPL-3.0-only. While it does, a binary that links annals is effectively
-AGPL-3.0-only: annals' own source stays BSD-3-Clause, but the linked whole
-carries angzarr-proto's terms.
+Some of annals' crates depend on `angzarr-proto`, angzarr's wire types,
+which is AGPL-3.0-only. In a normal build (dev-dependencies, which only
+tests build, aside):
+
+- **Carry angzarr-proto:** `annals`, which depends on it directly, and
+  `annals-log`, `annals-sim` and `annals-store-sql`, which depend on
+  `annals`. A binary that links any of these is effectively AGPL-3.0-only:
+  their source stays BSD-3-Clause, but the linked whole carries
+  angzarr-proto's terms.
+- **BSD-3-Clause only:** `annals-diagnostic`, `annals-graph`,
+  `annals-yaml` and `annals-catalog-check`. `annals-yaml` and
+  `annals-catalog-check` reach angzarr-proto only through
+  dev-dependencies, so their tests link it but a binary built on them
+  does not.
+
+`just licence-check`, part of `just lint`, fails when these two lists stop
+matching `cargo tree`.
