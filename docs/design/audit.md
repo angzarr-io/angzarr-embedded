@@ -4,7 +4,7 @@ Status: **implemented** in `crates/annals/src/next/`, pinned by the tests
 beside it (`*.test.rs`). It is annals' one kernel.
 
 The wire contract is angzarr's protos on angzarr-project's spec line
-(`spec/20261019-draft`, the crate pinned at **4be6a68**): `EventMeta.causation`
+(`spec/20261019-draft`, the crate pinned at **581d23e**): `EventMeta.causation`
 is the event's direct cause, with one arm, `command_id` (a process manager
 is a domain whose inputs are commands and facts, so no event is caused by
 another event); one `command_id` per command, deduplication on the events,
@@ -223,7 +223,7 @@ impl Identified {
 |---|---|---|---|
 | a client's command | as sent, else `Sampled::command_id` (a UUIDv7 the application minted) | as sent, else the command id | none |
 | a fact | `ids::fact_command_id(external_id)` (UUIDv5; a sent one must equal it) | as sent, else the same value (`ids::fact_correlation`) | none |
-| a policy's command | `ids::reaction_command_id(trigger, component, index)` (UUIDv5) | the trigger's | the trigger's `EventRef` |
+| a policy's command | `ids::policy_command_id(trigger, component, index)` (UUIDv5) | the trigger's | the trigger's `EventRef` |
 
 `component` is `Policy::NAME`; `index` is the order's place among those
 the trigger set off for that policy. The `causation_id` column is the
@@ -839,7 +839,7 @@ type itself:
 | an event's metadata | `v1::EventMeta { oneof causation { command_id }, fact, correlation_id, recorded_at, rules_version }` |
 | an event's direct cause | `v1::event_meta::Causation::{CommandId(Uuid), TriggeringEvent(EventRef)}` (`Envelope::causation()`) |
 | every id | `v1::Uuid` (16 bytes); text through `ids` at the boundary |
-| derived ids | `ids::{compute_root, reaction_command_id, fact_command_id, fact_correlation}` |
+| derived ids | `ids::{compute_root, policy_command_id, fact_command_id, fact_correlation}` |
 | a snapshot | `v1::Snapshot { sequence, state: Any, rules_version }` |
 | the answer | `Handled::outcome() -> v1::Outcome { delivery: APPLIED \| DUPLICATE, projector_failures }`; `Handled::books() -> Vec<EventBook>` |
 | a dead letter | `v1::AngzarrDeadLetter`, as a log line |

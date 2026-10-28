@@ -19,7 +19,7 @@
 //! cover, a `Command` page whose payload is the policy's command packed as
 //! `Any`, and **no ids and no handling**. The kernel checks it like any
 //! book, then identifies it from its trigger: command id
-//! [`ids::reaction_command_id`](super::ids::reaction_command_id)(trigger,
+//! [`ids::policy_command_id`](super::ids::policy_command_id)(trigger,
 //! [`Policy::NAME`], index), the trigger's correlation, and the trigger as
 //! its `causation_id`. Nothing outside the kernel can build one. The
 //! command's events name the command as their causation

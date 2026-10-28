@@ -70,7 +70,7 @@ fn a_policys_events_carry_the_derived_command_id_as_causation_and_no_trigger() {
     assert_eq!(
         meta.causation,
         Some(Causation::CommandId(
-            ids::reaction_command_id(&trigger, "bookkeeping", 0).unwrap()
+            ids::policy_command_id(&trigger, "bookkeeping", 0).unwrap()
         )),
         "the direct cause is the command, UUIDv5 of (trigger, component, \
          index) as angzarr derives it; never the trigger (decision 13.3)"
@@ -720,7 +720,7 @@ fn a_triggers_commands_are_indexed_in_target_order() {
         assert_eq!(
             pages[0].meta.as_ref().unwrap().causation,
             Some(Causation::CommandId(
-                ids::reaction_command_id(&trigger, "two-ledgers", u32::from(index)).unwrap()
+                ids::policy_command_id(&trigger, "two-ledgers", u32::from(index)).unwrap()
             )),
             "target {index}'s command is the trigger's {index}th"
         );

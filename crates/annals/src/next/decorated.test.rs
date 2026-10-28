@@ -2995,7 +2995,7 @@ mod refusal_flow {
         settle_in::<BuyIn>(&store, &registry, &log, 2, start(&correlation(3), 2, 30)).unwrap();
         let pages = pages(&store, &buy_in_cover(&correlation(3))).expect("the buy-in");
         let hold_id =
-            ::annals::next::ids::reaction_command_id(&trigger(&correlation(3)), "buyin-wallet", 0)
+            ::annals::next::ids::policy_command_id(&trigger(&correlation(3)), "buyin-wallet", 0)
                 .unwrap();
         let meta = pages[1].meta.clone().expect("meta");
         assert_eq!(meta.causation, Some(Causation::CommandId(hold_id.clone())));

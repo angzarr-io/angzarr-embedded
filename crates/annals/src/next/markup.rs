@@ -734,7 +734,7 @@ pub trait Policy: Send + Sync + 'static {
     /// name, in marker order.
     const TRANSLATES: &'static [TypeName];
 
-    /// angzarr's `SagaService.OnRefused`: the refusal fact's payload for
+    /// angzarr's `PolicyService.OnRefused`: the refusal fact's payload for
     /// the policy's source, packed. Pass-through: angzarr's `CommandRefused
     /// { command, refusal, trigger }`, `refusal` the response's object
     /// still packed, `trigger` the triggering event's `EventRef`. Translate:
@@ -869,7 +869,7 @@ pub mod v1 {
         const PACKAGE: &'static str = "io.angzarr.v1";
     }
 
-    /// `SagaService.OnRefused`'s input.
+    /// `PolicyService.OnRefused`'s input.
     #[derive(Clone, PartialEq, prost::Message)]
     pub struct Refusal {
         /// The triggering event's book.

@@ -13,7 +13,7 @@ fn uuid(n: u8) -> Uuid {
 /// since `check_policy_command` needs a registered domain and only the
 /// meta is under test.
 fn policy_command(trigger: EventRef) -> Identified {
-    let command_id = ids::reaction_command_id(&trigger, "bookkeeping", 0).unwrap();
+    let command_id = ids::policy_command_id(&trigger, "bookkeeping", 0).unwrap();
     Identified {
         cover: Cover {
             domain: "ledger".to_string(),
@@ -161,7 +161,7 @@ fn a_policys_book_is_identified_from_its_trigger() {
     });
     assert_eq!(
         id.command_id(),
-        &ids::reaction_command_id(&trigger(), "bookkeeping", 1).unwrap()
+        &ids::policy_command_id(&trigger(), "bookkeeping", 1).unwrap()
     );
     assert_eq!(id.correlation_id(), &uuid(8));
     assert_eq!(id.causation_id(), Some(&trigger()));
@@ -259,7 +259,7 @@ fn a_policy_commands_events_carry_its_command_id_as_causation_and_no_trigger() {
     assert_eq!(
         meta.causation,
         Some(Causation::CommandId(
-            ids::reaction_command_id(&trigger, "bookkeeping", 0).unwrap()
+            ids::policy_command_id(&trigger, "bookkeeping", 0).unwrap()
         )),
         "the direct cause: the command"
     );

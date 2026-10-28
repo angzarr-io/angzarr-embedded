@@ -137,7 +137,7 @@ pub use wire::WireError;
 
 /// angzarr's id helpers: `Display`/`FromStr` for [`v1::Uuid`] (text only at
 /// display and input), and the UUIDv5 derivations ([`ids::compute_root`],
-/// [`ids::reaction_command_id`], [`ids::fact_command_id`],
+/// [`ids::policy_command_id`], [`ids::fact_command_id`],
 /// [`ids::fact_correlation`]).
 pub use angzarr_proto::ids;
 /// angzarr's wire contract, as the kernel uses it: the `io.angzarr.v1`

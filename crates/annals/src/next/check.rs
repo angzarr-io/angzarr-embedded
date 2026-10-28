@@ -74,7 +74,7 @@ pub enum Malformed {
     /// A policy's book with handling: the target stamps its own head.
     HandlingOnPolicyCommand,
     /// The reaction's trigger cannot name a command id
-    /// ([`ids::reaction_command_id`]): no stream or root, a bad root, an
+    /// ([`ids::policy_command_id`]): no stream or root, a bad root, an
     /// empty edition or component.
     BadTrigger(UuidError),
     /// A fact without `fact_origin`.
@@ -328,7 +328,7 @@ pub fn check(book: CommandBook, registry: &Registry) -> Result<Checked, Malforme
 /// command `component` issued reacting to `trigger` (whose correlation is
 /// `correlation_id`): the same checks as [`check`], except that the book
 /// must name no ids of its own, no handling and no fact, and its command id
-/// is derived here ([`ids::reaction_command_id`]).
+/// is derived here ([`ids::policy_command_id`]).
 ///
 /// The id never names the reactor's rules version or code, so a re-run over
 /// a handled trigger (catch-up, redelivery) re-derives the same id and
@@ -342,7 +342,7 @@ pub(crate) fn check_policy_command(
     correlation_id: Uuid,
 ) -> Result<Checked, Malformed> {
     let command_id =
-        ids::reaction_command_id(&trigger, component, index).map_err(Malformed::BadTrigger)?;
+        ids::policy_command_id(&trigger, component, index).map_err(Malformed::BadTrigger)?;
     parse(
         book,
         registry,

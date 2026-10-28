@@ -374,7 +374,7 @@ mod tx {
                 rules_version: "p7".to_string(),
                 domain: "probe".to_string(),
                 recorded_seconds: 50,
-                command_id: ids::reaction_command_id(&trigger, "probing", 0)
+                command_id: ids::policy_command_id(&trigger, "probing", 0)
                     .unwrap()
                     .value
                     .to_vec(),
