@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Mutex;
 
-use angzarr_proto::v1::{ConflictResolution, EventPage, Snapshot, StateDescriptor};
+use angzarr_proto::v1::{ConflictResolution, EventPage, Snapshot, StateDescriptor, Uuid};
 use prost_types::Any;
 
 use annals_diagnostic::{Arg, Diagnostic, Report};
@@ -27,7 +27,7 @@ use super::coordinator::{run_step, Contextual};
 use super::dead_letter::DeadLetterLog;
 use super::domain::{Domain, State};
 use super::error::{Failure, StepError, UpcastChainError};
-use super::markup::{self, AsyncProjector, Projecting, ProjectionContext};
+use super::markup::{self, AsyncProjector, Projecting, ProjectionContext, SagaContext};
 use super::payload::{type_name, Payload};
 use super::upcast::Upcaster;
 use super::version::Rulebook;
@@ -64,6 +64,20 @@ type Fresh = Box<dyn AnyType + Send + Sync>;
 /// A factory of `S`.
 type Factory<S> = Box<dyn Fn() -> S + Send + Sync>;
 
+/// A saga's generated `on_event`, erased: the commands it answers, each
+/// packed with its stream's root.
+type OnEvent = Box<dyn Fn(&Any, &SagaContext) -> Option<Vec<(Uuid, Any)>> + Send + Sync>;
+
+/// A marked-up saga, erased: its name, its source and target domains, and
+/// its generated reaction and refusal answer.
+pub(crate) struct SagaEntry {
+    pub(crate) name: &'static str,
+    pub(crate) source: &'static str,
+    pub(crate) target: &'static str,
+    pub(crate) on_event: OnEvent,
+    pub(crate) on_refused: Box<dyn Fn(&markup::v1::Refusal) -> Any + Send + Sync>,
+}
+
 /// A marked-up projector, erased, its one instance held here: out of the
 /// lock while it runs.
 pub(crate) struct ProjectorEntry {
@@ -95,14 +109,23 @@ impl<P: AsyncProjector> ErasedProjector for P {
 /// command in a target it knows only by name: decode (from the chain's
 /// staged `Stream<D>`, boxed, when it has one), decide or ingest, and hand
 /// back the stream after (boxed) and the pages to append. A rejection
-/// comes back as its report.
+/// comes back as its report, with the typed refusal object it carries.
 pub(crate) type TypedStep = fn(
     Contextual,
     Option<Box<dyn AnyType + Send>>,
     &Registry,
     &Sampled,
     &dyn DeadLetterLog,
-) -> Result<(Box<dyn AnyType + Send>, Vec<EventPage>), StepError>;
+) -> Result<(Box<dyn AnyType + Send>, Vec<EventPage>), StepFailure>;
+
+/// A failed step: why, the typed refusal object a rejection carries (its
+/// domain's [`Domain::refusal`]), and the stream it ran on as it was
+/// before (boxed), when the step got that far.
+pub(crate) struct StepFailure {
+    pub(crate) error: StepError,
+    pub(crate) refusal: Option<Any>,
+    pub(crate) stream: Option<Box<dyn AnyType + Send>>,
+}
 
 /// [`TypedStep`] for `D`.
 fn typed_step<D: Domain>(
@@ -111,16 +134,26 @@ fn typed_step<D: Domain>(
     registry: &Registry,
     sampled: &Sampled,
     dead_letters: &dyn DeadLetterLog,
-) -> Result<(Box<dyn AnyType + Send>, Vec<EventPage>), StepError> {
-    let (stream, pages) =
-        run_step::<D>(command, staged, registry, sampled, dead_letters).map_err(|failure| {
-            match failure {
-                Failure::Rejected(rejection) => StepError::Rejected(Report::of(&rejection)),
+) -> Result<(Box<dyn AnyType + Send>, Vec<EventPage>), StepFailure> {
+    let (stream, pages) = run_step::<D>(command, staged, registry, sampled, dead_letters).map_err(
+        |(failure, stream)| {
+            let mut refusal = None;
+            let error = match failure {
+                Failure::Rejected(rejection) => {
+                    refusal = D::refusal(&rejection);
+                    StepError::Rejected(Report::of(&rejection))
+                }
                 Failure::Kernel(error) => StepError::Kernel(error),
                 Failure::Downstream { error, .. } => error,
                 Failure::Projection { .. } => unreachable!("a chain step runs no projector"),
+            };
+            StepFailure {
+                error,
+                refusal,
+                stream: stream.map(|s| Box::new(s) as Box<dyn AnyType + Send>),
             }
-        })?;
+        },
+    )?;
     Ok((Box::new(stream), pages))
 }
 
@@ -245,8 +278,7 @@ impl Diagnostic for Misconfigured {
 #[derive(Default)]
 pub struct Registry {
     domains: BTreeMap<String, Entry>,
-    /// The registered sagas' names.
-    sagas: Vec<&'static str>,
+    sagas: Vec<SagaEntry>,
     projectors: Vec<ProjectorEntry>,
 }
 
@@ -418,22 +450,35 @@ impl Registry {
         entry.process_manager = pm;
     }
 
-    /// Register `saga`, a marked-up saga (`#[saga]`). Registering one twice
-    /// PANICS at startup.
-    ///
-    /// annals does not run a saga yet: its steps, each committed on its
-    /// own (the source's events before the saga's command; a refusal fact
-    /// as a step of its own), arrive with the kernel's committed-step
-    /// dispatch. What a saga answers is its markup's
-    /// ([`Saga::on_event`](super::markup::Saga::on_event),
-    /// [`Saga::on_refused`](super::markup::Saga::on_refused)), whatever
-    /// runs it.
+    /// Register `saga`, a marked-up saga (`#[saga]`). [`Kernel::settle`](super::Kernel::settle)
+    /// runs it on each event of its source a step commits, and delivers
+    /// each of its commands to its target as a step of its own. When the
+    /// target refuses one (and records nothing), the saga's
+    /// [`on_refused`](super::markup::Saga::on_refused) answers a fact,
+    /// delivered to the exact stream of the triggering event as a step of
+    /// its own, whose id is the refused command's: the source's handler for
+    /// it records what the refusal means. A refusal fact the source has no
+    /// handler for is dead-lettered (`annals-next-no-refusal-handler`; the
+    /// dead letter is annals' alert), the steps before it stay committed,
+    /// and the call returns Ok, as on distributed angzarr. Registering one
+    /// twice PANICS at startup.
     pub fn saga<S: super::markup::Saga>(&mut self, saga: S) -> &mut Self {
-        if self.sagas.contains(&S::NAME) {
+        if self.sagas.iter().any(|entry| entry.name == S::NAME) {
             panic!("saga \"{}\" is registered already", S::NAME);
         }
-        drop(saga);
-        self.sagas.push(S::NAME);
+        let saga = std::sync::Arc::new(saga);
+        let reacting = saga.clone();
+        self.sagas.push(SagaEntry {
+            name: S::NAME,
+            source: <S::Source as Domain>::NAME,
+            target: <S::Target as Domain>::NAME,
+            on_event: Box::new(move |event, ctx| {
+                reacting
+                    .on_event(event, ctx)
+                    .map(markup::Commands::into_orders)
+            }),
+            on_refused: Box::new(move |refusal| saga.on_refused(refusal)),
+        });
         self
     }
 
@@ -468,6 +513,22 @@ impl Registry {
     /// Whether `domain` is a process manager's.
     pub(crate) fn is_process_manager(&self, domain: &str) -> bool {
         self.domains.get(domain).is_some_and(|e| e.process_manager)
+    }
+
+    /// The sagas whose source is `domain`, in registration order.
+    pub(crate) fn sagas<'r>(
+        &'r self,
+        domain: &'r str,
+    ) -> impl Iterator<Item = (usize, &'r SagaEntry)> + 'r {
+        self.sagas
+            .iter()
+            .enumerate()
+            .filter(move |(_, saga)| saga.source == domain)
+    }
+
+    /// Saga `index`.
+    pub(crate) fn saga_at(&self, index: usize) -> &SagaEntry {
+        &self.sagas[index]
     }
 
     /// Every projector, in registration order.

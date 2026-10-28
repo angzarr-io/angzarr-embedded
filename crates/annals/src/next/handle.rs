@@ -25,12 +25,16 @@
 //!   concurrency on every stream touched), and the unit committed: one
 //!   transaction. The command ids are written with the events, so
 //!   deduplication needs nothing else.
+//! - **A saga's refused command is not a failure.** The markup's sagas
+//!   ([`Registry::saga`]) run in the chain beside the policies; when a
+//!   saga's command is refused, its target records nothing, and the
+//!   chain delivers the saga's refusal fact to the stream of the
+//!   triggering event and goes on (see [`Registry::saga`]).
 //! - **Then projections run**, on committed events only. A failed chain is
 //!   never seen by one, and a failing projection never undoes the commit:
 //!   a [`Project`]ion route's is reported in
-//!   [`Recorded::projector_failures`]; a marked-up projector's
-//!   ([`Registry::projector`]), on the async path, is the caller's
-//!   [`Failure::Projection`].
+//!   [`Recorded::projector_failures`]; a marked-up projector's, on the
+//!   async path, is the caller's [`Failure::Projection`].
 //!
 //! **This is a deliberate divergence from angzarr** (see
 //! `docs/design/audit.md`, *Divergences*): angzarr appends one stream per
@@ -54,19 +58,22 @@ use angzarr_proto::v1::{
     self as v1, CommandBook, Cover, DeliveryOutcome, EventBook, EventPage, Outcome,
 };
 
-use super::check::{check, Checked, Sampled};
+use super::check::{check, check_reaction, check_refusal, Checked, Identified, Sampled};
 use super::coordinator::{
     deduplicate, expect, find_duplicate, load, novel, prepare, read, resolution, run_step,
     unknown_domain, Contextual, Deduplicated,
 };
-use super::dead_letter::{DeadLetterLog, NoTriggerLog, TriggerLog};
+use super::dead_letter::{write_dead_letter, DeadLetterLog, NoTriggerLog, TriggerLog};
 use super::domain::Domain;
 use super::error::{Failure, KernelError, Step, StepError};
 use super::handler::{Admit, Gap, Handler, Position};
-use super::markup::ProjectionContext;
+use super::markup::{self, ProjectionContext, SagaContext};
+use super::payload::type_name;
 use super::reaction::{policy, projection, Order, Policy, Projection};
-use super::registry::Registry;
-use super::store::{block, AsyncPort, AsyncUnitOfWork, EventStore, Port, SyncPort, UnitOfWork};
+use super::registry::{Registry, StepFailure};
+use super::store::{
+    block, AsyncPort, AsyncStore, AsyncUnitOfWork, EventStore, Port, SyncPort, UnitOfWork,
+};
 use super::stream::{Envelope, Stream};
 use annals_diagnostic::Report;
 
@@ -194,12 +201,42 @@ impl<'k> Kernel<'k> {
     /// [`Kernel::handle`], over the async ports: the store's reads, appends
     /// and commit are awaited; deciding stays synchronous and pure. After
     /// the commit and `projections`, every marked-up projector
-    /// ([`Registry::projector`]) runs on the committed events of its
-    /// source, awaited before this returns: any failure is
+    /// ([`Registry::projector`]) runs on the chain's events of its source,
+    /// awaited before this returns: any failure is
     /// [`Failure::Projection`], with every failing projector and what was
     /// committed, and does not stop the other projectors. (The synchronous
     /// [`Kernel::handle`] runs none: the async path is the one path.)
     pub async fn handle_async<D, U, Ps>(
+        &self,
+        unit: U,
+        routes: &Routes,
+        book: CommandBook,
+        sampled: &Sampled,
+        projections: &mut Ps,
+    ) -> Result<Handled, Failure<D::Rejection>>
+    where
+        D: Domain,
+        U: AsyncUnitOfWork,
+        Ps: Project,
+    {
+        let handled = self
+            .commit_async::<D, U, Ps>(unit, routes, book, sampled, projections)
+            .await?;
+        if let Handled::Applied(recorded) = &handled {
+            let committed = recorded.books.clone();
+            let failures = self.run_projectors(&committed).await;
+            if !failures.is_empty() {
+                return Err(Failure::Projection {
+                    committed,
+                    failures,
+                });
+            }
+        }
+        Ok(handled)
+    }
+
+    /// [`Kernel::handle_async`] without the marked-up projectors.
+    async fn commit_async<D, U, Ps>(
         &self,
         unit: U,
         routes: &Routes,
@@ -222,37 +259,21 @@ impl<'k> Kernel<'k> {
                 .await
                 .map_err(|e| Failure::Kernel(KernelError::Store(e)))?;
         }
-        let handled = self.project(handled, projections);
-        let committed = match &handled {
-            Handled::Applied(recorded) => recorded.books.clone(),
-            Handled::Duplicate(_) => return Ok(handled),
-        };
-        let failures = self.run_projectors(&committed).await;
-        if !failures.is_empty() {
-            return Err(Failure::Projection {
-                committed,
-                failures,
-            });
-        }
-        Ok(handled)
+        Ok(self.project(handled, projections))
     }
 
-    /// Every marked-up projector over the `committed` events of its
-    /// source, in registration order, each event in stream order: a
-    /// projector stops at its first failure, the others go on. The
-    /// failures, by projector.
+    /// Every marked-up projector over the `committed` events of its source, in
+    /// registration order, each event in stream order: a projector stops
+    /// at its first failure, the others go on. The failures, by projector.
     async fn run_projectors(&self, committed: &[EventBook]) -> Vec<(&'static str, Report)> {
         let mut failures = Vec::new();
         for entry in self.registry.projectors() {
-            let books: Vec<&EventBook> = committed
-                .iter()
-                .filter(|book| {
-                    book.cover
-                        .as_ref()
-                        .is_some_and(|c| c.domain == entry.source)
-                })
-                .collect();
-            if books.iter().all(|book| book.pages.is_empty()) {
+            let books = committed.iter().filter(|book| {
+                book.cover
+                    .as_ref()
+                    .is_some_and(|c| c.domain == entry.source)
+            });
+            if books.clone().all(|book| book.pages.is_empty()) {
                 continue;
             }
             // The one instance is out of the lock while it runs; a
@@ -294,6 +315,264 @@ impl<'k> Kernel<'k> {
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(instance);
         }
         failures
+    }
+
+    /// Handle `book` as its own step, then every saga step it sets off,
+    /// each committed on its own, and wait for them to settle: annals'
+    /// sagas ([`Registry::saga`]) run at once, in process, but with the
+    /// meaning they have anywhere. Atomicity covers ONE step: one stream's
+    /// events. The source's events are committed before a saga's command
+    /// runs; each command and each refusal fact is a step of its own,
+    /// deduplicated by its id, in its own unit of work begun on `store`. A
+    /// step that fails keeps every commit before it: the call is an error
+    /// (or a dead letter), never a rollback.
+    ///
+    /// Each step's marked-up projectors run after its commit; any failure
+    /// is reported once the steps have settled, as [`Failure::Projection`]
+    /// with every step's committed book. A saga's malformed command (a
+    /// saga bug) is dead-lettered and fails the call
+    /// ([`Failure::Downstream`], naming its step), as does any step's
+    /// fault; a business refusal is not a failure, but its saga's refusal
+    /// fact, delivered to the source.
+    ///
+    /// Not yet: a crash between steps is not resumed (annals keeps no saga
+    /// position yet), and the kernel's [`Routes`] policies do not run here.
+    pub async fn settle<D, S>(
+        &self,
+        store: &mut S,
+        book: CommandBook,
+        sampled: &Sampled,
+    ) -> Result<Settled, Failure<D::Rejection>>
+    where
+        D: Domain,
+        S: AsyncStore,
+    {
+        let routes = Routes::new();
+        let unit = store.begin().await;
+        let first = self
+            .commit_async::<D, _, _>(unit, &routes, book, sampled, &mut ())
+            .await?;
+        let mut settled = Settled::default();
+        let Handled::Applied(recorded) = first else {
+            return Ok(settled);
+        };
+        let mut failures = self.run_projectors(&recorded.books).await;
+        let mut pending: std::collections::VecDeque<EventBook> = recorded
+            .books
+            .into_iter()
+            .filter(|book| !book.pages.is_empty())
+            .collect();
+        while let Some(book) = pending.pop_front() {
+            settled.steps.push(book.clone());
+            let cover = book.cover.clone().unwrap_or_default();
+            for (index, saga) in self.registry.sagas(&cover.domain) {
+                for page in &book.pages {
+                    let trigger = v1::EventRef {
+                        stream: Some(cover.clone()),
+                        sequence: page.sequence,
+                    };
+                    let meta = page.meta.clone().unwrap_or_default();
+                    let correlation = meta.correlation_id.unwrap_or_default();
+                    let ctx = SagaContext::new(
+                        trigger.clone(),
+                        correlation.clone(),
+                        meta.recorded_at.unwrap_or_default(),
+                    );
+                    let payload = page.payload.clone().unwrap_or_default();
+                    let Some(commands) = (saga.on_event)(&payload, &ctx) else {
+                        continue;
+                    };
+                    for (n, (root, command)) in commands.into_iter().enumerate() {
+                        let step = Step {
+                            stream: Cover {
+                                domain: saga.target.to_string(),
+                                root: Some(root),
+                                edition: cover.edition.clone(),
+                            },
+                            cause: trigger.clone(),
+                        };
+                        let downstream = |error| Failure::Downstream {
+                            path: vec![step.clone()],
+                            error,
+                        };
+                        let order = CommandBook {
+                            cover: Some(step.stream.clone()),
+                            page: Some(v1::CommandPage {
+                                body: Some(v1::command_page::Body::Command(v1::Command {
+                                    payload: Some(command),
+                                })),
+                                ..v1::CommandPage::default()
+                            }),
+                            handling: None,
+                        };
+                        let checked = check_reaction(
+                            order.clone(),
+                            self.registry,
+                            trigger.clone(),
+                            saga.name,
+                            u32::try_from(n).unwrap_or(u32::MAX),
+                            correlation.clone(),
+                        )
+                        .map_err(|m| {
+                            write_dead_letter(self.dead_letters, order, saga.name, &m.to_string());
+                            downstream(StepError::Kernel(KernelError::Malformed(m)))
+                        })?;
+                        let command = checked.identify(sampled);
+                        if let Some(trigger) = command.causation_id() {
+                            self.triggers.dispatched(
+                                trigger,
+                                command.command_id(),
+                                command.cover(),
+                            );
+                        }
+                        let books = match self
+                            .settle_step(store, &routes, sampled, command.clone())
+                            .await
+                        {
+                            Ok(books) => books,
+                            Err(StepFailure {
+                                error: StepError::Rejected(report),
+                                refusal,
+                                ..
+                            }) => {
+                                let event = EventBook {
+                                    cover: Some(cover.clone()),
+                                    snapshot: None,
+                                    pages: vec![page.clone()],
+                                    ..EventBook::default()
+                                };
+                                self.refusal_step(
+                                    store, &routes, sampled, index, event, &command, &report,
+                                    refusal,
+                                )
+                                .await
+                                .map_err(downstream)?
+                            }
+                            Err(failure) => return Err(downstream(failure.error)),
+                        };
+                        failures.extend(self.run_projectors(&books).await);
+                        pending.extend(books);
+                    }
+                }
+            }
+        }
+        if !failures.is_empty() {
+            return Err(Failure::Projection {
+                committed: settled.steps,
+                failures,
+            });
+        }
+        Ok(settled)
+    }
+
+    /// `command` as a step of its own, in a unit of work begun on `store`
+    /// and committed: the books it appended (none for a duplicate).
+    async fn settle_step<S: AsyncStore>(
+        &self,
+        store: &mut S,
+        routes: &Routes,
+        sampled: &Sampled,
+        command: Identified,
+    ) -> Result<Vec<EventBook>, StepFailure> {
+        let kernel = |error| StepFailure {
+            error: StepError::Kernel(error),
+            refusal: None,
+            stream: None,
+        };
+        let mut unit = store.begin().await;
+        let recorded = {
+            let mut port = AsyncPort(&mut unit);
+            let mut run = Run::new(self, routes, sampled);
+            if run.step(&mut port, command).await?.is_none() {
+                return Ok(Vec::new());
+            }
+            run.append(&mut port).await.map_err(kernel)?
+        };
+        unit.commit()
+            .await
+            .map_err(|e| kernel(KernelError::Store(e)))?;
+        Ok(recorded
+            .books
+            .into_iter()
+            .filter(|book| !book.pages.is_empty())
+            .collect())
+    }
+
+    /// Saga `saga`'s refusal fact for `delivered`, which its target refused
+    /// with `report` (and `refusal`, its typed object), as a step of its own
+    /// in the stream of the triggering `event`, with the refused command's
+    /// id: the books it appended. A refusal the source has no handler for
+    /// is dead-lettered, and appends nothing.
+    #[allow(clippy::too_many_arguments)]
+    async fn refusal_step<S: AsyncStore>(
+        &self,
+        store: &mut S,
+        routes: &Routes,
+        sampled: &Sampled,
+        saga: usize,
+        event: EventBook,
+        delivered: &Identified,
+        report: &Report,
+        refusal: Option<prost_types::Any>,
+    ) -> Result<Vec<EventBook>, StepError> {
+        let entry = self.registry.saga_at(saga);
+        let answer = (entry.on_refused)(&markup::v1::Refusal {
+            event: Some(event),
+            command: Some(delivered.to_book()),
+            response: Some(markup::v1::RefusalResponse {
+                refusal,
+                message: report.to_string(),
+            }),
+        });
+        let trigger = delivered.causation_id().cloned().unwrap_or_default();
+        let book = CommandBook {
+            cover: trigger.stream.clone(),
+            page: Some(v1::CommandPage {
+                body: Some(v1::command_page::Body::Fact(v1::Fact {
+                    payload: Some(answer),
+                })),
+                fact_origin: Some(v1::FactOrigin {
+                    external_id: delivered.command_id().to_string(),
+                    description: format!(
+                        "{} refused by {}",
+                        type_name(&delivered.payload().type_url),
+                        delivered.domain()
+                    ),
+                }),
+                ..v1::CommandPage::default()
+            }),
+            handling: None,
+        };
+        let checked = check_refusal(
+            book.clone(),
+            self.registry,
+            trigger,
+            delivered.correlation_id().clone(),
+            delivered.command_id().clone(),
+        )
+        .map_err(|m| {
+            write_dead_letter(self.dead_letters, book, entry.name, &m.to_string());
+            StepError::Kernel(KernelError::Malformed(m))
+        })?;
+        let fact = checked.identify(sampled);
+        match self.settle_step(store, routes, sampled, fact.clone()).await {
+            Ok(books) => Ok(books),
+            Err(StepFailure {
+                error: StepError::Kernel(KernelError::UnknownType { type_url, .. }),
+                ..
+            }) => {
+                write_dead_letter(
+                    self.dead_letters,
+                    fact.to_book(),
+                    fact.domain(),
+                    &format!(
+                        "annals-next-no-refusal-handler: nothing handles the refusal of {type_url}"
+                    ),
+                );
+                Ok(Vec::new())
+            }
+            Err(failure) => Err(failure.error),
+        }
     }
 
     /// Deliver one owed order outside a chain (a catch-up from
@@ -680,7 +959,8 @@ impl<'u> Run<'u> {
             self.registry,
             self.sampled,
             self.dead_letters,
-        )?;
+        )
+        .map_err(|(failure, _)| failure)?;
         self.stage(cover.clone(), head, Box::new(stream), pages);
         self.react(port, &cover, head)
             .await
@@ -761,11 +1041,56 @@ impl<'u> Run<'u> {
                 self.sampled,
                 self.dead_letters,
             )
-            .map_err(|e| failed(self, e))?;
+            .map_err(|e| failed(self, e.error))?;
             self.stage(target.clone(), head, stream, pages);
             frames.push(self.owed(&target, head)?.into_iter());
         }
         Ok(())
+    }
+
+    /// Steps 2 to 5 for `command` in the stream it names, staged: the
+    /// stream and the length it had before, or `None` for a duplicate. On
+    /// a failure the stream, as it was, stays staged.
+    async fn step<P: Port>(
+        &mut self,
+        port: &mut P,
+        command: Identified,
+    ) -> Result<Option<(Cover, u64)>, StepFailure> {
+        let kernel = |error| StepFailure {
+            error: StepError::Kernel(error),
+            refusal: None,
+            stream: None,
+        };
+        let (contextual, staged) = match self.find(port, command).await.map_err(kernel)? {
+            Found::Duplicate(_) => return Ok(None),
+            Found::Novel(contextual, staged) => (contextual, staged),
+        };
+        let target = contextual.command().cover().clone();
+        let head = contextual.head();
+        let step = self
+            .registry
+            .step(&target.domain)
+            .ok_or_else(|| kernel(unknown_domain(&target.domain)))?;
+        match step(
+            *contextual,
+            staged,
+            self.registry,
+            self.sampled,
+            self.dead_letters,
+        ) {
+            Ok((stream, pages)) => {
+                self.stage(target.clone(), head, stream, pages);
+                Ok(Some((target, head)))
+            }
+            Err(mut failure) => {
+                if let (Some(stream), Some(staged)) =
+                    (failure.stream.take(), self.staged.get_mut(&target))
+                {
+                    staged.stream = Some(stream);
+                }
+                Err(failure)
+            }
+        }
     }
 
     /// See [`Chain::append`].
@@ -791,6 +1116,20 @@ impl<'u> Run<'u> {
             }
         }
         Ok(recorded)
+    }
+}
+
+/// What [`Kernel::settle`] committed: each step's book, in commit order.
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct Settled {
+    steps: Vec<EventBook>,
+}
+
+impl Settled {
+    /// Each committed step's events, one book per step (a step that
+    /// recorded nothing is not listed), in the order committed.
+    pub fn steps(&self) -> &[EventBook] {
+        &self.steps
     }
 }
 

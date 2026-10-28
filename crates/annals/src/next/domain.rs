@@ -144,6 +144,14 @@ pub trait Domain: Sized + 'static {
     /// Fold one event into the state. Pure: the same state, event and rules
     /// always give the same result. Never sees the event's metadata.
     fn apply(state: &mut Self::State, event: &Self::Event, rules: &Self::Rules);
+
+    /// The typed refusal object `rejection` carries, packed, if any: what
+    /// a refused saga receives as `RefusalResponse.refusal`. `None` by
+    /// default; a marked-up domain's is its
+    /// [`Rejection::refusal`](super::markup::Rejection::refusal).
+    fn refusal(_rejection: &Self::Rejection) -> Option<prost_types::Any> {
+        None
+    }
 }
 
 /// What an ingest may read besides the state and the fact, all read-only:

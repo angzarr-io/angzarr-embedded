@@ -785,6 +785,11 @@ impl<T: Domain> Commands<T> {
     pub fn orders(&self) -> &[(Uuid, Any)] {
         &self.orders
     }
+
+    /// As [`Commands::orders`], owned.
+    pub(crate) fn into_orders(self) -> Vec<(Uuid, Any)> {
+        self.orders
+    }
 }
 
 /// What a saga's handler reads besides the event: the triggering event's

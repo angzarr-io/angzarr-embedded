@@ -113,7 +113,7 @@ pub use error::{
 };
 pub use fixture::{assert_replay_fixtures, check_replay_fixtures, ReplayFixture};
 pub use handle::{
-    Chain, Handled, Kernel, Project, ProjectionRoute, ProjectorFailure, Recorded, Routes,
+    Chain, Handled, Kernel, Project, ProjectionRoute, ProjectorFailure, Recorded, Routes, Settled,
     DEFAULT_DEPTH_LIMIT,
 };
 pub use handler::{Admit, Committed, Gap, Handler, Position, Tracked};

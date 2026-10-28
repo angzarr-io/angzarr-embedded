@@ -3702,6 +3702,10 @@ fn domain(attr: Tokens, item: Tokens, kind: Kind) -> syn::Result<Tokens> {
                 #apply_body
             }
 
+            fn refusal(rejection: &#rejection_ty) -> ::core::option::Option<::annals::next::Any> {
+                rejection.refusal().cloned()
+            }
+
         }
 
         #process_manager

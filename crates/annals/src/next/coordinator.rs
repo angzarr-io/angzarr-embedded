@@ -486,6 +486,25 @@ pub(crate) fn prepare<D: Domain>(
     staged: Option<Box<dyn AnyType + Send>>,
     registry: &Registry,
 ) -> Result<Prepared<D>, KernelError> {
+    let stream = stream_for::<D>(&command, staged, registry)?;
+    let input = decode_input::<D>(&command.command, registry)?;
+    Ok(Prepared {
+        command: command.command,
+        input,
+        stream,
+        resolution: command.resolution,
+        expected: command.expected,
+        nonce: command.nonce,
+    })
+}
+
+/// The stream as `D`: `staged`, a chain's `Stream<D>`, if it has one; else
+/// from the snapshot or from 0.
+fn stream_for<D: Domain>(
+    command: &Contextual,
+    staged: Option<Box<dyn AnyType + Send>>,
+    registry: &Registry,
+) -> Result<Stream<D>, KernelError> {
     let cover = command.command.cover().clone();
     let wrong = || KernelError::WrongDomain {
         stream: cover.clone(),
@@ -506,15 +525,7 @@ pub(crate) fn prepare<D: Domain>(
         }
         (None, None) => Stream::replay(cover, &command.pages, registry)?,
     };
-    let input = decode_input::<D>(&command.command, registry)?;
-    Ok(Prepared {
-        command: command.command,
-        input,
-        stream,
-        resolution: command.resolution,
-        expected: command.expected,
-        nonce: command.nonce,
-    })
+    Ok(stream)
 }
 
 /// The command's payload through `D`'s upcaster, decoded strictly.
@@ -693,6 +704,10 @@ pub(crate) fn decide_on<D: Domain>(
 /// A step's stream after it, and the pages it adds.
 pub(crate) type Stepped<D> = (Stream<D>, Vec<EventPage>);
 
+/// Why a step failed, with the stream it ran on as it was before, when it
+/// got that far: a chain that goes on past a refusal keeps it staged.
+pub(crate) type StepFailed<D> = (Failure<<D as Domain>::Rejection>, Option<Stream<D>>);
+
 /// Step 5 for a chain: prepare, decide, commit in memory; the stream
 /// after, and the pages to append.
 pub(crate) fn run_step<D: Domain>(
@@ -701,14 +716,30 @@ pub(crate) fn run_step<D: Domain>(
     registry: &Registry,
     sampled: &Sampled,
     dead_letters: &dyn DeadLetterLog,
-) -> Result<Stepped<D>, Failure<D::Rejection>> {
-    let mut prepared = prepare::<D>(command, staged, registry).map_err(Failure::Kernel)?;
-    let decision = prepared.decide(sampled, registry, dead_letters)?;
+) -> Result<Stepped<D>, StepFailed<D>> {
+    let stream =
+        stream_for::<D>(&command, staged, registry).map_err(|e| (Failure::Kernel(e), None))?;
+    let input = match decode_input::<D>(&command.command, registry) {
+        Ok(input) => input,
+        Err(e) => return Err((Failure::Kernel(e), Some(stream))),
+    };
+    let mut prepared = Prepared {
+        command: command.command,
+        input,
+        stream,
+        resolution: command.resolution,
+        expected: command.expected,
+        nonce: command.nonce,
+    };
+    let decision = match prepared.decide(sampled, registry, dead_letters) {
+        Ok(decision) => decision,
+        Err(failure) => return Err((failure, Some(prepared.into_stream()))),
+    };
     let pages = decision.events().iter().map(Envelope::page).collect();
     let mut stream = prepared.into_stream();
     stream
         .commit(decision, registry, &mut [])
-        .map_err(Failure::Kernel)?;
+        .map_err(|e| (Failure::Kernel(e), None))?;
     Ok((stream, pages))
 }
 

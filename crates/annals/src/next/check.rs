@@ -292,6 +292,13 @@ enum Entry {
         correlation_id: Uuid,
         command_id: Uuid,
     },
+    /// A saga's refusal fact, built by the chain: its ids are the refused
+    /// command's, and its causation the saga's trigger.
+    Refusal {
+        trigger: EventRef,
+        correlation_id: Uuid,
+        command_id: Uuid,
+    },
 }
 
 /// A [`CommandBook`] that passed [`check`]. Every accessor that the book
@@ -345,6 +352,27 @@ pub(crate) fn check_reaction(
         book,
         registry,
         Some(Entry::Reaction {
+            trigger,
+            correlation_id,
+            command_id,
+        }),
+    )
+}
+
+/// The chain's entry for a saga's refusal fact: a fact whose command id is
+/// the refused command's (`command_id`), with that command's correlation,
+/// caused by the saga's `trigger`.
+pub(crate) fn check_refusal(
+    book: CommandBook,
+    registry: &Registry,
+    trigger: EventRef,
+    correlation_id: Uuid,
+    command_id: Uuid,
+) -> Result<Checked, Malformed> {
+    parse(
+        book,
+        registry,
+        Some(Entry::Refusal {
             trigger,
             correlation_id,
             command_id,
@@ -416,6 +444,7 @@ fn parse(
         Some(_) if command_id.is_some() || correlation_id.is_some() || causation_id.is_some() => {
             return Err(Malformed::IdOnReaction)
         }
+        Some(entry @ Entry::Refusal { .. }) => entry,
         Some(_) if is_fact => return Err(Malformed::FactFromReaction),
         Some(_) if handled => return Err(Malformed::HandlingOnReaction),
         Some(entry) => entry,
@@ -443,12 +472,14 @@ fn parse(
     };
 
     // A process manager's root is its correlation: a set correlation, or a
-    // reaction's (its trigger's), must be the root.
+    // reaction's or refusal's (its trigger's), must be the root.
     let process_manager = registry.is_process_manager(&cover.domain);
     if process_manager {
         let given = match &entry {
             Entry::Client => correlation_id.as_ref(),
-            Entry::Reaction { correlation_id, .. } => Some(correlation_id),
+            Entry::Reaction { correlation_id, .. } | Entry::Refusal { correlation_id, .. } => {
+                Some(correlation_id)
+            }
         };
         if given.is_some_and(|c| *c != root) {
             return Err(Malformed::RootNotCorrelation);
@@ -592,6 +623,14 @@ impl Checked {
         let (command_id, correlation_id, causation_id) = match (entry, &body) {
             (
                 Entry::Reaction {
+                    trigger,
+                    correlation_id,
+                    command_id,
+                },
+                _,
+            )
+            | (
+                Entry::Refusal {
                     trigger,
                     correlation_id,
                     command_id,

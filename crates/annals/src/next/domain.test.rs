@@ -548,3 +548,14 @@ mod tx {
         assert!(honest.decide(&at(60), &registry, &log).is_ok());
     }
 }
+
+/// A hand-written domain's rejection carries no typed refusal object:
+/// `Domain::refusal`'s default.
+#[test]
+fn a_hand_written_rejection_has_no_typed_refusal_object() {
+    use crate::next::toys::{Account, Refused};
+    assert_eq!(
+        <Account as crate::next::Domain>::refusal(&Refused::NotOpen),
+        None
+    );
+}

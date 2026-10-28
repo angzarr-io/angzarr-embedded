@@ -43,6 +43,7 @@ use ::annals::next::markup::{
     ProcessManager, ProjectionContext, Record, Refusal, Refuses, Refusing, Rejection, Saga,
     SagaContext, TypeName, MARKUP_RULES_VERSION, STEP_LIMIT,
 };
+use ::annals::next::v1::event_meta::Causation;
 use ::annals::next::v1::{
     command_page, Command, CommandBook, CommandPage, ConflictResolution, Cover, EventBook,
     EventPage, EventRef, Fact, FactOrigin, StateDescriptor, StateOptions, Uuid,
@@ -2292,6 +2293,35 @@ fn buy_ins() -> Registry {
     registry
 }
 
+/// The wallet, the buy-in, both sagas (`translating` picks the buy-in
+/// saga's mode).
+fn flows(translating: bool) -> Registry {
+    let mut registry = buy_ins();
+    registry.saga(WalletBuyIn);
+    match translating {
+        true => registry.saga(TranslatingBuyInWallet),
+        false => registry.saga(BuyInWallet),
+    };
+    registry
+}
+
+/// `flows`, a store, and a wallet at [`root`] opened with `bonus`
+/// (command 1, in a correlation of its own).
+fn funded(translating: bool, bonus: i64) -> (Registry, ::annals::next::InMemoryStore) {
+    let registry = flows(translating);
+    let mut store = ::annals::next::InMemoryStore::new();
+    let log = MemoryDeadLetters::new();
+    handle_in::<Wallet>(
+        &mut store,
+        &registry,
+        &log,
+        1,
+        send("wallet", 1, any(Open { bonus }), Some(correlation(15))),
+    )
+    .unwrap();
+    (registry, store)
+}
+
 /// StartBuyIn for `cents` from the wallet at [`root`], as command `n` to
 /// the buy-in of correlation `c`.
 fn start(c: &Uuid, n: u8, cents: i64) -> CommandBook {
@@ -2868,6 +2898,227 @@ mod saga_refusals {
             buy_in_events(&mut store, &correlation(3)),
             buy_in(&["BuyInStarted"])
         );
+    }
+}
+
+/// A store the settling driver begins each step's unit of work on.
+type Settling = ::annals::next::Ready<::annals::next::InMemoryStore>;
+
+/// Settle `book` (sampled at `n` seconds): its own step, then every saga
+/// step it sets off, each committed on its own, as an application does;
+/// `log` gets the dead letters.
+fn settle_in<D: Domain>(
+    store: &mut Settling,
+    registry: &Registry,
+    log: &MemoryDeadLetters,
+    n: u8,
+    book: CommandBook,
+) -> Result<::annals::next::Settled, Failure<D::Rejection>> {
+    let sampled = Sampled {
+        now: at(i64::from(n)),
+        command_id: Uuid::from_bytes([0x70 | n; 16]),
+    };
+    ready(::annals::next::Kernel::new(registry, log).settle::<D, _>(store, book, &sampled))
+}
+
+/// The covers of the steps `settled` committed, in commit order, each
+/// with the type names of its events.
+fn steps(settled: &::annals::next::Settled) -> Vec<(String, Vec<String>)> {
+    settled
+        .steps()
+        .iter()
+        .map(|book| {
+            (
+                book.cover.as_ref().unwrap().domain.clone(),
+                book.pages
+                    .iter()
+                    .map(|p| type_name(&p.payload.as_ref().unwrap().type_url).to_string())
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+mod refusal_flow {
+    use super::*;
+
+    /// A saga's command the target accepts flows on, each step committed
+    /// on its own, in order: the buy-in's start, then the hold the buy-in's
+    /// saga sends the wallet, then the record the wallet's saga sends back
+    /// to the buy-in of its correlation (the saga names the buy-in's root
+    /// with the correlation).
+    #[test]
+    fn an_accepted_command_flows_through_both_sagas_step_by_step() {
+        let (registry, store) = funded(false, 50);
+        let mut store = ::annals::next::Ready(store);
+        let log = MemoryDeadLetters::new();
+        let settled = settle_in::<BuyIn>(
+            &mut store,
+            &registry,
+            &log,
+            2,
+            start(&correlation(1), 2, 30),
+        )
+        .unwrap();
+        assert_eq!(
+            steps(&settled),
+            [
+                ("buyin", "toy.buyin.v1.BuyInStarted"),
+                ("wallet", "toy.wallet.v1.Held"),
+                ("buyin", "toy.buyin.v1.BuyInHeld"),
+            ]
+            .map(|(domain, event)| (domain.to_string(), vec![event.to_string()]))
+        );
+        assert_eq!(
+            buy_in_events(&mut store.0, &correlation(1)),
+            buy_in(&["BuyInStarted", "BuyInHeld"])
+        );
+    }
+
+    /// Pass-through: the buy-in's start is committed first; the wallet
+    /// refuses the hold and records nothing; the saga's `CommandRefused`
+    /// reaches the buy-in's `#[on_refused(Hold)]` as a step of its own,
+    /// which records the failure.
+    #[test]
+    fn a_refused_command_reaches_the_sources_on_refused_handler() {
+        let (registry, store) = funded(false, 10);
+        let mut store = ::annals::next::Ready(store);
+        let log = MemoryDeadLetters::new();
+        let settled = settle_in::<BuyIn>(
+            &mut store,
+            &registry,
+            &log,
+            2,
+            start(&correlation(2), 2, 30),
+        );
+        let Ok(settled) = settled else {
+            panic!("{:?}", settled.err().map(|e| e.to_string()));
+        };
+        assert_eq!(
+            steps(&settled),
+            [
+                ("buyin", "toy.buyin.v1.BuyInStarted"),
+                ("buyin", "toy.buyin.v1.BuyInFailed"),
+            ]
+            .map(|(domain, event)| (domain.to_string(), vec![event.to_string()]))
+        );
+        assert_eq!(
+            pages(&mut store.0, wallet().cover()).map(|p| p.len()),
+            Some(2),
+            "the wallet recorded nothing of the hold"
+        );
+    }
+
+    /// The refusal fact's id is the refused command's id, and its origin's
+    /// external id that id's canonical text.
+    #[test]
+    fn the_refusal_facts_id_is_the_refused_commands() {
+        let (registry, store) = funded(false, 10);
+        let mut store = ::annals::next::Ready(store);
+        let log = MemoryDeadLetters::new();
+        settle_in::<BuyIn>(
+            &mut store,
+            &registry,
+            &log,
+            2,
+            start(&correlation(3), 2, 30),
+        )
+        .unwrap();
+        let pages = pages(&mut store.0, &buy_in_cover(&correlation(3))).expect("the buy-in");
+        let hold_id =
+            ::annals::next::ids::reaction_command_id(&trigger(&correlation(3)), "buyin-wallet", 0)
+                .unwrap();
+        let meta = pages[1].meta.clone().expect("meta");
+        assert_eq!(meta.causation, Some(Causation::CommandId(hold_id.clone())));
+        assert_eq!(
+            meta.fact.map(|origin| origin.external_id),
+            Some(hold_id.to_string())
+        );
+    }
+
+    /// Translate: the saga's callback hands the buy-in its own fact,
+    /// which its `#[handles_fact(HoldLost)]` records, as its own step.
+    #[test]
+    fn translate_delivers_the_callbacks_domestic_fact() {
+        let (registry, store) = funded(true, 10);
+        let mut store = ::annals::next::Ready(store);
+        let log = MemoryDeadLetters::new();
+        let settled = settle_in::<BuyIn>(
+            &mut store,
+            &registry,
+            &log,
+            2,
+            start(&correlation(4), 2, 30),
+        )
+        .unwrap();
+        assert_eq!(
+            steps(&settled).last(),
+            Some(&(
+                "buyin".to_string(),
+                vec!["toy.buyin.v1.HoldWasLost".to_string()]
+            ))
+        );
+        assert_eq!(
+            buy_in_events(&mut store.0, &correlation(4)),
+            buy_in(&["BuyInStarted", "HoldWasLost"])
+        );
+    }
+
+    /// A refusal with no path: a hold on the wallet outside any buy-in is
+    /// committed, the wallet's saga sends `RecordHeld` to a correlation
+    /// with no buy-in, which refuses it, and the wallet handles no refusal
+    /// of `RecordHeld`. The hold stays committed, the fact is
+    /// dead-lettered, and the call is Ok.
+    #[test]
+    fn a_refusal_with_no_handler_is_dead_lettered() {
+        let (registry, store) = funded(false, 50);
+        let mut store = ::annals::next::Ready(store);
+        let log = MemoryDeadLetters::new();
+        let settled = settle_in::<Wallet>(
+            &mut store,
+            &registry,
+            &log,
+            2,
+            send("wallet", 2, any(Hold { cents: 5 }), Some(correlation(5))),
+        );
+        let Ok(settled) = settled else {
+            panic!("{:?}", settled.err().map(|e| e.to_string()));
+        };
+        assert_eq!(
+            steps(&settled),
+            [("wallet".to_string(), vec!["toy.wallet.v1.Held".to_string()])]
+        );
+        let lines = log.lines();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains(" to wallet "), "{lines:?}");
+    }
+
+    /// A step that fails mid-way keeps the commits before it: no rollback.
+    /// The wallet's saga sends to the buy-in, which this registry lacks:
+    /// the call is an error, the hold stays committed, and the saga's
+    /// malformed command is dead-lettered.
+    #[test]
+    fn a_failing_step_keeps_the_commits_before_it() {
+        let mut registry = registry();
+        registry.saga(WalletBuyIn);
+        let (_, store) = funded(false, 50);
+        let mut store = ::annals::next::Ready(store);
+        let log = MemoryDeadLetters::new();
+        let settled = settle_in::<Wallet>(
+            &mut store,
+            &registry,
+            &log,
+            2,
+            send("wallet", 2, any(Hold { cents: 5 }), Some(correlation(6))),
+        );
+        assert!(settled.is_err(), "the saga's step failed");
+        assert_eq!(
+            pages(&mut store.0, wallet().cover())
+                .and_then(|p| p.last().and_then(|p| p.payload.clone())),
+            Some(any(Held { cents: 5 })),
+            "the hold stays committed"
+        );
+        assert_eq!(log.lines().len(), 1, "{:?}", log.lines());
     }
 }
 
