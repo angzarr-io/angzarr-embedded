@@ -28,8 +28,8 @@
 //!    `#[handles_cmd(Cmd)]` stub per command typed from its `emits` and
 //!    `refuses` (and marked `starts` where the proto says so), one
 //!    `#[applies(Event)]` stub per event, `todo!()` bodies; and, for a saga,
-//!    the `#[saga]` impl, with `translate(..)` for the commands angzarr-cli's
-//!    refusal switch selects. The file is the user's and is never
+//!    the `#[saga]` impl, with an `#[on_refused(Cmd)]` callback stub for
+//!    each command angzarr-cli's refusal switch selects for translate. The file is the user's and is never
 //!    overwritten; `--missing` appends only the stubs that are absent.
 //!    Every handler it writes returns its events; a continuation step
 //!    (below) is the user's to add, where a later event depends on an
@@ -243,7 +243,7 @@
 //!
 //! - [`saga`], on an inherent impl: `name` (the component its commands'
 //!   ids are derived from), `source` and `target` (each a domain:
-//!   one source, one target), and optionally `translate(Cmd, ..)` (below).
+//!   one source, one target).
 //! - [`reacts`]`(Event)`, one per event of the source it reacts to:
 //!   `fn(&self, event: &Event, ctx: &ReactionContext) -> Commands<Target>`,
 //!   pure and infallible, each command one the target decides, with the
@@ -270,20 +270,26 @@
 //!   refusal fact is dead-lettered and alerted, and the call returns Ok, as
 //!   on distributed angzarr (RULED by the owner, 2026-10-28). A `CommandRefused` from outside the
 //!   chain is accepted when its trigger names the receiving stream (RULED by the owner, 2026-10-28).
-//! - **Translate**, selected in the saga's markup:
-//!   `#[saga(.., translate(Hold))]`. The saga's own callback,
-//!   `#[on_refused(Hold)] fn(&self, refusal: &Refusal<Hold>) -> F`, reads
-//!   the typed object and returns `F`, a fact its source ingests, so the
-//!   source never refers to the target's types. Selecting translate makes
-//!   the callback required, and a callback for a command not selected does
-//!   not compile. One marker, `#[on_refused(Cmd)]`, names both the source's
-//!   handler and the saga's callback (RULED by the owner, 2026-10-28).
+//! - **Translate**, for each command the saga has a callback for:
+//!   `#[on_refused(Hold)] fn(&self, refusal: &Refusal<Hold>) -> F` on the
+//!   saga's impl reads the typed object and returns `F`, a fact its source
+//!   ingests, so the source never refers to the target's types. A callback
+//!   returning anything else does not compile. One marker,
+//!   `#[on_refused(Cmd)]`, names both the source's handler and the saga's
+//!   callback (RULED by the owner, 2026-10-28).
 //!
-//! The selection is the markup's, at compile time, as angzarr-cli's refusal
-//! switch is angzarr's: the scaffold writes it from the CLI's flag or
-//! build config, and nothing about it is visible at run time beyond which
-//! fact arrives (RULED by the owner, 2026-10-28: the attribute, per command, written by the
-//! scaffold).
+//! The callback's PRESENCE is the selection: nothing else marks the mode,
+//! and `TRANSLATES` lists the commands the saga has callbacks for. It is
+//! fixed at compile time, as angzarr-cli's refusal switch is angzarr's:
+//! in Rust the switch means the scaffold writes the callback stub, or does
+//! not. Nothing about it is visible at run time beyond which fact arrives.
+//! (RULED by the owner, 2026-10-28; revised 2026-10-28 from a
+//! `translate(..)` argument to the callback's presence.)
+//!
+//! The trade-off, accepted by the owner: deleting a saga's callback
+//! silently reverts that command to pass-through. The source then receives
+//! `CommandRefused`, and if it has no `#[on_refused]` handler for that
+//! command, the refusal is a run-time dead letter, not a compile error.
 //!
 //! ## Context, rejections and domain types
 //!
@@ -418,10 +424,9 @@
 //! message-only command handlers whose `Result`s disagree on the
 //! rejection; a marker's type that is not its method's parameter type; a
 //! marked method whose shape is not the one above; a `refuses` type that is
-//! not a domain type; `starts` on an aggregate; a translate selection
-//! without its callback, or a callback without its selection, or one
-//! returning anything but a fact of the source; a saga handler's commands
-//! for another domain than its target.
+//! not a domain type; `starts` on an aggregate; a saga's `#[on_refused]`
+//! callback returning anything but a fact of its source; a saga handler's
+//! commands for another domain than its target.
 //!
 //! Which of the messages is a fact is the marker's to say, and the
 //! signature is checked against it. Checking the marker against the
@@ -1865,8 +1870,8 @@
 //! }
 //! ```
 //!
-//! A process manager has no triggers, so there is no `#[on]`: another
-//! domain's events reach it as commands, through a saga.
+//! A process manager has no triggers: `#[on]` is gone. Another domain's
+//! events reach it as commands, through a saga.
 //!
 //! ```compile_fail
 //! # use std::convert::Infallible;
@@ -2117,272 +2122,11 @@
 //! }
 //! ```
 //!
-//! A saga translating a command's refusals: `translate(SwitchOn)` selects
-//! it, and the callback returns the source's own fact (the control for the
-//! three below).
+//! A saga translating a command's refusals: its `#[on_refused(SwitchOn)]`
+//! callback is the selection, and returns the source's own fact (the control
+//! for the two below).
 //!
 //! ```no_run
-//! # use std::convert::Infallible;
-//! # use annals::next::markup::{
-//! #     CommandRefused, Commands, Context, DomainMessage, ReactionContext, Record, Refusal, Refuses,
-//! # };
-//! # use annals::next::WireError;
-//! # use annals_macros::{
-//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, reacts, saga,
-//! # };
-//! # // A compile-only fixture: nothing here runs.
-//! # pub mod wire {
-//! #     macro_rules! wire {
-//! #         ($($name:ident),*) => {$(
-//! #             #[derive(Clone, PartialEq, ::prost::Message)]
-//! #             pub struct $name {}
-//! #             impl ::prost::Name for $name {
-//! #                 const NAME: &'static str = stringify!($name);
-//! #                 const PACKAGE: &'static str = "lamp.v1";
-//! #             }
-//! #         )*};
-//! #     }
-//! #     wire!(SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
-//! #     wire!(StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
-//! # }
-//! # macro_rules! domain {
-//! #     ($($name:ident),*) => {$(
-//! #         #[derive(Clone, Debug)]
-//! #         pub struct $name;
-//! #         impl DomainMessage for $name {
-//! #             type Wire = wire::$name;
-//! #             fn to_wire(&self) -> wire::$name { unimplemented!() }
-//! #             fn from_wire(_: wire::$name) -> Result<Self, WireError> { unimplemented!() }
-//! #         }
-//! #     )*};
-//! # }
-//! # domain!(SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
-//! # domain!(StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
-//! # macro_rules! refusal {
-//! #     ($($name:ident),*) => {$(
-//! #         impl std::fmt::Display for $name {
-//! #             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-//! #                 f.write_str(stringify!($name))
-//! #             }
-//! #         }
-//! #         impl annals_diagnostic::Diagnostic for $name {
-//! #             fn code(&self) -> &'static str { "lamp-refused" }
-//! #             fn args(&self) -> Vec<(&'static str, annals_diagnostic::Arg)> { vec![] }
-//! #         }
-//! #     )*};
-//! # }
-//! # refusal!(Burnt, Fused);
-//! # #[derive(Clone, Default)]
-//! # pub struct Lamp { on: bool }
-//! # #[derive(Clone, Default)]
-//! # pub struct Timer { rang: bool }
-//! # pub struct TimerLamp;
-//! #[aggregate(domain = "lamp")]
-//! impl Lamp {
-//!     #[handles_cmd(SwitchOn, refuses(Burnt))]
-//!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<SwitchedOn, Refuses<Self, SwitchOn>> {
-//!         match self.on {
-//!             true => Err(Burnt.into()),
-//!             false => Ok(SwitchedOn),
-//!         }
-//!     }
-//!
-//!     #[handles_fact(PowerCut)]
-//!     fn power_cut(&self, _fact: PowerCut, _ctx: &Context) -> Record<Self> {
-//!         Record::of(WentDark)
-//!     }
-//!
-//!     #[applies(SwitchedOn)]
-//!     fn on(&mut self, _event: SwitchedOn) {
-//!         self.on = true;
-//!     }
-//!
-//!     #[applies(WentDark)]
-//!     fn dark(&mut self, _event: WentDark) {
-//!         self.on = false;
-//!     }
-//! }
-//!
-//! #[process_manager(domain = "timer")]
-//! impl Timer {
-//!     #[handles_cmd(StartTimer, starts)]
-//!     fn start(&self, _cmd: StartTimer, _ctx: &Context) -> Result<TimerStarted, Infallible> {
-//!         Ok(TimerStarted)
-//!     }
-//!
-//!     #[handles_fact(Ring)]
-//!     fn ring(&self, _fact: Ring, _ctx: &Context) -> Record<Self> {
-//!         Record::of(Rang)
-//!     }
-//!
-//!     #[handles_fact(LampLost)]
-//!     fn lamp_lost(&self, _fact: LampLost, _ctx: &Context) -> Record<Self> {
-//!         Record::of(Lost)
-//!     }
-//!
-//!     #[on_refused(SwitchOn)]
-//!     fn switch_on_refused(&self, _refused: CommandRefused<SwitchOn>, _ctx: &Context) -> Record<Self> {
-//!         Record::of(Lost)
-//!     }
-//!
-//!     #[applies(TimerStarted)]
-//!     fn started(&mut self, _event: TimerStarted) {}
-//!
-//!     #[applies(Rang)]
-//!     fn rang(&mut self, _event: Rang) {
-//!         self.rang = true;
-//!     }
-//!
-//!     #[applies(Lost)]
-//!     fn lost(&mut self, _event: Lost) {}
-//! }
-//!
-//! #[saga(name = "timer-lamp", source = Timer, target = Lamp, translate(SwitchOn))]
-//! impl TimerLamp {
-//!     #[reacts(Rang)]
-//!     fn rang(&self, _event: &Rang, ctx: &ReactionContext) -> Commands<Lamp> {
-//!         Commands::none().to(ctx.correlation_id().clone(), SwitchOn)
-//!     }
-//!
-//!     #[on_refused(SwitchOn)]
-//!     fn switch_on_refused(&self, _refusal: &Refusal<SwitchOn>) -> LampLost {
-//!         LampLost
-//!     }
-//! }
-//! ```
-//!
-//! Selecting translate makes the callback required: without it, the saga
-//! does not compile.
-//!
-//! ```compile_fail
-//! # use std::convert::Infallible;
-//! # use annals::next::markup::{
-//! #     CommandRefused, Commands, Context, DomainMessage, ReactionContext, Record, Refusal, Refuses,
-//! # };
-//! # use annals::next::WireError;
-//! # use annals_macros::{
-//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, reacts, saga,
-//! # };
-//! # // A compile-only fixture: nothing here runs.
-//! # pub mod wire {
-//! #     macro_rules! wire {
-//! #         ($($name:ident),*) => {$(
-//! #             #[derive(Clone, PartialEq, ::prost::Message)]
-//! #             pub struct $name {}
-//! #             impl ::prost::Name for $name {
-//! #                 const NAME: &'static str = stringify!($name);
-//! #                 const PACKAGE: &'static str = "lamp.v1";
-//! #             }
-//! #         )*};
-//! #     }
-//! #     wire!(SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
-//! #     wire!(StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
-//! # }
-//! # macro_rules! domain {
-//! #     ($($name:ident),*) => {$(
-//! #         #[derive(Clone, Debug)]
-//! #         pub struct $name;
-//! #         impl DomainMessage for $name {
-//! #             type Wire = wire::$name;
-//! #             fn to_wire(&self) -> wire::$name { unimplemented!() }
-//! #             fn from_wire(_: wire::$name) -> Result<Self, WireError> { unimplemented!() }
-//! #         }
-//! #     )*};
-//! # }
-//! # domain!(SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
-//! # domain!(StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
-//! # macro_rules! refusal {
-//! #     ($($name:ident),*) => {$(
-//! #         impl std::fmt::Display for $name {
-//! #             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-//! #                 f.write_str(stringify!($name))
-//! #             }
-//! #         }
-//! #         impl annals_diagnostic::Diagnostic for $name {
-//! #             fn code(&self) -> &'static str { "lamp-refused" }
-//! #             fn args(&self) -> Vec<(&'static str, annals_diagnostic::Arg)> { vec![] }
-//! #         }
-//! #     )*};
-//! # }
-//! # refusal!(Burnt, Fused);
-//! # #[derive(Clone, Default)]
-//! # pub struct Lamp { on: bool }
-//! # #[derive(Clone, Default)]
-//! # pub struct Timer { rang: bool }
-//! # pub struct TimerLamp;
-//! #[aggregate(domain = "lamp")]
-//! impl Lamp {
-//!     #[handles_cmd(SwitchOn, refuses(Burnt))]
-//!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<SwitchedOn, Refuses<Self, SwitchOn>> {
-//!         match self.on {
-//!             true => Err(Burnt.into()),
-//!             false => Ok(SwitchedOn),
-//!         }
-//!     }
-//!
-//!     #[handles_fact(PowerCut)]
-//!     fn power_cut(&self, _fact: PowerCut, _ctx: &Context) -> Record<Self> {
-//!         Record::of(WentDark)
-//!     }
-//!
-//!     #[applies(SwitchedOn)]
-//!     fn on(&mut self, _event: SwitchedOn) {
-//!         self.on = true;
-//!     }
-//!
-//!     #[applies(WentDark)]
-//!     fn dark(&mut self, _event: WentDark) {
-//!         self.on = false;
-//!     }
-//! }
-//!
-//! #[process_manager(domain = "timer")]
-//! impl Timer {
-//!     #[handles_cmd(StartTimer, starts)]
-//!     fn start(&self, _cmd: StartTimer, _ctx: &Context) -> Result<TimerStarted, Infallible> {
-//!         Ok(TimerStarted)
-//!     }
-//!
-//!     #[handles_fact(Ring)]
-//!     fn ring(&self, _fact: Ring, _ctx: &Context) -> Record<Self> {
-//!         Record::of(Rang)
-//!     }
-//!
-//!     #[handles_fact(LampLost)]
-//!     fn lamp_lost(&self, _fact: LampLost, _ctx: &Context) -> Record<Self> {
-//!         Record::of(Lost)
-//!     }
-//!
-//!     #[on_refused(SwitchOn)]
-//!     fn switch_on_refused(&self, _refused: CommandRefused<SwitchOn>, _ctx: &Context) -> Record<Self> {
-//!         Record::of(Lost)
-//!     }
-//!
-//!     #[applies(TimerStarted)]
-//!     fn started(&mut self, _event: TimerStarted) {}
-//!
-//!     #[applies(Rang)]
-//!     fn rang(&mut self, _event: Rang) {
-//!         self.rang = true;
-//!     }
-//!
-//!     #[applies(Lost)]
-//!     fn lost(&mut self, _event: Lost) {}
-//! }
-//!
-//! #[saga(name = "timer-lamp", source = Timer, target = Lamp, translate(SwitchOn))]
-//! impl TimerLamp {
-//!     #[reacts(Rang)]
-//!     fn rang(&self, _event: &Rang, ctx: &ReactionContext) -> Commands<Lamp> {
-//!         Commands::none().to(ctx.correlation_id().clone(), SwitchOn)
-//!     }
-//! }
-//! ```
-//!
-//! Nor does a callback for a command not selected for translate: the mode
-//! is the selection's, not the callback's presence.
-//!
-//! ```compile_fail
 //! # use std::convert::Infallible;
 //! # use annals::next::markup::{
 //! #     CommandRefused, Commands, Context, DomainMessage, ReactionContext, Record, Refusal, Refuses,
@@ -2631,7 +2375,7 @@
 //!     fn lost(&mut self, _event: Lost) {}
 //! }
 //!
-//! #[saga(name = "timer-lamp", source = Timer, target = Lamp, translate(SwitchOn))]
+//! #[saga(name = "timer-lamp", source = Timer, target = Lamp)]
 //! impl TimerLamp {
 //!     #[reacts(Rang)]
 //!     fn rang(&self, _event: &Rang, ctx: &ReactionContext) -> Commands<Lamp> {
@@ -2641,6 +2385,139 @@
 //!     #[on_refused(SwitchOn)]
 //!     fn switch_on_refused(&self, _refusal: &Refusal<SwitchOn>) -> Lost {
 //!         Lost
+//!     }
+//! }
+//! ```
+//!
+//! Nor a `translate(..)` argument: the callback's presence is the
+//! selection, and nothing else marks the mode.
+//!
+//! ```compile_fail
+//! # use std::convert::Infallible;
+//! # use annals::next::markup::{
+//! #     CommandRefused, Commands, Context, DomainMessage, ReactionContext, Record, Refusal, Refuses,
+//! # };
+//! # use annals::next::WireError;
+//! # use annals_macros::{
+//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, reacts, saga,
+//! # };
+//! # // A compile-only fixture: nothing here runs.
+//! # pub mod wire {
+//! #     macro_rules! wire {
+//! #         ($($name:ident),*) => {$(
+//! #             #[derive(Clone, PartialEq, ::prost::Message)]
+//! #             pub struct $name {}
+//! #             impl ::prost::Name for $name {
+//! #                 const NAME: &'static str = stringify!($name);
+//! #                 const PACKAGE: &'static str = "lamp.v1";
+//! #             }
+//! #         )*};
+//! #     }
+//! #     wire!(SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
+//! #     wire!(StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
+//! # }
+//! # macro_rules! domain {
+//! #     ($($name:ident),*) => {$(
+//! #         #[derive(Clone, Debug)]
+//! #         pub struct $name;
+//! #         impl DomainMessage for $name {
+//! #             type Wire = wire::$name;
+//! #             fn to_wire(&self) -> wire::$name { unimplemented!() }
+//! #             fn from_wire(_: wire::$name) -> Result<Self, WireError> { unimplemented!() }
+//! #         }
+//! #     )*};
+//! # }
+//! # domain!(SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
+//! # domain!(StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
+//! # macro_rules! refusal {
+//! #     ($($name:ident),*) => {$(
+//! #         impl std::fmt::Display for $name {
+//! #             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+//! #                 f.write_str(stringify!($name))
+//! #             }
+//! #         }
+//! #         impl annals_diagnostic::Diagnostic for $name {
+//! #             fn code(&self) -> &'static str { "lamp-refused" }
+//! #             fn args(&self) -> Vec<(&'static str, annals_diagnostic::Arg)> { vec![] }
+//! #         }
+//! #     )*};
+//! # }
+//! # refusal!(Burnt, Fused);
+//! # #[derive(Clone, Default)]
+//! # pub struct Lamp { on: bool }
+//! # #[derive(Clone, Default)]
+//! # pub struct Timer { rang: bool }
+//! # pub struct TimerLamp;
+//! #[aggregate(domain = "lamp")]
+//! impl Lamp {
+//!     #[handles_cmd(SwitchOn, refuses(Burnt))]
+//!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<SwitchedOn, Refuses<Self, SwitchOn>> {
+//!         match self.on {
+//!             true => Err(Burnt.into()),
+//!             false => Ok(SwitchedOn),
+//!         }
+//!     }
+//!
+//!     #[handles_fact(PowerCut)]
+//!     fn power_cut(&self, _fact: PowerCut, _ctx: &Context) -> Record<Self> {
+//!         Record::of(WentDark)
+//!     }
+//!
+//!     #[applies(SwitchedOn)]
+//!     fn on(&mut self, _event: SwitchedOn) {
+//!         self.on = true;
+//!     }
+//!
+//!     #[applies(WentDark)]
+//!     fn dark(&mut self, _event: WentDark) {
+//!         self.on = false;
+//!     }
+//! }
+//!
+//! #[process_manager(domain = "timer")]
+//! impl Timer {
+//!     #[handles_cmd(StartTimer, starts)]
+//!     fn start(&self, _cmd: StartTimer, _ctx: &Context) -> Result<TimerStarted, Infallible> {
+//!         Ok(TimerStarted)
+//!     }
+//!
+//!     #[handles_fact(Ring)]
+//!     fn ring(&self, _fact: Ring, _ctx: &Context) -> Record<Self> {
+//!         Record::of(Rang)
+//!     }
+//!
+//!     #[handles_fact(LampLost)]
+//!     fn lamp_lost(&self, _fact: LampLost, _ctx: &Context) -> Record<Self> {
+//!         Record::of(Lost)
+//!     }
+//!
+//!     #[on_refused(SwitchOn)]
+//!     fn switch_on_refused(&self, _refused: CommandRefused<SwitchOn>, _ctx: &Context) -> Record<Self> {
+//!         Record::of(Lost)
+//!     }
+//!
+//!     #[applies(TimerStarted)]
+//!     fn started(&mut self, _event: TimerStarted) {}
+//!
+//!     #[applies(Rang)]
+//!     fn rang(&mut self, _event: Rang) {
+//!         self.rang = true;
+//!     }
+//!
+//!     #[applies(Lost)]
+//!     fn lost(&mut self, _event: Lost) {}
+//! }
+//!
+//! #[saga(name = "timer-lamp", source = Timer, target = Lamp, translate(SwitchOn))]
+//! impl TimerLamp {
+//!     #[reacts(Rang)]
+//!     fn rang(&self, _event: &Rang, ctx: &ReactionContext) -> Commands<Lamp> {
+//!         Commands::none().to(ctx.correlation_id().clone(), SwitchOn)
+//!     }
+//!
+//!     #[on_refused(SwitchOn)]
+//!     fn switch_on_refused(&self, _refusal: &Refusal<SwitchOn>) -> LampLost {
+//!         LampLost
 //!     }
 //! }
 //! ```
@@ -2869,8 +2746,9 @@ pub fn state_factory(_attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 /// Marks an inherent impl as a SAGA: `#[saga(name = "..", source = <domain>,
-/// target = <domain>)]`, optionally `translate(Cmd, ..)` (see the crate
-/// docs). Generates `markup::Saga`, its refusal pass-through included.
+/// target = <domain>)]` (see the crate docs). Generates `markup::Saga`:
+/// its refusal pass-through, and translate for each command its
+/// `#[on_refused]` callbacks name.
 #[proc_macro_attribute]
 pub fn saga(attr: TokenStream, item: TokenStream) -> TokenStream {
     flow_stub(attr.into(), item.into(), Flow::Saga)
@@ -2927,23 +2805,20 @@ enum Flow {
     Projector,
 }
 
-/// One argument of `#[saga]` or `#[projector]`: `key = value`, or
-/// `translate(Cmd, ..)`.
-enum FlowArg {
-    Value(Ident, Expr),
-    Translate(Punctuated<Type, Token![,]>),
+/// One `key = value` argument of `#[saga]` or `#[projector]`.
+struct FlowArg {
+    key: Ident,
+    value: Expr,
 }
 
 impl Parse for FlowArg {
     fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
         let key: Ident = input.parse()?;
-        if key == "translate" {
-            let types;
-            syn::parenthesized!(types in input);
-            return Ok(FlowArg::Translate(Punctuated::parse_terminated(&types)?));
-        }
         input.parse::<Token![=]>()?;
-        Ok(FlowArg::Value(key, input.parse()?))
+        Ok(FlowArg {
+            key,
+            value: input.parse()?,
+        })
     }
 }
 
@@ -2953,19 +2828,12 @@ impl Parse for FlowArg {
 fn flow_stub(attr: Tokens, item: Tokens, flow: Flow) -> syn::Result<Tokens> {
     let args = Punctuated::<FlowArg, Token![,]>::parse_terminated.parse2(attr)?;
     let (mut name, mut source, mut target) = (None, None, None);
-    for arg in args {
-        match (arg, flow) {
-            (FlowArg::Value(key, value), _) if key == "name" => name = Some(value),
-            (FlowArg::Value(key, value), _) if key == "source" => source = Some(value),
-            (FlowArg::Value(key, value), Flow::Saga) if key == "target" => target = Some(value),
-            // The stub reads the selection and does nothing with it.
-            (FlowArg::Translate(selected), Flow::Saga) => drop(selected),
-            (FlowArg::Value(key, _), _) => {
-                return Err(Error::new_spanned(key, usage(flow)));
-            }
-            (FlowArg::Translate(_), Flow::Projector) => {
-                return Err(Error::new(Span::call_site(), usage(flow)));
-            }
+    for FlowArg { key, value } in args {
+        match (key.to_string().as_str(), flow) {
+            ("name", _) => name = Some(value),
+            ("source", _) => source = Some(value),
+            ("target", Flow::Saga) => target = Some(value),
+            _ => return Err(Error::new_spanned(key, usage(flow))),
         }
     }
     let name = name.ok_or_else(|| Error::new(Span::call_site(), usage(flow)))?;
@@ -3016,10 +2884,7 @@ fn flow_stub(attr: Tokens, item: Tokens, flow: Flow) -> syn::Result<Tokens> {
 /// What a flow's arguments are.
 fn usage(flow: Flow) -> &'static str {
     match flow {
-        Flow::Saga => {
-            "#[saga] takes `name = \"..\"`, `source = <domain>` and `target = <domain>`, \
-             and optionally `translate(<command>, ..)`"
-        }
+        Flow::Saga => "#[saga] takes `name = \"..\"`, `source = <domain>` and `target = <domain>`",
         Flow::Projector => "#[projector] takes `name = \"..\"` and `source = <aggregate>`",
     }
 }

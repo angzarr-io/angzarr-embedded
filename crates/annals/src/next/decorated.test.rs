@@ -1880,14 +1880,16 @@ mod beside {
 // the wallet's holds back into the buy-in (WalletBuyIn). When the wallet
 // refuses a hold (with a typed InsufficientFunds, recording nothing), the
 // saga delivers one refusal fact to the buy-in: passed through as
-// `CommandRefused`, handled by `#[on_refused(Hold)]`; or, where the saga's
-// markup selects translate, its callback's domestic fact, `HoldLost`. The
+// `CommandRefused`, handled by `#[on_refused(Hold)]`; or, where the saga
+// has its own `#[on_refused(Hold)]` callback, the callback's domestic
+// fact, `HoldLost`. The
 // dispatch is the linked angzarr-router's, blocked until the router is on
 // io.angzarr.v1: these pin the markup and the contract.
 //
-// RULED by the owner, 2026-10-28, and pinned below: (1) the translate
-// selection is the saga attribute, and a callback for a command not
-// selected does not compile; (2) typed refusals as `Refuses<Self, Cmd>` in
+// RULED by the owner, 2026-10-28, and pinned below: (1, revised
+// 2026-10-28) translate is selected by the PRESENCE of the saga's
+// `#[on_refused(Cmd)]` callback, nothing else (no `translate(..)`
+// argument), and the callback must return a fact of its source; (2) typed refusals as `Refuses<Self, Cmd>` in
 // `markup::Rejection<R>`, the objects `Diagnostic`s; (3) one marker,
 // `#[on_refused]`, for the source's handler and the saga's callback; (4)
 // annals does not check that a PM declares a starting input (angzarr-cli
@@ -2017,11 +2019,12 @@ impl BuyInWallet {
     }
 }
 
-/// As [`BuyInWallet`], with `Hold` selected for translate: its callback
-/// reads the wallet's refusal object and hands the buy-in its own fact.
+/// As [`BuyInWallet`], with an `#[on_refused(Hold)]` callback, whose
+/// presence selects translate for `Hold`: it reads the wallet's refusal
+/// object and hands the buy-in its own fact.
 pub struct TranslatingBuyInWallet;
 
-#[saga(name = "buyin-wallet", source = BuyIn, target = Wallet, translate(Hold))]
+#[saga(name = "buyin-wallet", source = BuyIn, target = Wallet)]
 impl TranslatingBuyInWallet {
     #[reacts(BuyInStarted)]
     fn started(&self, event: &BuyInStarted, _ctx: &ReactionContext) -> Commands<Wallet> {
@@ -2563,7 +2566,7 @@ mod saga_refusals {
         );
     }
 
-    /// Translate (selected in the markup): the callback reads the typed
+    /// Translate (selected by the callback's presence): it reads the typed
     /// object and answers the source's own fact (RULED, 1 and 3).
     #[test]
     fn translate_answers_the_callbacks_domestic_fact() {
@@ -2574,7 +2577,8 @@ mod saga_refusals {
         );
     }
 
-    /// A saga's constants: what it reacts to, and what it translates.
+    /// A saga's constants: what it reacts to, and what it translates, the
+    /// latter derived from its `#[on_refused]` callbacks (RULED, 1).
     #[test]
     fn its_constants_name_its_reactions_and_translations() {
         let started = TypeName {
