@@ -33,17 +33,15 @@ pub enum Failure<R> {
     /// originating stream or at the commit (a conflict on any stream the
     /// chain touched). Nothing was committed.
     Kernel(KernelError),
-    /// The chain COMMITTED, then `projector` (a marked-up projector, run
-    /// after the commit and awaited) failed with `error`. `committed` is
-    /// what the chain appended, every stream's book: those events stay
-    /// committed, and the projector's position does not pass the failing
-    /// event, so catch-up retries it. Its recovery is
-    /// [`Recovery::Retry`]: a retry is answered DUPLICATE. (RULED by the
-    /// owner, 2026-10-28.)
+    /// The chain COMMITTED, then marked-up projectors (run after the
+    /// commit and awaited) failed: each `(projector, error)` in
+    /// `failures`, in registration order; a failing projector does not
+    /// stop the others. `committed` is what the chain appended, every
+    /// stream's book: those events stay committed. Its recovery is
+    /// [`Recovery::Retry`]: a retry is answered DUPLICATE.
     Projection {
         committed: Vec<EventBook>,
-        projector: &'static str,
-        error: Report,
+        failures: Vec<(&'static str, Report)>,
     },
 }
 
@@ -371,12 +369,18 @@ impl<R: fmt::Display> fmt::Display for Failure<R> {
                 path.len()
             ),
             Failure::Kernel(error) => error.fmt(f),
-            Failure::Projection {
-                projector, error, ..
-            } => write!(
-                f,
-                "the command committed, then projector {projector} failed: {error}"
-            ),
+            Failure::Projection { failures, .. } => match failures.as_slice() {
+                [(projector, error)] => write!(
+                    f,
+                    "the command committed, then projector {projector} failed: {error}"
+                ),
+                [(projector, error), ..] => write!(
+                    f,
+                    "the command committed, then {} projectors failed, the first {projector}: {error}",
+                    failures.len()
+                ),
+                [] => f.write_str("the command committed"),
+            },
         }
     }
 }
@@ -398,12 +402,14 @@ impl<R: Diagnostic> Diagnostic for Failure<R> {
                 vec![("depth", path.len().into()), ("error", Arg::nested(error))]
             }
             Failure::Kernel(error) => error.args(),
-            Failure::Projection {
-                projector, error, ..
-            } => vec![
-                ("projector", (*projector).into()),
-                ("error", Arg::nested(error)),
-            ],
+            Failure::Projection { failures, .. } => {
+                let mut args = vec![("failures", failures.len().into())];
+                if let Some((projector, error)) = failures.first() {
+                    args.push(("projector", (*projector).into()));
+                    args.push(("error", Arg::nested(error)));
+                }
+                args
+            }
         }
     }
 }

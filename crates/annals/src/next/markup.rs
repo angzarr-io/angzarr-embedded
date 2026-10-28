@@ -302,9 +302,8 @@ impl<A: Domain, T: DomainMessage + Into<A::Event>> Emits<A> for Vec<T> {
 /// fn emptied(&self, ctx: &Context) -> Option<Emptied> { .. }
 /// ```
 ///
-/// (Accepted default of 2026-10-26: a fact handler's continuation steps
-/// are infallible. A separate type, not `Emit`, so a fallible step in a
-/// fact's chain does not compile.)
+/// A fact handler's continuation steps are infallible: a separate type,
+/// not `Emit`, so a fallible step in a fact's chain does not compile.
 ///
 /// **A proposal**: its bodies are `todo!()`.
 pub struct Record<A: Domain> {
@@ -387,7 +386,7 @@ records_shape! {
 /// fixed, because the markup has no rulebook of its own (`Rules = ()`).
 /// What changes how old events read is an upcaster
 /// ([`Aggregate::upcaster`](super::Aggregate::upcaster)), not a
-/// rules version. (Accepted default of 2026-10-26.)
+/// rules version.
 pub const MARKUP_RULES_VERSION: &str = "markup-1";
 
 /// A process manager written in the markup (`#[process_manager]`). A
@@ -415,7 +414,7 @@ pub const MARKUP_RULES_VERSION: &str = "markup-1";
 ///
 /// A process manager whose `STARTS` is empty can never start an instance;
 /// annals does not refuse one (no compile error, no check): the warning is
-/// angzarr-cli's (RULED by the owner, 2026-10-28).
+/// angzarr-cli's.
 ///
 /// **A proposal**: the macro emits it with `STARTS` empty; the dispatch is
 /// the linked angzarr-router's (blocked).
@@ -490,7 +489,7 @@ impl TypedRefusal {
 /// - [`Rejection::Typed`]: a handler with `refuses` refused with one of
 ///   its listed objects.
 ///
-/// Either way the refusing domain records nothing. (RULED by the owner, 2026-10-28.)
+/// Either way the refusing domain records nothing.
 #[derive(Clone, PartialEq, Debug)]
 pub enum Rejection<R> {
     Message(R),
@@ -660,9 +659,8 @@ impl<C> Refusal<C> {
 /// switch: annals' scaffold writes the callback stub, or does not), and
 /// nothing about it is visible at run time beyond which fact arrives.
 /// Deleting a callback silently reverts its command to pass-through: a
-/// run-time dead letter if the source has no handler for it (a trade-off
-/// the owner accepted; RULED 2026-10-28, revised 2026-10-28 from a
-/// `translate(..)` argument).
+/// run-time dead letter if the source has no handler for it, not a compile
+/// error.
 ///
 /// **A proposal**: the macro emits it with empty constants and a stub
 /// `on_refused`; the dispatch is the linked angzarr-router's (blocked).
@@ -685,15 +683,14 @@ pub trait Saga: Send + Sync + 'static {
     /// { command, refusal, trigger }`, `refusal` the response's object
     /// still packed, `trigger` the triggering event's `EventRef`. Translate:
     /// the callback's domestic fact. The chain addresses it to the
-    /// trigger's stream and stamps its identity. (RULED by the owner, 2026-10-28: the payload as
-    /// `Any`, not angzarr's `OnRefusedResponse` book.)
+    /// trigger's stream and stamps its identity.
     fn on_refused(&self, refusal: &v1::Refusal) -> Any;
 }
 
 /// What a saga's `#[reacts(E)]` handler returns: commands for its target
 /// `T`, each with the root of the stream it is for. For a process manager
 /// that is the trigger's correlation ([`ReactionContext::correlation_id`]);
-/// any other root is a saga bug (RULED by the owner, 2026-10-28). Each command's type must be one
+/// any other root is a saga bug. Each command's type must be one
 /// `T` decides ([`Decides`]).
 ///
 /// **A proposal**: its bodies are `todo!()`.
@@ -825,7 +822,7 @@ pub mod v1 {
 /// one instance per process, run after commit and awaited before the call
 /// returns. A failure is the caller's error,
 /// [`Failure::Projection`](super::Failure::Projection), carrying what was
-/// committed: the events stay committed (RULED by the owner, 2026-10-28). Projectors run on the async
+/// committed: the events stay committed. Projectors run on the async
 /// command path, the only one (async everywhere), so there is no guard
 /// against blocking on a synchronous one. Registered with
 /// [`Registry::projector`](super::Registry::projector).

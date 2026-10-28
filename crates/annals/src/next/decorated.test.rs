@@ -1886,21 +1886,19 @@ mod beside {
 // dispatch is the linked angzarr-router's, blocked until the router is on
 // io.angzarr.v1: these pin the markup and the contract.
 //
-// RULED by the owner, 2026-10-28, and pinned below: (1, revised
-// 2026-10-28) translate is selected by the PRESENCE of the saga's
-// `#[on_refused(Cmd)]` callback, nothing else (no `translate(..)`
-// argument), and the callback must return a fact of its source; (2) typed refusals as `Refuses<Self, Cmd>` in
-// `markup::Rejection<R>`, the objects `Diagnostic`s; (3) one marker,
-// `#[on_refused]`, for the source's handler and the saga's callback; (4)
+// Pinned below: translate is selected by the presence of the saga's
+// `#[on_refused(Cmd)]` callback, nothing else, and the callback returns a
+// fact of its source; typed refusals are `Refuses<Self, Cmd>` in
+// `markup::Rejection<R>`, the objects `Diagnostic`s; one marker,
+// `#[on_refused]`, serves the source's handler and the saga's callback;
 // annals does not check that a PM declares a starting input (angzarr-cli
-// warns), so nothing here pins it; (5) `Failure::Projection` with the
-// committed books, `Recovery::Retry`; (6) a refusal with no handler: the
-// chain commits, the fact is dead-lettered and alerted, the call is Ok;
-// (7) the new error codes pinned as strings until their variants exist;
-// (8) `Saga::on_refused` answers the fact's payload as `Any`; (9) a
+// warns), so nothing here pins it; `Failure::Projection` carries the
+// committed books, with `Recovery::Retry`; a refusal with no handler: the
+// chain commits, the fact is dead-lettered, the call is Ok;
+// `Saga::on_refused` answers the fact's payload as `Any`; a
 // `CommandRefused` from outside the chain is accepted when its trigger
-// names the receiving stream; (10) a saga names a PM target's root with
-// the correlation.
+// names the receiving stream; a saga names a PM target's root with the
+// correlation.
 
 /// A buy-in: a process across the wallet, keyed by its correlation.
 #[derive(Clone, Default, PartialEq, Debug)]
@@ -2253,7 +2251,7 @@ mod process_manager {
 
     /// A command that is not a starting one, for a correlation with no
     /// instance, is refused (`PM_NO_INSTANCE`, a business refusal) and
-    /// records nothing. Its code is pinned as a string (RULED, 7).
+    /// records nothing. Its code is pinned as a string.
     #[test]
     fn a_non_starting_command_for_no_instance_is_refused() {
         let registry = buy_ins();
@@ -2297,8 +2295,7 @@ mod process_manager {
     }
 
     /// A command whose correlation is set to anything but its cover's root
-    /// names no instance: malformed. Its code is pinned as a string
-    /// (RULED, 7).
+    /// names no instance: malformed. Its code is pinned as a string.
     #[test]
     fn a_correlation_other_than_the_root_is_malformed() {
         let registry = buy_ins();
@@ -2432,7 +2429,7 @@ mod typed_refusals {
     use super::*;
 
     /// A handler with `refuses` refuses with one of its typed objects, as
-    /// the caller receives it; the wallet records nothing (RULED, 2).
+    /// the caller receives it; the wallet records nothing.
     #[test]
     fn a_typed_refusal_carries_its_object_and_records_nothing() {
         let registry = registry();
@@ -2551,7 +2548,7 @@ mod saga_refusals {
     /// angzarr's `CommandRefused { command, refusal, trigger }`, the
     /// refused command as sent, its typed object still packed, the trigger
     /// the triggering event; the message stays behind. The answer is the
-    /// fact's payload, as `Any` (RULED, 8).
+    /// fact's payload, as `Any`.
     #[test]
     fn pass_through_builds_command_refused_for_the_source() {
         let refusal = hold_refusal(&correlation(1), 30, insufficient(20));
@@ -2567,7 +2564,7 @@ mod saga_refusals {
     }
 
     /// Translate (selected by the callback's presence): it reads the typed
-    /// object and answers the source's own fact (RULED, 1 and 3).
+    /// object and answers the source's own fact.
     #[test]
     fn translate_answers_the_callbacks_domestic_fact() {
         let refusal = hold_refusal(&correlation(1), 30, insufficient(20));
@@ -2578,7 +2575,7 @@ mod saga_refusals {
     }
 
     /// A saga's constants: what it reacts to, and what it translates, the
-    /// latter derived from its `#[on_refused]` callbacks (RULED, 1).
+    /// latter derived from its `#[on_refused]` callbacks.
     #[test]
     fn its_constants_name_its_reactions_and_translations() {
         let started = TypeName {
@@ -2598,7 +2595,7 @@ mod saga_refusals {
     /// command's type, and reads the typed object: a `CommandRefused` of a
     /// hold, delivered to the buy-in its trigger names, records the
     /// failure. Delivered from outside the chain, it is accepted because
-    /// its trigger names the receiving stream (RULED, 9).
+    /// its trigger names the receiving stream.
     #[test]
     fn on_refused_dispatches_by_the_refused_commands_type() {
         let registry = buy_ins();
@@ -2628,7 +2625,7 @@ mod saga_refusals {
     }
 
     /// A refusal fact is accepted only by the exact stream its trigger
-    /// names: delivered anywhere else, it is malformed (RULED, 7 and 9).
+    /// names: delivered anywhere else, it is malformed.
     #[test]
     fn a_refusal_fact_for_another_stream_is_malformed() {
         let registry = buy_ins();
@@ -2667,7 +2664,7 @@ mod refusal_flow {
     /// A saga's command the target accepts flows on: the buy-in's hold is
     /// recorded on the wallet, and the wallet's saga records it back on
     /// the buy-in of its correlation, all in one chain: the saga names the
-    /// buy-in's root with the correlation (RULED, 10).
+    /// buy-in's root with the correlation.
     #[test]
     fn an_accepted_command_flows_through_both_sagas() {
         let (registry, mut store) = funded(false, 50);
@@ -2771,7 +2768,7 @@ mod refusal_flow {
     /// recorded, the wallet's saga sends `RecordHeld` to a correlation with
     /// no buy-in, which refuses it, and the wallet handles no refusal of
     /// `RecordHeld`. The chain commits (the hold stays committed), the
-    /// fact is dead-lettered, and the call is Ok (RULED, 6).
+    /// fact is dead-lettered, and the call is Ok.
     #[test]
     fn a_refusal_with_no_handler_is_dead_lettered() {
         let (registry, mut store) = funded(false, 50);
@@ -2839,6 +2836,68 @@ impl Balances {
             .unwrap()
             .push((self.written, event.cents));
         Ok(())
+    }
+}
+
+/// A port recording the events a projector saw, by type name, and
+/// whether to fail.
+#[derive(Clone, Default)]
+pub struct TrailPort {
+    seen: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>,
+    fail: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl TrailPort {
+    fn see(&self, name: &'static str) -> Result<(), Report> {
+        if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(Report::of(&Refused::NotOpen));
+        }
+        self.seen.lock().unwrap().push(name);
+        Ok(())
+    }
+}
+
+/// A second projector on the wallet, marking two of its events.
+pub struct Audit {
+    port: TrailPort,
+}
+
+#[projector(name = "audit", source = Wallet)]
+impl Audit {
+    #[projects(Opened)]
+    async fn opened(&mut self, _event: &Opened, _ctx: &ProjectionContext) -> Result<(), Report> {
+        self.port.see("Opened")
+    }
+
+    #[projects(Deposited)]
+    async fn deposited(
+        &mut self,
+        _event: &Deposited,
+        _ctx: &ProjectionContext,
+    ) -> Result<(), Report> {
+        self.port.see("Deposited")
+    }
+}
+
+/// A third, marking the same events.
+pub struct Trail {
+    port: TrailPort,
+}
+
+#[projector(name = "trail", source = Wallet)]
+impl Trail {
+    #[projects(Opened)]
+    async fn opened(&mut self, _event: &Opened, _ctx: &ProjectionContext) -> Result<(), Report> {
+        self.port.see("Opened")
+    }
+
+    #[projects(Deposited)]
+    async fn deposited(
+        &mut self,
+        _event: &Deposited,
+        _ctx: &ProjectionContext,
+    ) -> Result<(), Report> {
+        self.port.see("Deposited")
     }
 }
 
@@ -2937,7 +2996,7 @@ mod projector {
     /// A failure is the caller's ERROR, raised after the commit: a
     /// `Failure::Projection` naming the projector and carrying what the
     /// chain committed, and those events stay committed; its recovery is
-    /// a retry (RULED, 5).
+    /// a retry.
     #[test]
     fn a_failure_is_the_callers_error_and_the_events_stay_committed() {
         use ::annals::next::EventStore;
@@ -2948,14 +3007,14 @@ mod projector {
         let failed = handle_async(&mut store, &registry, 1, any(Open { bonus: 5 }), root());
         let Err(Failure::Projection {
             committed,
-            projector,
-            error,
+            failures,
         }) = failed
         else {
             panic!("a failing projection is the caller's Failure::Projection");
         };
-        assert_eq!(projector, "balances");
-        assert_eq!(error.code(), "toy-wallet-not-open");
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].0, "balances");
+        assert_eq!(failures[0].1.code(), "toy-wallet-not-open");
         assert_eq!(
             committed
                 .iter()
@@ -2969,12 +3028,61 @@ mod projector {
         assert_eq!(
             Failure::<Rejection<Refused>>::Projection {
                 committed,
-                projector,
-                error,
+                failures,
             }
             .recovery(),
             Recovery::Retry
         );
+    }
+
+    /// Fan-out: every projector registered on one domain receives every
+    /// committed event of that domain it marks, each in its own instance.
+    #[test]
+    fn every_projector_on_a_domain_receives_its_events() {
+        let port = BalancePort::default();
+        let (audit, trail) = (TrailPort::default(), TrailPort::default());
+        let mut registry = projected(&port);
+        registry
+            .projector(Audit {
+                port: audit.clone(),
+            })
+            .projector(Trail {
+                port: trail.clone(),
+            });
+        let mut store = ::annals::next::InMemoryStore::new();
+        handle_async(&mut store, &registry, 1, any(Open { bonus: 5 }), root()).unwrap();
+        assert_eq!(*port.lines.lock().unwrap(), [(1, 5)]);
+        assert_eq!(*audit.seen.lock().unwrap(), ["Opened", "Deposited"]);
+        assert_eq!(*trail.seen.lock().unwrap(), ["Opened", "Deposited"]);
+    }
+
+    /// One projector's failure does not stop the others: each still
+    /// receives its events, and every failure is reported in the one
+    /// `Failure::Projection`, in registration order.
+    #[test]
+    fn a_projectors_failure_does_not_stop_the_others() {
+        let port = BalancePort::default();
+        port.fail.store(true, std::sync::atomic::Ordering::SeqCst);
+        let (audit, trail) = (TrailPort::default(), TrailPort::default());
+        audit.fail.store(true, std::sync::atomic::Ordering::SeqCst);
+        let mut registry = projected(&port);
+        registry
+            .projector(Audit {
+                port: audit.clone(),
+            })
+            .projector(Trail {
+                port: trail.clone(),
+            });
+        let mut store = ::annals::next::InMemoryStore::new();
+        let failed = handle_async(&mut store, &registry, 1, any(Open { bonus: 5 }), root());
+        let Err(Failure::Projection { failures, .. }) = failed else {
+            panic!("the failures are the caller's Failure::Projection");
+        };
+        assert_eq!(
+            failures.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+            ["balances", "audit"]
+        );
+        assert_eq!(*trail.seen.lock().unwrap(), ["Opened", "Deposited"]);
     }
 
     #[test]
