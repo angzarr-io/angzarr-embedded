@@ -352,18 +352,18 @@ impl Registry {
         todo!("Registry::process_manager is a stub")
     }
 
-    /// Register `saga`, a marked-up saga (`#[saga]`). The router runs it
-    /// on each event of its source the chain records, and delivers its
-    /// commands to its target in the same chain. When the target refuses
-    /// one (and records nothing), the chain calls the saga's
-    /// [`on_refused`](super::markup::Saga::on_refused) and delivers the
-    /// fact it answers to the exact stream of the triggering event, as a
-    /// fact whose id is the refused command's: the source's handler for it
-    /// records what the refusal means, and the chain commits. A refusal
-    /// fact the source has no handler for is dead-lettered
-    /// and alerted (`annals-next-no-refusal-handler`), the chain commits
-    /// without it, and the call returns Ok, as on distributed angzarr.
-    /// Registering one twice PANICS at startup.
+    /// Register `saga`, a marked-up saga (`#[saga]`). [`Kernel::settle`](super::Kernel::settle)
+    /// runs it on each event of its source a step commits, and delivers
+    /// each of its commands to its target as a step of its own. When the
+    /// target refuses one (and records nothing), the saga's
+    /// [`on_refused`](super::markup::Saga::on_refused) answers a fact,
+    /// delivered to the exact stream of the triggering event as a step of
+    /// its own, whose id is the refused command's: the source's handler for
+    /// it records what the refusal means. A refusal fact the source has no
+    /// handler for is dead-lettered (`annals-next-no-refusal-handler`; the
+    /// dead letter is annals' alert), the steps before it stay committed,
+    /// and the call returns Ok, as on distributed angzarr. Registering one
+    /// twice PANICS at startup.
     ///
     /// **A proposal**: `todo!()` (the dispatch is the linked router's).
     pub fn saga<S: super::markup::Saga>(&mut self, saga: S) -> &mut Self {

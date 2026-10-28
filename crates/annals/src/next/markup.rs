@@ -1,7 +1,7 @@
 //! What annals-macros' expansion names: the runtime under a marked-up
 //! aggregate or process manager (`#[aggregate]`, `#[process_manager]`,
 //! `#[handles_cmd]`, `#[handles_fact]`, `#[on_refused]`, `#[applies]`),
-//! saga (`#[saga]`, `#[reacts]`) and projector (`#[projector]`,
+//! saga (`#[saga]`, `#[on_event]`) and projector (`#[projector]`,
 //! `#[projects]`); see annals-macros' crate docs. A hand-written
 //! [`Domain`] needs none of it.
 //!
@@ -25,7 +25,7 @@
 //!   saga's callback reads it.
 //! - [`ProcessManager`]: what sets a process manager, a domain, apart: its
 //!   root is the correlation, and its starting inputs.
-//! - [`Saga`], [`Commands`] and [`ReactionContext`]: a saga, its output
+//! - [`Saga`], [`Commands`] and [`SagaContext`]: a saga, its output
 //!   and its handler's context. [`Decides`] and [`Ingests`] say what a
 //!   domain takes, for the checks on a saga.
 //! - [`AsyncProjector`] and [`ProjectionContext`]: a projector.
@@ -667,13 +667,13 @@ impl<C> Refusal<C> {
 pub trait Saga: Send + Sync + 'static {
     /// The saga's name: the component its commands' ids are derived from.
     const NAME: &'static str;
-    /// The one domain whose events it reacts to, and to which it delivers
+    /// The one domain whose events it handles, and to which it delivers
     /// its refusal facts.
     type Source: Domain;
     /// The one domain it sends commands to.
     type Target: Domain;
-    /// The events it reacts to, in marker order.
-    const REACTS: &'static [TypeName];
+    /// The events it handles, in marker order.
+    const EVENTS: &'static [TypeName];
     /// The commands it translates: those its `#[on_refused]` callbacks
     /// name, in marker order.
     const TRANSLATES: &'static [TypeName];
@@ -687,9 +687,9 @@ pub trait Saga: Send + Sync + 'static {
     fn on_refused(&self, refusal: &v1::Refusal) -> Any;
 }
 
-/// What a saga's `#[reacts(E)]` handler returns: commands for its target
+/// What a saga's `#[on_event(E)]` handler returns: commands for its target
 /// `T`, each with the root of the stream it is for. For a process manager
-/// that is the trigger's correlation ([`ReactionContext::correlation_id`]);
+/// that is the trigger's correlation ([`SagaContext::correlation_id`]);
 /// any other root is a saga bug. Each command's type must be one
 /// `T` decides ([`Decides`]).
 ///
@@ -720,17 +720,17 @@ impl<T: Domain> Commands<T> {
 /// `EventRef` (its stream and sequence), its correlation and when it was
 /// recorded.
 #[derive(Clone, PartialEq, Debug)]
-pub struct ReactionContext {
+pub struct SagaContext {
     trigger: EventRef,
     correlation_id: Uuid,
     recorded_at: Timestamp,
 }
 
-impl ReactionContext {
+impl SagaContext {
     /// A context for a saga's own unit tests; the router builds the real
     /// one from the committed event.
     pub fn new(trigger: EventRef, correlation_id: Uuid, recorded_at: Timestamp) -> Self {
-        ReactionContext {
+        SagaContext {
             trigger,
             correlation_id,
             recorded_at,
