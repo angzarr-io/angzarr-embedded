@@ -246,12 +246,17 @@ impl<D: Domain> Stream<D> {
     }
 
     fn empty(cover: Cover) -> Stream<D> {
+        Stream::from_state(cover, D::State::default())
+    }
+
+    /// An empty stream whose state before any event is `state`.
+    fn from_state(cover: Cover, state: D::State) -> Stream<D> {
         Stream {
             cover,
             first: 0,
-            base: D::State::default(),
+            base: state.clone(),
             events: Vec::new(),
-            state: D::State::default(),
+            state,
             last_recorded_at: None,
         }
     }
@@ -447,7 +452,9 @@ impl<D: Domain> Stream<D> {
         Ok(self.len())
     }
 
-    /// Rebuild a stream from its whole stored log, each page decoded
+    /// Rebuild a stream from its whole stored log, from a fresh state (the
+    /// registry's factory for `D`, if it holds one, else the default), each
+    /// page decoded
     /// ([`Envelope::decode`], upcast) and folded with the rules its
     /// `rules_version` names, from the registry's rulebook; the caller does
     /// not choose them. Refuses a cover of another domain, a rules version
@@ -460,7 +467,7 @@ impl<D: Domain> Stream<D> {
         registry: &Registry,
     ) -> Result<Stream<D>, KernelError> {
         Self::check_domain(&cover)?;
-        let mut stream = Stream::empty(cover);
+        let mut stream = Stream::from_state(cover, registry.fresh::<D>());
         stream.fold(pages, registry)?;
         Ok(stream)
     }
@@ -468,7 +475,9 @@ impl<D: Domain> Stream<D> {
     /// Rebuild a stream from a snapshot and the pages after it, checked as
     /// [`Stream::replay`] checks. The caller has checked the snapshot is
     /// usable ([`Registry::snapshot_usable`]); `last_recorded_at` is the
-    /// snapshot's last event's, the floor for the next.
+    /// snapshot's last event's, the floor for the next. The state is a
+    /// fresh one (as [`Stream::replay`]'s) [restored](State::restore) from
+    /// the snapshot, so what the snapshot does not hold is the factory's.
     pub fn resume(
         cover: Cover,
         snapshot: &Snapshot,
@@ -485,10 +494,14 @@ impl<D: Domain> Stream<D> {
                     error,
                 })
                 .and_then(|wire| {
-                    D::State::from_snapshot(wire).map_err(|reason| PayloadError::Invalid {
-                        type_url: any.type_url.clone(),
-                        reason,
-                    })
+                    let mut state = registry.fresh::<D>();
+                    state
+                        .restore(wire)
+                        .map(|()| state)
+                        .map_err(|reason| PayloadError::Invalid {
+                            type_url: any.type_url.clone(),
+                            reason,
+                        })
                 })
         } else {
             Err(PayloadError::UnknownType {
@@ -516,8 +529,12 @@ impl<D: Domain> Stream<D> {
 
     /// The stream's state as an angzarr `Snapshot`: the last sequence, the
     /// state packed as `Any` (its type URL is what a load compares), the
-    /// current rules version. `None` for an empty stream.
+    /// current rules version. `None` for an empty stream, and for a state
+    /// with no snapshot form ([`State::SNAPSHOTS`] `false`).
     pub fn snapshot(&self, registry: &Registry) -> Option<Snapshot> {
+        if !D::State::SNAPSHOTS {
+            return None;
+        }
         let sequence = self.len().checked_sub(1)?;
         Some(Snapshot {
             sequence,

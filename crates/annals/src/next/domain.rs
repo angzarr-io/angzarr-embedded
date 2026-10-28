@@ -34,8 +34,7 @@ pub trait State: Default + Clone + Send + 'static {
     /// whatever the snapshot does not (a marked-up aggregate's immutable
     /// configuration, from the registry's factory). Resuming builds a fresh
     /// instance, then restores it. The default replaces the whole instance
-    /// with [`State::from_snapshot`]'s. (A proposal: the kernel does not call
-    /// it yet.)
+    /// with [`State::from_snapshot`]'s.
     fn restore(&mut self, snapshot: Self::Snapshot) -> Result<(), annals_diagnostic::Report> {
         *self = Self::from_snapshot(snapshot)?;
         Ok(())
@@ -54,7 +53,7 @@ pub trait State: Default + Clone + Send + 'static {
     /// `snapshot = ..`, whose [`State::Snapshot`] is
     /// [`NoSnapshot`](super::markup::NoSnapshot)): its streams are always
     /// replayed from the start, and [`Stream::snapshot`](super::Stream::snapshot)
-    /// is `None`. (A proposal: the kernel does not read it yet.)
+    /// is `None`.
     const SNAPSHOTS: bool = true;
 
     /// The conflict units whose values differ between `before` and
@@ -158,6 +157,8 @@ pub struct IngestCtx<'a, D: Domain> {
     pub(crate) source: &'a FactOrigin,
     pub(crate) rules: &'a D::Rules,
     pub(crate) rules_version: &'a str,
+    /// The stream's length: 0 for a stream with no events yet.
+    pub(crate) head: u64,
 }
 
 impl<'a, D: Domain> IngestCtx<'a, D> {
@@ -226,6 +227,10 @@ pub struct Tx<'a, D: Domain> {
     /// The nonce decide gave back, if it did.
     pub(crate) resolved: Option<Nonce>,
     pub(crate) events: Vec<D::Event>,
+    /// A fault decide's glue raised (a marked-up decision past its step
+    /// limit): the kernel fails the command with it, whatever decide
+    /// returned.
+    pub(crate) fault: Option<super::error::KernelError>,
 }
 
 impl<'a, D: Domain> Tx<'a, D> {

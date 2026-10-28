@@ -99,6 +99,14 @@ pub enum Malformed {
         domain: String,
         requested: ConflictResolution,
     },
+    /// A book for a process manager whose correlation is set to anything
+    /// but its cover's root: a process manager's root is its correlation.
+    RootNotCorrelation,
+    /// A refusal fact (angzarr's `CommandRefused`) for a stream other than
+    /// the one its trigger names, domain, root and edition: a refusal fact
+    /// is accepted only by the exact stream of the saga's triggering
+    /// event.
+    RefusalMisaddressed,
 }
 
 impl fmt::Display for Malformed {
@@ -154,6 +162,12 @@ impl fmt::Display for Malformed {
                 "domain \"{domain}\"'s state does not support {}",
                 requested.as_str_name()
             ),
+            Malformed::RootNotCorrelation => f.write_str(
+                "the book's correlation is not its root: a process manager's root is its correlation",
+            ),
+            Malformed::RefusalMisaddressed => f.write_str(
+                "the refusal fact is for another stream than the one its trigger names",
+            ),
         }
     }
 }
@@ -189,6 +203,8 @@ impl Diagnostic for Malformed {
             Malformed::UnsupportedConflictResolution { .. } => {
                 "annals-next-malformed-unsupported-conflict-resolution"
             }
+            Malformed::RootNotCorrelation => "annals-next-malformed-root-not-correlation",
+            Malformed::RefusalMisaddressed => "annals-next-malformed-refusal-misaddressed",
         }
     }
 
@@ -292,6 +308,9 @@ pub struct Checked {
     expected_sequence: Option<u64>,
     conflict_resolution: Option<ConflictResolution>,
     entry: Entry,
+    /// Whether the cover is a process manager's: an absent correlation is
+    /// its root.
+    process_manager: bool,
 }
 
 /// Validate a client's `book`: step 1, the client entry. Domain-blind; the
@@ -423,6 +442,24 @@ fn parse(
         Body::Command { payload }
     };
 
+    // A process manager's root is its correlation: a set correlation, or a
+    // reaction's (its trigger's), must be the root.
+    let process_manager = registry.is_process_manager(&cover.domain);
+    if process_manager {
+        let given = match &entry {
+            Entry::Client => correlation_id.as_ref(),
+            Entry::Reaction { correlation_id, .. } => Some(correlation_id),
+        };
+        if given.is_some_and(|c| *c != root) {
+            return Err(Malformed::RootNotCorrelation);
+        }
+    }
+    if let Body::Fact { payload, .. } = &body {
+        if !refusal_addressed(payload, &cover) {
+            return Err(Malformed::RefusalMisaddressed);
+        }
+    }
+
     let conflict_resolution = match handling.conflict_resolution {
         0 => None,
         value => {
@@ -447,7 +484,23 @@ fn parse(
         expected_sequence: handling.expected_sequence,
         conflict_resolution,
         entry,
+        process_manager,
     })
+}
+
+/// Whether `payload`, if it is angzarr's `CommandRefused`, is for `cover`:
+/// its trigger names exactly that stream. Any other payload is.
+fn refusal_addressed(payload: &Any, cover: &Cover) -> bool {
+    use prost::Message;
+    let refused = <crate::next::markup::v1::CommandRefused as prost::Name>::full_name();
+    if crate::next::payload::type_name(&payload.type_url) != refused {
+        return true;
+    }
+    crate::next::markup::v1::CommandRefused::decode(&payload.value[..])
+        .ok()
+        .and_then(|refusal| refusal.trigger)
+        .and_then(|trigger| trigger.stream)
+        .is_some_and(|stream| stream == *cover)
 }
 
 impl Checked {
@@ -534,6 +587,7 @@ impl Checked {
             expected_sequence,
             conflict_resolution,
             entry,
+            process_manager,
         } = self;
         let (command_id, correlation_id, causation_id) = match (entry, &body) {
             (
@@ -546,12 +600,18 @@ impl Checked {
             ) => (command_id, correlation_id, Some(trigger)),
             (Entry::Client, Body::Fact { source, .. }) => (
                 ids::fact_command_id(&source.external_id),
-                correlation_id.unwrap_or_else(|| ids::fact_correlation(&source.external_id)),
+                correlation_id.unwrap_or_else(|| match process_manager {
+                    true => root.clone(),
+                    false => ids::fact_correlation(&source.external_id),
+                }),
                 None,
             ),
             (Entry::Client, Body::Command { .. }) => {
                 let id = command_id.unwrap_or_else(|| sampled.command_id.clone());
-                let correlation = correlation_id.unwrap_or_else(|| id.clone());
+                let correlation = correlation_id.unwrap_or_else(|| match process_manager {
+                    true => root.clone(),
+                    false => id.clone(),
+                });
                 (id, correlation, None)
             }
         };

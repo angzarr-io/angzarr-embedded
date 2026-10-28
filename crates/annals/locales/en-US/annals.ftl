@@ -53,11 +53,14 @@ annals-next-malformed-fact-command-id-not-derived = the fact's command id is not
 annals-next-malformed-handling-on-fact = a fact with handling: a fact is never checked against a sequence nor conflict-resolved
 annals-next-malformed-unknown-conflict-resolution = conflict resolution { $value } is not one this build knows
 annals-next-malformed-unsupported-conflict-resolution = domain "{ $domain }"'s state does not support { $requested }
+annals-next-malformed-root-not-correlation = the book's correlation is not its root: a process manager's root is its correlation
+annals-next-malformed-refusal-misaddressed = the refusal fact is for another stream than the one its trigger names
 
 annals-next-projection-failed = the command committed, then { $failures ->
     [one] projector { $projector } failed: { $error }
    *[other] { $failures } projectors failed, the first { $projector }: { $error }
 }
+annals-next-pm-no-instance = process manager stream { $stream } has no instance, and only a starting input starts one
 annals-next-downstream = a reaction down the chain failed, at depth { $depth }: { $error }
 annals-next-stale = stream { $stream } is at { $actual }, not the { $expected } expected: re-read and re-issue
 annals-next-unresolved = decide never acknowledged the window of stream { $stream } from { $expected } to { $actual }
