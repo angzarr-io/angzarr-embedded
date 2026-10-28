@@ -21,19 +21,21 @@ use annals_diagnostic::{Arg, Diagnostic, Report};
 
 use super::check::Malformed;
 
-/// Why a command did not commit.
+/// Why a command, or a step its chain set off, failed.
 #[derive(Clone, PartialEq, Debug)]
 pub enum Failure<R> {
     /// The domain refused it. Nothing was staged, appended or applied.
     Rejected(R),
     /// A step further down the chain failed: a policy's command rejected by
-    /// its target, a malformed policy book, a gap, a chain too deep. `path`
-    /// runs from the first reaction to the step that failed. Nothing was
-    /// appended anywhere, the originating command's events included.
+    /// its target, a malformed policy book, a gap, a chain too deep, a store
+    /// that failed a step's write. `path` runs from the first policy step to
+    /// the one that failed. Every step before it stays committed, the
+    /// originating command's included; the failed step wrote nothing but,
+    /// where it was refused, its position past it.
     Downstream { path: Vec<Step>, error: StepError },
     /// The book was malformed, or the kernel or the store failed at the
-    /// originating stream or at the commit (a conflict on any stream the
-    /// chain touched). Nothing was committed.
+    /// originating stream, its write included (a conflict). Nothing was
+    /// committed.
     Kernel(KernelError),
     /// The chain COMMITTED, then marked-up projectors (run after the
     /// commit and awaited) failed: each `(projector, error)` in
@@ -122,7 +124,7 @@ pub enum KernelError {
         stream: Cover,
         expected: &'static str,
     },
-    /// A command chain went deeper than its limit: a reaction cycle, or a
+    /// A command chain went deeper than its limit: a policy cycle, or a
     /// cascade longer than allowed.
     ChainTooDeep {
         limit: usize,
@@ -637,8 +639,11 @@ impl Diagnostic for ReplayError {
 /// What to do about a store's error: angzarr-ports' [`Recovery`]
 /// (`angzarr_ports::Recovery`), one to one (`Retry`, `Invalid`, `Bug`).
 pub(crate) fn store_recovery(error: &StoreError) -> Recovery {
-    let _ = error;
-    todo!("red: map angzarr-ports' Recovery onto annals'")
+    match error.recovery() {
+        angzarr_ports::Recovery::Retry => Recovery::Retry,
+        angzarr_ports::Recovery::Invalid => Recovery::Invalid,
+        angzarr_ports::Recovery::Bug => Recovery::Bug,
+    }
 }
 
 /// A store error's args as annals' diagnostics carry them: angzarr-ports'
@@ -646,8 +651,20 @@ pub(crate) fn store_recovery(error: &StoreError) -> Recovery {
 /// `Str` as a `Str`, and a wrapped `Cause` (the adapter's own code and
 /// English) as a nested report under that code.
 pub(crate) fn store_args(error: &StoreError) -> Vec<(&'static str, Arg)> {
-    let _ = error;
-    todo!("red: forward angzarr-ports' args")
+    error
+        .args()
+        .into_iter()
+        .map(|(name, arg)| {
+            let arg = match arg {
+                angzarr_ports::Arg::Uint(n) => Arg::Uint(n),
+                angzarr_ports::Arg::Str(s) => Arg::Str(s),
+                angzarr_ports::Arg::Cause(cause) => {
+                    Arg::Nested(Box::new(Report::new(cause.code, cause.message)))
+                }
+            };
+            (name, arg)
+        })
+        .collect()
 }
 
 /// A stored page the kernel cannot give back as a current event: its
@@ -655,8 +672,11 @@ pub(crate) fn store_args(error: &StoreError) -> Vec<(&'static str, Arg)> {
 /// not decode as that type. The kernel's, never the store's (angzarr-ports'
 /// `StoreError::Unreadable` is the store's: bytes it cannot return).
 pub(crate) fn unreadable(stream: &Cover, sequence: u64, reason: Report) -> KernelError {
-    let _ = (stream, sequence, reason);
-    todo!("red: KernelError::Unreadable")
+    KernelError::Unreadable {
+        stream: stream.clone(),
+        sequence,
+        reason,
+    }
 }
 
 // ---------------------------------------------------------------- payloads

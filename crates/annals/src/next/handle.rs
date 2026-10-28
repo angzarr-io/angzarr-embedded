@@ -1,71 +1,62 @@
-//! The command handler: a command and every reaction it sets off, as one
-//! atomic chain, in process.
+//! The command handler: a command, then every policy step it sets off, each
+//! committed on its own: atomicity covers one handling step, never a
+//! chain.
 //!
 //! [`Kernel::handle`] runs the book through the five steps (validate,
-//! identify, load then deduplicate, resolve, decode and decide or ingest),
-//! then synchronously runs the policies reacting to its events, whose
-//! commands take the same five steps in their targets, whose events set off
-//! their own policies, and so on down the chain. Every event stays **staged
-//! in memory**, in the chain, across every stream involved; a later step
-//! sees the staged state (and command ids) of any stream an earlier step
-//! touched, the originating stream included. Nothing is appended until the
-//! whole chain has succeeded.
+//! identify, load then deduplicate, resolve, decode and decide or ingest)
+//! and writes its events: ONE atomic write to the store, at the length the
+//! step loaded. Then every policy of its domain runs on those events, each
+//! command a step of its own in its target, written with the policy's
+//! position on the source; whose events set off their own policies, stream
+//! by stream in the order written, until the chain settles. The call waits
+//! for it.
 //!
-//! - **A duplicate ends it at once.** If step 3 finds the originating
-//!   command's events on its stream, the answer is [`Handled::Duplicate`]
-//!   with them; nothing runs, nothing is written.
-//! - **Any failure fails it all.** A policy's command rejected, a malformed
-//!   policy book, a panicking ingest, the depth limit: the failure
-//!   goes back to the caller with the path to the step that failed
-//!   ([`Failure::Downstream`]), and nothing is appended anywhere, the
-//!   originating command's events included. What angzarr would dead-letter
-//!   is also written to the [`DeadLetterLog`].
-//! - **On success** every staged stream is appended through the unit of
-//!   work, each checked against the length it was loaded at (optimistic
-//!   concurrency on every stream touched), and the unit committed: one
-//!   transaction. The command ids are written with the events, so
-//!   deduplication needs nothing else.
-//! - **Then projections run**, on committed events only. A failed chain is
-//!   never seen by one, and a failing projection never undoes the commit:
-//!   a [`Project`]ion route's is reported in
-//!   [`Recorded::projector_failures`]; a marked-up projector's
-//!   ([`Registry::projector`]), on the async path, is the caller's
-//!   [`Failure::Projection`].
+//! - **A duplicate** (step 3 finds the command's events on its stream) is
+//!   answered [`Handled::Duplicate`] with them, once its stream's policies
+//!   have run whatever they still owe (a retry after a crash finishes the
+//!   chain).
+//! - **A failing step keeps every write before it**: nothing is rolled
+//!   back. The failure goes back to the caller with the path to the step
+//!   ([`Failure::Downstream`]). A refused command of a policy that does not
+//!   answer refusals is dead-lettered and its position moves past it; a bug
+//!   (a malformed policy book, the depth limit) or a store failure holds
+//!   the position, so [`Kernel::resume`] runs the step again, deduplicated
+//!   by its derived command id.
+//! - **A refused command of a policy that answers refusals** (every
+//!   marked-up one) is no failure: the policy's refusal fact goes to the
+//!   stream of the triggering event as a step of its own, with the refused
+//!   command's id; a refusal its source has no handler for is
+//!   dead-lettered.
+//! - **Projections run** on what each step wrote: a [`Project`]ion route's
+//!   failure is reported in [`Recorded::projector_failures`]; a marked-up
+//!   projector's ([`Registry::projector`]) is the caller's
+//!   [`Failure::Projection`]. A failing projection never undoes a write.
 //!
-//! **This is a deliberate divergence from angzarr** (see
-//! `docs/design/audit.md`, *Divergences*): angzarr appends one stream per
-//! write and runs reactions asynchronously, each its own command, so a
-//! reaction's rejection never fails its trigger there. annals keeps policies
-//! inside the write side's consistency boundary because it is the in-process
-//! runtime: one process, one transaction, no bus, no outbox and no retry
-//! loop. A reaction that must cross a process or a service boundary is not
-//! one of these: that is angzarr's.
-//!
-//! Which policies run is a [`Routes`] table, keyed by source domain, so a
-//! chain can come back to a stream it already touched (A → B → A); a
-//! cascade deeper than the chain's limit is a [`KernelError::ChainTooDeep`],
-//! which is how a reaction cycle that never settles ends.
+//! Which policies run is the registry's one list
+//! ([`Registry::policy`]), in registration order, so a chain can come back
+//! to a stream it already touched (A → B → A); a cascade deeper than the
+//! chain's limit is a [`KernelError::ChainTooDeep`], which is how a cycle
+//! that never settles ends.
 
 use std::any::Any as AnyType;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::VecDeque;
 use std::convert::Infallible;
 
 use angzarr_proto::v1::{
-    self as v1, CommandBook, Cover, DeliveryOutcome, EventBook, EventPage, Outcome,
+    self as v1, command_page, CommandBook, CommandPage, Cover, DeliveryOutcome, EventBook,
+    EventPage, EventRef, Fact, FactOrigin, Outcome,
 };
 
-use super::check::{check, Checked, Sampled};
-use super::coordinator::{
-    deduplicate, expect, find_duplicate, load, resolution, run_step, unknown_domain, Contextual,
-    Deduplicated,
-};
-use super::dead_letter::DeadLetterLog;
+use super::check::{check, check_refusal, Checked, Identified, Sampled};
+use super::coordinator::{deduplicate, load, run_step, unknown_domain, Deduplicated};
+use super::dead_letter::{write_dead_letter, DeadLetterLog};
 use super::domain::Domain;
 use super::error::{Failure, KernelError, Step, StepError};
 use super::handler::Handler;
-use super::markup::ProjectionContext;
-use super::policy::{policy, projection, Policy, Projection};
-use super::registry::Registry;
+use super::markup::{self, PolicyContext, ProjectionContext};
+use super::payload::type_name;
+use super::policy::{orders, projection, Projection};
+use super::registry::{Registry, StepFailure};
 use super::store::{Port, Store, StorePort};
 use super::stream::{Envelope, Stream};
 use annals_diagnostic::Report;
@@ -142,7 +133,7 @@ impl<'k> Kernel<'k> {
         }
     }
 
-    /// Chains at most `limit` reaction steps deep.
+    /// Chains at most `limit` policy steps deep.
     pub fn limit(mut self, limit: usize) -> Kernel<'k> {
         self.limit = limit;
         self
@@ -153,43 +144,16 @@ impl<'k> Kernel<'k> {
     }
 
     /// Handle one book for the `D` stream it names, then every policy step
-    /// it sets off, and wait for the chain to settle. Each step is ONE
-    /// atomic write to `store` (no unit of work): one stream's events, with
-    /// the step's positions.
-    ///
-    /// 1. The command: [`check`](super::check) it, load its stream,
-    ///    deduplicate, decide, write its events.
-    /// 2. Then, for each event that write recorded, each policy for its
-    ///    domain (the [`Routes`]' hand-written ones, then the registry's
-    ///    marked-up ones, each in the order registered) and each of its
-    ///    targets in order: one step on the target's stream, deduplicated
-    ///    by the derived command id, its events written with the policy's
-    ///    position on the source stream (put once the trigger's last target
-    ///    lands). A marked-up policy's command its target refuses is no
-    ///    failure: the policy's refusal fact goes to the stream of the
-    ///    triggering event, as a step of its own, with the refused
-    ///    command's id. Depth first, to the chain's limit.
-    ///
-    /// A step that fails keeps every write before it: nothing is rolled
-    /// back. The answer is the failure, with the path to the step
-    /// ([`Failure::Downstream`]); a rejected step is also dead-lettered and
-    /// its position moves past it, while a step the store failed (or a
-    /// bug) keeps its position, so [`Kernel::resume`] runs it again. The
-    /// command's own failure writes nothing; a refused write and a lost
-    /// race are [`KernelError::Store`].
-    ///
-    /// A duplicate answers [`Handled::Duplicate`], and first settles what
-    /// its stream still owes its policies (by their positions), so a retry
-    /// after a crash finishes the chain. Projections run on every step's
-    /// events once written; a marked-up projector's failure is the
-    /// caller's [`Failure::Projection`], the events staying written. A
-    /// cover of another domain than `D` is [`KernelError::WrongDomain`].
-    /// Deciding stays synchronous and pure; the future is `Send` whenever
-    /// the store's are.
+    /// it sets off, and wait for the chain to settle (see the module docs).
+    /// Each step is ONE atomic write to `store`: one stream's events, with
+    /// the step's positions. The command's own failure writes nothing: a
+    /// refused write and a lost race are [`KernelError::Store`]. A cover of
+    /// another domain than `D` is [`KernelError::WrongDomain`]. Deciding
+    /// stays synchronous and pure; the future is `Send` whenever the
+    /// store's are.
     pub async fn handle<D, S, Ps>(
         &self,
         store: &S,
-        routes: &Routes,
         book: CommandBook,
         sampled: &Sampled,
         projections: &mut Ps,
@@ -200,35 +164,61 @@ impl<'k> Kernel<'k> {
         Ps: Project,
     {
         let checked = self.check::<D>(book)?;
-        let handled = self
-            .chain::<D, _>(&mut StorePort(store), routes, sampled, checked)
-            .await?;
-        let handled = self.project(handled, projections);
-        let committed = match &handled {
-            Handled::Applied(recorded) => recorded.books.clone(),
-            Handled::Duplicate(_) => return Ok(handled),
+        let mut port = StorePort(store);
+        let mut run = Run::new(self, sampled);
+        let identified = checked.identify(sampled);
+        let cover = identified.cover().clone();
+        let novel = match deduplicate(&mut port, self.registry, identified)
+            .await
+            .map_err(Failure::Kernel)?
+        {
+            Deduplicated::Duplicate { events } => {
+                // A retry settles what its own events still owe, as the
+                // original would have: never the stream's older history.
+                if let Some(first) = events.pages.first() {
+                    run.queue
+                        .push_back((cover, Vec::new(), Some(first.sequence)));
+                    run.settle(&mut port).await.map_err(downstream)?;
+                }
+                let failures = self.run_projectors(&run.recorded.steps).await;
+                if !failures.is_empty() {
+                    return Err(Failure::Projection {
+                        committed: run.recorded.books,
+                        failures,
+                    });
+                }
+                return Ok(Handled::Duplicate(events));
+            }
+            Deduplicated::Novel(novel) => novel,
         };
-        let failures = self.run_projectors(&committed).await;
-        if !failures.is_empty() {
-            return Err(Failure::Projection {
-                committed,
-                failures,
-            });
+        let contextual = load(*novel, &mut run.nonces).map_err(Failure::Kernel)?;
+        let head = contextual.head();
+        let (stream, pages) =
+            run_step::<D>(contextual, None, self.registry, sampled, self.dead_letters)?;
+        if !pages.is_empty() {
+            port.write(&cover, head, &pages, &[])
+                .await
+                .map_err(|e| Failure::Kernel(KernelError::Store(e)))?;
         }
-        Ok(handled)
+        run.record(cover.clone(), head, Box::new(stream), pages);
+        run.queue.push_back((cover, Vec::new(), Some(head)));
+        let settled = run.settle(&mut port).await.map_err(downstream);
+        let recorded = run.recorded;
+        settled?;
+        self.finish(Handled::Applied(recorded), projections).await
     }
 
-    /// Run every policy step still owed, by position: for each policy in
-    /// `routes` and each stream of its source domain, the events from the
-    /// policy's position on, each step as [`Kernel::handle`] runs them
-    /// (deduplicated, so a step that landed before a crash is not repeated;
-    /// one write each, its position written with it). What
-    /// an application runs at start, after a crash, or after adding a
-    /// policy to a domain with history. Returns what the steps recorded.
+    /// Run every policy step still owed, by position: for each stream of
+    /// each policy's source domain, the events from the lowest of its
+    /// policies' positions on, each policy for each event it has yet to
+    /// handle, each step as [`Kernel::handle`] runs them (deduplicated, so
+    /// a step that landed before a crash is not repeated; one write each,
+    /// its position written with it). What an application runs at start,
+    /// after a crash, or after adding a policy to a domain with history.
+    /// Returns what the steps recorded.
     pub async fn resume<S, Ps>(
         &self,
         store: &S,
-        routes: &Routes,
         sampled: &Sampled,
         projections: &mut Ps,
     ) -> Result<Recorded, Failure<Infallible>>
@@ -236,8 +226,52 @@ impl<'k> Kernel<'k> {
         S: Store,
         Ps: Project,
     {
-        let _ = (store, routes, sampled, projections);
-        todo!("red: resume every policy from its position")
+        let mut port = StorePort(store);
+        let mut run = Run::new(self, sampled);
+        let mut sources: Vec<&'static str> = Vec::new();
+        for policy in self.registry.all_policies() {
+            if !sources.contains(&policy.source()) {
+                sources.push(policy.source());
+            }
+        }
+        for source in sources {
+            let covers = port
+                .covers(source)
+                .await
+                .map_err(|e| Failure::Kernel(KernelError::Store(e)))?;
+            for cover in covers {
+                run.queue.push_back((cover, Vec::new(), None));
+            }
+        }
+        let settled = run.settle(&mut port).await.map_err(downstream);
+        let recorded = run.recorded;
+        settled?;
+        match self.finish(Handled::Applied(recorded), projections).await? {
+            Handled::Applied(recorded) => Ok(recorded),
+            Handled::Duplicate(_) => unreachable!("a resume answers what it recorded"),
+        }
+    }
+
+    /// Run `projections`, then every marked-up projector, over what was
+    /// written.
+    async fn finish<R, Ps: Project>(
+        &self,
+        handled: Handled,
+        projections: &mut Ps,
+    ) -> Result<Handled, Failure<R>> {
+        let handled = self.project(handled, projections);
+        let (steps, books) = match &handled {
+            Handled::Applied(recorded) => (recorded.steps.clone(), recorded.books.clone()),
+            Handled::Duplicate(_) => return Ok(handled),
+        };
+        let failures = self.run_projectors(&steps).await;
+        if !failures.is_empty() {
+            return Err(Failure::Projection {
+                committed: books,
+                failures,
+            });
+        }
+        Ok(handled)
     }
 
     /// Every marked-up projector over the `committed` events of its
@@ -312,19 +346,6 @@ impl<'k> Kernel<'k> {
         Ok(checked)
     }
 
-    /// The chain for `checked`, appended through `port`, uncommitted.
-    async fn chain<D: Domain, P: Port>(
-        &self,
-        port: &mut P,
-        routes: &Routes,
-        sampled: &Sampled,
-        checked: Checked,
-    ) -> Result<Handled, Failure<D::Rejection>> {
-        Run::new(self, routes, sampled)
-            .finish::<D, P>(port, checked)
-            .await
-    }
-
     /// Run `projections` over what a committed chain recorded.
     fn project<Ps: Project>(&self, handled: Handled, projections: &mut Ps) -> Handled {
         match handled {
@@ -337,343 +358,392 @@ impl<'k> Kernel<'k> {
     }
 }
 
-/// One policy, its types erased so a [`Routes`] table can hold policies of
-/// any domains, and so the table names no store: what the policy owes for
-/// the events a source stream (a `Stream<Source>`, boxed) staged from
-/// `from` on, each order booked and checked through the kernel's reaction
-/// entry, with the step it is. Pure: the chain loads, deduplicates and
-/// decides the orders' targets itself, the typed step reached through the
-/// [`Registry`] by the target's domain name.
-type Route = Box<dyn Fn(&dyn AnyType, u64, &Registry, &dyn DeadLetterLog) -> Owed + Send + Sync>;
-
-/// The orders owed, each with its step; or the path to the step that
-/// failed, from the step that owes, and why.
-type Owed = Result<Vec<(Step, Checked)>, (Vec<Step>, StepError)>;
-
-/// Which policies react to which source domain, in the order registered.
-/// Built once at start-up, independent of any store, and shared by every
-/// command.
-#[derive(Default)]
-pub struct Routes {
-    by_source: BTreeMap<&'static str, Vec<Route>>,
+/// A chain's failure, as the caller's: the path to the failing step, and
+/// why.
+fn downstream<R>((path, error): (Vec<Step>, StepError)) -> Failure<R> {
+    Failure::Downstream { path, error }
 }
 
-impl Routes {
-    pub fn new() -> Self {
-        Self::default()
-    }
+/// The path to a failing step, and why it failed.
+type Failed = (Vec<Step>, StepError);
 
-    /// Run `P` after any `P::Source` stream stages events: each order it
-    /// owes is checked, identified and executed in its target, in the same
-    /// chain. Both domains must be registered.
-    pub fn policy<P: Policy>(self) -> Self {
-        let route: Route = Box::new(|source, from, registry, dead_letters| {
-            let Some(source) = source.downcast_ref::<Stream<P::Source>>() else {
-                return Ok(Vec::new());
-            };
-            let mut orders = Vec::new();
-            source
-                .dispatch(
-                    from,
-                    registry,
-                    &mut [&mut policy::<P, _>(|order| orders.push(order))],
-                )
-                .map_err(|e| (Vec::new(), StepError::Kernel(e)))?;
-            orders
-                .into_iter()
-                .map(|order| {
-                    let step = Step {
-                        stream: order.cover().clone(),
-                        cause: order.trigger().clone(),
-                    };
-                    match order.check_logged(registry, dead_letters) {
-                        Ok(checked) => Ok((step, checked)),
-                        Err(m) => Err((vec![step], StepError::Kernel(KernelError::Malformed(m)))),
-                    }
-                })
-                .collect()
-        });
-        let mut routes = self;
-        routes
-            .by_source
-            .entry(<P::Source as Domain>::NAME)
-            .or_default()
-            .push(route);
-        routes
-    }
-}
-
-/// One staged stream: the sequence it was loaded at, the stream (a
-/// `Stream<D>`, boxed) with the chain's events committed to it in memory,
-/// and those events' pages, for deduplication and the append. The stream
-/// is out only while a step runs on it.
-struct Staged {
-    loaded_at: u64,
-    stream: Option<Box<dyn AnyType + Send>>,
-    pages: Vec<EventPage>,
-}
-
-/// A command chain in progress: every stream it has touched, loaded once
-/// from the store and staged since, the path from the originating
-/// command to the step running now, and what the application sampled for
-/// the whole chain (one instant; one minted command id, for the
-/// originating command only).
-struct Run<'u> {
-    registry: &'u Registry,
-    routes: &'u Routes,
-    sampled: &'u Sampled,
-    dead_letters: &'u dyn DeadLetterLog,
-    /// Looked up only; the order streams are appended in is `order`.
-    staged: HashMap<Cover, Staged>,
-    order: Vec<Cover>,
-    path: Vec<Step>,
+/// A chain in progress: the streams whose policies may owe steps, each with
+/// the path of steps that led to it, in the order written; what the
+/// application sampled for the whole chain (one instant; one minted
+/// command id, for the originating command only); and what it recorded.
+struct Run<'k> {
+    registry: &'k Registry,
+    sampled: &'k Sampled,
+    dead_letters: &'k dyn DeadLetterLog,
     limit: usize,
     /// Mints each delivery's [`Nonce`](super::Nonce).
     nonces: u64,
+    /// The streams to settle, the path to each, and which of its events:
+    /// those a step just wrote (`Some(from)`, from that sequence on), or
+    /// every one its policies still owe by their positions (`None`).
+    queue: VecDeque<(Cover, Vec<Step>, Option<u64>)>,
+    recorded: Recorded,
 }
 
-/// What step 4 found for a command in a chain.
-enum Found {
-    Duplicate(EventBook),
-    /// The command in context, and the chain's staged stream, if any.
-    Novel(Box<Contextual>, Option<Box<dyn AnyType + Send>>),
+/// What a step came to.
+enum Stepped {
+    /// It wrote events to its stream, from this sequence on.
+    Wrote(Cover, u64),
+    /// It wrote no event: a duplicate, or a decision with none.
+    Nothing,
 }
 
-impl<'u> Run<'u> {
-    fn new(kernel: &Kernel<'u>, routes: &'u Routes, sampled: &'u Sampled) -> Run<'u> {
+impl<'k> Run<'k> {
+    fn new(kernel: &Kernel<'k>, sampled: &'k Sampled) -> Run<'k> {
         Run {
             registry: kernel.registry,
-            routes,
             sampled,
             dead_letters: kernel.dead_letters,
-            staged: HashMap::new(),
-            order: Vec::new(),
-            path: Vec::new(),
             limit: kernel.limit,
             nonces: 0,
+            queue: VecDeque::new(),
+            recorded: Recorded::default(),
         }
     }
 
-    /// The originating command's chain, then the append: the duplicate's
-    /// events, or what the chain recorded.
-    async fn finish<D: Domain, P: Port>(
-        mut self,
-        port: &mut P,
-        command: Checked,
-    ) -> Result<Handled, Failure<D::Rejection>> {
-        if let Some(book) = self.execute::<D, P>(port, command).await? {
-            return Ok(Handled::Duplicate(book));
-        }
-        let recorded = self.append(port).await.map_err(Failure::Kernel)?;
-        Ok(Handled::Applied(recorded))
-    }
-
-    /// Steps 3 and 4 for `command`, the chain's staged events and streams
-    /// consulted before the store.
-    async fn find<P: Port>(
-        &mut self,
-        port: &mut P,
-        command: super::Identified,
-    ) -> Result<Found, KernelError> {
-        let cover = command.cover().clone();
-        let Some(staged_pages) = self.staged.get(&cover).map(|s| &s.pages) else {
-            // Not yet in the chain: load, then look up (step 3), then step 4.
-            return match deduplicate(port, self.registry, command).await? {
-                Deduplicated::Duplicate { events } => Ok(Found::Duplicate(events)),
-                Deduplicated::Novel(novel) => {
-                    let contextual = load(*novel, &mut self.nonces)?;
-                    Ok(Found::Novel(Box::new(contextual), None))
-                }
-            };
-        };
-        // Loaded when the chain first touched it: look up, store and staged.
-        if let Some(events) = find_duplicate(port, &command, staged_pages)
-            .await
-            .map_err(KernelError::Store)?
-        {
-            return Ok(Found::Duplicate(events));
-        }
-        let staged = self
-            .staged
-            .get_mut(&cover)
-            .expect("the chain holds the stream it just looked up");
-        let head = staged.loaded_at + staged.pages.len() as u64;
-        let resolution = resolution(self.registry, &command)?;
-        let (expected, nonce) = expect(&command, resolution, head, &mut self.nonces)?;
-        let contextual = Contextual {
-            command,
-            resolution,
-            expected,
-            snapshot: None,
-            pages: Vec::new(),
-            head,
-            last_recorded_at: None,
-            nonce,
-        };
-        Ok(Found::Novel(Box::new(contextual), staged.stream.take()))
-    }
-
-    /// Hold `stream` after a step, with the `pages` it added; `loaded_at`
-    /// is its length when the chain first touched it.
-    fn stage(
-        &mut self,
-        cover: Cover,
-        loaded_at: u64,
-        stream: Box<dyn AnyType + Send>,
-        pages: Vec<EventPage>,
-    ) {
-        match self.staged.get_mut(&cover) {
-            Some(staged) => {
-                staged.stream = Some(stream);
-                staged.pages.extend(pages);
-            }
-            None => {
-                self.order.push(cover.clone());
-                self.staged.insert(
-                    cover,
-                    Staged {
-                        loaded_at,
-                        stream: Some(stream),
-                        pages,
-                    },
-                );
-            }
-        }
-    }
-
-    /// Run a checked command through steps 2 to 5 in the stream it names
-    /// (deduplicating against the store and the chain's staged events;
-    /// loading from the store the first time the chain touches the stream,
-    /// from the staged copy after), stage its events, then run the routes
-    /// for `D` on them, depth first. `Some`: step 3 found the command's
-    /// events, which are the answer, and nothing was staged.
-    async fn execute<D: Domain, P: Port>(
-        &mut self,
-        port: &mut P,
-        command: Checked,
-    ) -> Result<Option<EventBook>, Failure<D::Rejection>> {
-        let command = command.identify(self.sampled);
-        let (contextual, staged) = match self.find(port, command).await.map_err(Failure::Kernel)? {
-            Found::Duplicate(book) => return Ok(Some(book)),
-            Found::Novel(contextual, staged) => (contextual, staged),
-        };
-        let cover = contextual.command().cover().clone();
-        let head = contextual.head();
-        let (stream, pages) = run_step::<D>(
-            *contextual,
-            staged,
-            self.registry,
-            self.sampled,
-            self.dead_letters,
-        )?;
-        self.stage(cover.clone(), head, Box::new(stream), pages);
-        self.react(port, &cover, head)
-            .await
-            .map_err(|(path, error)| Failure::Downstream { path, error })?;
-        Ok(None)
-    }
-
-    /// The orders the routes for `cover`'s domain owe for its events from
-    /// `from` on, each with its step.
-    fn owed(&self, cover: &Cover, from: u64) -> Owed {
-        let Some(stream) = self.staged.get(cover).and_then(|s| s.stream.as_deref()) else {
-            return Ok(Vec::new());
-        };
-        let mut orders = Vec::new();
-        for route in self
-            .routes
-            .by_source
-            .get(cover.domain.as_str())
-            .into_iter()
-            .flatten()
-        {
-            let owed =
-                route(stream, from, self.registry, self.dead_letters).map_err(|(rest, e)| {
-                    let mut path = self.path.clone();
-                    path.extend(rest);
-                    (path, e)
-                })?;
-            orders.extend(owed);
-        }
-        Ok(orders)
-    }
-
-    /// Every policy command `cover`'s events from `from` on set off, and
-    /// theirs, depth first.
-    async fn react<P: Port>(
-        &mut self,
-        port: &mut P,
-        cover: &Cover,
-        from: u64,
-    ) -> Result<(), (Vec<Step>, StepError)> {
-        let mut frames = vec![self.owed(cover, from)?.into_iter()];
-        while let Some(frame) = frames.last_mut() {
-            let Some((step, command)) = frame.next() else {
-                frames.pop();
-                continue;
-            };
-            let depth = frames.len();
-            self.path.truncate(depth - 1);
-            self.path.push(step);
-            let failed = |run: &Run<'_>, error| (run.path.clone(), error);
-            if depth > self.limit {
-                let limit = self.limit;
-                return Err(failed(
-                    self,
-                    StepError::Kernel(KernelError::ChainTooDeep { limit }),
-                ));
-            }
-            let command = command.identify(self.sampled);
-            let (contextual, staged) = match self.find(port, command).await {
-                Ok(Found::Duplicate(_)) => continue,
-                Ok(Found::Novel(contextual, staged)) => (contextual, staged),
-                Err(e) => return Err(failed(self, StepError::Kernel(e))),
-            };
-            let target = contextual.command().cover().clone();
-            let head = contextual.head();
-            let step = self
-                .registry
-                .step(&target.domain)
-                .ok_or_else(|| failed(self, StepError::Kernel(unknown_domain(&target.domain))))?;
-            let (stream, pages) = step(
-                *contextual,
-                staged,
-                self.registry,
-                self.sampled,
-                self.dead_letters,
-            )
-            .map_err(|e| failed(self, e))?;
-            self.stage(target.clone(), head, stream, pages);
-            frames.push(self.owed(&target, head)?.into_iter());
+    /// Settle every queued stream, in order: each runs its policies on
+    /// every event they have yet to handle; a stream a step writes to is
+    /// queued in its turn.
+    async fn settle<P: Port>(&mut self, port: &mut P) -> Result<(), Failed> {
+        while let Some((source, path, written)) = self.queue.pop_front() {
+            self.settle_stream(port, &source, &path, written).await?;
         }
         Ok(())
     }
 
-    /// Write every staged stream, in the order first touched, each
-    /// expecting the length it was loaded at. A conflict on any stream is a
-    /// [`StoreError::Conflict`](super::StoreError::Conflict) naming it.
-    async fn append<P: Port>(mut self, port: &mut P) -> Result<Recorded, KernelError> {
-        let mut recorded = Recorded::default();
-        for cover in std::mem::take(&mut self.order) {
-            let Some(staged) = self.staged.remove(&cover) else {
-                continue;
+    /// Run `source`'s policies on its events, each event in order, each
+    /// policy in registration order: on the events a step just wrote, from
+    /// `written` on; or, `written` `None`, on every event from each
+    /// policy's position on. A policy whose position is past an event has
+    /// handled it.
+    async fn settle_stream<P: Port>(
+        &mut self,
+        port: &mut P,
+        source: &Cover,
+        path: &[Step],
+        written: Option<u64>,
+    ) -> Result<(), Failed> {
+        let registry = self.registry;
+        let policies: Vec<_> = registry.policies(&source.domain).collect();
+        if policies.is_empty() {
+            return Ok(());
+        }
+        let store = |e| (path.to_vec(), StepError::Kernel(KernelError::Store(e)));
+        let mut positions = Vec::with_capacity(policies.len());
+        for policy in &policies {
+            positions.push(port.position(policy.name(), source).await.map_err(store)?);
+        }
+        let owed = positions.iter().copied().min().unwrap_or_default();
+        let from = written.map_or(owed, |written| written.max(owed));
+        let Some(slice) = port.read_from(source, from).await.map_err(store)? else {
+            return Ok(());
+        };
+        let upcaster = registry.upcaster(&source.domain);
+        for page in &slice.pages {
+            let trigger = EventRef {
+                stream: Some(source.clone()),
+                sequence: page.sequence,
             };
-            if !staged.pages.is_empty() {
-                port.write(&cover, staged.loaded_at, &staged.pages, &[])
-                    .await
-                    .map_err(KernelError::Store)?;
-            }
-            recorded.books.push(EventBook {
-                cover: Some(cover.clone()),
-                snapshot: None,
-                next_sequence: staged.loaded_at + staged.pages.len() as u64,
-                pages: staged.pages,
-            });
-            if let Some(stream) = staged.stream {
-                recorded.streams.push((cover, staged.loaded_at, stream));
+            let meta = page.meta.clone().unwrap_or_default();
+            let ctx = PolicyContext::new(
+                trigger,
+                meta.correlation_id.clone().unwrap_or_default(),
+                meta.recorded_at.unwrap_or_default(),
+            );
+            let sent = page.payload.clone().unwrap_or_default();
+            let event = match upcaster {
+                Some(upcaster) => upcaster.upcast_event(&sent).map_err(|error| {
+                    let error = KernelError::Upcast {
+                        stream: source.clone(),
+                        error,
+                    };
+                    (path.to_vec(), StepError::Kernel(error))
+                })?,
+                None => sent,
+            };
+            for (k, policy) in policies.iter().enumerate() {
+                if page.sequence < positions[k] {
+                    continue;
+                }
+                let ran = self
+                    .run_policy(port, *policy, source, page, &event, &ctx, path)
+                    .await;
+                if let Err(failed) = ran {
+                    // A command owes steps for its own events only: a step
+                    // that fails leaves its policy owing from its trigger,
+                    // as a success would have moved past the history
+                    // before it. Best effort: the step's error is the
+                    // answer, and a position left behind only owes more. A
+                    // refused step has already moved its position past.
+                    if !matches!(failed.1, StepError::Rejected(_)) {
+                        let _ = port
+                            .write_positions(&[(policy.name(), source, page.sequence)])
+                            .await;
+                    }
+                    return Err(failed);
+                }
+                positions[k] = page.sequence + 1;
             }
         }
-        Ok(recorded)
+        Ok(())
+    }
+
+    /// One policy on one event of `source`: each command it sends a step
+    /// of its own, its position written with the last (or alone, when no
+    /// step writes it).
+    #[allow(clippy::too_many_arguments)]
+    async fn run_policy<P: Port>(
+        &mut self,
+        port: &mut P,
+        policy: &dyn super::registry::ErasedPolicy,
+        source: &Cover,
+        page: &EventPage,
+        event: &prost_types::Any,
+        ctx: &PolicyContext,
+        path: &[Step],
+    ) -> Result<(), Failed> {
+        let next = page.sequence + 1;
+        let position = [(policy.name(), source, next)];
+        let commands = policy.on_event(event, ctx);
+        let orders = orders(policy.name(), policy.target(), source, ctx, commands);
+        let store = |path: Vec<Step>, e| (path, StepError::Kernel(KernelError::Store(e)));
+        if orders.is_empty() {
+            return port
+                .write_positions(&position)
+                .await
+                .map_err(|e| store(path.to_vec(), e));
+        }
+        let last = orders.len() - 1;
+        for (index, order) in orders.iter().enumerate() {
+            let mut path = path.to_vec();
+            path.push(Step {
+                stream: order.cover().clone(),
+                cause: order.trigger().clone(),
+            });
+            if path.len() > self.limit {
+                let limit = self.limit;
+                return Err((path, StepError::Kernel(KernelError::ChainTooDeep { limit })));
+            }
+            let checked = match order.check_logged(self.registry, self.dead_letters) {
+                Ok(checked) => checked,
+                Err(m) => return Err((path, StepError::Kernel(KernelError::Malformed(m)))),
+            };
+            let delivered = checked.identify(self.sampled);
+            let positions: &[(&str, &Cover, u64)] = match index == last {
+                true => &position,
+                false => &[],
+            };
+            match self.step(port, delivered.clone(), positions).await {
+                Ok(Stepped::Wrote(cover, head)) => self.queue.push_back((cover, path, Some(head))),
+                Ok(Stepped::Nothing) => {}
+                Err(StepFailure {
+                    error: StepError::Rejected(report),
+                    refusal,
+                }) => {
+                    if !policy.answers_refusals() {
+                        write_dead_letter(
+                            self.dead_letters,
+                            order.book(),
+                            policy.name(),
+                            &report.to_string(),
+                        );
+                        port.write_positions(&position)
+                            .await
+                            .map_err(|e| store(path.clone(), e))?;
+                        return Err((path, StepError::Rejected(report)));
+                    }
+                    let event = EventBook {
+                        cover: Some(source.clone()),
+                        pages: vec![page.clone()],
+                        ..EventBook::default()
+                    };
+                    let refusal = markup::v1::Refusal {
+                        event: Some(event),
+                        command: Some(delivered.to_book()),
+                        response: Some(markup::v1::RefusalResponse {
+                            refusal,
+                            message: report.to_string(),
+                        }),
+                    };
+                    let answer = policy.on_refused(&refusal);
+                    match self
+                        .refusal_step(port, policy.name(), &delivered, answer, positions)
+                        .await
+                    {
+                        Ok(Stepped::Wrote(cover, head)) => {
+                            self.queue.push_back((cover, path, Some(head)))
+                        }
+                        Ok(Stepped::Nothing) => {}
+                        Err(error) => return Err((path, error)),
+                    }
+                }
+                Err(failure) => return Err((path, failure.error)),
+            }
+        }
+        Ok(())
+    }
+
+    /// `delivered`'s refusal fact, `answer` the policy's payload for it, as
+    /// a step of its own in the stream of the triggering event, with the
+    /// refused command's id and correlation. A refusal its source has no
+    /// handler for is dead-lettered, and writes only `positions`.
+    async fn refusal_step<P: Port>(
+        &mut self,
+        port: &mut P,
+        policy: &'static str,
+        delivered: &Identified,
+        answer: prost_types::Any,
+        positions: &[(&str, &Cover, u64)],
+    ) -> Result<Stepped, StepError> {
+        let trigger = delivered.causation_id().cloned().unwrap_or_default();
+        let book = CommandBook {
+            cover: trigger.stream.clone(),
+            page: Some(CommandPage {
+                body: Some(command_page::Body::Fact(Fact {
+                    payload: Some(answer),
+                })),
+                fact_origin: Some(FactOrigin {
+                    external_id: delivered.command_id().to_string(),
+                    description: format!(
+                        "{} refused by {}",
+                        type_name(&delivered.payload().type_url),
+                        delivered.domain()
+                    ),
+                }),
+                ..CommandPage::default()
+            }),
+            handling: None,
+        };
+        let checked = check_refusal(
+            book.clone(),
+            self.registry,
+            trigger,
+            delivered.correlation_id().clone(),
+            delivered.command_id().clone(),
+        )
+        .map_err(|m| {
+            write_dead_letter(self.dead_letters, book, policy, &m.to_string());
+            StepError::Kernel(KernelError::Malformed(m))
+        })?;
+        let fact = checked.identify(self.sampled);
+        match self.step(port, fact.clone(), positions).await {
+            Ok(stepped) => Ok(stepped),
+            Err(StepFailure {
+                error: StepError::Kernel(KernelError::UnknownType { type_url, .. }),
+                ..
+            }) => {
+                write_dead_letter(
+                    self.dead_letters,
+                    fact.to_book(),
+                    fact.domain(),
+                    &format!("nothing handles the refusal of {type_url}"),
+                );
+                port.write_positions(positions)
+                    .await
+                    .map_err(|e| StepError::Kernel(KernelError::Store(e)))?;
+                Ok(Stepped::Nothing)
+            }
+            Err(failure) => Err(failure.error),
+        }
+    }
+
+    /// `command` as a step of its own in the stream it names: load,
+    /// deduplicate, decide or ingest, and write its events with
+    /// `positions` (or `positions` alone, when it writes no event).
+    async fn step<P: Port>(
+        &mut self,
+        port: &mut P,
+        command: Identified,
+        positions: &[(&str, &Cover, u64)],
+    ) -> Result<Stepped, StepFailure> {
+        let kernel = |error| StepFailure {
+            error: StepError::Kernel(error),
+            refusal: None,
+        };
+        let store = |e| kernel(KernelError::Store(e));
+        let cover = command.cover().clone();
+        let novel = match deduplicate(port, self.registry, command)
+            .await
+            .map_err(kernel)?
+        {
+            Deduplicated::Duplicate { .. } => {
+                if !positions.is_empty() {
+                    port.write_positions(positions).await.map_err(store)?;
+                }
+                return Ok(Stepped::Nothing);
+            }
+            Deduplicated::Novel(novel) => novel,
+        };
+        let contextual = load(*novel, &mut self.nonces).map_err(kernel)?;
+        let head = contextual.head();
+        let typed = self
+            .registry
+            .step(&cover.domain)
+            .ok_or_else(|| kernel(unknown_domain(&cover.domain)))?;
+        let (stream, pages) = typed(
+            contextual,
+            None,
+            self.registry,
+            self.sampled,
+            self.dead_letters,
+        )?;
+        if pages.is_empty() {
+            if !positions.is_empty() {
+                port.write_positions(positions).await.map_err(store)?;
+            }
+            return Ok(Stepped::Nothing);
+        }
+        port.write(&cover, head, &pages, positions)
+            .await
+            .map_err(store)?;
+        self.record(cover.clone(), head, stream, pages);
+        Ok(Stepped::Wrote(cover, head))
+    }
+
+    /// A step's write: its events, as the chain's answer.
+    fn record(
+        &mut self,
+        cover: Cover,
+        head: u64,
+        stream: Box<dyn AnyType + Send>,
+        pages: Vec<EventPage>,
+    ) {
+        if pages.is_empty() {
+            return;
+        }
+        let next_sequence = head + pages.len() as u64;
+        self.recorded.steps.push(EventBook {
+            cover: Some(cover.clone()),
+            snapshot: None,
+            next_sequence,
+            pages: pages.clone(),
+        });
+        match self
+            .recorded
+            .books
+            .iter_mut()
+            .find(|book| book.cover.as_ref() == Some(&cover))
+        {
+            Some(book) => {
+                book.pages.extend(pages);
+                book.next_sequence = next_sequence;
+            }
+            None => self.recorded.books.push(EventBook {
+                cover: Some(cover.clone()),
+                snapshot: None,
+                next_sequence,
+                pages,
+            }),
+        }
+        match self.recorded.streams.iter_mut().find(|(c, ..)| *c == cover) {
+            Some((_, _, held)) => *held = stream,
+            None => self.recorded.streams.push((cover, head, stream)),
+        }
     }
 }
 

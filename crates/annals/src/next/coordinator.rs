@@ -130,10 +130,6 @@ pub(crate) struct Contextual {
 }
 
 impl Contextual {
-    pub fn command(&self) -> &Identified {
-        &self.command
-    }
-
     /// The stream's next sequence.
     pub fn head(&self) -> u64 {
         self.head

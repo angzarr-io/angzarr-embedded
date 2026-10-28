@@ -92,8 +92,8 @@ mod tx {
 
     use crate::next::v1::{ConflictResolution, StateDescriptor, StateOptions, Uuid};
     use crate::next::{
-        ids, pack, Committed, Decoder, Domain, IngestCtx, Kernel, MemoryDeadLetters, Payload,
-        PayloadError, Policy, Registry, Rulebook, State, Tx, Upcaster,
+        ids, pack, Decoder, Domain, IngestCtx, Kernel, MemoryDeadLetters, Payload, PayloadError,
+        Policy, Registry, Rulebook, State, Tx, Upcaster,
     };
 
     use crate::next::toys::{at, command, cover, fees, opened, Account, AccountCmd, Edit};
@@ -304,22 +304,16 @@ mod tx {
     struct Probing;
 
     impl Policy for Probing {
+        const NAME: &'static str = "probing";
         type Source = Account;
         type Target = ProbeDomain;
-        type TargetId = ();
 
-        const NAME: &'static str = "probing";
-
-        fn targets(_: &crate::next::Committed<'_, Account>) -> Vec<()> {
-            vec![()]
-        }
-
-        fn root((): &()) -> Uuid {
-            probe_root()
-        }
-
-        fn command((): &(), _: &Committed<'_, Account>) -> Probe {
-            Probe { stash: 0 }
+        fn on_event(
+            &self,
+            _: &crate::next::Any,
+            _: &crate::next::markup::PolicyContext,
+        ) -> Option<crate::next::markup::Commands<ProbeDomain>> {
+            Some(crate::next::markup::Commands::none().send(probe_root(), &Probe { stash: 0 }))
         }
     }
 
@@ -351,17 +345,18 @@ mod tx {
 
     #[test]
     fn decide_reads_the_rules_the_stream_the_instant_and_the_ids() {
-        let registry = registry();
+        let plain = registry();
+        let mut registry = registry();
+        registry.policy(Probing);
         let log = MemoryDeadLetters::new();
         let kernel = Kernel::new(&registry, &log);
         let store = MemoryStore::new();
-        opened(&store, &registry, 1, 0);
-        let routes = crate::next::Routes::new().policy::<Probing>();
+        opened(&store, &plain, 1, 0);
         let book = command(cover("account", 1), AccountCmd::Deposit(5).to_any())
             .id(3)
             .correlated(6);
         let handled = kernel
-            .handle::<Account, _, _>(&store, &routes, book, &at(50), &mut ())
+            .handle::<Account, _, _>(&store, book, &at(50), &mut ())
             .ready()
             .unwrap();
         let trigger = crate::next::v1::EventRef {
@@ -393,7 +388,7 @@ mod tx {
         // Again: the probe stream is at 2 now, and decide sees its state.
         let book = command(cover("account", 1), AccountCmd::Deposit(5).to_any()).id(4);
         let handled = kernel
-            .handle::<Account, _, _>(&store, &routes, book, &at(51), &mut ())
+            .handle::<Account, _, _>(&store, book, &at(51), &mut ())
             .ready()
             .unwrap();
         let probed = &probes(&handled.books())[0];
@@ -410,25 +405,23 @@ mod tx {
     struct ProbeToLedger;
 
     impl Policy for ProbeToLedger {
+        const NAME: &'static str = "probe-to-ledger";
         type Source = ProbeDomain;
         type Target = crate::next::toys::Ledger;
-        type TargetId = ();
 
-        const NAME: &'static str = "probe-to-ledger";
-
-        fn targets(_: &crate::next::Committed<'_, ProbeDomain>) -> Vec<()> {
-            vec![()]
-        }
-
-        fn root((): &()) -> Uuid {
-            crate::next::toys::ledger_root()
-        }
-
-        fn command((): &(), c: &Committed<'_, ProbeDomain>) -> crate::next::toys::ledger::Record {
-            crate::next::toys::ledger::Record {
-                source_sequence: c.sequence(),
+        fn on_event(
+            &self,
+            _: &crate::next::Any,
+            ctx: &crate::next::markup::PolicyContext,
+        ) -> Option<crate::next::markup::Commands<crate::next::toys::Ledger>> {
+            let record = crate::next::toys::ledger::Record {
+                source_sequence: ctx.trigger().sequence,
                 cents: 1,
-            }
+            };
+            Some(
+                crate::next::markup::Commands::none()
+                    .send(crate::next::toys::ledger_root(), &record),
+            )
         }
     }
 
@@ -437,7 +430,10 @@ mod tx {
     /// and the steps before it stand.
     #[test]
     fn a_two_deep_chain_keeps_the_path_to_the_step_running_and_its_limit() {
+        let plain = registry();
         let mut registry = registry();
+        registry.policy(Probing);
+        registry.policy(ProbeToLedger);
         registry
             .register::<crate::next::toys::Ledger>(
                 Rulebook::new("v1", ()),
@@ -446,15 +442,12 @@ mod tx {
             .unwrap();
         let log = MemoryDeadLetters::new();
         let store = MemoryStore::new();
-        opened(&store, &registry, 1, 0);
-        let routes = crate::next::Routes::new()
-            .policy::<Probing>()
-            .policy::<ProbeToLedger>();
+        opened(&store, &plain, 1, 0);
         let deposit = || command(cover("account", 1), AccountCmd::Deposit(5).to_any()).id(3);
 
         let kernel = Kernel::new(&registry, &log).limit(2);
         kernel
-            .handle::<Account, _, _>(&store, &routes, deposit(), &at(50), &mut ())
+            .handle::<Account, _, _>(&store, deposit(), &at(50), &mut ())
             .ready()
             .unwrap();
         let probe = crate::next::v1::Cover {
@@ -479,10 +472,10 @@ mod tx {
         );
 
         let store = MemoryStore::new();
-        opened(&store, &registry, 1, 0);
+        opened(&store, &plain, 1, 0);
         let shallow = Kernel::new(&registry, &log).limit(1);
         let failure = shallow
-            .handle::<Account, _, _>(&store, &routes, deposit(), &at(50), &mut ())
+            .handle::<Account, _, _>(&store, deposit(), &at(50), &mut ())
             .ready()
             .err()
             .unwrap();

@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Mutex;
 
-use angzarr_proto::v1::{ConflictResolution, EventPage, Snapshot, StateDescriptor};
+use angzarr_proto::v1::{ConflictResolution, EventPage, Snapshot, StateDescriptor, Uuid};
 use prost_types::Any;
 
 use annals_diagnostic::{Arg, Diagnostic, Report};
@@ -72,6 +72,49 @@ pub(crate) struct ProjectorEntry {
     pub(crate) instance: Mutex<Option<Box<dyn ErasedProjector>>>,
 }
 
+/// A registered [`Policy`](super::Policy), its types erased, held in the
+/// registry's one list in registration order.
+pub(crate) trait ErasedPolicy: Send + Sync {
+    /// Its name: its commands' component and its position's handler.
+    fn name(&self) -> &'static str;
+    /// The domain whose events it handles.
+    fn source(&self) -> &'static str;
+    /// The domain it sends commands to.
+    fn target(&self) -> &'static str;
+    /// Whether its refused command is answered by its refusal fact.
+    fn answers_refusals(&self) -> bool;
+    /// The commands it sends for `event`, each with its target's root.
+    fn on_event(&self, event: &Any, ctx: &super::markup::PolicyContext) -> Vec<(Uuid, Any)>;
+    /// Its refusal fact's payload for `refusal`.
+    fn on_refused(&self, refusal: &super::markup::v1::Refusal) -> Any;
+}
+
+impl<P: super::Policy> ErasedPolicy for P {
+    fn name(&self) -> &'static str {
+        P::NAME
+    }
+
+    fn source(&self) -> &'static str {
+        <P::Source as Domain>::NAME
+    }
+
+    fn target(&self) -> &'static str {
+        <P::Target as Domain>::NAME
+    }
+
+    fn answers_refusals(&self) -> bool {
+        P::ANSWERS_REFUSALS
+    }
+
+    fn on_event(&self, event: &Any, ctx: &super::markup::PolicyContext) -> Vec<(Uuid, Any)> {
+        super::Policy::on_event(self, event, ctx).map_or_else(Vec::new, |c| c.into_orders())
+    }
+
+    fn on_refused(&self, refusal: &super::markup::v1::Refusal) -> Any {
+        super::Policy::on_refused(self, refusal)
+    }
+}
+
 /// [`AsyncProjector`] with its constant and type erased.
 pub(crate) trait ErasedProjector: Send {
     fn project<'a>(
@@ -102,7 +145,15 @@ pub(crate) type TypedStep = fn(
     &Registry,
     &Sampled,
     &dyn DeadLetterLog,
-) -> Result<(Box<dyn AnyType + Send>, Vec<EventPage>), StepError>;
+) -> Result<(Box<dyn AnyType + Send>, Vec<EventPage>), StepFailure>;
+
+/// Why a typed step failed: the error, and for a rejection the typed
+/// refusal object it carries, packed ([`Domain::refusal`]), which a refused
+/// policy receives.
+pub(crate) struct StepFailure {
+    pub(crate) error: StepError,
+    pub(crate) refusal: Option<Any>,
+}
 
 /// [`TypedStep`] for `D`.
 fn typed_step<D: Domain>(
@@ -111,13 +162,20 @@ fn typed_step<D: Domain>(
     registry: &Registry,
     sampled: &Sampled,
     dead_letters: &dyn DeadLetterLog,
-) -> Result<(Box<dyn AnyType + Send>, Vec<EventPage>), StepError> {
+) -> Result<(Box<dyn AnyType + Send>, Vec<EventPage>), StepFailure> {
     let (stream, pages) =
         run_step::<D>(command, staged, registry, sampled, dead_letters).map_err(|failure| {
+            let plain = |error| StepFailure {
+                error,
+                refusal: None,
+            };
             match failure {
-                Failure::Rejected(rejection) => StepError::Rejected(Report::of(&rejection)),
-                Failure::Kernel(error) => StepError::Kernel(error),
-                Failure::Downstream { error, .. } => error,
+                Failure::Rejected(rejection) => StepFailure {
+                    error: StepError::Rejected(Report::of(&rejection)),
+                    refusal: D::refusal(&rejection),
+                },
+                Failure::Kernel(error) => plain(StepError::Kernel(error)),
+                Failure::Downstream { error, .. } => plain(error),
                 Failure::Projection { .. } => unreachable!("a chain step runs no projector"),
             }
         })?;
@@ -245,8 +303,8 @@ impl Diagnostic for Misconfigured {
 #[derive(Default)]
 pub struct Registry {
     domains: BTreeMap<String, Entry>,
-    /// The registered policies' names.
-    policies: Vec<&'static str>,
+    /// The registered policies, in registration order: the one list.
+    policies: Vec<Box<dyn ErasedPolicy>>,
     projectors: Vec<ProjectorEntry>,
 }
 
@@ -418,29 +476,37 @@ impl Registry {
         entry.process_manager = pm;
     }
 
-    /// Register `policy`, a marked-up policy (`#[policy]`). Registering one twice
-    /// PANICS at startup.
-    ///
-    /// annals does not run a policy yet: its steps, each committed on its
-    /// own (the source's events before the policy's command; a refusal fact
-    /// as a step of its own), arrive with the kernel's committed-step
-    /// dispatch. What a policy answers is its markup's
-    /// ([`Policy::on_event`](super::markup::Policy::on_event),
-    /// [`Policy::on_refused`](super::markup::Policy::on_refused)), whatever
-    /// runs it.
-    pub fn policy<S: super::markup::Policy>(&mut self, policy: S) -> &mut Self {
-        if self.policies.contains(&S::NAME) {
-            panic!("policy \"{}\" is registered already", S::NAME);
+    /// Register `policy`, written by hand or marked up (`#[policy]`): ONE
+    /// list, in registration order, which is the order the kernel runs
+    /// every policy of a source in, for each of its events. Registering one
+    /// twice (by name) PANICS at startup.
+    pub fn policy<P: super::Policy>(&mut self, policy: P) -> &mut Self {
+        if self.policies.iter().any(|entry| entry.name() == P::NAME) {
+            panic!("policy \"{}\" is registered already", P::NAME);
         }
-        drop(policy);
-        self.policies.push(S::NAME);
+        self.policies.push(Box::new(policy));
         self
     }
 
+    /// The policies of `source`'s events, in registration order.
+    pub(crate) fn policies<'r>(
+        &'r self,
+        source: &'r str,
+    ) -> impl Iterator<Item = &'r dyn ErasedPolicy> + 'r {
+        self.policies
+            .iter()
+            .map(|entry| &**entry)
+            .filter(move |entry| entry.source() == source)
+    }
+
+    /// Every registered policy, in registration order.
+    pub(crate) fn all_policies(&self) -> impl Iterator<Item = &dyn ErasedPolicy> {
+        self.policies.iter().map(|entry| &**entry)
+    }
+
     /// Register `projector`, the ONE instance of a marked-up projector
-    /// (`#[projector]`) this process runs, holding its ports. The kernel's
-    /// async command path ([`Kernel::handle_async`](super::Kernel::handle_async))
-    /// runs it after each commit that records its source's events, and
+    /// (`#[projector]`) this process runs, holding its ports. The kernel
+    /// ([`Kernel::handle`](super::Kernel::handle)) runs it after each commit that records its source's events, and
     /// awaits it before the call returns: a failure is the caller's error
     /// ([`Failure::Projection`]; the events stay committed), and does not
     /// stop the other projectors. Registering one twice PANICS at startup.

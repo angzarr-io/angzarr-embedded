@@ -1,8 +1,7 @@
-//! The chain as a sequence of committed steps (the owner's ruling,
-//! 2026-10-28: atomicity covers one handling step, never a chain). A
-//! command commits on its own stream; each policy step after it is its own
-//! unit of work on one stream, committed with the policy's position on its
-//! source; a step that fails keeps every commit before it, and a step left
+//! The chain as a sequence of committed steps: atomicity covers one
+//! handling step, never a chain. A command commits on its own stream; each
+//! policy step after it is one atomic write to one stream, committed with
+//! the policy's position on its source; a step that fails keeps every commit before it, and a step left
 //! undone (a crash, a failed store) is resumed by position, deduplicated by
 //! its derived command id. The call waits for the chain to settle.
 
@@ -11,8 +10,7 @@ use crate::next::toys::prelude::*;
 use crate::next::v1::event_meta::Causation;
 use crate::next::v1::{CommandBook, EventMeta, EventRef};
 use crate::next::{
-    ids, Failure, Kernel, KernelError, MemoryDeadLetters, Payload, Recovery, Routes, Step,
-    StepError,
+    ids, Failure, Kernel, KernelError, MemoryDeadLetters, Payload, Recovery, Step, StepError,
 };
 
 use crate::next::toys::{
@@ -34,21 +32,16 @@ fn ledger_cover() -> crate::next::v1::Cover {
 
 #[test]
 fn a_policys_events_carry_the_derived_command_id_as_causation_and_no_trigger() {
-    let registry = registry();
+    let plain = registry();
+    let mut registry = registry();
+    registry.policy(Bookkeeping);
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry, &log);
     let store = MemoryStore::new();
-    opened(&store, &registry, 1, 0);
-    let routes = Routes::new().policy::<Bookkeeping>();
+    opened(&store, &plain, 1, 0);
 
     let handled = kernel
-        .handle::<Account, _, _>(
-            &store,
-            &routes,
-            deposit(3, 25).correlated(8),
-            &at(30),
-            &mut (),
-        )
+        .handle::<Account, _, _>(&store, deposit(3, 25).correlated(8), &at(30), &mut ())
         .ready()
         .unwrap();
     let books = handled.books();
@@ -94,22 +87,17 @@ fn a_policys_events_carry_the_derived_command_id_as_causation_and_no_trigger() {
 /// duplicate, and owes nothing.
 #[test]
 fn a_rejected_policy_step_keeps_the_commands_commit_and_is_dead_lettered() {
-    let registry = registry();
+    let plain = registry();
+    let mut registry = registry();
+    registry.policy(Bookkeeping);
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry, &log);
     let store = MemoryStore::new();
-    opened(&store, &registry, 1, 0);
+    opened(&store, &plain, 1, 0);
     let before = slice(&store, &cover("account", 1)).next_sequence;
-    let routes = Routes::new().policy::<Bookkeeping>();
 
     let failure = kernel
-        .handle::<Account, _, _>(
-            &store,
-            &routes,
-            deposit(3, LEDGER_LIMIT + 1),
-            &at(30),
-            &mut (),
-        )
+        .handle::<Account, _, _>(&store, deposit(3, LEDGER_LIMIT + 1), &at(30), &mut ())
         .ready()
         .err()
         .unwrap();
@@ -150,13 +138,7 @@ fn a_rejected_policy_step_keeps_the_commands_commit_and_is_dead_lettered() {
     );
 
     let retried = kernel
-        .handle::<Account, _, _>(
-            &store,
-            &routes,
-            deposit(3, LEDGER_LIMIT + 1),
-            &at(31),
-            &mut (),
-        )
+        .handle::<Account, _, _>(&store, deposit(3, LEDGER_LIMIT + 1), &at(31), &mut ())
         .ready()
         .unwrap();
     assert!(matches!(retried, crate::next::Handled::Duplicate(_)));
@@ -166,14 +148,15 @@ fn a_rejected_policy_step_keeps_the_commands_commit_and_is_dead_lettered() {
 
 #[test]
 fn a_chain_deeper_than_its_limit_is_refused() {
-    let registry = registry();
+    let plain = registry();
+    let mut registry = registry();
+    registry.policy(Bookkeeping);
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry, &log).limit(0);
     let store = MemoryStore::new();
-    opened(&store, &registry, 1, 0);
-    let routes = Routes::new().policy::<Bookkeeping>();
+    opened(&store, &plain, 1, 0);
     let failure = kernel
-        .handle::<Account, _, _>(&store, &routes, deposit(3, 1), &at(30), &mut ())
+        .handle::<Account, _, _>(&store, deposit(3, 1), &at(30), &mut ())
         .ready()
         .err()
         .unwrap();
@@ -198,15 +181,15 @@ fn a_chain_deeper_than_its_limit_is_refused() {
 /// edition yet.
 #[test]
 fn a_command_to_an_edition_is_refused_and_writes_nothing() {
-    let registry = registry();
+    let mut registry = registry();
+    registry.policy(Bookkeeping);
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry, &log);
     let store = MemoryStore::new();
-    let routes = Routes::new().policy::<Bookkeeping>();
     let stream = cover_in("account", 1, "what-if");
     let open = command(stream.clone(), AccountCmd::Open.to_any());
     let failure = kernel
-        .handle::<Account, _, _>(&store, &routes, open, &at(30), &mut ())
+        .handle::<Account, _, _>(&store, open, &at(30), &mut ())
         .ready()
         .err()
         .unwrap();
@@ -224,7 +207,10 @@ fn a_command_to_an_edition_is_refused_and_writes_nothing() {
 
 #[test]
 fn a_policys_target_is_in_its_sources_edition() {
-    let target = crate::next::target_cover::<Bookkeeping>(&cover_in("account", 1, "what-if"), &());
+    let target = crate::next::target_cover::<Bookkeeping>(
+        &cover_in("account", 1, "what-if"),
+        &ledger_root(),
+    );
     assert_eq!(
         target.edition.as_deref(),
         Some("what-if"),
@@ -238,11 +224,9 @@ fn a_book_for_another_domain_is_refused() {
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry, &log);
     let store = MemoryStore::new();
-    let routes = Routes::new();
     let failure = kernel
         .handle::<Ledger, _, _>(
             &store,
-            &routes,
             command(cover("account", 1), AccountCmd::Open.to_any()),
             &at(30),
             &mut (),
@@ -264,18 +248,19 @@ fn a_book_for_another_domain_is_refused() {
 /// every stream it committed to, in the order first touched.
 #[test]
 fn each_step_loads_what_the_steps_before_it_committed() {
-    let registry = registry();
+    let plain = registry();
+    let mut registry = registry();
+    registry.policy(Bookkeeping);
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry, &log);
     let store = MemoryStore::new();
-    opened(&store, &registry, 1, 0);
-    let routes = Routes::new().policy::<Bookkeeping>();
+    opened(&store, &plain, 1, 0);
     kernel
-        .handle::<Account, _, _>(&store, &routes, deposit(3, 25), &at(30), &mut ())
+        .handle::<Account, _, _>(&store, deposit(3, 25), &at(30), &mut ())
         .ready()
         .unwrap();
     let handled = kernel
-        .handle::<Account, _, _>(&store, &routes, deposit(4, 5), &at(31), &mut ())
+        .handle::<Account, _, _>(&store, deposit(4, 5), &at(31), &mut ())
         .ready()
         .unwrap();
     let crate::next::Handled::Applied(recorded) = handled else {
@@ -312,12 +297,13 @@ impl crate::next::Projection<Account> for Deposits {
 /// every policy step's.
 #[test]
 fn projections_run_after_commit_over_their_domains_streams() {
-    let registry = registry();
+    let plain = registry();
+    let mut registry = registry();
+    registry.policy(Bookkeeping);
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry, &log);
     let store = MemoryStore::new();
-    opened(&store, &registry, 1, 0);
-    let routes = Routes::new().policy::<Bookkeeping>();
+    opened(&store, &plain, 1, 0);
     let mut deposits = Deposits::default();
     let mut ledger_seen = 0;
     let mut route = crate::next::ProjectionRoute {
@@ -326,7 +312,7 @@ fn projections_run_after_commit_over_their_domains_streams() {
         domain: std::marker::PhantomData,
     };
     let handled = kernel
-        .handle::<Account, _, _>(&store, &routes, deposit(3, 25), &at(30), &mut route)
+        .handle::<Account, _, _>(&store, deposit(3, 25), &at(30), &mut route)
         .ready()
         .unwrap();
     assert!(handled.outcome().projector_failures.is_empty());
@@ -370,10 +356,9 @@ fn a_duplicate_runs_no_projection_and_commits_nothing() {
         projection: &mut deposits,
         domain: std::marker::PhantomData,
     };
-    let routes = Routes::new();
     let open = command(cover("account", 1), AccountCmd::Open.to_any()).id(1);
     let handled = kernel
-        .handle::<Account, _, _>(&store, &routes, open, &at(30), &mut route)
+        .handle::<Account, _, _>(&store, open, &at(30), &mut route)
         .ready()
         .unwrap();
     assert!(matches!(handled, crate::next::Handled::Duplicate(_)));
@@ -388,18 +373,18 @@ fn handle_is_a_send_future_over_a_send_store() {
     fn send<T: Send>(t: T) -> T {
         t
     }
-    let registry = registry();
+    let plain = registry();
+    let mut registry = registry();
+    registry.policy(Bookkeeping);
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry, &log);
     let store = MemoryStore::new();
-    opened(&store, &registry, 1, 0);
-    let routes = Routes::new().policy::<Bookkeeping>();
-    let handled =
-        send(kernel.handle::<Account, _, _>(&store, &routes, deposit(3, 25), &at(30), &mut ()))
-            .ready()
-            .unwrap();
+    opened(&store, &plain, 1, 0);
+    let handled = send(kernel.handle::<Account, _, _>(&store, deposit(3, 25), &at(30), &mut ()))
+        .ready()
+        .unwrap();
     assert_eq!(handled.books().len(), 2);
-    let resumed = send(kernel.resume(&store, &routes, &at(31), &mut ()))
+    let resumed = send(kernel.resume(&store, &at(31), &mut ()))
         .ready()
         .unwrap();
     assert!(resumed.books().is_empty(), "nothing owed");
@@ -419,42 +404,35 @@ fn account_stream(
 struct DepositsOnly;
 
 impl crate::next::Policy for DepositsOnly {
+    const NAME: &'static str = "deposits-only";
     type Source = Account;
     type Target = Ledger;
-    type TargetId = ();
 
-    const NAME: &'static str = "deposits-only";
-
-    fn targets(committed: &crate::next::Committed<'_, Account>) -> Vec<()> {
-        match committed.event() {
-            crate::next::toys::AccountEvent::Deposited(_) => vec![()],
-            _ => vec![],
-        }
-    }
-
-    fn root((): &()) -> crate::next::v1::Uuid {
-        ledger_root()
-    }
-
-    fn command((): &(), c: &crate::next::Committed<'_, Account>) -> ledger::Record {
-        let cents = match c.event() {
-            crate::next::toys::AccountEvent::Deposited(cents) => *cents,
-            _ => 0,
+    fn on_event(
+        &self,
+        event: &crate::next::Any,
+        ctx: &crate::next::markup::PolicyContext,
+    ) -> Option<crate::next::markup::Commands<Ledger>> {
+        let crate::next::toys::AccountEvent::Deposited(cents) =
+            crate::next::toys::AccountEvent::from_any(event).ok()?
+        else {
+            return None;
         };
-        ledger::Record {
-            source_sequence: c.sequence(),
+        let record = ledger::Record {
+            source_sequence: ctx.trigger().sequence,
             cents,
-        }
+        };
+        Some(crate::next::markup::Commands::none().send(ledger_root(), &record))
     }
 }
 
 #[test]
 fn a_filtered_policy_reaches_its_target_only_for_the_events_it_targets() {
-    let registry = registry();
+    let mut registry = registry();
+    registry.policy(DepositsOnly);
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry, &log);
     let store = MemoryStore::new();
-    let routes = Routes::new().policy::<DepositsOnly>();
     for book in [
         command(cover("account", 1), AccountCmd::Open.to_any()).id(1),
         deposit(2, 5),
@@ -462,7 +440,7 @@ fn a_filtered_policy_reaches_its_target_only_for_the_events_it_targets() {
         deposit(4, 7),
     ] {
         kernel
-            .handle::<Account, _, _>(&store, &routes, book, &at(30), &mut ())
+            .handle::<Account, _, _>(&store, book, &at(30), &mut ())
             .ready()
             .unwrap();
     }
@@ -488,6 +466,7 @@ fn a_filtered_policy_reaches_its_target_only_for_the_events_it_targets() {
 #[test]
 fn a_policy_book_for_an_unregistered_target_is_a_dead_lettered_bug() {
     let mut registry = crate::next::Registry::new();
+    registry.policy(Bookkeeping);
     registry
         .register::<Account>(
             crate::next::toys::fees(),
@@ -497,11 +476,9 @@ fn a_policy_book_for_an_unregistered_target_is_a_dead_lettered_bug() {
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry, &log);
     let store = MemoryStore::new();
-    let routes = Routes::new().policy::<Bookkeeping>();
     let failure = kernel
         .handle::<Account, _, _>(
             &store,
-            &routes,
             command(cover("account", 1), AccountCmd::Open.to_any()),
             &at(30),
             &mut (),
@@ -551,15 +528,16 @@ fn a_policy_book_for_an_unregistered_target_is_a_dead_lettered_bug() {
 /// again.
 #[test]
 fn a_command_owes_policy_steps_for_its_own_events_only() {
-    let registry = registry();
+    let plain = registry();
+    let mut registry = registry();
+    registry.policy(Bookkeeping);
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry, &log);
     let store = Recording::new();
-    opened(&store, &registry, 1, 0);
-    let routes = Routes::new().policy::<Bookkeeping>();
+    opened(&store, &plain, 1, 0);
     for n in [3, 4] {
         kernel
-            .handle::<Account, _, _>(&store, &routes, deposit(n, 1), &at(30), &mut ())
+            .handle::<Account, _, _>(&store, deposit(n, 1), &at(30), &mut ())
             .ready()
             .unwrap();
     }
@@ -615,13 +593,7 @@ fn a_chain_on_a_stream_loaded_from_a_snapshot_records_only_its_events() {
         domain: std::marker::PhantomData,
     };
     let handled = kernel
-        .handle::<Account, _, _>(
-            &store,
-            &Routes::new(),
-            deposit(3, 25),
-            &at(30),
-            &mut (first, second),
-        )
+        .handle::<Account, _, _>(&store, deposit(3, 25), &at(30), &mut (first, second))
         .ready()
         .unwrap();
     let crate::next::Handled::Applied(recorded) = handled else {
@@ -659,7 +631,7 @@ fn a_policys_orders_are_indexed_and_keep_the_triggers_correlation() {
     opened(&store, &registry, 1, 0);
     let source = account_stream(&store, &registry);
     let mut orders = Vec::new();
-    let mut handler = crate::next::policy::<TwoLedgers, _>(|order| orders.push(order));
+    let mut handler = crate::next::policy(&TwoLedgers, |order| orders.push(order));
     source.dispatch(1, &registry, &mut [&mut handler]).unwrap();
     assert_eq!(
         orders
@@ -677,38 +649,42 @@ fn a_policys_orders_are_indexed_and_keep_the_triggers_correlation() {
 struct TwoLedgers;
 
 impl crate::next::Policy for TwoLedgers {
+    const NAME: &'static str = "two-ledgers";
     type Source = Account;
     type Target = Ledger;
-    type TargetId = u8;
 
-    const NAME: &'static str = "two-ledgers";
-
-    fn targets(_: &crate::next::Committed<'_, Account>) -> Vec<u8> {
-        vec![0, 1]
-    }
-
-    fn root(n: &u8) -> crate::next::v1::Uuid {
-        ids::compute_root("ledger", &n.to_string()).unwrap()
-    }
-
-    fn command(_: &u8, c: &crate::next::Committed<'_, Account>) -> ledger::Record {
-        ledger::Record {
-            source_sequence: c.sequence(),
+    fn on_event(
+        &self,
+        _: &crate::next::Any,
+        ctx: &crate::next::markup::PolicyContext,
+    ) -> Option<crate::next::markup::Commands<Ledger>> {
+        let record = ledger::Record {
+            source_sequence: ctx.trigger().sequence,
             cents: 0,
-        }
+        };
+        let commands = crate::next::markup::Commands::none()
+            .send(two_ledgers_root(0), &record)
+            .send(two_ledgers_root(1), &record);
+        Some(commands)
     }
+}
+
+/// The root of the `n`th of [`TwoLedgers`]' ledgers.
+fn two_ledgers_root(n: u8) -> crate::next::v1::Uuid {
+    ids::compute_root("ledger", &n.to_string()).unwrap()
 }
 
 #[test]
 fn a_triggers_commands_are_indexed_in_target_order() {
-    let registry = registry();
+    let plain = registry();
+    let mut registry = registry();
+    registry.policy(TwoLedgers);
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry, &log);
     let store = MemoryStore::new();
-    opened(&store, &registry, 1, 0);
-    let routes = Routes::new().policy::<TwoLedgers>();
+    opened(&store, &plain, 1, 0);
     kernel
-        .handle::<Account, _, _>(&store, &routes, deposit(3, 5), &at(30), &mut ())
+        .handle::<Account, _, _>(&store, deposit(3, 5), &at(30), &mut ())
         .ready()
         .unwrap();
     let trigger = EventRef {
@@ -742,15 +718,16 @@ fn two_ledgers(n: u8) -> crate::next::v1::Cover {
 /// every target), each as its own committed step, after the command's own.
 #[test]
 fn every_policy_on_a_source_runs_for_each_of_its_events_in_registration_order() {
-    let registry = registry();
+    let mut registry = registry();
+    registry.policy(TwoLedgers);
+    registry.policy(Bookkeeping);
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry, &log);
     let store = Recording::new();
-    let routes = Routes::new().policy::<TwoLedgers>().policy::<Bookkeeping>();
     let open = command(cover("account", 1), AccountCmd::Open.to_any()).id(1);
     for (book, second) in [(open, 30), (deposit(2, 5), 31)] {
         kernel
-            .handle::<Account, _, _>(&store, &routes, book, &at(second), &mut ())
+            .handle::<Account, _, _>(&store, book, &at(second), &mut ())
             .ready()
             .unwrap();
     }
@@ -788,14 +765,16 @@ fn every_policy_on_a_source_runs_for_each_of_its_events_in_registration_order() 
 /// landed are deduplicated when it runs again).
 #[test]
 fn a_policy_step_commits_its_position_with_its_events() {
-    let registry = registry();
+    let plain = registry();
+    let mut registry = registry();
+    registry.policy(TwoLedgers);
+    registry.policy(Bookkeeping);
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry, &log);
     let store = Recording::new();
-    opened(&store, &registry, 1, 0);
-    let routes = Routes::new().policy::<TwoLedgers>().policy::<Bookkeeping>();
+    opened(&store, &plain, 1, 0);
     kernel
-        .handle::<Account, _, _>(&store, &routes, deposit(3, 5), &at(30), &mut ())
+        .handle::<Account, _, _>(&store, deposit(3, 5), &at(30), &mut ())
         .ready()
         .unwrap();
     let writes = store.writes();
@@ -826,15 +805,16 @@ fn a_policy_step_commits_its_position_with_its_events() {
 /// and running it again finds nothing more.
 #[test]
 fn a_step_the_store_failed_is_resumed_by_position() {
-    let registry = registry();
+    let plain = registry();
+    let mut registry = registry();
+    registry.policy(Bookkeeping);
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry, &log);
     let store = Recording::new();
-    opened(&store, &registry, 1, 0);
-    let routes = Routes::new().policy::<Bookkeeping>();
+    opened(&store, &plain, 1, 0);
     store.fail_write(1);
     let failure = kernel
-        .handle::<Account, _, _>(&store, &routes, deposit(3, 25), &at(30), &mut ())
+        .handle::<Account, _, _>(&store, deposit(3, 25), &at(30), &mut ())
         .ready()
         .err()
         .unwrap();
@@ -860,10 +840,7 @@ fn a_step_the_store_failed_is_resumed_by_position() {
     assert_eq!(pages(store.inner(), &ledger_cover()), []);
     assert_eq!(position(store.inner(), "bookkeeping", &account), 2);
 
-    let resumed = kernel
-        .resume(&store, &routes, &at(31), &mut ())
-        .ready()
-        .unwrap();
+    let resumed = kernel.resume(&store, &at(31), &mut ()).ready().unwrap();
     assert_eq!(
         payloads::<ledger::Recorded>(resumed.books()),
         [ledger::Recorded {
@@ -872,10 +849,7 @@ fn a_step_the_store_failed_is_resumed_by_position() {
         }]
     );
     assert_eq!(position(store.inner(), "bookkeeping", &account), 3);
-    let again = kernel
-        .resume(&store, &routes, &at(32), &mut ())
-        .ready()
-        .unwrap();
+    let again = kernel.resume(&store, &at(32), &mut ()).ready().unwrap();
     assert!(again.books().is_empty(), "nothing more owed");
     assert_eq!(pages(store.inner(), &ledger_cover()).len(), 1);
 }
@@ -886,19 +860,20 @@ fn a_step_the_store_failed_is_resumed_by_position() {
 /// chain.
 #[test]
 fn a_retry_after_a_crash_settles_what_its_stream_still_owes() {
-    let registry = registry();
+    let plain = registry();
+    let mut registry = registry();
+    registry.policy(Bookkeeping);
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry, &log);
     let store = Recording::new();
-    opened(&store, &registry, 1, 0);
-    let routes = Routes::new().policy::<Bookkeeping>();
+    opened(&store, &plain, 1, 0);
     store.fail_write(1);
     assert!(kernel
-        .handle::<Account, _, _>(&store, &routes, deposit(3, 25), &at(30), &mut ())
+        .handle::<Account, _, _>(&store, deposit(3, 25), &at(30), &mut ())
         .ready()
         .is_err());
     let retried = kernel
-        .handle::<Account, _, _>(&store, &routes, deposit(3, 25), &at(31), &mut ())
+        .handle::<Account, _, _>(&store, deposit(3, 25), &at(31), &mut ())
         .ready()
         .unwrap();
     assert!(matches!(retried, crate::next::Handled::Duplicate(_)));
@@ -917,17 +892,15 @@ fn a_retry_after_a_crash_settles_what_its_stream_still_owes() {
 /// runs it from the start (position 0), one step per event.
 #[test]
 fn resume_runs_a_new_policy_over_its_sources_history() {
-    let registry = registry();
+    let plain = registry();
+    let mut registry = registry();
+    registry.policy(Bookkeeping);
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry, &log);
     let store = MemoryStore::new();
-    opened(&store, &registry, 1, 7);
-    opened(&store, &registry, 2, 9);
-    let routes = Routes::new().policy::<Bookkeeping>();
-    let resumed = kernel
-        .resume(&store, &routes, &at(40), &mut ())
-        .ready()
-        .unwrap();
+    opened(&store, &plain, 1, 7);
+    opened(&store, &plain, 2, 9);
+    let resumed = kernel.resume(&store, &at(40), &mut ()).ready().unwrap();
     assert_eq!(
         payloads::<ledger::Recorded>(resumed.books())
             .iter()
@@ -946,26 +919,21 @@ fn resume_runs_a_new_policy_over_its_sources_history() {
 /// id: nothing lands twice.
 #[test]
 fn a_resumed_step_that_already_landed_is_a_duplicate() {
-    let registry = registry();
+    let plain = registry();
+    let mut registry = registry();
+    registry.policy(Bookkeeping);
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry, &log);
     let store = MemoryStore::new();
-    let routes = Routes::new().policy::<Bookkeeping>();
-    opened(&store, &registry, 1, 0);
-    kernel
-        .resume(&store, &routes, &at(30), &mut ())
-        .ready()
-        .unwrap();
+    opened(&store, &plain, 1, 0);
+    kernel.resume(&store, &at(30), &mut ()).ready().unwrap();
     let account = cover("account", 1);
     let key = crate::next::PositionKey {
         handler: "bookkeeping",
         stream: sref(&account),
     };
     store.write(Write::positions(&[(key, 0)])).ready().unwrap();
-    let resumed = kernel
-        .resume(&store, &routes, &at(31), &mut ())
-        .ready()
-        .unwrap();
+    let resumed = kernel.resume(&store, &at(31), &mut ()).ready().unwrap();
     assert!(resumed.books().iter().all(|b| b.pages.is_empty()));
     assert_eq!(pages(&store, &ledger_cover()).len(), 2, "nothing twice");
     assert_eq!(position(&store, "bookkeeping", &account), 2);
@@ -983,7 +951,6 @@ fn a_store_that_cannot_write_fails_the_command_with_nothing_written() {
     let failure = kernel
         .handle::<Account, _, _>(
             &store,
-            &Routes::new(),
             command(cover("account", 1), AccountCmd::Open.to_any()),
             &at(30),
             &mut (),
@@ -1060,7 +1027,7 @@ fn a_projection_that_fails_is_reported_and_the_commit_stands() {
         },
     );
     let handled = kernel
-        .handle::<Account, _, _>(&store, &Routes::new(), deposit(3, 25), &at(30), &mut routes)
+        .handle::<Account, _, _>(&store, deposit(3, 25), &at(30), &mut routes)
         .ready()
         .unwrap();
     let failure = crate::next::ProjectorFailure {

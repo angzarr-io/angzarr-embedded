@@ -20,13 +20,14 @@ use std::task::{Context, Poll, Waker};
 
 pub use angzarr_ports::memory::MemoryStore;
 
+use crate::next::markup::{Commands, PolicyContext};
 use crate::next::v1::{
     command_page, Command, CommandBook, CommandPage, ConflictResolution, Cover, EventPage,
     EventRef, Fact, FactOrigin, Handling, StateDescriptor, StateOptions, Uuid,
 };
 use crate::next::{
-    ids, pack, Any, Committed, Decoder, Domain, IngestCtx, Key, Payload, PayloadError, Policy,
-    Registry, Rulebook, Sampled, State, Timestamp, Tx, UnitPath, Units, Upcaster,
+    ids, pack, Any, Decoder, Domain, IngestCtx, Key, Payload, PayloadError, Policy, Registry,
+    Rulebook, Sampled, State, Timestamp, Tx, UnitPath, Units, Upcaster,
 };
 use crate::next::{EventStore, ListStreams, PositionKey, PositionStore, Store, StreamRef};
 use annals_diagnostic::{Arg, Diagnostic, Report};
@@ -1108,36 +1109,27 @@ pub fn ledger_root() -> Uuid {
 pub struct Bookkeeping;
 
 impl Policy for Bookkeeping {
+    const NAME: &'static str = "bookkeeping";
     type Source = Account;
     type Target = Ledger;
-    type TargetId = ();
 
-    const NAME: &'static str = "bookkeeping";
-
-    fn targets(_: &Committed<'_, Account>) -> Vec<()> {
-        vec![()]
-    }
-
-    fn root((): &()) -> Uuid {
-        ledger_root()
-    }
-
-    fn command((): &(), committed: &Committed<'_, Account>) -> ledger::Record {
-        let cents = match committed.event() {
-            AccountEvent::Deposited(cents) => *cents,
+    fn on_event(&self, event: &Any, ctx: &PolicyContext) -> Option<Commands<Ledger>> {
+        let cents = match AccountEvent::from_any(event).ok()? {
+            AccountEvent::Deposited(cents) => cents,
             _ => 0,
         };
-        ledger::Record {
-            source_sequence: committed.sequence(),
+        let record = ledger::Record {
+            source_sequence: ctx.trigger().sequence,
             cents,
-        }
+        };
+        Some(Commands::none().send(ledger_root(), &record))
     }
 }
 
 // ---------------------------------------------------------------- running
 
-/// Handle `book` through the kernel over `store`, with no policies and no
-/// projections, logging dead letters to nowhere the test reads.
+/// Handle `book` through the kernel over `store`, with the registry's
+/// policies and no projections, logging dead letters to nowhere the test reads.
 pub fn handle<D: Domain>(
     store: &impl Store,
     registry: &Registry,
@@ -1146,9 +1138,8 @@ pub fn handle<D: Domain>(
 ) -> Result<crate::next::Handled, crate::next::Failure<D::Rejection>> {
     let log = crate::next::MemoryDeadLetters::new();
     let kernel = crate::next::Kernel::new(registry, &log);
-    let routes = crate::next::Routes::new();
     kernel
-        .handle::<D, _, _>(store, &routes, book, sampled, &mut ())
+        .handle::<D, _, _>(store, book, sampled, &mut ())
         .ready()
 }
 

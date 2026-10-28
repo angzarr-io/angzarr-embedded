@@ -302,13 +302,7 @@ mod dedup {
             seen: std::sync::atomic::AtomicBool::new(false),
         };
         let retry = kernel
-            .handle::<crate::next::toys::Account, _, _>(
-                &racing,
-                &crate::next::Routes::new(),
-                deposit(3, 25),
-                &at(21),
-                &mut (),
-            )
+            .handle::<crate::next::toys::Account, _, _>(&racing, deposit(3, 25), &at(21), &mut ())
             .ready()
             .unwrap();
         assert!(

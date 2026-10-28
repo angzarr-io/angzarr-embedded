@@ -2256,7 +2256,6 @@ fn handle_in<D: Domain>(
     ready(
         ::annals::next::Kernel::new(registry, log).handle::<D, _, _>(
             store,
-            &::annals::next::Routes::new(),
             book,
             &sampled,
             &mut (),
@@ -2900,7 +2899,6 @@ fn settle_in<D: Domain>(
     let handled = ready(
         ::annals::next::Kernel::new(registry, log).handle::<D, _, _>(
             store,
-            &::annals::next::Routes::new(),
             book,
             &sampled,
             &mut (),
@@ -3223,7 +3221,6 @@ fn handle_async(
     ready(
         ::annals::next::Kernel::new(registry, &log).handle::<Wallet, _, _>(
             store,
-            &::annals::next::Routes::new(),
             book,
             &sampled,
             &mut (),

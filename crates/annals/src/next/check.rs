@@ -294,6 +294,14 @@ enum Entry {
         correlation_id: Uuid,
         command_id: Uuid,
     },
+    /// A policy's refusal fact, built by the chain: its id is the refused
+    /// command's, its correlation that command's, and its causation the
+    /// policy's trigger.
+    Refusal {
+        trigger: EventRef,
+        correlation_id: Uuid,
+        command_id: Uuid,
+    },
 }
 
 /// A [`CommandBook`] that passed [`check`]. Every accessor that the book
@@ -347,6 +355,28 @@ pub(crate) fn check_policy_command(
         book,
         registry,
         Some(Entry::Policy {
+            trigger,
+            correlation_id,
+            command_id,
+        }),
+    )
+}
+
+/// The chain's entry for a policy's refusal fact: a fact whose command id
+/// is the refused command's (`command_id`), with that command's
+/// correlation, caused by the policy's `trigger`, addressed to the
+/// trigger's stream.
+pub(crate) fn check_refusal(
+    book: CommandBook,
+    registry: &Registry,
+    trigger: EventRef,
+    correlation_id: Uuid,
+    command_id: Uuid,
+) -> Result<Checked, Malformed> {
+    parse(
+        book,
+        registry,
+        Some(Entry::Refusal {
             trigger,
             correlation_id,
             command_id,
@@ -418,6 +448,7 @@ fn parse(
         Some(_) if command_id.is_some() || correlation_id.is_some() || causation_id.is_some() => {
             return Err(Malformed::IdOnPolicyCommand)
         }
+        Some(entry @ Entry::Refusal { .. }) => entry,
         Some(_) if is_fact => return Err(Malformed::FactFromPolicy),
         Some(_) if handled => return Err(Malformed::HandlingOnPolicyCommand),
         Some(entry) => entry,
@@ -450,7 +481,9 @@ fn parse(
     if process_manager {
         let given = match &entry {
             Entry::Client => correlation_id.as_ref(),
-            Entry::Policy { correlation_id, .. } => Some(correlation_id),
+            Entry::Policy { correlation_id, .. } | Entry::Refusal { correlation_id, .. } => {
+                Some(correlation_id)
+            }
         };
         if given.is_some_and(|c| *c != root) {
             return Err(Malformed::RootNotCorrelation);
@@ -599,6 +632,14 @@ impl Checked {
                     command_id,
                 },
                 _,
+            )
+            | (
+                Entry::Refusal {
+                    trigger,
+                    correlation_id,
+                    command_id,
+                },
+                _,
             ) => (command_id, correlation_id, Some(trigger)),
             (Entry::Client, Body::Fact { source, .. }) => (
                 ids::fact_command_id(&source.external_id),
@@ -702,9 +743,9 @@ impl Identified {
     /// `EventMeta`): its causation (this command's id, the deduplication
     /// key), fact source and correlation, the instant it is recorded at and
     /// the rules version it is decided under. No actor: who did it belongs
-    /// in a security log. No trigger: a reaction's events name their
-    /// command, not what the command reacted to; the chain reports that
-    /// edge to the application's [`TriggerLog`](super::TriggerLog).
+    /// in a security log. No trigger: a policy command's events name their
+    /// command, not the event that set it off; that edge is the command's
+    /// own causation (`causation_id`), for tracing.
     pub fn meta(&self, recorded_at: Timestamp, rules_version: &str) -> EventMeta {
         EventMeta {
             causation: Some(event_meta::Causation::CommandId(self.command_id.clone())),

@@ -1,5 +1,5 @@
 //! Steps 3 to 5 driven one at a time, for tests that check each step's
-//! output: a coordinator over a unit of work, and the steps' accessors.
+//! output: a coordinator over a store, and the steps' accessors.
 //! The chain ([`Kernel::handle`](crate::next::Kernel::handle)) runs the
 //! same functions.
 
@@ -58,6 +58,10 @@ impl Novel {
 }
 
 impl Contextual {
+    pub fn command(&self) -> &Identified {
+        &self.command
+    }
+
     pub fn conflict_resolution(&self) -> ConflictResolution {
         self.resolution
     }

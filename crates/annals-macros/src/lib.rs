@@ -2927,6 +2927,7 @@ fn flow(attr: Tokens, item: Tokens, flow: Flow) -> syn::Result<Tokens> {
                     const TRANSLATES: &'static [#m::TypeName] = &[
                         #(#m::TypeName::of::<<#commands as #m::DomainMessage>::Wire>(),)*
                     ];
+                    const ANSWERS_REFUSALS: bool = true;
 
                     fn on_refused(&self, refusal: &#m::v1::Refusal) -> ::annals::next::Any {
                         #(
@@ -3702,6 +3703,10 @@ fn domain(attr: Tokens, item: Tokens, kind: Kind) -> syn::Result<Tokens> {
 
             fn apply(state: &mut Self, event: &#event_set, _rules: &()) {
                 #apply_body
+            }
+
+            fn refusal(rejection: &#rejection_ty) -> ::core::option::Option<::annals::next::Any> {
+                rejection.refusal().cloned()
             }
 
         }

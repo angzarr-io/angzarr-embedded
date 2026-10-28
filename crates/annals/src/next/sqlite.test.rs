@@ -22,7 +22,7 @@ use crate::next::v1::{
 use crate::next::{
     pack, Any, Domain, EventStore, Failure, Handled, IngestCtx, Kernel, KernelError,
     MemoryDeadLetters, Payload, PayloadError, PositionKey, PositionStore, Recovery, Registry,
-    Routes, Rulebook, Sampled, SnapshotStore, State, StoreError, Stream, StreamRef, Timestamp, Tx,
+    Rulebook, Sampled, SnapshotStore, State, StoreError, Stream, StreamRef, Timestamp, Tx,
     Upcaster,
 };
 
@@ -182,17 +182,17 @@ fn sampled(seconds: i64) -> Sampled {
     }
 }
 
-/// `book` through the kernel for a `D` stream, over `store`, with `routes`.
+/// `book` through the kernel for a `D` stream, over `store`, with the
+/// registry's policies.
 async fn handle<D: Domain>(
     store: &SqliteStore,
     registry: &Registry,
-    routes: &Routes,
     book: CommandBook,
 ) -> Result<Handled, Failure<D::Rejection>> {
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(registry, &log);
     kernel
-        .handle::<D, _, _>(store, routes, book, &sampled(10), &mut ())
+        .handle::<D, _, _>(store, book, &sampled(10), &mut ())
         .await
 }
 
@@ -247,11 +247,10 @@ fn open_account() -> CommandBook {
 async fn a_snapshot_at_or_past_the_head_is_not_used() {
     let registry = registry();
     let stream = cover("tally", 1);
-    let routes = Routes::new();
     for sequence in [2, 5] {
         let store = SqliteStore::open_in_memory().await.unwrap();
         for id in [1, 2] {
-            handle::<Tally>(&store, &registry, &routes, add(stream.clone(), id, 1))
+            handle::<Tally>(&store, &registry, add(stream.clone(), id, 1))
                 .await
                 .unwrap();
         }
@@ -263,7 +262,7 @@ async fn a_snapshot_at_or_past_the_head_is_not_used() {
         let at = StreamRef::try_from(&stream).unwrap();
         store.write_snapshot(at, &ahead).await.unwrap();
         for (id, head) in [(3, 3), (4, 4)] {
-            let handled = handle::<Tally>(&store, &registry, &routes, add(stream.clone(), id, 10))
+            let handled = handle::<Tally>(&store, &registry, add(stream.clone(), id, 10))
                 .await
                 .unwrap_or_else(|e| panic!("a snapshot at {sequence}, command {id}: {e}"));
             assert_eq!(handled.books()[0].next_sequence, head);
@@ -282,7 +281,7 @@ async fn a_command_to_an_edition_is_refused_and_writes_nothing() {
     let registry = registry();
     let store = SqliteStore::open_in_memory().await.unwrap();
     let stream = cover_in("tally", 1, "what-if");
-    let failure = handle::<Tally>(&store, &registry, &Routes::new(), add(stream.clone(), 1, 1))
+    let failure = handle::<Tally>(&store, &registry, add(stream.clone(), 1, 1))
         .await
         .err()
         .unwrap();
@@ -304,13 +303,13 @@ async fn a_command_to_an_edition_is_refused_and_writes_nothing() {
 /// reopening the file.
 #[tokio::test]
 async fn a_command_and_its_policy_step_each_commit_and_survive_reopening() {
-    let registry = toys::registry();
+    let mut registry = toys::registry();
+    registry.policy(Bookkeeping);
     let path = database();
-    let routes = Routes::new().policy::<Bookkeeping>();
     {
         let store = SqliteStore::open(&path).await.unwrap();
         for book in [open_account(), deposit(2, 25)] {
-            handle::<toys::Account>(&store, &registry, &routes, book)
+            handle::<toys::Account>(&store, &registry, book)
                 .await
                 .unwrap();
         }
@@ -330,23 +329,19 @@ async fn a_command_and_its_policy_step_each_commit_and_survive_reopening() {
 /// command's commit stands on disk, and nothing of the step landed.
 #[tokio::test]
 async fn a_rejected_policy_step_on_a_file_keeps_the_commands_commit() {
-    let registry = toys::registry();
+    let mut registry = toys::registry();
+    registry.policy(Bookkeeping);
     let path = database();
-    let routes = Routes::new().policy::<Bookkeeping>();
     {
         let store = SqliteStore::open(&path).await.unwrap();
-        handle::<toys::Account>(&store, &registry, &routes, open_account())
+        handle::<toys::Account>(&store, &registry, open_account())
             .await
             .unwrap();
-        let failure = handle::<toys::Account>(
-            &store,
-            &registry,
-            &routes,
-            deposit(2, toys::LEDGER_LIMIT + 1),
-        )
-        .await
-        .err()
-        .unwrap();
+        let failure =
+            handle::<toys::Account>(&store, &registry, deposit(2, toys::LEDGER_LIMIT + 1))
+                .await
+                .err()
+                .unwrap();
         assert_eq!(failure.recovery(), Recovery::Business);
     }
     let store = SqliteStore::open(&path).await.unwrap();
@@ -362,23 +357,22 @@ async fn a_rejected_policy_step_on_a_file_keeps_the_commands_commit() {
 /// step never ran) is run by `resume` after reopening, once.
 #[tokio::test]
 async fn resume_after_reopening_runs_what_a_crash_left_owed() {
-    let registry = toys::registry();
+    let mut registry = toys::registry();
+    registry.policy(Bookkeeping);
     let path = database();
     {
         let store = SqliteStore::open(&path).await.unwrap();
+        let plain = toys::registry();
         for book in [open_account(), deposit(2, 25)] {
-            handle::<toys::Account>(&store, &registry, &Routes::new(), book)
-                .await
-                .unwrap();
+            handle::<toys::Account>(&store, &plain, book).await.unwrap();
         }
     }
-    let routes = Routes::new().policy::<Bookkeeping>();
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry, &log);
     for (round, expected) in [(0, 2), (1, 0)] {
         let store = SqliteStore::open(&path).await.unwrap();
         let resumed = kernel
-            .resume(&store, &routes, &sampled(20 + round), &mut ())
+            .resume(&store, &sampled(20 + round), &mut ())
             .await
             .unwrap();
         let landed: usize = resumed.books().iter().map(|b| b.pages.len()).sum();
@@ -412,7 +406,7 @@ async fn a_panicking_decide_writes_nothing_and_frees_the_handle() {
         let stream = stream.clone();
         tokio::spawn(async move {
             let registry = registry();
-            handle::<Tally>(&store, &registry, &Routes::new(), add(stream, 1, -1))
+            handle::<Tally>(&store, &registry, add(stream, 1, -1))
                 .await
                 .map(drop)
                 .map_err(drop)
@@ -420,7 +414,7 @@ async fn a_panicking_decide_writes_nothing_and_frees_the_handle() {
     };
     assert!(panicking.await.unwrap_err().is_panic());
     let registry = registry();
-    handle::<Tally>(&store, &registry, &Routes::new(), add(stream.clone(), 2, 5))
+    handle::<Tally>(&store, &registry, add(stream.clone(), 2, 5))
         .await
         .unwrap();
     assert_eq!(count(&store, &registry, &stream).await, 5);
@@ -436,11 +430,10 @@ async fn the_same_command_through_two_handles_on_one_file_applies_once() {
     let one = SqliteStore::open(&path).await.unwrap();
     let two = SqliteStore::open(&path).await.unwrap();
     let registry = registry();
-    let routes = Routes::new();
     let book = add(cover("tally", 1), 1, 5);
     let (a, b) = tokio::join!(
-        handle::<Tally>(&one, &registry, &routes, book.clone()),
-        handle::<Tally>(&two, &registry, &routes, book),
+        handle::<Tally>(&one, &registry, book.clone()),
+        handle::<Tally>(&two, &registry, book),
     );
     let applied = [&a, &b]
         .iter()
@@ -458,10 +451,9 @@ async fn the_same_command_through_two_handles_on_one_file_applies_once() {
                     ),
                     "{failure:?}"
                 );
-                let retried =
-                    handle::<Tally>(&two, &registry, &routes, add(cover("tally", 1), 1, 5))
-                        .await
-                        .unwrap();
+                let retried = handle::<Tally>(&two, &registry, add(cover("tally", 1), 1, 5))
+                    .await
+                    .unwrap();
                 assert!(matches!(retried, Handled::Duplicate(_)));
             }
         }
@@ -471,8 +463,8 @@ async fn the_same_command_through_two_handles_on_one_file_applies_once() {
 
 // ------------------------------------------------------- round trips
 
-/// What a command costs in round trips to SQLite, MEASURED, not budgeted
-/// (the owner's ruling, 2026-10-28: minimise, no hard number). The
+/// What a command costs in round trips to SQLite, MEASURED, not budgeted:
+/// the aim is the fewest, with no hard number. The
 /// evaluation counted 11 statements a command (S3). The expectation: a
 /// command on a stream with history and no policy needs the snapshot
 /// read, the events read (whose pages answer the dedup lookup when no
@@ -486,11 +478,10 @@ async fn measure_a_commands_round_trips() {
     let registry = registry();
     let store = SqliteStore::open_in_memory().await.unwrap();
     let stream = cover("tally", 1);
-    let routes = Routes::new();
     let mut spent = Vec::new();
     for id in 1..=40 {
         let before = store.round_trips();
-        handle::<Tally>(&store, &registry, &routes, add(stream.clone(), id, 1))
+        handle::<Tally>(&store, &registry, add(stream.clone(), id, 1))
             .await
             .unwrap();
         spent.push(store.round_trips() - before);

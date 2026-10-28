@@ -80,6 +80,35 @@ pub(crate) trait Port {
         &mut self,
         stream: &Cover,
     ) -> impl Future<Output = Result<Option<Snapshot>, StoreError>>;
+
+    /// `handler`'s next sequence on `stream`.
+    fn position(
+        &mut self,
+        handler: &str,
+        stream: &Cover,
+    ) -> impl Future<Output = Result<u64, StoreError>>;
+
+    /// A step's write of positions alone: a step that wrote no event.
+    fn write_positions(
+        &mut self,
+        positions: &[(&str, &Cover, u64)],
+    ) -> impl Future<Output = Result<(), StoreError>>;
+
+    /// Every stream of `domain` holding an event.
+    fn covers(&mut self, domain: &str) -> impl Future<Output = Result<Vec<Cover>, StoreError>>;
+}
+
+/// `positions` as the ports key them.
+fn keyed<'a>(
+    positions: &'a [(&'a str, &'a Cover, u64)],
+) -> Result<Vec<(PositionKey<'a>, u64)>, StoreError> {
+    positions
+        .iter()
+        .map(|(handler, stream, next)| {
+            let stream = StreamRef::try_from(*stream)?;
+            Ok((PositionKey { handler, stream }, *next))
+        })
+        .collect()
 }
 
 /// An angzarr-ports store as the kernel's [`Port`]: each `Cover` as a
@@ -96,13 +125,26 @@ impl<S: Store> Port for StorePort<'_, S> {
         pages: &[EventPage],
         positions: &[(&str, &Cover, u64)],
     ) -> Result<u64, StoreError> {
-        let _ = (self.0, stream, expected, pages, positions);
-        todo!("red: a step's one write to the angzarr-ports store")
+        let positions = keyed(positions)?;
+        let write = Write {
+            events: Some(Append {
+                stream: StreamRef::try_from(stream)?,
+                expected,
+                pages,
+            }),
+            positions: &positions,
+            outbox: &[],
+        };
+        let written = self.0.write(write).await?;
+        Ok(written.next_sequence.unwrap_or(expected))
     }
 
     async fn read_from(&mut self, stream: &Cover, from: u64) -> Result<Option<Slice>, StoreError> {
-        let _ = (self.0, stream, from);
-        todo!("red: read through the angzarr-ports store")
+        let slice = self
+            .0
+            .read(StreamRef::try_from(stream)?, from, None)
+            .await?;
+        Ok((slice.next_sequence > 0).then_some(slice))
     }
 
     async fn find_command(
@@ -110,12 +152,33 @@ impl<S: Store> Port for StorePort<'_, S> {
         stream: &Cover,
         command_id: &Uuid,
     ) -> Result<Vec<EventPage>, StoreError> {
-        let _ = (self.0, stream, command_id);
-        todo!("red: look the command up through the angzarr-ports store")
+        let command_id =
+            angzarr_ports::Uuid::try_from(command_id).map_err(|_| StoreError::MalformedStream {
+                stream: Box::new(stream.clone()),
+            })?;
+        self.0
+            .find_command(StreamRef::try_from(stream)?, command_id)
+            .await
     }
 
     async fn read_snapshot(&mut self, stream: &Cover) -> Result<Option<Snapshot>, StoreError> {
-        let _ = (self.0, stream);
-        todo!("red: read the snapshot through the angzarr-ports store")
+        self.0.read_snapshot(StreamRef::try_from(stream)?).await
+    }
+
+    async fn position(&mut self, handler: &str, stream: &Cover) -> Result<u64, StoreError> {
+        let stream = StreamRef::try_from(stream)?;
+        self.0.position(PositionKey { handler, stream }).await
+    }
+
+    async fn write_positions(
+        &mut self,
+        positions: &[(&str, &Cover, u64)],
+    ) -> Result<(), StoreError> {
+        let positions = keyed(positions)?;
+        self.0.write(Write::positions(&positions)).await.map(drop)
+    }
+
+    async fn covers(&mut self, domain: &str) -> Result<Vec<Cover>, StoreError> {
+        self.0.covers(domain).await
     }
 }

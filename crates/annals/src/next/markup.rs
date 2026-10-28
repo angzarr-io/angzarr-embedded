@@ -52,6 +52,7 @@ use prost_types::{Any, Timestamp};
 
 use super::domain::Domain;
 use super::error::PayloadError;
+use super::payload::Payload as _;
 use super::wire::WireError;
 
 /// The error a generated `State::from_snapshot` returns, re-exported so
@@ -697,56 +698,10 @@ impl<C> Refusal<C> {
 
 // ---------------------------------------------------------------- policies
 
-/// A policy written in the markup (`#[policy]`): stateless translation of its
-/// ONE source domain's events into commands for its ONE target domain (an
-/// aggregate's or a process manager's). Registered with
-/// [`Registry::policy`](super::Registry::policy).
-///
-/// When a target refuses one of its commands, the target records nothing
-/// and the policy delivers ONE unrefusable fact of the refusal to the exact
-/// stream of its triggering event, in its source domain, whose id is the
-/// refused command's id ([`Policy::on_refused`]). By default the generated
-/// code passes it through as angzarr's `CommandRefused { command,
-/// refusal, trigger }`, which the source handles in `#[on_refused(C)]`;
-/// for each command the policy has its own `#[on_refused(C)]` callback for,
-/// TRANSLATE: the callback returns a domestic fact instead. The callback's
-/// presence is the selection, fixed at compile time (angzarr-cli's refusal
-/// switch: annals' scaffold writes the callback stub, or does not), and
-/// nothing about it is visible at run time beyond which fact arrives.
-/// Deleting a callback silently reverts its command to pass-through: a
-/// run-time dead letter if the source has no handler for it, not a compile
-/// error.
-///
-/// What a policy answers is all here, whatever runs it; annals runs policies
-/// once its kernel dispatches committed steps
-/// ([`Registry::policy`](super::Registry::policy)).
-pub trait Policy: Send + Sync + 'static {
-    /// The policy's name: the component its commands' ids are derived from.
-    const NAME: &'static str;
-    /// The one domain whose events it handles, and to which it delivers
-    /// its refusal facts.
-    type Source: Domain;
-    /// The one domain it sends commands to.
-    type Target: Domain;
-    /// The events it handles, in marker order.
-    const EVENTS: &'static [TypeName];
-    /// The commands it translates: those its `#[on_refused]` callbacks
-    /// name, in marker order.
-    const TRANSLATES: &'static [TypeName];
-
-    /// angzarr's `PolicyService.OnRefused`: the refusal fact's payload for
-    /// the policy's source, packed. Pass-through: angzarr's `CommandRefused
-    /// { command, refusal, trigger }`, `refusal` the response's object
-    /// still packed, `trigger` the triggering event's `EventRef`. Translate:
-    /// the callback's domestic fact. The chain addresses it to the
-    /// trigger's stream and stamps its identity.
-    fn on_refused(&self, refusal: &v1::Refusal) -> Any;
-
-    /// The commands this policy sends for `event` (an event of its source,
-    /// packed), from its `#[reacts]` handler for the event's type; `None`
-    /// for a type it does not react to. Generated.
-    fn on_event(&self, event: &Any, ctx: &PolicyContext) -> Option<Commands<Self::Target>>;
-}
+/// A policy: the kernel's one [`Policy`](super::Policy) trait, which
+/// `#[policy]` implements (answering refusals) and a hand-written policy
+/// implements as it is.
+pub use super::policy::Policy;
 
 /// What a policy's `#[on_event(E)]` handler returns: commands for its target
 /// `T`, each with the root of the stream it is for. For a process manager
@@ -784,6 +739,22 @@ impl<T: Domain> Commands<T> {
     /// Each command, packed, with the root of its stream, in order.
     pub fn orders(&self) -> &[(Uuid, Any)] {
         &self.orders
+    }
+
+    /// These commands and `command`, one of `T`'s, for the stream of `T` at
+    /// `root`: a hand-written policy's way to send one.
+    pub fn send(self, root: Uuid, command: &T::Command) -> Commands<T> {
+        let mut orders = self.orders;
+        orders.push((root, command.to_any()));
+        Commands {
+            orders,
+            target: self.target,
+        }
+    }
+
+    /// As [`Commands::orders`], owned.
+    pub(crate) fn into_orders(self) -> Vec<(Uuid, Any)> {
+        self.orders
     }
 }
 

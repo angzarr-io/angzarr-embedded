@@ -4,7 +4,7 @@ use crate::next::toys::prelude::*;
 use crate::next::v1::{angzarr_dead_letter, AngzarrDeadLetter, ComponentKind};
 use crate::next::{
     check, dead_letter_line, pack, DeadLetterLog, Failure, Kernel, KernelError, MemoryDeadLetters,
-    Routes, DEAD_LETTER_PREFIX,
+    DEAD_LETTER_PREFIX,
 };
 
 use crate::next::toys::{account, at, command, cover, fact, registry, Account, Edit};
@@ -54,7 +54,6 @@ fn a_panicking_ingest_aborts_the_chain_and_is_logged() {
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry, &log);
     let store = MemoryStore::new();
-    let routes = Routes::new();
 
     let bad = fact(
         cover("account", 1),
@@ -62,7 +61,7 @@ fn a_panicking_ingest_aborts_the_chain_and_is_logged() {
         "pi_bad",
     );
     let failure = kernel
-        .handle::<Account, _, _>(&store, &routes, bad, &at(30), &mut ())
+        .handle::<Account, _, _>(&store, bad, &at(30), &mut ())
         .ready()
         .err()
         .expect("a bug, never a business rejection");

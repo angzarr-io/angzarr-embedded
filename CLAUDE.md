@@ -51,7 +51,7 @@ aggregate test.
 angzarr-store-sqlite depends on `angzarr-ports`, `sea-query`, `sqlx` and
 `sea-query-binder`, because it is a SQL store: hand-rolling a query builder
 or a driver would be a second, unchecked implementation of the dialect. It
-is the one SQLite adapter annals and angzarr share (plan ruling 10), so it
+is the one SQLite adapter annals and angzarr share, so it
 is a LEAF: it depends on nothing of annals (its own test,
 `a_store_depends_on_nothing_of_annals`, holds it to that), and its errors
 follow angzarr-ports' style rather than `annals_diagnostic`'s. It lives here

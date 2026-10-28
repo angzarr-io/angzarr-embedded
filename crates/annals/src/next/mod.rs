@@ -116,8 +116,7 @@ pub use error::{
 };
 pub use fixture::{assert_replay_fixtures, check_replay_fixtures, ReplayFixture};
 pub use handle::{
-    Handled, Kernel, Project, ProjectionRoute, ProjectorFailure, Recorded, Routes,
-    DEFAULT_DEPTH_LIMIT,
+    Handled, Kernel, Project, ProjectionRoute, ProjectorFailure, Recorded, DEFAULT_DEPTH_LIMIT,
 };
 pub use handler::{Committed, Handler};
 pub use payload::{decode_as, pack, type_name, Decoder, Payload};
@@ -144,7 +143,7 @@ pub use angzarr_proto::ids;
 /// messages.
 pub use angzarr_proto::v1;
 /// The well-known types the kernel's pages carry: payloads are
-/// [`Any`](prost_types::Any), instants [`Timestamp`](prost_types::Timestamp).
+/// [`Any`], instants [`Timestamp`].
 pub use prost_types::{Any, Timestamp};
 
 /// The later of two instants: what `recorded_at` is raised to, so it never

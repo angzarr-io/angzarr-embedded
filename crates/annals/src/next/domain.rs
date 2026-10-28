@@ -132,8 +132,8 @@ pub trait Domain: Sized + 'static {
     /// source, the rules). **Infallible by type**: a fact already happened,
     /// so an awkward one is recorded (a payment for an unknown order
     /// becomes an event that says so), never refused. A panic here is a
-    /// bug: in process it aborts the whole chain, nothing is written, and
-    /// the dead-letter log says so.
+    /// bug: in process it aborts the step, which writes nothing, and the
+    /// dead-letter log says so.
     fn ingest(
         state: &Self::State,
         fact: &Self::Fact,
