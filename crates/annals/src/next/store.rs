@@ -154,8 +154,9 @@ pub trait EventStore {
         Ok(None)
     }
 
-    /// Keep `snapshot` as `stream`'s newest, replacing the one before.
-    /// Discarded by default.
+    /// Keep `snapshot` as `stream`'s newest, replacing the one before. On
+    /// a unit of work it lands at commit, and reads through the unit see it
+    /// at once. Discarded by default, by a store that keeps none.
     fn write_snapshot(&mut self, _stream: &Cover, _snapshot: &Snapshot) -> Result<(), StoreError> {
         Ok(())
     }
@@ -587,6 +588,7 @@ impl InMemoryStore {
         InMemoryTx {
             store: self,
             pending: BTreeMap::new(),
+            snapshots: BTreeMap::new(),
             purged: BTreeSet::new(),
         }
     }
@@ -727,6 +729,9 @@ impl ReadUnit for InMemoryRead<'_> {
 pub struct InMemoryTx<'s> {
     store: &'s mut InMemoryStore,
     pending: BTreeMap<Key, Held>,
+    /// The snapshots this unit wrote: kept at commit, and read through it
+    /// till then.
+    snapshots: BTreeMap<Key, Snapshot>,
     /// The streams this unit purged from the store: their events and
     /// snapshots are deleted at commit, and hidden from its reads till then.
     purged: BTreeSet<Key>,
@@ -804,10 +809,20 @@ impl EventStore for InMemoryTx<'_> {
     }
 
     fn read_snapshot(&mut self, stream: &Cover) -> Result<Option<Snapshot>, StoreError> {
-        if self.purged.contains(&key(stream)) {
+        let k = key(stream);
+        if let Some(snapshot) = self.snapshots.get(&k) {
+            return Ok(Some(snapshot.clone()));
+        }
+        if self.purged.contains(&k) {
             return Ok(None);
         }
         self.store.read_snapshot(stream)
+    }
+
+    /// Held till commit, as an append is.
+    fn write_snapshot(&mut self, stream: &Cover, snapshot: &Snapshot) -> Result<(), StoreError> {
+        self.snapshots.insert(key(stream), snapshot.clone());
+        Ok(())
     }
 }
 
@@ -816,6 +831,7 @@ impl Purge for InMemoryTx<'_> {
         let deleted = self.pages(stream).len() as u64;
         let k = key(stream);
         self.pending.remove(&k);
+        self.snapshots.remove(&k);
         self.purged.insert(k);
         Ok(deleted)
     }
@@ -826,14 +842,16 @@ impl UnitOfWork for InMemoryTx<'_> {
         let InMemoryTx {
             store,
             pending,
+            snapshots,
             purged,
         } = self;
-        // Purges first: what this unit appended after purging a stream
-        // starts it again.
+        // Purges first: what this unit appended (or snapshotted) after
+        // purging a stream starts it again.
         for k in purged {
             store.streams.remove(&k);
             store.snapshots.remove(&k);
         }
+        store.snapshots.extend(snapshots);
         store.committed();
         for held in pending.into_values() {
             let length = store.pages(&held.stream).len() as u64;

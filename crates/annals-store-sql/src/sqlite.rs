@@ -583,6 +583,20 @@ impl AsyncEventStore for SqliteUnit<'_> {
     async fn read_snapshot(&mut self, stream: &Cover) -> Result<Option<Snapshot>, StoreError> {
         read_snapshot(self.conn()?, stream).await
     }
+
+    /// Inside the unit's transaction: it lands at commit.
+    async fn write_snapshot(
+        &mut self,
+        stream: &Cover,
+        snapshot: &Snapshot,
+    ) -> Result<(), StoreError> {
+        execute(
+            self.conn()?,
+            statements::upsert_snapshot::<SqliteDialect>(stream, snapshot)?,
+        )
+        .await
+        .map(drop)
+    }
 }
 
 impl AsyncPurge for SqliteUnit<'_> {
