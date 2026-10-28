@@ -440,9 +440,7 @@ impl<'k> Run<'k> {
         }
         let owed = positions.iter().copied().min().unwrap_or_default();
         let from = written.map_or(owed, |written| written.max(owed));
-        let Some(slice) = port.read_from(source, from).await.map_err(store)? else {
-            return Ok(());
-        };
+        let slice = port.read_from(source, from).await.map_err(store)?;
         let upcaster = registry.upcaster(&source.domain);
         for page in &slice.pages {
             let trigger = EventRef {
@@ -487,7 +485,6 @@ impl<'k> Run<'k> {
                     }
                     return Err(failed);
                 }
-                positions[k] = page.sequence + 1;
             }
         }
         Ok(())

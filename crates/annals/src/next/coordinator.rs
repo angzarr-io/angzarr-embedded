@@ -324,27 +324,18 @@ pub(crate) async fn read<P: Port>(
         // (a purge left it, or it was written ahead of them), so it is
         // unusable, like one under other rules, and the stream is read
         // from its events.
-        (Some(s), Some(read)) if s.sequence >= read.next_sequence => {
+        (Some(s), read) if s.sequence >= read.next_sequence => {
             slice = port.read_from(cover, 0).await.map_err(KernelError::Store)?;
             None
         }
         (snapshot, _) => snapshot,
     };
-    let (snapshot, pages, head, last_recorded_at) = match slice {
-        Some(slice) => (
-            snapshot,
-            slice.pages,
-            slice.next_sequence,
-            slice.last_recorded_at,
-        ),
-        None => (None, Vec::new(), 0, None),
-    };
     Ok(Loaded {
         resolution,
         snapshot,
-        pages,
-        head,
-        last_recorded_at,
+        pages: slice.pages,
+        head: slice.next_sequence,
+        last_recorded_at: slice.last_recorded_at,
     })
 }
 

@@ -667,8 +667,9 @@ on no writer; the change token is the connection's `PRAGMA data_version`
 with its `total_changes()`; migrations 0001 and 0002 are as released, and
 0003 adds positions, the outbox and the `correlation_id`/`recorded_at`
 columns, filled for an existing file by a one-time backfill under the
-migration's lock. The SQLite adapter implements no edition yet: no stream
-is ever forked there.
+migration's lock. An edition stream there is forked by a creation event
+as its first own event and reads main below the fork; the edition
+administration (the `Editions` port) is not implemented.
 
 ## Snapshots
 

@@ -218,6 +218,22 @@ fn a_policys_target_is_in_its_sources_edition() {
     );
 }
 
+/// A hand-written policy's refusal answer is angzarr's pass-through
+/// `CommandRefused` unless it says otherwise.
+#[test]
+fn a_hand_written_policy_passes_a_refusal_through() {
+    use crate::next::markup::{self, v1::Refusal};
+    let refusal = Refusal {
+        event: Some(crate::next::v1::EventBook {
+            cover: Some(cover("account", 1)),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let answer = crate::next::Policy::on_refused(&Bookkeeping, &refusal);
+    assert_eq!(answer, markup::__pass_through(&refusal));
+}
+
 #[test]
 fn a_book_for_another_domain_is_refused() {
     let registry = registry();

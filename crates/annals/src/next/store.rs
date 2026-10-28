@@ -51,7 +51,7 @@ pub(crate) fn produced_by(page: &EventPage, command_id: &Uuid) -> bool {
 }
 
 /// The store operations a step makes, keyed by the wire `Cover` the kernel
-/// carries. `read_from` answers `None` for a stream with no events.
+/// carries. A stream with no events reads as an empty slice at 0.
 pub(crate) trait Port {
     /// One step's write: `pages` to `stream` at `expected`, with the step's
     /// `positions` ((handler, the stream it consumes, its next sequence)),
@@ -68,7 +68,7 @@ pub(crate) trait Port {
         &mut self,
         stream: &Cover,
         from: u64,
-    ) -> impl Future<Output = Result<Option<Slice>, StoreError>>;
+    ) -> impl Future<Output = Result<Slice, StoreError>>;
 
     fn find_command(
         &mut self,
@@ -139,12 +139,8 @@ impl<S: Store> Port for StorePort<'_, S> {
         Ok(written.next_sequence.unwrap_or(expected))
     }
 
-    async fn read_from(&mut self, stream: &Cover, from: u64) -> Result<Option<Slice>, StoreError> {
-        let slice = self
-            .0
-            .read(StreamRef::try_from(stream)?, from, None)
-            .await?;
-        Ok((slice.next_sequence > 0).then_some(slice))
+    async fn read_from(&mut self, stream: &Cover, from: u64) -> Result<Slice, StoreError> {
+        self.0.read(StreamRef::try_from(stream)?, from, None).await
     }
 
     async fn find_command(
