@@ -7,8 +7,8 @@
 #   cargo install protoc-gen-prost --version 0.5.0 --locked
 #
 # The pre-commit gates and their recipes (fmt, fmt-check, test, test-staged,
-# mutants-staged, lint-deps, secrets-scan-staged and the `_run` machinery)
-# are gates/gates.just, imported below; this file gives them annals'
+# test-commit, mutants-staged, lint-deps, secrets-scan-staged and the `_run`
+# machinery) are gates/gates.just, imported below; this file gives them annals'
 # parameters.
 
 set windows-shell := ["bash", "-cu"]

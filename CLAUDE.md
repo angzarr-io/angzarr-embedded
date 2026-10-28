@@ -173,10 +173,13 @@ failing gate is a finding: fix the cause and commit again; never
    workspace run cannot see (its own dev-dependency turns `sqlite` on).
 4. **deps**: `just lint-deps`. A new licence, git source or advisory ignore
    is a change to `deny.toml`, with its reason.
-5. **tests**: `just test-staged` tests the crates with staged changes and
-   their workspace dependents (normal, dev and build), on a throwaway
-   worktree of HEAD plus the staged diff (`target/staged-tree`), so unstaged
-   edits cannot pass or fail it.
+5. **tests**: `just test-commit` runs `just test-staged`, which tests the
+   crates with staged changes and their workspace dependents (normal, dev
+   and build), on a throwaway worktree of HEAD plus the staged diff
+   (`target/staged-tree`), so unstaged edits cannot pass or fail it. Red
+   tests (failing tests, not a failed build) are committed on a branch other
+   than the default one, with a warning that it cannot merge until they
+   pass, and refused on the default branch.
 6. **mutants**: `just mutants-staged` runs `cargo mutants --in-diff` over
    the staged diff in that tree and holds every crate's new code to a 90%
    kill rate (`mutation_thresholds`; a new crate gets a threshold there
