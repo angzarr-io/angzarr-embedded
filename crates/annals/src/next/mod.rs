@@ -78,7 +78,7 @@ mod handle;
 mod handler;
 pub mod markup;
 mod payload;
-mod reaction;
+mod policy;
 mod registry;
 mod store;
 mod stream;
@@ -114,8 +114,8 @@ pub use handle::{
 };
 pub use handler::{Committed, Handler};
 pub use payload::{decode_as, pack, type_name, Decoder, Payload};
-pub use reaction::{
-    policy, projection, target_cover, Order, Policy, Projection, Projector, Reaction, Reactor,
+pub use policy::{
+    policy, projection, target_cover, Order, Policy, PolicyHandler, Projection, Projector,
 };
 pub use registry::{Aggregate, Misconfigured, Registry};
 pub use store::{
@@ -178,9 +178,9 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn annals_diagnostic::Diagnostic>
         Malformed::BadCommandId { len: 1 },
         Malformed::BadCorrelationId { len: 17 },
         Malformed::CausationFromOutside,
-        Malformed::IdOnReaction,
-        Malformed::FactFromReaction,
-        Malformed::HandlingOnReaction,
+        Malformed::IdOnPolicyCommand,
+        Malformed::FactFromPolicy,
+        Malformed::HandlingOnPolicyCommand,
         Malformed::BadTrigger(ids::UuidError::MissingTrigger),
         Malformed::FactWithoutOrigin,
         Malformed::EmptyExternalId,

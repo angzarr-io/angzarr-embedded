@@ -10,9 +10,9 @@ fn uuid(n: u8) -> Uuid {
 }
 
 /// A reaction's command as the chain identifies it: built directly,
-/// since `check_reaction` needs a registered domain and only the
+/// since `check_policy_command` needs a registered domain and only the
 /// meta is under test.
-fn reaction(trigger: EventRef) -> Identified {
+fn policy_command(trigger: EventRef) -> Identified {
     let command_id = ids::reaction_command_id(&trigger, "bookkeeping", 0).unwrap();
     Identified {
         cover: Cover {
@@ -140,7 +140,7 @@ fn command() -> command_page::Body {
 }
 
 fn react(book: CommandBook) -> Result<Checked, Malformed> {
-    check_reaction(
+    check_policy_command(
         book,
         &empty::registry(),
         trigger(),
@@ -153,7 +153,7 @@ fn react(book: CommandBook) -> Result<Checked, Malformed> {
 #[test]
 fn a_policys_book_is_identified_from_its_trigger() {
     let checked = react(book(command())).unwrap();
-    assert!(checked.is_reaction());
+    assert!(checked.is_policy_command());
     assert!(!checked.body().is_fact());
     let id = checked.identify(&Sampled {
         now: Timestamp::default(),
@@ -188,15 +188,15 @@ fn a_policys_book_names_no_ids_no_fact_and_no_handling() {
     };
     assert_eq!(
         with(|b| b.page.as_mut().unwrap().command_id = Some(uuid(1))),
-        Some(Malformed::IdOnReaction)
+        Some(Malformed::IdOnPolicyCommand)
     );
     assert_eq!(
         with(|b| b.page.as_mut().unwrap().correlation_id = Some(uuid(1))),
-        Some(Malformed::IdOnReaction)
+        Some(Malformed::IdOnPolicyCommand)
     );
     assert_eq!(
         with(|b| b.page.as_mut().unwrap().causation_id = Some(trigger())),
-        Some(Malformed::IdOnReaction)
+        Some(Malformed::IdOnPolicyCommand)
     );
     assert_eq!(
         with(|b| {
@@ -205,7 +205,7 @@ fn a_policys_book_names_no_ids_no_fact_and_no_handling() {
                 conflict_resolution: 0,
             })
         }),
-        Some(Malformed::HandlingOnReaction)
+        Some(Malformed::HandlingOnPolicyCommand)
     );
     assert_eq!(
         with(|b| b.handling = Some(Handling::default())),
@@ -215,9 +215,9 @@ fn a_policys_book_names_no_ids_no_fact_and_no_handling() {
     let fact = book(command_page::Body::Fact(angzarr_proto::v1::Fact {
         payload: Some(Any::default()),
     }));
-    assert_eq!(react(fact).err(), Some(Malformed::FactFromReaction));
+    assert_eq!(react(fact).err(), Some(Malformed::FactFromPolicy));
     assert_eq!(
-        check_reaction(
+        check_policy_command(
             book(command()),
             &empty::registry(),
             EventRef::default(),
@@ -229,7 +229,7 @@ fn a_policys_book_names_no_ids_no_fact_and_no_handling() {
         Some(Malformed::BadTrigger(UuidError::MissingTrigger))
     );
     assert_eq!(
-        check_reaction(
+        check_policy_command(
             book(command()),
             &empty::registry(),
             trigger(),
@@ -243,7 +243,7 @@ fn a_policys_book_names_no_ids_no_fact_and_no_handling() {
 }
 
 #[test]
-fn a_reactions_events_carry_its_command_id_as_causation_and_no_trigger() {
+fn a_policy_commands_events_carry_its_command_id_as_causation_and_no_trigger() {
     let trigger = EventRef {
         stream: Some(Cover {
             domain: "account".to_string(),
@@ -252,7 +252,7 @@ fn a_reactions_events_carry_its_command_id_as_causation_and_no_trigger() {
         }),
         sequence: 2,
     };
-    let id = reaction(trigger.clone());
+    let id = policy_command(trigger.clone());
     assert_eq!(id.causation_id(), Some(&trigger), "the command keeps it");
 
     let meta = id.meta(Timestamp::default(), "v1");
@@ -320,7 +320,7 @@ mod parse {
         assert_eq!(checked.correlation_id(), None, "assigned at identify");
         assert_eq!(checked.expected_sequence(), None, "stamped at load");
         assert_eq!(checked.conflict_resolution(), None, "resolved at load");
-        assert!(!checked.is_reaction());
+        assert!(!checked.is_policy_command());
     }
 
     #[test]

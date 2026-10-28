@@ -27,11 +27,11 @@ annals-next-malformed-bad-correlation-id = the correlation id is { $len ->
         [one] one byte
        *[other] { $len } bytes
     }, not a UUID's 16
-annals-next-malformed-causation-from-outside = a client's book names a causation: only the kernel's chain issues reactions
-annals-next-malformed-id-on-reaction = a policy's book names its own ids: the kernel derives them from the trigger
-annals-next-malformed-fact-from-reaction = a policy's book holds a fact: a reaction never injects one
-annals-next-malformed-handling-on-reaction = a policy's book has handling: its target stamps its own head
-annals-next-malformed-bad-trigger = the reaction's trigger cannot name a command id: { $reason ->
+annals-next-malformed-causation-from-outside = a client's book names a causation: only the kernel's chain issues policy commands
+annals-next-malformed-id-on-policy-command = a policy's book names its own ids: the kernel derives them from the trigger
+annals-next-malformed-fact-from-policy = a policy's book holds a fact: a policy never injects one
+annals-next-malformed-handling-on-policy-command = a policy's book has handling: its target stamps its own head
+annals-next-malformed-bad-trigger = the policy command's trigger cannot name a command id: { $reason ->
         [bad-root] its root is not a UUID's 16 bytes
         [missing-trigger] it needs a stream with a root
         [empty-edition] its stream's edition is set but empty
@@ -53,7 +53,7 @@ annals-next-projection-failed = the command committed, then { $failures ->
    *[other] { $failures } projectors failed, the first { $projector }: { $error }
 }
 annals-next-pm-no-instance = process manager stream { $stream } has no instance, and only a starting input starts one
-annals-next-downstream = a reaction down the chain failed, at depth { $depth }: { $error }
+annals-next-downstream = a policy command down the chain failed, at depth { $depth }: { $error }
 annals-next-stale = stream { $stream } is at { $actual }, not the { $expected } expected: re-read and re-issue
 annals-next-unresolved = decide never acknowledged the window of stream { $stream } from { $expected } to { $actual }
 annals-next-unknown-type = stream { $stream }'s domain does not decode the type { $type_url }

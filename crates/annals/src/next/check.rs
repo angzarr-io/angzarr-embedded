@@ -68,11 +68,11 @@ pub enum Malformed {
     CausationFromOutside,
     /// A policy's book that names its own command, correlation or causation
     /// id: the kernel derives all three from the trigger.
-    IdOnReaction,
+    IdOnPolicyCommand,
     /// A policy's book with a fact: a reaction can never inject a fact.
-    FactFromReaction,
+    FactFromPolicy,
     /// A policy's book with handling: the target stamps its own head.
-    HandlingOnReaction,
+    HandlingOnPolicyCommand,
     /// The reaction's trigger cannot name a command id
     /// ([`ids::reaction_command_id`]): no stream or root, a bad root, an
     /// empty edition or component.
@@ -129,19 +129,19 @@ impl fmt::Display for Malformed {
                 write!(f, "the correlation id is {len} bytes, not a UUID's 16")
             }
             Malformed::CausationFromOutside => f.write_str(
-                "a client's book names a causation: only the kernel's chain issues reactions",
+                "a client's book names a causation: only the kernel's chain issues policy commands",
             ),
-            Malformed::IdOnReaction => f.write_str(
+            Malformed::IdOnPolicyCommand => f.write_str(
                 "a policy's book names its own ids: the kernel derives them from the trigger",
             ),
-            Malformed::FactFromReaction => {
-                f.write_str("a policy's book holds a fact: a reaction never injects one")
+            Malformed::FactFromPolicy => {
+                f.write_str("a policy's book holds a fact: a policy never injects one")
             }
-            Malformed::HandlingOnReaction => {
+            Malformed::HandlingOnPolicyCommand => {
                 f.write_str("a policy's book has handling: its target stamps its own head")
             }
             Malformed::BadTrigger(error) => {
-                write!(f, "the reaction's trigger cannot name a command id: {error}")
+                write!(f, "the policy command's trigger cannot name a command id: {error}")
             }
             Malformed::FactWithoutOrigin => f.write_str("a fact without its origin"),
             Malformed::EmptyExternalId => {
@@ -186,9 +186,11 @@ impl Diagnostic for Malformed {
             Malformed::BadCommandId { .. } => "annals-next-malformed-bad-command-id",
             Malformed::BadCorrelationId { .. } => "annals-next-malformed-bad-correlation-id",
             Malformed::CausationFromOutside => "annals-next-malformed-causation-from-outside",
-            Malformed::IdOnReaction => "annals-next-malformed-id-on-reaction",
-            Malformed::FactFromReaction => "annals-next-malformed-fact-from-reaction",
-            Malformed::HandlingOnReaction => "annals-next-malformed-handling-on-reaction",
+            Malformed::IdOnPolicyCommand => "annals-next-malformed-id-on-policy-command",
+            Malformed::FactFromPolicy => "annals-next-malformed-fact-from-policy",
+            Malformed::HandlingOnPolicyCommand => {
+                "annals-next-malformed-handling-on-policy-command"
+            }
             Malformed::BadTrigger(_) => "annals-next-malformed-bad-trigger",
             Malformed::FactWithoutOrigin => "annals-next-malformed-fact-without-origin",
             Malformed::EmptyExternalId => "annals-next-malformed-empty-external-id",
@@ -287,7 +289,7 @@ enum Entry {
     Client,
     /// A policy in the kernel's own chain, reacting to `trigger`. The ids
     /// are derived at check time, so identifying cannot fail.
-    Reaction {
+    Policy {
         trigger: EventRef,
         correlation_id: Uuid,
         command_id: Uuid,
@@ -317,7 +319,7 @@ pub struct Checked {
 /// registry answers only whether `cover.domain` is registered and what its
 /// state supports. Refuses, in [`Malformed`]'s order, every case angzarr's
 /// `Handling` region lists as malformed, plus a causation (only the
-/// kernel's chain issues reactions).
+/// kernel's chain issues policy commands).
 pub fn check(book: CommandBook, registry: &Registry) -> Result<Checked, Malformed> {
     parse(book, registry, None)
 }
@@ -331,7 +333,7 @@ pub fn check(book: CommandBook, registry: &Registry) -> Result<Checked, Malforme
 /// The id never names the reactor's rules version or code, so a re-run over
 /// a handled trigger (catch-up, redelivery) re-derives the same id and
 /// deduplicates (angzarr decision 13.4). Repairs are new commands.
-pub(crate) fn check_reaction(
+pub(crate) fn check_policy_command(
     book: CommandBook,
     registry: &Registry,
     trigger: EventRef,
@@ -344,7 +346,7 @@ pub(crate) fn check_reaction(
     parse(
         book,
         registry,
-        Some(Entry::Reaction {
+        Some(Entry::Policy {
             trigger,
             correlation_id,
             command_id,
@@ -352,11 +354,11 @@ pub(crate) fn check_reaction(
     )
 }
 
-/// The one parse: `reaction` is `None` for a client's book.
+/// The one parse: `policy` is `None` for a client's book.
 fn parse(
     book: CommandBook,
     registry: &Registry,
-    reaction: Option<Entry>,
+    policy: Option<Entry>,
 ) -> Result<Checked, Malformed> {
     let CommandBook {
         cover,
@@ -410,14 +412,14 @@ fn parse(
 
     let handling = handling.unwrap_or_default();
     let handled = handling != Handling::default();
-    let entry = match reaction {
+    let entry = match policy {
         None if causation_id.is_some() => return Err(Malformed::CausationFromOutside),
         None => Entry::Client,
         Some(_) if command_id.is_some() || correlation_id.is_some() || causation_id.is_some() => {
-            return Err(Malformed::IdOnReaction)
+            return Err(Malformed::IdOnPolicyCommand)
         }
-        Some(_) if is_fact => return Err(Malformed::FactFromReaction),
-        Some(_) if handled => return Err(Malformed::HandlingOnReaction),
+        Some(_) if is_fact => return Err(Malformed::FactFromPolicy),
+        Some(_) if handled => return Err(Malformed::HandlingOnPolicyCommand),
         Some(entry) => entry,
     };
 
@@ -448,7 +450,7 @@ fn parse(
     if process_manager {
         let given = match &entry {
             Entry::Client => correlation_id.as_ref(),
-            Entry::Reaction { correlation_id, .. } => Some(correlation_id),
+            Entry::Policy { correlation_id, .. } => Some(correlation_id),
         };
         if given.is_some_and(|c| *c != root) {
             return Err(Malformed::RootNotCorrelation);
@@ -559,8 +561,8 @@ impl Checked {
     }
 
     /// Whether the kernel's own chain issued it.
-    pub fn is_reaction(&self) -> bool {
-        matches!(self.entry, Entry::Reaction { .. })
+    pub fn is_policy_command(&self) -> bool {
+        matches!(self.entry, Entry::Policy { .. })
     }
 
     /// Step 2: assign the ids (angzarr's `command_identity` region).
@@ -591,7 +593,7 @@ impl Checked {
         } = self;
         let (command_id, correlation_id, causation_id) = match (entry, &body) {
             (
-                Entry::Reaction {
+                Entry::Policy {
                     trigger,
                     correlation_id,
                     command_id,

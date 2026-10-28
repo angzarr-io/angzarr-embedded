@@ -354,7 +354,7 @@ impl<R: fmt::Display> fmt::Display for Failure<R> {
             Failure::Rejected(rejection) => rejection.fmt(f),
             Failure::Downstream { path, error } => write!(
                 f,
-                "a reaction down the chain failed, at depth {}: {error}",
+                "a policy command down the chain failed, at depth {}: {error}",
                 path.len()
             ),
             Failure::Kernel(error) => error.fmt(f),

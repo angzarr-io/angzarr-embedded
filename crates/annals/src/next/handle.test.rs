@@ -185,12 +185,12 @@ fn a_command_to_an_edition_is_refused_and_writes_nothing() {
 }
 
 #[test]
-fn a_reaction_targets_its_sources_edition() {
+fn a_policys_target_is_in_its_sources_edition() {
     let target = crate::next::target_cover::<Bookkeeping>(&cover_in("account", 1, "what-if"), &());
     assert_eq!(
         target.edition.as_deref(),
         Some("what-if"),
-        "a reaction never crosses timelines"
+        "a policy never crosses timelines"
     );
 }
 
@@ -431,7 +431,7 @@ fn account_stream(
 /// from the event, so the ledger is owed only some of the account's events.
 struct DepositsOnly;
 
-impl crate::next::Reaction for DepositsOnly {
+impl crate::next::Policy for DepositsOnly {
     type Source = Account;
     type Target = Ledger;
     type TargetId = ();
@@ -448,9 +448,7 @@ impl crate::next::Reaction for DepositsOnly {
     fn root((): &()) -> crate::next::v1::Uuid {
         ledger_root()
     }
-}
 
-impl crate::next::Policy for DepositsOnly {
     fn command((): &(), c: &crate::next::Committed<'_, Account>) -> ledger::Record {
         let cents = match c.event() {
             crate::next::toys::AccountEvent::Deposited(cents) => *cents,
@@ -630,10 +628,34 @@ fn a_committed_event_names_its_stream() {
     assert_eq!(covers, [(cover("account", 1), 1)]);
 }
 
+/// A policy as a handler of its source hands over one order per target,
+/// in target order: each indexed by its place, keeping the trigger's
+/// correlation.
+#[test]
+fn a_policys_orders_are_indexed_and_keep_the_triggers_correlation() {
+    let registry = registry();
+    let mut store = InMemoryStore::new();
+    opened(&mut store, &registry, 1, 0);
+    let source = account_stream(&mut store, &registry);
+    let mut orders = Vec::new();
+    let mut handler = crate::next::policy::<TwoLedgers, _>(|order| orders.push(order));
+    source.dispatch(1, &registry, &mut [&mut handler]).unwrap();
+    assert_eq!(
+        orders
+            .iter()
+            .map(|o| (o.index(), o.cover().clone(), o.trigger().sequence))
+            .collect::<Vec<_>>(),
+        [(0, two_ledgers(0), 1), (1, two_ledgers(1), 1)]
+    );
+    let correlation = source.events()[1].correlation_id().clone();
+    assert!(orders.iter().all(|o| *o.correlation_id() == correlation));
+    assert_ne!(correlation, crate::next::v1::Uuid::default());
+}
+
 /// Two ledgers per account event: orders are indexed in target order.
 struct TwoLedgers;
 
-impl crate::next::Reaction for TwoLedgers {
+impl crate::next::Policy for TwoLedgers {
     type Source = Account;
     type Target = Ledger;
     type TargetId = u8;
@@ -647,9 +669,7 @@ impl crate::next::Reaction for TwoLedgers {
     fn root(n: &u8) -> crate::next::v1::Uuid {
         ids::compute_root("ledger", &n.to_string()).unwrap()
     }
-}
 
-impl crate::next::Policy for TwoLedgers {
     fn command(_: &u8, c: &crate::next::Committed<'_, Account>) -> ledger::Record {
         ledger::Record {
             source_sequence: c.sequence(),
@@ -698,7 +718,7 @@ fn two_ledgers(n: u8) -> crate::next::v1::Cover {
 /// for every event the chain stages in that domain, in the order they were
 /// registered, and everything lands in one unit of work.
 #[test]
-fn every_reaction_on_a_source_runs_for_each_of_its_events_in_registration_order() {
+fn every_policy_on_a_source_runs_for_each_of_its_events_in_registration_order() {
     let registry = registry();
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry, &log);

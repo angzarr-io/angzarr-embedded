@@ -93,7 +93,7 @@ mod tx {
     use crate::next::v1::{ConflictResolution, StateDescriptor, StateOptions, Uuid};
     use crate::next::{
         ids, pack, Committed, Decoder, Domain, InMemoryStore, IngestCtx, Kernel, MemoryDeadLetters,
-        Payload, PayloadError, Policy, Reaction, Registry, Rulebook, State, Tx, Upcaster,
+        Payload, PayloadError, Policy, Registry, Rulebook, State, Tx, Upcaster,
     };
 
     use crate::next::toys::{at, command, cover, fees, opened, Account, AccountCmd, Edit};
@@ -303,7 +303,7 @@ mod tx {
     /// Every account event → the probe.
     struct Probing;
 
-    impl Reaction for Probing {
+    impl Policy for Probing {
         type Source = Account;
         type Target = ProbeDomain;
         type TargetId = ();
@@ -317,9 +317,7 @@ mod tx {
         fn root((): &()) -> Uuid {
             probe_root()
         }
-    }
 
-    impl Policy for Probing {
         fn command((): &(), _: &Committed<'_, Account>) -> Probe {
             Probe { stash: 0 }
         }
@@ -409,7 +407,7 @@ mod tx {
     /// this sets off two sibling steps, two deep.
     struct ProbeToLedger;
 
-    impl Reaction for ProbeToLedger {
+    impl Policy for ProbeToLedger {
         type Source = ProbeDomain;
         type Target = crate::next::toys::Ledger;
         type TargetId = ();
@@ -423,9 +421,7 @@ mod tx {
         fn root((): &()) -> Uuid {
             crate::next::toys::ledger_root()
         }
-    }
 
-    impl Policy for ProbeToLedger {
         fn command((): &(), c: &Committed<'_, ProbeDomain>) -> crate::next::toys::ledger::Record {
             crate::next::toys::ledger::Record {
                 source_sequence: c.sequence(),

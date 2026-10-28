@@ -170,7 +170,7 @@ impl Checked {
     pub fn correlation_id(&self) -> Option<&Uuid>;
     pub fn expected_sequence(&self) -> Option<u64>;
     pub fn conflict_resolution(&self) -> Option<ConflictResolution>;   // supported if set
-    pub fn is_reaction(&self) -> bool;
+    pub fn is_policy_command(&self) -> bool;
     pub fn identify(self, sampled: &Sampled) -> Identified;
 }
 ```
@@ -190,8 +190,8 @@ no cover; an unregistered domain; no root; a root that is not 16 bytes; a
 set empty edition; no page; no body; no payload; a set command or
 correlation id that is not 16 bytes; a causation from a client
 (`CausationFromOutside`); for a policy's book, ids of its own
-(`IdOnReaction`), a fact (`FactFromReaction`) or handling
-(`HandlingOnReaction`), or a trigger that cannot name an id (`BadTrigger`);
+(`IdOnPolicyCommand`), a fact (`FactFromPolicy`) or handling
+(`HandlingOnPolicyCommand`), or a trigger that cannot name an id (`BadTrigger`);
 a fact without `fact_origin`; an empty `external_id`; a command with a
 `fact_origin`; a fact whose `command_id` is not its derivation; a fact with
 **any** handling field (`HandlingOnFact`); a `conflict_resolution` value the
@@ -201,7 +201,7 @@ build does not know; a resolution the domain's state does not support
 
 **No causation from outside.** `check` is the client entry. The kernel's
 chain builds its policies' books itself and checks them through a
-crate-private entry (`check_reaction`) that applies the same checks plus
+crate-private entry (`check_policy_command`) that applies the same checks plus
 the reaction rules and derives the command id from the trigger. annals
 needs no authentication for this: no one outside the process can call it.
 
@@ -226,7 +226,7 @@ impl Identified {
 | a fact | `ids::fact_command_id(external_id)` (UUIDv5; a sent one must equal it) | as sent, else the same value (`ids::fact_correlation`) | none |
 | a policy's command | `ids::reaction_command_id(trigger, component, index)` (UUIDv5) | the trigger's | the trigger's `EventRef` |
 
-`component` is `Reaction::NAME`; `index` is the order's place among those
+`component` is `Policy::NAME`; `index` is the order's place among those
 the trigger set off for that policy. The `causation_id` column is the
 command's own (`CommandPage.causation_id`); `Identified::meta` stamps the
 events with `causation.command_id` only. Identification is infallible: the
@@ -495,13 +495,11 @@ needs a snapshot migration.
 ## Reactions and the chain
 
 ```rust
-pub trait Reaction {
+pub trait Policy {
     type Source: Domain; type Target: Domain; type TargetId: Ord + Clone;
     const NAME: &'static str;           // the component its command ids derive from
     fn targets(committed: &Committed<'_, Self::Source>) -> Vec<Self::TargetId>;   // event + state
     fn root(target: &Self::TargetId) -> Uuid;   // covered in the source's edition
-}
-pub trait Policy: Reaction {
     fn command(target: &Self::TargetId, c: &Committed<'_, Self::Source>) -> <Self::Target as Domain>::Command;
 }
 pub trait Projection<D: Domain> { fn project(&mut self, c: &Committed<'_, D>); }
@@ -553,7 +551,7 @@ kernel.handle::<List, _, _>(unit, &routes, book, &sampled, &mut projections)?;  
 ### Reactor re-runs
 
 There is no switch (angzarr decision 13.4). A reaction's command id is
-UUIDv5(trigger, `Reaction::NAME`, index) and names nothing else: not a
+UUIDv5(trigger, `Policy::NAME`, index) and names nothing else: not a
 rules version, not the policy's code. So:
 
 - **A re-run deduplicates.** Re-delivering a trigger re-derives the same

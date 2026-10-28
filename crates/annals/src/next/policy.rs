@@ -1,4 +1,4 @@
-//! Reactions to committed events: policies and projections, over one base.
+//! Handlers of committed events: policies and projections, over one base.
 //!
 //! Every kind takes the same input, a [`Committed`] event (the stream, the
 //! sequence, the metadata, the payload, the state just after it), and runs
@@ -6,9 +6,9 @@
 //!
 //! - [`Policy`] (Event Storming's term; an *automation* in Event
 //!   Modeling): event → **commands** to target streams. A command goes
-//!   through the target's five steps and may be rejected. **A reaction's
+//!   through the target's five steps and may be rejected. **A policy's
 //!   only output is commands**: facts come from outside the system only, so
-//!   there is no reaction-injected fact (and no `Translation`).
+//!   there is no policy-injected fact (and no `Translation`).
 //!   Propagating one aggregate's changes into another (hatpick's list into
 //!   its draw systems) is a policy whose target records the change in its
 //!   own events.
@@ -20,16 +20,16 @@
 //! `Any`, and **no ids and no handling**. The kernel checks it like any
 //! book, then identifies it from its trigger: command id
 //! [`ids::reaction_command_id`](super::ids::reaction_command_id)(trigger,
-//! [`Reaction::NAME`], index), the trigger's correlation, and the trigger as
+//! [`Policy::NAME`], index), the trigger's correlation, and the trigger as
 //! its `causation_id`. Nothing outside the kernel can build one. The
 //! command's events name the command as their causation
 //! (`EventMeta.causation.command_id`), never the trigger: the trigger edge
 //! is the command's, for tracing.
 //!
 //! A target's cover is the target domain's, in **the source's edition**: a
-//! reaction never crosses timelines.
+//! policy never crosses timelines.
 //!
-//! **Targeting from the event.** [`Reaction::targets`] receives the whole
+//! **Targeting from the event.** [`Policy::targets`] receives the whole
 //! committed event (the event and the source's state just after it), so a
 //! policy may forward **only some events** to a target: hatpick's list
 //! forwards content changes to its draw systems and keeps its invites to
@@ -40,34 +40,38 @@ use std::marker::PhantomData;
 
 use angzarr_proto::v1::{command_page, Command, CommandBook, CommandPage, Cover, EventRef, Uuid};
 
-use super::check::{check_reaction, Checked, Malformed};
+use super::check::{check_policy_command, Checked, Malformed};
 use super::dead_letter::{write_dead_letter, DeadLetterLog};
 use super::domain::Domain;
 use super::handler::{Committed, Handler};
 use super::payload::Payload;
 use super::registry::Registry;
 
-// ---------------------------------------------------------------- the base
+// ---------------------------------------------------------------- policies
 
-/// What a policy is over: a source, a target domain, and the targets each
-/// source event is owed to. Stateless: live targets are a fold of the
-/// source.
-pub trait Reaction {
+/// Event → commands: a source, a target domain, the targets each source
+/// event is owed to, and the command each is owed. Stateless: live targets
+/// are a fold of the source. Each command is decided by its target and may
+/// be rejected; in the command handler a rejection fails the whole chain,
+/// the originating command included, as
+/// [`Failure::Downstream`](super::Failure::Downstream) with
+/// [`StepError::Rejected`](super::StepError::Rejected).
+pub trait Policy {
     type Source: Domain;
     type Target: Domain;
     /// Names one target.
     type TargetId: Ord + Clone;
 
-    /// The reaction's name, stable across releases and never empty: the
+    /// The policy's name, stable across releases and never empty: the
     /// `component` its commands' ids are derived from. Changing it changes
     /// every derived command id.
     ///
-    /// The ids name nothing else of the reaction: not a rules version, not
-    /// its code. A re-run over a trigger it already handled (catch-up after
-    /// a reset, redelivery) re-derives the same ids and deduplicates, even
+    /// The ids name nothing else of the policy: not a rules version, not
+    /// its code. A re-run over a trigger it already handled (a redelivery)
+    /// re-derives the same ids and deduplicates, even
     /// if the policy now decides differently. Repairs are new commands with
     /// new ids, appended after what the old code wrote; history is never
-    /// rewritten (angzarr decision 13.4). Inside a chain a reaction runs
+    /// rewritten (angzarr decision 13.4). Inside a chain a policy runs
     /// exactly once per trigger, atomically with it.
     const NAME: &'static str;
 
@@ -82,13 +86,7 @@ pub trait Reaction {
     /// Its cover is `(Target::NAME, the source's edition, root)`: see
     /// [`target_cover`].
     fn root(target: &Self::TargetId) -> Uuid;
-}
 
-/// Event → commands. Each command is decided by its target and may be
-/// rejected; in the command handler a rejection fails the whole chain, the
-/// originating command included, as [`Failure::Downstream`](super::Failure::Downstream)
-/// with [`StepError::Rejected`](super::StepError::Rejected).
-pub trait Policy: Reaction {
     /// The command `target` is owed for `committed`. For the event that
     /// first makes `target` a target, whatever creates it.
     fn command(
@@ -150,7 +148,7 @@ impl<P: Policy> Order<P> {
     /// the target's cover, the command packed as `Any`, no ids, no
     /// handling. Malformed only by a bug (a policy or kernel one).
     pub(crate) fn check(&self, registry: &Registry) -> Result<Checked, Malformed> {
-        check_reaction(
+        check_policy_command(
             self.book(),
             registry,
             self.trigger.clone(),
@@ -190,10 +188,10 @@ impl<P: Policy> Order<P> {
 
 /// A policy as a [`Handler`] of its source: each committed event becomes
 /// one [`Order`] per target, handed to `sink` in target order.
-pub fn policy<P: Policy, F: FnMut(Order<P>)>(sink: F) -> Reactor<P, F> {
-    Reactor {
+pub fn policy<P: Policy, F: FnMut(Order<P>)>(sink: F) -> PolicyHandler<P, F> {
+    PolicyHandler {
         sink,
-        reaction: PhantomData,
+        policy: PhantomData,
     }
 }
 
@@ -203,15 +201,15 @@ pub fn projection<P>(projection: &mut P) -> Projector<'_, P> {
 }
 
 /// See [`policy`].
-pub struct Reactor<P, F> {
+pub struct PolicyHandler<P, F> {
     sink: F,
-    reaction: PhantomData<fn() -> P>,
+    policy: PhantomData<fn() -> P>,
 }
 
 /// See [`projection`].
 pub struct Projector<'p, P>(&'p mut P);
 
-impl<P: Policy, F: FnMut(Order<P>)> Handler<P::Source> for Reactor<P, F> {
+impl<P: Policy, F: FnMut(Order<P>)> Handler<P::Source> for PolicyHandler<P, F> {
     fn handle(&mut self, committed: &Committed<'_, P::Source>) {
         for order in owe::<P>(committed) {
             (self.sink)(order);
@@ -227,10 +225,10 @@ impl<D: Domain, P: Projection<D>> Handler<D> for Projector<'_, P> {
 
 /// The stream `target` is, for a source event in `source`: the target
 /// domain's, in the source's edition.
-pub fn target_cover<R: Reaction>(source: &Cover, target: &R::TargetId) -> Cover {
+pub fn target_cover<P: Policy>(source: &Cover, target: &P::TargetId) -> Cover {
     Cover {
-        domain: <R::Target as Domain>::NAME.to_string(),
-        root: Some(R::root(target)),
+        domain: <P::Target as Domain>::NAME.to_string(),
+        root: Some(P::root(target)),
         edition: source.edition.clone(),
     }
 }

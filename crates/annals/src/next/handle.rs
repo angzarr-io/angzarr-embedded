@@ -63,7 +63,7 @@ use super::domain::Domain;
 use super::error::{Failure, KernelError, Step, StepError};
 use super::handler::Handler;
 use super::markup::ProjectionContext;
-use super::reaction::{policy, projection, Policy, Projection};
+use super::policy::{policy, projection, Policy, Projection};
 use super::registry::Registry;
 use super::store::{block, AsyncPort, AsyncUnitOfWork, Port, SyncPort, UnitOfWork};
 use super::stream::{Envelope, Stream};

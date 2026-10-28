@@ -43,7 +43,7 @@ impl<'a, D: Domain> Committed<'a, D> {
 }
 
 /// Anything that reacts to a domain's committed events: a projection, a
-/// policy's [`Reactor`](super::Reactor), an application callback. Called
+/// policy's [`PolicyHandler`](super::PolicyHandler), an application callback. Called
 /// after commit, in log order, once per event. It cannot change the stream
 /// it is reading; it can only record, or hand off commands for others.
 ///

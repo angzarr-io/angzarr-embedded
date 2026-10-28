@@ -24,7 +24,7 @@ use crate::next::v1::{
 };
 use crate::next::{
     ids, pack, Any, Committed, Decoder, Domain, IngestCtx, Key, Payload, PayloadError, Policy,
-    Reaction, Registry, Rulebook, Sampled, State, Timestamp, Tx, UnitPath, Units, Upcaster,
+    Registry, Rulebook, Sampled, State, Timestamp, Tx, UnitPath, Units, Upcaster,
 };
 use annals_diagnostic::{Arg, Diagnostic, Report};
 
@@ -1104,7 +1104,7 @@ pub fn ledger_root() -> Uuid {
 /// Account deposits → the ledger.
 pub struct Bookkeeping;
 
-impl Reaction for Bookkeeping {
+impl Policy for Bookkeeping {
     type Source = Account;
     type Target = Ledger;
     type TargetId = ();
@@ -1118,9 +1118,7 @@ impl Reaction for Bookkeeping {
     fn root((): &()) -> Uuid {
         ledger_root()
     }
-}
 
-impl Policy for Bookkeeping {
     fn command((): &(), committed: &Committed<'_, Account>) -> ledger::Record {
         let cents = match committed.event() {
             AccountEvent::Deposited(cents) => *cents,
