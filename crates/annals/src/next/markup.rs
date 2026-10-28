@@ -43,8 +43,7 @@
 //! marked-up aggregate, process manager, saga or projector runs in
 //! annals' process or as its own service, with no change to its code.
 //!
-//! **A proposal.** The bodies marked as stubs are `todo!()`; annals'
-//! `next/decorated.test.rs` pins them.
+//! annals' `next/decorated.test.rs` runs all of it.
 
 use std::fmt;
 
@@ -52,6 +51,7 @@ use angzarr_proto::v1::{Cover, EventBook, EventRef, FactOrigin, Uuid};
 use prost_types::{Any, Timestamp};
 
 use super::domain::Domain;
+use super::error::PayloadError;
 use super::wire::WireError;
 
 /// The error a generated `State::from_snapshot` returns, re-exported so
@@ -182,8 +182,7 @@ pub struct Emit<A: Domain> {
 impl<A: Domain> Emit<A> {
     /// These events, and no continuation.
     pub fn of(events: impl Emits<A>) -> Emit<A> {
-        let _ = events;
-        todo!("annals::next::markup::Emit is a stub")
+        events.into_emit()
     }
 
     /// Run `step` on the instance once these events are applied. The step
@@ -194,8 +193,25 @@ impl<A: Domain> Emit<A> {
         O: Emits<A>,
         E: Into<A::Rejection>,
     {
-        let _ = (self.events, self.next, step);
-        todo!("annals::next::markup::Emit is a stub")
+        self.push(Box::new(move |instance, ctx| {
+            step(instance, ctx)
+                .map(Emits::into_emit)
+                .map_err(Into::into)
+        }))
+    }
+
+    /// `step` after this emit's continuation, if it has one, else as it.
+    fn push(self, step: Step<A>) -> Emit<A> {
+        let next: Step<A> = match self.next {
+            None => step,
+            Some(first) => {
+                Box::new(move |instance, ctx| first(instance, ctx).map(|emit| emit.push(step)))
+            }
+        };
+        Emit {
+            events: self.events,
+            next: Some(next),
+        }
     }
 }
 
@@ -228,13 +244,18 @@ pub trait Emits<A: Domain> {
 
 impl<A: Domain> Emits<A> for Emit<A> {
     fn into_emit(self) -> Emit<A> {
-        todo!("annals::next::markup::Emits is a stub")
+        self
     }
+}
+
+/// These events, with no continuation.
+fn emitted<A: Domain>(events: Vec<A::Event>) -> Emit<A> {
+    Emit { events, next: None }
 }
 
 impl<A: Domain, T: DomainMessage + Into<A::Event>> Emits<A> for T {
     fn into_emit(self) -> Emit<A> {
-        todo!("annals::next::markup::Emits is a stub")
+        emitted(vec![self.into()])
     }
 }
 
@@ -245,7 +266,7 @@ where
     T2: DomainMessage + Into<A::Event>,
 {
     fn into_emit(self) -> Emit<A> {
-        todo!("annals::next::markup::Emits is a stub")
+        emitted(vec![self.0.into(), self.1.into()])
     }
 }
 
@@ -257,7 +278,7 @@ where
     T3: DomainMessage + Into<A::Event>,
 {
     fn into_emit(self) -> Emit<A> {
-        todo!("annals::next::markup::Emits is a stub")
+        emitted(vec![self.0.into(), self.1.into(), self.2.into()])
     }
 }
 
@@ -270,19 +291,24 @@ where
     T4: DomainMessage + Into<A::Event>,
 {
     fn into_emit(self) -> Emit<A> {
-        todo!("annals::next::markup::Emits is a stub")
+        emitted(vec![
+            self.0.into(),
+            self.1.into(),
+            self.2.into(),
+            self.3.into(),
+        ])
     }
 }
 
 impl<A: Domain, T: DomainMessage + Into<A::Event>> Emits<A> for Option<T> {
     fn into_emit(self) -> Emit<A> {
-        todo!("annals::next::markup::Emits is a stub")
+        emitted(self.into_iter().map(Into::into).collect())
     }
 }
 
 impl<A: Domain, T: DomainMessage + Into<A::Event>> Emits<A> for Vec<T> {
     fn into_emit(self) -> Emit<A> {
-        todo!("annals::next::markup::Emits is a stub")
+        emitted(self.into_iter().map(Into::into).collect())
     }
 }
 
@@ -304,8 +330,6 @@ impl<A: Domain, T: DomainMessage + Into<A::Event>> Emits<A> for Vec<T> {
 ///
 /// A fact handler's continuation steps are infallible: a separate type,
 /// not `Emit`, so a fallible step in a fact's chain does not compile.
-///
-/// **A proposal**: its bodies are `todo!()`.
 pub struct Record<A: Domain> {
     events: Vec<A::Event>,
     next: Option<RecordStep<A>>,
@@ -317,8 +341,7 @@ type RecordStep<A> = Box<dyn FnOnce(&A, &Context) -> Record<A>>;
 impl<A: Domain> Record<A> {
     /// These events, and no continuation.
     pub fn of(events: impl Records<A>) -> Record<A> {
-        let _ = events;
-        todo!("annals::next::markup::Record is a stub")
+        events.into_record()
     }
 
     /// Run `step` on the instance once these events are applied. The step
@@ -328,8 +351,21 @@ impl<A: Domain> Record<A> {
         S: FnOnce(&A, &Context) -> O + 'static,
         O: Records<A>,
     {
-        let _ = (self.events, self.next, step);
-        todo!("annals::next::markup::Record is a stub")
+        self.push(Box::new(move |instance, ctx| {
+            step(instance, ctx).into_record()
+        }))
+    }
+
+    /// `step` after this record's continuation, if it has one, else as it.
+    fn push(self, step: RecordStep<A>) -> Record<A> {
+        let next: RecordStep<A> = match self.next {
+            None => step,
+            Some(first) => Box::new(move |instance, ctx| first(instance, ctx).push(step)),
+        };
+        Record {
+            events: self.events,
+            next: Some(next),
+        }
     }
 }
 
@@ -363,7 +399,8 @@ macro_rules! records_shape {
     ($([$($t:ident),+] $shape:ty;)*) => {$(
         impl<A: Domain, $($t: DomainMessage + Into<A::Event>),+> Records<A> for $shape {
             fn into_record(self) -> Record<A> {
-                todo!("annals::next::markup::Records is a stub")
+                let Emit { events, .. } = Emits::<A>::into_emit(self);
+                Record { events, next: None }
             }
         }
     )*};
@@ -416,8 +453,8 @@ pub const MARKUP_RULES_VERSION: &str = "markup-1";
 /// annals does not refuse one (no compile error, no check): the warning is
 /// angzarr-cli's.
 ///
-/// **A proposal**: the macro emits it with `STARTS` empty; the dispatch is
-/// the linked angzarr-router's (blocked).
+/// annals applies both rules: the first in [`check`](super::check), the
+/// second in the generated `Domain` impl, before the handler.
 pub trait ProcessManager: Domain<State = Self, Rules = ()> {
     /// The input types (commands and facts) that may start an instance,
     /// in marker order: angzarr's `ComponentDescriptor.starting_types`.
@@ -458,8 +495,6 @@ pub type Refuses<A, C> = <A as Refusing<C>>::Refuses;
 /// [`DomainMessage`] of the command's own domain, and a
 /// [`Diagnostic`](annals_diagnostic::Diagnostic), whose message is the
 /// refusal's), with its diagnostic.
-///
-/// **A proposal**: its constructor and readers are stubs.
 #[derive(Clone, PartialEq, Debug)]
 pub struct TypedRefusal {
     object: Any,
@@ -469,14 +504,15 @@ pub struct TypedRefusal {
 impl TypedRefusal {
     /// `object`, packed, with its diagnostic.
     pub fn of<T: DomainMessage + annals_diagnostic::Diagnostic>(object: &T) -> TypedRefusal {
-        let _ = object;
-        todo!("annals::next::markup::TypedRefusal is a stub")
+        TypedRefusal {
+            object: __pack(object),
+            report: Report::of(object),
+        }
     }
 
     /// The object, as `T`, if it is one.
     pub fn object<T: DomainMessage>(&self) -> Option<T> {
-        let _ = (&self.object, &self.report);
-        todo!("annals::next::markup::TypedRefusal is a stub")
+        __decode(&self.object).ok().flatten()
     }
 }
 
@@ -489,11 +525,15 @@ impl TypedRefusal {
 /// - [`Rejection::Typed`]: a handler with `refuses` refused with one of
 ///   its listed objects.
 ///
+/// - [`Rejection::NoInstance`]: a command for a process manager's
+///   correlation with no instance, of a type that does not start one.
+///
 /// Either way the refusing domain records nothing.
 #[derive(Clone, PartialEq, Debug)]
 pub enum Rejection<R> {
     Message(R),
     Typed(TypedRefusal),
+    NoInstance { stream: Cover },
 }
 
 /// A message-only refusal: a handler's or a step's `Err` of the domain's
@@ -507,10 +547,21 @@ impl<R> From<R> for Rejection<R> {
 impl<R: annals_diagnostic::Diagnostic> Rejection<R> {
     /// As a refused saga receives it: the typed object packed (unset for a
     /// message), and the en-US message.
-    ///
-    /// **A proposal**: a stub.
     pub fn response(&self) -> v1::RefusalResponse {
-        todo!("annals::next::markup::Rejection::response is a stub")
+        v1::RefusalResponse {
+            refusal: self.refusal().cloned(),
+            message: self.to_string(),
+        }
+    }
+}
+
+impl<R> Rejection<R> {
+    /// The typed refusal object, packed: `None` unless [`Rejection::Typed`].
+    pub fn refusal(&self) -> Option<&Any> {
+        match self {
+            Rejection::Typed(typed) => Some(&typed.object),
+            Rejection::Message(_) | Rejection::NoInstance { .. } => None,
+        }
     }
 }
 
@@ -519,6 +570,11 @@ impl<R: fmt::Display> fmt::Display for Rejection<R> {
         match self {
             Rejection::Message(rejection) => rejection.fmt(f),
             Rejection::Typed(typed) => typed.report.fmt(f),
+            Rejection::NoInstance { stream } => write!(
+                f,
+                "process manager stream {} has no instance, and only a starting input starts one",
+                super::error::cover_text(stream)
+            ),
         }
     }
 }
@@ -528,6 +584,7 @@ impl<R: annals_diagnostic::Diagnostic> annals_diagnostic::Diagnostic for Rejecti
         match self {
             Rejection::Message(rejection) => rejection.code(),
             Rejection::Typed(typed) => typed.report.code(),
+            Rejection::NoInstance { .. } => "annals-next-pm-no-instance",
         }
     }
 
@@ -535,6 +592,9 @@ impl<R: annals_diagnostic::Diagnostic> annals_diagnostic::Diagnostic for Rejecti
         match self {
             Rejection::Message(rejection) => rejection.args(),
             Rejection::Typed(typed) => typed.report.args(),
+            Rejection::NoInstance { stream } => {
+                vec![("stream", super::error::cover_text(stream).into())]
+            }
         }
     }
 }
@@ -547,8 +607,6 @@ impl<R: annals_diagnostic::Diagnostic> annals_diagnostic::Diagnostic for Rejecti
 /// it: which refusals a domain handles is inferred from its handlers, so a
 /// `CommandRefused` for a command it has no handler for is caught at run
 /// time (`annals-next-no-refusal-handler`, dead-lettered).
-///
-/// **A proposal**: its readers of the object are stubs.
 #[derive(Clone, PartialEq, Debug)]
 pub struct CommandRefused<C> {
     command: C,
@@ -582,8 +640,7 @@ impl<C> CommandRefused<C> {
     /// The typed refusal object, as `T`, if the target refused with one
     /// and it is a `T`.
     pub fn refusal<T: DomainMessage>(&self) -> Option<T> {
-        let _ = &self.refusal;
-        todo!("annals::next::markup::CommandRefused is a stub")
+        __decode(self.refusal.as_ref()?).ok().flatten()
     }
 
     /// The saga's triggering event: a page of this stream.
@@ -597,8 +654,6 @@ impl<C> CommandRefused<C> {
 /// response }`, the command decoded. The callback returns a fact of the
 /// saga's source domain, so the source never refers to the target's
 /// types.
-///
-/// **A proposal**: its readers of the object are stubs.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Refusal<C> {
     event: EventBook,
@@ -631,7 +686,7 @@ impl<C> Refusal<C> {
     /// The typed refusal object, as `T`, if the target refused with one
     /// and it is a `T`.
     pub fn refusal<T: DomainMessage>(&self) -> Option<T> {
-        todo!("annals::next::markup::Refusal is a stub")
+        __decode(self.response.refusal.as_ref()?).ok().flatten()
     }
 
     /// The refusal's message.
@@ -662,8 +717,9 @@ impl<C> Refusal<C> {
 /// run-time dead letter if the source has no handler for it, not a compile
 /// error.
 ///
-/// **A proposal**: the macro emits it with empty constants and a stub
-/// `on_refused`; the dispatch is the linked angzarr-router's (blocked).
+/// What a saga answers is all here, whatever runs it; annals runs sagas
+/// once its kernel dispatches committed steps
+/// ([`Registry::saga`](super::Registry::saga)).
 pub trait Saga: Send + Sync + 'static {
     /// The saga's name: the component its commands' ids are derived from.
     const NAME: &'static str;
@@ -685,6 +741,11 @@ pub trait Saga: Send + Sync + 'static {
     /// the callback's domestic fact. The chain addresses it to the
     /// trigger's stream and stamps its identity.
     fn on_refused(&self, refusal: &v1::Refusal) -> Any;
+
+    /// The commands this saga sends for `event` (an event of its source,
+    /// packed), from its `#[reacts]` handler for the event's type; `None`
+    /// for a type it does not react to. Generated.
+    fn on_event(&self, event: &Any, ctx: &SagaContext) -> Option<Commands<Self::Target>>;
 }
 
 /// What a saga's `#[on_event(E)]` handler returns: commands for its target
@@ -692,8 +753,6 @@ pub trait Saga: Send + Sync + 'static {
 /// that is the trigger's correlation ([`SagaContext::correlation_id`]);
 /// any other root is a saga bug. Each command's type must be one
 /// `T` decides ([`Decides`]).
-///
-/// **A proposal**: its bodies are `todo!()`.
 pub struct Commands<T: Domain> {
     orders: Vec<(Uuid, Any)>,
     target: std::marker::PhantomData<fn() -> T>,
@@ -702,7 +761,10 @@ pub struct Commands<T: Domain> {
 impl<T: Domain> Commands<T> {
     /// No commands.
     pub fn none() -> Commands<T> {
-        todo!("annals::next::markup::Commands is a stub")
+        Commands {
+            orders: Vec::new(),
+            target: std::marker::PhantomData,
+        }
     }
 
     /// These commands and `command`, for the stream of `T` at `root`.
@@ -711,8 +773,17 @@ impl<T: Domain> Commands<T> {
         C: DomainMessage,
         T: Decides<C>,
     {
-        let _ = (self.orders, self.target, root, command);
-        todo!("annals::next::markup::Commands is a stub")
+        let mut orders = self.orders;
+        orders.push((root, __pack(&command)));
+        Commands {
+            orders,
+            target: self.target,
+        }
+    }
+
+    /// Each command, packed, with the root of its stream, in order.
+    pub fn orders(&self) -> &[(Uuid, Any)] {
+        &self.orders
     }
 }
 
@@ -825,21 +896,33 @@ pub mod v1 {
 /// committed: the events stay committed. Projectors run on the async
 /// command path, the only one (async everywhere), so there is no guard
 /// against blocking on a synchronous one. Registered with
-/// [`Registry::projector`](super::Registry::projector).
-///
-/// **A proposal**: the macro emits it with the name and source; the
-/// dispatch is the linked angzarr-router's (blocked).
+/// [`Registry::projector`](super::Registry::projector). Several
+/// projectors on one domain each receive every committed event of it they
+/// mark; one's failure does not stop the others.
 pub trait AsyncProjector: Send + 'static {
     /// Named in the error a failure raises.
     const NAME: &'static str;
     /// The one domain whose events it projects.
     type Source: Domain;
+    /// The projected events, in marker order.
+    const PROJECTS: &'static [TypeName];
+
+    /// Project `event` (an event of its source, packed), from its
+    /// `#[projects]` handler for the event's type; `None` for a type it
+    /// does not mark. Generated.
+    fn project<'a>(
+        &'a mut self,
+        event: &'a Any,
+        ctx: &'a ProjectionContext,
+    ) -> Option<Projecting<'a>>;
 }
+
+/// A projector handler's run: awaited by the kernel after the commit.
+pub type Projecting<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Report>> + Send + 'a>>;
 
 /// What a projector's handler reads besides the event: the stream it is
 /// from, its sequence there and when it was recorded.
-///
-/// **A proposal**: a stub.
 #[derive(Clone, PartialEq, Debug)]
 pub struct ProjectionContext {
     stream: Cover,
@@ -848,6 +931,16 @@ pub struct ProjectionContext {
 }
 
 impl ProjectionContext {
+    /// A context for a projector's own unit tests; the kernel builds the
+    /// real one from the committed event.
+    pub fn new(stream: Cover, sequence: u64, recorded_at: Timestamp) -> Self {
+        ProjectionContext {
+            stream,
+            sequence,
+            recorded_at,
+        }
+    }
+
     /// The source stream.
     pub fn stream(&self) -> &Cover {
         &self.stream
@@ -885,8 +978,310 @@ where
     O: Emits<A>,
     E: Into<A::Rejection> + fmt::Debug,
 {
-    let _ = (instance, step, ctx);
-    todo!("annals::next::markup::assert_step_idempotent is a stub")
+    let mut instance = instance;
+    let first = match step(&instance, ctx) {
+        Ok(first) => first.into_emit(),
+        Err(rejection) => panic!("the step refused: {rejection:?}"),
+    };
+    let mut emit = first;
+    for _ in 0..=STEP_LIMIT {
+        for event in std::mem::take(&mut emit.events) {
+            A::apply(&mut instance, &event, &());
+        }
+        let Some(next) = emit.next.take() else {
+            break;
+        };
+        emit = match next(&instance, ctx) {
+            Ok(emit) => emit,
+            Err(rejection) => panic!("the step's continuation refused: {rejection}"),
+        };
+    }
+    let again = match step(&instance, ctx) {
+        Ok(again) => again.into_emit(),
+        Err(rejection) => panic!("the step refused on its own result: {rejection:?}"),
+    };
+    if !again.events.is_empty() || again.next.is_some() {
+        panic!(
+            "the step is not idempotent: re-run on its own result, it emitted {:?}{}",
+            again.events,
+            if again.next.is_some() {
+                " and continued"
+            } else {
+                ""
+            }
+        );
+    }
+    instance
+}
+
+// ---------------------------------------------------------------- the glue
+//
+// What annals-macros' expansion calls: public so the expansion can name
+// them, hidden because nothing else should.
+
+/// `value` packed as its wire message.
+#[doc(hidden)]
+pub fn __pack<T: DomainMessage>(value: &T) -> Any {
+    super::payload::pack(&value.to_wire())
+}
+
+/// `T`'s type URL.
+#[doc(hidden)]
+pub fn __type_url<T: DomainMessage>() -> String {
+    format!("/{}", <T::Wire as prost::Name>::full_name())
+}
+
+/// `any` as a `T`, if it is one: `None` for another type; a payload of
+/// `T`'s type that does not decode, or that is not a valid `T`, is the
+/// error.
+#[doc(hidden)]
+pub fn __decode<T: DomainMessage>(any: &Any) -> Result<Option<T>, PayloadError> {
+    if super::payload::type_name(&any.type_url) != <T::Wire as prost::Name>::full_name() {
+        return Ok(None);
+    }
+    let wire = <T::Wire as prost::Message>::decode(&any.value[..]).map_err(|error| {
+        PayloadError::Decode {
+            type_url: any.type_url.clone(),
+            error,
+        }
+    })?;
+    T::from_wire(wire)
+        .map(Some)
+        .map_err(|error| PayloadError::Invalid {
+            type_url: any.type_url.clone(),
+            reason: Report::of(&error),
+        })
+}
+
+/// The full name of angzarr's `CommandRefused`.
+fn command_refused() -> String {
+    <v1::CommandRefused as prost::Name>::full_name()
+}
+
+/// `CommandRefused`'s type URL: a payload set with `#[on_refused]`
+/// handlers decodes it.
+#[doc(hidden)]
+pub fn __command_refused_url() -> String {
+    format!("/{}", command_refused())
+}
+
+/// `any`, angzarr's `CommandRefused`, as the refusal of a `C`, if it is
+/// one: `None` for another payload type, or a refusal of another command.
+#[doc(hidden)]
+pub fn __refused<C: DomainMessage>(any: &Any) -> Result<Option<CommandRefused<C>>, PayloadError> {
+    if super::payload::type_name(&any.type_url) != command_refused() {
+        return Ok(None);
+    }
+    let wire = <v1::CommandRefused as prost::Message>::decode(&any.value[..]).map_err(|error| {
+        PayloadError::Decode {
+            type_url: any.type_url.clone(),
+            error,
+        }
+    })?;
+    let book = wire.command.unwrap_or_default();
+    let Some(command) = command_payload(&book) else {
+        return Ok(None);
+    };
+    let Some(command) = __decode::<C>(command)? else {
+        return Ok(None);
+    };
+    Ok(Some(CommandRefused {
+        command,
+        target: book.cover.unwrap_or_default(),
+        refusal: wire.refusal,
+        trigger: wire.trigger.unwrap_or_default(),
+    }))
+}
+
+/// The refused command's type URL in `any`, angzarr's `CommandRefused`:
+/// what a payload set names when it has no handler for that refusal.
+#[doc(hidden)]
+pub fn __refused_command_url(any: &Any) -> Option<String> {
+    if super::payload::type_name(&any.type_url) != command_refused() {
+        return None;
+    }
+    let wire = <v1::CommandRefused as prost::Message>::decode(&any.value[..]).ok()?;
+    command_payload(wire.command.as_ref()?).map(|payload| payload.type_url.clone())
+}
+
+/// A command book's payload, if it holds a command.
+fn command_payload(book: &angzarr_proto::v1::CommandBook) -> Option<&Any> {
+    match book.page.as_ref()?.body.as_ref()? {
+        angzarr_proto::v1::command_page::Body::Command(command) => command.payload.as_ref(),
+        angzarr_proto::v1::command_page::Body::Fact(_) => None,
+    }
+}
+
+/// The context a command handler reads, from its `Tx`.
+#[doc(hidden)]
+pub fn __context<A: Domain>(tx: &super::domain::Tx<'_, A>) -> Context {
+    Context::new(
+        tx.recorded_at,
+        tx.stream.clone(),
+        tx.command_id.clone(),
+        tx.correlation_id.clone(),
+    )
+}
+
+/// The context a fact handler reads, from its `IngestCtx`.
+#[doc(hidden)]
+pub fn __fact_context<A: Domain>(ctx: &super::domain::IngestCtx<'_, A>) -> Context {
+    Context::new(
+        ctx.recorded_at,
+        ctx.stream.clone(),
+        ctx.command_id.clone(),
+        ctx.correlation_id.clone(),
+    )
+    .with_fact_origin(ctx.source.clone())
+}
+
+/// Whether the stream a command is decided on holds an instance: any
+/// event at all.
+#[doc(hidden)]
+pub fn __decided_instance<A: Domain>(tx: &super::domain::Tx<'_, A>) -> bool {
+    tx.head > 0
+}
+
+/// Whether the stream a fact is ingested into holds an instance.
+#[doc(hidden)]
+pub fn __ingested_instance<A: Domain>(ctx: &super::domain::IngestCtx<'_, A>) -> bool {
+    ctx.head > 0
+}
+
+/// The refusal of a command that does not start a process manager, for a
+/// correlation with no instance.
+#[doc(hidden)]
+pub fn __no_instance<A: Domain, R>(tx: &super::domain::Tx<'_, A>) -> Rejection<R> {
+    Rejection::NoInstance {
+        stream: tx.stream.clone(),
+    }
+}
+
+/// A command handler's result, run as one decision: its events emitted
+/// through `tx` (folded into the staged instance), then each continuation
+/// step on the staged instance, until there is none. A rejection anywhere
+/// refuses it all; more than [`STEP_LIMIT`] steps is the kernel's
+/// [`KernelError::TooManySteps`](super::KernelError::TooManySteps).
+#[doc(hidden)]
+pub fn __decide<A, O, E>(
+    tx: &mut super::domain::Tx<'_, A>,
+    ctx: &Context,
+    handled: Result<O, E>,
+) -> Result<(), A::Rejection>
+where
+    A: Domain<State = A>,
+    O: Emits<A>,
+    E: Into<A::Rejection>,
+{
+    let mut emit = handled.map_err(Into::into)?.into_emit();
+    let mut steps = 0;
+    loop {
+        for event in std::mem::take(&mut emit.events) {
+            tx.emit(event);
+        }
+        let Some(next) = emit.next.take() else {
+            return Ok(());
+        };
+        steps += 1;
+        if steps > STEP_LIMIT {
+            tx.fault = Some(super::error::KernelError::TooManySteps {
+                stream: tx.stream.clone(),
+                limit: STEP_LIMIT,
+            });
+            return Ok(());
+        }
+        emit = next(tx.state(), ctx)?;
+    }
+}
+
+/// A fact handler's result, run as one decision on a working copy of
+/// `state`: its events, then each continuation step's on the copy with
+/// them applied. Infallible; more than [`STEP_LIMIT`] steps is a bug,
+/// which panics (the kernel's `IngestPanicked`, dead-lettered).
+#[doc(hidden)]
+pub fn __ingest<A, R>(state: &A, ctx: &Context, recorded: R) -> Vec<A::Event>
+where
+    A: Domain<State = A, Rules = ()> + Clone,
+    R: Records<A>,
+{
+    let mut working = state.clone();
+    let mut events = Vec::new();
+    let mut record = recorded.into_record();
+    let mut steps = 0;
+    loop {
+        for event in std::mem::take(&mut record.events) {
+            A::apply(&mut working, &event, &());
+            events.push(event);
+        }
+        let Some(next) = record.next.take() else {
+            return events;
+        };
+        steps += 1;
+        assert!(
+            steps <= STEP_LIMIT,
+            "the fact on stream {} ran more than its limit of {STEP_LIMIT} continuation steps",
+            super::error::cover_text(ctx.stream())
+        );
+        record = next(&working, ctx);
+    }
+}
+
+/// angzarr's pass-through refusal fact: `CommandRefused { command,
+/// refusal, trigger }`, the refusal object still packed and the trigger
+/// the triggering event's `EventRef`, packed.
+#[doc(hidden)]
+pub fn __pass_through(refusal: &v1::Refusal) -> Any {
+    let trigger = refusal.event.as_ref().map(|book| EventRef {
+        stream: book.cover.clone(),
+        sequence: book.pages.first().map_or(0, |page| page.sequence),
+    });
+    super::payload::pack(&v1::CommandRefused {
+        command: refusal.command.clone(),
+        refusal: refusal.response.as_ref().and_then(|r| r.refusal.clone()),
+        trigger,
+    })
+}
+
+/// `refusal` as a translating callback for command `C` reads it, if the
+/// refused command is a `C`.
+#[doc(hidden)]
+pub fn __translating<C: DomainMessage>(refusal: &v1::Refusal) -> Option<Refusal<C>> {
+    let command = __decode::<C>(command_payload(refusal.command.as_ref()?)?).ok()??;
+    Some(Refusal {
+        event: refusal.event.clone().unwrap_or_default(),
+        command,
+        response: refusal.response.clone().unwrap_or_default(),
+    })
+}
+
+/// A translating callback's fact, packed: one its source `S` ingests.
+#[doc(hidden)]
+pub fn __domestic<S: Ingests<F>, F: DomainMessage>(fact: &F) -> Any {
+    __pack(fact)
+}
+
+/// A projector handler's result, as the kernel awaits it.
+#[doc(hidden)]
+pub fn __projecting<'a, F>(run: F) -> Projecting<'a>
+where
+    F: std::future::Future<Output = Result<(), Report>> + Send + 'a,
+{
+    Box::pin(run)
+}
+
+/// The state descriptor of a marked-up domain whose snapshot form is `S`:
+/// its type URL, with STRICT and AGGREGATE_HANDLES.
+#[doc(hidden)]
+pub fn __descriptor<S: prost::Name>() -> angzarr_proto::v1::StateDescriptor {
+    angzarr_proto::v1::StateDescriptor {
+        type_url: format!("/{}", S::full_name()),
+        options: Some(angzarr_proto::v1::StateOptions {
+            conflict_resolutions: vec![
+                angzarr_proto::v1::ConflictResolution::Strict as i32,
+                angzarr_proto::v1::ConflictResolution::AggregateHandles as i32,
+            ],
+        }),
+    }
 }
 
 /// A message's protobuf package and name, as constants: what `HANDLES` and

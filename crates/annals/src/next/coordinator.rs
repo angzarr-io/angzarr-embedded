@@ -584,6 +584,7 @@ pub(crate) fn decide_on<D: Domain>(
                 source,
                 rules,
                 rules_version,
+                head,
             };
             match catch_unwind(AssertUnwindSafe(|| D::ingest(stream.state(), fact, &ctx))) {
                 Ok(events) => events,
@@ -627,8 +628,13 @@ pub(crate) fn decide_on<D: Domain>(
                 conflicts,
                 resolved: None,
                 events: Vec::new(),
+                fault: None,
             };
-            D::decide(cmd, &mut tx).map_err(Failure::Rejected)?;
+            let decided = D::decide(cmd, &mut tx);
+            if let Some(fault) = tx.fault.take() {
+                return Err(kernel(fault));
+            }
+            decided.map_err(Failure::Rejected)?;
             let stale = |unresolved: bool| {
                 let (stream, actual) = (cover.clone(), head);
                 kernel(if unresolved {

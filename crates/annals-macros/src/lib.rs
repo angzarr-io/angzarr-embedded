@@ -12,11 +12,9 @@
 //! same aggregate, process manager, saga or projector runs in annals'
 //! process or as its own service, with no change to its code.
 //!
-//! **A proposal.** The macros are stubs: they emit the generated items
-//! with `todo!()` bodies and empty constants, and check nothing, so the
-//! tests that pin the expansion (annals' `next/decorated.test.rs`, and the
-//! `compile_fail` examples here) fail until it is written. Dispatch is the
-//! linked angzarr-router's, blocked until the router is on io.angzarr.v1.
+//! annals' `next/decorated.test.rs` runs the expansion; the
+//! `compile_fail` examples here pin what it refuses. annals does not run a
+//! saga yet: that comes with the kernel's committed-step dispatch.
 //!
 //! # Where it sits
 //!
@@ -209,8 +207,7 @@
 //! another domain it records an event carrying the command's data, and
 //! the saga for (the PM's domain, that domain) builds the command. Where a
 //! workflow's logic belongs together, the PM and its sagas run in one
-//! annals process (`annals::next::Kernel::settle`),
-//! each saga hop a step committed on its own.
+//! process, each saga hop a step committed on its own.
 //!
 //! What sets it apart, `markup::ProcessManager`:
 //!
@@ -265,9 +262,8 @@
 //!   (`refused.refusal::<InsufficientFunds>()`); it imports the target's
 //!   types to do so. Which refusals a domain handles is inferred from its
 //!   `#[on_refused]` handlers (`REFUSALS` lists them): one with no handler
-//!   is caught at run time: the steps before it stay committed, the
-//!   refusal fact is dead-lettered and alerted, and the call returns Ok, as
-//!   on distributed angzarr. A `CommandRefused` from outside a saga is
+//!   is caught at run time: the steps before it stay committed, and the
+//!   refusal fact is dead-lettered and alerted. A `CommandRefused` from outside a saga is
 //!   accepted when its trigger names the receiving stream.
 //! - **Translate**, for each command the saga has a callback for:
 //!   `#[on_refused(Hold)] fn(&self, refusal: &Refusal<Hold>) -> F` on the
@@ -2658,12 +2654,12 @@
 
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as Tokens};
-use quote::{format_ident, quote};
+use quote::{format_ident, quote, ToTokens};
 use syn::parse::{Parse, ParseStream, Parser};
 use syn::punctuated::Punctuated;
 use syn::{
-    Error, Expr, GenericArgument, Ident, ImplItem, ItemImpl, PathArguments, ReturnType, Signature,
-    Token, Type, Visibility,
+    Error, Expr, FnArg, GenericArgument, Ident, ImplItem, ImplItemFn, ItemImpl, Pat, PathArguments,
+    ReturnType, Signature, Token, Type, Visibility,
 };
 
 /// Marks an inherent impl as an aggregate, and generates its annals
@@ -2676,7 +2672,7 @@ use syn::{
 /// <visibility>` (the trait's; `pub` when absent).
 #[proc_macro_attribute]
 pub fn aggregate(attr: TokenStream, item: TokenStream) -> TokenStream {
-    stub(attr.into(), item.into(), Kind::Aggregate)
+    domain(attr.into(), item.into(), Kind::Aggregate)
         .unwrap_or_else(Error::into_compile_error)
         .into()
 }
@@ -2687,7 +2683,7 @@ pub fn aggregate(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// input marked `starts` may start an instance (see the crate docs).
 #[proc_macro_attribute]
 pub fn process_manager(attr: TokenStream, item: TokenStream) -> TokenStream {
-    stub(attr.into(), item.into(), Kind::ProcessManager)
+    domain(attr.into(), item.into(), Kind::ProcessManager)
         .unwrap_or_else(Error::into_compile_error)
         .into()
 }
@@ -2728,18 +2724,29 @@ pub fn applies(_attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 /// angzarr-macros' rejection handler, which annals refuses: a refusal
-/// reaches its saga's source as a fact, handled in `#[on_refused]`. (A
-/// stub: inert.)
+/// reaches its saga's source as a fact, handled in `#[on_refused]`.
 #[proc_macro_attribute]
-pub fn rejected(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    item
+pub fn rejected(_attr: TokenStream, _item: TokenStream) -> TokenStream {
+    Error::new(
+        Span::call_site(),
+        "annals has no #[rejected]: a refusal reaches the saga's source as a fact, \
+         handled in #[on_refused(Cmd)]",
+    )
+    .into_compile_error()
+    .into()
 }
 
 /// angzarr-macros' state factory, which annals refuses: the registry holds
-/// the factory. (A stub: inert.)
+/// the factory.
 #[proc_macro_attribute]
-pub fn state_factory(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    item
+pub fn state_factory(_attr: TokenStream, _item: TokenStream) -> TokenStream {
+    Error::new(
+        Span::call_site(),
+        "annals has no #[state_factory]: register the factory, \
+         `registry.aggregate::<A>(factory)`",
+    )
+    .into_compile_error()
+    .into()
 }
 
 /// Marks an inherent impl as a SAGA: `#[saga(name = "..", source = <domain>,
@@ -2748,7 +2755,7 @@ pub fn state_factory(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// `#[on_refused]` callbacks name.
 #[proc_macro_attribute]
 pub fn saga(attr: TokenStream, item: TokenStream) -> TokenStream {
-    flow_stub(attr.into(), item.into(), Flow::Saga)
+    flow(attr.into(), item.into(), Flow::Saga)
         .unwrap_or_else(Error::into_compile_error)
         .into()
 }
@@ -2760,8 +2767,7 @@ pub fn on_event(_attr: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 
-/// Marks an inherent impl as a PROJECTOR (PROPOSAL, red), the one impure
-/// kind:
+/// Marks an inherent impl as a PROJECTOR, the one impure kind:
 ///
 /// ```text
 /// #[projector(name = "balances", source = Wallet)]
@@ -2771,19 +2777,16 @@ pub fn on_event(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// }
 /// ```
 ///
-/// One source domain. ONE instance per process (ruling B2), registered
-/// with its ports: `registry.projector(Balances::new(port))`. The router
-/// runs it AFTER COMMIT, awaited before the call returns, so a failure
-/// reaches the caller as `Failure::Projection`, carrying what was
-/// committed; its position advances per stream on success only. Unmarked
-/// events are skipped. It runs on the async command path, the only one,
-/// so nothing guards against blocking on a synchronous path.
-///
-/// The stub keeps the impl and emits `markup::AsyncProjector` with its
-/// name and source, and an empty `PROJECTS`.
+/// One source domain. ONE instance per process, registered with its
+/// ports: `registry.projector(Balances::new(port))`. The kernel's async
+/// path runs it AFTER COMMIT, awaited before the call returns, so a
+/// failure reaches the caller as `Failure::Projection`, carrying what was
+/// committed, and does not stop the other projectors on the domain.
+/// Unmarked events are skipped. It runs on the async command path, the
+/// only one, so nothing guards against blocking on a synchronous path.
 #[proc_macro_attribute]
 pub fn projector(attr: TokenStream, item: TokenStream) -> TokenStream {
-    flow_stub(attr.into(), item.into(), Flow::Projector)
+    flow(attr.into(), item.into(), Flow::Projector)
         .unwrap_or_else(Error::into_compile_error)
         .into()
 }
@@ -2795,7 +2798,14 @@ pub fn projects(_attr: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 
-/// Which flow [`flow_stub`] expands.
+const MARKUP: &str = "::annals::next::markup";
+
+/// `::annals::next::markup`, as a path.
+fn markup() -> Tokens {
+    MARKUP.parse().expect("a path")
+}
+
+/// Which flow [`flow`] expands.
 #[derive(Clone, Copy, PartialEq)]
 enum Flow {
     Saga,
@@ -2811,6 +2821,13 @@ struct FlowArg {
 impl Parse for FlowArg {
     fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
         let key: Ident = input.parse()?;
+        if !input.peek(Token![=]) {
+            return Err(Error::new_spanned(
+                key,
+                "#[saga] and #[projector] take `key = value` arguments only; a saga's \
+                 translate mode is its `#[on_refused(Cmd)]` callback's presence",
+            ));
+        }
         input.parse::<Token![=]>()?;
         Ok(FlowArg {
             key,
@@ -2819,10 +2836,53 @@ impl Parse for FlowArg {
     }
 }
 
-/// The stub expansion of a saga or a projector: the impl as given (its
-/// markers inert), its trait with the name, the domains and empty
-/// constants. It dispatches nothing.
-fn flow_stub(attr: Tokens, item: Tokens, flow: Flow) -> syn::Result<Tokens> {
+/// What a flow's arguments are.
+fn usage(flow: Flow) -> &'static str {
+    match flow {
+        Flow::Saga => "#[saga] takes `name = \"..\"`, `source = <domain>` and `target = <domain>`",
+        Flow::Projector => "#[projector] takes `name = \"..\"` and `source = <aggregate>`",
+    }
+}
+
+/// A marked method: its marker's name, the method, and the marker's type.
+struct Marked<'a> {
+    marker: &'static str,
+    method: &'a ImplItemFn,
+    args: Marker,
+}
+
+/// The methods of `imp` marked with one of `markers`, in impl order. A
+/// method with two markers is refused.
+fn marked<'a>(imp: &'a ItemImpl, markers: &[&'static str]) -> syn::Result<Vec<Marked<'a>>> {
+    let mut found = Vec::new();
+    for item in &imp.items {
+        let ImplItem::Fn(method) = item else {
+            continue;
+        };
+        let mut on = method.attrs.iter().filter_map(|a| {
+            markers
+                .iter()
+                .find(|m| a.path().is_ident(m))
+                .map(|m| (*m, a))
+        });
+        let Some((marker, attr)) = on.next() else {
+            continue;
+        };
+        if let Some((_, second)) = on.next() {
+            return Err(Error::new_spanned(second, "a method takes one marker"));
+        }
+        found.push(Marked {
+            marker,
+            method,
+            args: attr.parse_args::<Marker>()?,
+        });
+    }
+    Ok(found)
+}
+
+/// The expansion of a saga or a projector: the impl as given (its markers
+/// inert) and its trait.
+fn flow(attr: Tokens, item: Tokens, flow: Flow) -> syn::Result<Tokens> {
     let args = Punctuated::<FlowArg, Token![,]>::parse_terminated.parse2(attr)?;
     let (mut name, mut source, mut target) = (None, None, None);
     for FlowArg { key, value } in args {
@@ -2837,58 +2897,118 @@ fn flow_stub(attr: Tokens, item: Tokens, flow: Flow) -> syn::Result<Tokens> {
     let source = source.ok_or_else(|| Error::new(Span::call_site(), usage(flow)))?;
     let imp: ItemImpl = syn::parse2(item)?;
     let self_ty = &imp.self_ty;
+    let m = markup();
     let generated = match flow {
         Flow::Saga => {
             let target = target.ok_or_else(|| Error::new(Span::call_site(), usage(flow)))?;
+            let methods = marked(&imp, &["on_event", "on_refused"])?;
+            let events: Vec<_> = methods.iter().filter(|x| x.marker == "on_event").collect();
+            let callbacks: Vec<_> = methods
+                .iter()
+                .filter(|x| x.marker == "on_refused")
+                .collect();
+            for x in &methods {
+                refuse_extras(x, false)?;
+            }
+            let event_types: Vec<_> = events.iter().map(|x| &x.args.ty).collect();
+            let event_methods: Vec<_> = events.iter().map(|x| &x.method.sig.ident).collect();
+            let commands: Vec<_> = callbacks.iter().map(|x| &x.args.ty).collect();
+            let callback_methods: Vec<_> = callbacks.iter().map(|x| &x.method.sig.ident).collect();
             quote! {
-                impl ::annals::next::markup::Saga for #self_ty {
+                impl #m::Saga for #self_ty {
                     const NAME: &'static str = #name;
                     type Source = #source;
                     type Target = #target;
-                    const EVENTS: &'static [::annals::next::markup::TypeName] = &[];
-                    const TRANSLATES: &'static [::annals::next::markup::TypeName] = &[];
+                    const EVENTS: &'static [#m::TypeName] = &[
+                        #(#m::TypeName::of::<<#event_types as #m::DomainMessage>::Wire>(),)*
+                    ];
+                    const TRANSLATES: &'static [#m::TypeName] = &[
+                        #(#m::TypeName::of::<<#commands as #m::DomainMessage>::Wire>(),)*
+                    ];
 
-                    fn on_refused(
+                    fn on_refused(&self, refusal: &#m::v1::Refusal) -> ::annals::next::Any {
+                        #(
+                            if let ::core::option::Option::Some(refusal) =
+                                #m::__translating::<#commands>(refusal)
+                            {
+                                return #m::__domestic::<<Self as #m::Saga>::Source, _>(
+                                    &<#self_ty>::#callback_methods(self, &refusal),
+                                );
+                            }
+                        )*
+                        #m::__pass_through(refusal)
+                    }
+
+                    fn on_event(
                         &self,
-                        _refusal: &::annals::next::markup::v1::Refusal,
-                    ) -> ::annals::next::Any {
-                        ::core::todo!("{}", #STUB)
+                        event: &::annals::next::Any,
+                        ctx: &#m::SagaContext,
+                    ) -> ::core::option::Option<#m::Commands<<Self as #m::Saga>::Target>> {
+                        #(
+                            if let ::core::result::Result::Ok(::core::option::Option::Some(event)) =
+                                #m::__decode::<#event_types>(event)
+                            {
+                                return ::core::option::Option::Some(
+                                    <#self_ty>::#event_methods(self, &event, ctx),
+                                );
+                            }
+                        )*
+                        let _ = (event, ctx);
+                        ::core::option::Option::None
                     }
                 }
             }
         }
-        Flow::Projector => quote! {
-            impl ::annals::next::markup::AsyncProjector for #self_ty {
-                const NAME: &'static str = #name;
-                type Source = #source;
+        Flow::Projector => {
+            let methods = marked(&imp, &["projects"])?;
+            for x in &methods {
+                refuse_extras(x, false)?;
             }
+            let types: Vec<_> = methods.iter().map(|x| &x.args.ty).collect();
+            let names: Vec<_> = methods.iter().map(|x| &x.method.sig.ident).collect();
+            quote! {
+                impl #m::AsyncProjector for #self_ty {
+                    const NAME: &'static str = #name;
+                    type Source = #source;
+                    const PROJECTS: &'static [#m::TypeName] = &[
+                        #(#m::TypeName::of::<<#types as #m::DomainMessage>::Wire>(),)*
+                    ];
 
-            impl #self_ty {
-                /// The projected events, in marker order.
-                pub const PROJECTS: &'static [::annals::next::markup::TypeName] = &[];
+                    fn project<'a>(
+                        &'a mut self,
+                        event: &'a ::annals::next::Any,
+                        ctx: &'a #m::ProjectionContext,
+                    ) -> ::core::option::Option<#m::Projecting<'a>> {
+                        #(
+                            match #m::__decode::<#types>(event) {
+                                ::core::result::Result::Ok(::core::option::Option::Some(event)) => {
+                                    return ::core::option::Option::Some(#m::__projecting(
+                                        async move { <#self_ty>::#names(self, &event, ctx).await },
+                                    ));
+                                }
+                                ::core::result::Result::Err(error) => {
+                                    return ::core::option::Option::Some(#m::__projecting(
+                                        async move { ::core::result::Result::Err(#m::Report::of(&error)) },
+                                    ));
+                                }
+                                ::core::result::Result::Ok(::core::option::Option::None) => {}
+                            }
+                        )*
+                        let _ = (event, ctx);
+                        ::core::option::Option::None
+                    }
+                }
             }
-        },
+        }
     };
     Ok(quote! {
-        // The stub calls no marked method.
-        #[allow(dead_code)]
         #imp
 
         #generated
     })
 }
 
-/// What a flow's arguments are.
-fn usage(flow: Flow) -> &'static str {
-    match flow {
-        Flow::Saga => "#[saga] takes `name = \"..\"`, `source = <domain>` and `target = <domain>`",
-        Flow::Projector => "#[projector] takes `name = \"..\"` and `source = <aggregate>`",
-    }
-}
-
-const STUB: &str = "annals-macros is a stub";
-
-/// Which domain [`stub`] expands.
+/// Which domain [`domain`] expands.
 #[derive(Clone, Copy, PartialEq)]
 enum Kind {
     Aggregate,
@@ -2921,18 +3041,24 @@ impl Parse for Arg {
     }
 }
 
-/// A handler marker's arguments: `#[handles_cmd(Cmd, starts, refuses(T,
-/// ..))]`, every one after the type optional.
+/// A marker's arguments: `#[handles_cmd(Cmd, starts, refuses(T, ..))]`,
+/// every one after the type optional.
 struct Marker {
     ty: Type,
-    starts: bool,
+    starts: Option<Ident>,
     refuses: Vec<Type>,
+    refuses_key: Option<Ident>,
 }
 
 impl Parse for Marker {
     fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
         let ty: Type = input.parse()?;
-        let (mut starts, mut refuses) = (false, Vec::new());
+        let mut marker = Marker {
+            ty,
+            starts: None,
+            refuses: Vec::new(),
+            refuses_key: None,
+        };
         while !input.is_empty() {
             input.parse::<Token![,]>()?;
             if input.is_empty() {
@@ -2940,11 +3066,14 @@ impl Parse for Marker {
             }
             let key: Ident = input.parse()?;
             match key.to_string().as_str() {
-                "starts" => starts = true,
+                "starts" => marker.starts = Some(key),
                 "refuses" => {
                     let types;
                     syn::parenthesized!(types in input);
-                    refuses.extend(Punctuated::<Type, Token![,]>::parse_terminated(&types)?);
+                    marker
+                        .refuses
+                        .extend(Punctuated::<Type, Token![,]>::parse_terminated(&types)?);
+                    marker.refuses_key = Some(key);
                 }
                 _ => return Err(Error::new_spanned(
                     key,
@@ -2952,16 +3081,46 @@ impl Parse for Marker {
                 )),
             }
         }
-        Ok(Marker {
-            ty,
-            starts,
-            refuses,
-        })
+        Ok(marker)
     }
 }
 
-/// The `R` of `-> Result<_, R>`, if the signature returns a `Result`.
-fn rejection_of(sig: &Signature) -> Option<Type> {
+/// Refuse `starts` (unless `starts_allowed`) and `refuses` where they mean
+/// nothing.
+fn refuse_extras(x: &Marked<'_>, starts_allowed: bool) -> syn::Result<()> {
+    let starts_allowed = starts_allowed && matches!(x.marker, "handles_cmd" | "handles_fact");
+    if let (Some(starts), false) = (&x.args.starts, starts_allowed) {
+        return Err(Error::new_spanned(
+            starts,
+            match x.marker {
+                "handles_cmd" | "handles_fact" => {
+                    "`starts` is a process manager's: only its inputs start an instance; \
+                     an aggregate's handler takes none"
+                }
+                _ => "`starts` marks a process manager's command or fact handler only",
+            },
+        ));
+    }
+    if let (Some(refuses), true) = (&x.args.refuses_key, x.marker != "handles_cmd") {
+        return Err(Error::new_spanned(
+            refuses,
+            "`refuses` names a command handler's typed refusal objects: a fact is never refused",
+        ));
+    }
+    Ok(())
+}
+
+/// The last segment of a type's path.
+fn last_ident(ty: &Type) -> Option<&Ident> {
+    match ty {
+        Type::Path(path) => path.path.segments.last().map(|s| &s.ident),
+        _ => None,
+    }
+}
+
+/// The outer type's name and its generic arguments, for a signature's
+/// return type: `Result<A, B>` is `("Result", [A, B])`.
+fn returned(sig: &Signature) -> Option<(String, Vec<Type>)> {
     let ReturnType::Type(_, ty) = &sig.output else {
         return None;
     };
@@ -2969,15 +3128,78 @@ fn rejection_of(sig: &Signature) -> Option<Type> {
         return None;
     };
     let last = path.path.segments.last()?;
-    if last.ident != "Result" {
-        return None;
-    }
-    let PathArguments::AngleBracketed(args) = &last.arguments else {
-        return None;
+    let args = match &last.arguments {
+        PathArguments::AngleBracketed(args) => args
+            .args
+            .iter()
+            .filter_map(|a| match a {
+                GenericArgument::Type(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
     };
-    match args.args.iter().nth(1)? {
-        GenericArgument::Type(rejection) => Some(rejection.clone()),
+    Some((last.ident.to_string(), args))
+}
+
+/// The receiver a method takes: `Some(true)` for `&mut self`, `Some(false)`
+/// for `&self`, `None` for anything else.
+fn receiver(sig: &Signature) -> Option<bool> {
+    match sig.inputs.first()? {
+        FnArg::Receiver(r) if r.reference.is_some() => Some(r.mutability.is_some()),
         _ => None,
+    }
+}
+
+/// Hold each marked method's signature to its marker (see the crate docs).
+fn check_signature(x: &Marked<'_>) -> syn::Result<()> {
+    let sig = &x.method.sig;
+    let fail = |message: &str| Err(Error::new_spanned(sig, message));
+    match x.marker {
+        "applies" => {
+            if receiver(sig) != Some(true) {
+                return fail("an applier takes `&mut self`: it assigns the event's state");
+            }
+            return Ok(());
+        }
+        _ => {
+            if receiver(sig) != Some(false) {
+                return fail(
+                    "a handler takes `&self`: it decides, and only the router's appliers \
+                     change the instance",
+                );
+            }
+        }
+    }
+    let output = returned(sig);
+    let outer = output.as_ref().map(|(name, _)| name.as_str());
+    match x.marker {
+        "handles_cmd" => {
+            let Some((_, args)) = output.as_ref().filter(|(name, _)| name == "Result") else {
+                return fail(
+                    "a command handler returns `Result<_, Rejection>`: a command may be refused",
+                );
+            };
+            if !x.args.refuses.is_empty()
+                && args
+                    .get(1)
+                    .and_then(last_ident)
+                    .is_none_or(|e| e != "Refuses")
+            {
+                return fail(
+                    "a command handler with `refuses(..)` returns `Result<_, Refuses<Self, Cmd>>`",
+                );
+            }
+            Ok(())
+        }
+        _ if outer == Some("Result") => fail(
+            "a fact handler returns no `Result`: a fact cannot be refused \
+             (`#[on_refused]` on a domain is a fact handler)",
+        ),
+        _ if outer == Some("Emit") => {
+            fail("a fact handler returns a `Record`, not an `Emit`, whose steps may refuse")
+        }
+        _ => Ok(()),
     }
 }
 
@@ -2998,138 +3220,325 @@ fn own_type(tokens: Tokens, self_ty: &Type) -> Tokens {
         .collect()
 }
 
-/// The last segment of a type's path, as an identifier part.
-fn last_ident(ty: &Type) -> Option<&Ident> {
-    match ty {
-        Type::Path(path) => path.path.segments.last().map(|s| &s.ident),
-        _ => None,
+/// `sig` with its arguments named `arg0`, `arg1`, ..: the handler trait's
+/// signature, and the arguments to forward.
+fn renamed(sig: &Signature) -> (Signature, Vec<Ident>) {
+    let mut sig = sig.clone();
+    let mut names = Vec::new();
+    for (n, input) in sig.inputs.iter_mut().enumerate() {
+        if let FnArg::Typed(typed) = input {
+            let name = format_ident!("arg{}", n);
+            *typed.pat = Pat::Verbatim(quote!(#name));
+            names.push(name);
+        }
     }
+    (sig, names)
 }
 
-/// An empty payload set: `Payload` with `todo!()` bodies.
-fn empty_set(name: &Ident) -> Tokens {
+/// A payload enum: one variant per type, with its `Payload` impl. `extra`
+/// are further variants (a refusal handler's), each with its type, how it
+/// is decoded and how it is packed.
+fn payload_set(
+    name: &Ident,
+    variants: &[(Ident, Type)],
+    refused: &[(Ident, Type)],
+    vis: &Visibility,
+) -> Tokens {
+    let m = markup();
+    let (idents, types): (Vec<_>, Vec<_>) = variants.iter().cloned().unzip();
+    let (refused_idents, refused_types): (Vec<_>, Vec<_>) = refused.iter().cloned().unzip();
+    let packing = if variants.is_empty() && refused.is_empty() {
+        quote!(match *self {})
+    } else {
+        quote! {
+            match self {
+                #(#name::#idents(value) => #m::__pack(value),)*
+                #(#name::#refused_idents(_, any) => ::core::clone::Clone::clone(any),)*
+            }
+        }
+    };
+    let refusal_url = (!refused.is_empty()).then(|| quote!(#m::__command_refused_url(),));
     quote! {
+        #[doc(hidden)]
         #[derive(Clone, Debug)]
-        pub enum #name {}
+        #[allow(non_camel_case_types)]
+        #vis enum #name {
+            #(#idents(#types),)*
+            #(#refused_idents(#m::CommandRefused<#refused_types>, ::annals::next::Any),)*
+        }
 
         impl ::annals::next::Payload for #name {
             fn to_any(&self) -> ::annals::next::Any {
-                match *self {}
+                #packing
             }
+
             fn from_any(
-                _any: &::annals::next::Any,
+                any: &::annals::next::Any,
             ) -> ::core::result::Result<Self, ::annals::next::PayloadError> {
-                ::core::todo!("{}", #STUB)
+                #(
+                    if let ::core::option::Option::Some(value) = #m::__decode::<#types>(any)? {
+                        return ::core::result::Result::Ok(#name::#idents(value));
+                    }
+                )*
+                #(
+                    if let ::core::option::Option::Some(refused) =
+                        #m::__refused::<#refused_types>(any)?
+                    {
+                        return ::core::result::Result::Ok(
+                            #name::#refused_idents(refused, ::core::clone::Clone::clone(any)),
+                        );
+                    }
+                )*
+                ::core::result::Result::Err(::annals::next::PayloadError::UnknownType {
+                    type_url: #m::__refused_command_url(any)
+                        .unwrap_or_else(|| ::core::clone::Clone::clone(&any.type_url)),
+                })
             }
+
             fn type_urls() -> ::std::vec::Vec<::std::string::String> {
-                ::core::todo!("{}", #STUB)
+                ::std::vec![#(#m::__type_url::<#types>(),)* #refusal_url]
             }
         }
     }
 }
 
-/// The stub expansion of an aggregate or a process manager: the impl as
-/// given, and every generated item with a `todo!()` body or an empty
-/// constant. It reads the arguments, the self type, the marked methods'
-/// signatures (for the trait), the markers' types (for `Decides`,
-/// `Ingests`, `Refusing` and the `From` impls into the event set) and the
-/// first message-only command handler's rejection; it checks nothing,
-/// dispatches nothing (its one call is `State::restore` to the user's
-/// `restore`), and gives the trait `pub` whatever `vis` says.
-fn stub(attr: Tokens, item: Tokens, kind: Kind) -> syn::Result<Tokens> {
+/// A variant's name for `ty`: its last segment, or `prefix` with it.
+fn variant(ty: &Type, prefix: &str) -> syn::Result<Ident> {
+    last_ident(ty)
+        .map(|ident| format_ident!("{}{}", prefix, ident))
+        .ok_or_else(|| Error::new_spanned(ty, "names no type"))
+}
+
+/// The expansion of an aggregate or a process manager (see the crate
+/// docs).
+fn domain(attr: Tokens, item: Tokens, kind: Kind) -> syn::Result<Tokens> {
     let args = Punctuated::<Arg, Token![,]>::parse_terminated.parse2(attr)?;
     let (mut domain, mut rejection, mut snapshot) = (None, None, None);
+    let mut vis: Visibility = syn::parse_quote!(pub);
     for arg in args {
         match arg {
             Arg::Domain(value) => domain = Some(value),
             Arg::Rejection(value) => rejection = Some(value),
             Arg::Snapshot(value) => snapshot = Some(value),
-            // The stub gives the trait `pub` regardless.
-            Arg::Vis(vis) => drop(vis),
+            Arg::Vis(value) => vis = value,
         }
     }
     let domain = domain.ok_or_else(|| Error::new(Span::call_site(), "needs `domain = \"..\"`"))?;
-
     let imp: ItemImpl = syn::parse2(item)?;
     let self_ty = &imp.self_ty;
-    let name =
-        last_ident(self_ty).ok_or_else(|| Error::new_spanned(self_ty, "goes on `impl <Type>`"))?;
-    let handler = format_ident!("{}Handler", name);
-    let module = format_ident!("__{}_markup", name.to_string().to_lowercase());
-    // Each marked method's signature and its marker's arguments.
-    let marked_with = |marker: &'static str| {
-        imp.items.iter().filter_map(move |item| match item {
-            ImplItem::Fn(f) => f
-                .attrs
-                .iter()
-                .find(|a| a.path().is_ident(marker))
-                .map(|a| (&f.sig, a.parse_args::<Marker>())),
-            _ => None,
-        })
-    };
-    let mut markers = Vec::new();
-    for marker in ["handles_cmd", "handles_fact", "on_refused", "applies"] {
-        for (sig, args) in marked_with(marker) {
-            markers.push((marker, sig, args?));
+    let name = last_ident(self_ty)
+        .ok_or_else(|| Error::new_spanned(self_ty, "goes on `impl <Type>`"))?
+        .clone();
+    let m = markup();
+    let methods = marked(
+        &imp,
+        &["handles_cmd", "handles_fact", "on_refused", "applies"],
+    )?;
+
+    // Each signature held to its marker; one handler per type.
+    let mut seen: Vec<(&'static str, String)> = Vec::new();
+    for x in &methods {
+        refuse_extras(x, kind == Kind::ProcessManager)?;
+        check_signature(x)?;
+        let set = match x.marker {
+            "handles_cmd" | "handles_fact" => "input",
+            other => other,
+        };
+        let key = (set, x.args.ty.to_token_stream().to_string());
+        if seen.contains(&key) {
+            return Err(Error::new_spanned(
+                &x.args.ty,
+                "a second handler for this type: which one decides is not a question the \
+                 markup leaves open",
+            ));
         }
+        seen.push(key);
     }
+    let of = |marker: &'static str| methods.iter().filter(move |x| x.marker == marker);
+
+    // The domain's own rejection: given, or the message-only command
+    // handlers', which must agree.
     let rejection = match rejection {
         Some(rejection) => rejection,
-        None => markers
-            .iter()
-            .filter(|(marker, _, args)| *marker == "handles_cmd" && args.refuses.is_empty())
-            .find_map(|(_, sig, _)| rejection_of(sig))
-            .unwrap_or_else(|| syn::parse_quote!(::core::convert::Infallible)),
+        None => {
+            let mut found: Option<Type> = None;
+            for x in of("handles_cmd").filter(|x| x.args.refuses.is_empty()) {
+                let Some(error) =
+                    returned(&x.method.sig).and_then(|(_, args)| args.get(1).cloned())
+                else {
+                    continue;
+                };
+                match &found {
+                    None => found = Some(error),
+                    Some(first)
+                        if first.to_token_stream().to_string()
+                            != error.to_token_stream().to_string() =>
+                    {
+                        return Err(Error::new_spanned(
+                            &x.method.sig.output,
+                            format!(
+                                "the command handlers disagree on the rejection: `{}` here, \
+                                 `{}` before; the domain has one (or give `rejection = ..`)",
+                                error.to_token_stream(),
+                                first.to_token_stream()
+                            ),
+                        ));
+                    }
+                    Some(_) => {}
+                }
+            }
+            found.unwrap_or_else(|| syn::parse_quote!(::core::convert::Infallible))
+        }
     };
-    let rejection = quote!(::annals::next::markup::Rejection<#rejection>);
-    // In the trait, `Self` is the implementor: the domain's own type is
-    // what the signatures mean.
-    let declared = markers
-        .iter()
-        .map(|(_, sig, _)| own_type(quote!(#sig), self_ty));
-    let delegated = markers
-        .iter()
-        .map(|(_, sig, _)| quote!(#sig { ::core::todo!("{}", #STUB) }));
-    let typed = |wanted: &'static str| {
-        markers
-            .iter()
-            .filter(move |(marker, _, _)| *marker == wanted)
-            .map(|(_, _, args)| &args.ty)
+    let rejection_ty = quote!(#m::Rejection<#rejection>);
+
+    let command_set = format_ident!("__{}Command", name);
+    let fact_set = format_ident!("__{}Fact", name);
+    let event_set = format_ident!("__{}Event", name);
+    let typed = |marker: &'static str, prefix: &str| -> syn::Result<Vec<(Ident, Type)>> {
+        of(marker)
+            .map(|x| Ok((variant(&x.args.ty, prefix)?, x.args.ty.clone())))
+            .collect()
     };
-    let from_events = typed("applies").map(|event| {
+    let commands = typed("handles_cmd", "")?;
+    let facts = typed("handles_fact", "")?;
+    let refusals = typed("on_refused", "Refused")?;
+    let events = typed("applies", "")?;
+    let sets = [
+        payload_set(&command_set, &commands, &[], &vis),
+        payload_set(&fact_set, &facts, &refusals, &vis),
+        payload_set(&event_set, &events, &[], &vis),
+    ];
+
+    let call = |x: &Marked<'_>| x.method.sig.ident.clone();
+    let command_arms = of("handles_cmd").map(|x| {
+        let (v, method) = (variant(&x.args.ty, "").expect("checked"), call(x));
         quote! {
-            impl ::core::convert::From<#event> for #module::Event {
-                fn from(_event: #event) -> Self {
-                    ::core::todo!("{}", #STUB)
+            #command_set::#v(input) => {
+                let handled = <#self_ty>::#method(tx.state(), ::core::clone::Clone::clone(input), &ctx);
+                #m::__decide(tx, &ctx, handled)
+            }
+        }
+    });
+    let fact_arms = of("handles_fact").map(|x| {
+        let (v, method) = (variant(&x.args.ty, "").expect("checked"), call(x));
+        quote! {
+            #fact_set::#v(input) => #m::__ingest(state, &ctx, <#self_ty>::#method(state, ::core::clone::Clone::clone(input), &ctx)),
+        }
+    });
+    let refusal_arms = of("on_refused").map(|x| {
+        let (v, method) = (variant(&x.args.ty, "Refused").expect("checked"), call(x));
+        quote! {
+            #fact_set::#v(refused, _) => #m::__ingest(state, &ctx, <#self_ty>::#method(state, ::core::clone::Clone::clone(refused), &ctx)),
+        }
+    });
+    let apply_arms = of("applies").map(|x| {
+        let (v, method) = (variant(&x.args.ty, "").expect("checked"), call(x));
+        quote! {
+            #event_set::#v(event) => <#self_ty>::#method(state, ::core::clone::Clone::clone(event)),
+        }
+    });
+    let decide_body = if commands.is_empty() {
+        quote!(match *command {})
+    } else {
+        quote!(match command { #(#command_arms)* })
+    };
+    let ingest_body = if facts.is_empty() && refusals.is_empty() {
+        quote!(match *fact {})
+    } else {
+        quote!(match fact { #(#fact_arms)* #(#refusal_arms)* })
+    };
+    let apply_body = if events.is_empty() {
+        quote!(match *event {})
+    } else {
+        quote!(match event { #(#apply_arms)* })
+    };
+
+    // A process manager's start rule, before any handler.
+    let (decide_start, ingest_start, process_manager) = match kind {
+        Kind::Aggregate => (quote!(), quote!(), quote!()),
+        Kind::ProcessManager => {
+            let starting = |marker: &'static str, set: &Ident, refused: bool| {
+                let arms = of(marker).map(|x| {
+                    let v = variant(&x.args.ty, "").expect("checked");
+                    let starts = x.args.starts.is_some();
+                    quote!(#set::#v(..) => #starts,)
+                });
+                let refused = refused.then(|| {
+                    let arms = of("on_refused").map(|x| {
+                        let v = variant(&x.args.ty, "Refused").expect("checked");
+                        quote!(#set::#v(..) => false,)
+                    });
+                    quote!(#(#arms)*)
+                });
+                quote!(#(#arms)* #refused)
+            };
+            let command_starts = starting("handles_cmd", &command_set, false);
+            let fact_starts = starting("handles_fact", &fact_set, true);
+            let starts = methods
+                .iter()
+                .filter(|x| x.args.starts.is_some())
+                .map(|x| &x.args.ty);
+            (
+                if commands.is_empty() {
+                    quote!()
+                } else {
+                    quote! {
+                        if !#m::__decided_instance(tx) && !(match command { #command_starts }) {
+                            return ::core::result::Result::Err(#m::__no_instance(tx));
+                        }
+                    }
+                },
+                if facts.is_empty() && refusals.is_empty() {
+                    quote!()
+                } else {
+                    quote! {
+                        if !#m::__ingested_instance(ctx) && !(match fact { #fact_starts }) {
+                            return ::std::vec::Vec::new();
+                        }
+                    }
+                },
+                quote! {
+                    impl #m::ProcessManager for #self_ty {
+                        const STARTS: &'static [#m::TypeName] = &[
+                            #(#m::TypeName::of::<<#starts as #m::DomainMessage>::Wire>(),)*
+                        ];
+                    }
+                },
+            )
+        }
+    };
+
+    let from_events = events.iter().map(|(v, ty)| {
+        quote! {
+            impl ::core::convert::From<#ty> for #event_set {
+                fn from(event: #ty) -> Self {
+                    #event_set::#v(event)
                 }
             }
         }
     });
-    let decides = typed("handles_cmd")
-        .map(|command| quote!(impl ::annals::next::markup::Decides<#command> for #self_ty {}));
-    let ingests = typed("handles_fact")
-        .map(|fact| quote!(impl ::annals::next::markup::Ingests<#fact> for #self_ty {}));
-    let mut refusing = Vec::new();
-    for (_, _, args) in markers
+    let decides = commands
         .iter()
-        .filter(|(marker, _, args)| *marker == "handles_cmd" && !args.refuses.is_empty())
-    {
-        let command = &args.ty;
-        let choice = format_ident!(
-            "__{}{}Refuses",
-            name,
-            last_ident(command).ok_or_else(|| Error::new_spanned(command, "names no type"))?
-        );
-        let variants = args
+        .map(|(_, ty)| quote!(impl #m::Decides<#ty> for #self_ty {}));
+    let ingests = facts
+        .iter()
+        .map(|(_, ty)| quote!(impl #m::Ingests<#ty> for #self_ty {}));
+    let mut refusing = Vec::new();
+    for x in of("handles_cmd").filter(|x| !x.args.refuses.is_empty()) {
+        let command = &x.args.ty;
+        let choice = format_ident!("__{}{}Refuses", name, variant(command, "")?);
+        let variants = x
+            .args
             .refuses
             .iter()
-            .map(|ty| last_ident(ty).ok_or_else(|| Error::new_spanned(ty, "names no type")))
+            .map(|ty| variant(ty, ""))
             .collect::<syn::Result<Vec<_>>>()?;
-        let types = &args.refuses;
+        let types = &x.args.refuses;
         refusing.push(quote! {
             #[doc(hidden)]
-            #[allow(non_camel_case_types, dead_code)]
-            pub enum #choice {
+            #[allow(non_camel_case_types)]
+            #vis enum #choice {
                 #(#variants(#types),)*
             }
 
@@ -3141,99 +3550,119 @@ fn stub(attr: Tokens, item: Tokens, kind: Kind) -> syn::Result<Tokens> {
                 }
             )*
 
-            impl ::core::convert::From<#choice> for ::annals::next::markup::TypedRefusal {
-                fn from(_choice: #choice) -> Self {
-                    ::core::todo!("{}", #STUB)
+            impl ::core::convert::From<#choice> for #m::TypedRefusal {
+                fn from(choice: #choice) -> Self {
+                    match choice {
+                        #(#choice::#variants(object) => #m::TypedRefusal::of(&object),)*
+                    }
                 }
             }
 
-            impl ::core::convert::From<#choice> for #rejection {
-                fn from(_choice: #choice) -> Self {
-                    ::core::todo!("{}", #STUB)
+            impl ::core::convert::From<#choice> for #rejection_ty {
+                fn from(choice: #choice) -> Self {
+                    #m::Rejection::Typed(::core::convert::Into::into(choice))
                 }
             }
 
-            impl ::annals::next::markup::Refusing<#command> for #self_ty {
+            impl #m::Refusing<#command> for #self_ty {
                 type Refuses = #choice;
-                const REFUSES: &'static [::annals::next::markup::TypeName] = &[];
+                const REFUSES: &'static [#m::TypeName] = &[
+                    #(#m::TypeName::of::<<#types as #m::DomainMessage>::Wire>(),)*
+                ];
             }
         });
     }
-    let (command_set, fact_set, event_set) = (
-        empty_set(&format_ident!("Command")),
-        empty_set(&format_ident!("Fact")),
-        empty_set(&format_ident!("Event")),
-    );
-    // With a snapshot form, `restore` is the user's (the one call the stub
-    // makes); without, there is nothing to restore.
-    let (snapshot_ty, snapshots, restore) = match snapshot {
-        Some(snapshot) => (
-            quote!(#snapshot),
-            quote!(),
-            quote!(<#self_ty>::restore(self, snapshot)
-                .map_err(|error| ::annals::next::markup::Report::of(&error))),
-        ),
-        None => (
-            quote!(::annals::next::markup::NoSnapshot),
-            quote!(
+
+    // The snapshot form: the user's conversions, or none.
+    let state = match snapshot {
+        Some(snapshot) => quote! {
+            impl ::annals::next::State for #self_ty {
+                type Snapshot = #snapshot;
+
+                fn to_snapshot(&self) -> #snapshot {
+                    <#snapshot as ::core::convert::From<&#self_ty>>::from(self)
+                }
+
+                fn from_snapshot(
+                    snapshot: #snapshot,
+                ) -> ::core::result::Result<Self, #m::Report> {
+                    let mut state = <#self_ty as ::core::default::Default>::default();
+                    ::annals::next::State::restore(&mut state, snapshot)?;
+                    ::core::result::Result::Ok(state)
+                }
+
+                fn restore(
+                    &mut self,
+                    snapshot: #snapshot,
+                ) -> ::core::result::Result<(), #m::Report> {
+                    <#self_ty>::restore(self, snapshot).map_err(|error| #m::Report::of(&error))
+                }
+
+                fn descriptor() -> ::annals::next::v1::StateDescriptor {
+                    #m::__descriptor::<#snapshot>()
+                }
+            }
+        },
+        None => quote! {
+            impl ::annals::next::State for #self_ty {
+                type Snapshot = #m::NoSnapshot;
+
                 const SNAPSHOTS: bool = false;
-            ),
-            quote!({
-                let _ = snapshot;
-                ::core::todo!("{}", #STUB)
-            }),
-        ),
-    };
-    // The stub reads which inputs start an instance and does nothing with
-    // them.
-    let _starting = markers.iter().filter(|(_, _, args)| args.starts).count();
-    let process_manager = match kind {
-        Kind::Aggregate => quote!(),
-        Kind::ProcessManager => quote! {
-            impl ::annals::next::markup::ProcessManager for #self_ty {
-                const STARTS: &'static [::annals::next::markup::TypeName] = &[];
+
+                fn to_snapshot(&self) -> #m::NoSnapshot {
+                    #m::NoSnapshot {}
+                }
+
+                fn from_snapshot(
+                    _snapshot: #m::NoSnapshot,
+                ) -> ::core::result::Result<Self, #m::Report> {
+                    ::core::result::Result::Ok(<#self_ty as ::core::default::Default>::default())
+                }
+
+                fn restore(
+                    &mut self,
+                    _snapshot: #m::NoSnapshot,
+                ) -> ::core::result::Result<(), #m::Report> {
+                    ::core::result::Result::Ok(())
+                }
+
+                fn descriptor() -> ::annals::next::v1::StateDescriptor {
+                    #m::__descriptor::<#m::NoSnapshot>()
+                }
             }
         },
     };
 
+    // The handler trait: every marked method, forwarded.
+    let handler = format_ident!("{}Handler", name);
+    let (declared, forwarded): (Vec<_>, Vec<_>) = methods
+        .iter()
+        .map(|x| {
+            let (sig, names) = renamed(&x.method.sig);
+            let method = &sig.ident;
+            let declared = own_type(quote!(#sig), self_ty);
+            let forwarded = quote!(#declared { <#self_ty>::#method(self, #(#names),*) });
+            (declared, forwarded)
+        })
+        .unzip();
+    let constant = |marker: &'static str| {
+        let types: Vec<_> = of(marker).map(|x| &x.args.ty).collect();
+        quote!(&[#(#m::TypeName::of::<<#types as #m::DomainMessage>::Wire>(),)*])
+    };
+    let handled: Vec<_> = methods
+        .iter()
+        .filter(|x| x.marker == "handles_cmd" || x.marker == "handles_fact")
+        .map(|x| &x.args.ty)
+        .collect();
+    let refusal_constant = constant("on_refused");
+    let applies_constant = constant("applies");
+
     Ok(quote! {
-        // The stub calls no marked method.
-        #[allow(dead_code)]
         #imp
 
-        #[doc(hidden)]
-        mod #module {
-            #command_set
-            #fact_set
-            #event_set
-        }
+        #(#sets)*
 
-        impl ::annals::next::State for #self_ty {
-            type Snapshot = #snapshot_ty;
-
-            #snapshots
-
-            fn to_snapshot(&self) -> #snapshot_ty {
-                ::core::todo!("{}", #STUB)
-            }
-
-            fn from_snapshot(
-                _snapshot: #snapshot_ty,
-            ) -> ::core::result::Result<Self, ::annals::next::markup::Report> {
-                ::core::todo!("{}", #STUB)
-            }
-
-            fn restore(
-                &mut self,
-                snapshot: #snapshot_ty,
-            ) -> ::core::result::Result<(), ::annals::next::markup::Report> {
-                #restore
-            }
-
-            fn descriptor() -> ::annals::next::v1::StateDescriptor {
-                ::core::todo!("{}", #STUB)
-            }
-        }
+        #state
 
         #(#from_events)*
         #(#decides)*
@@ -3242,54 +3671,63 @@ fn stub(attr: Tokens, item: Tokens, kind: Kind) -> syn::Result<Tokens> {
 
         impl ::annals::next::Domain for #self_ty {
             type State = Self;
-            type Command = #module::Command;
-            type Fact = #module::Fact;
-            type Event = #module::Event;
-            type Rejection = #rejection;
+            type Command = #command_set;
+            type Fact = #fact_set;
+            type Event = #event_set;
+            type Rejection = #rejection_ty;
             type Rules = ();
 
             const NAME: &'static str = #domain;
 
             fn decide(
-                _command: &#module::Command,
-                _tx: &mut ::annals::next::Tx<'_, Self>,
-            ) -> ::core::result::Result<(), #rejection> {
-                ::core::todo!("{}", #STUB)
+                command: &#command_set,
+                tx: &mut ::annals::next::Tx<'_, Self>,
+            ) -> ::core::result::Result<(), #rejection_ty> {
+                #decide_start
+                let ctx = #m::__context(tx);
+                #decide_body
             }
 
             fn ingest(
-                _state: &Self,
-                _fact: &#module::Fact,
-                _ctx: &::annals::next::IngestCtx<'_, Self>,
-            ) -> ::std::vec::Vec<#module::Event> {
-                ::core::todo!("{}", #STUB)
+                state: &Self,
+                fact: &#fact_set,
+                ctx: &::annals::next::IngestCtx<'_, Self>,
+            ) -> ::std::vec::Vec<#event_set> {
+                #ingest_start
+                let ctx = #m::__fact_context(ctx);
+                #ingest_body
             }
 
-            fn apply(_state: &mut Self, _event: &#module::Event, _rules: &()) {
-                ::core::todo!("{}", #STUB)
+            fn apply(state: &mut Self, event: &#event_set, _rules: &()) {
+                #apply_body
             }
+
         }
 
         #process_manager
 
         /// The domain's handler set: every marked method.
-        pub trait #handler {
+        #vis trait #handler {
             #(#declared;)*
         }
 
-        #[allow(unused_variables)]
         impl #handler for #self_ty {
-            #(#delegated)*
+            #(#forwarded)*
         }
 
         impl #self_ty {
             /// The handled commands and facts, in marker order.
-            pub const HANDLES: &'static [::annals::next::markup::TypeName] = &[];
+            pub const HANDLES: &'static [#m::TypeName] =
+                &[#(#m::TypeName::of::<<#handled as #m::DomainMessage>::Wire>(),)*];
             /// The commands whose refusals it handles (`#[on_refused]`),
             /// in marker order.
-            pub const REFUSALS: &'static [::annals::next::markup::TypeName] = &[];
+            pub const REFUSALS: &'static [#m::TypeName] = #refusal_constant;
             /// The applied events, in marker order.
-            pub const APPLIES: &'static [::annals::next::markup::TypeName] = &[];
+            pub const APPLIES: &'static [#m::TypeName] = #applies_constant;
         }
     })
 }
+
+#[cfg(test)]
+#[path = "lib.test.rs"]
+mod tests;

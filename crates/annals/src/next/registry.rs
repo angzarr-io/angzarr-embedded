@@ -15,8 +15,10 @@
 use std::any::Any as AnyType;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::Mutex;
 
 use angzarr_proto::v1::{ConflictResolution, EventPage, Snapshot, StateDescriptor};
+use prost_types::Any;
 
 use annals_diagnostic::{Arg, Diagnostic, Report};
 
@@ -25,6 +27,7 @@ use super::coordinator::{run_step, Contextual};
 use super::dead_letter::DeadLetterLog;
 use super::domain::{Domain, State};
 use super::error::{Failure, StepError, UpcastChainError};
+use super::markup::{self, AsyncProjector, Projecting, ProjectionContext};
 use super::payload::{type_name, Payload};
 use super::upcast::Upcaster;
 use super::version::Rulebook;
@@ -49,6 +52,43 @@ struct Entry {
     current: fn() -> Vec<String>,
     /// `D`'s typed step 5, erased: [`typed_step::<D>`].
     step: TypedStep,
+    /// A marked-up domain's factory: every fresh `D::State`, boxed.
+    fresh: Option<Fresh>,
+    /// Whether it is a process manager: its root is the correlation.
+    process_manager: bool,
+}
+
+/// A marked-up domain's factory, erased: a `Factory<D::State>`, boxed.
+type Fresh = Box<dyn AnyType + Send + Sync>;
+
+/// A factory of `S`.
+type Factory<S> = Box<dyn Fn() -> S + Send + Sync>;
+
+/// A marked-up projector, erased, its one instance held here: out of the
+/// lock while it runs.
+pub(crate) struct ProjectorEntry {
+    pub(crate) name: &'static str,
+    pub(crate) source: &'static str,
+    pub(crate) instance: Mutex<Option<Box<dyn ErasedProjector>>>,
+}
+
+/// [`AsyncProjector`] with its constant and type erased.
+pub(crate) trait ErasedProjector: Send {
+    fn project<'a>(
+        &'a mut self,
+        event: &'a Any,
+        ctx: &'a ProjectionContext,
+    ) -> Option<Projecting<'a>>;
+}
+
+impl<P: AsyncProjector> ErasedProjector for P {
+    fn project<'a>(
+        &'a mut self,
+        event: &'a Any,
+        ctx: &'a ProjectionContext,
+    ) -> Option<Projecting<'a>> {
+        AsyncProjector::project(self, event, ctx)
+    }
 }
 
 /// A domain's typed step 5, its types erased so a chain can run a policy's
@@ -205,6 +245,9 @@ impl Diagnostic for Misconfigured {
 #[derive(Default)]
 pub struct Registry {
     domains: BTreeMap<String, Entry>,
+    /// The registered sagas' names.
+    sagas: Vec<&'static str>,
+    projectors: Vec<ProjectorEntry>,
 }
 
 impl Registry {
@@ -296,6 +339,8 @@ impl Registry {
                 urls
             },
             step: typed_step::<D>,
+            fresh: None,
+            process_manager: false,
         };
         self.domains.insert(domain, entry);
         Ok(())
@@ -322,7 +367,6 @@ impl Registry {
     /// registry, so registrations chain:
     /// `registry.aggregate::<Wallet>(f).upcaster(u).aggregate::<Lamp>(g)`.
     ///
-    /// **A proposal**: a stub whose body is `todo!()`.
     pub fn aggregate<D>(
         &mut self,
         factory: impl Fn() -> D + Send + Sync + 'static,
@@ -330,8 +374,11 @@ impl Registry {
     where
         D: Domain<State = D, Rules = ()>,
     {
-        let _ = factory;
-        todo!("Registry::aggregate is a stub")
+        self.marked_up::<D>(factory, false);
+        Aggregate {
+            registry: self,
+            domain: std::marker::PhantomData,
+        }
     }
 
     /// Register the marked-up process manager `P` (`#[process_manager]`)
@@ -340,48 +387,92 @@ impl Registry {
     /// (the markup's rules version, an empty upcaster, a second
     /// registration PANICS at startup), plus the two rules of
     /// [`ProcessManager`](super::markup::ProcessManager): an input
-    /// addressed to it must name the instance its correlation names, and
-    /// only a starting input type may start an instance.
-    ///
-    /// **A proposal**: `todo!()` (the dispatch is the linked router's).
+    /// addressed to it must name the instance its correlation names
+    /// ([`check`](super::check) refuses any other), and only a starting
+    /// input type may start an instance (its generated `Domain` impl).
     pub fn process_manager<P: super::markup::ProcessManager>(
         &mut self,
         factory: impl Fn() -> P + Send + Sync + 'static,
     ) -> &mut Self {
-        let _ = factory;
-        todo!("Registry::process_manager is a stub")
+        self.marked_up::<P>(factory, true);
+        self
     }
 
-    /// Register `saga`, a marked-up saga (`#[saga]`). [`Kernel::settle`](super::Kernel::settle)
-    /// runs it on each event of its source a step commits, and delivers
-    /// each of its commands to its target as a step of its own. When the
-    /// target refuses one (and records nothing), the saga's
-    /// [`on_refused`](super::markup::Saga::on_refused) answers a fact,
-    /// delivered to the exact stream of the triggering event as a step of
-    /// its own, whose id is the refused command's: the source's handler for
-    /// it records what the refusal means. A refusal fact the source has no
-    /// handler for is dead-lettered (`annals-next-no-refusal-handler`; the
-    /// dead letter is annals' alert), the steps before it stay committed,
-    /// and the call returns Ok, as on distributed angzarr. Registering one
-    /// twice PANICS at startup.
+    /// Register `D`, marked up, with `factory`; a process manager if `pm`.
+    /// A registration [`Registry::register`] refuses panics: a bug in the
+    /// composition root.
+    fn marked_up<D>(&mut self, factory: impl Fn() -> D + Send + Sync + 'static, pm: bool)
+    where
+        D: Domain<State = D, Rules = ()>,
+    {
+        let rules = Rulebook::new(markup::MARKUP_RULES_VERSION, ());
+        if let Err(problem) = self.register::<D>(rules, Upcaster::new(D::NAME, D::NAME)) {
+            panic!("{problem}");
+        }
+        let entry = self
+            .domains
+            .get_mut(D::NAME)
+            .expect("the domain was just registered");
+        let factory: Factory<D> = Box::new(factory);
+        entry.fresh = Some(Box::new(factory));
+        entry.process_manager = pm;
+    }
+
+    /// Register `saga`, a marked-up saga (`#[saga]`). Registering one twice
+    /// PANICS at startup.
     ///
-    /// **A proposal**: `todo!()` (the dispatch is the linked router's).
+    /// annals does not run a saga yet: its steps, each committed on its
+    /// own (the source's events before the saga's command; a refusal fact
+    /// as a step of its own), arrive with the kernel's committed-step
+    /// dispatch. What a saga answers is its markup's
+    /// ([`Saga::on_event`](super::markup::Saga::on_event),
+    /// [`Saga::on_refused`](super::markup::Saga::on_refused)), whatever
+    /// runs it.
     pub fn saga<S: super::markup::Saga>(&mut self, saga: S) -> &mut Self {
-        let _ = saga;
-        todo!("Registry::saga is a stub")
+        if self.sagas.contains(&S::NAME) {
+            panic!("saga \"{}\" is registered already", S::NAME);
+        }
+        drop(saga);
+        self.sagas.push(S::NAME);
+        self
     }
 
     /// Register `projector`, the ONE instance of a marked-up projector
-    /// (`#[projector]`) this process runs, holding its ports. The router
+    /// (`#[projector]`) this process runs, holding its ports. The kernel's
+    /// async command path ([`Kernel::handle_async`](super::Kernel::handle_async))
     /// runs it after each commit that records its source's events, and
     /// awaits it before the call returns: a failure is the caller's error
-    /// (the events stay committed), and its position does not advance
-    /// past the failing event. Registering one twice PANICS at startup.
-    ///
-    /// **A proposal**: `todo!()` (the dispatch is the linked router's).
-    pub fn projector<P: super::markup::AsyncProjector>(&mut self, projector: P) -> &mut Self {
-        let _ = projector;
-        todo!("Registry::projector is a stub")
+    /// ([`Failure::Projection`]; the events stay committed), and does not
+    /// stop the other projectors. Registering one twice PANICS at startup.
+    pub fn projector<P: AsyncProjector>(&mut self, projector: P) -> &mut Self {
+        if self.projectors.iter().any(|entry| entry.name == P::NAME) {
+            panic!("projector \"{}\" is registered already", P::NAME);
+        }
+        self.projectors.push(ProjectorEntry {
+            name: P::NAME,
+            source: <P::Source as Domain>::NAME,
+            instance: Mutex::new(Some(Box::new(projector))),
+        });
+        self
+    }
+
+    /// A fresh `D` state: the registered factory's, else the default.
+    pub(crate) fn fresh<D: Domain>(&self) -> D::State {
+        self.domains
+            .get(D::NAME)
+            .and_then(|entry| entry.fresh.as_ref())
+            .and_then(|fresh| fresh.downcast_ref::<Factory<D::State>>())
+            .map_or_else(D::State::default, |factory| factory())
+    }
+
+    /// Whether `domain` is a process manager's.
+    pub(crate) fn is_process_manager(&self, domain: &str) -> bool {
+        self.domains.get(domain).is_some_and(|e| e.process_manager)
+    }
+
+    /// Every projector, in registration order.
+    pub(crate) fn projectors(&self) -> &[ProjectorEntry] {
+        &self.projectors
     }
 
     /// `domain`'s state descriptor, if registered: what [`check`](super::check)
@@ -490,8 +581,6 @@ mod tests;
 /// already registered, with an empty upcaster, until
 /// [`Aggregate::upcaster`] replaces it. Derefs to the registry, so
 /// registrations chain.
-///
-/// **A proposal**: a stub.
 pub struct Aggregate<'r, D: Domain> {
     registry: &'r mut Registry,
     domain: std::marker::PhantomData<fn() -> D>,
@@ -501,8 +590,17 @@ impl<'r, D: Domain> Aggregate<'r, D> {
     /// Read the aggregate's old events through `upcaster` (its domain must
     /// be `D::NAME`; another panics, as a composition-root bug).
     pub fn upcaster(self, upcaster: super::Upcaster) -> Aggregate<'r, D> {
-        let _ = (upcaster, self.domain);
-        todo!("Aggregate::upcaster is a stub")
+        if upcaster.domain() != D::NAME {
+            panic!(
+                "the upcaster given for domain \"{}\" is for \"{}\"",
+                D::NAME,
+                upcaster.domain()
+            );
+        }
+        if let Some(entry) = self.registry.domains.get_mut(D::NAME) {
+            entry.upcaster = upcaster;
+        }
+        self
     }
 }
 

@@ -113,7 +113,7 @@ pub use error::{
 };
 pub use fixture::{assert_replay_fixtures, check_replay_fixtures, ReplayFixture};
 pub use handle::{
-    Chain, Handled, Kernel, Project, ProjectionRoute, ProjectorFailure, Recorded, Routes, Settled,
+    Chain, Handled, Kernel, Project, ProjectionRoute, ProjectorFailure, Recorded, Routes,
     DEFAULT_DEPTH_LIMIT,
 };
 pub use handler::{Admit, Committed, Gap, Handler, Position, Tracked};
@@ -193,6 +193,8 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn annals_diagnostic::Diagnostic>
         Malformed::FactCommandIdNotDerived,
         Malformed::HandlingOnFact,
         Malformed::UnknownConflictResolution { value: 9 },
+        Malformed::RootNotCorrelation,
+        Malformed::RefusalMisaddressed,
         Malformed::UnsupportedConflictResolution {
             domain: domain(),
             requested: ConflictResolution::Commutative,
@@ -363,6 +365,9 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn annals_diagnostic::Diagnostic>
     samples.push(Box::new(Failure::<Gap>::Projection {
         committed: Vec::new(),
         failures: vec![("balances", report())],
+    }));
+    samples.push(Box::new(markup::Rejection::<Gap>::NoInstance {
+        stream: stream(),
     }));
     samples.push(Box::new(gap));
     samples.push(Box::new(missing));

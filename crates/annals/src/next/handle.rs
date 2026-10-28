@@ -27,7 +27,10 @@
 //!   deduplication needs nothing else.
 //! - **Then projections run**, on committed events only. A failed chain is
 //!   never seen by one, and a failing projection never undoes the commit:
-//!   it is reported in [`Recorded::projector_failures`].
+//!   a [`Project`]ion route's is reported in
+//!   [`Recorded::projector_failures`]; a marked-up projector's
+//!   ([`Registry::projector`]), on the async path, is the caller's
+//!   [`Failure::Projection`].
 //!
 //! **This is a deliberate divergence from angzarr** (see
 //! `docs/design/audit.md`, *Divergences*): angzarr appends one stream per
@@ -60,12 +63,12 @@ use super::dead_letter::{DeadLetterLog, NoTriggerLog, TriggerLog};
 use super::domain::Domain;
 use super::error::{Failure, KernelError, Step, StepError};
 use super::handler::{Admit, Gap, Handler, Position};
+use super::markup::ProjectionContext;
 use super::reaction::{policy, projection, Order, Policy, Projection};
 use super::registry::Registry;
-use super::store::{
-    block, AsyncPort, AsyncStore, AsyncUnitOfWork, EventStore, Port, SyncPort, UnitOfWork,
-};
+use super::store::{block, AsyncPort, AsyncUnitOfWork, EventStore, Port, SyncPort, UnitOfWork};
 use super::stream::{Envelope, Stream};
+use annals_diagnostic::Report;
 
 /// How deep a chain may go before it is a [`KernelError::ChainTooDeep`],
 /// unless the kernel says otherwise ([`Kernel::limit`]).
@@ -189,7 +192,13 @@ impl<'k> Kernel<'k> {
     }
 
     /// [`Kernel::handle`], over the async ports: the store's reads, appends
-    /// and commit are awaited; deciding stays synchronous and pure.
+    /// and commit are awaited; deciding stays synchronous and pure. After
+    /// the commit and `projections`, every marked-up projector
+    /// ([`Registry::projector`]) runs on the committed events of its
+    /// source, awaited before this returns: any failure is
+    /// [`Failure::Projection`], with every failing projector and what was
+    /// committed, and does not stop the other projectors. (The synchronous
+    /// [`Kernel::handle`] runs none: the async path is the one path.)
     pub async fn handle_async<D, U, Ps>(
         &self,
         unit: U,
@@ -213,32 +222,78 @@ impl<'k> Kernel<'k> {
                 .await
                 .map_err(|e| Failure::Kernel(KernelError::Store(e)))?;
         }
-        Ok(self.project(handled, projections))
+        let handled = self.project(handled, projections);
+        let committed = match &handled {
+            Handled::Applied(recorded) => recorded.books.clone(),
+            Handled::Duplicate(_) => return Ok(handled),
+        };
+        let failures = self.run_projectors(&committed).await;
+        if !failures.is_empty() {
+            return Err(Failure::Projection {
+                committed,
+                failures,
+            });
+        }
+        Ok(handled)
     }
 
-    /// Handle `book` as its own step, then every saga step it sets off,
-    /// each committed on its own, and wait for them to settle: annals'
-    /// sagas ([`Registry::saga`]) run at once, in process, but with the
-    /// meaning they have anywhere. Atomicity covers ONE step: one stream's
-    /// events. The source's events are committed before a saga's command
-    /// runs; each command and each refusal fact is a step of its own,
-    /// deduplicated by its id, in its own unit of work begun on `store`. A
-    /// step that fails keeps every commit before it: the call is an error
-    /// (or a dead letter), never a rollback.
-    ///
-    /// **A proposal**: a stub whose body is `todo!()`.
-    pub async fn settle<D, S>(
-        &self,
-        store: &mut S,
-        book: CommandBook,
-        sampled: &Sampled,
-    ) -> Result<Settled, Failure<D::Rejection>>
-    where
-        D: Domain,
-        S: AsyncStore,
-    {
-        let _ = (store, book, sampled);
-        todo!("Kernel::settle is a stub")
+    /// Every marked-up projector over the `committed` events of its
+    /// source, in registration order, each event in stream order: a
+    /// projector stops at its first failure, the others go on. The
+    /// failures, by projector.
+    async fn run_projectors(&self, committed: &[EventBook]) -> Vec<(&'static str, Report)> {
+        let mut failures = Vec::new();
+        for entry in self.registry.projectors() {
+            let books: Vec<&EventBook> = committed
+                .iter()
+                .filter(|book| {
+                    book.cover
+                        .as_ref()
+                        .is_some_and(|c| c.domain == entry.source)
+                })
+                .collect();
+            if books.iter().all(|book| book.pages.is_empty()) {
+                continue;
+            }
+            // The one instance is out of the lock while it runs; a
+            // concurrent command waits for it.
+            let mut instance = loop {
+                let taken = entry
+                    .instance
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                match taken {
+                    Some(instance) => break instance,
+                    None => Yield(false).await,
+                }
+            };
+            'books: for book in books {
+                let cover = book.cover.clone().unwrap_or_default();
+                for page in &book.pages {
+                    let recorded_at = page
+                        .meta
+                        .as_ref()
+                        .and_then(|m| m.recorded_at)
+                        .unwrap_or_default();
+                    let ctx = ProjectionContext::new(cover.clone(), page.sequence, recorded_at);
+                    let payload = page.payload.clone().unwrap_or_default();
+                    let run = instance.project(&payload, &ctx);
+                    if let Some(Err(error)) = match run {
+                        Some(run) => Some(run.await),
+                        None => None,
+                    } {
+                        failures.push((entry.name, error));
+                        break 'books;
+                    }
+                }
+            }
+            *entry
+                .instance
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(instance);
+        }
+        failures
     }
 
     /// Deliver one owed order outside a chain (a catch-up from
@@ -739,20 +794,6 @@ impl<'u> Run<'u> {
     }
 }
 
-/// What [`Kernel::settle`] committed: each step's book, in commit order.
-#[derive(Clone, PartialEq, Debug, Default)]
-pub struct Settled {
-    steps: Vec<EventBook>,
-}
-
-impl Settled {
-    /// Each committed step's events, one book per step (a step that
-    /// recorded nothing is not listed), in the order committed.
-    pub fn steps(&self) -> &[EventBook] {
-        &self.steps
-    }
-}
-
 /// Everything a chain recorded, every stream, after commit: angzarr's
 /// `CommandResponse.events`, one `EventBook` per stream here, since a chain
 /// touches several.
@@ -891,3 +932,22 @@ fn place<P: Policy>(position: Position, order: &Order<P>) -> Result<Admit, Gap> 
 #[cfg(test)]
 #[path = "handle.test.rs"]
 mod tests;
+
+/// A future that is pending once, waking itself: a turn for another task.
+struct Yield(bool);
+
+impl std::future::Future for Yield {
+    type Output = ();
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
+        if self.0 {
+            return std::task::Poll::Ready(());
+        }
+        self.0 = true;
+        cx.waker().wake_by_ref();
+        std::task::Poll::Pending
+    }
+}

@@ -1,0 +1,246 @@
+//! What the expansion refuses, and why, by its messages: the
+//! `compile_fail` examples pin that each misuse fails to compile; these pin
+//! that it fails for its own reason.
+
+use proc_macro2::TokenStream as Tokens;
+use quote::quote;
+
+use super::{domain, flow, Flow, Kind};
+
+/// The aggregate expansion's error for `item`, under `attr`.
+fn refused(kind: Kind, attr: Tokens, item: Tokens) -> String {
+    match domain(attr, item, kind) {
+        Ok(_) => panic!("expanded, but should be refused"),
+        Err(error) => error.to_string(),
+    }
+}
+
+fn lamp(item: Tokens) -> String {
+    refused(Kind::Aggregate, quote!(domain = "lamp"), item)
+}
+
+#[test]
+fn a_second_handler_for_one_type_is_refused() {
+    let error = lamp(quote! {
+        impl Lamp {
+            #[handles_cmd(On)]
+            fn on(&self, cmd: On, ctx: &Context) -> Result<Lit, Infallible> { todo!() }
+            #[handles_fact(On)]
+            fn on_again(&self, fact: On, ctx: &Context) -> Record<Self> { todo!() }
+        }
+    });
+    assert!(error.contains("a second handler for this type"), "{error}");
+}
+
+#[test]
+fn handlers_that_disagree_on_the_rejection_are_refused() {
+    let error = lamp(quote! {
+        impl Lamp {
+            #[handles_cmd(On)]
+            fn on(&self, cmd: On, ctx: &Context) -> Result<Lit, Infallible> { todo!() }
+            #[handles_cmd(Off)]
+            fn off(&self, cmd: Off, ctx: &Context) -> Result<Dark, WireError> { todo!() }
+        }
+    });
+    assert!(
+        error.contains("disagree on the rejection: `WireError` here, `Infallible` before"),
+        "{error}"
+    );
+}
+
+#[test]
+fn handlers_that_agree_on_the_rejection_expand() {
+    let expanded = domain(
+        quote!(domain = "lamp"),
+        quote! {
+            impl Lamp {
+                #[handles_cmd(On)]
+                fn on(&self, cmd: On, ctx: &Context) -> Result<Lit, Refused> { todo!() }
+                #[handles_cmd(Off)]
+                fn off(&self, cmd: Off, ctx: &Context) -> Result<Dark, Refused> { todo!() }
+            }
+        },
+        Kind::Aggregate,
+    )
+    .expect("expands")
+    .to_string();
+    assert!(expanded.contains("Rejection < Refused >"), "{expanded}");
+}
+
+#[test]
+fn a_handler_taking_mut_self_is_refused() {
+    let error = lamp(quote! {
+        impl Lamp {
+            #[handles_cmd(On)]
+            fn on(&mut self, cmd: On, ctx: &Context) -> Result<Lit, Infallible> { todo!() }
+        }
+    });
+    assert!(error.contains("a handler takes `&self`"), "{error}");
+}
+
+#[test]
+fn a_handler_taking_self_by_value_is_refused() {
+    let error = lamp(quote! {
+        impl Lamp {
+            #[handles_cmd(On)]
+            fn on(self, cmd: On, ctx: &Context) -> Result<Lit, Infallible> { todo!() }
+        }
+    });
+    assert!(error.contains("a handler takes `&self`"), "{error}");
+}
+
+#[test]
+fn an_applier_taking_self_is_refused() {
+    let error = lamp(quote! {
+        impl Lamp {
+            #[applies(Lit)]
+            fn lit(&self, event: Lit) {}
+        }
+    });
+    assert!(error.contains("an applier takes `&mut self`"), "{error}");
+}
+
+#[test]
+fn a_command_handler_without_a_result_is_refused() {
+    let error = lamp(quote! {
+        impl Lamp {
+            #[handles_cmd(On)]
+            fn on(&self, cmd: On, ctx: &Context) -> Option<Lit> { todo!() }
+        }
+    });
+    assert!(
+        error.contains("a command handler returns `Result<_, Rejection>`"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_refusing_handler_whose_err_is_not_its_choice_is_refused() {
+    let error = lamp(quote! {
+        impl Lamp {
+            #[handles_cmd(On, refuses(Burnt))]
+            fn on(&self, cmd: On, ctx: &Context) -> Result<Lit, Burnt> { todo!() }
+        }
+    });
+    assert!(error.contains("`Result<_, Refuses<Self, Cmd>>`"), "{error}");
+}
+
+#[test]
+fn a_fact_handler_returning_a_result_is_refused() {
+    let error = lamp(quote! {
+        impl Lamp {
+            #[handles_fact(Cut)]
+            fn cut(&self, fact: Cut, ctx: &Context) -> Result<Dark, Infallible> { todo!() }
+        }
+    });
+    assert!(
+        error.contains("a fact handler returns no `Result`"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_fact_handler_returning_an_emit_is_refused() {
+    let error = lamp(quote! {
+        impl Lamp {
+            #[on_refused(On)]
+            fn on_refused(&self, refused: CommandRefused<On>, ctx: &Context) -> Emit<Self> { todo!() }
+        }
+    });
+    assert!(error.contains("not an `Emit`"), "{error}");
+}
+
+#[test]
+fn starts_on_an_aggregate_is_refused() {
+    let error = lamp(quote! {
+        impl Lamp {
+            #[handles_cmd(On, starts)]
+            fn on(&self, cmd: On, ctx: &Context) -> Result<Lit, Infallible> { todo!() }
+        }
+    });
+    assert!(error.contains("`starts` is a process manager's"), "{error}");
+}
+
+#[test]
+fn starts_on_an_applier_is_refused() {
+    let error = refused(
+        Kind::ProcessManager,
+        quote!(domain = "timer"),
+        quote! {
+            impl Timer {
+                #[applies(Rang, starts)]
+                fn rang(&mut self, event: Rang) {}
+            }
+        },
+    );
+    assert!(
+        error.contains("`starts` marks a process manager's command or fact handler only"),
+        "{error}"
+    );
+}
+
+#[test]
+fn refuses_on_a_fact_handler_is_refused() {
+    let error = lamp(quote! {
+        impl Lamp {
+            #[handles_fact(Cut, refuses(Burnt))]
+            fn cut(&self, fact: Cut, ctx: &Context) -> Record<Self> { todo!() }
+        }
+    });
+    assert!(error.contains("a fact is never refused"), "{error}");
+}
+
+#[test]
+fn a_process_manager_with_only_refusal_handlers_still_skips_for_no_instance() {
+    let expanded = domain(
+        quote!(domain = "timer"),
+        quote! {
+            impl Timer {
+                #[on_refused(On)]
+                fn on_refused(&self, refused: CommandRefused<On>, ctx: &Context) -> Record<Self> { todo!() }
+            }
+        },
+        Kind::ProcessManager,
+    )
+    .expect("expands")
+    .to_string();
+    assert!(expanded.contains("__ingested_instance"), "{expanded}");
+}
+
+#[test]
+fn a_flow_argument_that_is_not_key_value_is_refused() {
+    let error = flow(
+        quote!(name = "s", source = A, target = B, translate(On)),
+        quote!(impl S {}),
+        Flow::Saga,
+    )
+    .expect_err("refused")
+    .to_string();
+    assert!(
+        error.contains("translate mode is its `#[on_refused(Cmd)]`"),
+        "{error}"
+    );
+}
+
+#[test]
+fn an_unknown_flow_argument_names_the_usage() {
+    let saga = flow(
+        quote!(name = "s", source = A, sink = B),
+        quote!(impl S {}),
+        Flow::Saga,
+    )
+    .expect_err("refused")
+    .to_string();
+    assert!(saga.contains("#[saga] takes `name"), "{saga}");
+    let projector = flow(
+        quote!(name = "p", target = A),
+        quote!(impl P {}),
+        Flow::Projector,
+    )
+    .expect_err("refused")
+    .to_string();
+    assert!(
+        projector.contains("#[projector] takes `name"),
+        "{projector}"
+    );
+}
