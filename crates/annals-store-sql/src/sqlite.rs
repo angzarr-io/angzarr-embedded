@@ -603,12 +603,22 @@ impl SqliteRead<'_> {
     }
 }
 
+/// The store keeps no edition registry, so it has created no edition: a
+/// read unit reads and lists main alone, and refuses a stream in any
+/// edition (`StoreError::UnknownEdition`).
 impl AsyncReadUnit for SqliteRead<'_> {
     async fn covers(&mut self, domain: &str) -> Result<Vec<Cover>, StoreError> {
-        covers(self.conn()?, domain).await
+        let mut covers = covers(self.conn()?, domain).await?;
+        covers.retain(|c| c.edition.is_none());
+        Ok(covers)
     }
 
     async fn read_from(&mut self, stream: &Cover, from: u64) -> Result<Option<Slice>, StoreError> {
+        if stream.edition.is_some() {
+            return Err(StoreError::UnknownEdition {
+                stream: stream.clone(),
+            });
+        }
         read_from(self.conn()?, stream, from, || {}).await
     }
 }

@@ -47,6 +47,10 @@
 //! so a write or a purge landing in between cannot mix two moments in what
 //! it shows. It writes nothing and takes no write lock. Each read on the
 //! store itself is one moment already; only a run of them needs the unit.
+//! A read unit is also where a query or subscription naming an edition
+//! the store never created is refused ([`StoreError::UnknownEdition`],
+//! angzarr's EA-2): such a stream is neither read nor listed. A store with
+//! no edition registry has created none, so its read units read main alone.
 //!
 //! **Watching** is opt-in as well: a store that can say cheaply whether
 //! anything was committed implements [`Watch`] (or [`AsyncWatch`]), whose
@@ -286,7 +290,8 @@ pub trait AsyncPurge: AsyncEventStore {
 }
 
 /// A read-only unit of work: reads that all see one moment, the store as it
-/// stood when the unit began. Nothing written after, through this store or
+/// stood when the unit began, refusing a stream in an edition the store
+/// never created ([`StoreError::UnknownEdition`]) and listing none. Nothing written after, through this store or
 /// any other handle on its database, is seen through it, and a stream
 /// purged after it began is read whole. It writes nothing and takes no
 /// write lock, so it waits on no writer and no writer waits on it. It ends
@@ -695,15 +700,25 @@ impl ReadStore for InMemoryStore {
 }
 
 /// A read-only unit of work over an [`InMemoryStore`]: it borrows the store,
-/// so the store cannot change under it.
+/// so the store cannot change under it. The store keeps no edition
+/// registry, so it has created no edition: the unit reads and lists main
+/// alone, and refuses a stream in any edition
+/// ([`StoreError::UnknownEdition`]).
 pub struct InMemoryRead<'s>(&'s InMemoryStore);
 
 impl ReadUnit for InMemoryRead<'_> {
     fn covers(&mut self, domain: &str) -> Result<Vec<Cover>, StoreError> {
-        Ok(self.0.covers_of(domain))
+        let mut covers = self.0.covers_of(domain);
+        covers.retain(|c| c.edition.is_none());
+        Ok(covers)
     }
 
     fn read_from(&mut self, stream: &Cover, from: u64) -> Result<Option<Slice>, StoreError> {
+        if stream.edition.is_some() {
+            return Err(StoreError::UnknownEdition {
+                stream: stream.clone(),
+            });
+        }
         Ok(self.0.slice_from(stream, from))
     }
 }

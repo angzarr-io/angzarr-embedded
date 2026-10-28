@@ -16,7 +16,8 @@
 //! held to the contract's purge section too. Every backend opens read-only
 //! units of work (`annals::next::AsyncReadStore`), one read transaction
 //! each, held to the contract's read section, and answers each read outside
-//! a unit as one moment. Every backend answers a change token
+//! a unit as one moment; with no edition registry yet, a read unit reads
+//! main alone and refuses a stream in any edition. Every backend answers a change token
 //! (`annals::next::AsyncWatch`), held to the contract's watch section.
 //! Every backend keeps the store's commit position
 //! (`annals::next::AsyncStore::commit_position`), raised inside each

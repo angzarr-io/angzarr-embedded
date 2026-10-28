@@ -745,6 +745,13 @@ checks take a reader and a writer on one store and write through the
 writer while the reader's unit is open, after it began and between its
 reads, so a unit that reads live fails them.
 
+A read unit is also the one place a query or subscription naming an
+edition the store never created is refused (angzarr's EA-2):
+`StoreError::UnknownEdition`, NOT_FOUND, and such a stream is not listed.
+No store keeps an edition registry yet, so none has created an edition, and
+every read unit reads main alone. The contract checks it once, in the read
+section.
+
 ### Watching for commits
 
 ```rust
@@ -950,9 +957,10 @@ is not. This list matches angzarr's `docs/design/audit-meta/annals-divergence.md
 7. **Configuration lives on the domain** (`CONFLICT_RESOLUTION`,
    `CONFLICT_RESOLUTION_BY_COMMAND`), checked at registration; there is no
    configuration that forbids a `Handling` override.
-8. **No edition registry or branching.** Any non-empty edition name is
-   accepted without `CreateEdition`; its streams start empty, with no
-   read-through to main.
+8. **No edition registry or branching.** A store's own appends accept any
+   non-empty edition name without `CreateEdition`, and its streams start
+   empty, with no read-through to main; a read unit refuses every edition,
+   none having been created.
 9. **`recorded_at` is sampled by the application** once per chain, then
    raised per stream; same guarantee as angzarr's stamp at persist.
 10. **A stream can be purged** where its store opts in
@@ -1175,7 +1183,9 @@ keeps the trigger as `causation_id`.
   deletes a snapshot with no events; a purged stream starts again from
   nothing, a stale append refused; a purge in a unit of work lands at
   commit or not at all; a unit purges its own appends and appends after;
-  a purge never lowers the commit position.
+  a purge never lowers the commit position. The opt-in read section: a
+  read unit sees the store as it began, keeps a stream purged after, and
+  refuses an edition never created.
   **Every check fails a store broken in the way it exists to catch** (an
   in-memory store with one bug: a gap accepted, an edition ignored, a unit
   blind to its own appends or writing through, an empty append that creates
