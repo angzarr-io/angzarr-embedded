@@ -160,9 +160,6 @@ pub enum KernelError {
 pub enum ReplayError {
     /// The page at `index` claims sequence `found`.
     OutOfSequence { index: usize, found: u64 },
-    /// Event `sequence`'s `causation.triggering_event` names an event of
-    /// its own stream at or after itself.
-    CauseNotEarlier { sequence: u64, cause: u64 },
     /// Event `sequence` was recorded before the event before it.
     RecordedBackwards { sequence: u64 },
     /// Event `sequence`'s `EventMeta` lacks `field` (`causation`,
@@ -622,10 +619,6 @@ impl fmt::Display for ReplayError {
                 f,
                 "page {index} of the log claims sequence {found}, not the one due"
             ),
-            ReplayError::CauseNotEarlier { sequence, cause } => write!(
-                f,
-                "event {sequence} names event {cause} of its own stream as its trigger, which is not earlier"
-            ),
             ReplayError::RecordedBackwards { sequence } => write!(
                 f,
                 "event {sequence} was recorded before the event before it"
@@ -649,7 +642,6 @@ impl Diagnostic for ReplayError {
     fn code(&self) -> &'static str {
         match self {
             ReplayError::OutOfSequence { .. } => "annals-next-replay-out-of-sequence",
-            ReplayError::CauseNotEarlier { .. } => "annals-next-replay-cause-not-earlier",
             ReplayError::RecordedBackwards { .. } => "annals-next-replay-recorded-backwards",
             ReplayError::IncompleteMeta { .. } => "annals-next-replay-incomplete-meta",
             ReplayError::WrongDomain { .. } => "annals-next-replay-wrong-domain",
@@ -661,9 +653,6 @@ impl Diagnostic for ReplayError {
         match self {
             ReplayError::OutOfSequence { index, found } => {
                 vec![("index", (*index).into()), ("found", (*found).into())]
-            }
-            ReplayError::CauseNotEarlier { sequence, cause } => {
-                vec![("sequence", (*sequence).into()), ("cause", (*cause).into())]
             }
             ReplayError::RecordedBackwards { sequence } => vec![("sequence", (*sequence).into())],
             ReplayError::IncompleteMeta { sequence, field } => {

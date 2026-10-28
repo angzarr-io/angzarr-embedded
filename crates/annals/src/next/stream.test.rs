@@ -1,9 +1,9 @@
-//! Replay is strict and checked: every page's sequence, metadata, trigger,
+//! Replay is strict and checked: every page's sequence, metadata,
 //! instant and rules; snapshots resume it; golden fixtures pin it; and every
 //! failure says how to recover.
 
 use crate::next::v1::event_meta::Causation;
-use crate::next::v1::{EventMeta, EventPage, EventRef, Snapshot};
+use crate::next::v1::{EventMeta, EventPage, Snapshot};
 use crate::next::{
     assert_replay_fixtures, check_replay_fixtures, pack, Committed, Failure, KernelError,
     Malformed, Recovery, ReplayError, ReplayFixture, StepError, StoreError, Stream,
@@ -56,8 +56,7 @@ fn replay_folds_each_event_with_the_rules_it_names() {
     assert_eq!(stream.len(), 3);
     assert_eq!(stream.last_recorded_at(), Some(instant(2)));
     assert_eq!(stream.events()[2].rules_version(), "v1");
-    assert_eq!(stream.events()[1].command_id(), Some(&command_id(1)));
-    assert_eq!(stream.events()[1].triggering_event(), None);
+    assert_eq!(stream.events()[1].command_id(), &command_id(1));
     assert_eq!(stream.events()[1].correlation_id(), &command_id(1));
     assert_eq!(stream.events()[1].fact(), None);
     assert_eq!(stream.events()[1].meta(), meta(1, "v2"));
@@ -140,39 +139,6 @@ fn replay_refuses_a_log_that_does_not_hold_together() {
             expected: "account"
         }))
     );
-}
-
-#[test]
-fn a_process_events_trigger_in_its_own_stream_must_be_earlier() {
-    let trigger = |sequence| {
-        Some(Causation::TriggeringEvent(EventRef {
-            stream: Some(cover("account", 1)),
-            sequence,
-        }))
-    };
-    let mut pages = log();
-    pages[2].meta.as_mut().unwrap().causation = trigger(1);
-    let stream = replay(&pages).unwrap();
-    assert_eq!(stream.events()[2].command_id(), None);
-    assert_eq!(stream.events()[2].triggering_event().unwrap().sequence, 1);
-
-    for cause in [2, 3] {
-        pages[2].meta.as_mut().unwrap().causation = trigger(cause);
-        assert_eq!(
-            replay(&pages).err(),
-            Some(KernelError::Replay(ReplayError::CauseNotEarlier {
-                sequence: 2,
-                cause
-            }))
-        );
-    }
-
-    // Another stream's event may be at any sequence.
-    pages[2].meta.as_mut().unwrap().causation = Some(Causation::TriggeringEvent(EventRef {
-        stream: Some(cover("account", 2)),
-        sequence: 7,
-    }));
-    assert!(replay(&pages).is_ok());
 }
 
 #[test]

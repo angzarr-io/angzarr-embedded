@@ -4,24 +4,20 @@ Status: **implemented** in `crates/annals/src/next/`, pinned by the tests
 beside it (`*.test.rs`). It does not yet replace the crate root's kernel:
 hatpick moves onto it first.
 
-The wire contract is angzarr's protos at angzarr-project `feat/audit-meta`
-**5850057** (the crate is pinned at 672ed76, which changes no proto and
-only adds angzarr-proto's embedded `.proto` sources for dependents' own
-protos) (pass 13: `EventMeta.causation` is the event's direct cause,
-`oneof { command_id, triggering_event }`, with no command-causation on
-events; PM process events deduplicate on their trigger; reactor re-runs
-always deduplicate. On top of pass 12: one `command_id` per command,
-deduplication on the events, no actor, `StateOptions`/`StateDescriptor`,
-commands may be upcast),
+The wire contract is angzarr's protos on angzarr-project's spec line
+(`spec/20261019-draft`, the crate pinned at **1ea3da9**): `EventMeta.causation`
+is the event's direct cause, with one arm, `command_id` (a process manager
+is a domain whose inputs are commands and facts, so no event is caused by
+another event); one `command_id` per command, deduplication on the events,
+no actor, `StateOptions`/`StateDescriptor`, commands may be upcast;
 and the record in angzarr's `docs/design/audit-meta/` (`decision-log.md`,
 `idempotency.md`, `annals-divergence.md`) and
 `docs/guide/state-and-conflicts.md`.
 
 **Causation is the direct cause** (angzarr decisions 13.1 and 13.3). An
 event's `EventMeta.causation` names what produced it: its command
-(`command_id`, every command's event, a policy's included), or, for a
-process manager's own process event, the event it reacted to
-(`triggering_event`). A policy's command still names its trigger in
+(`command_id`, every command's event, a policy's and a fact's included).
+A policy's command still names its trigger in
 `CommandPage.causation_id`, the command's own causation (transport and
 trace metadata, and the input its derived id hashes), but that is never
 copied onto its events: the trigger-to-command edge belongs in tracing and
@@ -42,7 +38,7 @@ places:
 | ID | Finding | Resolution here |
 |---|---|---|
 | A1 | `Envelope` holds only seq, cause and event: no when, no why. Consumers put metadata in the payload (hatpick's `Stamp`, annals-sim's `Ticked`). | Every event carries angzarr's `EventMeta`, stamped by the kernel. Business code emits payloads only. [Metadata](#metadata) |
-| A2 | `cause` is only within a stream; there is no correlation id. | Every event names its direct cause (its command, or a process event's trigger, an `EventRef` into any stream); a reaction command names its trigger as its own `causation_id`; correlation is always set and kept through every reaction. [Identification](#step-2-identification), [Metadata](#metadata) |
+| A2 | `cause` is only within a stream; there is no correlation id. | Every event names its direct cause, its command; a reaction command names its trigger as its own `causation_id`; correlation is always set and kept through every reaction. [Identification](#step-2-identification), [Metadata](#metadata) |
 | A3 | `Header.rules` is a free string replay never checks. | The rules version is registered, stamped per event, resolved by a `Rulebook` at replay, and invalidates snapshots. [Rules versions](#rules-versions) |
 | A5 | `Header.schema` is unused; there is no upcasting. | A payload's type URL is its version. Old types are upcast by type URL, strictly, events at read and (discouraged) commands before decode. [Decode](#step-5-decode-then-decide-or-ingest) |
 | A6 | Events emitted before a rejection stay in the `Stream`. | Decide is pure and stages its events; a rejection leaves nothing. |
@@ -454,7 +450,7 @@ Every event carries angzarr's `EventMeta`, the same in both runtimes:
 
 | Field | annals stamps |
 |---|---|
-| `causation` | the event's direct cause, exactly one of: `command_id`, the producing command's (step 2: a client's, a fact's or a policy's), its deduplication key; or `triggering_event`, for a process event a process manager wrote in reaction to another event with no command between (see [Process managers](#process-managers)) |
+| `causation` | the event's direct cause, `command_id`: the producing command's (step 2: a client's, a fact's or a policy's), its deduplication key |
 | `fact` | the fact's `FactOrigin`, for a fact; unset otherwise |
 | `correlation_id` | the producing command's; never unset |
 | `recorded_at` | `max(Sampled::now, the stream's last recorded_at)`: non-decreasing per stream, one instant per chain, so as-of-time reads are prefixes |
@@ -477,38 +473,18 @@ instant) belongs in the payload, where `apply` sees it; decide copies
 A decoded event is an `Envelope<E>`: a checked `EventPage`, its metadata's
 required fields outside their `Option`s (`causation()`, the generated
 `v1::event_meta::Causation`; `correlation_id()`, `recorded_at()`,
-`rules_version()`; `command_id()` and `triggering_event()` are the two arms
-of `causation()`), its payload decoded. A stored page
+`rules_version()`; `command_id()`, the one arm of `causation()`), its
+payload decoded. A stored page
 whose meta lacks one is `ReplayError::IncompleteMeta`.
 
 ## Process managers
 
-annals has no process manager today: its reactions are stateless policies
-whose only output is commands. The metadata is ready for one, and this is
-how one would fit the chain:
-
-- A process manager is a domain with its own stream (per correlation, or a
-  root it derives), reacting to source events. For each trigger it **writes
-  its own events** (its state: what it has seen and decided) and may
-  **issue commands**.
-- Its own events are produced by no command: they carry
-  `causation.triggering_event` = the trigger's `EventRef` and the
-  **trigger's correlation**, never a `command_id`. They are deduplicated
-  on the trigger within the process manager's stream
-  (`EventStore::find_triggered`, over an index on (stream, triggering
-  event)), so a redelivered trigger writes nothing twice.
-- Its commands are reaction commands like a policy's: checked through the
-  reaction entry, identified from the trigger (`reaction_command_id` with
-  the process manager's name), with the command's `causation_id` = the
-  trigger; their events name the command.
-- In the chain it is one more route kind: staged and committed with
-  everything else, its rejection-free event write followed by its commands
-  taking steps 3 to 5 in their targets, depth first, under the same depth
-  limit.
-
-Nothing of this is implemented beyond `Envelope`'s `causation()`
-accessors and the defaulted `find_triggered` (which finds nothing: no
-process manager writes yet).
+A process manager is a domain (angzarr decision 14.31). Its inputs are
+commands, which sagas send it, and facts (timeouts, webhooks); it never
+subscribes to another domain's events. So annals needs nothing of its own
+for one: its commands and facts take the five steps like any domain's, its
+events name the command or the fact's derived id as their cause, and its
+deduplication is `find_command`'s, by command id and fact id.
 
 ## Rules versions
 
@@ -612,7 +588,6 @@ pub trait EventStore {
     fn read_from(&mut self, stream: &Cover, from: u64) -> Result<Option<Slice>, StoreError>;
     fn read(&mut self, stream: &Cover) -> Result<Option<Slice>, StoreError>;      // from 0
     fn find_command(&mut self, stream: &Cover, command_id: &Uuid) -> Result<Vec<EventPage>, StoreError>;
-    fn find_triggered(&mut self, stream: &Cover, trigger: &EventRef) -> Result<Vec<EventPage>, StoreError>; // PMs; none by default
     fn covers(&mut self, domain: &str) -> Result<Vec<Cover>, StoreError>;   // a domain's streams: main first, then by edition, each by root
     fn read_snapshot(&mut self, stream: &Cover) -> Result<Option<Snapshot>, StoreError>;  // none by default
     fn write_snapshot(&mut self, stream: &Cover, snapshot: &Snapshot) -> Result<(), StoreError>;
@@ -667,15 +642,13 @@ payload; upcasting is the kernel's, on every read. The Postgres shape:
 | `sequence` | `EventPage.sequence` (`bigint`; u64 in range) |
 | `type_url` | the payload's type URL as written, before any upcast |
 | `page` | the `EventPage` bytes as written |
-| `command_id` | `EventMeta.causation.command_id`, `uuid`; NULL for a process manager's process event |
-| `trigger_domain`, `trigger_edition`, `trigger_root`, `trigger_sequence` | `EventMeta.causation.triggering_event`; NULL unless a process manager wrote it |
+| `command_id` | `EventMeta.causation.command_id`, `uuid` |
 | `correlation_id` | `EventMeta`'s, `uuid` |
 | `external_id` | `EventMeta.fact.external_id`; NULL unless a fact produced it |
 | `recorded_at`, `rules_version` | the rest of `EventMeta` |
 
 Unique on (`domain`, `edition`, `root`, `sequence`); a **non-unique index on
-(`domain`, `edition`, `root`, `command_id`)** for `find_command`, and one
-on the stream and the triggering event for `find_triggered`. The columns
+(`domain`, `edition`, `root`, `command_id`)** for `find_command`. The columns
 and the page's `EventMeta` hold the same metadata; the page is what an
 angzarr reader is served. A store answers the stream, `None` (no such
 stream), a refusal it is sure of (`Conflict`, `Discontinuous`) or a failure
@@ -883,13 +856,13 @@ type itself:
 | Concept | Type |
 |---|---|
 | stream identity | `v1::Cover { domain, root: Uuid, optional edition }`; main is the unset edition |
-| an event's identity; a reaction command's causation; a process event's trigger | `v1::EventRef { stream: Cover, sequence }` |
+| an event's identity; a reaction command's causation | `v1::EventRef { stream: Cover, sequence }` |
 | a command or a fact | `v1::CommandBook { cover, page: CommandPage { body: Command \| Fact, command_id, correlation_id, causation_id, fact_origin }, handling }` |
 | how to handle it | `v1::Handling { optional expected_sequence, conflict_resolution }` |
 | a conflict resolution | `v1::ConflictResolution` |
 | a state's capabilities | `v1::StateDescriptor { type_url, StateOptions { conflict_resolutions } }` |
 | an event, stored | `v1::EventPage { sequence, meta: EventMeta, payload: Any }` |
-| an event's metadata | `v1::EventMeta { oneof causation { command_id, triggering_event }, fact, correlation_id, recorded_at, rules_version }` |
+| an event's metadata | `v1::EventMeta { oneof causation { command_id }, fact, correlation_id, recorded_at, rules_version }` |
 | an event's direct cause | `v1::event_meta::Causation::{CommandId(Uuid), TriggeringEvent(EventRef)}` (`Envelope::causation()`) |
 | every id | `v1::Uuid` (16 bytes); text through `ids` at the boundary |
 | derived ids | `ids::{compute_root, reaction_command_id, fact_command_id, fact_correlation}` |
@@ -1101,7 +1074,6 @@ to the application's `TriggerLog`, beside the dead-letter log.
 | Snapshot frequency and retention configuration | `write_snapshot` is the application's; the load and discard rules are specified. | Replay latency that matters. |
 | Persisted projections | Replay on read. | Read latency; `Tracked` is ready. |
 | Edition registry, branching, read-through (EA-1 to EA-3) | The commit position an edition's create records is in the contract; the `Editions` port waits on the decision about the shared ports' shape (sync, async, or both). | That decision. |
-| Process managers (stateful reactors writing their own events) | hatpick needs none; the metadata (`causation.triggering_event`) and the store lookup (`find_triggered`) are ready. | A workflow that must remember across triggers. |
 | Configuration that forbids a `Handling` override | No hatpick command needs it. | A command type whose resolution a client must not choose. |
 | A `!Send` async store port | No browser store exists. | A wasm adapter over IndexedDB. |
 | Reading angzarr `EventBook`s into annals | annals writes books; nothing feeds it angzarr's. | An angzarr runtime delivering to annals. |
@@ -1214,7 +1186,7 @@ keeps the trigger as `causation_id`.
   handle's), and passes the same store with none.
 - **replay.rs**: replay folds each event with the rules it names, and
   refuses a log that does not hold together (sequence, metadata, instant,
-  rules, domain, a process event's trigger); a stream resumes from a
+  rules, domain); a stream resumes from a
   snapshot and dispatches only after it; a decision commits only to its
   own stream and head; golden fixtures replay through the upcaster and
   name every failure; every failure says how to recover; errors render

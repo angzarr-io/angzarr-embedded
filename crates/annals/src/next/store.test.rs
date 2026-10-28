@@ -99,13 +99,8 @@ impl EventStore for Minimal {
 }
 
 #[test]
-fn a_store_keeps_no_snapshots_and_finds_no_process_events_by_default() {
-    use crate::next::v1::EventRef;
+fn a_store_keeps_no_snapshots_by_default() {
     let stream = cover("account", 1);
-    let trigger = EventRef {
-        stream: Some(stream.clone()),
-        sequence: 0,
-    };
     let mut minimal = Minimal(InMemoryStore::new());
     minimal.append(&stream, 0, &[page(0, 1)]).unwrap();
     assert_eq!(minimal.read(&stream).unwrap().unwrap().pages, [page(0, 1)]);
@@ -113,10 +108,6 @@ fn a_store_keeps_no_snapshots_and_finds_no_process_events_by_default() {
         .write_snapshot(&stream, &Snapshot::default())
         .unwrap();
     assert_eq!(minimal.read_snapshot(&stream), Ok(None));
-    assert_eq!(minimal.find_triggered(&stream, &trigger), Ok(vec![]));
-    let mut store = InMemoryStore::new();
-    store.append(&stream, 0, &[page(0, 1)]).unwrap();
-    assert_eq!(store.find_triggered(&stream, &trigger), Ok(vec![]));
 
     let mut async_store = Ready(InMemoryStore::new());
     ready(async_store.write_snapshot(&stream, &Snapshot::default())).unwrap();

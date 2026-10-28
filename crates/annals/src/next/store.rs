@@ -16,16 +16,14 @@
 //! | `sequence` | `EventPage.sequence` (64-bit) |
 //! | `type_url` | the payload's type URL as written, before any upcast |
 //! | `page` | the `EventPage` bytes as written |
-//! | `command_id` | `EventMeta.causation.command_id`, Postgres `uuid`; NULL for a process manager's process event |
-//! | `trigger_domain`, `trigger_edition`, `trigger_root`, `trigger_sequence` | `EventMeta.causation.triggering_event`, NULL unless a process manager wrote it |
+//! | `command_id` | `EventMeta.causation.command_id`, Postgres `uuid` |
 //! | `correlation_id` | `EventMeta`'s, Postgres `uuid` |
 //! | `external_id` | `EventMeta.fact.external_id`, NULL unless a fact produced it |
 //! | `recorded_at`, `rules_version` | the rest of `EventMeta` |
 //!
 //! with a unique key on (`domain`, `edition`, `root`, `sequence`) and a
 //! **non-unique index on (`domain`, `edition`, `root`, `command_id`)**: the
-//! deduplication lookup ([`EventStore::find_command`]); a process manager's
-//! stream adds one on the trigger columns ([`EventStore::find_triggered`]). Not unique, because
+//! deduplication lookup ([`EventStore::find_command`]). Not unique, because
 //! one command may produce several events. There is no commands table and
 //! no claim: "already applied?" is "does the stream hold events with this
 //! command id?", atomic with the append because the id is written with the
@@ -82,7 +80,7 @@ use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 
 use angzarr_proto::v1::event_meta::Causation;
-use angzarr_proto::v1::{Cover, EventPage, EventRef, Snapshot, Uuid};
+use angzarr_proto::v1::{Cover, EventPage, Snapshot, Uuid};
 use prost_types::Timestamp;
 
 use super::error::StoreError;
@@ -132,19 +130,6 @@ pub trait EventStore {
         stream: &Cover,
         command_id: &Uuid,
     ) -> Result<Vec<EventPage>, StoreError>;
-
-    /// The pages of `stream` that a process manager wrote in reaction to
-    /// `trigger` (`EventMeta.causation.triggering_event`), in sequence
-    /// order: a process manager's deduplication lookup within its own
-    /// stream, over an index on (stream, triggering event). annals has no
-    /// process manager yet, so nothing is found by default.
-    fn find_triggered(
-        &mut self,
-        _stream: &Cover,
-        _trigger: &EventRef,
-    ) -> Result<Vec<EventPage>, StoreError> {
-        Ok(Vec::new())
-    }
 
     /// Every stream of `domain` holding at least one page, in every edition:
     /// the main timeline's first, then each edition's in name order, each by

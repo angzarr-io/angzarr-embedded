@@ -252,10 +252,6 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn annals_diagnostic::Diagnostic>
     ];
     let replay = [
         ReplayError::OutOfSequence { index: 1, found: 2 },
-        ReplayError::CauseNotEarlier {
-            sequence: 1,
-            cause: 1,
-        },
         ReplayError::RecordedBackwards { sequence: 4 },
         ReplayError::IncompleteMeta {
             sequence: 4,

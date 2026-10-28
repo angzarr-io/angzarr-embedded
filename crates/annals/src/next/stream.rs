@@ -2,9 +2,7 @@
 //! it.
 
 use angzarr_proto::v1::event_meta::Causation;
-use angzarr_proto::v1::{
-    CommandBook, Cover, EventMeta, EventPage, EventRef, FactOrigin, Snapshot, Uuid,
-};
+use angzarr_proto::v1::{CommandBook, Cover, EventMeta, EventPage, FactOrigin, Snapshot, Uuid};
 use annals_diagnostic::Report;
 use prost::{Message, Name};
 use prost_types::Timestamp;
@@ -43,8 +41,7 @@ impl<E> Envelope<E> {
     }
 
     /// Its direct cause (angzarr's `EventMeta.causation`): the producing
-    /// command's id, or (for a process manager's own process event) the
-    /// event it reacted to. Exactly one; never absent on a recorded event.
+    /// command's id. Never absent on a recorded event.
     ///
     /// For an event of a policy's command this is the command, never the
     /// policy's trigger: events record their direct cause only (angzarr
@@ -55,26 +52,14 @@ impl<E> Envelope<E> {
         &self.causation
     }
 
-    /// The producing command's id, what deduplication finds; `None` for a
-    /// process manager's process event.
-    pub fn command_id(&self) -> Option<&Uuid> {
-        match &self.causation {
-            Causation::CommandId(id) => Some(id),
-            Causation::TriggeringEvent(_) => None,
-        }
+    /// The producing command's id, what deduplication finds: a command's,
+    /// a fact's derived id, or a reaction's.
+    pub fn command_id(&self) -> &Uuid {
+        let Causation::CommandId(id) = &self.causation;
+        id
     }
 
-    /// The event a process manager reacted to in writing this one, what its
-    /// deduplication finds within its stream; `None` for a command's event.
-    pub fn triggering_event(&self) -> Option<&EventRef> {
-        match &self.causation {
-            Causation::TriggeringEvent(trigger) => Some(trigger),
-            Causation::CommandId(_) => None,
-        }
-    }
-
-    /// Never absent on a recorded event: for a process event, its
-    /// trigger's.
+    /// Never absent on a recorded event.
     pub fn correlation_id(&self) -> &Uuid {
         &self.correlation_id
     }
@@ -163,7 +148,6 @@ impl<E> Envelope<E> {
         let incomplete = |field| ReplayError::IncompleteMeta { sequence, field };
         let causation = match meta.causation {
             Some(Causation::CommandId(id)) if id.is_well_formed() => Causation::CommandId(id),
-            Some(Causation::TriggeringEvent(trigger)) => Causation::TriggeringEvent(trigger),
             _ => return Err(incomplete("causation")),
         };
         let correlation_id = meta
@@ -308,14 +292,6 @@ impl<D: Domain> Stream<D> {
             }
             let envelope = Envelope::decode(&self.cover, page, upcaster)?;
             let sequence = envelope.sequence;
-            if let Some(cause) = envelope.triggering_event() {
-                if cause.stream.as_ref() == Some(&self.cover) && cause.sequence >= sequence {
-                    return Err(KernelError::Replay(ReplayError::CauseNotEarlier {
-                        sequence,
-                        cause: cause.sequence,
-                    }));
-                }
-            }
             if let Some(last) = self.last_recorded_at {
                 let at = envelope.recorded_at;
                 if (at.seconds, at.nanos) < (last.seconds, last.nanos) {
@@ -595,7 +571,7 @@ impl<D: Domain> Stream<D> {
     /// Where the held events of command `command_id` are: one contiguous
     /// run, or empty.
     fn command_run(&self, command_id: &Uuid) -> std::ops::Range<usize> {
-        let produced = |e: &Envelope<D::Event>| e.command_id() == Some(command_id);
+        let produced = |e: &Envelope<D::Event>| e.command_id() == command_id;
         let Some(start) = self.events.iter().position(produced) else {
             return 0..0;
         };
