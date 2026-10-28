@@ -62,10 +62,13 @@ fn events_of<D: Dialect>(cover: &Cover) -> SelectStatement {
         .to_owned()
 }
 
-/// The stream's length: its pages run from 0 without a gap.
-pub(crate) fn stream_length<D: Dialect>(cover: &Cover) -> SelectStatement {
+/// Row `(MAX(sequence))`: the stream's last sequence, NULL for no stream.
+/// Its pages run from 0 without a gap, so its length is one past it. A
+/// seek to the end of the stream in the primary key, not a count of its
+/// rows.
+pub(crate) fn stream_last<D: Dialect>(cover: &Cover) -> SelectStatement {
     events_of::<D>(cover)
-        .expr(Func::count(Expr::col(Events::Sequence)))
+        .expr(Func::max(Expr::col(Events::Sequence)))
         .to_owned()
 }
 

@@ -9,6 +9,7 @@
 //! position is a one-row table raised inside each append's transaction, and
 //! every event row is stamped with the position it landed at.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
@@ -22,6 +23,7 @@ use annals::next::{
     AsyncEventStore, AsyncPurge, AsyncReadStore, AsyncReadUnit, AsyncStore, AsyncUnitOfWork,
     AsyncWatch, ChangeToken, Slice, StoreError,
 };
+use prost::Message;
 use sea_query::{SelectStatement, SqliteQueryBuilder};
 use sea_query_binder::SqlxBinder;
 use sqlx::migrate::{MigrateError, Migration, Migrator};
@@ -449,7 +451,7 @@ impl AsyncEventStore for SqliteStore {
     ) -> Result<u64, StoreError> {
         // The length check and the inserts are one transaction.
         let mut tx = self.conn.begin().await.map_err(unavailable)?;
-        let length = append(&mut tx, stream, expected, pages).await?;
+        let length = append(&mut tx, stream, expected, None, pages).await?;
         tx.commit().await.map_err(unavailable)?;
         Ok(length)
     }
@@ -522,6 +524,7 @@ impl AsyncStore for SqliteStore {
                 .begin_with("BEGIN IMMEDIATE")
                 .await
                 .map_err(unavailable),
+            heads: HashMap::new(),
         }
     }
 
@@ -540,6 +543,11 @@ impl AsyncStore for SqliteStore {
 /// lists none.
 pub struct SqliteUnit<'s> {
     tx: Result<Transaction<'s, Sqlite>, StoreError>,
+    /// Each stream's next sequence, by its encoded cover, as the unit last
+    /// read or appended it. The unit holds the write lock, so no other
+    /// connection can move it: an append checks against it rather than
+    /// reading the length again. A purge forgets it.
+    heads: HashMap<Vec<u8>, u64>,
 }
 
 impl SqliteUnit<'_> {
@@ -559,11 +567,22 @@ impl AsyncEventStore for SqliteUnit<'_> {
         expected: u64,
         pages: &[EventPage],
     ) -> Result<u64, StoreError> {
-        append(self.conn()?, main_only(stream)?, expected, pages).await
+        let stream = main_only(stream)?;
+        let key = stream.encode_to_vec();
+        // Forgotten until the append succeeds: a failed one may have
+        // inserted part of its pages.
+        let head = self.heads.remove(&key);
+        let length = append(self.conn()?, stream, expected, head, pages).await?;
+        self.heads.insert(key, length);
+        Ok(length)
     }
 
     async fn read_from(&mut self, stream: &Cover, from: u64) -> Result<Option<Slice>, StoreError> {
-        read_from(self.conn()?, main_only(stream)?, from, || {}).await
+        let stream = main_only(stream)?;
+        let slice = read_from(self.conn()?, stream, from, || {}).await?;
+        let head = slice.as_ref().map_or(0, |s| s.next_sequence);
+        self.heads.insert(stream.encode_to_vec(), head);
+        Ok(slice)
     }
 
     async fn find_command(
@@ -609,6 +628,7 @@ impl AsyncPurge for SqliteUnit<'_> {
     /// Under a savepoint, so a purge that fails part-way leaves the unit as
     /// it was, and a commit after it deletes nothing.
     async fn purge(&mut self, stream: &Cover) -> Result<u64, StoreError> {
+        self.heads.remove(&stream.encode_to_vec());
         let mut savepoint = self.conn()?.begin().await.map_err(unavailable)?;
         let deleted = purge(&mut savepoint, stream).await?;
         savepoint.commit().await.map_err(unavailable)?;
@@ -741,22 +761,30 @@ async fn execute(
     Ok(done.rows_affected())
 }
 
+/// The stream's length: one past its last sequence, 0 for no stream.
 async fn length(conn: &mut SqliteConnection, stream: &Cover) -> Result<u64, StoreError> {
-    let rows = fetch_all(conn, statements::stream_length::<SqliteDialect>(stream)).await?;
-    let count: i64 = match rows.first() {
+    let rows = fetch_all(conn, statements::stream_last::<SqliteDialect>(stream)).await?;
+    let last: Option<i64> = match rows.first() {
         Some(row) => row.try_get(0).map_err(unavailable)?,
-        None => 0,
+        None => None,
     };
-    Ok(count.unsigned_abs())
+    Ok(last.map_or(0, |last| last.unsigned_abs() + 1))
 }
 
+/// Append `pages` to `stream`, checked against its length: `head` when the
+/// caller knows it (a unit of work that read or appended the stream under
+/// its write lock), else read.
 async fn append(
     conn: &mut SqliteConnection,
     stream: &Cover,
     expected: u64,
+    head: Option<u64>,
     pages: &[EventPage],
 ) -> Result<u64, StoreError> {
-    let actual = length(conn, stream).await?;
+    let actual = match head {
+        Some(head) => head,
+        None => length(conn, stream).await?,
+    };
     if expected != actual {
         return Err(StoreError::Conflict {
             stream: stream.clone(),
