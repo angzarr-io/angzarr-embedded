@@ -31,8 +31,9 @@
 //! tests do), so it can remove whatever the pair made once the check is
 //! done: two handles on one store are two connections to one database,
 //! which a test makes on a file. The read section is also where a read
-//! unit's refusal of an edition never created is checked, once
-//! ([`a_read_unit_refuses_an_edition_never_created`]).
+//! unit's refusal of an edition never created is checked
+//! ([`a_read_unit_refuses_an_edition_never_created`]); a unit of work's is
+//! in the base section ([`a_unit_of_work_refuses_an_edition_never_created`]).
 //!
 //! A store that answers a change token ([`AsyncWatch`](super::AsyncWatch),
 //! or [`Watch`](super::Watch) through `Ready`) also runs the watch checks,
@@ -819,7 +820,8 @@ pub async fn the_commit_position_counts_every_handles_commits<R, W>(
 
 /// A read unit refuses a stream in an edition its store never created
 /// (angzarr's EA-2: a query or subscription naming one is refused): the
-/// store's read units are where that is enforced, once. Such a stream is
+/// store's units are where that is enforced (a unit of work's refusal is
+/// [`a_unit_of_work_refuses_an_edition_never_created`]). Such a stream is
 /// neither read nor listed. A store with no edition registry has created
 /// none, so its read units refuse every edition; main is always read.
 pub async fn a_read_unit_refuses_an_edition_never_created<R, W>((mut reader, mut writer): (R, W))

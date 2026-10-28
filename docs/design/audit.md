@@ -745,12 +745,15 @@ checks take a reader and a writer on one store and write through the
 writer while the reader's unit is open, after it began and between its
 reads, so a unit that reads live fails them.
 
-A read unit is also the one place a query or subscription naming an
-edition the store never created is refused (angzarr's EA-2):
+A store's units, read-only and of work, are where a stream in an edition
+the store never created is refused (angzarr's EA-2):
 `StoreError::UnknownEdition`, NOT_FOUND, and such a stream is not listed.
-No store keeps an edition registry yet, so none has created an edition, and
-every read unit reads main alone. The contract checks it once, in the read
-section.
+No store keeps an edition registry yet, so none has created an edition:
+every read unit reads main alone, and every unit of work reads, appends and
+snapshots main alone, so a command naming an edition is refused rather than
+given a stream with no main history. The store's own operations, outside a
+unit, take any edition. The contract checks a read unit's refusal in the
+read section and a unit of work's in the base one.
 
 On SQLite a store's file is kept in WAL: without it a read of one moment,
 or a read-only unit of work, would wait on a writer and hold one up. So
@@ -808,9 +811,12 @@ a framework optimisation, never business data. `Stream::snapshot` makes one
 under the current rules version; the application writes it
 (`write_snapshot`) when it likes. On load the coordinator uses it only if
 `Registry::snapshot_usable` (the state's type URL and the rules version
-match the registration) and, under AGGREGATE_HANDLES and COMMUTATIVE, its
-sequence is at or below expected−1. Otherwise it is discarded and the
-stream replayed from 0. The floor for the next `recorded_at` comes from the
+match the registration), its sequence is below the head (one at or past it
+claims events the stream does not hold: a purge left it, or it was written
+ahead of them) and, under AGGREGATE_HANDLES and COMMUTATIVE, its sequence
+is at or below expected−1. Otherwise it is discarded and the stream
+replayed from 0. A snapshot written through a unit of work lands at its
+commit, like an append. The floor for the next `recorded_at` comes from the
 store (`Slice::last_recorded_at`), not the snapshot.
 
 ## Dead letters: a logger
@@ -969,8 +975,9 @@ is not. This list matches angzarr's `docs/design/audit-meta/annals-divergence.md
    configuration that forbids a `Handling` override.
 8. **No edition registry or branching.** A store's own appends accept any
    non-empty edition name without `CreateEdition`, and its streams start
-   empty, with no read-through to main; a read unit refuses every edition,
-   none having been created.
+   empty, with no read-through to main; its units, read-only and of work,
+   refuse every edition, none having been created, so no command reaches
+   one.
 9. **`recorded_at` is sampled by the application** once per chain, then
    raised per stream; same guarantee as angzarr's stamp at persist.
 10. **A stream can be purged** where its store opts in
@@ -1171,8 +1178,9 @@ keeps the trigger as `causation_id`.
 - **chain.rs**: a policy's events carry the derived reaction id as their
   causation, the trigger's correlation, and no trigger; **a rejection downstream fails
   the whole chain, the origin included, with the path**, and its retry
-  runs again; a chain deeper than its limit is refused; a chain in an
-  edition stays in it; a book for another domain is refused; each reaction
+  runs again; a chain deeper than its limit is refused; a command to an
+  edition is refused with nothing written, and a reaction's target is in
+  its source's edition; a book for another domain is refused; each reaction
   command's trigger edge goes to the `TriggerLog`; a chain sees its own
   staged events and streams; projections run after commit, a duplicate
   runs none; the async handler has the same contract and a `Send` future;
@@ -1187,7 +1195,9 @@ keeps the trigger as `causation_id`.
   the events**, per stream; a unit of work lands at commit or not at all;
   the async port has the same contract; a unit of work checks and reads
   its pending appends; an empty append creates nothing; a store keeps the
-  newest snapshot per stream; the commit position rises with every commit,
+  newest snapshot per stream; a unit of work's snapshot lands at commit or
+  not at all; a unit of work refuses an edition never created; the commit
+  position rises with every commit,
   and is the store's across handles. The opt-in purge section: **a purge deletes
   a stream's events, snapshot and command ids**, and no other stream's; it
   deletes a snapshot with no events; a purged stream starts again from
@@ -1200,7 +1210,7 @@ keeps the trigger as `causation_id`.
   in-memory store with one bug: a gap accepted, an edition ignored, a unit
   blind to its own appends or writing through, an empty append that creates
   a stream, a past-the-end read that forgets the end, the first snapshot
-  kept, a commit position that stands still, counts events, or is the
+  kept, a unit that drops its snapshot or takes any edition, a commit position that stands still, counts events, or is the
   handle's), and passes the same store with none.
 - **replay.rs**: replay folds each event with the rules it names, and
   refuses a log that does not hold together (sequence, metadata, instant,
