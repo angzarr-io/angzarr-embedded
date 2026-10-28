@@ -362,8 +362,7 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn annals_diagnostic::Diagnostic>
     }));
     samples.push(Box::new(Failure::<Gap>::Projection {
         committed: Vec::new(),
-        projector: "balances",
-        error: report(),
+        failures: vec![("balances", report())],
     }));
     samples.push(Box::new(gap));
     samples.push(Box::new(missing));

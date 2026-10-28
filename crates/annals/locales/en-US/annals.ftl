@@ -54,7 +54,10 @@ annals-next-malformed-handling-on-fact = a fact with handling: a fact is never c
 annals-next-malformed-unknown-conflict-resolution = conflict resolution { $value } is not one this build knows
 annals-next-malformed-unsupported-conflict-resolution = domain "{ $domain }"'s state does not support { $requested }
 
-annals-next-projection-failed = the command committed, then projector { $projector } failed: { $error }
+annals-next-projection-failed = the command committed, then { $failures ->
+    [one] projector { $projector } failed: { $error }
+   *[other] { $failures } projectors failed, the first { $projector }: { $error }
+}
 annals-next-downstream = a reaction down the chain failed, at depth { $depth }: { $error }
 annals-next-stale = stream { $stream } is at { $actual }, not the { $expected } expected: re-read and re-issue
 annals-next-unresolved = decide never acknowledged the window of stream { $stream } from { $expected } to { $actual }

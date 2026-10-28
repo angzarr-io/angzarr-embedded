@@ -186,8 +186,7 @@
 //! whose message is the refusal's. The handler's `Err` is then
 //! `Refuses<Self, Hold>`, a choice the macro builds of exactly those
 //! types, each `From` its type: `Err(InsufficientFunds { .. }.into())`. An
-//! object not listed does not compile. (RULED by the owner, 2026-10-28: `Refuses<Self, Cmd>`,
-//! `markup::Rejection<R>`, and refusal objects that are `Diagnostic`s.)
+//! object not listed does not compile.
 //!
 //! A command handler without `refuses` refuses with the domain's own
 //! rejection, a message only. Either way the domain's `Domain::Rejection`
@@ -226,7 +225,7 @@
 //!   manager that marks no input `starts` can never start an instance,
 //!   yet annals does not refuse it: the check is angzarr-cli's, a
 //!   generator warning, because a proc macro on stable Rust cannot warn,
-//!   and a compile error would be stricter than the spec (RULED by the owner, 2026-10-28).
+//!   and a compile error would be stricter than the spec.
 //!
 //! Deduplication is by command id and fact id, before the handler runs,
 //! as for any domain, and it has the one handler context every domain has.
@@ -247,8 +246,7 @@
 //! - [`reacts`]`(Event)`, one per event of the source it reacts to:
 //!   `fn(&self, event: &Event, ctx: &ReactionContext) -> Commands<Target>`,
 //!   pure and infallible, each command one the target decides, with the
-//!   root of its stream (for a process manager, `ctx.correlation_id()`;
-//!   RULED by the owner, 2026-10-28).
+//!   root of its stream (for a process manager, `ctx.correlation_id()`).
 //!
 //! ## Refusals
 //!
@@ -268,25 +266,23 @@
 //!   `#[on_refused]` handlers (`REFUSALS` lists them): one with no handler
 //!   is caught at run time. In annals' chain the chain COMMITS, the
 //!   refusal fact is dead-lettered and alerted, and the call returns Ok, as
-//!   on distributed angzarr (RULED by the owner, 2026-10-28). A `CommandRefused` from outside the
-//!   chain is accepted when its trigger names the receiving stream (RULED by the owner, 2026-10-28).
+//!   on distributed angzarr. A `CommandRefused` from outside the
+//!   chain is accepted when its trigger names the receiving stream.
 //! - **Translate**, for each command the saga has a callback for:
 //!   `#[on_refused(Hold)] fn(&self, refusal: &Refusal<Hold>) -> F` on the
 //!   saga's impl reads the typed object and returns `F`, a fact its source
 //!   ingests, so the source never refers to the target's types. A callback
 //!   returning anything else does not compile. One marker,
 //!   `#[on_refused(Cmd)]`, names both the source's handler and the saga's
-//!   callback (RULED by the owner, 2026-10-28).
+//!   callback.
 //!
 //! The callback's PRESENCE is the selection: nothing else marks the mode,
 //! and `TRANSLATES` lists the commands the saga has callbacks for. It is
 //! fixed at compile time, as angzarr-cli's refusal switch is angzarr's:
 //! in Rust the switch means the scaffold writes the callback stub, or does
 //! not. Nothing about it is visible at run time beyond which fact arrives.
-//! (RULED by the owner, 2026-10-28; revised 2026-10-28 from a
-//! `translate(..)` argument to the callback's presence.)
 //!
-//! The trade-off, accepted by the owner: deleting a saga's callback
+//! The trade-off: deleting a saga's callback
 //! silently reverts that command to pass-through. The source then receives
 //! `CommandRefused`, and if it has no `#[on_refused]` handler for that
 //! command, the refusal is a run-time dead letter, not a compile error.
@@ -2778,7 +2774,7 @@ pub fn reacts(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// with its ports: `registry.projector(Balances::new(port))`. The router
 /// runs it AFTER COMMIT, awaited before the call returns, so a failure
 /// reaches the caller as `Failure::Projection`, carrying what was
-/// committed (RULED by the owner, 2026-10-28, with `Recovery::Retry`); its position advances per stream on success only. Unmarked
+/// committed; its position advances per stream on success only. Unmarked
 /// events are skipped. It runs on the async command path, the only one,
 /// so nothing guards against blocking on a synchronous path.
 ///
