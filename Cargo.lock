@@ -20,7 +20,7 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 [[package]]
 name = "angzarr-proto"
 version = "0.1.0"
-source = "git+https://github.com/angzarr-io/angzarr-project?rev=1ea3da95b3f94f323ae5c760df38eb6a23ebfb38#1ea3da95b3f94f323ae5c760df38eb6a23ebfb38"
+source = "git+https://github.com/angzarr-io/angzarr-project?rev=4be6a684d46110909811c0e30cf5a135d7134e6a#4be6a684d46110909811c0e30cf5a135d7134e6a"
 dependencies = [
  "bytes",
  "prost",

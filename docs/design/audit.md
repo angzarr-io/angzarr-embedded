@@ -5,7 +5,7 @@ beside it (`*.test.rs`). It does not yet replace the crate root's kernel:
 hatpick moves onto it first.
 
 The wire contract is angzarr's protos on angzarr-project's spec line
-(`spec/20261019-draft`, the crate pinned at **1ea3da9**): `EventMeta.causation`
+(`spec/20261019-draft`, the crate pinned at **4be6a68**): `EventMeta.causation`
 is the event's direct cause, with one arm, `command_id` (a process manager
 is a domain whose inputs are commands and facts, so no event is caused by
 another event); one `command_id` per command, deduplication on the events,
