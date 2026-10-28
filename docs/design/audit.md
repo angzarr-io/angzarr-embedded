@@ -1,8 +1,7 @@
 # The audited kernel on angzarr's proto types: design
 
 Status: **implemented** in `crates/annals/src/next/`, pinned by the tests
-beside it (`*.test.rs`). It does not yet replace the crate root's kernel:
-hatpick moves onto it first.
+beside it (`*.test.rs`). It is annals' one kernel.
 
 The wire contract is angzarr's protos on angzarr-project's spec line
 (`spec/20261019-draft`, the crate pinned at **4be6a68**): `EventMeta.causation`
@@ -37,7 +36,7 @@ places:
 
 | ID | Finding | Resolution here |
 |---|---|---|
-| A1 | `Envelope` holds only seq, cause and event: no when, no why. Consumers put metadata in the payload (hatpick's `Stamp`, annals-sim's `Ticked`). | Every event carries angzarr's `EventMeta`, stamped by the kernel. Business code emits payloads only. [Metadata](#metadata) |
+| A1 | `Envelope` holds only seq, cause and event: no when, no why. Consumers put metadata in the payload (hatpick's `Stamp`). | Every event carries angzarr's `EventMeta`, stamped by the kernel. Business code emits payloads only. [Metadata](#metadata) |
 | A2 | `cause` is only within a stream; there is no correlation id. | Every event names its direct cause, its command; a reaction command names its trigger as its own `causation_id`; correlation is always set and kept through every reaction. [Identification](#step-2-identification), [Metadata](#metadata) |
 | A3 | `Header.rules` is a free string replay never checks. | The rules version is registered, stamped per event, resolved by a `Rulebook` at replay, and invalidates snapshots. [Rules versions](#rules-versions) |
 | A5 | `Header.schema` is unused; there is no upcasting. | A payload's type URL is its version. Old types are upcast by type URL, strictly, events at read and (discouraged) commands before decode. [Decode](#step-5-decode-then-decide-or-ingest) |
@@ -985,13 +984,6 @@ no actor), and reactor re-runs deduplicate in both, with no switch.
   dead-letter log, which the server routes to `tracing` at error level and
   alerts on by its prefix.
 - `Routes`, the `Registry` and the `Kernel` are built once at start-up.
-
-**annals-sim.** `schedule::advance(tx: &mut Tx<D>, ..)` and `Clock::run`
-move to `next::Tx` unchanged in shape. Its test domain's state becomes a
-prost message with a `State` impl, and gains `type Fact = Infallible`.
-
-**annals-log.** Keeps `annals.log.v1` for the root API; the kernel's wire
-form is angzarr's.
 
 ## Open questions, each with a recommendation
 

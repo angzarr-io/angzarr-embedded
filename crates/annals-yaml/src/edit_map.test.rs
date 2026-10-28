@@ -399,8 +399,8 @@ fn an_item_with_its_dash_alone_on_a_line_is_edited_below_it() {
 
 // ------------------------------------------------------------------ property
 
+use crate::rng::Rng;
 use crate::write;
-use annals_sim::Rng;
 
 const NAMES: &[&str] = &[
     "a",

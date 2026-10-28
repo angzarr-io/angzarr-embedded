@@ -391,8 +391,8 @@ mod roundtrip {
     // invisible_characters and unicode_not_nfc stay denied here.
     #![allow(clippy::non_ascii_literal)]
 
+    use crate::rng::Rng;
     use crate::{parse, write, Value};
-    use annals_sim::Rng;
 
     /// Hand-picked text: every kind of character the writer must get right.
     const CORPUS: &[&str] = &[

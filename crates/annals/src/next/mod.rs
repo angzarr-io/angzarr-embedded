@@ -1,8 +1,5 @@
-//! The audited kernel, designed in `docs/design/audit.md`, that is to
-//! replace the crate root's [`Stream`](crate::Stream), [`Tx`](crate::Tx),
-//! [`EventStore`](crate::EventStore), [`Projection`](crate::Projection) and
-//! [`policy`](crate::policy). Each module's tests are in its `*.test.rs`, over
-//! the toy domains of `toys.test.rs`.
+//! The kernel, designed in `docs/design/audit.md`. Each module's tests are
+//! in its `*.test.rs`, over the toy domains of `toys.test.rs`.
 //!
 //! annals is the in-process runtime, and it **operates on angzarr's wire
 //! types directly** (`io.angzarr.v1`, re-exported as [`v1`]): a stream is a

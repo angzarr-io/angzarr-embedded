@@ -1,11 +1,8 @@
-# cargo-mutants (https://mutants.rs): `just mutants` runs it after `just gen`.
+# cargo-mutants (https://mutants.rs): `just mutants` runs it.
 #
 # Test code is not mutated: a test is what judges a mutant, so a mutant in
-# one measures the measure. cargo-mutants skips a module under a bare
-# `#[cfg(test)]`, but not one under `#[cfg(all(test, feature = ...))]`, as
-# annals-log's codegen check is; the glob names every test file instead.
-# That covers annals-log's generated protobuf (crates/annals-log/gen) too:
-# it is reached only by `include!` from src/codegen.test.rs.
+# one measures the measure. The glob names every test file, whatever cfg
+# includes it.
 exclude_globs = ["*.test.rs"]
 
 # Otherwise excluded: only the mutants in `exclude_re` below, each equivalent
@@ -20,13 +17,7 @@ exclude_globs = ["*.test.rs"]
 # other crates' Diagnostic codes, args and Display, from outside them.
 test_workspace = true
 
-# The codegen-check feature is not set here but by `just mutants`: cargo
-# refuses `--features annals-log/codegen-check` when the unmutated baseline
-# builds only a crate that does not depend on annals-log.
 
-# Copy gitignored files into the scratch tree: the codegen check reads
-# crates/annals-log/gen, which `just gen` writes and git ignores.
-gitignore = false
 
 exclude_re = [
     # annals
@@ -40,7 +31,6 @@ exclude_re = [
     # changes nothing.
     '''replace <impl Payload for std::convert::Infallible>::type_urls -> Vec<String> with vec!\[\]$''',
     '''replace <impl Project for \(\)>::project -> Vec<ProjectorFailure> with vec!\[\]$''',
-    '''replace EventStore::find_triggered -> Result<Vec<EventPage>, StoreError> with Ok\(vec!\[\]\)$''',
     # annals-store-sql
     # into_wal's busy guard. Taking a non-busy error for busy makes into_wal
     # run `BEGIN EXCLUSIVE` and try the move again: the same error comes back

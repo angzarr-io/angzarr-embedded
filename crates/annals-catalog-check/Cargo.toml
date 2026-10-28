@@ -5,7 +5,7 @@ description = "Test-only: every error code in Annals has a message, using exactl
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
-# It reads annals-log's samples, so it needs what annals-log needs.
+# It reads annals' samples, so it needs what annals needs.
 rust-version = "1.85"
 
 # No library to speak of and no dependencies: the check is src/lib.test.rs.
@@ -17,7 +17,6 @@ rust-version = "1.85"
 annals = { path = "../annals" }
 annals-diagnostic = { path = "../annals-diagnostic" }
 annals-graph = { path = "../annals-graph" }
-annals-log = { path = "../annals-log" }
 annals-store-sql = { path = "../annals-store-sql" }
 annals-yaml = { path = "../annals-yaml" }
 fluent-syntax = "0.12"

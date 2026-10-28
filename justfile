@@ -1,10 +1,5 @@
-# Build, test and lint the workspace. Plain cargo needs only protoc here; these
-# recipes also run `gen` so the annals-log codegen check (the `codegen-check`
-# feature) can compare the hand-written wire types with buf's output.
-#
-# Needs: buf (~/go/bin/buf) and protoc-gen-prost 0.5.0 on PATH, and protoc
-# (angzarr-proto, under annals, runs it in its build script)
-#   cargo install protoc-gen-prost --version 0.5.0 --locked
+# Build, test and lint the workspace. Needs protoc on PATH (angzarr-proto,
+# under annals, runs it in its build script).
 #
 # The pre-commit gates and their recipes (fmt, fmt-check, test, test-staged,
 # test-commit, mutants-staged, lint-deps, secrets-scan-staged and the `_run`
@@ -20,49 +15,40 @@ import 'gates/gates.just'
 # so a new crate gets a threshold before it gets code. Every crate is
 # hand-written library code whose behaviour its tests reach in-process
 # (annals-store-sql's SQLite backend included), so every crate is held to the
-# same bar. annals-log's generated protobuf (gen/) is not a tier: it is
-# reached only from a test file, and .cargo/mutants.toml mutates no test
-# file.
-mutation_thresholds := "crates/annals=90 crates/annals-catalog-check=90 crates/annals-diagnostic=90 crates/annals-graph=90 crates/annals-log=90 crates/annals-macros=90 crates/annals-sim=90 crates/annals-store-sql=90 crates/annals-yaml=90"
+# same bar.
+mutation_thresholds := "crates/annals=90 crates/annals-catalog-check=90 crates/annals-diagnostic=90 crates/annals-graph=90 crates/annals-macros=90 crates/annals-store-sql=90 crates/annals-yaml=90"
 
-# Staged paths outside any crate that test the whole workspace. buf's files
-# decide what the codegen check compares against.
-workspace_wide := "Cargo.toml Cargo.lock rust-toolchain.toml .cargo/config.toml .cargo/config buf.yaml buf.gen.yaml"
+# Staged paths outside any crate that test the whole workspace.
+workspace_wide := "Cargo.toml Cargo.lock rust-toolchain.toml .cargo/config.toml .cargo/config"
 
 # annals has no path dependency outside its tree, so the staged tree can live
 # under target/.
 staged_tree := "target/staged-tree"
 
-# The codegen check, whenever annals-log is tested or mutated, after `gen`.
-feature_rules := "annals-log=annals-log/codegen-check"
-features_prepare := "gen"
+# No crate needs a feature turned on, or a step run, to be tested.
+feature_rules := ""
+features_prepare := ""
 
 # List the recipes.
 default:
     @just --list
 
-# Generate annals-log's protobuf types into crates/annals-log/gen (never
-# committed), for the codegen check only.
-gen:
-    @buf generate
-
-# Build everything, tests and the codegen check included.
+# Build everything, tests included.
 [no-exit-message]
-build: gen
+build:
     #!/usr/bin/env bash
     set -euo pipefail
     terse=(-q --message-format=short)
     [ "${VERBOSE:-}" = 1 ] && terse=()
     exec just _run build workspace cargo \
-        cargo build "${terse[@]}" --release --workspace --all-targets --features annals-log/codegen-check
+        cargo build "${terse[@]}" --release --workspace --all-targets
 
-# Lint the protobuf schema and the Rust, and check the licence lists: the
-# pre-commit clippy gate.
+# Lint the Rust, and check the licence lists: the pre-commit clippy gate.
 [no-exit-message]
-lint: gen
+lint:
     @just _run lint workspace cargo just _lint
 
-# Clippy, warnings denied, over the workspace with the codegen check; then
+# Clippy, warnings denied, over the workspace; then
 # annals-store-sql's library alone, with no backend: in the workspace run its
 # own dev-dependency turns `sqlite` on, which would hide what the default
 # build leaves unused.
@@ -72,8 +58,7 @@ _lint:
     set -euo pipefail
     terse=(-q --message-format=short)
     [ "${VERBOSE:-}" = 1 ] && terse=()
-    buf lint
-    cargo clippy "${terse[@]}" --workspace --all-targets --features annals-log/codegen-check -- -D warnings
+    cargo clippy "${terse[@]}" --workspace --all-targets -- -D warnings
     cargo clippy "${terse[@]}" --package annals-store-sql --lib -- -D warnings
     just licence-check
 
@@ -104,10 +89,6 @@ licence-check:
     [ "$fail" = 0 ] && echo "licence-check: angzarr-proto in" $actual"; BSD-3-Clause only:" $bsd
     exit "$fail"
 
-# Check the schema for wire-breaking changes against main.
-breaking:
-    buf breaking --against '.git#branch=main'
-
 # Build the crates that must run in a browser for wasm32-unknown-unknown.
 #   rustup target add wasm32-unknown-unknown
 wasm:
@@ -115,21 +96,17 @@ wasm:
 
 # Mutation-test with cargo-mutants (config in .cargo/mutants.toml): the whole
 # workspace, or only the named crates' code (`just mutants annals`). Each
-# mutant runs every crate's tests, annals-log's codegen check included
-# whenever annals-log is mutated. Results land in mutants.out/.
+# mutant runs every crate's tests. Results land in mutants.out/.
 #   cargo install cargo-mutants --locked
-mutants *crates: gen
+mutants *crates:
     cargo mutants \
-        {{ if crates == "" { "--workspace" } else { "--package " + replace(crates, " ", " --package ") } }} \
-        {{ if crates == "" { "--features annals-log/codegen-check" } else if crates =~ '(^| )annals-log( |$)' { "--features annals-log/codegen-check" } else { "" } }}
+        {{ if crates == "" { "--workspace" } else { "--package " + replace(crates, " ", " --package ") } }}
 
 # Mutation-test only the lines changed since `base` (default main): the
 # working tree, uncommitted and untracked files included, against the merge
-# base, so it matches the source cargo-mutants mutates. cargo-mutants builds
-# only the changed crates' packages, so the codegen check is on only when
-# annals-log changed (cargo refuses the feature otherwise). `mutants-staged`
-# is the commit's gate; this is the branch's.
-mutants-diff base="main": gen
+# base, so it matches the source cargo-mutants mutates. `mutants-staged` is
+# the commit's gate; this is the branch's.
+mutants-diff base="main":
     #!/usr/bin/env bash
     set -euo pipefail
     patch=target/mutants-diff.patch
@@ -141,11 +118,7 @@ mutants-diff base="main": gen
         echo "mutants-diff: no Rust changes since '{{base}}'; nothing to mutate."
         exit 0
     fi
-    features=()
-    if grep -q '^+++ b/crates/annals-log/' "$patch"; then
-        features=(--features annals-log/codegen-check)
-    fi
-    cargo mutants --workspace "${features[@]}" --in-diff "$patch"
+    cargo mutants --workspace --in-diff "$patch"
 
 # Wire lefthook's git hooks into the repository's .git/hooks. Worktrees share
 # .git/hooks, so this is once per clone, and again whenever lefthook.yml or

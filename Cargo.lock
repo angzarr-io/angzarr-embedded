@@ -48,7 +48,6 @@ dependencies = [
  "annals",
  "annals-diagnostic",
  "annals-graph",
- "annals-log",
  "annals-store-sql",
  "annals-yaml",
  "fluent-syntax",
@@ -66,15 +65,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "annals-log"
-version = "0.1.0"
-dependencies = [
- "annals",
- "annals-diagnostic",
- "prost",
-]
-
-[[package]]
 name = "annals-macros"
 version = "0.1.0"
 dependencies = [
@@ -84,14 +74,6 @@ dependencies = [
  "prost",
  "quote",
  "syn 2.0.119",
-]
-
-[[package]]
-name = "annals-sim"
-version = "0.1.0"
-dependencies = [
- "annals",
- "annals-diagnostic",
 ]
 
 [[package]]
@@ -113,7 +95,6 @@ name = "annals-yaml"
 version = "0.1.0"
 dependencies = [
  "annals-diagnostic",
- "annals-sim",
 ]
 
 [[package]]

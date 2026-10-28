@@ -19,16 +19,12 @@ knows nothing about any application that uses it, so anything specific to
 one belongs in that application's repository, not here.
 
 Every crate has zero third-party dependencies, except annals,
-annals-log, annals-store-sql, annals-catalog-check and annals-macros. A crate may depend
-on another crate in this workspace, as annals-sim does on annals.
+annals-store-sql, annals-catalog-check and annals-macros. A crate may depend
+on another crate in this workspace, as annals-store-sql does on annals.
 
 annals-catalog-check is test-only: its one dev-dependency, `fluent-syntax`
 (Apache-2.0 OR MIT), parses the Fluent catalogs for the parity test.
 Nothing depends on it and it has no library to speak of.
-
-annals-log depends on `prost` because it is a protobuf format: the wire
-encoding needs a protobuf runtime, and hand-rolling the encoding would be a
-second, unchecked implementation of a published format.
 
 annals depends on `angzarr-proto` (a git dependency pinned by rev:
 angzarr's own prost types for `io.angzarr.v1`, whose build needs `protoc`),
@@ -56,22 +52,8 @@ running, migrations and the dialect differ per backend. It lives here for
 now: angzarr core's own SQL storage is older, and this crate moves to angzarr
 core when that storage is brought onto it.
 
-Protobuf code lives in annals (angzarr's types) and annals-log (annals' own
-log format); every other crate stays dependency-free except as above.
-
-## annals-log's wire types are hand-written; the `.proto` is the schema of record
-
-annals-log's messages are `#[derive(prost::Message)]` structs written by
-hand, matching `crates/annals-log/proto/` field for field, so annals-log
-builds with plain `cargo` and works as a git dependency with no codegen step.
-Change the `.proto` first, then the Rust to match. `buf lint` and `buf
-breaking` guard the `.proto`.
-
-Codegen is only a test-time cross-check: `buf generate` writes into
-`crates/annals-log/gen/`, which is gitignored and never committed, and
-`crates/annals-log/src/codegen.test.rs` (the `codegen-check` feature) proves
-the hand-written and generated types are wire-identical. Never edit `gen/`, or
-include it from anything but that test.
+Protobuf code lives in annals (angzarr's types); every other crate stays
+dependency-free except as above.
 
 ## Licence: BSD-3-Clause; not published
 
@@ -132,7 +114,7 @@ not put its tests in the reader's (or an LLM's) context.
 
 - Shared fixtures are `*.test.rs` files too, declared
   `#[cfg(test)] #[path = "toys.test.rs"] pub(crate) mod toys;`
-  (`annals::next::toys`, `annals_log::toy`, `annals_sim::brawl`).
+  (`annals::next::toys`, `annals_yaml::rng`).
 - A source file with several test files includes each,
   `#[cfg(test)] #[path = "edit_map.test.rs"] mod edit_map_tests;`, or keeps
   one `foo.test.rs` with a module per subject.
@@ -142,12 +124,8 @@ not put its tests in the reader's (or an LLM's) context.
 
 ## Use `just`
 
-Plain `cargo build` and `cargo test` work from a clean checkout and skip the
-codegen check; annals' build also needs `protoc` and github.com
-(for angzarr-proto). `just test`, `just lint` and `just build` run `just gen` first
-and turn on `annals-log/codegen-check`, so they need `buf` and
-`protoc-gen-prost`.
-`just breaking` checks the schema against main for wire-breaking changes.
+Plain `cargo build` and `cargo test` work from a clean checkout; annals'
+build also needs `protoc` and github.com (for angzarr-proto).
 `just wasm` builds annals for `wasm32-unknown-unknown`; it must keep
 building there.
 
@@ -179,9 +157,9 @@ failing gate is a finding: fix the cause and commit again; never
    as it was, and named. `just fmt-check` is CI's check.
 2. **secrets**: gitleaks over the staged changes (`.gitleaks.toml`). A fake
    secret in a test ends its line with `gitleaks:allow`.
-3. **clippy**: `just lint`: buf lint, clippy over the workspace with the
-   codegen check, and annals-store-sql's library with no backend, which the
-   workspace run cannot see (its own dev-dependency turns `sqlite` on).
+3. **clippy**: `just lint`: clippy over the workspace, and annals-store-sql's
+   library with no backend, which the workspace run cannot see (its own
+   dev-dependency turns `sqlite` on).
 4. **deps**: `just lint-deps`. A new licence, git source or advisory ignore
    is a change to `deny.toml`, with its reason.
 5. **tests**: `just test-commit` runs `just test-staged`, which tests the

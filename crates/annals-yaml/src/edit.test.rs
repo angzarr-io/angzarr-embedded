@@ -4,9 +4,9 @@
 //! written documents and checks each result reads back as the value expected.
 
 use crate::edit::{Document, EditError, EditProblem};
+use crate::rng::Rng;
 use crate::{parse, write, Value};
 use annals_diagnostic::Diagnostic;
-use annals_sim::Rng;
 
 fn s(x: &str) -> Value {
     Value::scalar(x)

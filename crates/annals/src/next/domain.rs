@@ -67,8 +67,7 @@ pub trait State: Default + Clone + Send + 'static {
 }
 
 /// One kind of event stream: its state, its commands and facts, its events
-/// and its rules for each. As the crate root's [`Domain`](crate::Domain),
-/// with these changes:
+/// and its rules for each:
 ///
 /// - **No `Ctx`.** Decide is a function of its explicit inputs only: the
 ///   state, the command and the rules, plus what the kernel stamps (the

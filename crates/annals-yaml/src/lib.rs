@@ -860,3 +860,8 @@ pub fn diagnostic_samples() -> Vec<Box<dyn annals_diagnostic::Diagnostic>> {
 #[cfg(test)]
 #[path = "lib.test.rs"]
 mod tests;
+
+// The property tests' seeded random stream.
+#[cfg(test)]
+#[path = "rng.test.rs"]
+pub(crate) mod rng;

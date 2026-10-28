@@ -21,7 +21,6 @@ fn samples() -> Vec<(&'static str, Vec<Box<dyn Diagnostic>>)> {
     vec![
         ("annals", annals::diagnostic_samples()),
         ("annals-graph", annals_graph::diagnostic_samples()),
-        ("annals-log", annals_log::diagnostic_samples()),
         ("annals-store-sql", annals_store_sql::diagnostic_samples()),
         ("annals-yaml", annals_yaml::diagnostic_samples()),
     ]
@@ -32,19 +31,13 @@ fn exported() -> Vec<(&'static str, &'static str)> {
     vec![
         annals::EN_US,
         annals_graph::EN_US,
-        annals_log::EN_US,
         annals_store_sql::EN_US,
         annals_yaml::EN_US,
     ]
 }
 
 /// Crates that define no codes of their own.
-const NO_CODES: &[&str] = &[
-    "annals-catalog-check",
-    "annals-diagnostic",
-    "annals-macros",
-    "annals-sim",
-];
+const NO_CODES: &[&str] = &["annals-catalog-check", "annals-diagnostic", "annals-macros"];
 
 fn crates_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

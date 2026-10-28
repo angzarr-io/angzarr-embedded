@@ -6,8 +6,8 @@
 # and has no open RustSec advisory.
 
 [graph]
-# Every feature, so annals-store-sql's sqlite backend (sqlx and its tree) and
-# annals-log's codegen-check are judged too, not only the default build.
+# Every feature, so annals-store-sql's sqlite backend (sqlx and its tree) is
+# judged too, not only the default build.
 all-features = true
 
 [advisories]
@@ -37,7 +37,7 @@ confidence-threshold = 0.9
 # directly (CLAUDE.md, *Few dependencies*; docs/design/audit.md, *Layering*).
 # It is AGPL-3.0-only, so a build that links any crate carrying it is
 # subject to the AGPL. In normal builds those crates are:
-#   `annals`, `annals-log`, `annals-sim`, `annals-store-sql`
+#   `annals`, `annals-store-sql`
 # and the rest (annals-diagnostic, annals-graph, annals-yaml,
 # annals-catalog-check) are BSD-3-Clause only (README, *Licence*;
 # `just licence-check` holds both to `cargo tree`). Accepted with the

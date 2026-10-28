@@ -2,9 +2,6 @@
 # variables are its args. Messages are lowercase fragments, like the English
 # Display, so a nested cause reads well inside another message.
 
-annals-replay-out-of-sequence = event { $index } claims sequence number { $found }, not { $index }
-annals-replay-cause-not-earlier = event { $seq } names event { $cause } as its cause, which is not earlier
-
 ## The audited kernel, annals::next. $stream names a stream as domain/root,
 ## with @edition outside the main timeline.
 
