@@ -1,4 +1,3 @@
 target/
 gen/
 mutants.out*/
-.gates

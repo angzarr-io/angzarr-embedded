@@ -29,7 +29,7 @@ just breaking       # buf breaking against main
 just fmt            # cargo fmt over the workspace's crates (just fmt-check changes nothing)
 just mutants        # cargo-mutants over the workspace; `just mutants annals` for one crate
 just wasm           # build annals for wasm32-unknown-unknown
-just hooks-install  # link the shared gates repository (../gates) and install the pre-commit hooks
+just hooks-install  # install the pre-commit hooks (gates/)
 ```
 
 annals depends on angzarr-proto, a git dependency whose build runs

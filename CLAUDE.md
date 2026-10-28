@@ -145,19 +145,18 @@ on a failure, a `FAIL` line, the extract worth reading, and the full log in
 `target/logs/<gate>.log`. `VERBOSE=1 just <gate>` shows the full output.
 `just test` runs cargo-nextest.
 
-## The pre-commit gates are shared; annals gives their parameters
+## The pre-commit gates are in gates/; the justfile gives their parameters
 
-The gates and their recipes live in the shared gates repository
-(`gates.just`, `lefthook.yml`), checked out at `gates_dir` (justfile)
-relative to annals' main checkout. The justfile imports `.gates/gates.just`
-and lefthook.yml extends `.gates/lefthook.yml`; `.gates` is a gitignored
-link made by `just gates-link`, once per checkout (worktrees included).
-`just hooks-install` links and installs the hooks, once per clone: every
-worktree shares them. A commit without the link is refused by `just
-gates-check`, saying where to clone the gates. Change a gate there, not
-here; annals keeps only its parameters (`mutation_thresholds`,
-`workspace_wide`, `staged_tree`, `feature_rules`, `features_prepare`), its
-`lint`, `deny.toml`, `.gitleaks.toml` and `.cargo/mutants.toml`.
+The gates and their recipes are `gates/gates.just` and
+`gates/lefthook.yml`: the justfile imports the one and lefthook.yml extends
+the other. The justfile keeps annals' parameters for them
+(`mutation_thresholds`, `workspace_wide`, `staged_tree`, `feature_rules`,
+`features_prepare`) and its own `lint`; their tool configs are
+`deny.toml`, `.gitleaks.toml` and `.cargo/mutants.toml`. `just
+hooks-install` installs the hooks, once per clone (every worktree shares
+them), and again after a change to the gates names a new hook
+(`gates/MIGRATING.md`). They came from the shared gates repository that
+taskloom and ctxloom-rs also copied; a change here does not reach them.
 
 lefthook runs the gates one at a time, stopping at the first failure. A
 failing gate is a finding: fix the cause and commit again; never
