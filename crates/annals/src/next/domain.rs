@@ -30,6 +30,17 @@ pub trait State: Default + Clone + Send + 'static {
     /// snapshot unreadable ([`PayloadError::Invalid`](super::PayloadError)).
     fn from_snapshot(snapshot: Self::Snapshot) -> Result<Self, annals_diagnostic::Report>;
 
+    /// Overwrite this instance's state with what `snapshot` holds, keeping
+    /// whatever the snapshot does not (a marked-up aggregate's immutable
+    /// configuration, from the registry's factory). Resuming builds a fresh
+    /// instance, then restores it. The default replaces the whole instance
+    /// with [`State::from_snapshot`]'s. (A proposal: the kernel does not call
+    /// it yet.)
+    fn restore(&mut self, snapshot: Self::Snapshot) -> Result<(), annals_diagnostic::Report> {
+        *self = Self::from_snapshot(snapshot)?;
+        Ok(())
+    }
+
     /// The state's type URL and the conflict resolutions it supports, the
     /// full resolved list (`[COMMUTATIVE, STRICT, AGGREGATE_HANDLES]` for a
     /// state that lists COMMUTATIVE and marks its units; `[STRICT,
@@ -37,6 +48,14 @@ pub trait State: Default + Clone + Send + 'static {
     /// [`Registry::register`](super::Registry::register) records, as
     /// angzarr's `ComponentDescriptor.state`.
     fn descriptor() -> StateDescriptor;
+
+    /// Whether the kernel takes snapshots of this state. `false` for a
+    /// state with no snapshot form (a marked-up aggregate without
+    /// `snapshot = ..`, whose [`State::Snapshot`] is
+    /// [`NoSnapshot`](super::markup::NoSnapshot)): its streams are always
+    /// replayed from the start, and [`Stream::snapshot`](super::Stream::snapshot)
+    /// is `None`. (A proposal: the kernel does not read it yet.)
+    const SNAPSHOTS: bool = true;
 
     /// The conflict units whose values differ between `before` and
     /// `after` (angzarr's `conflict_units` table, field kind by field kind,

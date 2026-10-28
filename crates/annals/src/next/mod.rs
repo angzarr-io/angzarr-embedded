@@ -77,6 +77,7 @@ mod error;
 mod fixture;
 mod handle;
 mod handler;
+pub mod markup;
 mod payload;
 mod reaction;
 mod registry;
@@ -90,6 +91,13 @@ mod wire;
 #[cfg(test)]
 #[path = "toys.test.rs"]
 pub(crate) mod toys;
+
+// Aggregates, a process manager, sagas and a projector written in
+// annals-macros' markup (`markup` is its runtime), on annals as a dependent
+// sees it (`::annals`), beside a hand-written domain.
+#[cfg(test)]
+#[path = "decorated.test.rs"]
+mod decorated;
 
 pub use check::{check, Body, Checked, Identified, Malformed, Sampled};
 pub use conflict::{Key, UnitPath, Units};
@@ -114,7 +122,7 @@ pub use reaction::{
     orders_owed, policy, projection, target_cover, Backlog, Order, Policy, Projection, Projector,
     Reaction, Reactor,
 };
-pub use registry::{Misconfigured, Registry};
+pub use registry::{Aggregate, Misconfigured, Registry};
 pub use store::{
     AsyncEventStore, AsyncPurge, AsyncReadStore, AsyncReadUnit, AsyncStore, AsyncUnitOfWork,
     AsyncWatch, ChangeToken, EventStore, InMemoryRead, InMemoryStore, InMemoryTx, Purge, ReadStore,
@@ -230,6 +238,10 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn annals_diagnostic::Diagnostic>
             expected: "ledger",
         },
         KernelError::ChainTooDeep { limit: 8 },
+        KernelError::TooManySteps {
+            stream: stream(),
+            limit: 16,
+        },
         KernelError::BeforeSnapshot {
             stream: stream(),
             first: 10,
@@ -347,6 +359,11 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn annals_diagnostic::Diagnostic>
     samples.push(Box::new(Failure::<Gap>::Downstream {
         path: Vec::new(),
         error: StepError::Kernel(KernelError::ChainTooDeep { limit: 8 }),
+    }));
+    samples.push(Box::new(Failure::<Gap>::Projection {
+        committed: Vec::new(),
+        projector: "balances",
+        error: report(),
     }));
     samples.push(Box::new(gap));
     samples.push(Box::new(missing));

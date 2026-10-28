@@ -54,6 +54,7 @@ annals-next-malformed-handling-on-fact = a fact with handling: a fact is never c
 annals-next-malformed-unknown-conflict-resolution = conflict resolution { $value } is not one this build knows
 annals-next-malformed-unsupported-conflict-resolution = domain "{ $domain }"'s state does not support { $requested }
 
+annals-next-projection-failed = the command committed, then projector { $projector } failed: { $error }
 annals-next-downstream = a reaction down the chain failed, at depth { $depth }: { $error }
 annals-next-stale = stream { $stream } is at { $actual }, not the { $expected } expected: re-read and re-issue
 annals-next-unresolved = decide never acknowledged the window of stream { $stream } from { $expected } to { $actual }
@@ -64,6 +65,7 @@ annals-next-ingest-panicked = ingesting fact { $command_id } into stream { $stre
 annals-next-gap = a delivery to stream { $stream } skips ahead to { $found } from { $expected }, the next due
 annals-next-wrong-domain = stream { $stream } was given to the { $expected } domain's code
 annals-next-chain-too-deep = the command chain went deeper than its limit of { $limit }
+annals-next-too-many-steps = the decision on stream { $stream } ran more than its limit of { $limit } continuation steps
 annals-next-before-snapshot = stream { $stream } holds its events from { $first } on only, after its snapshot
 annals-next-unregistered-domain = a stored { $domain } stream was read, but no domain "{ $domain }" is registered
 

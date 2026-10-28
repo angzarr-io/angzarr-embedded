@@ -23,7 +23,7 @@ import 'gates/gates.just'
 # same bar. annals-log's generated protobuf (gen/) is not a tier: it is
 # reached only from a test file, and .cargo/mutants.toml mutates no test
 # file.
-mutation_thresholds := "crates/annals=90 crates/annals-catalog-check=90 crates/annals-diagnostic=90 crates/annals-graph=90 crates/annals-log=90 crates/annals-sim=90 crates/annals-store-sql=90 crates/annals-yaml=90"
+mutation_thresholds := "crates/annals=90 crates/annals-catalog-check=90 crates/annals-diagnostic=90 crates/annals-graph=90 crates/annals-log=90 crates/annals-macros=90 crates/annals-sim=90 crates/annals-store-sql=90 crates/annals-yaml=90"
 
 # Staged paths outside any crate that test the whole workspace. buf's files
 # decide what the codegen check compares against.

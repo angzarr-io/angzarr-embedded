@@ -13,7 +13,7 @@
 
 use std::fmt;
 
-use angzarr_proto::v1::{Cover, EventRef, Uuid};
+use angzarr_proto::v1::{Cover, EventBook, EventRef, Uuid};
 use annals_diagnostic::{Arg, Diagnostic, Report};
 
 use super::check::Malformed;
@@ -33,6 +33,16 @@ pub enum Failure<R> {
     /// originating stream or at the commit (a conflict on any stream the
     /// chain touched). Nothing was committed.
     Kernel(KernelError),
+    /// The chain COMMITTED, then `projector` (a marked-up projector, run
+    /// after the commit and awaited) failed with `error`. `committed` is
+    /// what the chain appended, every stream's book: those events stay
+    /// committed, and the projector's position does not pass the failing
+    /// event, so catch-up retries it.
+    Projection {
+        committed: Vec<EventBook>,
+        projector: &'static str,
+        error: Report,
+    },
 }
 
 /// One step of a command chain: a policy's command delivered to `stream`,
@@ -118,6 +128,13 @@ pub enum KernelError {
     /// A command chain went deeper than its limit: a reaction cycle, or a
     /// cascade longer than allowed.
     ChainTooDeep {
+        limit: usize,
+    },
+    /// A decision on `stream` ran more continuation steps than its limit
+    /// ([`STEP_LIMIT`](super::markup::STEP_LIMIT)): a step that always
+    /// continues. Nothing it emitted is kept.
+    TooManySteps {
+        stream: Cover,
         limit: usize,
     },
     /// A dispatch from before a resumed stream's snapshot: those events are
@@ -279,6 +296,7 @@ impl<R> Failure<R> {
             Failure::Rejected(_) => Recovery::Business,
             Failure::Downstream { error, .. } => error.recovery(),
             Failure::Kernel(error) => error.recovery(),
+            Failure::Projection { .. } => Recovery::Retry,
         }
     }
 }
@@ -307,6 +325,7 @@ impl KernelError {
             | KernelError::IngestPanicked { .. }
             | KernelError::WrongDomain { .. }
             | KernelError::ChainTooDeep { .. }
+            | KernelError::TooManySteps { .. }
             | KernelError::BeforeSnapshot { .. }
             | KernelError::UnregisteredDomain { .. }
             | KernelError::Replay(_) => Recovery::Bug,
@@ -350,6 +369,12 @@ impl<R: fmt::Display> fmt::Display for Failure<R> {
                 path.len()
             ),
             Failure::Kernel(error) => error.fmt(f),
+            Failure::Projection {
+                projector, error, ..
+            } => write!(
+                f,
+                "the command committed, then projector {projector} failed: {error}"
+            ),
         }
     }
 }
@@ -360,6 +385,7 @@ impl<R: Diagnostic> Diagnostic for Failure<R> {
             Failure::Rejected(rejection) => rejection.code(),
             Failure::Downstream { .. } => "annals-next-downstream",
             Failure::Kernel(error) => error.code(),
+            Failure::Projection { .. } => "annals-next-projection-failed",
         }
     }
 
@@ -370,6 +396,12 @@ impl<R: Diagnostic> Diagnostic for Failure<R> {
                 vec![("depth", path.len().into()), ("error", Arg::nested(error))]
             }
             Failure::Kernel(error) => error.args(),
+            Failure::Projection {
+                projector, error, ..
+            } => vec![
+                ("projector", (*projector).into()),
+                ("error", Arg::nested(error)),
+            ],
         }
     }
 }
@@ -462,6 +494,11 @@ impl fmt::Display for KernelError {
             KernelError::ChainTooDeep { limit } => {
                 write!(f, "the command chain went deeper than its limit of {limit}")
             }
+            KernelError::TooManySteps { stream, limit } => write!(
+                f,
+                "the decision on stream {} ran more than its limit of {limit} continuation steps",
+                cover_text(stream)
+            ),
             KernelError::BeforeSnapshot { stream, first } => write!(
                 f,
                 "stream {} holds its events from {first} on only, after its snapshot",
@@ -490,6 +527,7 @@ impl Diagnostic for KernelError {
             KernelError::Gap { .. } => "annals-next-gap",
             KernelError::WrongDomain { .. } => "annals-next-wrong-domain",
             KernelError::ChainTooDeep { .. } => "annals-next-chain-too-deep",
+            KernelError::TooManySteps { .. } => "annals-next-too-many-steps",
             KernelError::BeforeSnapshot { .. } => "annals-next-before-snapshot",
             KernelError::UnregisteredDomain { .. } => "annals-next-unregistered-domain",
             KernelError::Replay(error) => error.code(),
@@ -552,6 +590,9 @@ impl Diagnostic for KernelError {
                 vec![("stream", stream(s)), ("expected", (*expected).into())]
             }
             KernelError::ChainTooDeep { limit } => vec![("limit", (*limit).into())],
+            KernelError::TooManySteps { stream: s, limit } => {
+                vec![("stream", stream(s)), ("limit", (*limit).into())]
+            }
             KernelError::BeforeSnapshot { stream: s, first } => {
                 vec![("stream", stream(s)), ("first", (*first).into())]
             }

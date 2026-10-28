@@ -39,7 +39,12 @@ fn exported() -> Vec<(&'static str, &'static str)> {
 }
 
 /// Crates that define no codes of their own.
-const NO_CODES: &[&str] = &["annals-catalog-check", "annals-diagnostic", "annals-sim"];
+const NO_CODES: &[&str] = &[
+    "annals-catalog-check",
+    "annals-diagnostic",
+    "annals-macros",
+    "annals-sim",
+];
 
 fn crates_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
