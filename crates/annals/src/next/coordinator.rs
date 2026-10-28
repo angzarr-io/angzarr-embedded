@@ -10,7 +10,8 @@
 //! 3. [`Coordinator::deduplicate`]: **load the stream first** (resolve the
 //!    conflict resolution: the book's, the command type's, the domain's,
 //!    else COMMUTATIVE where the state supports it and STRICT otherwise,
-//!    [`Registry::resolve`]; then the newest usable snapshot and the events
+//!    [`Registry::resolve`]; then the newest usable snapshot (under the
+//!    current rules and state type, and below the head) and the events
 //!    after it), **then** look the command id up: does the addressed
 //!    stream already hold events with this command id? Then the command
 //!    was applied: answered [`Deduplicated::Duplicate`] with those events,
@@ -408,7 +409,8 @@ pub(crate) fn expect(
 }
 
 /// The read half of step 3: the resolution, the newest usable snapshot and
-/// the events after it.
+/// the events after it. A snapshot at or past the head is not usable: the
+/// stream is read from 0.
 pub(crate) async fn read<P: Port>(
     port: &mut P,
     registry: &Registry,
@@ -426,11 +428,22 @@ pub(crate) async fn read<P: Port>(
                 && !(windowed && command.expected_sequence().is_some_and(|e| s.sequence >= e))
         });
     let from = snapshot.as_ref().map_or(0, |s| s.sequence + 1);
-    let (snapshot, pages, head, last_recorded_at) = match port
+    let mut slice = port
         .read_from(cover, from)
         .await
-        .map_err(KernelError::Store)?
-    {
+        .map_err(KernelError::Store)?;
+    let snapshot = match (snapshot, &slice) {
+        // At or past the head: it claims events the stream does not hold
+        // (a purge left it, or it was written ahead of them), so it is
+        // unusable, like one under other rules, and the stream is read
+        // from its events.
+        (Some(s), Some(read)) if s.sequence >= read.next_sequence => {
+            slice = port.read_from(cover, 0).await.map_err(KernelError::Store)?;
+            None
+        }
+        (snapshot, _) => snapshot,
+    };
+    let (snapshot, pages, head, last_recorded_at) = match slice {
         Some(slice) => (
             snapshot,
             slice.pages,
