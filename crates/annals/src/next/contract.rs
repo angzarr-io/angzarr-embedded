@@ -359,6 +359,42 @@ pub async fn a_store_keeps_the_newest_snapshot_per_stream<S: AsyncStore>(mut sto
     assert_eq!(unit.read_snapshot(&stream).await, Ok(Some(snapshot(4))));
 }
 
+/// A snapshot written through a unit of work lands with it: the unit's
+/// reads see it at once, the store at commit, and nothing if the unit is
+/// dropped.
+pub async fn a_unit_of_work_writes_its_snapshot_at_commit_or_not_at_all<S: AsyncStore>(
+    mut store: S,
+) {
+    let stream = cover("account", 1);
+    store
+        .append(&stream, 0, &[page(0, 1), page(1, 1)])
+        .await
+        .unwrap();
+    store.write_snapshot(&stream, &snapshot(0)).await.unwrap();
+    {
+        let mut unit = store.begin().await;
+        unit.write_snapshot(&stream, &snapshot(1)).await.unwrap();
+        assert_eq!(
+            unit.read_snapshot(&stream).await,
+            Ok(Some(snapshot(1))),
+            "read through the unit"
+        );
+    }
+    assert_eq!(
+        store.read_snapshot(&stream).await,
+        Ok(Some(snapshot(0))),
+        "dropped: not written"
+    );
+    let mut unit = store.begin().await;
+    unit.write_snapshot(&stream, &snapshot(1)).await.unwrap();
+    unit.commit().await.unwrap();
+    assert_eq!(
+        store.read_snapshot(&stream).await,
+        Ok(Some(snapshot(1))),
+        "committed"
+    );
+}
+
 pub async fn the_commit_position_rises_with_every_commit<S: AsyncStore>(mut store: S) {
     let empty = store.commit_position().await.unwrap();
     store
@@ -541,8 +577,14 @@ where
     let mut unit = store.begin().await;
     unit.append(&stream, 1, &[page(1, 2)]).await.unwrap();
     unit.append(&other, 0, &[page(0, 2)]).await.unwrap();
+    unit.write_snapshot(&other, &snapshot(0)).await.unwrap();
     assert_eq!(unit.purge(&stream).await, Ok(2), "stored and pending");
     assert_eq!(unit.purge(&other).await, Ok(1), "only pending");
+    assert_eq!(
+        unit.read_snapshot(&other).await,
+        Ok(None),
+        "its own snapshot purged"
+    );
     assert_eq!(unit.covers("account").await, Ok(vec![]));
     assert_eq!(
         unit.append(&stream, 1, &[page(1, 3)]).await,
@@ -565,6 +607,7 @@ where
     assert_eq!(store.read_snapshot(&stream).await, Ok(None));
     assert_eq!(store.find_command(&stream, &command(2)).await, Ok(vec![]));
     assert_eq!(store.read_from(&other, 0).await, Ok(None));
+    assert_eq!(store.read_snapshot(&other).await, Ok(None));
     assert_eq!(store.covers("account").await, Ok(vec![stream]));
 }
 
@@ -872,6 +915,7 @@ macro_rules! store_contract {
             an_empty_append_checks_and_creates_nothing,
             a_read_past_the_end_is_empty_but_knows_the_end,
             a_store_keeps_the_newest_snapshot_per_stream,
+            a_unit_of_work_writes_its_snapshot_at_commit_or_not_at_all,
             the_commit_position_rises_with_every_commit,
         );
     };
@@ -938,6 +982,7 @@ macro_rules! async_store_contract {
             an_empty_append_checks_and_creates_nothing,
             a_read_past_the_end_is_empty_but_knows_the_end,
             a_store_keeps_the_newest_snapshot_per_stream,
+            a_unit_of_work_writes_its_snapshot_at_commit_or_not_at_all,
             the_commit_position_rises_with_every_commit,
         );
     };

@@ -44,6 +44,8 @@ enum Bug {
     KeepsTheFirstSnapshot,
     /// Its unit of work reads no snapshot.
     UnitSeesNoSnapshot,
+    /// Its unit of work discards a snapshot written through it.
+    UnitDropsTheSnapshot,
     /// Its commit position never moves, whatever is committed.
     PositionStandsStill,
 }
@@ -268,6 +270,13 @@ impl EventStore for BrokenUnit<'_> {
             _ => self.store().read_snapshot(stream),
         }
     }
+
+    fn write_snapshot(&mut self, stream: &Cover, snapshot: &Snapshot) -> Result<(), StoreError> {
+        match self {
+            BrokenUnit::Tx(tx) if tx.bug == Bug::UnitDropsTheSnapshot => Ok(()),
+            _ => self.store().write_snapshot(stream, snapshot),
+        }
+    }
 }
 
 impl UnitOfWork for BrokenUnit<'_> {
@@ -420,6 +429,15 @@ fn the_snapshot_check_fails_a_store_that_keeps_the_first_or_a_unit_that_sees_non
 }
 
 #[test]
+fn the_unit_snapshot_check_fails_a_unit_that_drops_its_snapshot() {
+    fails_on!(
+        a_unit_of_work_writes_its_snapshot_at_commit_or_not_at_all,
+        UnitDropsTheSnapshot,
+        UnitSeesNoSnapshot,
+    );
+}
+
+#[test]
 fn the_commit_position_check_fails_a_position_that_stands_still() {
     fails_on!(
         the_commit_position_rises_with_every_commit,
@@ -443,5 +461,8 @@ fn a_broken_store_with_no_bug_passes_every_check() {
     block(an_empty_append_checks_and_creates_nothing(fresh()));
     block(a_read_past_the_end_is_empty_but_knows_the_end(fresh()));
     block(a_store_keeps_the_newest_snapshot_per_stream(fresh()));
+    block(a_unit_of_work_writes_its_snapshot_at_commit_or_not_at_all(
+        fresh(),
+    ));
     block(the_commit_position_rises_with_every_commit(fresh()));
 }
