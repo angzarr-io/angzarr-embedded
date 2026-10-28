@@ -212,7 +212,7 @@ fn a_flow_argument_that_is_not_key_value_is_refused() {
     let error = flow(
         quote!(name = "s", source = A, target = B, translate(On)),
         quote!(impl S {}),
-        Flow::Saga,
+        Flow::Policy,
     )
     .expect_err("refused")
     .to_string();
@@ -224,14 +224,14 @@ fn a_flow_argument_that_is_not_key_value_is_refused() {
 
 #[test]
 fn an_unknown_flow_argument_names_the_usage() {
-    let saga = flow(
+    let policy = flow(
         quote!(name = "s", source = A, sink = B),
         quote!(impl S {}),
-        Flow::Saga,
+        Flow::Policy,
     )
     .expect_err("refused")
     .to_string();
-    assert!(saga.contains("#[saga] takes `name"), "{saga}");
+    assert!(policy.contains("#[policy] takes `name"), "{policy}");
     let projector = flow(
         quote!(name = "p", target = A),
         quote!(impl P {}),

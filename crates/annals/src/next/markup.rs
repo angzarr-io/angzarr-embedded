@@ -1,7 +1,7 @@
 //! What annals-macros' expansion names: the runtime under a marked-up
 //! aggregate or process manager (`#[aggregate]`, `#[process_manager]`,
 //! `#[handles_cmd]`, `#[handles_fact]`, `#[on_refused]`, `#[applies]`),
-//! saga (`#[saga]`, `#[on_event]`) and projector (`#[projector]`,
+//! policy (`#[policy]`, `#[on_event]`) and projector (`#[projector]`,
 //! `#[projects]`); see annals-macros' crate docs. A hand-written
 //! [`Domain`] needs none of it.
 //!
@@ -22,12 +22,12 @@
 //!   refusal objects.
 //! - [`CommandRefused`] and [`Refusal`]: a refusal fact as its source's
 //!   `#[on_refused]` handler reads it, and a refusal as a translating
-//!   saga's callback reads it.
+//!   policy's callback reads it.
 //! - [`ProcessManager`]: what sets a process manager, a domain, apart: its
 //!   root is the correlation, and its starting inputs.
-//! - [`Saga`], [`Commands`] and [`SagaContext`]: a saga, its output
+//! - [`Policy`], [`Commands`] and [`PolicyContext`]: a policy, its output
 //!   and its handler's context. [`Decides`] and [`Ingests`] say what a
-//!   domain takes, for the checks on a saga.
+//!   domain takes, for the checks on a policy.
 //! - [`AsyncProjector`] and [`ProjectionContext`]: a projector.
 //! - [`MARKUP_RULES_VERSION`]: the rules version every marked-up
 //!   domain's events are recorded under.
@@ -40,7 +40,7 @@
 //!   them.
 //!
 //! Every component here assumes nothing about distribution: the same
-//! marked-up aggregate, process manager, saga or projector runs in
+//! marked-up aggregate, process manager, policy or projector runs in
 //! annals' process or as its own service, with no change to its code.
 //!
 //! annals' `next/decorated.test.rs` runs all of it.
@@ -65,7 +65,7 @@ pub use annals_diagnostic::Report;
 /// stays pure: there is no wall clock), the stream it decides (for a
 /// process manager, its root is the correlation), and the input's
 /// identity: its command id (a client's, the one the application minted,
-/// a saga's derived one, or, for a fact, the one derived from its origin;
+/// a policy's derived one, or, for a fact, the one derived from its origin;
 /// a refusal fact's is the refused command's), its correlation, and, for a
 /// fact, its origin.
 #[derive(Clone, PartialEq, Debug)]
@@ -427,10 +427,10 @@ records_shape! {
 pub const MARKUP_RULES_VERSION: &str = "markup-1";
 
 /// A process manager written in the markup (`#[process_manager]`). A
-/// process manager IS A DOMAIN: its inputs are commands (which sagas send
+/// process manager IS A DOMAIN: its inputs are commands (which policies send
 /// it, and which it may refuse) and facts (timeouts, webhooks, refusal
 /// facts, which it never refuses); its only output is its own events. It
-/// subscribes to nothing: the saga for (another domain, the PM's domain)
+/// subscribes to nothing: the policy for (another domain, the PM's domain)
 /// turns that domain's events into commands to it. The macro gives it the
 /// same `Domain` and `State` impls an `#[aggregate]` gets; this trait adds
 /// the two things that set a PM apart. Registered with
@@ -446,7 +446,7 @@ pub const MARKUP_RULES_VERSION: &str = "markup-1";
 ///   not delivered, decided before the handler by the type after
 ///   upcasting: a FACT is skipped silently (applied, no events, nothing
 ///   dead-lettered), and a COMMAND is refused (`annals-next-pm-no-instance`,
-///   a business refusal, so a saga's refused command yields its refusal
+///   a business refusal, so a policy's refused command yields its refusal
 ///   fact like any other), recording nothing.
 ///
 /// A process manager whose `STARTS` is empty can never start an instance;
@@ -462,12 +462,12 @@ pub trait ProcessManager: Domain<State = Self, Rules = ()> {
 }
 
 /// That `A` decides command `C`: `#[handles_cmd(C)]` on its impl. What a
-/// saga's [`Commands`] is checked against. Emitted by the macro, one per
+/// policy's [`Commands`] is checked against. Emitted by the macro, one per
 /// command.
 pub trait Decides<C: DomainMessage>: Domain {}
 
 /// That `A` ingests fact `F`: `#[handles_fact(F)]` on its impl. What a
-/// translating saga's callback is checked against: it must return a fact
+/// translating policy's callback is checked against: it must return a fact
 /// its source ingests. Emitted by the macro, one per fact.
 pub trait Ingests<F: DomainMessage>: Domain {}
 
@@ -517,7 +517,7 @@ impl TypedRefusal {
 }
 
 /// A marked-up domain's `Domain::Rejection`: a handler's refusal, as the
-/// caller (or a refused saga) receives it.
+/// caller (or a refused policy) receives it.
 ///
 /// - [`Rejection::Message`]: a command handler without `refuses` refused
 ///   with the domain's own rejection `R` (inferred from those handlers, or
@@ -545,7 +545,7 @@ impl<R> From<R> for Rejection<R> {
 }
 
 impl<R: annals_diagnostic::Diagnostic> Rejection<R> {
-    /// As a refused saga receives it: the typed object packed (unset for a
+    /// As a refused policy receives it: the typed object packed (unset for a
     /// message), and the en-US message.
     pub fn response(&self) -> v1::RefusalResponse {
         v1::RefusalResponse {
@@ -599,7 +599,7 @@ impl<R: annals_diagnostic::Diagnostic> annals_diagnostic::Diagnostic for Rejecti
     }
 }
 
-/// The pass-through refusal fact, as the saga's SOURCE domain's handler
+/// The pass-through refusal fact, as the policy's SOURCE domain's handler
 /// for it reads it: `#[on_refused(C)]`, an ordinary, infallible fact
 /// handler, `fn(&self, refused: CommandRefused<C>, ctx: &Context) ->
 /// Record<Self>` (or a shape). The macro dispatches angzarr's
@@ -643,16 +643,16 @@ impl<C> CommandRefused<C> {
         __decode(self.refusal.as_ref()?).ok().flatten()
     }
 
-    /// The saga's triggering event: a page of this stream.
+    /// The policy's triggering event: a page of this stream.
     pub fn trigger(&self) -> &EventRef {
         &self.trigger
     }
 }
 
-/// What a saga's translating callback reads (`#[on_refused(C)]` on the
-/// saga's impl): angzarr's `Refusal { event, command,
+/// What a policy's translating callback reads (`#[on_refused(C)]` on the
+/// policy's impl): angzarr's `Refusal { event, command,
 /// response }`, the command decoded. The callback returns a fact of the
-/// saga's source domain, so the source never refers to the target's
+/// policy's source domain, so the source never refers to the target's
 /// types.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Refusal<C> {
@@ -662,7 +662,7 @@ pub struct Refusal<C> {
 }
 
 impl<C> Refusal<C> {
-    /// A refusal for a callback's own unit tests; the saga's generated
+    /// A refusal for a callback's own unit tests; the policy's generated
     /// `on_refused` builds the real one.
     pub fn new(event: EventBook, command: C, response: v1::RefusalResponse) -> Self {
         Refusal {
@@ -673,7 +673,7 @@ impl<C> Refusal<C> {
     }
 
     /// The triggering event: a book of the source stream holding the one
-    /// event the saga reacted to.
+    /// event the policy reacted to.
     pub fn event(&self) -> &EventBook {
         &self.event
     }
@@ -695,20 +695,20 @@ impl<C> Refusal<C> {
     }
 }
 
-// ---------------------------------------------------------------- sagas
+// ---------------------------------------------------------------- policies
 
-/// A saga written in the markup (`#[saga]`): stateless translation of its
+/// A policy written in the markup (`#[policy]`): stateless translation of its
 /// ONE source domain's events into commands for its ONE target domain (an
 /// aggregate's or a process manager's). Registered with
-/// [`Registry::saga`](super::Registry::saga).
+/// [`Registry::policy`](super::Registry::policy).
 ///
 /// When a target refuses one of its commands, the target records nothing
-/// and the saga delivers ONE unrefusable fact of the refusal to the exact
+/// and the policy delivers ONE unrefusable fact of the refusal to the exact
 /// stream of its triggering event, in its source domain, whose id is the
-/// refused command's id ([`Saga::on_refused`]). By default the generated
+/// refused command's id ([`Policy::on_refused`]). By default the generated
 /// code passes it through as angzarr's `CommandRefused { command,
 /// refusal, trigger }`, which the source handles in `#[on_refused(C)]`;
-/// for each command the saga has its own `#[on_refused(C)]` callback for,
+/// for each command the policy has its own `#[on_refused(C)]` callback for,
 /// TRANSLATE: the callback returns a domestic fact instead. The callback's
 /// presence is the selection, fixed at compile time (angzarr-cli's refusal
 /// switch: annals' scaffold writes the callback stub, or does not), and
@@ -717,11 +717,11 @@ impl<C> Refusal<C> {
 /// run-time dead letter if the source has no handler for it, not a compile
 /// error.
 ///
-/// What a saga answers is all here, whatever runs it; annals runs sagas
+/// What a policy answers is all here, whatever runs it; annals runs policies
 /// once its kernel dispatches committed steps
-/// ([`Registry::saga`](super::Registry::saga)).
-pub trait Saga: Send + Sync + 'static {
-    /// The saga's name: the component its commands' ids are derived from.
+/// ([`Registry::policy`](super::Registry::policy)).
+pub trait Policy: Send + Sync + 'static {
+    /// The policy's name: the component its commands' ids are derived from.
     const NAME: &'static str;
     /// The one domain whose events it handles, and to which it delivers
     /// its refusal facts.
@@ -735,23 +735,23 @@ pub trait Saga: Send + Sync + 'static {
     const TRANSLATES: &'static [TypeName];
 
     /// angzarr's `SagaService.OnRefused`: the refusal fact's payload for
-    /// the saga's source, packed. Pass-through: angzarr's `CommandRefused
+    /// the policy's source, packed. Pass-through: angzarr's `CommandRefused
     /// { command, refusal, trigger }`, `refusal` the response's object
     /// still packed, `trigger` the triggering event's `EventRef`. Translate:
     /// the callback's domestic fact. The chain addresses it to the
     /// trigger's stream and stamps its identity.
     fn on_refused(&self, refusal: &v1::Refusal) -> Any;
 
-    /// The commands this saga sends for `event` (an event of its source,
+    /// The commands this policy sends for `event` (an event of its source,
     /// packed), from its `#[reacts]` handler for the event's type; `None`
     /// for a type it does not react to. Generated.
-    fn on_event(&self, event: &Any, ctx: &SagaContext) -> Option<Commands<Self::Target>>;
+    fn on_event(&self, event: &Any, ctx: &PolicyContext) -> Option<Commands<Self::Target>>;
 }
 
-/// What a saga's `#[on_event(E)]` handler returns: commands for its target
+/// What a policy's `#[on_event(E)]` handler returns: commands for its target
 /// `T`, each with the root of the stream it is for. For a process manager
-/// that is the trigger's correlation ([`SagaContext::correlation_id`]);
-/// any other root is a saga bug. Each command's type must be one
+/// that is the trigger's correlation ([`PolicyContext::correlation_id`]);
+/// any other root is a policy bug. Each command's type must be one
 /// `T` decides ([`Decides`]).
 pub struct Commands<T: Domain> {
     orders: Vec<(Uuid, Any)>,
@@ -787,21 +787,21 @@ impl<T: Domain> Commands<T> {
     }
 }
 
-/// What a saga's handler reads besides the event: the triggering event's
+/// What a policy's handler reads besides the event: the triggering event's
 /// `EventRef` (its stream and sequence), its correlation and when it was
 /// recorded.
 #[derive(Clone, PartialEq, Debug)]
-pub struct SagaContext {
+pub struct PolicyContext {
     trigger: EventRef,
     correlation_id: Uuid,
     recorded_at: Timestamp,
 }
 
-impl SagaContext {
-    /// A context for a saga's own unit tests; the router builds the real
+impl PolicyContext {
+    /// A context for a policy's own unit tests; the router builds the real
     /// one from the committed event.
     pub fn new(trigger: EventRef, correlation_id: Uuid, recorded_at: Timestamp) -> Self {
-        SagaContext {
+        PolicyContext {
             trigger,
             correlation_id,
             recorded_at,
@@ -833,7 +833,7 @@ pub mod v1 {
     use angzarr_proto::v1::{CommandBook, EventBook, EventRef};
     use prost_types::Any;
 
-    /// The standard refusal fact a pass-through saga delivers to its
+    /// The standard refusal fact a pass-through policy delivers to its
     /// source.
     #[derive(Clone, PartialEq, prost::Message)]
     pub struct CommandRefused {
@@ -843,7 +843,7 @@ pub mod v1 {
         /// The target's typed refusal object, packed; unset if none.
         #[prost(message, optional, tag = "2")]
         pub refusal: Option<Any>,
-        /// The saga's triggering event: the stream the fact is for.
+        /// The policy's triggering event: the stream the fact is for.
         #[prost(message, optional, tag = "3")]
         pub trigger: Option<EventRef>,
     }
@@ -853,7 +853,7 @@ pub mod v1 {
         const PACKAGE: &'static str = "io.angzarr.v1";
     }
 
-    /// A target's refusal, as the refused saga receives it.
+    /// A target's refusal, as the refused policy receives it.
     #[derive(Clone, PartialEq, prost::Message)]
     pub struct RefusalResponse {
         /// The typed refusal object, packed; unset if none.

@@ -19,7 +19,7 @@ Every error is localizable: a stable code and named args (see
 | [`annals-sim`](crates/annals-sim) | simulation parts on `annals`: per-entity dice, a folded tick scheduler, jobs as data, a parallel map, a Gherkin runner |
 | [`annals-log`](crates/annals-log) | a binary event-log format for `annals` streams: length-delimited protobuf (prost) |
 | [`annals-store-sql`](crates/annals-store-sql) | `annals::next`'s store port on SQL: backend-neutral sea-query statements, and each backend (`sqlite`) behind a feature, on sqlx with its migrations |
-| [`annals-macros`](crates/annals-macros) | markup over hand-written aggregates, process managers, sagas and projectors, generating their `annals::next` glue |
+| [`annals-macros`](crates/annals-macros) | markup over hand-written aggregates, process managers, policies and projectors, generating their `annals::next` glue |
 | [`annals-catalog-check`](crates/annals-catalog-check) | test-only: every error code has a message, with exactly its args, in every shipped Fluent catalog |
 
 ```

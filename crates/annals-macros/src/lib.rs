@@ -3,18 +3,18 @@
 //! [`handles_fact`], [`on_refused`] and [`applies`] markers, the runtime
 //! glue that runs a domain on annals (its `annals::next::Domain` and
 //! `annals::next::State` impls, routing by type URL), a nameable
-//! `<Name>Handler` trait, and its constants. [`saga`] generates a saga's
-//! `annals::next::markup::Saga`, its refusal pass-through included, and
+//! `<Name>Handler` trait, and its constants. [`policy`] generates a policy's
+//! `annals::next::markup::Policy`, its refusal pass-through included, and
 //! [`projector`] a projector's `AsyncProjector`. Hand-writing `Domain`
 //! stays first-class; this is a way of writing one, not a layer over it.
 //!
 //! Every component written here assumes nothing about distribution: the
-//! same aggregate, process manager, saga or projector runs in annals'
+//! same aggregate, process manager, policy or projector runs in annals'
 //! process or as its own service, with no change to its code.
 //!
 //! annals' `next/decorated.test.rs` runs the expansion; the
 //! `compile_fail` examples here pin what it refuses. annals does not run a
-//! saga yet: that comes with the kernel's committed-step dispatch.
+//! policy yet: that comes with the kernel's committed-step dispatch.
 //!
 //! # Where it sits
 //!
@@ -25,8 +25,8 @@
 //!    `#[aggregate]` (or `#[process_manager]`) impl, one
 //!    `#[handles_cmd(Cmd)]` stub per command typed from its `emits` and
 //!    `refuses` (and marked `starts` where the proto says so), one
-//!    `#[applies(Event)]` stub per event, `todo!()` bodies; and, for a saga,
-//!    the `#[saga]` impl, with an `#[on_refused(Cmd)]` callback stub for
+//!    `#[applies(Event)]` stub per event, `todo!()` bodies; and, for a policy,
+//!    the `#[policy]` impl, with an `#[on_refused(Cmd)]` callback stub for
 //!    each command angzarr-cli's refusal switch selects for translate. The file is the user's and is never
 //!    overwritten; `--missing` appends only the stubs that are absent.
 //!    Every handler it writes returns its events; a continuation step
@@ -85,7 +85,7 @@
 //!   `R` is a shape or a `Record<Self>`, whose continuation steps return no
 //!   `Result` either. A refusal is an event the handler records. On a
 //!   process manager, `starts` marks a starting input.
-//! - [`on_refused`]`(Cmd)`, one per command of another domain that a saga
+//! - [`on_refused`]`(Cmd)`, one per command of another domain that a policy
 //!   sent on this domain's behalf and whose refusals it handles: a fact
 //!   handler, `fn(&self, refused: CommandRefused<Cmd>, ctx: &Context) ->
 //!   R` (see *Refusals*).
@@ -158,10 +158,10 @@
 //! ## Commands and facts
 //!
 //! If it can't be refused, it is a fact. A **command** (a request: a user,
-//! a CLI, an API, a saga) may be refused, so its handler returns
+//! a CLI, an API, a policy) may be refused, so its handler returns
 //! `Result`, and a refusal goes back to the caller, the domain recording
 //! nothing. A **fact** (a timeout, a webhook, an import, a refusal fact
-//! from a saga) already happened and is never refused: its handler
+//! from a policy) already happened and is never refused: its handler
 //! returns no `Result` and always records an outcome, a refusal included,
 //! as an event (`PayoutRefused`). A fact's step cannot fail; only a bug
 //! can. The router hands a fact to
@@ -190,7 +190,7 @@
 //! rejection, a message only. Either way the domain's `Domain::Rejection`
 //! is `markup::Rejection<R>`: `Message(R)`, the domain's own rejection as
 //! returned, or `Typed`, the object packed with its diagnostic. A refused
-//! saga receives either as angzarr's `RefusalResponse { refusal, message
+//! policy receives either as angzarr's `RefusalResponse { refusal, message
 //! }` (`Rejection::response`). On angzarr the glue converts it with
 //! `Into<CommandRejectedError>`, packing the object into the status
 //! details.
@@ -199,15 +199,15 @@
 //!
 //! A process manager IS A DOMAIN: [`process_manager`] takes the same
 //! arguments and markers as [`aggregate`] and generates the same
-//! expansion. Its inputs are commands (which sagas send it, and which it
+//! expansion. Its inputs are commands (which policies send it, and which it
 //! may refuse) and facts (timeouts, webhooks, refusal facts); its only
 //! output is its own events. It has no triggers: it subscribes to no
-//! domain, and the saga for (another domain, the PM's domain) turns that
+//! domain, and the policy for (another domain, the PM's domain) turns that
 //! domain's events into commands to it. It sends no commands: to act on
 //! another domain it records an event carrying the command's data, and
-//! the saga for (the PM's domain, that domain) builds the command. Where a
-//! workflow's logic belongs together, the PM and its sagas run in one
-//! process, each saga hop a step committed on its own.
+//! the policy for (the PM's domain, that domain) builds the command. Where a
+//! workflow's logic belongs together, the PM and its policies run in one
+//! process, each policy hop a step committed on its own.
 //!
 //! What sets it apart, `markup::ProcessManager`:
 //!
@@ -228,34 +228,34 @@
 //! Deduplication is by command id and fact id, before the handler runs,
 //! as for any domain, and it has the one handler context every domain has.
 //!
-//! ## Sagas
+//! ## Policies
 //!
 //! ```text
-//! #[saga(name = "buyin-wallet", source = BuyIn, target = Wallet)]
+//! #[policy(name = "buyin-wallet", source = BuyIn, target = Wallet)]
 //! impl BuyInWallet {
 //!     #[on_event(BuyInStarted)]
-//!     fn started(&self, event: &BuyInStarted, ctx: &SagaContext) -> Commands<Wallet> { .. }
+//!     fn started(&self, event: &BuyInStarted, ctx: &PolicyContext) -> Commands<Wallet> { .. }
 //! }
 //! ```
 //!
-//! - [`saga`], on an inherent impl: `name` (the component its commands'
+//! - [`policy`], on an inherent impl: `name` (the component its commands'
 //!   ids are derived from), `source` and `target` (each a domain:
 //!   one source, one target).
 //! - [`on_event`]`(Event)`, one per event of the source it handles:
-//!   `fn(&self, event: &Event, ctx: &SagaContext) -> Commands<Target>`,
+//!   `fn(&self, event: &Event, ctx: &PolicyContext) -> Commands<Target>`,
 //!   pure and infallible, each command one the target decides, with the
 //!   root of its stream (for a process manager, `ctx.correlation_id()`).
 //!
 //! ## Refusals
 //!
-//! When a target refuses a saga's command, it records nothing. The saga
+//! When a target refuses a policy's command, it records nothing. The policy
 //! then delivers ONE unrefusable fact of the refusal to its OWN source
 //! domain, at the exact stream of its triggering event, whose id is the
 //! refused command's id; the source decides what the refusal means and
 //! records its own events. By one of two paths, chosen per command:
 //!
-//! - **Pass-through** (the default). The saga's generated
-//!   `Saga::on_refused` answers angzarr's standard `CommandRefused {
+//! - **Pass-through** (the default). The policy's generated
+//!   `Policy::on_refused` answers angzarr's standard `CommandRefused {
 //!   command, refusal, trigger }`, the typed refusal object still packed.
 //!   The source handles it in `#[on_refused(Cmd)]`, chosen by the refused
 //!   command's type, unpacking the object
@@ -263,23 +263,23 @@
 //!   types to do so. Which refusals a domain handles is inferred from its
 //!   `#[on_refused]` handlers (`REFUSALS` lists them): one with no handler
 //!   is caught at run time: the steps before it stay committed, and the
-//!   refusal fact is dead-lettered and alerted. A `CommandRefused` from outside a saga is
+//!   refusal fact is dead-lettered and alerted. A `CommandRefused` from outside a policy is
 //!   accepted when its trigger names the receiving stream.
-//! - **Translate**, for each command the saga has a callback for:
+//! - **Translate**, for each command the policy has a callback for:
 //!   `#[on_refused(Hold)] fn(&self, refusal: &Refusal<Hold>) -> F` on the
-//!   saga's impl reads the typed object and returns `F`, a fact its source
+//!   policy's impl reads the typed object and returns `F`, a fact its source
 //!   ingests, so the source never refers to the target's types. A callback
 //!   returning anything else does not compile. One marker,
-//!   `#[on_refused(Cmd)]`, names both the source's handler and the saga's
+//!   `#[on_refused(Cmd)]`, names both the source's handler and the policy's
 //!   callback.
 //!
 //! The callback's PRESENCE is the selection: nothing else marks the mode,
-//! and `TRANSLATES` lists the commands the saga has callbacks for. It is
+//! and `TRANSLATES` lists the commands the policy has callbacks for. It is
 //! fixed at compile time, as angzarr-cli's refusal switch is angzarr's:
 //! in Rust the switch means the scaffold writes the callback stub, or does
 //! not. Nothing about it is visible at run time beyond which fact arrives.
 //!
-//! The trade-off: deleting a saga's callback
+//! The trade-off: deleting a policy's callback
 //! silently reverts that command to pass-through. The source then receives
 //! `CommandRefused`, and if it has no `#[on_refused]` handler for that
 //! command, the refusal is a run-time dead letter, not a compile error.
@@ -301,8 +301,8 @@
 //! whole registration: `registry.aggregate::<Wallet>(Wallet::default)`, or
 //! `registry.aggregate::<Wallet>(move || Wallet::with(config.clone()))` for
 //! one that carries immutable reference configuration; a process manager
-//! with `registry.process_manager::<BuyIn>(BuyIn::default)`, a saga with
-//! `registry.saga(BuyInWallet)`. The kernel builds a fresh instance per
+//! with `registry.process_manager::<BuyIn>(BuyIn::default)`, a policy with
+//! `registry.policy(BuyInWallet)`. The kernel builds a fresh instance per
 //! stream from the factory, replays the stream's events through the
 //! appliers, then calls the handler on the result. No instance outlives
 //! its input, and none is shared between streams.
@@ -339,7 +339,7 @@
 //! pub enum __WalletHoldRefuses { InsufficientFunds(InsufficientFunds), .. }
 //! impl Refusing<Hold> for Wallet { type Refuses = __WalletHoldRefuses; const REFUSES = ..; }
 //!
-//! // What a saga is checked against.
+//! // What a policy is checked against.
 //! impl Decides<Deposit> for Wallet {} // one per command
 //! impl Ingests<Payout> for Wallet {}  // one per fact
 //!
@@ -407,7 +407,7 @@
 //! }
 //! ```
 //!
-//! A saga's expansion is its `markup::Saga` impl: `NAME`, `Source`,
+//! A policy's expansion is its `markup::Policy` impl: `NAME`, `Source`,
 //! `Target`, `EVENTS`, `TRANSLATES`, and `on_refused`, which unpacks the
 //! refused command and either builds the pass-through `CommandRefused` or
 //! calls the translating callback.
@@ -417,8 +417,8 @@
 //! message-only command handlers whose `Result`s disagree on the
 //! rejection; a marker's type that is not its method's parameter type; a
 //! marked method whose shape is not the one above; a `refuses` type that is
-//! not a domain type; `starts` on an aggregate; a saga's `#[on_refused]`
-//! callback returning anything but a fact of its source; a saga handler's
+//! not a domain type; `starts` on an aggregate; a policy's `#[on_refused]`
+//! callback returning anything but a fact of its source; a policy handler's
 //! commands for another domain than its target.
 //!
 //! Which of the messages is a fact is the marker's to say, and the
@@ -427,7 +427,7 @@
 //!
 //! **Not on annals.** `Rules` is `()`. [`rejected`] and [`state_factory`],
 //! angzarr-macros' rejection handlers and state factories, are a
-//! `compile_error!` here: a refusal reaches the saga's source as a fact,
+//! `compile_error!` here: a refusal reaches the policy's source as a fact,
 //! handled in `#[on_refused]`, and the instance is built by `Default` or
 //! the registry's factory, as above.
 //!
@@ -1165,7 +1165,7 @@
 //! }
 //! ```
 //!
-//! Nor does a `#[rejected]` handler: a refusal reaches the saga's source
+//! Nor does a `#[rejected]` handler: a refusal reaches the policy's source
 //! as a fact, handled in `#[on_refused]`.
 //!
 //! ```compile_fail
@@ -1296,18 +1296,18 @@
 //! }
 //! ```
 //!
-//! A domain, a process manager and a saga that compile (the control for the
+//! A domain, a process manager and a policy that compile (the control for the
 //! examples below): typed refusals, a starting input, a refusal handler and
-//! a pass-through saga.
+//! a pass-through policy.
 //!
 //! ```no_run
 //! # use std::convert::Infallible;
 //! # use annals::next::markup::{
-//! #     CommandRefused, Commands, Context, DomainMessage, SagaContext, Record, Refusal, Refuses,
+//! #     CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record, Refusal, Refuses,
 //! # };
 //! # use annals::next::WireError;
 //! # use annals_macros::{
-//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, saga,
+//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, policy,
 //! # };
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
@@ -1416,10 +1416,10 @@
 //!     fn lost(&mut self, _event: Lost) {}
 //! }
 //!
-//! #[saga(name = "timer-lamp", source = Timer, target = Lamp)]
+//! #[policy(name = "timer-lamp", source = Timer, target = Lamp)]
 //! impl TimerLamp {
 //!     #[on_event(Rang)]
-//!     fn rang(&self, _event: &Rang, ctx: &SagaContext) -> Commands<Lamp> {
+//!     fn rang(&self, _event: &Rang, ctx: &PolicyContext) -> Commands<Lamp> {
 //!         Commands::none().to(ctx.correlation_id().clone(), SwitchOn)
 //!     }
 //! }
@@ -1431,11 +1431,11 @@
 //! ```compile_fail
 //! # use std::convert::Infallible;
 //! # use annals::next::markup::{
-//! #     CommandRefused, Commands, Context, DomainMessage, SagaContext, Record, Refusal, Refuses,
+//! #     CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record, Refusal, Refuses,
 //! # };
 //! # use annals::next::WireError;
 //! # use annals_macros::{
-//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, saga,
+//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, policy,
 //! # };
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
@@ -1517,11 +1517,11 @@
 //! ```compile_fail
 //! # use std::convert::Infallible;
 //! # use annals::next::markup::{
-//! #     CommandRefused, Commands, Context, DomainMessage, SagaContext, Record, Refusal, Refuses,
+//! #     CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record, Refusal, Refuses,
 //! # };
 //! # use annals::next::WireError;
 //! # use annals_macros::{
-//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, saga,
+//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, policy,
 //! # };
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
@@ -1603,11 +1603,11 @@
 //! ```compile_fail
 //! # use std::convert::Infallible;
 //! # use annals::next::markup::{
-//! #     CommandRefused, Commands, Context, DomainMessage, SagaContext, Record, Refusal, Refuses,
+//! #     CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record, Refusal, Refuses,
 //! # };
 //! # use annals::next::WireError;
 //! # use annals_macros::{
-//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, saga,
+//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, policy,
 //! # };
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
@@ -1689,11 +1689,11 @@
 //! ```compile_fail
 //! # use std::convert::Infallible;
 //! # use annals::next::markup::{
-//! #     CommandRefused, Commands, Context, DomainMessage, SagaContext, Record, Refusal, Refuses,
+//! #     CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record, Refusal, Refuses,
 //! # };
 //! # use annals::next::WireError;
 //! # use annals_macros::{
-//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, saga,
+//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, policy,
 //! # };
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
@@ -1775,11 +1775,11 @@
 //! ```compile_fail
 //! # use std::convert::Infallible;
 //! # use annals::next::markup::{
-//! #     CommandRefused, Commands, Context, DomainMessage, SagaContext, Record, Refusal, Refuses,
+//! #     CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record, Refusal, Refuses,
 //! # };
 //! # use annals::next::WireError;
 //! # use annals_macros::{
-//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, saga,
+//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, policy,
 //! # };
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
@@ -1864,16 +1864,16 @@
 //! ```
 //!
 //! A process manager has no triggers: `#[on]` is gone. Another domain's
-//! events reach it as commands, through a saga.
+//! events reach it as commands, through a policy.
 //!
 //! ```compile_fail
 //! # use std::convert::Infallible;
 //! # use annals::next::markup::{
-//! #     CommandRefused, Commands, Context, DomainMessage, SagaContext, Record, Refusal, Refuses,
+//! #     CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record, Refusal, Refuses,
 //! # };
 //! # use annals::next::WireError;
 //! # use annals_macros::{
-//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, saga,
+//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, policy,
 //! # };
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
@@ -1965,11 +1965,11 @@
 //! ```compile_fail
 //! # use std::convert::Infallible;
 //! # use annals::next::markup::{
-//! #     CommandRefused, Commands, Context, DomainMessage, SagaContext, Record, Refusal, Refuses,
+//! #     CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record, Refusal, Refuses,
 //! # };
 //! # use annals::next::WireError;
 //! # use annals_macros::{
-//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, saga,
+//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, policy,
 //! # };
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
@@ -2027,11 +2027,11 @@
 //! ```compile_fail
 //! # use std::convert::Infallible;
 //! # use annals::next::markup::{
-//! #     CommandRefused, Commands, Context, DomainMessage, SagaContext, Record, Refusal, Refuses,
+//! #     CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record, Refusal, Refuses,
 //! # };
 //! # use annals::next::WireError;
 //! # use annals_macros::{
-//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, saga,
+//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, policy,
 //! # };
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
@@ -2115,18 +2115,18 @@
 //! }
 //! ```
 //!
-//! A saga translating a command's refusals: its `#[on_refused(SwitchOn)]`
+//! A policy translating a command's refusals: its `#[on_refused(SwitchOn)]`
 //! callback is the selection, and returns the source's own fact (the control
 //! for the two below).
 //!
 //! ```no_run
 //! # use std::convert::Infallible;
 //! # use annals::next::markup::{
-//! #     CommandRefused, Commands, Context, DomainMessage, SagaContext, Record, Refusal, Refuses,
+//! #     CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record, Refusal, Refuses,
 //! # };
 //! # use annals::next::WireError;
 //! # use annals_macros::{
-//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, saga,
+//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, policy,
 //! # };
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
@@ -2235,10 +2235,10 @@
 //!     fn lost(&mut self, _event: Lost) {}
 //! }
 //!
-//! #[saga(name = "timer-lamp", source = Timer, target = Lamp)]
+//! #[policy(name = "timer-lamp", source = Timer, target = Lamp)]
 //! impl TimerLamp {
 //!     #[on_event(Rang)]
-//!     fn rang(&self, _event: &Rang, ctx: &SagaContext) -> Commands<Lamp> {
+//!     fn rang(&self, _event: &Rang, ctx: &PolicyContext) -> Commands<Lamp> {
 //!         Commands::none().to(ctx.correlation_id().clone(), SwitchOn)
 //!     }
 //!
@@ -2255,11 +2255,11 @@
 //! ```compile_fail
 //! # use std::convert::Infallible;
 //! # use annals::next::markup::{
-//! #     CommandRefused, Commands, Context, DomainMessage, SagaContext, Record, Refusal, Refuses,
+//! #     CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record, Refusal, Refuses,
 //! # };
 //! # use annals::next::WireError;
 //! # use annals_macros::{
-//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, saga,
+//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, policy,
 //! # };
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
@@ -2368,10 +2368,10 @@
 //!     fn lost(&mut self, _event: Lost) {}
 //! }
 //!
-//! #[saga(name = "timer-lamp", source = Timer, target = Lamp)]
+//! #[policy(name = "timer-lamp", source = Timer, target = Lamp)]
 //! impl TimerLamp {
 //!     #[on_event(Rang)]
-//!     fn rang(&self, _event: &Rang, ctx: &SagaContext) -> Commands<Lamp> {
+//!     fn rang(&self, _event: &Rang, ctx: &PolicyContext) -> Commands<Lamp> {
 //!         Commands::none().to(ctx.correlation_id().clone(), SwitchOn)
 //!     }
 //!
@@ -2388,11 +2388,11 @@
 //! ```compile_fail
 //! # use std::convert::Infallible;
 //! # use annals::next::markup::{
-//! #     CommandRefused, Commands, Context, DomainMessage, SagaContext, Record, Refusal, Refuses,
+//! #     CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record, Refusal, Refuses,
 //! # };
 //! # use annals::next::WireError;
 //! # use annals_macros::{
-//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, saga,
+//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, policy,
 //! # };
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
@@ -2501,10 +2501,10 @@
 //!     fn lost(&mut self, _event: Lost) {}
 //! }
 //!
-//! #[saga(name = "timer-lamp", source = Timer, target = Lamp, translate(SwitchOn))]
+//! #[policy(name = "timer-lamp", source = Timer, target = Lamp, translate(SwitchOn))]
 //! impl TimerLamp {
 //!     #[on_event(Rang)]
-//!     fn rang(&self, _event: &Rang, ctx: &SagaContext) -> Commands<Lamp> {
+//!     fn rang(&self, _event: &Rang, ctx: &PolicyContext) -> Commands<Lamp> {
 //!         Commands::none().to(ctx.correlation_id().clone(), SwitchOn)
 //!     }
 //!
@@ -2515,17 +2515,17 @@
 //! }
 //! ```
 //!
-//! A saga sends to its one target: commands for another domain do not
+//! A policy sends to its one target: commands for another domain do not
 //! compile.
 //!
 //! ```compile_fail
 //! # use std::convert::Infallible;
 //! # use annals::next::markup::{
-//! #     CommandRefused, Commands, Context, DomainMessage, SagaContext, Record, Refusal, Refuses,
+//! #     CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record, Refusal, Refuses,
 //! # };
 //! # use annals::next::WireError;
 //! # use annals_macros::{
-//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, saga,
+//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, policy,
 //! # };
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
@@ -2634,10 +2634,10 @@
 //!     fn lost(&mut self, _event: Lost) {}
 //! }
 //!
-//! #[saga(name = "timer-lamp", source = Timer, target = Lamp)]
+//! #[policy(name = "timer-lamp", source = Timer, target = Lamp)]
 //! impl TimerLamp {
 //!     #[on_event(Rang)]
-//!     fn rang(&self, _event: &Rang, ctx: &SagaContext) -> Commands<Timer> {
+//!     fn rang(&self, _event: &Rang, ctx: &PolicyContext) -> Commands<Timer> {
 //!         Commands::none().to(ctx.correlation_id().clone(), StartTimer)
 //!     }
 //! }
@@ -2706,9 +2706,9 @@ pub fn handles_fact(_attr: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 
-/// On a domain: the handler of the refusal of the saga command `Cmd` it
+/// On a domain: the handler of the refusal of the policy command `Cmd` it
 /// caused, passed through (`#[on_refused(Cmd)]`, an infallible fact
-/// handler of `markup::CommandRefused<Cmd>`). On a saga: the translating
+/// handler of `markup::CommandRefused<Cmd>`). On a policy: the translating
 /// callback for `Cmd`, returning a fact of the source. Inert: the
 /// component's macro reads it.
 #[proc_macro_attribute]
@@ -2724,12 +2724,12 @@ pub fn applies(_attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 /// angzarr-macros' rejection handler, which annals refuses: a refusal
-/// reaches its saga's source as a fact, handled in `#[on_refused]`.
+/// reaches its policy's source as a fact, handled in `#[on_refused]`.
 #[proc_macro_attribute]
 pub fn rejected(_attr: TokenStream, _item: TokenStream) -> TokenStream {
     Error::new(
         Span::call_site(),
-        "annals has no #[rejected]: a refusal reaches the saga's source as a fact, \
+        "annals has no #[rejected]: a refusal reaches the policy's source as a fact, \
          handled in #[on_refused(Cmd)]",
     )
     .into_compile_error()
@@ -2749,18 +2749,18 @@ pub fn state_factory(_attr: TokenStream, _item: TokenStream) -> TokenStream {
     .into()
 }
 
-/// Marks an inherent impl as a SAGA: `#[saga(name = "..", source = <domain>,
-/// target = <domain>)]` (see the crate docs). Generates `markup::Saga`:
+/// Marks an inherent impl as a POLICY: `#[policy(name = "..", source = <domain>,
+/// target = <domain>)]` (see the crate docs). Generates `markup::Policy`:
 /// its refusal pass-through, and translate for each command its
 /// `#[on_refused]` callbacks name.
 #[proc_macro_attribute]
-pub fn saga(attr: TokenStream, item: TokenStream) -> TokenStream {
-    flow(attr.into(), item.into(), Flow::Saga)
+pub fn policy(attr: TokenStream, item: TokenStream) -> TokenStream {
+    flow(attr.into(), item.into(), Flow::Policy)
         .unwrap_or_else(Error::into_compile_error)
         .into()
 }
 
-/// Marks a saga's handler for one event of its source. Inert: [`saga`]
+/// Marks a policy's handler for one event of its source. Inert: [`policy`]
 /// reads it.
 #[proc_macro_attribute]
 pub fn on_event(_attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -2808,11 +2808,11 @@ fn markup() -> Tokens {
 /// Which flow [`flow`] expands.
 #[derive(Clone, Copy, PartialEq)]
 enum Flow {
-    Saga,
+    Policy,
     Projector,
 }
 
-/// One `key = value` argument of `#[saga]` or `#[projector]`.
+/// One `key = value` argument of `#[policy]` or `#[projector]`.
 struct FlowArg {
     key: Ident,
     value: Expr,
@@ -2824,7 +2824,7 @@ impl Parse for FlowArg {
         if !input.peek(Token![=]) {
             return Err(Error::new_spanned(
                 key,
-                "#[saga] and #[projector] take `key = value` arguments only; a saga's \
+                "#[policy] and #[projector] take `key = value` arguments only; a policy's \
                  translate mode is its `#[on_refused(Cmd)]` callback's presence",
             ));
         }
@@ -2839,7 +2839,9 @@ impl Parse for FlowArg {
 /// What a flow's arguments are.
 fn usage(flow: Flow) -> &'static str {
     match flow {
-        Flow::Saga => "#[saga] takes `name = \"..\"`, `source = <domain>` and `target = <domain>`",
+        Flow::Policy => {
+            "#[policy] takes `name = \"..\"`, `source = <domain>` and `target = <domain>`"
+        }
         Flow::Projector => "#[projector] takes `name = \"..\"` and `source = <aggregate>`",
     }
 }
@@ -2880,7 +2882,7 @@ fn marked<'a>(imp: &'a ItemImpl, markers: &[&'static str]) -> syn::Result<Vec<Ma
     Ok(found)
 }
 
-/// The expansion of a saga or a projector: the impl as given (its markers
+/// The expansion of a policy or a projector: the impl as given (its markers
 /// inert) and its trait.
 fn flow(attr: Tokens, item: Tokens, flow: Flow) -> syn::Result<Tokens> {
     let args = Punctuated::<FlowArg, Token![,]>::parse_terminated.parse2(attr)?;
@@ -2889,7 +2891,7 @@ fn flow(attr: Tokens, item: Tokens, flow: Flow) -> syn::Result<Tokens> {
         match (key.to_string().as_str(), flow) {
             ("name", _) => name = Some(value),
             ("source", _) => source = Some(value),
-            ("target", Flow::Saga) => target = Some(value),
+            ("target", Flow::Policy) => target = Some(value),
             _ => return Err(Error::new_spanned(key, usage(flow))),
         }
     }
@@ -2899,7 +2901,7 @@ fn flow(attr: Tokens, item: Tokens, flow: Flow) -> syn::Result<Tokens> {
     let self_ty = &imp.self_ty;
     let m = markup();
     let generated = match flow {
-        Flow::Saga => {
+        Flow::Policy => {
             let target = target.ok_or_else(|| Error::new(Span::call_site(), usage(flow)))?;
             let methods = marked(&imp, &["on_event", "on_refused"])?;
             let events: Vec<_> = methods.iter().filter(|x| x.marker == "on_event").collect();
@@ -2915,7 +2917,7 @@ fn flow(attr: Tokens, item: Tokens, flow: Flow) -> syn::Result<Tokens> {
             let commands: Vec<_> = callbacks.iter().map(|x| &x.args.ty).collect();
             let callback_methods: Vec<_> = callbacks.iter().map(|x| &x.method.sig.ident).collect();
             quote! {
-                impl #m::Saga for #self_ty {
+                impl #m::Policy for #self_ty {
                     const NAME: &'static str = #name;
                     type Source = #source;
                     type Target = #target;
@@ -2931,7 +2933,7 @@ fn flow(attr: Tokens, item: Tokens, flow: Flow) -> syn::Result<Tokens> {
                             if let ::core::option::Option::Some(refusal) =
                                 #m::__translating::<#commands>(refusal)
                             {
-                                return #m::__domestic::<<Self as #m::Saga>::Source, _>(
+                                return #m::__domestic::<<Self as #m::Policy>::Source, _>(
                                     &<#self_ty>::#callback_methods(self, &refusal),
                                 );
                             }
@@ -2942,8 +2944,8 @@ fn flow(attr: Tokens, item: Tokens, flow: Flow) -> syn::Result<Tokens> {
                     fn on_event(
                         &self,
                         event: &::annals::next::Any,
-                        ctx: &#m::SagaContext,
-                    ) -> ::core::option::Option<#m::Commands<<Self as #m::Saga>::Target>> {
+                        ctx: &#m::PolicyContext,
+                    ) -> ::core::option::Option<#m::Commands<<Self as #m::Policy>::Target>> {
                         #(
                             if let ::core::result::Result::Ok(::core::option::Option::Some(event)) =
                                 #m::__decode::<#event_types>(event)

@@ -91,7 +91,7 @@ mod wire;
 #[path = "toys.test.rs"]
 pub(crate) mod toys;
 
-// Aggregates, a process manager, sagas and a projector written in
+// Aggregates, a process manager, policies and a projector written in
 // annals-macros' markup (`markup` is its runtime), on annals as a dependent
 // sees it (`::annals`), beside a hand-written domain.
 #[cfg(test)]

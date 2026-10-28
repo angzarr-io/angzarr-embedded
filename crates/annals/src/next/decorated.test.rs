@@ -1,6 +1,6 @@
 //! A **wallet** and a **lamp** written entirely in annals-macros' markup,
 //! beside a hand-written **tally**, in one registry; a **buy-in**, a
-//! process manager, and the **sagas** between it and the wallet. All are
+//! process manager, and the **policies** between it and the wallet. All are
 //! on annals as a dependent sees it, `::annals`, the path the expansion
 //! names: not `crate::`, whose types are another instance's in this test
 //! build.
@@ -29,7 +29,7 @@
 //! and without a snapshot form; the generated `WalletHandler` trait and
 //! constants; the hand-written domain working beside the generated ones;
 //! the process manager as a domain (its root the correlation, its start
-//! rule, its one context); what the sagas answer (their commands, the
+//! rule, its one context); what the policies answer (their commands, the
 //! refusal pass-through and translate) and the source's `#[on_refused]`;
 //! and the projectors. What does not
 //! compile is pinned by annals-macros' `compile_fail` examples.
@@ -39,9 +39,9 @@ use std::fmt;
 
 use ::annals::next::markup::v1::RefusalResponse;
 use ::annals::next::markup::{
-    self, assert_step_idempotent, CommandRefused, Commands, Context, DomainMessage, Emit,
-    ProcessManager, ProjectionContext, Record, Refusal, Refuses, Refusing, Rejection, Saga,
-    SagaContext, TypeName, MARKUP_RULES_VERSION, STEP_LIMIT,
+    self, assert_step_idempotent, CommandRefused, Commands, Context, DomainMessage, Emit, Policy,
+    PolicyContext, ProcessManager, ProjectionContext, Record, Refusal, Refuses, Refusing,
+    Rejection, TypeName, MARKUP_RULES_VERSION, STEP_LIMIT,
 };
 use ::annals::next::v1::{
     command_page, Command, CommandBook, CommandPage, ConflictResolution, Cover, EventBook,
@@ -54,8 +54,8 @@ use ::annals::next::{
 };
 use annals_diagnostic::{Arg, Diagnostic, Report};
 use annals_macros::{
-    aggregate, applies, handles_cmd, handles_fact, on_event, on_refused, process_manager,
-    projector, projects, saga,
+    aggregate, applies, handles_cmd, handles_fact, on_event, on_refused, policy, process_manager,
+    projector, projects,
 };
 
 // ---------------------------------------------------------------- the wire
@@ -725,7 +725,7 @@ impl Wallet {
         Ok(Emit::of(Spun {}).then(Self::spin_again))
     }
 
-    /// A fact (sent by a saga): no `Result`. A payout the wallet cannot
+    /// A fact (sent by a policy): no `Result`. A payout the wallet cannot
     /// cover is not refused; its refusal is recorded.
     #[handles_fact(Payout)]
     fn payout(&self, fact: Payout, _ctx: &Context) -> Record<Self> {
@@ -1982,31 +1982,31 @@ mod beside {
     }
 }
 
-// --------------------------------------------- the process manager and sagas
+// --------------------------------------------- the process manager and policies
 //
-// A PROCESS MANAGER IS A DOMAIN. The buy-in takes commands (which sagas
+// A PROCESS MANAGER IS A DOMAIN. The buy-in takes commands (which policies
 // send it, and which it may refuse) and facts (a timeout; refusal facts),
 // and records only its own events; it subscribes to nothing. Its root is
 // the correlation, and only its declared starting inputs may start an
-// instance. Two sagas carry events across: the buy-in's into holds on the
+// instance. Two policies carry events across: the buy-in's into holds on the
 // wallet (BuyInWallet), and the wallet's holds back into the buy-in
 // (WalletBuyIn). When the wallet refuses a hold (with a typed
-// InsufficientFunds, recording nothing), the saga answers one refusal fact
+// InsufficientFunds, recording nothing), the policy answers one refusal fact
 // for the buy-in: passed through as `CommandRefused`, handled by
-// `#[on_refused(Hold)]`; or, where the saga has its own
+// `#[on_refused(Hold)]`; or, where the policy has its own
 // `#[on_refused(Hold)]` callback, the callback's domestic fact, `HoldLost`.
-// What the sagas answer is pinned here; running them, each step committed
+// What the policies answer is pinned here; running them, each step committed
 // on its own, comes with the kernel's committed-step dispatch.
 //
-// Also pinned: translate is selected by the presence of the saga's
+// Also pinned: translate is selected by the presence of the policy's
 // callback, nothing else, and the callback returns a fact of its source;
 // typed refusals are `Refuses<Self, Cmd>` in `markup::Rejection<R>`, the
 // objects `Diagnostic`s; one marker, `#[on_refused]`, serves the source's
-// handler and the saga's callback; annals does not check that a PM
+// handler and the policy's callback; annals does not check that a PM
 // declares a starting input (angzarr-cli warns), so nothing here pins it;
-// `Saga::on_refused` answers the fact's payload as `Any`; a
-// `CommandRefused` from outside a saga is accepted when its trigger names
-// the receiving stream; a saga names a PM target's root with the
+// `Policy::on_refused` answers the fact's payload as `Any`; a
+// `CommandRefused` from outside a policy is accepted when its trigger names
+// the receiving stream; a policy names a PM target's root with the
 // correlation.
 
 /// A buy-in: a process across the wallet, keyed by its correlation.
@@ -2082,7 +2082,7 @@ impl BuyIn {
         })
     }
 
-    /// The same refusal, translated by the saga into the buy-in's own
+    /// The same refusal, translated by the policy into the buy-in's own
     /// fact: the buy-in never reads the wallet's refusal object.
     #[handles_fact(HoldLost)]
     fn hold_lost(&self, fact: HoldLost, _ctx: &Context) -> Record<Self> {
@@ -2113,15 +2113,15 @@ impl BuyIn {
     }
 }
 
-/// The saga for (buy-in, wallet): a started buy-in holds its stake on the
+/// The policy for (buy-in, wallet): a started buy-in holds its stake on the
 /// wallet it names. Pass-through: a refused hold reaches the buy-in as
 /// `CommandRefused`.
 pub struct BuyInWallet;
 
-#[saga(name = "buyin-wallet", source = BuyIn, target = Wallet)]
+#[policy(name = "buyin-wallet", source = BuyIn, target = Wallet)]
 impl BuyInWallet {
     #[on_event(BuyInStarted)]
-    fn started(&self, event: &BuyInStarted, _ctx: &SagaContext) -> Commands<Wallet> {
+    fn started(&self, event: &BuyInStarted, _ctx: &PolicyContext) -> Commands<Wallet> {
         Commands::none().to(uuid(&event.wallet), Hold { cents: event.cents })
     }
 }
@@ -2131,10 +2131,10 @@ impl BuyInWallet {
 /// object and hands the buy-in its own fact.
 pub struct TranslatingBuyInWallet;
 
-#[saga(name = "buyin-wallet", source = BuyIn, target = Wallet)]
+#[policy(name = "buyin-wallet", source = BuyIn, target = Wallet)]
 impl TranslatingBuyInWallet {
     #[on_event(BuyInStarted)]
-    fn started(&self, event: &BuyInStarted, _ctx: &SagaContext) -> Commands<Wallet> {
+    fn started(&self, event: &BuyInStarted, _ctx: &PolicyContext) -> Commands<Wallet> {
         Commands::none().to(uuid(&event.wallet), Hold { cents: event.cents })
     }
 
@@ -2149,14 +2149,14 @@ impl TranslatingBuyInWallet {
     }
 }
 
-/// The saga for (wallet, buy-in): a hold on the wallet is recorded on the
+/// The policy for (wallet, buy-in): a hold on the wallet is recorded on the
 /// buy-in of its correlation. The buy-in's root IS that correlation.
 pub struct WalletBuyIn;
 
-#[saga(name = "wallet-buyin", source = Wallet, target = BuyIn)]
+#[policy(name = "wallet-buyin", source = Wallet, target = BuyIn)]
 impl WalletBuyIn {
     #[on_event(Held)]
-    fn held(&self, event: &Held, ctx: &SagaContext) -> Commands<BuyIn> {
+    fn held(&self, event: &Held, ctx: &PolicyContext) -> Commands<BuyIn> {
         Commands::none().to(
             ctx.correlation_id().clone(),
             RecordHeld { cents: event.cents },
@@ -2285,7 +2285,7 @@ fn buy_in(names: &[&str]) -> Option<Vec<String>> {
     Some(names.iter().map(|n| format!("toy.buyin.v1.{n}")).collect())
 }
 
-/// The wallet and the buy-in, with no saga between them.
+/// The wallet and the buy-in, with no policy between them.
 fn buy_ins() -> Registry {
     let mut registry = registry();
     registry.process_manager::<BuyIn>(BuyIn::default);
@@ -2515,52 +2515,52 @@ mod process_manager {
     }
 }
 
-mod saga_registration {
+mod policy_registration {
     use super::*;
 
     #[test]
     #[should_panic(expected = "buyin-wallet")]
-    fn registering_a_saga_twice_panics() {
+    fn registering_a_policy_twice_panics() {
         let mut registry = registry();
-        registry.saga(BuyInWallet).saga(BuyInWallet);
+        registry.policy(BuyInWallet).policy(BuyInWallet);
     }
 }
 
-mod saga_events {
+mod policy_events {
     use super::*;
 
-    fn ctx(c: &Uuid) -> SagaContext {
-        SagaContext::new(trigger(c), c.clone(), at(1))
+    fn ctx(c: &Uuid) -> PolicyContext {
+        PolicyContext::new(trigger(c), c.clone(), at(1))
     }
 
-    /// A saga answers an event of its source with its `#[on_event]`
+    /// A policy answers an event of its source with its `#[on_event]`
     /// handler's commands, each with the root of its stream.
     #[test]
-    fn a_saga_answers_its_handlers_commands() {
+    fn a_policy_answers_its_handlers_commands() {
         let started = any(BuyInStarted {
             wallet: root().value.to_vec(),
             cents: 30,
         });
         let commands = BuyInWallet
             .on_event(&started, &ctx(&correlation(1)))
-            .expect("the saga handles BuyInStarted");
+            .expect("the policy handles BuyInStarted");
         assert_eq!(commands.orders(), [(root(), any(Hold { cents: 30 }))]);
     }
 
-    /// A saga addressing a process manager names the instance by the
+    /// A policy addressing a process manager names the instance by the
     /// event's correlation, its root.
     #[test]
-    fn a_saga_names_a_process_managers_root_with_the_correlation() {
+    fn a_policy_names_a_process_managers_root_with_the_correlation() {
         let commands = WalletBuyIn
             .on_event(&any(Held { cents: 5 }), &ctx(&correlation(7)))
-            .expect("the saga handles Held");
+            .expect("the policy handles Held");
         assert_eq!(
             commands.orders(),
             [(correlation(7), any(RecordHeld { cents: 5 }))]
         );
     }
 
-    /// An event the saga has no handler for answers nothing.
+    /// An event the policy has no handler for answers nothing.
     #[test]
     fn an_event_it_does_not_handle_answers_nothing() {
         assert!(BuyInWallet
@@ -2592,7 +2592,7 @@ mod typed_refusals {
         assert_eq!(wallet.len(), 2, "nothing was recorded");
     }
 
-    /// As a refused saga receives it: the object packed, and its message.
+    /// As a refused policy receives it: the object packed, and its message.
     #[test]
     fn a_typed_refusals_response_packs_its_object_and_message() {
         let registry = registry();
@@ -2648,7 +2648,7 @@ mod typed_refusals {
     }
 }
 
-/// The buy-in's first event at correlation `c` (sequence 0), as a saga's
+/// The buy-in's first event at correlation `c` (sequence 0), as a policy's
 /// trigger.
 fn trigger(c: &Uuid) -> EventRef {
     EventRef {
@@ -2657,7 +2657,7 @@ fn trigger(c: &Uuid) -> EventRef {
     }
 }
 
-/// A refusal of a hold for `cents`, sent by the buy-in saga for the
+/// A refusal of a hold for `cents`, sent by the buy-in policy for the
 /// buy-in at correlation `c`, with `response`.
 fn hold_refusal(c: &Uuid, cents: i64, response: RefusalResponse) -> markup::v1::Refusal {
     markup::v1::Refusal {
@@ -2685,7 +2685,7 @@ fn insufficient(short: i64) -> RefusalResponse {
     }
 }
 
-mod saga_refusals {
+mod policy_refusals {
     use super::*;
 
     /// Pass-through (the default): the generated `on_refused` answers
@@ -2718,7 +2718,7 @@ mod saga_refusals {
         );
     }
 
-    /// A saga's constants: what events it handles, and what it translates, the
+    /// A policy's constants: what events it handles, and what it translates, the
     /// latter derived from its `#[on_refused]` callbacks.
     #[test]
     fn its_constants_name_its_events_and_translations() {
@@ -2730,22 +2730,22 @@ mod saga_refusals {
             package: "toy.wallet.cmd.v1",
             name: "Hold",
         };
-        assert_eq!(<BuyInWallet as Saga>::EVENTS, [started]);
+        assert_eq!(<BuyInWallet as Policy>::EVENTS, [started]);
         assert_eq!(
-            <WalletBuyIn as Saga>::EVENTS,
+            <WalletBuyIn as Policy>::EVENTS,
             [TypeName {
                 package: "toy.wallet.v1",
                 name: "Held",
             }]
         );
-        assert_eq!(<BuyInWallet as Saga>::TRANSLATES, []);
-        assert_eq!(<TranslatingBuyInWallet as Saga>::TRANSLATES, [hold]);
+        assert_eq!(<BuyInWallet as Policy>::TRANSLATES, []);
+        assert_eq!(<TranslatingBuyInWallet as Policy>::TRANSLATES, [hold]);
     }
 
     /// The source's `#[on_refused(Hold)]` is chosen by the refused
     /// command's type, and reads the typed object: a `CommandRefused` of a
     /// hold, delivered to the buy-in its trigger names, records the
-    /// failure. Delivered from outside a saga, it is accepted because
+    /// failure. Delivered from outside a policy, it is accepted because
     /// its trigger names the receiving stream.
     #[test]
     fn on_refused_dispatches_by_the_refused_commands_type() {

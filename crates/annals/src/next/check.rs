@@ -104,7 +104,7 @@ pub enum Malformed {
     RootNotCorrelation,
     /// A refusal fact (angzarr's `CommandRefused`) for a stream other than
     /// the one its trigger names, domain, root and edition: a refusal fact
-    /// is accepted only by the exact stream of the saga's triggering
+    /// is accepted only by the exact stream of the policy's triggering
     /// event.
     RefusalMisaddressed,
 }

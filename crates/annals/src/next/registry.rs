@@ -245,8 +245,8 @@ impl Diagnostic for Misconfigured {
 #[derive(Default)]
 pub struct Registry {
     domains: BTreeMap<String, Entry>,
-    /// The registered sagas' names.
-    sagas: Vec<&'static str>,
+    /// The registered policies' names.
+    policies: Vec<&'static str>,
     projectors: Vec<ProjectorEntry>,
 }
 
@@ -418,22 +418,22 @@ impl Registry {
         entry.process_manager = pm;
     }
 
-    /// Register `saga`, a marked-up saga (`#[saga]`). Registering one twice
+    /// Register `policy`, a marked-up policy (`#[policy]`). Registering one twice
     /// PANICS at startup.
     ///
-    /// annals does not run a saga yet: its steps, each committed on its
-    /// own (the source's events before the saga's command; a refusal fact
+    /// annals does not run a policy yet: its steps, each committed on its
+    /// own (the source's events before the policy's command; a refusal fact
     /// as a step of its own), arrive with the kernel's committed-step
-    /// dispatch. What a saga answers is its markup's
-    /// ([`Saga::on_event`](super::markup::Saga::on_event),
-    /// [`Saga::on_refused`](super::markup::Saga::on_refused)), whatever
+    /// dispatch. What a policy answers is its markup's
+    /// ([`Policy::on_event`](super::markup::Policy::on_event),
+    /// [`Policy::on_refused`](super::markup::Policy::on_refused)), whatever
     /// runs it.
-    pub fn saga<S: super::markup::Saga>(&mut self, saga: S) -> &mut Self {
-        if self.sagas.contains(&S::NAME) {
-            panic!("saga \"{}\" is registered already", S::NAME);
+    pub fn policy<S: super::markup::Policy>(&mut self, policy: S) -> &mut Self {
+        if self.policies.contains(&S::NAME) {
+            panic!("policy \"{}\" is registered already", S::NAME);
         }
-        drop(saga);
-        self.sagas.push(S::NAME);
+        drop(policy);
+        self.policies.push(S::NAME);
         self
     }
 

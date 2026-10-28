@@ -42,7 +42,7 @@ places:
 | A3 | `Header.rules` is a free string replay never checks. | The rules version is registered, stamped per event, resolved by a `Rulebook` at replay, and invalidates snapshots. [Rules versions](#rules-versions) |
 | A5 | `Header.schema` is unused; there is no upcasting. | A payload's type URL is its version. Old types are upcast by type URL, strictly, events at read and (discouraged) commands before decode. [Decode](#step-5-decode-then-decide-or-ingest) |
 | A6 | Events emitted before a rejection stay in the `Stream`. | Decide is pure and stages its events; a rejection leaves nothing. |
-| B1 | The "saga" is a stateless policy; the target-contiguity invariant is undocumented; `backlog` replays the source once per target. | Policies and projections share one base; the invariant is documented and checked; the backlog is one pass. [Reactions](#reactions-and-the-chain) |
+| B1 | The "policy" is a stateless policy; the target-contiguity invariant is undocumented; `backlog` replays the source once per target. | Policies and projections share one base; the invariant is documented and checked; the backlog is one pass. [Reactions](#reactions-and-the-chain) |
 | B2 | `Projection::on` gets no stream identity or position. | Every reaction gets a `Committed`: the cover, the sequence, the metadata, the event, the state just after. |
 | B6 | The store port is synchronous, whole-stream, `u64`-keyed; `read -> Option` hides I/O failure. | Sync and async ports over opaque pages keyed by `Cover`, a unit of work, `read_from`, `find_command`, continuity checks; `StoreError` separates conflict, caller bug, unreadable and unavailable. [The store port](#the-store-port) |
 | B8 | Kernel faults are folded into business rejections. | `Failure` keeps the rejection apart from malformed input, kernel faults and failures down the chain, each classified for recovery. [Errors](#errors-and-recovery) |
@@ -475,7 +475,7 @@ whose meta lacks one is `ReplayError::IncompleteMeta`.
 ## Process managers
 
 A process manager is a domain (angzarr decision 14.31). Its inputs are
-commands, which sagas send it, and facts (timeouts, webhooks); it never
+commands, which policies send it, and facts (timeouts, webhooks); it never
 subscribes to another domain's events. So annals needs nothing of its own
 for one: its commands and facts take the five steps like any domain's, its
 events name the command or the fact's derived id as their cause, and its
@@ -953,7 +953,7 @@ no actor), and reactor re-runs deduplicate in both, with no switch.
   Draws are STRICT, via `CONFLICT_RESOLUTION_BY_COMMAND` (or the draw-system
   state lists no COMMUTATIVE). Every map field is a `btree_map`, so encoding
   is deterministic.
-- `saga.rs`'s `ListToDrawSystems` becomes a **`Policy`**; `Instantiate` and
+- `policy.rs`'s `ListToDrawSystems` becomes a **`Policy`**; `Instantiate` and
   `Inject` become the commands `Instantiate { source_seq, list }` and
   `ApplyListChange { source_seq, change }`, recorded by the draw system as
   its own events; `DrawSystemRejection::Gap` disappears (the kernel's `Gap`);
