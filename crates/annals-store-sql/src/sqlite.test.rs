@@ -17,9 +17,10 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection};
 use sqlx::{ConnectOptions, Connection};
 
 use super::{
-    covers, into_wal, migrate, pause, read_alone, read_from, read_only, unavailable, SqliteRead,
-    SqliteStore, BUSY_TIMEOUT, MIGRATOR,
+    covers, execute, into_wal, migrate, pause, read_alone, read_from, read_only, unavailable,
+    SqliteDialect, SqliteRead, SqliteStore, BUSY_TIMEOUT, MIGRATOR,
 };
+use crate::statements;
 use crate::{Damage, Integrity};
 
 annals::async_store_contract!(#[tokio::test], SqliteStore::open_in_memory().await.unwrap());
@@ -92,6 +93,34 @@ async fn a_dropped_unit_leaves_the_file_as_it_was() {
     assert_eq!(store.read_from(&stream, 0).await, Ok(None));
     drop(store);
     remove(&path);
+}
+
+/// A unit of work holds the write lock from its first read, so the head
+/// it loaded cannot move under it, and its append trusts that head rather
+/// than reading the stream's length again. Shown by a row the unit cannot
+/// see coming, written past the head through the unit's own connection
+/// (nothing else can write under it): the appends run on from the head
+/// the unit loaded, then from its own.
+#[tokio::test]
+async fn a_unit_of_work_appends_at_the_head_it_loaded() {
+    let mut store = SqliteStore::open_in_memory().await.unwrap();
+    let stream = cover("tasks", 1);
+    store.append(&stream, 0, &[page(0, 1)]).await.unwrap();
+    let mut unit = store.begin().await;
+    let loaded = unit.read_from(&stream, 0).await.unwrap().unwrap();
+    assert_eq!(loaded.next_sequence, 1);
+    let stray = statements::insert_page::<SqliteDialect>(&stream, &page(5, 2), 0).unwrap();
+    execute(unit.conn().unwrap(), stray).await.unwrap();
+    assert_eq!(
+        unit.append(&stream, 1, &[page(1, 3)]).await,
+        Ok(2),
+        "at the head it loaded"
+    );
+    assert_eq!(
+        unit.append(&stream, 2, &[page(2, 3)]).await,
+        Ok(3),
+        "then at its own"
+    );
 }
 
 #[tokio::test]
