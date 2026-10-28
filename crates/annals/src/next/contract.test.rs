@@ -44,6 +44,8 @@ enum Bug {
     KeepsTheFirstSnapshot,
     /// Its unit of work reads no snapshot.
     UnitSeesNoSnapshot,
+    /// Its commit position never moves, whatever is committed.
+    PositionStandsStill,
 }
 
 /// A store (`S` an [`InMemoryStore`]) or unit of work (an [`InMemoryTx`])
@@ -304,6 +306,13 @@ impl Store for Broken<InMemoryStore> {
             }),
         }
     }
+
+    fn commit_position(&mut self) -> Result<u64, StoreError> {
+        match self.bug {
+            Bug::PositionStandsStill => Ok(7),
+            _ => self.inner.commit_position(),
+        }
+    }
 }
 
 /// Whether `check` fails on a fresh store with `bug`.
@@ -410,6 +419,14 @@ fn the_snapshot_check_fails_a_store_that_keeps_the_first_or_a_unit_that_sees_non
     );
 }
 
+#[test]
+fn the_commit_position_check_fails_a_position_that_stands_still() {
+    fails_on!(
+        the_commit_position_rises_with_every_commit,
+        PositionStandsStill
+    );
+}
+
 /// A broken store is broken only where its bug says: with none, it passes
 /// every check, so a check that fails it above fails it for its bug.
 #[test]
@@ -426,4 +443,5 @@ fn a_broken_store_with_no_bug_passes_every_check() {
     block(an_empty_append_checks_and_creates_nothing(fresh()));
     block(a_read_past_the_end_is_empty_but_knows_the_end(fresh()));
     block(a_store_keeps_the_newest_snapshot_per_stream(fresh()));
+    block(the_commit_position_rises_with_every_commit(fresh()));
 }

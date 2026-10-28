@@ -45,6 +45,15 @@
 //! fresh_store)` runs the first, and an async store calls the pair check
 //! itself, as it does the read checks.
 //!
+//! Every store answers a commit position ([`Store::commit_position`](super::Store::commit_position),
+//! [`AsyncStore::commit_position`](super::AsyncStore::commit_position)),
+//! held to a check in the base section and one in the purge section. A
+//! third takes a `(reader, writer)` pair and commits through the writer, so
+//! a position that is the handle's rather than the store's is caught; a
+//! store whose handles share a database (two connections on one file) calls
+//! it itself, as it does the read checks:
+//! [`the_commit_position_counts_every_handles_commits`].
+//!
 //! Each check takes a fresh, empty store and panics, naming what failed.
 //! The pages are opaque to a store, so the checks write their own: a store
 //! never decodes a payload.
@@ -348,6 +357,38 @@ pub async fn a_store_keeps_the_newest_snapshot_per_stream<S: AsyncStore>(mut sto
     assert_eq!(unit.read_snapshot(&stream).await, Ok(Some(snapshot(4))));
 }
 
+pub async fn the_commit_position_rises_with_every_commit<S: AsyncStore>(mut store: S) {
+    let empty = store.commit_position().await.unwrap();
+    store
+        .append(&cover("account", 1), 0, &[page(0, 1)])
+        .await
+        .unwrap();
+    let appended = store.commit_position().await.unwrap();
+    assert!(appended > empty, "an append: {empty}, then {appended}");
+    store
+        .append(&cover("ledger", 1), 0, &[page(0, 2)])
+        .await
+        .unwrap();
+    let elsewhere = store.commit_position().await.unwrap();
+    assert!(
+        elsewhere > appended,
+        "an append to another domain's stream: {appended}, then {elsewhere}"
+    );
+    let mut unit = store.begin().await;
+    unit.append(&cover("account", 1), 1, &[page(1, 3)])
+        .await
+        .unwrap();
+    unit.append(&cover("account", 2), 0, &[page(0, 3)])
+        .await
+        .unwrap();
+    unit.commit().await.unwrap();
+    let committed = store.commit_position().await.unwrap();
+    assert!(
+        committed > elsewhere,
+        "a unit of work committed: {elsewhere}, then {committed}"
+    );
+}
+
 // ----------------------------------------------------------- purge (opt-in)
 
 fn snapshot(sequence: u64) -> Snapshot {
@@ -525,6 +566,38 @@ where
     assert_eq!(store.covers("account").await, Ok(vec![stream]));
 }
 
+pub async fn a_purge_never_lowers_the_commit_position<S>(mut store: S)
+where
+    S: AsyncStore + AsyncPurge,
+    for<'s> S::Unit<'s>: AsyncPurge,
+{
+    let purged = cover("account", 1);
+    let kept = cover("account", 2);
+    store
+        .append(&purged, 0, &[page(0, 1), page(1, 1)])
+        .await
+        .unwrap();
+    store.append(&kept, 0, &[page(0, 2)]).await.unwrap();
+    let before = store.commit_position().await.unwrap();
+    assert_eq!(store.purge(&purged).await, Ok(2));
+    let after = store.commit_position().await.unwrap();
+    assert!(after >= before, "a purge: {before}, then {after}");
+    let mut unit = store.begin().await;
+    unit.purge(&kept).await.unwrap();
+    unit.commit().await.unwrap();
+    let emptied = store.commit_position().await.unwrap();
+    assert!(
+        emptied >= after,
+        "a purge in a unit of work: {after}, then {emptied}"
+    );
+    store.append(&kept, 0, &[page(0, 3)]).await.unwrap();
+    let again = store.commit_position().await.unwrap();
+    assert!(
+        again > before,
+        "an append after the purges rises past every position before them: {before}, then {again}"
+    );
+}
+
 // ------------------------------------------------------------ read (opt-in)
 
 pub async fn a_read_unit_sees_the_store_as_it_began<R, W>((mut reader, mut writer): (R, W))
@@ -596,6 +669,37 @@ pub async fn a_read_unit_keeps_a_stream_purged_after_it_began<R, W>(
     let mut later = reader.begin_read().await;
     assert_eq!(later.covers("account").await, Ok(vec![kept]));
     assert_eq!(later.read_from(&purged, 0).await, Ok(None));
+}
+
+// ------------------------------------------- commit position, two handles
+
+/// The commit position is the store's, not the handle's: a commit through
+/// `writer` raises `reader`'s. Two handles on one fresh, empty store.
+pub async fn the_commit_position_counts_every_handles_commits<R, W>(
+    (mut reader, mut writer): (R, W),
+) where
+    R: AsyncStore,
+    W: AsyncEventStore,
+{
+    let empty = reader.commit_position().await.unwrap();
+    writer
+        .append(&cover("account", 1), 0, &[page(0, 1)])
+        .await
+        .unwrap();
+    let created = reader.commit_position().await.unwrap();
+    assert!(
+        created > empty,
+        "another handle's append: {empty}, then {created}"
+    );
+    writer
+        .append(&cover("account", 1), 1, &[page(1, 2)])
+        .await
+        .unwrap();
+    let grown = reader.commit_position().await.unwrap();
+    assert!(
+        grown > created,
+        "another handle's second append: {created}, then {grown}"
+    );
 }
 
 // ----------------------------------------------------- watch (opt-in)
@@ -707,6 +811,7 @@ macro_rules! store_contract {
             a_purged_stream_starts_again_from_nothing,
             a_purge_in_a_unit_of_work_lands_at_commit_or_not_at_all,
             a_unit_of_work_purges_its_own_appends_and_appends_after,
+            a_purge_never_lowers_the_commit_position,
         );
     };
     ($fresh:expr) => {
@@ -721,6 +826,7 @@ macro_rules! store_contract {
             an_empty_append_checks_and_creates_nothing,
             a_read_past_the_end_is_empty_but_knows_the_end,
             a_store_keeps_the_newest_snapshot_per_stream,
+            the_commit_position_rises_with_every_commit,
         );
     };
     (@pair $pair:expr; $($check:ident),* $(,)?) => {
@@ -771,6 +877,7 @@ macro_rules! async_store_contract {
             a_purged_stream_starts_again_from_nothing,
             a_purge_in_a_unit_of_work_lands_at_commit_or_not_at_all,
             a_unit_of_work_purges_its_own_appends_and_appends_after,
+            a_purge_never_lowers_the_commit_position,
         );
     };
     (#[$test:meta], $fresh:expr) => {
@@ -785,6 +892,7 @@ macro_rules! async_store_contract {
             an_empty_append_checks_and_creates_nothing,
             a_read_past_the_end_is_empty_but_knows_the_end,
             a_store_keeps_the_newest_snapshot_per_stream,
+            the_commit_position_rises_with_every_commit,
         );
     };
     (@each #[$test:meta], $fresh:expr; $($check:ident),* $(,)?) => {

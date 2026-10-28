@@ -133,6 +133,9 @@ enum Fault {
     DeletesNothing,
     /// Its purge deletes the events but keeps the snapshot.
     KeepsSnapshots,
+    /// Its purge is sound, but its commit position is how many events it
+    /// holds, so a purge lowers it.
+    CountsEvents,
 }
 
 /// An [`InMemoryStore`] whose purge has `fault`: every purge check must
@@ -142,7 +145,7 @@ struct Faulty {
     fault: Fault,
 }
 
-struct FaultyTx<'s>(crate::next::InMemoryTx<'s>);
+struct FaultyTx<'s>(crate::next::InMemoryTx<'s>, Fault);
 
 macro_rules! delegate_event_store {
     ($ty:ty, $($inner:tt)+) => {
@@ -200,6 +203,7 @@ delegate_event_store!(FaultyTx<'_>, 0);
 impl crate::next::Purge for Faulty {
     fn purge(&mut self, stream: &crate::next::v1::Cover) -> Result<u64, StoreError> {
         match self.fault {
+            Fault::CountsEvents => self.store.purge(stream),
             Fault::DeletesNothing => Ok(0),
             Fault::KeepsSnapshots => {
                 let kept = self.store.read_snapshot(stream)?;
@@ -214,8 +218,11 @@ impl crate::next::Purge for Faulty {
 }
 
 impl crate::next::Purge for FaultyTx<'_> {
-    fn purge(&mut self, _stream: &crate::next::v1::Cover) -> Result<u64, StoreError> {
-        Ok(0)
+    fn purge(&mut self, stream: &crate::next::v1::Cover) -> Result<u64, StoreError> {
+        match self.1 {
+            Fault::CountsEvents => self.0.purge(stream),
+            _ => Ok(0),
+        }
     }
 }
 
@@ -229,7 +236,20 @@ impl crate::next::Store for Faulty {
     type Unit<'s> = FaultyTx<'s>;
 
     fn begin(&mut self) -> FaultyTx<'_> {
-        FaultyTx(self.store.begin())
+        FaultyTx(self.store.begin(), self.fault)
+    }
+
+    fn commit_position(&mut self) -> Result<u64, StoreError> {
+        match self.fault {
+            Fault::CountsEvents => {
+                let mut events = 0;
+                for stream in self.store.streams() {
+                    events += self.store.read(&stream)?.map_or(0, |s| s.next_sequence);
+                }
+                Ok(events)
+            }
+            _ => self.store.commit_position(),
+        }
     }
 }
 
@@ -274,6 +294,47 @@ fn the_purge_checks_fail_a_store_whose_purge_keeps_snapshots() {
         a_purge_deletes_a_streams_events_snapshot_and_command_ids
     ));
     assert!(fails(fault, a_purge_deletes_a_snapshot_with_no_events));
+}
+
+#[test]
+fn the_purge_position_check_fails_a_position_that_counts_events() {
+    use crate::next::contract::*;
+    assert!(fails(
+        Fault::CountsEvents,
+        a_purge_never_lowers_the_commit_position
+    ));
+    // Its purge is sound: the position is all it gets wrong.
+    assert!(!fails(
+        Fault::CountsEvents,
+        a_purge_deletes_a_streams_events_snapshot_and_command_ids
+    ));
+}
+
+#[test]
+fn the_two_handle_position_check_fails_a_position_that_is_the_handles() {
+    use crate::next::contract::*;
+    // Two stores, not two handles on one: each counts only its own commits.
+    let apart = std::panic::catch_unwind(|| {
+        block(the_commit_position_counts_every_handles_commits((
+            Ready(InMemoryStore::new()),
+            Ready(InMemoryStore::new()),
+        )))
+    });
+    assert!(apart.is_err());
+}
+
+#[test]
+fn a_commit_position_is_served_async_and_is_the_stores_own() {
+    use crate::next::{AsyncStore, Store};
+    let mut store = InMemoryStore::new();
+    let before = store.commit_position().unwrap();
+    let mut store = Ready(store);
+    assert_eq!(ready(store.commit_position()), Ok(before));
+    store
+        .0
+        .append(&cover("account", 1), 0, &[page(0, 1)])
+        .unwrap();
+    assert!(ready(store.commit_position()).unwrap() > before);
 }
 
 #[test]
@@ -500,6 +561,10 @@ impl<S: crate::next::Store> crate::next::Store for Frozen<S> {
 
     fn begin(&mut self) -> S::Unit<'_> {
         self.0.begin()
+    }
+
+    fn commit_position(&mut self) -> Result<u64, StoreError> {
+        self.0.commit_position()
     }
 }
 

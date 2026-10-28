@@ -1155,6 +1155,94 @@ async fn a_writer_waits_on_no_open_read_unit() {
     remove(&path);
 }
 
+// ------------------------------------------------------ commit position
+
+mod position_contract {
+    use annals::next::contract as checks;
+
+    use super::{on_file, read_only_store, writable};
+
+    #[tokio::test]
+    async fn the_commit_position_counts_every_handles_commits() {
+        on_file(
+            writable,
+            checks::the_commit_position_counts_every_handles_commits,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_read_only_stores_commit_position_counts_every_handles_commits() {
+        on_file(
+            read_only_store,
+            checks::the_commit_position_counts_every_handles_commits,
+        )
+        .await;
+    }
+}
+
+/// Every event's commit position, as `(domain, sequence, position)`, in
+/// domain and sequence order.
+async fn positions(store: &mut SqliteStore) -> Vec<(String, i64, i64)> {
+    sqlx::query_as("SELECT domain, sequence, position FROM events ORDER BY domain, sequence")
+        .fetch_all(&mut store.conn)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn every_event_is_stamped_with_the_position_it_was_committed_at() {
+    let path = database();
+    let mut store = SqliteStore::open(&path).await.unwrap();
+    let empty = store.commit_position().await.unwrap();
+    store
+        .append(&cover("account", 1), 0, &[page(0, 1), page(1, 1)])
+        .await
+        .unwrap();
+    let first = store.commit_position().await.unwrap();
+    let mut unit = store.begin().await;
+    unit.append(&cover("ledger", 1), 0, &[page(0, 2)])
+        .await
+        .unwrap();
+    unit.commit().await.unwrap();
+    let second = store.commit_position().await.unwrap();
+    let stamped = positions(&mut store).await;
+    let at = |i: usize| u64::try_from(stamped[i].2).unwrap();
+    assert_eq!(stamped.len(), 3);
+    assert_eq!(at(0), at(1), "one append, one position");
+    assert!(
+        empty <= at(0) && at(0) < first,
+        "{empty} <= {} < {first}",
+        at(0)
+    );
+    assert!(
+        first <= at(2) && at(2) < second,
+        "{first} <= {} < {second}",
+        at(2)
+    );
+    // Kept on the file, and never lowered by a purge.
+    store.purge(&cover("account", 1)).await.unwrap();
+    drop(store);
+    let mut reopened = SqliteStore::open(&path).await.unwrap();
+    assert_eq!(reopened.commit_position().await, Ok(second));
+    drop(reopened);
+    remove(&path);
+}
+
+#[tokio::test]
+async fn a_rolled_back_unit_stamps_nothing_and_moves_no_position() {
+    let mut store = SqliteStore::open_in_memory().await.unwrap();
+    let before = store.commit_position().await.unwrap();
+    {
+        let mut unit = store.begin().await;
+        unit.append(&cover("account", 1), 0, &[page(0, 1)])
+            .await
+            .unwrap();
+    }
+    assert_eq!(store.commit_position().await, Ok(before));
+    assert_eq!(positions(&mut store).await, vec![]);
+}
+
 // ------------------------------------------------------------- watching
 
 mod watch_contract {
@@ -1268,6 +1356,10 @@ impl AsyncStore for FaultyWatch {
 
     async fn begin(&mut self) -> super::SqliteUnit<'_> {
         self.store.begin().await
+    }
+
+    async fn commit_position(&mut self) -> Result<u64, StoreError> {
+        self.store.commit_position().await
     }
 }
 

@@ -173,6 +173,17 @@ pub trait Store: EventStore {
 
     /// A unit of work over this store: appends land at its commit.
     fn begin(&mut self) -> Self::Unit<'_>;
+
+    /// The store's commit position now: global (one for the whole store,
+    /// every stream and every handle on its database) and monotonic. Every
+    /// event committed before it is answered lies below it, and every event
+    /// committed after it at or above it, so it rises with every commit
+    /// that appends an event, through any handle, and never falls, a purge
+    /// included. Commit order, not `recorded_at`: an event sampled before
+    /// it was read but committed after lies above it. What an edition's
+    /// create records, so the edition reads exactly main's events
+    /// committed before it (angzarr's EA-3).
+    fn commit_position(&mut self) -> Result<u64, StoreError>;
 }
 
 /// [`EventStore`], async: for a database driver. Native return-position
@@ -244,6 +255,9 @@ pub trait AsyncStore: AsyncEventStore {
         Self: 's;
 
     fn begin(&mut self) -> impl Future<Output = Self::Unit<'_>> + Send;
+
+    /// As [`Store::commit_position`].
+    fn commit_position(&mut self) -> impl Future<Output = Result<u64, StoreError>> + Send;
 }
 
 /// A store that can delete a stream. A store opts in by implementing it,
@@ -458,6 +472,10 @@ impl<S: Store + Send> AsyncStore for Ready<S> {
 
     async fn begin(&mut self) -> Ready<S::Unit<'_>> {
         Ready(self.0.begin())
+    }
+
+    async fn commit_position(&mut self) -> Result<u64, StoreError> {
+        self.0.commit_position()
     }
 }
 
@@ -809,6 +827,10 @@ impl Store for InMemoryStore {
 
     fn begin(&mut self) -> InMemoryTx<'_> {
         InMemoryStore::begin(self)
+    }
+
+    fn commit_position(&mut self) -> Result<u64, StoreError> {
+        todo!("InMemoryStore::commit_position is a stub")
     }
 }
 

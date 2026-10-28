@@ -484,6 +484,10 @@ impl AsyncStore for SqliteStore {
                 .map_err(unavailable),
         }
     }
+
+    async fn commit_position(&mut self) -> Result<u64, StoreError> {
+        todo!("SqliteStore::commit_position is a stub")
+    }
 }
 
 /// A unit of work: one SQLite transaction, committed by
