@@ -165,8 +165,8 @@
 //! nothing. A **fact** (a timeout, a webhook, an import, a refusal fact
 //! from a saga) already happened and is never refused: its handler
 //! returns no `Result` and always records an outcome, a refusal included,
-//! as an event (`PayoutRefused`). In annals' atomic chain a fact cannot
-//! fail the chain; only a bug can. The router hands a fact to
+//! as an event (`PayoutRefused`). A fact's step cannot fail; only a bug
+//! can. The router hands a fact to
 //! `Domain::ingest`, a command to `Domain::decide`.
 //!
 //! A fact's continuations are infallible too: its handler returns a
@@ -208,8 +208,9 @@
 //! domain's events into commands to it. It sends no commands: to act on
 //! another domain it records an event carrying the command's data, and
 //! the saga for (the PM's domain, that domain) builds the command. Where a
-//! workflow's logic belongs together, the PM and its sagas run as one
-//! annals process, the saga hops chained calls in one unit of work.
+//! workflow's logic belongs together, the PM and its sagas run in one
+//! annals process (`annals::next::Kernel::settle`),
+//! each saga hop a step committed on its own.
 //!
 //! What sets it apart, `markup::ProcessManager`:
 //!
@@ -235,16 +236,16 @@
 //! ```text
 //! #[saga(name = "buyin-wallet", source = BuyIn, target = Wallet)]
 //! impl BuyInWallet {
-//!     #[reacts(BuyInStarted)]
-//!     fn started(&self, event: &BuyInStarted, ctx: &ReactionContext) -> Commands<Wallet> { .. }
+//!     #[on_event(BuyInStarted)]
+//!     fn started(&self, event: &BuyInStarted, ctx: &SagaContext) -> Commands<Wallet> { .. }
 //! }
 //! ```
 //!
 //! - [`saga`], on an inherent impl: `name` (the component its commands'
 //!   ids are derived from), `source` and `target` (each a domain:
 //!   one source, one target).
-//! - [`reacts`]`(Event)`, one per event of the source it reacts to:
-//!   `fn(&self, event: &Event, ctx: &ReactionContext) -> Commands<Target>`,
+//! - [`on_event`]`(Event)`, one per event of the source it handles:
+//!   `fn(&self, event: &Event, ctx: &SagaContext) -> Commands<Target>`,
 //!   pure and infallible, each command one the target decides, with the
 //!   root of its stream (for a process manager, `ctx.correlation_id()`).
 //!
@@ -264,10 +265,10 @@
 //!   (`refused.refusal::<InsufficientFunds>()`); it imports the target's
 //!   types to do so. Which refusals a domain handles is inferred from its
 //!   `#[on_refused]` handlers (`REFUSALS` lists them): one with no handler
-//!   is caught at run time. In annals' chain the chain COMMITS, the
+//!   is caught at run time: the steps before it stay committed, the
 //!   refusal fact is dead-lettered and alerted, and the call returns Ok, as
-//!   on distributed angzarr. A `CommandRefused` from outside the
-//!   chain is accepted when its trigger names the receiving stream.
+//!   on distributed angzarr. A `CommandRefused` from outside a saga is
+//!   accepted when its trigger names the receiving stream.
 //! - **Translate**, for each command the saga has a callback for:
 //!   `#[on_refused(Hold)] fn(&self, refusal: &Refusal<Hold>) -> F` on the
 //!   saga's impl reads the typed object and returns `F`, a fact its source
@@ -411,7 +412,7 @@
 //! ```
 //!
 //! A saga's expansion is its `markup::Saga` impl: `NAME`, `Source`,
-//! `Target`, `REACTS`, `TRANSLATES`, and `on_refused`, which unpacks the
+//! `Target`, `EVENTS`, `TRANSLATES`, and `on_refused`, which unpacks the
 //! refused command and either builds the pass-through `CommandRefused` or
 //! calls the translating callback.
 //!
@@ -1306,11 +1307,11 @@
 //! ```no_run
 //! # use std::convert::Infallible;
 //! # use annals::next::markup::{
-//! #     CommandRefused, Commands, Context, DomainMessage, ReactionContext, Record, Refusal, Refuses,
+//! #     CommandRefused, Commands, Context, DomainMessage, SagaContext, Record, Refusal, Refuses,
 //! # };
 //! # use annals::next::WireError;
 //! # use annals_macros::{
-//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, reacts, saga,
+//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, saga,
 //! # };
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
@@ -1421,8 +1422,8 @@
 //!
 //! #[saga(name = "timer-lamp", source = Timer, target = Lamp)]
 //! impl TimerLamp {
-//!     #[reacts(Rang)]
-//!     fn rang(&self, _event: &Rang, ctx: &ReactionContext) -> Commands<Lamp> {
+//!     #[on_event(Rang)]
+//!     fn rang(&self, _event: &Rang, ctx: &SagaContext) -> Commands<Lamp> {
 //!         Commands::none().to(ctx.correlation_id().clone(), SwitchOn)
 //!     }
 //! }
@@ -1434,11 +1435,11 @@
 //! ```compile_fail
 //! # use std::convert::Infallible;
 //! # use annals::next::markup::{
-//! #     CommandRefused, Commands, Context, DomainMessage, ReactionContext, Record, Refusal, Refuses,
+//! #     CommandRefused, Commands, Context, DomainMessage, SagaContext, Record, Refusal, Refuses,
 //! # };
 //! # use annals::next::WireError;
 //! # use annals_macros::{
-//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, reacts, saga,
+//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, saga,
 //! # };
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
@@ -1520,11 +1521,11 @@
 //! ```compile_fail
 //! # use std::convert::Infallible;
 //! # use annals::next::markup::{
-//! #     CommandRefused, Commands, Context, DomainMessage, ReactionContext, Record, Refusal, Refuses,
+//! #     CommandRefused, Commands, Context, DomainMessage, SagaContext, Record, Refusal, Refuses,
 //! # };
 //! # use annals::next::WireError;
 //! # use annals_macros::{
-//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, reacts, saga,
+//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, saga,
 //! # };
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
@@ -1606,11 +1607,11 @@
 //! ```compile_fail
 //! # use std::convert::Infallible;
 //! # use annals::next::markup::{
-//! #     CommandRefused, Commands, Context, DomainMessage, ReactionContext, Record, Refusal, Refuses,
+//! #     CommandRefused, Commands, Context, DomainMessage, SagaContext, Record, Refusal, Refuses,
 //! # };
 //! # use annals::next::WireError;
 //! # use annals_macros::{
-//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, reacts, saga,
+//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, saga,
 //! # };
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
@@ -1692,11 +1693,11 @@
 //! ```compile_fail
 //! # use std::convert::Infallible;
 //! # use annals::next::markup::{
-//! #     CommandRefused, Commands, Context, DomainMessage, ReactionContext, Record, Refusal, Refuses,
+//! #     CommandRefused, Commands, Context, DomainMessage, SagaContext, Record, Refusal, Refuses,
 //! # };
 //! # use annals::next::WireError;
 //! # use annals_macros::{
-//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, reacts, saga,
+//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, saga,
 //! # };
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
@@ -1778,11 +1779,11 @@
 //! ```compile_fail
 //! # use std::convert::Infallible;
 //! # use annals::next::markup::{
-//! #     CommandRefused, Commands, Context, DomainMessage, ReactionContext, Record, Refusal, Refuses,
+//! #     CommandRefused, Commands, Context, DomainMessage, SagaContext, Record, Refusal, Refuses,
 //! # };
 //! # use annals::next::WireError;
 //! # use annals_macros::{
-//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, reacts, saga,
+//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, saga,
 //! # };
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
@@ -1872,11 +1873,11 @@
 //! ```compile_fail
 //! # use std::convert::Infallible;
 //! # use annals::next::markup::{
-//! #     CommandRefused, Commands, Context, DomainMessage, ReactionContext, Record, Refusal, Refuses,
+//! #     CommandRefused, Commands, Context, DomainMessage, SagaContext, Record, Refusal, Refuses,
 //! # };
 //! # use annals::next::WireError;
 //! # use annals_macros::{
-//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, reacts, saga,
+//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, saga,
 //! # };
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
@@ -1968,11 +1969,11 @@
 //! ```compile_fail
 //! # use std::convert::Infallible;
 //! # use annals::next::markup::{
-//! #     CommandRefused, Commands, Context, DomainMessage, ReactionContext, Record, Refusal, Refuses,
+//! #     CommandRefused, Commands, Context, DomainMessage, SagaContext, Record, Refusal, Refuses,
 //! # };
 //! # use annals::next::WireError;
 //! # use annals_macros::{
-//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, reacts, saga,
+//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, saga,
 //! # };
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
@@ -2030,11 +2031,11 @@
 //! ```compile_fail
 //! # use std::convert::Infallible;
 //! # use annals::next::markup::{
-//! #     CommandRefused, Commands, Context, DomainMessage, ReactionContext, Record, Refusal, Refuses,
+//! #     CommandRefused, Commands, Context, DomainMessage, SagaContext, Record, Refusal, Refuses,
 //! # };
 //! # use annals::next::WireError;
 //! # use annals_macros::{
-//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, reacts, saga,
+//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, saga,
 //! # };
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
@@ -2125,11 +2126,11 @@
 //! ```no_run
 //! # use std::convert::Infallible;
 //! # use annals::next::markup::{
-//! #     CommandRefused, Commands, Context, DomainMessage, ReactionContext, Record, Refusal, Refuses,
+//! #     CommandRefused, Commands, Context, DomainMessage, SagaContext, Record, Refusal, Refuses,
 //! # };
 //! # use annals::next::WireError;
 //! # use annals_macros::{
-//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, reacts, saga,
+//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, saga,
 //! # };
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
@@ -2240,8 +2241,8 @@
 //!
 //! #[saga(name = "timer-lamp", source = Timer, target = Lamp)]
 //! impl TimerLamp {
-//!     #[reacts(Rang)]
-//!     fn rang(&self, _event: &Rang, ctx: &ReactionContext) -> Commands<Lamp> {
+//!     #[on_event(Rang)]
+//!     fn rang(&self, _event: &Rang, ctx: &SagaContext) -> Commands<Lamp> {
 //!         Commands::none().to(ctx.correlation_id().clone(), SwitchOn)
 //!     }
 //!
@@ -2258,11 +2259,11 @@
 //! ```compile_fail
 //! # use std::convert::Infallible;
 //! # use annals::next::markup::{
-//! #     CommandRefused, Commands, Context, DomainMessage, ReactionContext, Record, Refusal, Refuses,
+//! #     CommandRefused, Commands, Context, DomainMessage, SagaContext, Record, Refusal, Refuses,
 //! # };
 //! # use annals::next::WireError;
 //! # use annals_macros::{
-//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, reacts, saga,
+//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, saga,
 //! # };
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
@@ -2373,8 +2374,8 @@
 //!
 //! #[saga(name = "timer-lamp", source = Timer, target = Lamp)]
 //! impl TimerLamp {
-//!     #[reacts(Rang)]
-//!     fn rang(&self, _event: &Rang, ctx: &ReactionContext) -> Commands<Lamp> {
+//!     #[on_event(Rang)]
+//!     fn rang(&self, _event: &Rang, ctx: &SagaContext) -> Commands<Lamp> {
 //!         Commands::none().to(ctx.correlation_id().clone(), SwitchOn)
 //!     }
 //!
@@ -2391,11 +2392,11 @@
 //! ```compile_fail
 //! # use std::convert::Infallible;
 //! # use annals::next::markup::{
-//! #     CommandRefused, Commands, Context, DomainMessage, ReactionContext, Record, Refusal, Refuses,
+//! #     CommandRefused, Commands, Context, DomainMessage, SagaContext, Record, Refusal, Refuses,
 //! # };
 //! # use annals::next::WireError;
 //! # use annals_macros::{
-//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, reacts, saga,
+//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, saga,
 //! # };
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
@@ -2506,8 +2507,8 @@
 //!
 //! #[saga(name = "timer-lamp", source = Timer, target = Lamp, translate(SwitchOn))]
 //! impl TimerLamp {
-//!     #[reacts(Rang)]
-//!     fn rang(&self, _event: &Rang, ctx: &ReactionContext) -> Commands<Lamp> {
+//!     #[on_event(Rang)]
+//!     fn rang(&self, _event: &Rang, ctx: &SagaContext) -> Commands<Lamp> {
 //!         Commands::none().to(ctx.correlation_id().clone(), SwitchOn)
 //!     }
 //!
@@ -2524,11 +2525,11 @@
 //! ```compile_fail
 //! # use std::convert::Infallible;
 //! # use annals::next::markup::{
-//! #     CommandRefused, Commands, Context, DomainMessage, ReactionContext, Record, Refusal, Refuses,
+//! #     CommandRefused, Commands, Context, DomainMessage, SagaContext, Record, Refusal, Refuses,
 //! # };
 //! # use annals::next::WireError;
 //! # use annals_macros::{
-//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, reacts, saga,
+//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, saga,
 //! # };
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
@@ -2639,8 +2640,8 @@
 //!
 //! #[saga(name = "timer-lamp", source = Timer, target = Lamp)]
 //! impl TimerLamp {
-//!     #[reacts(Rang)]
-//!     fn rang(&self, _event: &Rang, ctx: &ReactionContext) -> Commands<Timer> {
+//!     #[on_event(Rang)]
+//!     fn rang(&self, _event: &Rang, ctx: &SagaContext) -> Commands<Timer> {
 //!         Commands::none().to(ctx.correlation_id().clone(), StartTimer)
 //!     }
 //! }
@@ -2755,7 +2756,7 @@ pub fn saga(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Marks a saga's handler for one event of its source. Inert: [`saga`]
 /// reads it.
 #[proc_macro_attribute]
-pub fn reacts(_attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn on_event(_attr: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 
@@ -2844,7 +2845,7 @@ fn flow_stub(attr: Tokens, item: Tokens, flow: Flow) -> syn::Result<Tokens> {
                     const NAME: &'static str = #name;
                     type Source = #source;
                     type Target = #target;
-                    const REACTS: &'static [::annals::next::markup::TypeName] = &[];
+                    const EVENTS: &'static [::annals::next::markup::TypeName] = &[];
                     const TRANSLATES: &'static [::annals::next::markup::TypeName] = &[];
 
                     fn on_refused(

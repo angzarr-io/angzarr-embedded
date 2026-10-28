@@ -62,7 +62,9 @@ use super::error::{Failure, KernelError, Step, StepError};
 use super::handler::{Admit, Gap, Handler, Position};
 use super::reaction::{policy, projection, Order, Policy, Projection};
 use super::registry::Registry;
-use super::store::{block, AsyncPort, AsyncUnitOfWork, EventStore, Port, SyncPort, UnitOfWork};
+use super::store::{
+    block, AsyncPort, AsyncStore, AsyncUnitOfWork, EventStore, Port, SyncPort, UnitOfWork,
+};
 use super::stream::{Envelope, Stream};
 
 /// How deep a chain may go before it is a [`KernelError::ChainTooDeep`],
@@ -212,6 +214,31 @@ impl<'k> Kernel<'k> {
                 .map_err(|e| Failure::Kernel(KernelError::Store(e)))?;
         }
         Ok(self.project(handled, projections))
+    }
+
+    /// Handle `book` as its own step, then every saga step it sets off,
+    /// each committed on its own, and wait for them to settle: annals'
+    /// sagas ([`Registry::saga`]) run at once, in process, but with the
+    /// meaning they have anywhere. Atomicity covers ONE step: one stream's
+    /// events. The source's events are committed before a saga's command
+    /// runs; each command and each refusal fact is a step of its own,
+    /// deduplicated by its id, in its own unit of work begun on `store`. A
+    /// step that fails keeps every commit before it: the call is an error
+    /// (or a dead letter), never a rollback.
+    ///
+    /// **A proposal**: a stub whose body is `todo!()`.
+    pub async fn settle<D, S>(
+        &self,
+        store: &mut S,
+        book: CommandBook,
+        sampled: &Sampled,
+    ) -> Result<Settled, Failure<D::Rejection>>
+    where
+        D: Domain,
+        S: AsyncStore,
+    {
+        let _ = (store, book, sampled);
+        todo!("Kernel::settle is a stub")
     }
 
     /// Deliver one owed order outside a chain (a catch-up from
@@ -709,6 +736,20 @@ impl<'u> Run<'u> {
             }
         }
         Ok(recorded)
+    }
+}
+
+/// What [`Kernel::settle`] committed: each step's book, in commit order.
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct Settled {
+    steps: Vec<EventBook>,
+}
+
+impl Settled {
+    /// Each committed step's events, one book per step (a step that
+    /// recorded nothing is not listed), in the order committed.
+    pub fn steps(&self) -> &[EventBook] {
+        &self.steps
     }
 }
 
