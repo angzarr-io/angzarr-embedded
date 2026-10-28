@@ -1,0 +1,90 @@
+# Messages for the angzarr-embedded crate's errors. Each id is an error's code; the
+# variables are its args. Messages are lowercase fragments, like the English
+# Display, so a nested cause reads well inside another message.
+
+## The audited kernel, angzarr_embedded::next. $stream names a stream as domain/root,
+## with @edition outside the main timeline.
+
+angzarr-embedded-next-malformed-no-cover = the book has no cover
+angzarr-embedded-next-malformed-unknown-domain = no domain "{ $domain }" is registered
+angzarr-embedded-next-malformed-no-root = the cover has no root
+angzarr-embedded-next-malformed-bad-root = the root is { $len ->
+        [one] one byte
+       *[other] { $len } bytes
+    }, not a UUID's 16
+angzarr-embedded-next-malformed-empty-edition = the edition is set but empty: the main timeline is the unset edition
+angzarr-embedded-next-malformed-no-page = the book has no page
+angzarr-embedded-next-malformed-no-body = the page has neither a command nor a fact
+angzarr-embedded-next-malformed-no-payload = the command or fact has no payload
+angzarr-embedded-next-malformed-bad-command-id = the command id is { $len ->
+        [one] one byte
+       *[other] { $len } bytes
+    }, not a UUID's 16
+angzarr-embedded-next-malformed-bad-correlation-id = the correlation id is { $len ->
+        [one] one byte
+       *[other] { $len } bytes
+    }, not a UUID's 16
+angzarr-embedded-next-malformed-causation-from-outside = a client's book names a causation: only the kernel's chain issues policy commands
+angzarr-embedded-next-malformed-id-on-policy-command = a policy's book names its own ids: the kernel derives them from the trigger
+angzarr-embedded-next-malformed-fact-from-policy = a policy's book holds a fact: a policy never injects one
+angzarr-embedded-next-malformed-handling-on-policy-command = a policy's book has handling: its target stamps its own head
+angzarr-embedded-next-malformed-bad-trigger = the policy command's trigger cannot name a command id: { $reason ->
+        [bad-root] its root is not a UUID's 16 bytes
+        [missing-trigger] it needs a stream with a root
+        [empty-edition] its stream's edition is set but empty
+        [empty-component] the reacting component has no name
+       *[other] { $reason }
+    }
+angzarr-embedded-next-malformed-fact-without-origin = a fact without its origin
+angzarr-embedded-next-malformed-empty-external-id = the fact's external id is empty: it is the fact's identity
+angzarr-embedded-next-malformed-command-with-fact-origin = a command with a fact origin
+angzarr-embedded-next-malformed-fact-command-id-not-derived = the fact's command id is not the one derived from its external id
+angzarr-embedded-next-malformed-handling-on-fact = a fact with handling: a fact is never checked against a sequence nor conflict-resolved
+angzarr-embedded-next-malformed-unknown-conflict-resolution = conflict resolution { $value } is not one this build knows
+angzarr-embedded-next-malformed-unsupported-conflict-resolution = domain "{ $domain }"'s state does not support { $requested }
+angzarr-embedded-next-malformed-root-not-correlation = the book's correlation is not its root: a process manager's root is its correlation
+angzarr-embedded-next-malformed-refusal-misaddressed = the refusal fact is for another stream than the one its trigger names
+
+angzarr-embedded-next-projection-failed = the command committed, then { $failures ->
+    [one] projector { $projector } failed: { $error }
+   *[other] { $failures } projectors failed, the first { $projector }: { $error }
+}
+angzarr-embedded-next-pm-no-instance = process manager stream { $stream } has no instance, and only a starting input starts one
+angzarr-embedded-next-downstream = a policy command down the chain failed, at depth { $depth }: { $error }
+angzarr-embedded-next-stale = stream { $stream } is at { $actual }, not the { $expected } expected: re-read and re-issue
+angzarr-embedded-next-unresolved = decide never acknowledged the window of stream { $stream } from { $expected } to { $actual }
+angzarr-embedded-next-unknown-type = stream { $stream }'s domain does not decode the type { $type_url }
+angzarr-embedded-next-invalid-payload = a { $type_url } for stream { $stream } is not a valid value: { $reason }
+angzarr-embedded-next-upcast = upcasting a payload for stream { $stream } failed: { $error }
+angzarr-embedded-next-ingest-panicked = ingesting fact { $command_id } into stream { $stream } panicked: a bug
+angzarr-embedded-next-wrong-domain = stream { $stream } was given to the { $expected } domain's code
+angzarr-embedded-next-chain-too-deep = the command chain went deeper than its limit of { $limit }
+angzarr-embedded-next-too-many-steps = the decision on stream { $stream } ran more than its limit of { $limit } continuation steps
+angzarr-embedded-next-before-snapshot = stream { $stream } holds its events from { $first } on only, after its snapshot
+angzarr-embedded-next-unregistered-domain = a stored { $domain } stream was read, but no domain "{ $domain }" is registered
+
+angzarr-embedded-next-replay-out-of-sequence = page { $index } of the log claims sequence { $found }, not the one due
+angzarr-embedded-next-replay-recorded-backwards = event { $sequence } was recorded before the event before it
+angzarr-embedded-next-replay-incomplete-meta = event { $sequence }'s metadata lacks a well-formed { $field }
+angzarr-embedded-next-replay-wrong-domain = a { $found } log was given to the { $expected } domain's code
+angzarr-embedded-next-replay-unknown-rules = event { $sequence } was decided under rules { $version }, which the rulebook does not hold
+
+angzarr-embedded-next-unreadable = event { $sequence } of stream { $stream } cannot be replayed: { $reason }
+
+angzarr-embedded-next-payload-unknown-type = no decoder for the type { $type_url }
+angzarr-embedded-next-payload-decode = a payload of type { $type_url } does not decode
+angzarr-embedded-next-payload-invalid = a payload of type { $type_url } is not a valid value: { $reason }
+angzarr-embedded-next-wire-missing = { $message }.{ $field } is required and absent
+angzarr-embedded-next-wire-unknown-enum = { $message }.{ $field } holds { $value }, which no variant defines
+angzarr-embedded-next-upcast-rule = the upcast rule from { $source } failed: { $error }
+angzarr-embedded-next-upcaster-duplicate = domain { $domain }'s upcaster has two typed rules from { $source }: the second never runs
+angzarr-embedded-next-upcaster-out-of-order = domain { $domain }'s upcaster registers the rule from { $source } before the rule from { $produced_by }, which produces it
+angzarr-embedded-next-upcaster-dead-end = domain { $domain }'s upcaster takes { $source } to { $ends_at }, which the domain does not decode
+
+angzarr-embedded-next-misconfigured-already-registered = domain "{ $domain }" is registered already
+angzarr-embedded-next-misconfigured-upcaster-for-another-domain = the upcaster registered for domain "{ $domain }" is for "{ $upcaster }"
+angzarr-embedded-next-misconfigured-empty-rules-version = domain "{ $domain }"'s current rules version is empty
+angzarr-embedded-next-misconfigured-bad-state-descriptor = domain "{ $domain }"'s state descriptor lists a value that is not a resolution, or lacks STRICT or AGGREGATE_HANDLES
+angzarr-embedded-next-misconfigured-unsupported-resolution = domain "{ $domain }" is configured { $resolution }, which its state does not support
+angzarr-embedded-next-misconfigured-unsupported-command-resolution = domain "{ $domain }" configures { $command_type } { $resolution }, which its state does not support
+

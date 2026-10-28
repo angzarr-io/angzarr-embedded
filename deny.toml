@@ -1,6 +1,6 @@
 # cargo-deny: what may enter the dependency graph. `just lint-deps` runs it.
 #
-# Annals keeps few dependencies on purpose (CLAUDE.md, *Few dependencies, no
+# angzarr-embedded keeps few dependencies on purpose (CLAUDE.md, *Few dependencies, no
 # domain*); this file is the machine check that what does enter is
 # permissively licensed, comes from crates.io or a pinned, named git repo,
 # and has no open RustSec advisory.
@@ -17,9 +17,9 @@ ignore = []
 
 [licenses]
 version = 2
-# Annals is BSD-3-Clause and used as a library by applications under other
+# angzarr-embedded is BSD-3-Clause and used as a library by applications under other
 # licences, so a dependency's licence must be permissive: it must not impose
-# its terms on annals or on what links it. Copyleft is not on this list.
+# its terms on angzarr-embedded or on what links it. Copyleft is not on this list.
 allow = [
   "Apache-2.0",
   "Apache-2.0 WITH LLVM-exception",
@@ -32,15 +32,15 @@ allow = [
 ]
 confidence-threshold = 0.9
 # The one copyleft licence in the graph, allowed for angzarr's two crates
-# only: angzarr-proto, angzarr's wire types, which annals' kernel operates
-# on directly, and angzarr-ports, the shared store contract annals' kernel
+# only: angzarr-proto, angzarr's wire types, which angzarr-embedded's kernel operates
+# on directly, and angzarr-ports, the shared store contract angzarr-embedded's kernel
 # and angzarr-store-sqlite implement and use (CLAUDE.md, *Few
 # dependencies*; docs/design/audit.md, *Layering*). Both are AGPL-3.0-only,
 # so a build that links any crate carrying them is subject to the AGPL.
 # In normal builds those crates are:
-#   `annals`, `angzarr-store-sqlite`
-# and the rest (annals-diagnostic, annals-graph, annals-yaml,
-# annals-catalog-check) are BSD-3-Clause only (README, *Licence*;
+#   `angzarr-embedded`, `angzarr-store-sqlite`
+# and the rest (angzarr-embedded-diagnostic, angzarr-embedded-graph, angzarr-embedded-yaml,
+# angzarr-embedded-catalog-check) are BSD-3-Clause only (README, *Licence*;
 # `just licence-check` holds both to `cargo tree`). Accepted with the
 # dependency; any other copyleft crate fails here.
 exceptions = [
@@ -49,14 +49,14 @@ exceptions = [
 ]
 
 [licenses.private]
-# Not ignored: annals' own crates are `publish = false`, and so are
+# Not ignored: angzarr-embedded's own crates are `publish = false`, and so are
 # angzarr-proto and angzarr-ports, whose licences are exactly what must be
 # checked.
 ignore = false
 
 [bans]
 # Duplicate versions warn, not fail: they are logged by the gate, and most
-# come from upstream trees (sqlx) that annals does not control.
+# come from upstream trees (sqlx) that angzarr-embedded does not control.
 multiple-versions = "warn"
 wildcards = "deny"
 # A path dependency has no version; allowed for unpublished crates only.

@@ -1,7 +1,7 @@
 [package]
 name = "angzarr-store-sqlite"
 version = "0.1.0"
-description = "angzarr-ports on SQLite: the shared store adapter annals and angzarr both use, its schema and migrations, held to the ports' conformance suite."
+description = "angzarr-ports on SQLite: the shared store adapter that angzarr-embedded (angzarr's in-app runtime) and angzarr core (the distributed system, https://github.com/angzarr-io/angzarr) both use, its schema and migrations, held to the ports' conformance suite."
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
@@ -9,8 +9,8 @@ publish.workspace = true
 rust-version = "1.85"
 
 # A LEAF: angzarr-ports (and the wire types through it) and SQL, nothing of
-# annals (`a_store_depends_on_nothing_of_annals`), so angzarr's runtimes use
-# it as annals does. Third-party by design (see CLAUDE.md): a SQL store needs
+# angzarr-embedded (`a_store_depends_on_nothing_of_angzarr_embedded`), so angzarr's runtimes use
+# it as angzarr-embedded does. Third-party by design (see CLAUDE.md): a SQL store needs
 # a query builder and a driver, and hand-rolling either is a second,
 # unchecked implementation of the dialect.
 [dependencies]

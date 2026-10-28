@@ -1,8 +1,8 @@
 # Changing the gates
 
 These gates were the shared gates repository (`~/workspace/gates`), brought
-into annals at its `8c131cf` with their history, as taskloom and ctxloom-rs
-brought in their own copies. They are annals' own now: change them here,
+into angzarr-embedded at its `8c131cf` with their history, as taskloom and ctxloom-rs
+brought in their own copies. They are angzarr-embedded's own now: change them here,
 and nothing here reaches the other repositories, nor anything there this
 one. Carry a fix across by hand when more than one needs it.
 

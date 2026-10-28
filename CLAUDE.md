@@ -14,77 +14,77 @@ changes, rewrite the text in place to say what is true now.
 
 ## Few dependencies, no domain
 
-Annals is a deterministic application engine on CQRS/ES. Every crate here
+angzarr-embedded is a deterministic application engine on CQRS/ES. Every crate here
 knows nothing about any application that uses it, so anything specific to
 one belongs in that application's repository, not here.
 
-Every crate has zero third-party dependencies, except annals,
-angzarr-store-sqlite, annals-catalog-check and annals-macros. A crate may
-depend on another crate in this workspace, as annals-catalog-check does.
+Every crate has zero third-party dependencies, except angzarr-embedded,
+angzarr-store-sqlite, angzarr-embedded-catalog-check and angzarr-embedded-macros. A crate may
+depend on another crate in this workspace, as angzarr-embedded-catalog-check does.
 
-annals-catalog-check is test-only: its one dev-dependency, `fluent-syntax`
+angzarr-embedded-catalog-check is test-only: its one dev-dependency, `fluent-syntax`
 (Apache-2.0 OR MIT), parses the Fluent catalogs for the parity test.
 Nothing depends on it and it has no library to speak of.
 
-annals depends on `angzarr-proto` (a git dependency pinned by rev:
+angzarr-embedded depends on `angzarr-proto` (a git dependency pinned by rev:
 angzarr's own prost types for `io.angzarr.v1`, whose build needs `protoc`),
-`prost` and `prost-types`, because its event-sourcing kernel (`annals::next`)
-operates on angzarr's wire types directly rather than on parallel annals
-types: angzarr owns that contract, and annals is its in-process runtime.
-Every user of annals therefore builds angzarr-proto; this is accepted.
-annals also depends on `angzarr-ports`, pinned at the same rev of
+`prost` and `prost-types`, because its event-sourcing kernel (`angzarr_embedded::next`)
+operates on angzarr's wire types directly rather than on parallel angzarr-embedded
+types: angzarr owns that contract, and angzarr-embedded is its in-process runtime.
+Every user of angzarr-embedded therefore builds angzarr-proto; this is accepted.
+angzarr-embedded also depends on `angzarr-ports`, pinned at the same rev of
 angzarr-project's spec line: angzarr's shared store contract (one async
-trait set, its errors and codes, its conformance suite), which annals'
+trait set, its errors and codes, its conformance suite), which angzarr-embedded's
 kernel runs on and has no store traits of its own beside.
 
-annals-macros depends on `syn`, `quote` and `proc-macro2`, because it is a
+angzarr-embedded-macros depends on `syn`, `quote` and `proc-macro2`, because it is a
 procedural macro crate that parses a whole impl (its methods' signatures,
 attributes and types): hand-rolling a Rust parser over `proc_macro` tokens
 would be a second, unchecked implementation of Rust's grammar. They are
 compile-time only, and already in the graph through prost-derive, so they
 add no crate: each is pinned with `=` to the version prost-derive resolves
 in Cargo.lock, and moves when that does. Nothing else in the workspace
-depends on them directly; the kernel (annals) never does. annals itself
-depends on annals-macros only as a dev-dependency, for its decorated
+depends on them directly; the kernel (angzarr-embedded) never does. angzarr-embedded itself
+depends on angzarr-embedded-macros only as a dev-dependency, for its decorated
 aggregate test.
 
 angzarr-store-sqlite depends on `angzarr-ports`, `sea-query`, `sqlx` and
 `sea-query-binder`, because it is a SQL store: hand-rolling a query builder
 or a driver would be a second, unchecked implementation of the dialect. It
-is the one SQLite adapter annals and angzarr share, so it
-is a LEAF: it depends on nothing of annals (its own test,
-`a_store_depends_on_nothing_of_annals`, holds it to that), and its errors
-follow angzarr-ports' style rather than `annals_diagnostic`'s. It lives here
+is the one SQLite adapter angzarr-embedded and angzarr share, so it
+is a LEAF: it depends on nothing of angzarr-embedded (its own test,
+`a_store_depends_on_nothing_of_angzarr_embedded`, holds it to that), and its errors
+follow angzarr-ports' style rather than `angzarr_embedded_diagnostic`'s. It lives here
 for the POC, beside its first user; it can move to angzarr-project unchanged.
 
-Protobuf code lives in annals (angzarr's types); every other crate stays
+Protobuf code lives in angzarr-embedded (angzarr's types); every other crate stays
 dependency-free except as above.
 
 ## Licence: BSD-3-Clause; not published
 
-Annals is licensed under the BSD 3-Clause License (`LICENSE`).
+angzarr-embedded is licensed under the BSD 3-Clause License (`LICENSE`).
 Every crate has `license = "BSD-3-Clause"` and `publish = false`, both inherited
 from `[workspace.package]`. A new crate sets `license.workspace = true` and
 `publish.workspace = true`.
 
 ## Errors are localizable: a code, args, and an en-US message
 
-Every public error type implements `annals_diagnostic::Diagnostic` and keeps
+Every public error type implements `angzarr_embedded_diagnostic::Diagnostic` and keeps
 an English `Display` as the fallback. The game client renders the localized
-text from Fluent catalogs; Annals renders nothing. The trait lives in its own
-crate, annals-diagnostic, not in annals, so annals-yaml and annals-graph get
+text from Fluent catalogs; angzarr-embedded renders nothing. The trait lives in its own
+crate, angzarr-embedded-diagnostic, not in angzarr-embedded, so angzarr-embedded-yaml and angzarr-embedded-graph get
 it without depending on the event-sourcing kernel.
 
 Two exceptions, angzarr's: angzarr-ports' `StoreError` and
 angzarr-store-sqlite's errors have `code()`, args and English in the same
-style without the trait (they depend on no annals crate). annals forwards a
+style without the trait (they depend on no angzarr-embedded crate). angzarr-embedded forwards a
 `StoreError` under its own `angzarr-ports-*` code through
 `KernelError::Store`, and carries angzarr-ports' catalog
-(`crates/annals/locales/en-US/angzarr-ports.ftl`, exported as
-`annals::ANGZARR_PORTS_EN_US`); the catalog check wraps the adapter's.
+(`crates/angzarr-embedded/locales/en-US/angzarr-ports.ftl`, exported as
+`angzarr_embedded::ANGZARR_PORTS_EN_US`); the catalog check wraps the adapter's.
 
 - **Codes are stable and never reused.** Kebab-case, starting with the
-  crate's name (`annals-yaml-too-new`), and a valid Fluent message id. A code
+  crate's name (`angzarr-embedded-yaml-too-new`), and a valid Fluent message id. A code
   whose meaning changes gets a new code; a retired code is not given to
   anything else.
 - **Args carry data, never pre-formatted English.** Numbers, ids, paths and
@@ -94,8 +94,8 @@ style without the trait (they depend on no annals crate). annals forwards a
 - **A new variant needs a code and an en-US message** in
   `crates/<crate>/locales/en-US/<crate>.ftl`, using exactly the variant's
   args, with a Fluent selector wherever a count is shown.
-- A game's error that an Annals error carries (a migration step's, a content
-  decoder's) is held as an `annals_diagnostic::Report`, keeping the game's
+- A game's error that an angzarr-embedded error carries (a migration step's, a content
+  decoder's) is held as an `angzarr_embedded_diagnostic::Report`, keeping the game's
   own code.
 - Where a game's error crosses into the engine, the trait demands it:
   `Domain::Rejection: Diagnostic`, so a domain whose rejections are not
@@ -107,7 +107,7 @@ The workspace denies three clippy lints, and every crate opts in with
 `[lints] workspace = true`: `invisible_characters`, `unicode_not_nfc` and
 `non_ascii_literal`. A non-ASCII character in a literal is written as an
 escape (`"\u{e9}"`), so what the code holds is plain. The one allow is the
-`roundtrip` module of `crates/annals-yaml/src/lib.test.rs`, whose corpus is
+`roundtrip` module of `crates/angzarr-embedded-yaml/src/lib.test.rs`, whose corpus is
 readable text by design; a new allow needs a comment saying why.
 
 ## Tests live beside the code, in `*.test.rs`
@@ -127,7 +127,7 @@ not put its tests in the reader's (or an LLM's) context.
 
 - Shared fixtures are `*.test.rs` files too, declared
   `#[cfg(test)] #[path = "toys.test.rs"] pub(crate) mod toys;`
-  (`annals::next::toys`, `annals_yaml::rng`).
+  (`angzarr_embedded::next::toys`, `angzarr_embedded_yaml::rng`).
 - A source file with several test files includes each,
   `#[cfg(test)] #[path = "edit_map.test.rs"] mod edit_map_tests;`, or keeps
   one `foo.test.rs` with a module per subject.
@@ -137,9 +137,9 @@ not put its tests in the reader's (or an LLM's) context.
 
 ## Use `just`
 
-Plain `cargo build` and `cargo test` work from a clean checkout; annals'
+Plain `cargo build` and `cargo test` work from a clean checkout; angzarr-embedded's
 build also needs `protoc` and github.com (for angzarr-proto).
-`just wasm` builds annals for `wasm32-unknown-unknown`; it must keep
+`just wasm` builds angzarr-embedded for `wasm32-unknown-unknown`; it must keep
 building there.
 
 Every gate prints one line on a pass, `ok   <gate> (<scope>) <duration>`;
@@ -151,7 +151,7 @@ on a failure, a `FAIL` line, the extract worth reading, and the full log in
 
 The gates and their recipes are `gates/gates.just` and
 `gates/lefthook.yml`: the justfile imports the one and lefthook.yml extends
-the other. The justfile keeps annals' parameters for them
+the other. The justfile keeps angzarr-embedded's parameters for them
 (`mutation_thresholds`, `workspace_wide`, `staged_tree`, `feature_rules`,
 `features_prepare`) and its own `lint`; their tool configs are
 `deny.toml`, `.gitleaks.toml` and `.cargo/mutants.toml`. `just
@@ -191,10 +191,10 @@ failing gate is a finding: fix the cause and commit again; never
 
 ## Versioned documents: bump, register a step, keep an old fixture
 
-`annals_yaml::versioned` loads content stamped with a root `version: N` (a
+`angzarr_embedded_yaml::versioned` loads content stamped with a root `version: N` (a
 non-negative integer; a mapping with no `version` is version 0). It
-is a module of annals-yaml rather than its own crate because it works only on
-`annals_yaml::Value` and every user of it already depends on annals-yaml.
+is a module of angzarr-embedded-yaml rather than its own crate because it works only on
+`angzarr_embedded_yaml::Value` and every user of it already depends on angzarr-embedded-yaml.
 
 - `Migrations::new(kind, current).step(from, fn).build()` checks the chain
   (no gaps, no duplicates, no step at or past `current`) and returns a

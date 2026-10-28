@@ -1,9 +1,9 @@
 # Build, test and lint the workspace. Needs protoc on PATH (angzarr-proto,
-# under annals, runs it in its build script).
+# under angzarr-embedded, runs it in its build script).
 #
 # The pre-commit gates and their recipes (fmt, fmt-check, test, test-staged,
 # test-commit, mutants-staged, lint-deps, secrets-scan-staged and the `_run`
-# machinery) are gates/gates.just, imported below; this file gives them annals'
+# machinery) are gates/gates.just, imported below; this file gives them angzarr-embedded's
 # parameters.
 
 set windows-shell := ["bash", "-cu"]
@@ -16,12 +16,12 @@ import 'gates/gates.just'
 # hand-written library code whose behaviour its tests reach in-process
 # (angzarr-store-sqlite's SQLite included), so every crate is held to the
 # same bar.
-mutation_thresholds := "crates/annals=90 crates/annals-catalog-check=90 crates/annals-diagnostic=90 crates/annals-graph=90 crates/annals-macros=90 crates/annals-yaml=90 crates/angzarr-store-sqlite=90"
+mutation_thresholds := "crates/angzarr-embedded=90 crates/angzarr-embedded-catalog-check=90 crates/angzarr-embedded-diagnostic=90 crates/angzarr-embedded-graph=90 crates/angzarr-embedded-macros=90 crates/angzarr-embedded-yaml=90 crates/angzarr-store-sqlite=90"
 
 # Staged paths outside any crate that test the whole workspace.
 workspace_wide := "Cargo.toml Cargo.lock rust-toolchain.toml .cargo/config.toml .cargo/config"
 
-# annals has no path dependency outside its tree, so the staged tree can live
+# angzarr-embedded has no path dependency outside its tree, so the staged tree can live
 # under target/.
 staged_tree := "target/staged-tree"
 
@@ -65,7 +65,7 @@ _lint:
 licence-check:
     #!/usr/bin/env bash
     set -euo pipefail
-    names() { grep -oE '`(annals|angzarr)[a-z-]*`' | tr -d '`' | sort -u; }
+    names() { grep -oE '`angzarr[a-z-]*`' | tr -d '`' | sort -u; }
     # A README bullet: from the line starting it to the next bullet or blank.
     bullet() { awk -v h="$1" 'index($0, h) == 1 { f = 1; print; next } f && /^(- |$)/ { exit } f' README.md; }
     members=$(cargo metadata -q --no-deps --format-version 1 | jq -r '.packages[].name' | sort -u)
@@ -90,10 +90,10 @@ licence-check:
 # Build the crates that must run in a browser for wasm32-unknown-unknown.
 #   rustup target add wasm32-unknown-unknown
 wasm:
-    cargo build --release --target wasm32-unknown-unknown --package annals
+    cargo build --release --target wasm32-unknown-unknown --package angzarr-embedded
 
 # Mutation-test with cargo-mutants (config in .cargo/mutants.toml): the whole
-# workspace, or only the named crates' code (`just mutants annals`). Each
+# workspace, or only the named crates' code (`just mutants angzarr-embedded`). Each
 # mutant runs every crate's tests. Results land in mutants.out/.
 #   cargo install cargo-mutants --locked
 mutants *crates:

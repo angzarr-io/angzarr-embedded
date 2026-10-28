@@ -1,4 +1,4 @@
-# Pre-commit gates for annals' cargo workspace. Each gate prints one line
+# Pre-commit gates for angzarr-embedded's cargo workspace. Each gate prints one line
 # on a pass and, on a failure, the extract worth reading plus its full log in
 # target/logs/<gate>.log.
 #

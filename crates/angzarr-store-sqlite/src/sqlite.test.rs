@@ -1,5 +1,5 @@
 //! The SQLite store held to angzarr-ports' conformance suite, every section
-//! but editions, the same checks `MemoryStore` passes, so annals and angzarr
+//! but editions, the same checks `MemoryStore` passes, so angzarr-embedded and angzarr
 //! behave alike over either; then what is particular to a store on a file:
 //! opening, WAL, migrations (an existing database's included), integrity,
 //! damage, purges and reads racing writers, the commit position as stamped,

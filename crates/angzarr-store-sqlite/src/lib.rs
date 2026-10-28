@@ -1,6 +1,6 @@
-//! angzarr-ports on SQLite: the one SQLite adapter annals and angzarr both
+//! angzarr-ports on SQLite: the one SQLite adapter angzarr-embedded and angzarr both
 //! use (plan ruling 10). A leaf: it depends on angzarr-ports and SQL, and
-//! on nothing of annals.
+//! on nothing of angzarr-embedded.
 //!
 //! [`SqliteStore`] implements every base port and every opt-in capability
 //! but the edition administration: [`EventStore`](angzarr_ports::EventStore),

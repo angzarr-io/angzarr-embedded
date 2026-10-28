@@ -9,18 +9,18 @@ exclude_globs = ["*.test.rs"]
 # (no test can tell it from the code), each matched alone by its description, grouped by crate.
 #
 # Not excluded, though they might have been:
-# - annals-catalog-check's src/lib.rs holds no code; its check is a test.
-# - Display impls are not noise: annals-catalog-check fails an empty English
+# - angzarr-embedded-catalog-check's src/lib.rs holds no code; its check is a test.
+# - Display impls are not noise: angzarr-embedded-catalog-check fails an empty English
 #   Display, so with test_workspace those mutants are caught.
 
-# Run every crate's tests against each mutant: annals-catalog-check tests the
+# Run every crate's tests against each mutant: angzarr-embedded-catalog-check tests the
 # other crates' Diagnostic codes, args and Display, from outside them.
 test_workspace = true
 
 
 
 exclude_re = [
-    # annals
+    # angzarr-embedded
     # A body that cannot run: no value of `Infallible` exists to call it on
     # (`match *self {}`), so whatever the mutant returns is never returned.
     '''replace <impl Payload for std::convert::Infallible>::to_any -> Any with Default::default\(\)$''',
@@ -42,7 +42,7 @@ exclude_re = [
     # with that error, only later. No test can tell the two apart.
     'crates/angzarr-store-sqlite/src/sqlite\.rs:\d+:\d+: replace match guard busy\(&error\) with true in into_wal$',
     'crates/angzarr-store-sqlite/src/sqlite\.rs:\d+:\d+: replace busy -> bool with true$',
-    # annals-yaml
+    # angzarr-embedded-yaml
     # update_to's last check, that the edits reached the target, cannot fail:
     # reach returns Ok only once each differing entry is set and each edit
     # has read back as intended, so the guard is always true when reached.

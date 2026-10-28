@@ -1,7 +1,7 @@
 # The audited kernel on angzarr's proto types: design
 
-Status: **implemented** in `crates/annals/src/next/`, pinned by the tests
-beside it (`*.test.rs`). It is annals' one kernel.
+Status: **implemented** in `crates/angzarr-embedded/src/next/`, pinned by the tests
+beside it (`*.test.rs`). It is angzarr-embedded's one kernel.
 
 The wire contract is angzarr's protos on angzarr-project's spec line
 (`spec/20261019-draft`, the crate pinned at **581d23e**): `EventMeta.causation`
@@ -55,8 +55,8 @@ flowchart TB
     AP["angzarr-proto<br/>(prost types, prost::Name, ids)"]
     P --> AP
   end
-  subgraph annals
-    K["annals::next<br/>(kernel: parse, coordinator, chain, upcaster, registry)"]
+  subgraph angzarr-embedded
+    K["angzarr_embedded::next<br/>(kernel: parse, coordinator, chain, upcaster, registry)"]
   end
   AP --> K
   subgraph hatpick
@@ -68,9 +68,9 @@ flowchart TB
   K --> S
 ```
 
-- **angzarr owns the wire contract.** annals defines no wire schema of its
+- **angzarr owns the wire contract.** angzarr-embedded defines no wire schema of its
   own for the kernel's events: its types are angzarr-proto's.
-- **annals operates on the proto types directly.** The kernel depends on
+- **angzarr-embedded operates on the proto types directly.** The kernel depends on
   angzarr-proto and handles `v1::Cover`, `CommandBook`, `EventPage`,
   `EventMeta`, `EventRef`, `Snapshot`, `Uuid`, `ConflictResolution`,
   `StateDescriptor` and `AngzarrDeadLetter` as generated. There is no
@@ -79,22 +79,22 @@ flowchart TB
   deliberately: a mapping layer is a second home for every value, and every
   second home is a place for the two to disagree.
 - **annals-angzarr is folded into the kernel.** What it held that was more
-  than mapping lives on in `annals::next`: the `Payload` trait, `pack`,
+  than mapping lives on in `angzarr_embedded::next`: the `Payload` trait, `pack`,
   `type_name` and `Decoder`; the `Upcaster` (a mirror of angzarr-router's
   `UpcasterDispatch`), now also for commands; the `Registry`, now also the
   mirror of `ComponentDescriptor.state`; and the golden replay fixtures. The
   opaque-row store adapter (`Opaque`, `Stored`) is gone: the store port
   itself is opaque now. The id helpers are angzarr-proto's own
-  (`angzarr_proto::ids`, re-exported as `annals::next::ids`). One crate, not
+  (`angzarr_proto::ids`, re-exported as `angzarr_embedded::next::ids`). One crate, not
   two, because with no mapping left the adapter would be a crate of
   re-exports.
-- **annals is the in-process runtime**, embedded in hatpick's server. Each
+- **angzarr-embedded is the in-process runtime**, embedded in hatpick's server. Each
   step of a chain is one atomic write: one stream's events with the step's
   policy positions.
-  hatpick calls annals directly, in process: there is no HTTP or gRPC layer
-  into annals, so no caller outside the process can deliver a policy command.
-- **annals is not angzarr.** They share the protos, some code and their
-  intents. Where the execution models differ, annals' choice is deliberate
+  hatpick calls angzarr-embedded directly, in process: there is no HTTP or gRPC layer
+  into angzarr-embedded, so no caller outside the process can deliver a policy command.
+- **angzarr-embedded is not angzarr.** They share the protos, some code and their
+  intents. Where the execution models differ, angzarr-embedded's choice is deliberate
   and listed under [Divergences](#divergences-from-angzarr).
 - **Storage is opaque**: the encoded page as written and the metadata as
   typed columns. Typed views are projections; in hatpick they are replayed
@@ -102,7 +102,7 @@ flowchart TB
 
 ## Design constraints
 
-- **annals does no I/O**, keeps no infrastructure and never retries. Its
+- **angzarr-embedded does no I/O**, keeps no infrastructure and never retries. Its
   failures say whether to retry (`Recovery`), and a retry is always safe
   (it starts at the deduplication lookup).
 - **Pure and deterministic.** No clock, no randomness, no I/O and no
@@ -113,7 +113,7 @@ flowchart TB
   The conflict nonce is a counter.
 - **The kernel stays synchronous.** The only async parts are the async store
   port and the handler over it, with native `impl Future` in traits.
-- **MSRV 1.85** (prost 0.14). **annals builds for
+- **MSRV 1.85** (prost 0.14). **angzarr-embedded builds for
   `wasm32-unknown-unknown`**, angzarr-proto included; `just wasm` checks it.
 - **Must not preclude hash chaining** (deferred). Stored pages are never
   rewritten; upcasting happens on read; metadata is deterministic; no
@@ -202,7 +202,7 @@ build does not know; a resolution the domain's state does not support
 **No causation from outside.** `check` is the client entry. The kernel's
 chain builds its policies' books itself and checks them through a
 crate-private entry (`check_policy_command`) that applies the same checks plus
-the policy-command rules and derives the command id from the trigger. annals
+the policy-command rules and derives the command id from the trigger. angzarr-embedded
 needs no authentication for this: no one outside the process can call it.
 
 ## Step 2: identification
@@ -247,7 +247,7 @@ command is atomic with its effects, with nothing else to keep consistent.
 processed ids in the stream.)
 
 **Accepted costs** (the first two are angzarr's decision 12.2, the same in
-both runtimes; the third is annals' own, divergence 10):
+both runtimes; the third is angzarr-embedded's own, divergence 10):
 
 - **A decision that produced no events leaves nothing to find**, so a
   redelivery of it is decided again, against the stream as it is then
@@ -373,7 +373,7 @@ when it should not. That is a modelling failure: put dependent data in one
 unit (mark the containing message without `descend`), derive the value in
 decide or a projection rather than storing it, or configure that command
 type STRICT. angzarr's `docs/guide/state-and-conflicts.md` shows the
-failures and their fixes; it applies to annals unchanged.
+failures and their fixes; it applies to angzarr-embedded unchanged.
 
 ## Step 5: decode, then decide or ingest
 
@@ -444,7 +444,7 @@ sequences and their `EventMeta` (`Identified::meta`).
 
 Every event carries angzarr's `EventMeta`, the same in both runtimes:
 
-| Field | annals stamps |
+| Field | angzarr-embedded stamps |
 |---|---|
 | `causation` | the event's direct cause, `command_id`: the producing command's (step 2: a client's, a fact's or a policy's), its deduplication key |
 | `fact` | the fact's `FactOrigin`, for a fact; unset otherwise |
@@ -476,7 +476,7 @@ whose meta lacks one is `ReplayError::IncompleteMeta`.
 
 A process manager is a domain (angzarr decision 14.31). Its inputs are
 commands, which policies send it, and facts (timeouts, webhooks); it never
-subscribes to another domain's events. So annals needs nothing of its own
+subscribes to another domain's events. So angzarr-embedded needs nothing of its own
 for one: its commands and facts take the five steps like any domain's, its
 events name the command or the fact's derived id as their cause, and its
 deduplication is `find_command`'s, by command id and fact id.
@@ -486,7 +486,7 @@ deduplication is `find_command`'s, by command id and fact id.
 A rules version is a short label the domain's author chooses (`"v3"`) and
 bumps whenever decide, ingest or apply semantics change. The domain
 registers a `Rulebook` (the current version and every older one its logs
-name); the current version is stamped on every event. In annals it is
+name); the current version is stamped on every event. In angzarr-embedded it is
 **load-bearing**: replay folds each event with the rules its version names
 (`ReplayError::UnknownRules` if the rulebook lacks it), and a snapshot
 folded under another version is discarded. A rules change therefore never
@@ -582,7 +582,7 @@ version, not the policy's code. So:
 - **Repairs are new commands.** To fix what a buggy policy did, issue new
   commands, with new ids, that make the corrections; their events append
   after the buggy-era ones. **History is never rewritten.** angzarr plans
-  standard re-drive commands (its backlog RD-1); annals would adopt them
+  standard re-drive commands (its backlog RD-1); angzarr-embedded would adopt them
   as ordinary commands.
 
 ## The store port
@@ -590,7 +590,7 @@ version, not the policy's code. So:
 The store ports are angzarr-ports': ONE async trait set shared with
 angzarr, held to ONE conformance suite (`angzarr_ports::contract`), with
 `MemoryStore` (feature `memory`) and the shared SQLite adapter,
-angzarr-store-sqlite. annals has no store trait of its own; `annals::next`
+angzarr-store-sqlite. angzarr-embedded has no store trait of its own; `angzarr_embedded::next`
 re-exports the shared ones.
 
 ```rust
@@ -645,7 +645,7 @@ included.
 
 **Errors** are angzarr-ports' `StoreError`, codes `angzarr-ports-*`: the
 kernel forwards each as `KernelError::Store` with its code and args, and
-annals carries the catalog for them (`locales/en-US/angzarr-ports.ftl`).
+angzarr-embedded carries the catalog for them (`locales/en-US/angzarr-ports.ftl`).
 A store's own failure is a `Cause` (its code and English) inside
 `Unavailable` or `Unreadable`.
 
@@ -659,7 +659,7 @@ from one handle mean nothing was committed between), `ReadUntilTime`,
 
 **Editions** are per-stream forks (14.32), their lifecycle angzarr's. A
 command to an edition stream never forked is refused by the store at the
-write (`EDITION_NOT_FORKED`); annals creates no edition.
+write (`EDITION_NOT_FORKED`); angzarr-embedded creates no edition.
 
 On SQLite (angzarr-store-sqlite) a write is one `BEGIN IMMEDIATE`, begun
 and committed inside the call; the file is kept in WAL, so a reader waits
@@ -689,7 +689,7 @@ floor for the next `recorded_at` comes from the store
 ## Dead letters: a logger
 
 angzarr dead-letters what it cannot deliver and cannot refuse to a caller.
-annals is in process and atomic: there is no queue, no store and no replay.
+angzarr-embedded is in process and atomic: there is no queue, no store and no replay.
 Whatever angzarr would dead-letter fails the chain back to its caller with
 nothing written, and the kernel writes one line to the application's
 `DeadLetterLog`:
@@ -706,13 +706,13 @@ decide under AGGREGATE_HANDLES that never acknowledged its window. **Every
 line starts with the prefix**: anything arriving there almost certainly
 indicates a problem, so an operator alerts on it. The line is built from
 angzarr's own `AngzarrDeadLetter`, so it says what an angzarr DLQ entry
-would. annals never answers PARKED.
+would. angzarr-embedded never answers PARKED.
 
 **Trigger edges are tracing.** No event records the edge from a trigger
 to the policy command it set off (angzarr decision 13.3; angzarr sends it
-to OpenTelemetry, its backlog PS-6). In annals the edge is the policy
+to OpenTelemetry, its backlog PS-6). In angzarr-embedded the edge is the policy
 command's own causation (`Identified::causation_id`), and its derived id
-names the trigger; annals has no tracing dependency and reports it nowhere.
+names the trigger; angzarr-embedded has no tracing dependency and reports it nowhere.
 
 ## Errors and recovery
 
@@ -728,12 +728,12 @@ names the trigger; annals has no tracing dependency and reports it nowhere.
 | `IngestPanicked`, `Upcast`, `WrongDomain`, `ChainTooDeep`, `BeforeSnapshot`, `UnregisteredDomain` (a stored stream of a domain the application did not register; an incoming book for one is `Malformed`), `Replay(..)`, `StoreError::Discontinuous`, `Unreadable` | a bug or a misconfiguration | `Bug` |
 
 A duplicate is not an error: it is `Handled::Duplicate`. Each error becomes
-a `Diagnostic` with the implementation (codes under `annals-next-*`,
-messages in `locales/en-US/annals.ftl`).
+a `Diagnostic` with the implementation (codes under `angzarr-embedded-next-*`,
+messages in `locales/en-US/angzarr-embedded.ftl`).
 
 ## Mapping: identity
 
-There is no mapping left. What annals means by each concept is the proto
+There is no mapping left. What angzarr-embedded means by each concept is the proto
 type itself:
 
 | Concept | Type |
@@ -754,7 +754,7 @@ type itself:
 | a dead letter | `v1::AngzarrDeadLetter`, as a log line |
 | a payload's version | its type URL (`pkg.v1.Foo` then `pkg.v2.Foo`) |
 
-annals' own types are the ones angzarr has no message for, because they
+angzarr-embedded's own types are the ones angzarr has no message for, because they
 are execution, not wire: `Checked`, `Identified`, `Contextual`, `Prepared`,
 `Envelope` (a checked, decoded page), `Stream`, `Tx`, `IngestCtx`, `Nonce`,
 `Rulebook`, `Registry`, `Order`, `Kernel`.
@@ -796,7 +796,7 @@ impl Registry {
 
 ## Divergences from angzarr
 
-annals is **not** angzarr; the wire meaning is shared, the execution model
+angzarr-embedded is **not** angzarr; the wire meaning is shared, the execution model
 is not. This list matches angzarr's `docs/design/audit-meta/annals-divergence.md`.
 
 1. **The chain runs in process and waits to settle.** A command commits
@@ -808,11 +808,11 @@ is not. This list matches angzarr's `docs/design/audit-meta/annals-divergence.md
    past it. A step left undone (a crash, a failed store) is resumed by
    position (`Kernel::resume`) and deduplicated by its derived command id.
    angzarr runs the same steps asynchronously, from a bus.
-2. **No transient outbox.** annals delivers each step in process, so it
+2. **No transient outbox.** angzarr-embedded delivers each step in process, so it
    writes no outbox entries; its positions say what is still owed. Its
    command ids are the derived ones, so the audit record is identical.
 3. **Causation is never accepted from outside**, because nothing outside
-   the process can call annals; angzarr needs mTLS-identified framework
+   the process can call angzarr-embedded; angzarr needs mTLS-identified framework
    components for the same guarantee. (This is the command's
    `causation_id`; it is never persisted on events, in either runtime.)
 4. **The dead-letter queue is a logger**, every line prefixed with its
@@ -827,14 +827,14 @@ is not. This list matches angzarr's `docs/design/audit-meta/annals-divergence.md
    `CONFLICT_RESOLUTION_BY_COMMAND`), checked at registration; there is no
    configuration that forbids a `Handling` override.
 8. **No edition lifecycle.** Editions are angzarr's, created by its
-   system layer; annals creates none. A command to an edition stream
+   system layer; angzarr-embedded creates none. A command to an edition stream
    never forked is refused by the store at the write
    (`EDITION_NOT_FORKED`), with nothing written.
 9. **`recorded_at` is sampled by the application** once per call, then
    raised per stream; same guarantee as angzarr's stamp at persist.
 10. **A stream can be purged** where its store opts in
     ([the store port](#the-store-port)). angzarr's events are
-    permanent and its deduplication forever; in annals deduplication lasts
+    permanent and its deduplication forever; in angzarr-embedded deduplication lasts
     as long as the stream, and a redelivery after a purge is decided again.
 
 Not divergences: `EventMeta` is the same in both runtimes
@@ -843,7 +843,7 @@ no actor), and reactor re-runs deduplicate in both, with no switch.
 
 ## hatpick changes
 
-**hatpick-events** (pinned to an annals rev; nothing breaks until it moves):
+**hatpick-events** (pinned to an angzarr-embedded rev; nothing breaks until it moves):
 
 - Events, commands and facts are prost messages with `prost::Name` under
   versioned packages (`hatpick.list.v1`, `hatpick.draw_system.v1`), one
@@ -902,7 +902,7 @@ no actor), and reactor re-runs deduplicate in both, with no switch.
 ## Open questions, each with a recommendation
 
 1. **Re-drive commands.** Repairs are new commands; angzarr may ship
-   standard ones (its backlog RD-1, undecided). I recommend annals adopt
+   standard ones (its backlog RD-1, undecided). I recommend angzarr-embedded adopt
    whatever angzarr ships as ordinary commands, and hand-build any it needs
    before then.
 2. **Snapshot validity in the coordinator**, not the typed step. The
@@ -935,7 +935,7 @@ no actor), and reactor re-runs deduplicate in both, with no switch.
 11. **The default depth limit of 8.** I recommend 8; hatpick's deepest
     chain is two levels.
 
-Decided: every annals user builds angzarr-proto (no feature gate; the
+Decided: every angzarr-embedded user builds angzarr-proto (no feature gate; the
 workspace `CLAUDE.md` says so); there is no re-run switch; a trigger edge
 is the policy command's own causation, for tracing.
 
@@ -944,21 +944,21 @@ is the policy command's own causation, for tracing.
 | Deferred | Why | What revives it |
 |---|---|---|
 | Hash chaining | Not asked for. Kept possible: immutable pages, upcast on read, deterministic meta, no personal data. | A tamper-evidence requirement. |
-| Generated `State` impls, and angzarr's golden conflict-unit parity suite run here | The generator is angzarr's backlog CR-1; until then a hand-written fixture stands in. | CR-1 landing: annals generates from the same markers and runs every fixture pair through `Units::overlaps`. |
+| Generated `State` impls, and angzarr's golden conflict-unit parity suite run here | The generator is angzarr's backlog CR-1; until then a hand-written fixture stands in. | CR-1 landing: angzarr-embedded generates from the same markers and runs every fixture pair through `Units::overlaps`. |
 | Snapshot frequency and retention configuration | `write_snapshot` is the application's; the load and discard rules are specified. | Replay latency that matters. |
 | Persisted projections | Replay on read. | Read latency: a projector's position goes to angzarr-ports' `PositionStore`. |
-| Edition lifecycle, branching, read-through (EA-1 to EA-3) | angzarr's system layer owns the edition lifecycle; annals only meets an edition through the store's refusal. | That layer landing. |
+| Edition lifecycle, branching, read-through (EA-1 to EA-3) | angzarr's system layer owns the edition lifecycle; angzarr-embedded only meets an edition through the store's refusal. | That layer landing. |
 | Configuration that forbids a `Handling` override | No hatpick command needs it. | A command type whose resolution a client must not choose. |
 | A `!Send` async store port | No browser store exists. | A wasm adapter over IndexedDB. |
-| Reading angzarr `EventBook`s into annals | annals writes books; nothing feeds it angzarr's. | An angzarr runtime delivering to annals. |
+| Reading angzarr `EventBook`s into angzarr-embedded | angzarr-embedded writes books; nothing feeds it angzarr's. | An angzarr runtime delivering to angzarr-embedded. |
 
 ## The tests
 
 Beside the module each contract is about, in its `*.test.rs` under
-`crates/annals/src/next/`, over the toy domains in `toys.test.rs` and the
+`crates/angzarr-embedded/src/next/`, over the toy domains in `toys.test.rs` and the
 in-memory store (`angzarr_ports::MemoryStore`). The store's own contract is
 angzarr-ports' conformance suite, run by each adapter (angzarr-store-sqlite
-runs it in full); annals tests the kernel over it, not the store.
+runs it in full); angzarr-embedded tests the kernel over it, not the store.
 
 - **check.test.rs**: a checked command's accessors are non-optional where
   the book had to say something; a fact carries its source in its body; the
