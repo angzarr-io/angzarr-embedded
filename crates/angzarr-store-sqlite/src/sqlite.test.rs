@@ -1288,6 +1288,14 @@ async fn damaged_copy(tamper: impl FnOnce(&mut Vec<u8>)) -> Database {
     copy
 }
 
+/// A cause's args for SQLite's primary result code `errno` and its text.
+fn sqlite_said(errno: u64, text: &str) -> Vec<(&'static str, Arg)> {
+    vec![
+        ("errno", Arg::Uint(errno)),
+        ("ext_err_txt", Arg::Str(text.to_string())),
+    ]
+}
+
 /// Each open of the file `tamper` makes of a healthy copy: the code it
 /// fails with and its cause's args, the file left untouched.
 async fn open_damaged(
@@ -1324,11 +1332,12 @@ async fn a_file_that_is_no_database_is_damaged_however_it_is_opened() {
             .collect();
     })
     .await;
-    // SQLite's numeric code travels as the cause's `errno`, never its
-    // message (decision 14.37): SQLITE_NOTADB.
+    // SQLite's numeric code travels as the cause's `errno` (SQLITE_NOTADB),
+    // and its text verbatim as `ext_err_txt`: a third party's error, kept
+    // as it said it (the owner's ruling, 2026-10-29).
     for (code, args) in found {
         assert_eq!(code, Some("angzarr-store-sqlite-damaged-file"));
-        assert_eq!(args, [("errno", Arg::Uint(26))]);
+        assert_eq!(args, sqlite_said(26, "file is not a database"));
     }
 }
 
@@ -1337,7 +1346,7 @@ async fn a_database_whose_header_is_overwritten_is_damaged_however_it_is_opened(
     // The magic string gone: SQLite no longer takes it for a database.
     for (code, args) in open_damaged(|bytes| bytes[..16].fill(0)).await {
         assert_eq!(code, Some("angzarr-store-sqlite-damaged-file"));
-        assert_eq!(args, [("errno", Arg::Uint(26))]);
+        assert_eq!(args, sqlite_said(26, "file is not a database"));
     }
 }
 
@@ -1350,10 +1359,10 @@ async fn a_database_whose_schema_is_beyond_reading_is_damaged_however_it_is_open
         bytes[100..page_size].fill(0xff);
     })
     .await;
-    // SQLITE_CORRUPT, as the cause's `errno`.
+    // SQLITE_CORRUPT, as the cause's `errno`, and SQLite's text.
     for (code, args) in found {
         assert_eq!(code, Some("angzarr-store-sqlite-damaged-file"));
-        assert_eq!(args, [("errno", Arg::Uint(11))]);
+        assert_eq!(args, sqlite_said(11, "database disk image is malformed"));
     }
 }
 

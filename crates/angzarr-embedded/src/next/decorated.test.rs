@@ -1694,7 +1694,8 @@ mod continuation {
     }
 
     /// A fact's steps that never stop are a bug: the ingest panics, which
-    /// the kernel reports and dead-letters.
+    /// the router catches (its cause HANDLER_PANICKED) and the kernel
+    /// dead-letters.
     #[test]
     fn a_facts_steps_past_the_limit_are_a_bug() {
         let registry = registry();
@@ -1707,11 +1708,13 @@ mod continuation {
         );
         assert!(
             matches!(
-                slipped,
-                Err(Failure::Kernel(KernelError::IngestPanicked { .. }))
+                &slipped,
+                Err(Failure::Kernel(KernelError::Router(e)))
+                    if e.extras.get("cause").map(String::as_str) == Some("HANDLER_PANICKED")
             ),
             "{slipped:?}"
         );
+        assert_eq!(slipped.err().map(|f| f.recovery()), Some(Recovery::Bug));
         assert!(ladder.is_empty());
     }
 
@@ -3178,8 +3181,10 @@ mod typed_refusals {
         assert_eq!(wallet.len(), 2, "nothing was recorded");
     }
 
-    /// As a refused policy receives it: the object packed; its `Display` is
-    /// its code and args, never English (decision 14.37).
+    /// As a refused policy receives it: the object packed; keyed
+    /// COMMAND_REFUSED with the object's type as `refusal_type`, as on the
+    /// wire, and its `Display` is that code and args, never English
+    /// (decision 14.37).
     #[test]
     fn a_typed_refusals_response_packs_its_object_and_message() {
         let registry = registry();
@@ -3190,7 +3195,11 @@ mod typed_refusals {
         };
         assert_eq!(
             (rejection.refusal_object().cloned(), rejection.to_string()),
-            (Some(any(WalletClosed {})), "toy-wallet-closed".to_string())
+            (
+                Some(any(WalletClosed {})),
+                "angzarr-embedded-next-command-refused refusal_type=toy.wallet.v1.WalletClosed"
+                    .to_string()
+            )
         );
     }
 
@@ -4619,27 +4628,55 @@ mod router {
         }
     }
 
-    /// The backoffs the kernel waited out, in order; each wait completes at
-    /// once.
-    #[derive(Default)]
-    struct Waits(std::sync::Mutex<Vec<std::time::Duration>>);
+    /// The backoffs the kernel waited out, in order, each completing at
+    /// once; every jitter draw is `draw`.
+    struct Waits {
+        waited: std::sync::Mutex<Vec<std::time::Duration>>,
+        draw: f64,
+    }
+
+    impl Waits {
+        fn drawing(draw: f64) -> Waits {
+            Waits {
+                waited: std::sync::Mutex::new(Vec::new()),
+                draw,
+            }
+        }
+
+        /// Each wait, in microseconds, rounded.
+        fn micros(&self) -> Vec<u128> {
+            self.waited
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|d| (d.as_nanos() + 500) / 1_000)
+                .collect()
+        }
+    }
 
     impl ::angzarr_embedded::next::Wait for Waits {
         fn wait(
             &self,
             backoff: std::time::Duration,
         ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
-            self.0.lock().unwrap().push(backoff);
+            self.waited.lock().unwrap().push(backoff);
             Box::pin(std::future::ready(()))
+        }
+
+        fn draw(&self) -> f64 {
+            self.draw
         }
     }
 
-    /// Retries 3 times, from 10 ms, at most 25 ms apart.
+    /// Retries 3 times, from 10 ms, tripling, at most 50 ms apart, up to
+    /// half of each wait taken off at random.
     fn capped() -> ::angzarr_embedded::next::OnRetryable {
         ::angzarr_embedded::next::OnRetryable {
             max_retries: 3,
             initial_backoff: std::time::Duration::from_millis(10),
-            max_backoff: std::time::Duration::from_millis(25),
+            multiplier: 3.0,
+            max_backoff: std::time::Duration::from_millis(50),
+            jitter: 0.5,
         }
     }
 
@@ -4679,28 +4716,55 @@ mod router {
         (registry, calls)
     }
 
-    /// A retryable failure (decision 14.37's third class) is retried with
-    /// backoff, doubling up to its most, as many times as the cap allows,
-    /// then dead-lettered as a visible failure under its key and args,
-    /// with how many times it was retried; the caller still gets it.
+    /// The application's instant and minted id `n`.
+    fn sampled_at(n: u8) -> Sampled {
+        Sampled {
+            now: at(i64::from(n)),
+            command_id: Uuid::from_bytes([n; 16]),
+        }
+    }
+
+    /// Retrying is on by default, with no config: three retries, from 100
+    /// ms, doubling, at most 5 s apart, a fifth of each wait at random.
     #[test]
-    fn a_retryable_failure_is_retried_with_backoff_up_to_the_cap_then_dead_lettered() {
-        use std::sync::atomic::Ordering::SeqCst;
+    fn retrying_is_on_by_default() {
+        use ::angzarr_embedded::next::OnRetryable;
         use std::time::Duration;
+        let registry = registry();
+        let log = MemoryDeadLetters::new();
+        let kernel = ::angzarr_embedded::next::Kernel::new(&registry, &log);
+        assert_eq!(
+            kernel.retryable(),
+            OnRetryable {
+                max_retries: 3,
+                initial_backoff: Duration::from_millis(100),
+                multiplier: 2.0,
+                max_backoff: Duration::from_secs(5),
+                jitter: 0.2,
+            }
+        );
+    }
+
+    /// A retryable failure (decision 14.37: neither a business refusal nor
+    /// a bug) is retried with exponential backoff (10, 30, then 50 ms, the
+    /// most, not 90), each wait less its jitter (a draw of 0.5 at a jitter
+    /// of 0.5 takes a quarter off), as many times as the cap allows, then
+    /// dead-lettered as a visible failure under its key and args, with how
+    /// many times it was retried; the caller still gets it.
+    #[test]
+    fn a_retryable_failure_is_retried_with_backoff_and_jitter_then_dead_lettered() {
+        use std::sync::atomic::Ordering::SeqCst;
         let (registry, calls) = recovering(usize::MAX);
         let store = Mem::new();
         let log = MemoryDeadLetters::new();
-        let waits = Waits::default();
-        let kernel =
-            ::angzarr_embedded::next::Kernel::new(&registry, &log).on_retryable(capped(), &waits);
-        let sampled = Sampled {
-            now: at(9),
-            command_id: Uuid::from_bytes([0x79; 16]),
-        };
+        let waits = Waits::drawing(0.5);
+        let kernel = ::angzarr_embedded::next::Kernel::new(&registry, &log)
+            .on_retryable(capped())
+            .wait_with(&waits);
         let failed = ready(kernel.handle_any(
             &store,
             send("remote", 3, any(Note {}), None),
-            &sampled,
+            &sampled_at(9),
             &mut (),
         ))
         .err()
@@ -4713,15 +4777,7 @@ mod router {
             "{failed:?}"
         );
         assert_eq!(calls.load(SeqCst), 4, "the first attempt and 3 retries");
-        assert_eq!(
-            *waits.0.lock().unwrap(),
-            [
-                Duration::from_millis(10),
-                Duration::from_millis(20),
-                Duration::from_millis(25)
-            ],
-            "doubling, up to its most"
-        );
+        assert_eq!(waits.micros(), [7_500, 22_500, 37_500]);
         let lines = log.lines();
         assert_eq!(lines.len(), 1, "dead-lettered once, visibly: {lines:?}");
         assert!(
@@ -4735,59 +4791,87 @@ mod router {
         assert!(lines[0].contains("retry_count=3"), "{lines:?}");
     }
 
-    /// As a policy's step, the same: retried up to the cap, then
-    /// dead-lettered, and the dead letter is the record to replay: the
-    /// policy's position moves past the trigger, so a resume does not run
-    /// the step again.
+    /// `max_retries = 0` turns retrying off: a retryable failure goes back
+    /// to the caller at once, waits for nothing and is not dead-lettered;
+    /// as a policy's step, its position holds, so a resume runs it again.
     #[test]
-    fn a_policy_steps_retryable_failure_is_dead_lettered_after_the_cap() {
-        use ::angzarr_embedded::next::StepError;
+    fn no_retries_turns_retrying_off() {
         use std::sync::atomic::Ordering::SeqCst;
         let (registry, calls) = recovering(usize::MAX);
         let store = Mem::new();
         let log = MemoryDeadLetters::new();
-        let waits = Waits::default();
-        let kernel =
-            ::angzarr_embedded::next::Kernel::new(&registry, &log).on_retryable(capped(), &waits);
-        let sampled = |n: u8| Sampled {
-            now: at(i64::from(n)),
-            command_id: Uuid::from_bytes([n; 16]),
-        };
-        ready(kernel.handle_any(
+        let waits = Waits::drawing(0.0);
+        let kernel = ::angzarr_embedded::next::Kernel::new(&registry, &log)
+            .on_retryable(::angzarr_embedded::next::OnRetryable {
+                max_retries: 0,
+                ..capped()
+            })
+            .wait_with(&waits);
+        let failed = ready(kernel.handle_any(
             &store,
-            send("wallet", 1, any(Open { bonus: 50 }), None),
-            &sampled(1),
+            send("remote", 3, any(Note {}), None),
+            &sampled_at(9),
             &mut (),
-        ))
-        .unwrap();
-        let held = ready(kernel.handle_any(
-            &store,
-            send("wallet", 2, any(Hold { cents: 5 }), None),
-            &sampled(2),
-            &mut (),
-        ))
-        .err()
-        .expect("the policy's step is unreachable");
-        assert!(
-            matches!(
-                &held,
-                Failure::Downstream {
-                    error: StepError::Kernel(KernelError::HandlerUnavailable { .. }),
-                    ..
-                }
-            ),
-            "{held:?}"
-        );
-        assert_eq!(calls.load(SeqCst), 4);
-        assert_eq!(waits.0.lock().unwrap().len(), 3);
-        let lines = log.lines();
-        assert_eq!(lines.len(), 1, "{lines:?}");
-        assert!(
-            lines[0].contains("angzarr-embedded-next-handler-unavailable"),
-            "{lines:?}"
-        );
-        ready(kernel.resume(&store, &sampled(3), &mut ())).unwrap();
-        assert_eq!(calls.load(SeqCst), 4, "moved past: not run again");
+        ));
+        assert!(failed.is_err());
+        assert_eq!(calls.load(SeqCst), 1);
+        assert!(waits.micros().is_empty());
+        assert!(log.lines().is_empty(), "{:?}", log.lines());
+    }
+
+    /// As a policy's step, the same: retried up to the cap, then
+    /// dead-lettered; the policy's position then does what `on_policy_bug`
+    /// says: past the trigger by default (a resume does not run the step
+    /// again), or at it under `Stay` (a resume does).
+    #[test]
+    fn a_policy_steps_retryable_failure_is_dead_lettered_after_the_cap() {
+        use ::angzarr_embedded::next::{OnPolicyBug, StepError};
+        use std::sync::atomic::Ordering::SeqCst;
+        for (policy_bug, resumed_calls) in [(OnPolicyBug::MovePast, 4), (OnPolicyBug::Stay, 8)] {
+            let (registry, calls) = recovering(usize::MAX);
+            let store = Mem::new();
+            let log = MemoryDeadLetters::new();
+            let waits = Waits::drawing(0.0);
+            let kernel = ::angzarr_embedded::next::Kernel::new(&registry, &log)
+                .on_retryable(capped())
+                .wait_with(&waits)
+                .on_policy_bug(policy_bug);
+            ready(kernel.handle_any(
+                &store,
+                send("wallet", 1, any(Open { bonus: 50 }), None),
+                &sampled_at(1),
+                &mut (),
+            ))
+            .unwrap();
+            let held = ready(kernel.handle_any(
+                &store,
+                send("wallet", 2, any(Hold { cents: 5 }), None),
+                &sampled_at(2),
+                &mut (),
+            ))
+            .err()
+            .expect("the policy's step is unreachable");
+            assert!(
+                matches!(
+                    &held,
+                    Failure::Downstream {
+                        error: StepError::Kernel(KernelError::HandlerUnavailable { .. }),
+                        ..
+                    }
+                ),
+                "{held:?}"
+            );
+            assert_eq!(calls.load(SeqCst), 4, "{policy_bug:?}");
+            assert_eq!(waits.micros(), [10_000, 30_000, 50_000], "{policy_bug:?}");
+            let lines = log.lines();
+            assert_eq!(lines.len(), 1, "{policy_bug:?}: {lines:?}");
+            assert!(
+                lines[0].contains("angzarr-embedded-next-handler-unavailable"),
+                "{lines:?}"
+            );
+            let _ = ready(kernel.resume(&store, &sampled_at(3), &mut ()));
+            assert_eq!(calls.load(SeqCst), resumed_calls, "{policy_bug:?}");
+        }
     }
 
     /// A retryable failure that clears within the cap writes nothing extra:
@@ -4796,21 +4880,17 @@ mod router {
     #[test]
     fn a_success_within_the_cap_writes_nothing_extra() {
         use std::sync::atomic::Ordering::SeqCst;
-        use std::time::Duration;
         let (registry, calls) = recovering(2);
         let store = Mem::new();
         let log = MemoryDeadLetters::new();
-        let waits = Waits::default();
-        let kernel =
-            ::angzarr_embedded::next::Kernel::new(&registry, &log).on_retryable(capped(), &waits);
-        let sampled = Sampled {
-            now: at(9),
-            command_id: Uuid::from_bytes([0x79; 16]),
-        };
+        let waits = Waits::drawing(0.0);
+        let kernel = ::angzarr_embedded::next::Kernel::new(&registry, &log)
+            .on_retryable(capped())
+            .wait_with(&waits);
         let handled = ready(kernel.handle_any(
             &store,
             send("remote", 3, any(Note {}), None),
-            &sampled,
+            &sampled_at(9),
             &mut (),
         ));
         assert!(
@@ -4819,10 +4899,7 @@ mod router {
             handled.err()
         );
         assert_eq!(calls.load(SeqCst), 3);
-        assert_eq!(
-            *waits.0.lock().unwrap(),
-            [Duration::from_millis(10), Duration::from_millis(20)]
-        );
+        assert_eq!(waits.micros(), [10_000, 30_000]);
         assert!(log.lines().is_empty(), "{:?}", log.lines());
         let remote_cover = Cover {
             domain: "remote".to_string(),
@@ -4830,6 +4907,35 @@ mod router {
             edition: None,
         };
         assert_eq!(pages(&store, &remote_cover).map(|p| p.len()), Some(1));
+    }
+
+    /// A caller's own `expected_sequence` that comes back stale goes back
+    /// to the caller at once, to reload: never retried, never
+    /// dead-lettered. (A policy's step, whose expected sequence the kernel
+    /// stamps, is retried.)
+    #[test]
+    fn a_callers_stale_expected_sequence_goes_back_at_once() {
+        let (registry, _) = recovering(0);
+        let store = Mem::new();
+        let log = MemoryDeadLetters::new();
+        let waits = Waits::drawing(0.0);
+        let kernel = ::angzarr_embedded::next::Kernel::new(&registry, &log)
+            .on_retryable(capped())
+            .wait_with(&waits);
+        let mut stale = send("remote", 3, any(Note {}), None);
+        stale.handling = Some(::angzarr_embedded::next::v1::Handling {
+            expected_sequence: Some(5),
+            conflict_resolution: ConflictResolution::Strict as i32,
+        });
+        let failed = ready(kernel.handle_any(&store, stale, &sampled_at(9), &mut ()))
+            .err()
+            .expect("stale");
+        assert!(
+            matches!(&failed, Failure::Kernel(KernelError::Stale { .. })),
+            "{failed:?}"
+        );
+        assert!(waits.micros().is_empty(), "{:?}", waits.micros());
+        assert!(log.lines().is_empty(), "{:?}", log.lines());
     }
 
     /// A remote handler that fails every command with `error`.

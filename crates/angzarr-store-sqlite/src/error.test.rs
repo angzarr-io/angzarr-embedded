@@ -3,8 +3,9 @@ use angzarr_ports::{Arg, StoreError};
 use super::{causes, damaged, unavailable, Damage, SqlError};
 
 /// An error's `Display` is its code, then its args (` name=value` each),
-/// never English (decision 14.37): text is rendered only where it is
-/// shown, from the catalog. The driver's own text is not an arg.
+/// never English of angzarr's (decision 14.37): text is rendered only
+/// where it is shown, from the catalog. A third party's text (the
+/// driver's) is carried verbatim as `ext_err_txt`.
 #[test]
 fn an_error_displays_its_code_and_args_never_english() {
     assert_eq!(
@@ -12,14 +13,14 @@ fn an_error_displays_its_code_and_args_never_english() {
         "angzarr-store-sqlite-unmigrated pending=2"
     );
     let unavailable = SqlError::Unavailable {
+        errno: None,
         detail: "disk I/O error".to_string(),
     }
     .to_string();
-    assert!(
-        unavailable.starts_with("angzarr-store-sqlite-unavailable"),
-        "{unavailable}"
+    assert_eq!(
+        unavailable,
+        "angzarr-store-sqlite-unavailable ext_err_txt=disk I/O error"
     );
-    assert!(!unavailable.contains("disk I/O error"), "{unavailable}");
     assert!(
         !unavailable.contains("the database failed"),
         "{unavailable}"
@@ -60,25 +61,51 @@ fn damage_shows_the_first_problem_and_counts_the_rest() {
 }
 
 /// A failure reaches the ports as angzarr-ports' `StoreError`, this crate's
-/// code its `Cause`; the driver's text stays in the adapter's own log and
-/// never travels, in an arg or anywhere else (decision 14.37).
+/// code its `Cause`; SQLite's primary result code is its `errno` and its
+/// text, verbatim, its `ext_err_txt`, never wrapped in English of
+/// angzarr's (the owner's ruling, 2026-10-29).
 #[test]
-fn a_failure_reaches_the_ports_with_this_crates_code_and_no_driver_text() {
-    let StoreError::Unavailable(cause) = unavailable("disk I/O error") else {
+fn a_failure_reaches_the_ports_with_the_drivers_code_and_text() {
+    let locked = SqlError::Unavailable {
+        errno: Some(5),
+        detail: "database is locked".to_string(),
+    };
+    let StoreError::Unavailable(cause) = StoreError::Unavailable(locked.cause()) else {
         panic!("unavailable");
     };
     assert_eq!(cause.code, "angzarr-store-sqlite-unavailable");
-    assert!(
-        !format!("{cause:?}").contains("disk I/O error"),
-        "{cause:?}"
+    assert_eq!(
+        cause.args,
+        [
+            ("errno", Arg::Uint(5)),
+            ("ext_err_txt", Arg::Str("database is locked".to_string())),
+        ]
     );
-    let StoreError::Unavailable(cause) = damaged("file is not a database".to_string()) else {
+    assert_eq!(
+        locked.to_string(),
+        "angzarr-store-sqlite-unavailable errno=5 ext_err_txt=database is locked"
+    );
+    let StoreError::Unavailable(cause) = unavailable("pool timed out") else {
+        panic!("unavailable");
+    };
+    assert_eq!(
+        cause.args,
+        [("ext_err_txt", Arg::Str("pool timed out".to_string()))],
+        "no errno where the driver gave none"
+    );
+    let StoreError::Unavailable(cause) = damaged(26, "file is not a database".to_string()) else {
         panic!("unavailable");
     };
     assert_eq!(cause.code, "angzarr-store-sqlite-damaged-file");
-    assert!(
-        !format!("{cause:?}").contains("file is not a database"),
-        "{cause:?}"
+    assert_eq!(
+        cause.args,
+        [
+            ("errno", Arg::Uint(26)),
+            (
+                "ext_err_txt",
+                Arg::Str("file is not a database".to_string())
+            ),
+        ]
     );
 }
 

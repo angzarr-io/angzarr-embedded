@@ -488,7 +488,7 @@ fn every_failure_says_how_to_recover() {
             KernelError::Router(CodedError::bug("PLAYER_BROKE", [])),
         ),
         (
-            Recovery::Bug,
+            Recovery::Retry,
             KernelError::Router(CodedError::stale("PLAYER_BROKE", [])),
         ),
         // A handler's own code: under a business status a refusal, under a
@@ -522,10 +522,17 @@ fn every_failure_says_how_to_recover() {
         (Recovery::Bug, KernelError::Router(own(GrpcCode::Internal))),
         (Recovery::Bug, KernelError::Router(own(GrpcCode::Unknown))),
         (Recovery::Bug, KernelError::Router(own(GrpcCode::DataLoss))),
+        // Under a retryable status, neither a refusal nor a bug: retried
+        // (the owner's ruling, 2026-10-29).
         (
-            Recovery::Bug,
+            Recovery::Retry,
             KernelError::Router(own(GrpcCode::Unimplemented)),
         ),
+        (
+            Recovery::Retry,
+            KernelError::Router(own(GrpcCode::Unavailable)),
+        ),
+        (Recovery::Retry, KernelError::Router(own(GrpcCode::Aborted))),
         (
             Recovery::Retry,
             KernelError::Router(CodedError::stale(codes::CONFLICT_OVERLAP, [])),

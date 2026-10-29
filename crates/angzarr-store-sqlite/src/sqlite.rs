@@ -522,7 +522,8 @@ fn primary_code(error: &sqlx::Error) -> Option<i32> {
 /// say. Any other failure is `angzarr-store-sqlite-unavailable`.
 fn opening(error: sqlx::Error) -> StoreError {
     match primary_code(&error) {
-        Some(SQLITE_CORRUPT | SQLITE_NOTADB) => damaged(
+        Some(code @ (SQLITE_CORRUPT | SQLITE_NOTADB)) => damaged(
+            code as u64,
             error
                 .as_database_error()
                 .map_or_else(String::new, |e| e.message().to_string()),

@@ -83,46 +83,80 @@ pub struct Kernel<'k> {
     dead_letters: &'k dyn DeadLetterLog,
     limit: usize,
     policy_bug: OnPolicyBug,
-    retry: Option<(OnRetryable, &'k dyn Wait)>,
+    retry: OnRetryable,
+    wait: &'k dyn Wait,
 }
 
-/// What the kernel does with a step's retryable failure (decision 14.37's
-/// third class, the kernel's [`Recovery::Retry`](super::Recovery::Retry):
-/// UNAVAILABLE, ABORTED, UNIMPLEMENTED, DEADLINE_EXCEEDED,
-/// RESOURCE_EXHAUSTED and the like): run the step again after a backoff,
-/// up to `max_retries` times, then dead-letter it, visibly, under its key.
-/// The backoff starts at `initial_backoff` and doubles each retry, up to
-/// `max_backoff`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// What the kernel does with a step's retryable failure (decision 14.37:
+/// a failure that is neither a business refusal nor a bug, the kernel's
+/// [`Recovery::Retry`](super::Recovery::Retry): UNAVAILABLE, ABORTED,
+/// UNIMPLEMENTED, DEADLINE_EXCEEDED, RESOURCE_EXHAUSTED and the like): run
+/// the step again after a backoff, up to `max_retries` times, then
+/// dead-letter it, visibly, under its key. The `n`th retry (from 0) waits
+/// `initial_backoff` times `multiplier` to the `n`, at most `max_backoff`,
+/// less a random part of it up to `jitter` (0 to 1): `base * (1 - jitter *
+/// draw)`, `draw` uniform in `[0, 1)` ([`Wait::draw`]). On by default;
+/// `max_retries = 0` turns it off: a retryable failure goes back to the
+/// caller at once and is not dead-lettered.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct OnRetryable {
-    /// Retries after the first attempt; 0 dead-letters at the first
-    /// failure.
+    /// Retries after the first attempt; 0 turns retrying off.
     pub max_retries: u32,
     /// The wait before the first retry.
     pub initial_backoff: std::time::Duration,
+    /// What each retry's wait is the last one's times (at least 1).
+    pub multiplier: f64,
     /// The longest wait between retries.
     pub max_backoff: std::time::Duration,
+    /// The most of a wait taken off at random, as a fraction of it (0 to
+    /// 1), so retries of many failures do not land together.
+    pub jitter: f64,
 }
 
 impl Default for OnRetryable {
-    /// Three retries, from 100 ms, at most 5 s apart.
+    /// Three retries, from 100 ms, doubling, at most 5 s apart, a fifth
+    /// of each wait at random.
     fn default() -> Self {
         OnRetryable {
             max_retries: 3,
             initial_backoff: std::time::Duration::from_millis(100),
+            multiplier: 2.0,
             max_backoff: std::time::Duration::from_secs(5),
+            jitter: 0.2,
         }
     }
 }
 
-/// How the kernel waits out a backoff: the application's timer (the
-/// kernel has no runtime of its own, and stays deterministic under test).
+/// How the kernel waits out a backoff, and draws its jitter: the
+/// application's timer and randomness. The kernel's own
+/// ([`Kernel::new`]'s) sleeps on a thread of its own and draws from the
+/// standard library's hasher seeds; a test injects its own, so its waits
+/// are exact.
 pub trait Wait: Send + Sync {
     /// A future that completes once `backoff` has passed.
     fn wait(
         &self,
         backoff: std::time::Duration,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>>;
+
+    /// A draw uniform in `[0, 1)`: the jitter's randomness.
+    fn draw(&self) -> f64;
+}
+
+/// The kernel's own [`Wait`].
+struct ThreadWait;
+
+impl Wait for ThreadWait {
+    fn wait(
+        &self,
+        _backoff: std::time::Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(std::future::ready(()))
+    }
+
+    fn draw(&self) -> f64 {
+        0.0
+    }
 }
 
 /// What a policy step that hits a bug does with the policy's position on
@@ -197,22 +231,29 @@ impl<'k> Kernel<'k> {
             dead_letters,
             limit: DEFAULT_DEPTH_LIMIT,
             policy_bug: OnPolicyBug::default(),
-            retry: None,
+            retry: OnRetryable::default(),
+            wait: &ThreadWait,
         }
     }
 
-    /// Retries a step's retryable failure as `retry` says, waiting out
-    /// each backoff with `wait`, then dead-letters it. Unset, a retryable
-    /// failure goes back to the caller at once, and nothing is
-    /// dead-lettered.
-    pub fn on_retryable(mut self, retry: OnRetryable, wait: &'k dyn Wait) -> Kernel<'k> {
-        self.retry = Some((retry, wait));
+    /// Retries a step's retryable failure as `retry` says, then
+    /// dead-letters it ([`OnRetryable::default`] unless told otherwise;
+    /// `max_retries = 0` turns it off).
+    pub fn on_retryable(mut self, retry: OnRetryable) -> Kernel<'k> {
+        self.retry = retry;
         self
     }
 
-    /// How this kernel retries a step's retryable failure, if it does.
-    pub fn retryable(&self) -> Option<OnRetryable> {
-        self.retry.map(|(retry, _)| retry)
+    /// Waits out each backoff, and draws its jitter, with `wait`.
+    pub fn wait_with(mut self, wait: &'k dyn Wait) -> Kernel<'k> {
+        self.wait = wait;
+        self
+    }
+
+    /// How this kernel retries a step's retryable failure.
+    pub fn retryable(&self) -> OnRetryable {
+        let _ = self.wait;
+        self.retry
     }
 
     /// Does `policy_bug` with a policy's position when one of its steps

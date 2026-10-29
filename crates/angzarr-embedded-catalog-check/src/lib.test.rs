@@ -59,30 +59,39 @@ fn exported() -> Vec<(&'static str, &'static str)> {
 const CARRIED: &[(&str, &str)] = &[("angzarr-ports", "angzarr-embedded")];
 
 /// An error of a crate in angzarr-ports' style (a code, args in
-/// angzarr-ports' `Arg`, an English `Display`), as a [`Diagnostic`].
+/// angzarr-ports' `Arg`, its own `Display`), as a [`Diagnostic`].
 #[derive(Clone, Debug)]
 struct Ported {
     code: &'static str,
-    english: String,
+    display: String,
     args: Vec<(&'static str, angzarr_ports::Arg)>,
 }
 
-/// Its English, where the error has one; else its code and args (decision
-/// 14.37: an adapter's cause carries no English).
-impl fmt::Display for Ported {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if !self.english.is_empty() {
-            return f.write_str(&self.english);
-        }
-        f.write_str(self.code)?;
-        for (name, arg) in &self.args {
+impl Ported {
+    /// A wrapped cause, which has no `Display` of its own here: shown as
+    /// angzarr-ports shows it, its code and args.
+    fn cause(cause: &angzarr_ports::Cause) -> Ported {
+        let mut display = cause.code.to_string();
+        for (name, arg) in &cause.args {
             match arg {
-                angzarr_ports::Arg::Uint(n) => write!(f, " {name}={n}")?,
-                angzarr_ports::Arg::Str(s) => write!(f, " {name}={s}")?,
-                angzarr_ports::Arg::Cause(cause) => write!(f, " {name}={}", cause.code)?,
+                angzarr_ports::Arg::Uint(n) => display.push_str(&format!(" {name}={n}")),
+                angzarr_ports::Arg::Str(s) => display.push_str(&format!(" {name}={s}")),
+                angzarr_ports::Arg::Cause(inner) => {
+                    display.push_str(&format!(" {name}={}", inner.code))
+                }
             }
         }
-        Ok(())
+        Ported {
+            code: cause.code,
+            display,
+            args: cause.args.clone(),
+        }
+    }
+}
+
+impl fmt::Display for Ported {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.display)
     }
 }
 
@@ -98,11 +107,7 @@ impl Diagnostic for Ported {
                 let arg = match arg {
                     angzarr_ports::Arg::Uint(n) => Arg::Uint(*n),
                     angzarr_ports::Arg::Str(s) => Arg::Str(s.clone()),
-                    angzarr_ports::Arg::Cause(cause) => Arg::nested(&Ported {
-                        code: cause.code,
-                        english: String::new(),
-                        args: cause.args.clone(),
-                    }),
+                    angzarr_ports::Arg::Cause(cause) => Arg::nested(&Ported::cause(cause)),
                 };
                 (*name, arg)
             })
@@ -110,26 +115,48 @@ impl Diagnostic for Ported {
     }
 }
 
-/// angzarr-store-sqlite's errors: every cause it puts in a store error
-/// (a code and English, no args), and a damage report.
+/// angzarr-store-sqlite's errors: each one it puts in a store error as its
+/// cause, and a damage report, with their own `Display`.
 fn sqlite_samples() -> Vec<Box<dyn Diagnostic>> {
-    let mut samples: Vec<Box<dyn Diagnostic>> = angzarr_store_sqlite::causes()
+    let mut samples: Vec<Box<dyn Diagnostic>> = angzarr_store_sqlite::errors()
         .into_iter()
-        .map(|cause| -> Box<dyn Diagnostic> {
+        .map(|error| -> Box<dyn Diagnostic> {
             Box::new(Ported {
-                code: cause.code,
-                english: String::new(),
-                args: cause.args,
+                code: error.code(),
+                display: error.to_string(),
+                args: error.cause().args,
             })
         })
         .collect();
     let damage = angzarr_store_sqlite::damage_sample();
     samples.push(Box::new(Ported {
         code: damage.code(),
-        english: damage.to_string(),
+        display: damage.to_string(),
         args: damage.args(),
     }));
     samples
+}
+
+/// A diagnostic as decision 14.37 displays it, worked out here on its own:
+/// its code, then ` name=value` for each arg, a wrapped cause as its code
+/// under the arg's name and its own args under `<name>.<arg>`.
+fn keyed(d: &dyn Diagnostic) -> String {
+    fn args(d: &dyn Diagnostic, prefix: &str, out: &mut String) {
+        for (name, arg) in d.args() {
+            match arg {
+                Arg::Int(n) => out.push_str(&format!(" {prefix}{name}={n}")),
+                Arg::Uint(n) => out.push_str(&format!(" {prefix}{name}={n}")),
+                Arg::Str(s) => out.push_str(&format!(" {prefix}{name}={s}")),
+                Arg::Nested(cause) => {
+                    out.push_str(&format!(" {prefix}{name}={}", cause.code()));
+                    args(cause.as_ref(), &format!("{prefix}{name}."), out);
+                }
+            }
+        }
+    }
+    let mut out = d.code().to_string();
+    args(d, "", &mut out);
+    out
 }
 
 /// Crates that define no codes of their own.
@@ -344,9 +371,14 @@ fn check(
         Some(owner) if CARRIED.contains(&(owner, krate)) => owner,
         _ => krate,
     };
-    let english = d.to_string();
-    if english.trim().is_empty() {
-        problems.push(format!("{code}: empty English Display"));
+    // Its `Display` is its code then its args, never English (decision
+    // 14.37): English is the catalog's, where the error is shown.
+    let shown = d.to_string();
+    if shown != keyed(d) {
+        problems.push(format!(
+            "{code}: displays {shown:?}, not its code and args {:?}",
+            keyed(d)
+        ));
     }
     if !code_ok(code, krate) || owner(code, catalogs.keys().map(String::as_str)) != Some(krate) {
         problems.push(format!(

@@ -16,8 +16,10 @@ use angzarr_ports::{Arg, Cause, StoreError};
 /// The database's own failures, as causes.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum SqlError {
-    /// The database itself failed: the store could not say.
-    Unavailable { detail: String },
+    /// The database itself failed: the store could not say. `errno` is
+    /// SQLite's primary result code, when the driver gave one; `detail`
+    /// the driver's text, verbatim.
+    Unavailable { errno: Option<u64>, detail: String },
     /// A stored value's bytes do not decode as what was written.
     Undecodable { detail: String },
     /// A database opened read-only has `pending` migrations this build
@@ -25,8 +27,8 @@ pub enum SqlError {
     /// finishing it, and only a store opened to write migrates it.
     Unmigrated { pending: usize },
     /// A file too damaged to open: SQLite finds it malformed or no database
-    /// at all. `message` is SQLite's.
-    DamagedFile { message: String },
+    /// at all. `errno` is SQLite's primary result code, `detail` its text.
+    DamagedFile { errno: u64, detail: String },
 }
 
 impl SqlError {
@@ -48,7 +50,7 @@ impl SqlError {
 impl fmt::Display for SqlError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            SqlError::Unavailable { detail } => write!(f, "the database failed: {detail}"),
+            SqlError::Unavailable { detail, .. } => write!(f, "the database failed: {detail}"),
             SqlError::Undecodable { detail } => {
                 write!(f, "a stored value does not decode: {detail}")
             }
@@ -62,8 +64,8 @@ impl fmt::Display for SqlError {
                 f,
                 "the database, opened to read, has {pending} migrations not yet applied"
             ),
-            SqlError::DamagedFile { message } => {
-                write!(f, "the database file is too damaged to open: {message}")
+            SqlError::DamagedFile { detail, .. } => {
+                write!(f, "the database file is too damaged to open: {detail}")
             }
         }
     }
@@ -129,16 +131,24 @@ impl fmt::Display for Damage {
 /// Every cause this crate can put in a [`StoreError`], one each, for the
 /// catalog test; and a [`Damage`].
 pub fn causes() -> Vec<Cause> {
+    errors().iter().map(SqlError::cause).collect()
+}
+
+/// One of each of this crate's errors, for the catalog test.
+pub fn errors() -> Vec<SqlError> {
     let detail = || "x".to_string();
-    [
-        SqlError::Unavailable { detail: detail() },
+    Vec::from([
+        SqlError::Unavailable {
+            errno: Some(1),
+            detail: detail(),
+        },
         SqlError::Undecodable { detail: detail() },
         SqlError::Unmigrated { pending: 1 },
-        SqlError::DamagedFile { message: detail() },
-    ]
-    .iter()
-    .map(SqlError::cause)
-    .collect()
+        SqlError::DamagedFile {
+            errno: 26,
+            detail: detail(),
+        },
+    ])
 }
 
 /// A damage report, for the catalog test.
@@ -153,6 +163,7 @@ pub fn damage_sample() -> Damage {
 pub(crate) fn unavailable(detail: impl fmt::Display) -> StoreError {
     StoreError::Unavailable(
         SqlError::Unavailable {
+            errno: None,
             detail: detail.to_string(),
         }
         .cause(),
@@ -166,9 +177,10 @@ pub(crate) fn unmigrated(pending: usize) -> StoreError {
 }
 
 /// A database file too damaged to open, as the port's failure
-/// (`angzarr-store-sqlite-damaged-file`), SQLite's message its detail.
-pub(crate) fn damaged(message: String) -> StoreError {
-    StoreError::Unavailable(SqlError::DamagedFile { message }.cause())
+/// (`angzarr-store-sqlite-damaged-file`): SQLite's primary result code
+/// `errno` and its text.
+pub(crate) fn damaged(errno: u64, detail: String) -> StoreError {
+    StoreError::Unavailable(SqlError::DamagedFile { errno, detail }.cause())
 }
 
 /// A stored value that does not decode (`Recovery::Bug`, as `Unreadable`).

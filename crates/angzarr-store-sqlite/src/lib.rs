@@ -48,7 +48,7 @@ pub mod sqlite;
 
 use angzarr_ports::angzarr_proto::v1::Cover;
 
-pub use error::{causes, damage_sample, Damage, Integrity, SqlError};
+pub use error::{causes, damage_sample, errors, Damage, Integrity, SqlError};
 pub use sqlite::{SqliteRead, SqliteStore, BUSY_TIMEOUT};
 
 /// This crate's en-US Fluent catalog, its name first: what a dependent

@@ -26,8 +26,8 @@ fn a_dead_letter_line_starts_with_the_warning_and_names_the_command() {
             book.to_book(),
         )),
         reason: Some(Diagnostic {
-            code: "angzarr-embedded-next-ingest-panicked".to_string(),
-            args: [("stream".to_string(), "account/1".to_string())].into(),
+            code: "angzarr-embedded-next-unhandled-handler-error".to_string(),
+            args: [("cause".to_string(), "HANDLER_PANICKED".to_string())].into(),
         }),
         source_component: "account".to_string(),
         source_component_kind: ComponentKind::Aggregate as i32,
@@ -39,11 +39,14 @@ fn a_dead_letter_line_starts_with_the_warning_and_names_the_command() {
         line.starts_with(DEAD_LETTER_PREFIX),
         "an operator alerts on the prefix: {line}"
     );
-    assert!(DEAD_LETTER_PREFIX.contains("almost certainly"));
+    // A key to alert on, never English (decision 14.37).
+    assert_eq!(DEAD_LETTER_PREFIX, "DEAD_LETTER");
     // The reason is the letter's Diagnostic: its code, then its args
     // (decision 14.37).
     assert!(
-        line.contains("account: angzarr-embedded-next-ingest-panicked stream=account/1"),
+        line.contains(
+            "account: angzarr-embedded-next-unhandled-handler-error cause=HANDLER_PANICKED"
+        ),
         "{line}"
     );
     assert!(
@@ -73,10 +76,16 @@ fn a_panicking_ingest_aborts_the_chain_and_is_logged() {
         .ready()
         .err()
         .expect("a bug, never a business rejection");
-    assert!(matches!(
-        failure,
-        Failure::Kernel(KernelError::IngestPanicked { .. })
-    ));
+    // The router catches the panic: a handler's bug, its cause
+    // HANDLER_PANICKED (decision 14.37).
+    assert!(
+        matches!(
+            &failure,
+            Failure::Kernel(KernelError::Router(e))
+                if e.extras.get("cause").map(String::as_str) == Some("HANDLER_PANICKED")
+        ),
+        "{failure:?}"
+    );
     assert_eq!(failure.recovery(), crate::next::Recovery::Bug);
     assert!(streams(&store).is_empty(), "nothing written");
     let lines = log.lines();
@@ -104,9 +113,14 @@ fn a_panicking_ingests_dead_letter_carries_its_code_not_english() {
     let lines = log.lines();
     assert_eq!(lines.len(), 1);
     assert!(
-        lines[0].contains("angzarr-embedded-next-ingest-panicked"),
+        lines[0].contains("angzarr-embedded-next-unhandled-handler-error cause=HANDLER_PANICKED"),
         "{}",
         lines[0]
     );
-    assert!(!lines[0].contains("ingest panicked"), "{}", lines[0]);
+    assert!(!lines[0].contains("panicked:"), "{}", lines[0]);
+    assert!(
+        !lines[0].contains("negative"),
+        "the panic's text stays out: {}",
+        lines[0]
+    );
 }

@@ -29,9 +29,12 @@
 //!                              # position past the trigger; "stay" keeps it
 //!
 //! [retry]
-//! max_retries = 3              # a retryable failure is retried this often,
-//! initial_backoff_ms = 100     # waiting this long first, doubling,
-//! max_backoff_ms = 5000        # at most this long, then dead-lettered
+//! max_retries = 3              # a retryable failure is retried this often
+//!                              # (0: never), then dead-lettered; waiting
+//! initial_backoff_ms = 100     # this long first,
+//! multiplier = 2.0             # this many times longer each retry,
+//! max_backoff_ms = 5000        # at most this long,
+//! jitter = 0.2                 # less up to this fraction of it at random
 //! ```
 //!
 //! A domain's language picks its default launch command and nothing else:
@@ -62,7 +65,7 @@ pub fn default_launch(language: &str) -> Option<&'static [&'static str]> {
 }
 
 /// The host's whole config.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostConfig {
     /// Every domain of the application, in-process and remote: the
@@ -85,19 +88,26 @@ pub struct HostConfig {
 
 /// The `[retry]` table: how the kernel retries a step whose failure is
 /// retryable (UNAVAILABLE, ABORTED, UNIMPLEMENTED, DEADLINE_EXCEEDED,
-/// RESOURCE_EXHAUSTED and the like), with backoff, before it dead-letters
-/// it. The kernel's
-/// [`OnRetryable`](angzarr_embedded::next::OnRetryable). Every key has a
-/// default, so the table may be left out.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// RESOURCE_EXHAUSTED and the like), with exponential backoff and jitter,
+/// before it dead-letters it. The kernel's
+/// [`OnRetryable`](angzarr_embedded::next::OnRetryable), whose defaults
+/// these are. Retrying is on with no config; `max_retries = 0` turns it
+/// off. Every key has a default, so the table may be left out.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct RetryConfig {
-    /// Retries after the first attempt, then the step is dead-lettered.
+    /// Retries after the first attempt, then the step is dead-lettered; 0
+    /// turns retrying off.
     pub max_retries: u32,
-    /// The wait before the first retry; each retry doubles it.
+    /// The wait before the first retry.
     pub initial_backoff_ms: u64,
+    /// What each retry's wait is the last one's times.
+    pub multiplier: f64,
     /// The longest wait between retries.
     pub max_backoff_ms: u64,
+    /// The most of each wait taken off at random, as a fraction of it (0
+    /// to 1).
+    pub jitter: f64,
 }
 
 impl Default for RetryConfig {
@@ -105,7 +115,9 @@ impl Default for RetryConfig {
         RetryConfig {
             max_retries: 3,
             initial_backoff_ms: 100,
+            multiplier: 2.0,
             max_backoff_ms: 5_000,
+            jitter: 0.2,
         }
     }
 }
