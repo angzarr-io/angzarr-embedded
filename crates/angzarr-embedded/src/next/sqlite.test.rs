@@ -243,6 +243,14 @@ impl std::ops::Deref for Database {
     }
 }
 
+impl Drop for Database {
+    fn drop(&mut self) {
+        for file in with_wal(&self.0) {
+            let _ = std::fs::remove_file(file);
+        }
+    }
+}
+
 /// The database file at `path` and its WAL files.
 fn with_wal(path: &Path) -> [PathBuf; 3] {
     ["", "-wal", "-shm"].map(|suffix| {
