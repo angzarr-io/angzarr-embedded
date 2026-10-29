@@ -19,7 +19,9 @@ pub enum Arg { Int(i64), Uint(u64), Str(String), Nested(Box<dyn Diagnostic>) }
   Never English. A wrapped cause is `Arg::Nested`.
 - **`Display`** is the code, then ` name=value` for each arg, a nested
   cause as `name=<its code>` and `name.<arg>=value` (angzarr decision
-  14.37): never English. `display(d, f)` writes it.
+  14.37): never English. A value that is empty or holds whitespace, `=`,
+  `"` or `\` is double-quoted, its `"` and `\` backslash-escaped, so the
+  line parses back (`quote`). `display(d, f)` writes it.
 
 Each crate ships an en-US Fluent catalog,
 `crates/<crate>/locales/en-US/<crate>.ftl`, with a message for every code.

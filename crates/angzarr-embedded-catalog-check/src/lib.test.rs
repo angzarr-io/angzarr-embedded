@@ -139,14 +139,23 @@ fn sqlite_samples() -> Vec<Box<dyn Diagnostic>> {
 
 /// A diagnostic as decision 14.37 displays it, worked out here on its own:
 /// its code, then ` name=value` for each arg, a wrapped cause as its code
-/// under the arg's name and its own args under `<name>.<arg>`.
+/// under the arg's name and its own args under `<name>.<arg>`; a text
+/// value that would not parse back (empty, or holding whitespace, `=`, `"`
+/// or `\`) double-quoted, its `"` and `\` escaped.
 fn keyed(d: &dyn Diagnostic) -> String {
+    fn text(s: &str) -> String {
+        let plain = !s.is_empty() && !s.chars().any(|c| c.is_whitespace() || "=\"\\".contains(c));
+        match plain {
+            true => s.to_string(),
+            false => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
+        }
+    }
     fn args(d: &dyn Diagnostic, prefix: &str, out: &mut String) {
         for (name, arg) in d.args() {
             match arg {
                 Arg::Int(n) => out.push_str(&format!(" {prefix}{name}={n}")),
                 Arg::Uint(n) => out.push_str(&format!(" {prefix}{name}={n}")),
-                Arg::Str(s) => out.push_str(&format!(" {prefix}{name}={s}")),
+                Arg::Str(s) => out.push_str(&format!(" {prefix}{name}={}", text(&s))),
                 Arg::Nested(cause) => {
                     out.push_str(&format!(" {prefix}{name}={}", cause.code()));
                     args(cause.as_ref(), &format!("{prefix}{name}."), out);

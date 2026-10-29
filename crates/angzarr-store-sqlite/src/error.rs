@@ -76,7 +76,29 @@ impl SqlError {
     }
 }
 
-/// `code`, then each arg as ` name=value`.
+/// `value` as a code-plus-args display writes it (decision 14.37): bare,
+/// unless it would not parse back (empty, or holding whitespace, `=`, `"`
+/// or `\`), then double-quoted with its `"` and `\` backslash-escaped.
+fn write_value(f: &mut fmt::Formatter<'_>, value: &str) -> fmt::Result {
+    let ambiguous = value.is_empty()
+        || value
+            .chars()
+            .any(|c| c.is_whitespace() || matches!(c, '=' | '"' | '\\'));
+    if !ambiguous {
+        return f.write_str(value);
+    }
+    f.write_str("\"")?;
+    for c in value.chars() {
+        if matches!(c, '"' | '\\') {
+            f.write_str("\\")?;
+        }
+        write!(f, "{c}")?;
+    }
+    f.write_str("\"")
+}
+
+/// `code`, then each arg as ` name=value`, a text value quoted where it
+/// would not parse back ([`write_value`]).
 fn write_keyed(
     f: &mut fmt::Formatter<'_>,
     code: &str,
@@ -86,7 +108,10 @@ fn write_keyed(
     for (name, arg) in args {
         match arg {
             Arg::Uint(n) => write!(f, " {name}={n}")?,
-            Arg::Str(s) => write!(f, " {name}={s}")?,
+            Arg::Str(s) => {
+                write!(f, " {name}=")?;
+                write_value(f, s)?;
+            }
             Arg::Cause(cause) => write!(f, " {name}={}", cause.code)?,
         }
     }

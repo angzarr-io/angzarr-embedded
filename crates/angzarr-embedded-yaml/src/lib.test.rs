@@ -280,7 +280,7 @@ fn double_quotes_take_unicode_cr_and_nul_escapes() {
     assert_eq!(e.problem, ParseProblem::UnknownEscape { escape: bs("^q") });
     assert_eq!(
         e.to_string(),
-        bs("angzarr-embedded-yaml-unknown-escape line=1 escape=^q")
+        bs(r#"angzarr-embedded-yaml-unknown-escape line=1 escape="^^q""#)
     );
     let e = parse(&bs(r#"a: "^uDDE1""#)).unwrap_err();
     assert_eq!(

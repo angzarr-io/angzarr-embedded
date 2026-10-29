@@ -46,7 +46,8 @@ pub trait DeadLetterLog: Send + Sync {
 
 /// A dead letter as one line, keys and values only: [`DEAD_LETTER_PREFIX`],
 /// the component that produced it, the reason's code and its args as
-/// `name=value` in name order, then any metadata, a retried step's
+/// `name=value` in name order (a value quoted where it would not parse
+/// back, `angzarr_embedded_diagnostic::quote`), then any metadata, a retried step's
 /// `retry_count`, and the command's `command_id` and `stream`, or the
 /// event's `sequence` and `stream`, as the letter holds. Built from
 /// angzarr's own `AngzarrDeadLetter`, so a line and an angzarr DLQ entry
@@ -89,7 +90,10 @@ pub fn dead_letter_line(letter: &AngzarrDeadLetter) -> String {
     for (name, value) in fields {
         // The payload's stream, where the reason names it already, once.
         if named.insert(name.clone()) {
-            line.push_str(&format!(" {name}={value}"));
+            line.push_str(&format!(
+                " {name}={}",
+                angzarr_embedded_diagnostic::quote(&value)
+            ));
         }
     }
     line

@@ -95,8 +95,10 @@ from `[workspace.package]`. A new crate sets `license.workspace = true` and
 
 Every public error type implements `angzarr_embedded_diagnostic::Diagnostic`, and
 its `Display` is its code then its args (` name=value` each, a wrapped
-cause flattened as `name=<code>` and `name.<arg>=value`), never English
-(angzarr decision 14.37): `angzarr_embedded_diagnostic::display` writes it.
+cause flattened as `name=<code>` and `name.<arg>=value`, a value that is
+empty or holds whitespace, `=`, `"` or `\` double-quoted with its `"` and
+`\` escaped), never English (angzarr decision 14.37):
+`angzarr_embedded_diagnostic::display` writes it.
 English is rendered only where an error is shown, from the Fluent catalogs
 keyed by the code: the game client renders it; angzarr-embedded renders nothing. The trait lives in its own
 crate, angzarr-embedded-diagnostic, not in angzarr-embedded, so angzarr-embedded-yaml and angzarr-embedded-graph get

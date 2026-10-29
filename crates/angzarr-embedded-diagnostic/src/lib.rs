@@ -199,8 +199,9 @@ impl fmt::Display for Report {
 /// `d` as every error displays itself (angzarr decision 14.37): its code,
 /// then ` name=value` for each arg in order, a wrapped cause as its code
 /// under the arg's name and each of its own args under `<name>.<arg>`, as
-/// angzarr flattens a cause on the wire. Never English: an error's
-/// `Display` calls this.
+/// angzarr flattens a cause on the wire, a text value quoted where it
+/// would not parse back ([`quote`]). Never English: an error's `Display`
+/// calls this.
 pub fn display(d: &dyn Diagnostic, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     f.write_str(d.code())?;
     write_args(d, "", f)
@@ -212,7 +213,7 @@ fn write_args(d: &dyn Diagnostic, prefix: &str, f: &mut fmt::Formatter<'_>) -> f
         match arg {
             Arg::Int(n) => write!(f, " {prefix}{name}={n}")?,
             Arg::Uint(n) => write!(f, " {prefix}{name}={n}")?,
-            Arg::Str(s) => write!(f, " {prefix}{name}={s}")?,
+            Arg::Str(s) => write!(f, " {prefix}{name}={}", quote(&s))?,
             Arg::Nested(cause) => {
                 write!(f, " {prefix}{name}={}", cause.code())?;
                 write_args(cause.as_ref(), &format!("{prefix}{name}."), f)?;
@@ -220,6 +221,29 @@ fn write_args(d: &dyn Diagnostic, prefix: &str, f: &mut fmt::Formatter<'_>) -> f
         }
     }
     Ok(())
+}
+
+/// `value` as a code-plus-args display writes it (decision 14.37): bare,
+/// unless it would not parse back (empty, or holding whitespace, `=`, `"`
+/// or `\`), then double-quoted with its `"` and `\` backslash-escaped.
+pub fn quote(value: &str) -> std::borrow::Cow<'_, str> {
+    let ambiguous = value.is_empty()
+        || value
+            .chars()
+            .any(|c| c.is_whitespace() || matches!(c, '=' | '"' | '\\'));
+    if !ambiguous {
+        return std::borrow::Cow::Borrowed(value);
+    }
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('"');
+    for c in value.chars() {
+        if matches!(c, '"' | '\\') {
+            quoted.push('\\');
+        }
+        quoted.push(c);
+    }
+    quoted.push('"');
+    std::borrow::Cow::Owned(quoted)
 }
 
 impl std::error::Error for Report {}
