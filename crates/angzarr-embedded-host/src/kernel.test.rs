@@ -307,6 +307,11 @@ fn a_remote_internal_failure_under_its_own_code_is_a_dead_lettered_bug() {
         pages(&store, &cover("player")).is_empty(),
         "nothing written"
     );
+    assert!(
+        lines[0].contains(&Uuid::from_bytes([1; 16]).to_string()),
+        "the command: {}",
+        lines[0]
+    );
     host.shutdown();
 }
 

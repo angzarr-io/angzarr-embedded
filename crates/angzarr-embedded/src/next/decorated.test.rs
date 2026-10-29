@@ -4476,6 +4476,7 @@ mod router {
                     lines[0]
                 );
                 assert!(!lines[0].contains("broke"), "no English: {}", lines[0]);
+                assert!(lines[0].contains("(command "), "the command: {}", lines[0]);
             };
 
             let origin = ready(kernel.handle_any(
@@ -4495,6 +4496,11 @@ mod router {
             );
             assert_eq!(origin.recovery(), Recovery::Bug, "{grpc:?}");
             dead_lettered(&log.lines());
+            assert!(
+                log.lines()[0].contains(&Uuid::from_bytes([3; 16]).to_string()),
+                "the origin's command id: {:?}",
+                log.lines()
+            );
 
             handle_in::<Wallet>(
                 &store,

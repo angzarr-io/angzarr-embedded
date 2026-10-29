@@ -12,7 +12,9 @@
 //!   UNAVAILABLE (or other transient) status are [`codes::REMOTE_HANDLER_UNAVAILABLE`],
 //!   which [`is_retryable`] says to retry: the child is being restarted, and
 //!   resuming by position retries the input once it is back;
-//! - any other status keeps its gRPC code and its ErrorInfo's reason.
+//! - any other status keeps its gRPC code and its ErrorInfo's reason: the
+//!   kernel takes a reason of the child's own under it as the child's bug,
+//!   never a refusal.
 
 use std::sync::{Arc, RwLock};
 use std::time::Duration;

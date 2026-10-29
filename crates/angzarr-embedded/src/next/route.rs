@@ -265,11 +265,21 @@ impl Diagnostic for Rejected {
     }
 }
 
-/// Whether the router's `error` is a business refusal (a domain's own
-/// code, or the router's FAILED_PRECONDITION: a process manager with no
-/// instance), not a fault.
+/// Whether the router's `error` is a business refusal: FAILED_PRECONDITION,
+/// under a domain's own code or the router's (a process manager with no
+/// instance). Under any other status it is a fault, a domain's own code
+/// included: errors are defects unless deliberately refused.
 pub(crate) fn is_rejection(error: &CodedError) -> bool {
-    reason_code(&error.code).is_none() || error.grpc == GrpcCode::FailedPrecondition
+    error.grpc == GrpcCode::FailedPrecondition
+}
+
+/// Whether the router's `error`, which the kernel keeps as
+/// [`KernelError::Router`](super::KernelError::Router) (never a refusal:
+/// that is [`Rejected`]), is a handler's own fault: a code neither the
+/// router's nor a policy's failure ([`POLICY_FAILED`]). The kernel
+/// dead-letters it by its code and args.
+pub(crate) fn is_handler_fault(error: &CodedError) -> bool {
+    reason_code(&error.code).is_none() && error.code != POLICY_FAILED
 }
 
 /// A handler's refusal `rejection`, with its typed refusal object, as the

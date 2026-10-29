@@ -24,7 +24,9 @@ use super::check::Malformed;
 /// Why a command, or a step its chain set off, failed.
 #[derive(Clone, PartialEq, Debug)]
 pub enum Failure<R> {
-    /// The domain refused it. Nothing was staged, appended or applied.
+    /// The domain refused it, deliberately: a FAILED_PRECONDITION, under
+    /// its own code or the router's. Nothing was staged, appended or
+    /// applied.
     Rejected(R),
     /// A step further down the chain failed: a policy's command rejected by
     /// its target, a malformed policy book, a gap, a chain too deep, a store
@@ -171,9 +173,10 @@ pub enum KernelError {
     Store(StoreError),
     /// angzarr-router refused the input or a policy's answer: its
     /// `CodedError`, whose `code` (SCREAMING_SNAKE, angzarr's `ErrorInfo`
-    /// reason) is this error's `reason`. INTERNAL is a policy's or a
-    /// handler's bug, FAILED_PRECONDITION a business refusal, ABORTED a
-    /// stale command, anything else the sender's to fix.
+    /// reason) is this error's `reason`. FAILED_PRECONDITION is a business
+    /// refusal; a handler's own code under any other status is its bug;
+    /// of the router's codes, INTERNAL is a policy's or a handler's bug,
+    /// ABORTED a stale command, anything else the sender's to fix.
     Router(angzarr_router::error::CodedError),
     /// The domain's handler could not be reached (a remote handler whose
     /// process is not running, or whose transport failed: its
@@ -272,9 +275,10 @@ pub enum Recovery {
     /// does not decode (angzarr's INVALID_ARGUMENT). Fix the request.
     Invalid,
     /// A bug or a misconfiguration: a malformed policy book, a panicking
-    /// ingest, a discontinuous append, a key of the wrong domain, a chain
-    /// too deep, unknown rules, a log that does not replay, an event the
-    /// store cannot read back. Retrying will not help; an operator must.
+    /// ingest, a handler's failure under a code of its own that is not a
+    /// FAILED_PRECONDITION, a discontinuous append, a key of the wrong
+    /// domain, a chain too deep, unknown rules, a log that does not replay,
+    /// an event the store cannot read back. Retrying will not help; an operator must.
     Bug,
 }
 
@@ -612,9 +616,14 @@ impl Diagnostic for KernelError {
     }
 }
 
-/// What to do about the router's refusal, by its gRPC code.
+/// What to do about the router's refusal, by its gRPC code; a code the
+/// router does not know (a handler's own) that is not a refusal is a bug,
+/// whatever its status.
 fn router_recovery(error: &angzarr_router::error::CodedError) -> Recovery {
     use angzarr_router::error::GrpcCode;
+    if super::route::reason_code(&error.code).is_none() && !super::route::is_rejection(error) {
+        return Recovery::Bug;
+    }
     match error.grpc {
         GrpcCode::Internal | GrpcCode::DataLoss | GrpcCode::Unimplemented => Recovery::Bug,
         GrpcCode::FailedPrecondition => Recovery::Business,

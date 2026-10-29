@@ -25,6 +25,7 @@ use std::sync::Mutex;
 use angzarr_embedded_diagnostic::Diagnostic;
 use angzarr_proto::v1::angzarr_dead_letter::Payload;
 use angzarr_proto::v1::{AngzarrDeadLetter, CommandBook};
+use angzarr_router::error::CodedError;
 
 use super::route::flat_args;
 
@@ -114,6 +115,24 @@ pub(crate) fn write_policy_failure(
         payload: Some(payload),
         rejection_reason: failure.code().to_string(),
         metadata: flat_args(failure).into_iter().collect(),
+        source_component: component.to_string(),
+        ..AngzarrDeadLetter::default()
+    }));
+}
+
+/// Write the dead letter for `component`'s handler's own fault `error` on
+/// `book`: its code as the reason and its metadata as the letter's, never
+/// its English.
+pub(crate) fn write_handler_fault(
+    log: &dyn DeadLetterLog,
+    book: CommandBook,
+    component: &str,
+    error: &CodedError,
+) {
+    log.write(&dead_letter_line(&AngzarrDeadLetter {
+        payload: Some(Payload::RejectedCommand(book)),
+        rejection_reason: error.code.clone(),
+        metadata: error.extras.clone().into_iter().collect(),
         source_component: component.to_string(),
         ..AngzarrDeadLetter::default()
     }));

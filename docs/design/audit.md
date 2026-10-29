@@ -434,7 +434,12 @@ and its handling resolved, and the nonce. An unknown command type is the
 router's NO_HANDLER_REGISTERED, an unknown fact type NO_FACT_HANDLER. A
 handler's refusal comes back as a business rejection carrying the refusal's
 code, args and typed refusal object: the caller's `Failure::Rejected(Rejected)`.
-Every other reason the router refuses with is `KernelError::Router`,
+A rejection is a FAILED_PRECONDITION, whatever its code: errors are
+defects unless deliberately refused. A handler's own code under any other
+status (INTERNAL, or any other) is its bug: `KernelError::Router`,
+`Recovery::Bug`, [dead-lettered](#dead-letters-a-logger) by its code and
+args, and as a policy's step its position stays, so `resume` runs it
+again. Every other reason the router refuses with is `KernelError::Router`,
 forwarded under an angzarr-embedded code of its own
 (`angzarr-embedded-next-<reason>`), each with its own message. A remote
 handler that cannot be reached (`REMOTE_HANDLER_UNAVAILABLE`) is
@@ -736,7 +741,9 @@ pub fn dead_letter_line(letter: &AngzarrDeadLetter) -> String;   // prefix, comp
 Cases: a panicking ingest; a policy's book the kernel built malformed; a
 decide under AGGREGATE_HANDLES that never acknowledged its window; a
 policy that failed on its trigger, whose line is its error's code and args
-(`name=value`), never its English, and the trigger's place. **Every
+(`name=value`), never its English, and the trigger's place; a handler
+that failed under a code of its own, not as a FAILED_PRECONDITION, whose
+line is that code and its args, never its English, and the command. **Every
 line starts with the prefix**: anything arriving there almost certainly
 indicates a problem, so an operator alerts on it. The line is built from
 angzarr's own `AngzarrDeadLetter`, so it says what an angzarr DLQ entry
@@ -758,6 +765,7 @@ names the trigger; angzarr-embedded has no tracing dependency and reports it now
 | `KernelError::UnknownType` | a command or fact type the domain does not decode, after upcasting | `Invalid` |
 | `KernelError::InvalidPayload` | a command or fact that decodes but is not a valid domain value (`WireError`: a required field absent, an undefined enum value) | `Invalid` |
 | `KernelError::Stale`, `Unresolved` | re-read and re-issue | `Retry` |
+| `KernelError::Router` | the router refused, or a handler failed under a code of its own (never FAILED_PRECONDITION: that is `Rejected`) | a handler's own code `Bug`; of the router's codes, by gRPC status: INTERNAL, DATA_LOSS and UNIMPLEMENTED `Bug`, ABORTED `Retry`, INVALID_ARGUMENT and NOT_FOUND `Invalid` |
 | `StoreError::Conflict`, `Unavailable` | run again with the same command id (step 3 makes it safe) | `Retry` |
 | `IngestPanicked`, `Upcast`, `WrongDomain`, `ChainTooDeep`, `BeforeSnapshot`, `UnregisteredDomain` (a stored stream of a domain the application did not register; an incoming book for one is `Malformed`), `Replay(..)`, `StoreError::Discontinuous`, `Unreadable` | a bug or a misconfiguration | `Bug` |
 
@@ -1059,8 +1067,9 @@ runs it in full); angzarr-embedded tests the kernel over it, not the store.
   `#[policy]`, `#[projector]`) end to end: dispatch by type URL, returned
   events applied in order, step limits, typed refusals, the refusal flow
   (pass-through `CommandRefused` or a translated fact to the source, a
-  refusal no handler takes dead-lettered), and a failing step keeping the
-  commits before it.
+  refusal no handler takes dead-lettered), a failing step keeping the
+  commits before it, and **a handler's own code is a rejection only as a
+  FAILED_PRECONDITION; under any other status it is a dead-lettered bug**.
 - **sqlite.test.rs**: the kernel over angzarr-store-sqlite on a file: a
   command and its policy step each commit and survive reopening; resume
   after reopening runs what a crash left owed; **a command's round trips

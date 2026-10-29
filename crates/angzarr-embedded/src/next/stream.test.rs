@@ -10,6 +10,7 @@ use crate::next::{
 };
 use angzarr_embedded_diagnostic::Report;
 use angzarr_ports::Cause;
+use angzarr_router::error::{codes, CodedError};
 
 use crate::next::toys::{
     account, at, command, command_id, cover, instant, registry, registry_with_upcasters, root,
@@ -473,6 +474,42 @@ fn every_failure_says_how_to_recover() {
         (
             Recovery::Bug,
             KernelError::Replay(ReplayError::RecordedBackwards { sequence: 1 }),
+        ),
+        (
+            Recovery::Business,
+            KernelError::Router(CodedError::rejection_precondition_failed(
+                "PLAYER_BROKE",
+                "",
+                [],
+            )),
+        ),
+        (
+            Recovery::Bug,
+            KernelError::Router(CodedError::internal("PLAYER_BROKE", "", [])),
+        ),
+        (
+            Recovery::Bug,
+            KernelError::Router(CodedError::stale("PLAYER_BROKE", "", [])),
+        ),
+        (
+            Recovery::Bug,
+            KernelError::Router(CodedError::rejection_invalid_argument(
+                "PLAYER_BROKE",
+                "",
+                [],
+            )),
+        ),
+        (
+            Recovery::Retry,
+            KernelError::Router(CodedError::stale(codes::CONFLICT_OVERLAP, "", [])),
+        ),
+        (
+            Recovery::Invalid,
+            KernelError::Router(CodedError::rejection_invalid_argument(
+                codes::MISSING_COMMAND_BOOK,
+                "",
+                [],
+            )),
         ),
     ];
     for (recovery, error) in cases {

@@ -49,7 +49,7 @@ use angzarr_router::pb::ContextualCommand;
 use prost_types::Timestamp;
 
 use super::check::{Body, Identified, Malformed, Sampled};
-use super::dead_letter::{write_dead_letter, DeadLetterLog};
+use super::dead_letter::{write_dead_letter, write_handler_fault, DeadLetterLog};
 use super::error::{Failure, KernelError};
 use super::markup::STEP_LIMIT;
 use super::registry::Registry;
@@ -125,10 +125,12 @@ pub(crate) fn unknown_domain(domain: &str) -> KernelError {
 }
 
 /// The router's refusal `error` of an input to `command`'s stream, in the
-/// kernel's terms: a business refusal is [`Failure::Rejected`]; a decision
-/// past its step limit [`KernelError::TooManySteps`]; anything else, a
-/// policy's failure in its source's `#[on_refused]` handler included (the
-/// chain makes it [`StepError::PolicyFailed`](super::StepError::PolicyFailed)),
+/// kernel's terms: a business refusal (FAILED_PRECONDITION, whatever its
+/// code) is [`Failure::Rejected`]; a decision past its step limit
+/// [`KernelError::TooManySteps`]; anything else, a handler's own code under
+/// any other status and a policy's failure in its source's `#[on_refused]`
+/// handler included (the chain makes it
+/// [`StepError::PolicyFailed`](super::StepError::PolicyFailed)),
 /// [`KernelError::Router`].
 pub(crate) fn refused(command: &Identified, error: CodedError) -> Failure<Rejected> {
     if error.code == route::TOO_MANY_STEPS {
@@ -149,7 +151,7 @@ pub(crate) fn refused(command: &Identified, error: CodedError) -> Failure<Reject
             error,
         });
     }
-    if error.code != route::POLICY_FAILED && route::is_rejection(&error) {
+    if route::is_rejection(&error) {
         return Failure::Rejected(Rejected::of(&error));
     }
     Failure::Kernel(KernelError::Router(error))
@@ -304,7 +306,10 @@ pub(crate) fn load(novel: Novel, nonces: &mut u64) -> Result<Contextual, KernelE
 /// now, the stream's last)` with the domain's rules version, from the
 /// head on. A panicking fact handler fails the chain
 /// ([`KernelError::IngestPanicked`]) and `dead_letters` gets a line; a
-/// panicking command handler panics on.
+/// panicking command handler panics on. A handler's fault under a code of
+/// its own ([`route::is_handler_fault`]) fails it as
+/// [`KernelError::Router`], a bug, and `dead_letters` gets a line of its
+/// code and args.
 pub(crate) fn dispatch(
     command: &Contextual,
     sampled: &Sampled,
@@ -362,7 +367,15 @@ pub(crate) fn dispatch(
                 expected,
                 actual,
             }),
-            _ => refused(identified, error),
+            _ => {
+                let failure = refused(identified, error);
+                if let Failure::Kernel(KernelError::Router(error)) = &failure {
+                    if route::is_handler_fault(error) {
+                        write_handler_fault(dead_letters, identified.to_book(), domain, error);
+                    }
+                }
+                failure
+            }
         }
     })?;
     let rules_version = registry
