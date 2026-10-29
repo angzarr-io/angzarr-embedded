@@ -4658,6 +4658,56 @@ mod router {
         );
     }
 
+    /// A code the router knows under any status but INTERNAL (here
+    /// MISSING_COMMAND_BOOK, INVALID_ARGUMENT) is not a handler's bug: as a
+    /// policy's step it is not dead-lettered, and the policy's position
+    /// stays, so a resume runs the step again.
+    #[test]
+    fn a_routers_code_other_than_internal_in_a_policys_step_holds_its_position() {
+        use ::angzarr_embedded::next::angzarr_router::error::{codes, GrpcCode};
+        use ::angzarr_embedded::next::StepError;
+        let registry = faulty_under(codes::MISSING_COMMAND_BOOK, GrpcCode::InvalidArgument);
+        let store = Mem::new();
+        let log = MemoryDeadLetters::new();
+        handle_in::<Wallet>(
+            &store,
+            &registry,
+            &log,
+            1,
+            send("wallet", 1, any(Open { bonus: 50 }), None),
+        )
+        .unwrap();
+        let held = handle_in::<Wallet>(
+            &store,
+            &registry,
+            &log,
+            2,
+            send("wallet", 2, any(Hold { cents: 5 }), None),
+        )
+        .err()
+        .expect("the policy's step fails");
+        assert!(
+            matches!(
+                &held,
+                Failure::Downstream {
+                    error: StepError::Kernel(KernelError::Router(e)),
+                    ..
+                } if e.code == "MISSING_COMMAND_BOOK"
+            ),
+            "{held:?}"
+        );
+        assert!(log.lines().is_empty(), "{:?}", log.lines());
+        let kernel = ::angzarr_embedded::next::Kernel::new(&registry, &log);
+        let sampled = Sampled {
+            now: at(9),
+            command_id: Uuid::from_bytes([0x79; 16]),
+        };
+        assert!(
+            ready(kernel.resume(&store, &sampled, &mut ())).is_err(),
+            "the position stayed, so the step runs again"
+        );
+    }
+
     /// A code the router knows, failed INTERNAL (UNHANDLED_HANDLER_ERROR:
     /// what a handler's error without a code of its own becomes, a remote
     /// child's included), is a bug too: `Recovery::Bug`, dead-lettered by
