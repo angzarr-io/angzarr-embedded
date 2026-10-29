@@ -444,10 +444,25 @@ fn a_child_ignoring_stdin_eof_is_killed_after_the_grace() {
 /// Dropping the host stops its children as shutdown does.
 #[test]
 fn dropping_the_host_stops_its_children() {
-    let host = started(vec![player(mode::SERVE)]);
+    let mark = std::env::temp_dir().join(format!(
+        "angzarr-host-drop-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_file(&mark);
+    let mut player = player(mode::SERVE);
+    player.env.insert(
+        fake_child::EOF_MARK_ENV.to_string(),
+        mark.display().to_string(),
+    );
+    let host = started(vec![player]);
     let pid = pid_of(&host.handler("player").unwrap());
     drop(host);
     assert!(!alive(&pid));
+    // Stopped by its stdin's end, and waited for: not killed, as a
+    // dropped runtime would have it (kill_on_drop).
+    assert!(mark.exists(), "the child exited on stdin's end");
+    let _ = std::fs::remove_file(&mark);
 }
 
 /// A variable the tests set on a child to find it again.

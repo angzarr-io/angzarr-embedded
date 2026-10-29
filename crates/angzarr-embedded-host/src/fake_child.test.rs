@@ -42,6 +42,9 @@ use crate::rpc::DescribeRequest;
 
 /// The variable naming the fake's mode.
 pub(crate) const MODE_ENV: &str = "ANGZARR_FAKE_CHILD";
+/// The variable naming a file the fake writes when it exits on stdin's end,
+/// and only then: a kill leaves no mark.
+pub(crate) const EOF_MARK_ENV: &str = "ANGZARR_FAKE_EOF_MARK";
 /// The variable naming the component it describes.
 pub(crate) const NAME_ENV: &str = "ANGZARR_FAKE_NAME";
 
@@ -127,6 +130,9 @@ fn entry() {
     if mode != mode::STUBBORN {
         std::thread::spawn(|| {
             let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
+            if let Some(mark) = std::env::var_os(EOF_MARK_ENV) {
+                std::fs::write(mark, b"eof").unwrap();
+            }
             std::process::exit(0);
         });
     }

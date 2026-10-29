@@ -42,6 +42,10 @@ exclude_re = [
     # with that error, only later. No test can tell the two apart.
     'crates/angzarr-store-sqlite/src/sqlite\.rs:\d+:\d+: replace match guard busy\(&error\) with true in into_wal$',
     'crates/angzarr-store-sqlite/src/sqlite\.rs:\d+:\d+: replace busy -> bool with true$',
+    # angzarr-embedded-host
+    # The mutant is the code: a remote domain's command_types already
+    # returns an empty Vec, so `vec![]` changes nothing.
+    '''replace <impl CommandHandler for RemoteCommandHandler>::command_types -> Vec<String> with vec!\[\]$''',
     # angzarr-embedded-yaml
     # update_to's last check, that the edits reached the target, cannot fail:
     # reach returns Ok only once each differing entry is set and each edit
