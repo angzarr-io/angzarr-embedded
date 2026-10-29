@@ -68,6 +68,75 @@ fn handlers_that_agree_on_the_rejection_expand() {
 }
 
 #[test]
+fn the_rejection_is_inferred_through_failed() {
+    let expanded = domain(
+        quote!(domain = "lamp"),
+        quote! {
+            impl Lamp {
+                #[handles_cmd(On)]
+                fn on(&self, cmd: On, ctx: &Context) -> Result<Lit, Failed<Refused>> { todo!() }
+                #[handles_cmd(Off)]
+                fn off(&self, cmd: Off, ctx: &Context) -> Result<Dark, Refused> { todo!() }
+            }
+        },
+        Kind::Aggregate,
+    )
+    .expect("expands")
+    .to_string();
+    assert!(
+        expanded.contains(
+            "type Rejection = :: angzarr_embedded :: next :: markup :: Rejection < Refused >"
+        ),
+        "{expanded}"
+    );
+}
+
+#[test]
+fn failed_of_another_name_is_not_unwrapped() {
+    let error = lamp(quote! {
+        impl Lamp {
+            #[handles_cmd(On)]
+            fn on(&self, cmd: On, ctx: &Context) -> Result<Lit, Failed<Refused>> { todo!() }
+            #[handles_cmd(Off)]
+            fn off(&self, cmd: Off, ctx: &Context) -> Result<Dark, Unfailed<Refused>> { todo!() }
+        }
+    });
+    assert!(
+        error.contains("disagree on the rejection: `Unfailed < Refused >` here, `Refused` before"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_refusing_handler_may_fail_with_its_choice() {
+    domain(
+        quote!(domain = "lamp"),
+        quote! {
+            impl Lamp {
+                #[handles_cmd(On, refuses(Burnt))]
+                fn on(&self, cmd: On, ctx: &Context) -> Result<Lit, Failed<Refuses<Self, On>>> { todo!() }
+            }
+        },
+        Kind::Aggregate,
+    )
+    .expect("expands");
+}
+
+#[test]
+fn a_refusing_handler_failing_with_another_is_refused() {
+    let error = lamp(quote! {
+        impl Lamp {
+            #[handles_cmd(On, refuses(Burnt))]
+            fn on(&self, cmd: On, ctx: &Context) -> Result<Lit, Failed<Burnt>> { todo!() }
+        }
+    });
+    assert!(
+        error.contains("`Result<_, Failed<Refuses<Self, Cmd>>>`"),
+        "{error}"
+    );
+}
+
+#[test]
 fn a_handler_taking_mut_self_is_refused() {
     let error = lamp(quote! {
         impl Lamp {

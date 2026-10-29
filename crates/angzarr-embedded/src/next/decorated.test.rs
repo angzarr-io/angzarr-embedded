@@ -221,6 +221,22 @@ mod wire {
             reading: i64,
         }
     );
+    message!(
+        "toy.meter.cmd.v1",
+        Tune {
+            #[prost(int64, tag = "1")]
+            reading: i64,
+        }
+    );
+    message!(
+        "toy.meter.cmd.v1",
+        Seal {
+            #[prost(int64, tag = "1")]
+            code: i64,
+        }
+    );
+    message!("toy.meter.v1", Sealed {});
+    message!("toy.meter.v1", MeterSealed {});
     message!("toy.meter.cmd.v1", Calibrate {});
     message!("toy.meter.v1", Calibrated {});
 
@@ -946,6 +962,27 @@ domain_type!(Gauge { reading: i64 });
 domain_type!(Gauged { reading: i64 });
 domain_type!(Calibrate {});
 domain_type!(Calibrated {});
+domain_type!(Tune { reading: i64 });
+domain_type!(Seal { code: i64 });
+domain_type!(Sealed {});
+domain_type!(MeterSealed {});
+
+/// The meter's typed refusal object.
+impl fmt::Display for MeterSealed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("the meter is sealed")
+    }
+}
+
+impl Diagnostic for MeterSealed {
+    fn code(&self) -> &'static str {
+        "toy-meter-sealed"
+    }
+
+    fn args(&self) -> Vec<(&'static str, Arg)> {
+        vec![]
+    }
+}
 
 /// The meter's bug: a defect, never a business answer, keyed and with its
 /// args like any diagnostic.
@@ -1002,6 +1039,29 @@ impl Meter {
         })
     }
 
+    /// A reading, then a step that fails both ways: a zero reading is the
+    /// step's bug, a negative one its refusal (INVALID_ARGUMENT); either
+    /// fails the whole decision.
+    #[handles_cmd(Tune)]
+    fn tune(&self, cmd: Tune, _ctx: &Context) -> Result<Emit<Self>, Refused> {
+        let reading = cmd.reading;
+        Ok(Emit::of(Gauged { reading: 1 })
+            .then(move |meter: &Self, ctx: &Context| meter.adjust(reading, ctx)))
+    }
+
+    /// A typed-refusal handler's two ways to fail: a zero code is its bug,
+    /// a negative one its typed refusal under NOT_FOUND.
+    #[handles_cmd(Seal, refuses(MeterSealed))]
+    fn seal(&self, cmd: Seal, _ctx: &Context) -> Result<Sealed, Failed<Refuses<Self, Seal>>> {
+        if cmd.code == 0 {
+            return Err(Failed::bug(&MeterBroke { seat: 9 }));
+        }
+        if cmd.code < 0 {
+            return Err(Failed::rejected(MeterSealed {}).with_status(BusinessStatus::NotFound));
+        }
+        Ok(Sealed {})
+    }
+
     /// The handler as it was before `Failed`: its own rejection, as is.
     #[handles_cmd(Calibrate)]
     fn calibrate(&self, _cmd: Calibrate, _ctx: &Context) -> Result<Calibrated, Refused> {
@@ -1016,9 +1076,26 @@ impl Meter {
         self.reading = event.reading;
     }
 
+    #[applies(Sealed)]
+    fn sealed(&mut self, _event: Sealed) {}
+
     #[applies(Calibrated)]
     fn calibrated(&mut self, _event: Calibrated) {
         self.reading = 0;
+    }
+}
+
+impl Meter {
+    /// [`Meter::tune`]'s step.
+    fn adjust(&self, reading: i64, _ctx: &Context) -> Result<Option<Gauged>, Failed<Refused>> {
+        if reading == 0 {
+            return Err(Failed::bug(&MeterBroke { seat: self.reading }));
+        }
+        if reading < 0 {
+            return Err(Failed::from(Refused::NotPositive { cents: reading })
+                .with_status(BusinessStatus::InvalidArgument));
+        }
+        Ok(Some(Gauged { reading }))
     }
 }
 
@@ -2229,6 +2306,108 @@ mod failed {
         assert_eq!(failure.recovery(), Recovery::Business);
         assert!(log.lines().is_empty(), "a refusal is not dead-lettered");
         assert_eq!(pages(&store, &meter_cover()), None, "nothing written");
+    }
+
+    /// The meter's one dead letter, a bug of `seat`.
+    fn broke_at(log: &MemoryDeadLetters, seat: i64) {
+        let lines = log.lines();
+        assert_eq!(lines.len(), 1, "dead-lettered once: {lines:?}");
+        let cause =
+            format!("meter: UNHANDLED_HANDLER_ERROR cause=toy-meter-broke cause.seat={seat}");
+        assert!(lines[0].contains(&cause), "{cause}: {}", lines[0]);
+        assert!(
+            !lines[0].contains("the meter at"),
+            "no English: {}",
+            lines[0]
+        );
+    }
+
+    /// `book` (command 1) to the meter, failing.
+    fn failing(store: &Mem, log: &MemoryDeadLetters, payload: Any) -> Failure<Rejected> {
+        handle_in::<Meter>(store, &registry(), log, 1, send("meter", 1, payload, None))
+            .err()
+            .expect("failed")
+    }
+
+    /// A continuation step's bug fails the whole decision as a handler's
+    /// does: UNHANDLED_HANDLER_ERROR, `Recovery::Bug`, dead-lettered with
+    /// its cause, and nothing written, the handler's own event included.
+    #[test]
+    fn a_steps_bug_fails_the_whole_decision() {
+        let store = Mem::new();
+        let log = MemoryDeadLetters::new();
+
+        let failure = failing(&store, &log, any(Tune { reading: 0 }));
+
+        assert!(
+            matches!(
+                &failure,
+                Failure::Kernel(KernelError::Router(e)) if e.code == "UNHANDLED_HANDLER_ERROR"
+            ),
+            "a bug, not a refusal: {failure:?}"
+        );
+        assert_eq!(failure.recovery(), Recovery::Bug);
+        broke_at(&log, 1);
+        assert_eq!(pages(&store, &meter_cover()), None, "nothing written");
+    }
+
+    /// A continuation step's refusal keeps its status: a business refusal
+    /// of the whole decision, nothing dead-lettered or written.
+    #[test]
+    fn a_steps_refusal_keeps_its_status() {
+        let store = Mem::new();
+        let log = MemoryDeadLetters::new();
+
+        let failure = failing(&store, &log, any(Tune { reading: -2 }));
+
+        let Failure::Rejected(rejected) = &failure else {
+            panic!("a business refusal, not {failure:?}");
+        };
+        assert_eq!(rejected.status(), BusinessStatus::InvalidArgument);
+        assert_eq!(said(rejected), said(&Refused::NotPositive { cents: -2 }));
+        assert_eq!(failure.recovery(), Recovery::Business);
+        assert!(log.lines().is_empty(), "a refusal is not dead-lettered");
+        assert_eq!(pages(&store, &meter_cover()), None, "nothing written");
+    }
+
+    /// A handler with `refuses(..)` fails with `Failed<Refuses<Self, Cmd>>`:
+    /// its bug is a bug like any handler's.
+    #[test]
+    fn a_typed_refusal_handlers_bug_is_dead_lettered() {
+        let store = Mem::new();
+        let log = MemoryDeadLetters::new();
+
+        let failure = failing(&store, &log, any(Seal { code: 0 }));
+
+        assert!(
+            matches!(
+                &failure,
+                Failure::Kernel(KernelError::Router(e)) if e.code == "UNHANDLED_HANDLER_ERROR"
+            ),
+            "a bug, not a refusal: {failure:?}"
+        );
+        assert_eq!(failure.recovery(), Recovery::Bug);
+        broke_at(&log, 9);
+        assert_eq!(pages(&store, &meter_cover()), None, "nothing written");
+    }
+
+    /// ... and its typed refusal goes out under its status, the object
+    /// packed beside.
+    #[test]
+    fn a_typed_refusal_goes_out_under_its_status_with_its_object() {
+        let store = Mem::new();
+        let log = MemoryDeadLetters::new();
+
+        let failure = failing(&store, &log, any(Seal { code: -1 }));
+
+        let Failure::Rejected(rejected) = &failure else {
+            panic!("a business refusal, not {failure:?}");
+        };
+        assert_eq!(rejected.status(), BusinessStatus::NotFound);
+        assert_eq!(rejected.refusal::<MeterSealed>(), Some(MeterSealed {}));
+        assert_eq!(said(rejected), said(&MeterSealed {}));
+        assert_eq!(failure.recovery(), Recovery::Business);
+        assert!(log.lines().is_empty(), "a refusal is not dead-lettered");
     }
 
     /// `?` on the domain's own rejection inside a handler returning

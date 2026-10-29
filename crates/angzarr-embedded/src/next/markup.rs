@@ -20,9 +20,9 @@
 //! - [`Rejection`], [`Refusing`], [`Refuses`] and [`TypedRefusal`]: a
 //!   command's refusal, a message only or one of its declared typed
 //!   refusal objects.
-//! - [`Failed`] and [`BusinessStatus`]: what a command handler fails
-//!   with, a business refusal (under a status of the business set) or a
-//!   bug.
+//! - [`Failed`], [`BusinessStatus`] and [`Fails`]: what a command handler
+//!   or a continuation step fails with, a business refusal (under a status
+//!   of the business set) or a bug.
 //! - [`CommandRefused`] and [`Refusal`]: a refusal fact as its source's
 //!   `#[on_refused]` handler reads it, and a refusal as a translating
 //!   policy's callback reads it.
@@ -135,10 +135,9 @@ pub trait DomainMessage: Clone + Send + Sync + Sized + 'static {
 
 /// A continuation step: a pure `&self` method of the aggregate (or a
 /// closure over one), run on the instance with every event so far applied.
-/// It refuses with anything that converts into the domain's
-/// [`Rejection`]: the domain's own message-only rejection, or a
-/// [`Refuses`] choice.
-type Step<A> = Box<dyn FnOnce(&A, &Context) -> Result<Emit<A>, <A as Domain>::Rejection>>;
+/// It fails as a handler does ([`Fails`]): a refusal with the domain's own
+/// rejection or a [`Refuses`] choice, as is or as a [`Failed`], or a bug.
+type Step<A> = Box<dyn FnOnce(&A, &Context) -> Result<Emit<A>, Failed<<A as Domain>::Rejection>>>;
 
 /// Events for the router to apply, in order, and optionally one
 /// continuation step to run on the instance after them.
@@ -154,8 +153,9 @@ type Step<A> = Box<dyn FnOnce(&A, &Context) -> Result<Emit<A>, <A as Domain>::Re
 /// The router applies the events, calls the step on the updated instance,
 /// applies what it returns, and repeats while there is a continuation. All
 /// of it is **one decision**: a rejection from the handler or from any step
-/// refuses it all, and what is committed is every step's events, in order,
-/// in one commit. More than [`STEP_LIMIT`] steps is a bug, and the kernel's
+/// refuses it all, a bug from any of them fails it all as the handler's
+/// bug would, and what is committed is every step's events, in order, in
+/// one commit. More than [`STEP_LIMIT`] steps is a bug, and the kernel's
 /// [`KernelError::TooManySteps`](super::KernelError::TooManySteps).
 ///
 /// A continuation is the only way a later event is decided from the state
@@ -178,12 +178,12 @@ impl<A: Domain> Emit<A> {
     where
         S: FnOnce(&A, &Context) -> Result<O, E> + 'static,
         O: Emits<A>,
-        E: Into<A::Rejection>,
+        E: Fails<A>,
     {
         self.push(Box::new(move |instance, ctx| {
             step(instance, ctx)
                 .map(Emits::into_emit)
-                .map_err(Into::into)
+                .map_err(Fails::into_failed)
         }))
     }
 
@@ -578,24 +578,43 @@ impl<R: angzarr_embedded_diagnostic::Diagnostic> angzarr_embedded_diagnostic::Di
     }
 }
 
-/// What a command handler fails with: one of the two classes, a business
-/// refusal or a bug (decision 14.37), `R` the domain's own rejection.
+/// What a command handler, or a continuation step, fails with: one of the
+/// two classes, a business refusal or a bug (decision 14.37). `X` is what
+/// it refuses with: the domain's own rejection, or, for a handler with
+/// `refuses(..)`, its [`Refuses`] choice.
 ///
 /// - [`Failed::Rejected`]: the domain said no. It goes out as a business
 ///   refusal under `status` (FAILED_PRECONDITION unless the handler says
 ///   otherwise, [`Failed::with_status`]), the refusal's code and args
 ///   beside, and reaches the issuing policy's refusal path.
-/// - [`Failed::Bug`]: a defect, never a business answer. It goes out as
-///   INTERNAL UNHANDLED_HANDLER_ERROR, the report's code as its `cause` and
+/// - [`Failed::Bug`]: a defect, never a business answer: the report of the
+///   bug value (a policy's `Err` is the same), its code and args. It goes
+///   out as INTERNAL UNHANDLED_HANDLER_ERROR, the code as its `cause` and
 ///   each arg as `cause.<arg>`, and the input is dead-lettered.
 ///
-/// A handler that only refuses keeps returning `R` (or a `Refuses`
-/// choice): each converts into a `Failed` by `From`, so `?` on a
-/// `Result<_, R>` works inside a handler returning `Failed<R>`.
+/// A handler or step that only refuses keeps returning `X` as is: it
+/// converts into a `Failed` by `From`, so `?` on a `Result<_, X>` works
+/// inside one returning `Failed<X>`.
+///
+/// ```text
+/// fn gauge(&self, cmd: Gauge, ctx: &Context) -> Result<Gauged, Failed<Refused>> {
+///     if broken { return Err(Failed::bug(&MeterBroke { seat })); }
+///     if cmd.reading < 0 {
+///         return Err(Failed::from(Refused::Negative).with_status(BusinessStatus::InvalidArgument));
+///     }
+///     within(cmd.reading)?; // a Result<_, Refused>: FAILED_PRECONDITION
+///     ..
+/// }
+///
+/// fn hold(&self, cmd: Hold, ctx: &Context) -> Result<Held, Failed<Refuses<Self, Hold>>> {
+///     if broken { return Err(Failed::bug(&WalletBroke {})); }
+///     Err(Failed::rejected(InsufficientFunds { short }))
+/// }
+/// ```
 #[derive(Clone, PartialEq, Debug)]
-pub enum Failed<R> {
+pub enum Failed<X> {
     Rejected {
-        rejection: Rejection<R>,
+        rejection: X,
         status: BusinessStatus,
     },
     Bug(Report),
@@ -614,29 +633,90 @@ pub enum BusinessStatus {
     PermissionDenied,
 }
 
-impl<R> Failed<R> {
-    /// A bug, keyed by `diagnostic`'s code, with its args.
-    pub fn bug(diagnostic: &dyn angzarr_embedded_diagnostic::Diagnostic) -> Failed<R> {
-        Failed::Bug(Report::of(diagnostic))
+impl<X> Failed<X> {
+    /// A refusal with `rejection`, FAILED_PRECONDITION.
+    pub fn rejected(rejection: impl Into<X>) -> Failed<X> {
+        Failed::Rejected {
+            rejection: rejection.into(),
+            status: BusinessStatus::default(),
+        }
+    }
+
+    /// A bug, keyed by `bug`'s code, with its args.
+    pub fn bug(bug: &dyn angzarr_embedded_diagnostic::Diagnostic) -> Failed<X> {
+        Failed::Bug(Report::of(bug))
     }
 
     /// This refusal under `status`; a bug is unchanged.
-    pub fn with_status(self, status: BusinessStatus) -> Failed<R> {
+    pub fn with_status(self, status: BusinessStatus) -> Failed<X> {
         match self {
             Failed::Rejected { rejection, .. } => Failed::Rejected { rejection, status },
             bug @ Failed::Bug(_) => bug,
         }
     }
+
+    /// This failure, its refusal converted into `Y`.
+    fn widen<Y>(self) -> Failed<Y>
+    where
+        X: Into<Y>,
+    {
+        match self {
+            Failed::Rejected { rejection, status } => Failed::Rejected {
+                rejection: rejection.into(),
+                status,
+            },
+            Failed::Bug(report) => Failed::Bug(report),
+        }
+    }
 }
 
-/// A message-only refusal, FAILED_PRECONDITION: a handler's `Err` (or
-/// `?`) of the domain's own rejection.
-impl<R> From<R> for Failed<R> {
-    fn from(rejection: R) -> Self {
-        Failed::Rejected {
-            rejection: Rejection::Message(rejection),
-            status: BusinessStatus::default(),
+/// A refusal, FAILED_PRECONDITION: a handler's `Err` (or `?`) of what it
+/// refuses with.
+impl<X> From<X> for Failed<X> {
+    fn from(rejection: X) -> Self {
+        Failed::rejected(rejection)
+    }
+}
+
+impl<X: fmt::Display> fmt::Display for Failed<X> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Failed::Rejected { rejection, .. } => rejection.fmt(f),
+            Failed::Bug(report) => report.fmt(f),
         }
+    }
+}
+
+impl<X: angzarr_embedded_diagnostic::Diagnostic> angzarr_embedded_diagnostic::Diagnostic
+    for Failed<X>
+{
+    fn code(&self) -> &'static str {
+        match self {
+            Failed::Rejected { rejection, .. } => rejection.code(),
+            Failed::Bug(report) => report.code(),
+        }
+    }
+
+    fn args(&self) -> Vec<(&'static str, angzarr_embedded_diagnostic::Arg)> {
+        match self {
+            Failed::Rejected { rejection, .. } => rejection.args(),
+            Failed::Bug(report) => report.args(),
+        }
+    }
+}
+
+/// What a command handler's or a continuation step's `Err` may be, for
+/// domain `A`: a [`Failed`] of anything `Into` the domain's rejection, or,
+/// as the macro emits for each domain, its own rejection or a
+/// [`Refuses`] choice as is.
+pub trait Fails<A: Domain> {
+    /// This failure, its refusal as the domain's rejection.
+    fn into_failed(self) -> Failed<A::Rejection>;
+}
+
+impl<A: Domain, X: Into<A::Rejection>> Fails<A> for Failed<X> {
+    fn into_failed(self) -> Failed<A::Rejection> {
+        self.widen()
     }
 }
 
@@ -940,7 +1020,7 @@ where
     A::Event: fmt::Debug,
     S: Fn(&A, &Context) -> Result<O, E>,
     O: Emits<A>,
-    E: Into<A::Rejection> + fmt::Debug,
+    E: Fails<A> + fmt::Debug,
 {
     let mut instance = instance;
     let first = match step(&instance, ctx) {
@@ -1157,17 +1237,18 @@ where
     R: angzarr_embedded_diagnostic::Diagnostic,
     C: DomainMessage,
     O: Emits<A>,
-    E: Into<Failed<R>>,
+    E: Fails<A>,
 {
-    let refuse =
-        |rejection: Rejection<R>| super::route::rejection(&rejection, rejection.refusal().cloned());
+    let fail = |failed: Failed<Rejection<R>>| match failed {
+        Failed::Rejected { rejection, .. } => {
+            super::route::rejection(&rejection, rejection.refusal().cloned())
+        }
+        Failed::Bug(report) => super::route::rejection(&report, None),
+    };
     let ctx = context_of(cctx);
     let command = input::<C>(any)?;
     let mut emit = handler(state, command, &ctx)
-        .map_err(|e| match e.into() {
-            Failed::Rejected { rejection, .. } => refuse(rejection),
-            Failed::Bug(report) => super::route::rejection(&report, None),
-        })?
+        .map_err(|e| fail(e.into_failed()))?
         .into_emit();
     let mut working = state.clone();
     let mut events = Vec::new();
@@ -1190,7 +1271,7 @@ where
                 ),
             ));
         }
-        emit = next(&working, &ctx).map_err(refuse)?;
+        emit = next(&working, &ctx).map_err(fail)?;
     }
 }
 

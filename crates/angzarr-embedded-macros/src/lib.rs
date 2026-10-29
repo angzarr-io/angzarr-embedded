@@ -3314,11 +3314,15 @@ fn check_signature(x: &Marked<'_>) -> syn::Result<()> {
             if !x.args.refuses.is_empty()
                 && args
                     .get(1)
+                    .cloned()
+                    .map(own_rejection)
+                    .as_ref()
                     .and_then(last_ident)
                     .is_none_or(|e| e != "Refuses")
             {
                 return fail(
-                    "a command handler with `refuses(..)` returns `Result<_, Refuses<Self, Cmd>>`",
+                    "a command handler with `refuses(..)` returns `Result<_, Refuses<Self, Cmd>>` \
+                     or `Result<_, Failed<Refuses<Self, Cmd>>>`",
                 );
             }
             Ok(())
@@ -3682,12 +3686,9 @@ fn domain(attr: Tokens, item: Tokens, kind: Kind) -> syn::Result<Tokens> {
                 }
             }
 
-            impl ::core::convert::From<#choice> for #m::Failed<#rejection> {
-                fn from(choice: #choice) -> Self {
-                    #m::Failed::Rejected {
-                        rejection: ::core::convert::Into::into(choice),
-                        status: #m::BusinessStatus::FailedPrecondition,
-                    }
+            impl #m::Fails<#self_ty> for #choice {
+                fn into_failed(self) -> #m::Failed<#rejection_ty> {
+                    #m::Failed::rejected(self)
                 }
             }
 
@@ -3808,6 +3809,12 @@ fn domain(attr: Tokens, item: Tokens, kind: Kind) -> syn::Result<Tokens> {
 
             fn apply(state: &mut Self, event: &#event_set, _rules: &()) {
                 #apply_body
+            }
+        }
+
+        impl #m::Fails<#self_ty> for #rejection {
+            fn into_failed(self) -> #m::Failed<#rejection_ty> {
+                #m::Failed::rejected(self)
             }
         }
 
