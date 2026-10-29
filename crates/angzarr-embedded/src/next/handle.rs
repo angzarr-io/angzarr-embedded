@@ -160,6 +160,15 @@ impl OnRetryable {
     }
 }
 
+/// The kernel's own [`Wait`] on a target with threads (`threads`), or
+/// without them.
+const THREADS: bool = true;
+
+fn default_wait(threads: bool) -> &'static dyn Wait {
+    let _ = threads;
+    &ThreadWait
+}
+
 /// The kernel's own [`Wait`]: each wait on a thread of its own, which
 /// wakes the waiting task when the backoff has passed (no runtime of the
 /// kernel's own; not on `wasm32-unknown-unknown`, which has no threads), and
@@ -316,7 +325,7 @@ impl<'k> Kernel<'k> {
             limit: DEFAULT_DEPTH_LIMIT,
             policy_bug: OnPolicyBug::default(),
             retry: OnRetryable::default(),
-            wait: &ThreadWait,
+            wait: default_wait(THREADS),
         }
     }
 

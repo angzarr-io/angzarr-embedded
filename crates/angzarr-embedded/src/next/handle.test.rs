@@ -1738,6 +1738,30 @@ fn the_kernels_own_wait_waits_out_its_backoff() {
     assert!(polls >= 1, "pending until the backoff passed");
 }
 
+/// Without threads (`wasm32-unknown-unknown`, which panics on a thread's
+/// spawn), the kernel's own wait completes at once, whatever the backoff,
+/// so a retry never panics there: a retry runs straight after the failure,
+/// and an application that wants the backoff waited out injects its
+/// timer ([`Kernel::wait_with`]). Its draws are the kernel's own, uniform
+/// in `[0, 1)`. With threads, the wait is the thread's: still pending at
+/// its first poll.
+#[test]
+fn without_threads_the_kernels_own_wait_completes_at_once() {
+    use std::task::{Context, Poll, Waker};
+    let mut cx = Context::from_waker(Waker::noop());
+    let hour = std::time::Duration::from_secs(3600);
+
+    let mut unthreaded = super::default_wait(false).wait(hour);
+    assert_eq!(unthreaded.as_mut().poll(&mut cx), Poll::Ready(()));
+    let draws: Vec<f64> = (0..64).map(|_| super::default_wait(false).draw()).collect();
+    assert!(draws.iter().all(|d| (0.0..1.0).contains(d)), "{draws:?}");
+    let distinct: std::collections::BTreeSet<u64> = draws.iter().map(|d| d.to_bits()).collect();
+    assert!(distinct.len() > 1, "random, not one value: {draws:?}");
+
+    let mut threaded = super::default_wait(true).wait(hour);
+    assert_eq!(threaded.as_mut().poll(&mut cx), Poll::Pending);
+}
+
 /// A command whose write lost a race (a store conflict, ABORTED) goes back
 /// to its outside caller at once, to reload: never retried, never
 /// dead-lettered.
