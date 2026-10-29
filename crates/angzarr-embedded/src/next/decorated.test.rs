@@ -4383,11 +4383,9 @@ mod router {
         );
     }
 
-    /// A remote handler that fails every command under `code` (with a
-    /// `seat` arg), answered with `grpc`.
+    /// A remote handler that fails every command with `error`.
     struct Faulty {
-        code: &'static str,
-        grpc: ::angzarr_embedded::next::angzarr_router::error::GrpcCode,
+        error: ::angzarr_embedded::next::angzarr_router::error::CodedError,
     }
 
     impl ::angzarr_embedded::next::angzarr_router::router::CommandHandler for Faulty {
@@ -4406,15 +4404,7 @@ mod router {
             pb::CommandHandlerResponse,
             ::angzarr_embedded::next::angzarr_router::error::CodedError,
         > {
-            Err(
-                ::angzarr_embedded::next::angzarr_router::error::CodedError {
-                    code: self.code.to_string(),
-                    message: "the player's handler broke".to_string(),
-                    extras: [("seat".to_string(), "3".to_string())].into(),
-                    grpc: self.grpc,
-                    refusal: None,
-                },
-            )
+            Err(self.error.clone())
         }
 
         fn component_descriptor(
@@ -4434,14 +4424,27 @@ mod router {
         faulty_under("PLAYER_BROKE", grpc)
     }
 
-    /// [`faulty`], its handler failing under `code`.
+    /// [`faulty`], its handler failing under `code` (with a `seat` arg).
     fn faulty_under(
         code: &'static str,
         grpc: ::angzarr_embedded::next::angzarr_router::error::GrpcCode,
     ) -> Registry {
+        faulty_with(
+            ::angzarr_embedded::next::angzarr_router::error::CodedError {
+                code: code.to_string(),
+                message: "the player's handler broke".to_string(),
+                extras: [("seat".to_string(), "3".to_string())].into(),
+                grpc,
+                refusal: None,
+            },
+        )
+    }
+
+    /// [`faulty`], its handler failing with `error`.
+    fn faulty_with(error: ::angzarr_embedded::next::angzarr_router::error::CodedError) -> Registry {
         use ::angzarr_embedded::next::angzarr_router::router::CommandHandler;
         let mut registry = registry();
-        let faulty: Box<dyn CommandHandler> = Box::new(Faulty { code, grpc });
+        let faulty: Box<dyn CommandHandler> = Box::new(Faulty { error });
         registry.command_handler("remote", faulty).unwrap();
         registry.policy_dispatch(
             PolicyDispatch::new("wallet-remote", "wallet", "remote").on_event(
@@ -4708,16 +4711,20 @@ mod router {
         );
     }
 
-    /// A code the router knows, failed INTERNAL (UNHANDLED_HANDLER_ERROR:
-    /// what a handler's error without a code of its own becomes, a remote
-    /// child's included), is a bug too: `Recovery::Bug`, dead-lettered by
-    /// its code and args, at the origin and as a policy's step, whose
-    /// position moves past the trigger.
+    /// A handler's bug (angzarr-router's `CodedError::bug`, decision
+    /// 14.37) is INTERNAL UNHANDLED_HANDLER_ERROR with the handler's own
+    /// code and args as its cause: `Recovery::Bug`, dead-lettered by that
+    /// code and its cause (`cause=<code>`, `cause.<arg>`), at the origin and
+    /// as a policy's step, whose position moves past the trigger.
     #[test]
-    fn a_routers_internal_code_is_a_dead_lettered_bug() {
-        use ::angzarr_embedded::next::angzarr_router::error::{codes, GrpcCode};
+    fn a_handlers_bug_is_dead_lettered_with_its_code_as_the_cause() {
+        use ::angzarr_embedded::next::angzarr_router::error::CodedError;
         use ::angzarr_embedded::next::StepError;
-        let registry = faulty_under(codes::UNHANDLED_HANDLER_ERROR, GrpcCode::Internal);
+        let registry = faulty_with(CodedError::bug(
+            "PLAYER_BROKE",
+            "the player's handler broke",
+            [("seat".to_string(), "3".to_string())],
+        ));
         let store = Mem::new();
         let log = MemoryDeadLetters::new();
         let kernel = ::angzarr_embedded::next::Kernel::new(&registry, &log);
@@ -4733,10 +4740,12 @@ mod router {
                 lines[0]
             );
             assert!(
-                lines[0].contains("remote: UNHANDLED_HANDLER_ERROR seat=3"),
-                "its code and args: {}",
+                lines[0]
+                    .contains("remote: UNHANDLED_HANDLER_ERROR cause=PLAYER_BROKE cause.seat=3"),
+                "its code, and the handler's code and args as its cause: {}",
                 lines[0]
             );
+            assert!(!lines[0].contains("broke"), "no English: {}", lines[0]);
             assert!(lines[0].contains("(command "), "the command: {}", lines[0]);
         };
 
@@ -4819,7 +4828,7 @@ mod router {
             pb::CommandHandlerResponse,
             ::angzarr_embedded::next::angzarr_router::error::CodedError,
         > {
-            use ::angzarr_embedded::next::angzarr_router::error::{codes, CodedError};
+            use ::angzarr_embedded::next::angzarr_router::error::CodedError;
             let fact = req
                 .command
                 .as_ref()
@@ -4827,7 +4836,7 @@ mod router {
                 .is_some_and(|p| matches!(p.body, Some(pb::command_page::Body::Fact(_))));
             match fact {
                 true => Err(CodedError::bug(
-                    codes::UNHANDLED_HANDLER_ERROR,
+                    "PICKY_FACT_BROKE",
                     "the fact handler failed",
                     [],
                 )),
@@ -4923,8 +4932,8 @@ mod router {
         let lines = log.lines();
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(
-            lines[0].contains("picky: UNHANDLED_HANDLER_ERROR"),
-            "the source's handler's bug: {}",
+            lines[0].contains("picky: UNHANDLED_HANDLER_ERROR cause=PICKY_FACT_BROKE"),
+            "the source's handler's bug, its code the cause: {}",
             lines[0]
         );
 

@@ -29,7 +29,7 @@ angzarr-ports = { git = "https://github.com/angzarr-io/angzarr-project", rev = "
 # rule, a policy's commands kept in its trigger's edition, their root and
 # correlation), implemented once for every runtime. The kernel calls it and
 # keeps the check, identification, the store writes, positions and resume.
-angzarr-router = { git = "https://github.com/angzarr-io/angzarr-router", rev = "dfdea9447a61299ec38a93f4baa8d63748f8b6d6" }
+angzarr-router = { git = "https://github.com/angzarr-io/angzarr-router", rev = "51748aed23c67368be5a12087792bdf3103cd676" }
 
 # The kernel's tests run on angzarr-ports' MemoryStore and, on a tokio
 # runtime, on the shared SQLite adapter (sqlite.test.rs); and a decorated
