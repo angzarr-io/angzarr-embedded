@@ -655,8 +655,9 @@ impl<X> Failed<X> {
         }
     }
 
-    /// This failure, its refusal converted into `Y`.
-    fn widen<Y>(self) -> Failed<Y>
+    /// This failure, its refusal converted into `Y`: a typed refusal
+    /// object's into its command's [`Refuses`] choice, say.
+    pub fn widen<Y>(self) -> Failed<Y>
     where
         X: Into<Y>,
     {
