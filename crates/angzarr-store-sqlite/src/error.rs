@@ -20,7 +20,11 @@ use angzarr_ports::{Arg, Cause, StoreError};
 pub enum SqlError {
     /// The database itself failed: the store could not say. `errno` is
     /// SQLite's primary result code, when the driver gave one; `detail`
-    /// the driver's text, verbatim.
+    /// the driver's text, verbatim. With an errno it is SQLite's answer
+    /// (`angzarr-store-sqlite-unavailable`); without one the driver failed
+    /// before SQLite answered, an I/O error or a pool timing out, under a
+    /// key of its own whose message names no errno
+    /// (`angzarr-store-sqlite-driver-failed`).
     Unavailable { errno: Option<u64>, detail: String },
     /// A stored value's bytes do not decode as what was written: `detail`
     /// is the decoder's text, verbatim.
@@ -42,7 +46,8 @@ pub enum SqlError {
 impl SqlError {
     pub fn code(&self) -> &'static str {
         match self {
-            SqlError::Unavailable { .. } => "angzarr-store-sqlite-unavailable",
+            SqlError::Unavailable { errno: Some(_), .. } => "angzarr-store-sqlite-unavailable",
+            SqlError::Unavailable { errno: None, .. } => "angzarr-store-sqlite-driver-failed",
             SqlError::Undecodable { .. } => "angzarr-store-sqlite-undecodable",
             SqlError::Unmigrated { .. } => "angzarr-store-sqlite-unmigrated",
             SqlError::DamagedFile { .. } => "angzarr-store-sqlite-damaged-file",

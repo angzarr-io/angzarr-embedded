@@ -151,6 +151,7 @@ fn every_cause_has_this_crates_code_once() {
         codes,
         [
             "angzarr-store-sqlite-unavailable",
+            "angzarr-store-sqlite-driver-failed",
             "angzarr-store-sqlite-undecodable",
             "angzarr-store-sqlite-unmigrated",
             "angzarr-store-sqlite-damaged-file",

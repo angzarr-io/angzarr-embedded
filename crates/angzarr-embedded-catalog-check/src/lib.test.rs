@@ -75,7 +75,10 @@ impl Ported {
         for (name, arg) in &cause.args {
             match arg {
                 angzarr_ports::Arg::Uint(n) => display.push_str(&format!(" {name}={n}")),
-                angzarr_ports::Arg::Str(s) => display.push_str(&format!(" {name}={s}")),
+                angzarr_ports::Arg::Str(s) => display.push_str(&format!(
+                    " {name}={}",
+                    angzarr_embedded_diagnostic::quote(s)
+                )),
                 angzarr_ports::Arg::Cause(inner) => {
                     display.push_str(&format!(" {name}={}", inner.code))
                 }

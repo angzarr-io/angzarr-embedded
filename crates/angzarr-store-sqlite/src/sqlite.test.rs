@@ -757,7 +757,8 @@ async fn a_pause_lasts_as_long_as_it_says() {
 }
 
 /// Each way a database's applied migrations can disagree with this build's,
-/// which sqlx's migrator refuses: neither open passes it by.
+/// which sqlx's migrator refuses: neither open passes it by. SQLite never
+/// answered, so the failure is the driver's, without an errno.
 #[tokio::test]
 async fn a_database_whose_migrations_disagree_opens_neither_way() {
     for tamper in [
@@ -775,13 +776,13 @@ async fn a_database_whose_migrations_disagree_opens_neither_way() {
         let read = SqliteStore::open_existing(&path).await.map(drop);
         assert_eq!(
             written.map_err(|e| code(&e)),
-            Err(Some("angzarr-store-sqlite-unavailable")),
-            "{tamper}"
+            Err(Some("angzarr-store-sqlite-driver-failed")),
+            "{tamper}: the migrator's refusal, no errno of SQLite's"
         );
         assert_eq!(
             read.map_err(|e| code(&e)),
-            Err(Some("angzarr-store-sqlite-unavailable")),
-            "{tamper}"
+            Err(Some("angzarr-store-sqlite-driver-failed")),
+            "{tamper}: the migrator's refusal, no errno of SQLite's"
         );
     }
 }
