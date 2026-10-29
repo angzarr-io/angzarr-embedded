@@ -517,6 +517,84 @@ fn angzarr_embedded_exports_the_angzarr_ports_catalog_it_carries() {
     assert_eq!(text, file);
 }
 
+/// The reasons angzarr-router refuses with: every `pub const` of its
+/// `error::codes` module, read from the source of the very router
+/// angzarr-embedded is built with (`cargo metadata` names its checkout), so
+/// a reason the router adds is checked here without a list to keep.
+fn router_reasons() -> Vec<String> {
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let metadata = std::process::Command::new(cargo)
+        .args([
+            "metadata",
+            "--format-version",
+            "1",
+            "--offline",
+            "--manifest-path",
+        ])
+        .arg(crates_dir().join("../Cargo.toml"))
+        .output()
+        .expect("cargo metadata runs");
+    assert!(metadata.status.success(), "cargo metadata failed");
+    let text = String::from_utf8(metadata.stdout).unwrap();
+    // The router package's manifest path, without a JSON parser: the field
+    // after its package entry (a dependency on it names no version).
+    let package = text
+        .split("{\"name\":\"angzarr-router\",\"version\"")
+        .nth(1)
+        .expect("angzarr-router is in the graph");
+    let manifest = package
+        .split("\"manifest_path\":\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("its manifest path");
+    let source = Path::new(manifest).with_file_name("src/error.rs");
+    let source =
+        fs::read_to_string(&source).unwrap_or_else(|e| panic!("read {}: {e}", source.display()));
+    let codes = source
+        .split("pub mod codes {")
+        .nth(1)
+        .and_then(|rest| rest.split("\n}").next())
+        .expect("the router's codes module");
+    let reasons: Vec<String> = codes
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("pub const "))
+        .filter_map(|decl| decl.split('"').nth(1))
+        .map(str::to_string)
+        .collect();
+    assert!(!reasons.is_empty(), "no reasons read from {codes}");
+    reasons
+}
+
+/// Every reason angzarr-router refuses with is an angzarr-embedded code of
+/// its own, `angzarr-embedded-next-` and the reason in kebab-case, with a
+/// message in every locale: `KernelError::Router` forwards the router's
+/// `CodedError` under it.
+#[test]
+fn every_router_reason_has_its_own_code_and_message() {
+    use angzarr_embedded::next::angzarr_router::error::CodedError;
+    use angzarr_embedded::next::KernelError;
+
+    let mut problems = Vec::new();
+    let catalogs = catalogs(&mut problems);
+    let mine = &catalogs["angzarr-embedded"];
+    for reason in router_reasons() {
+        let expected = format!(
+            "angzarr-embedded-next-{}",
+            reason.to_ascii_lowercase().replace('_', "-")
+        );
+        let error = KernelError::Router(CodedError::internal(&reason, "", []));
+        if error.code() != expected {
+            problems.push(format!("{reason} is {}, not {expected}", error.code()));
+        }
+        for (locale, catalog) in mine {
+            if !catalog.contains_key(&expected) {
+                problems.push(format!("{locale}: no message for {expected} ({reason})"));
+            }
+        }
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
 #[test]
 fn the_checks_catch_what_they_should() {
     assert!(code_ok(

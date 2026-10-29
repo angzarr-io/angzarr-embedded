@@ -76,3 +76,29 @@ fn a_panicking_ingest_aborts_the_chain_and_is_logged() {
     assert!(lines[0].starts_with(DEAD_LETTER_PREFIX));
     assert!(lines[0].contains(&crate::next::ids::fact_command_id("pi_bad").to_string()));
 }
+
+/// A dead letter carries its error's code and args, never rendered
+/// English: the operator's text is produced where the line is displayed.
+#[test]
+fn a_panicking_ingests_dead_letter_carries_its_code_not_english() {
+    let registry = registry();
+    let log = MemoryDeadLetters::new();
+    let kernel = Kernel::new(&registry, &log);
+    let store = MemoryStore::new();
+    let bad = fact(
+        cover("account", 1),
+        pack(&account::fact::PaymentReceived { cents: -1 }),
+        "pi_bad",
+    );
+    let _ = kernel
+        .handle::<Account, _, _>(&store, bad, &at(30), &mut ())
+        .ready();
+    let lines = log.lines();
+    assert_eq!(lines.len(), 1);
+    assert!(
+        lines[0].contains("angzarr-embedded-next-ingest-panicked"),
+        "{}",
+        lines[0]
+    );
+    assert!(!lines[0].contains("ingest panicked"), "{}", lines[0]);
+}
