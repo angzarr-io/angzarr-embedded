@@ -240,7 +240,7 @@
 //! impl BuyInWallet {
 //!     #[on_event(BuyInStarted)]
 //!     fn started(&self, event: &BuyInStarted, ctx: &PolicyContext)
-//!         -> Result<Commands<Wallet>, PolicyBug> { .. }
+//!         -> Result<Commands<Wallet>, Infallible> { .. }
 //! }
 //! ```
 //!
@@ -250,11 +250,18 @@
 //! - [`on_event`]`(Event)`, one per event of the source it handles:
 //!   `fn(&self, event: &Event, ctx: &PolicyContext) -> Result<Commands<Target>, E>`,
 //!   pure, each command one the target decides, with the root of its
-//!   stream (for a process manager, `ctx.correlation_id()`). `E` is any
-//!   `Diagnostic` (`Infallible` for a handler that cannot fail): an `Err`
-//!   is a bug, an event the policy cannot answer, and its step is
-//!   dead-lettered with the error's code as its reason and its position
-//!   moved past the event, as for a refused command's step.
+//!   stream (for a process manager, `ctx.correlation_id()`). It always
+//!   returns `Result`; `E` is any `Diagnostic` (`Infallible` for a handler
+//!   that cannot fail).
+//!
+//! **Policies should not fail for business reasons**: they react to events
+//! the application's own domains created, so an `Err` is a bug, an event
+//! the policy cannot answer. So is an event of a type the policy marks
+//! that does not decode. Either fails the step as
+//! `StepError::PolicyFailed`, a defect (never the business `Rejected`):
+//! the step is dead-lettered with the error's code as its reason and its
+//! args as the letter's metadata, never its English, and the policy's
+//! position moves past the event.
 //!
 //! ## Refusals
 //!
@@ -2766,6 +2773,11 @@ pub fn state_factory(_attr: TokenStream, _item: TokenStream) -> TokenStream {
 /// target = <domain>)]` (see the crate docs). Generates `markup::Policy`:
 /// its refusal pass-through, and translate for each command its
 /// `#[on_refused]` callbacks name.
+///
+/// Policies should not fail for business reasons: they react to events the
+/// application's own domains created, so an `Err` from an `#[on_event]`
+/// handler (or a marked event that does not decode) is a bug, dead-lettered
+/// as `StepError::PolicyFailed`.
 #[proc_macro_attribute]
 pub fn policy(attr: TokenStream, item: TokenStream) -> TokenStream {
     flow(attr.into(), item.into(), Flow::Policy)
@@ -2773,8 +2785,10 @@ pub fn policy(attr: TokenStream, item: TokenStream) -> TokenStream {
         .into()
 }
 
-/// Marks a policy's handler for one event of its source. Inert: [`policy`]
-/// reads it.
+/// Marks a policy's handler for one event of its source:
+/// `fn(&self, event: &E, ctx: &PolicyContext) -> Result<Commands<Target>, Err>`,
+/// always a `Result`, its `Err` any `Diagnostic` and a bug. Inert:
+/// [`policy`] reads it.
 #[proc_macro_attribute]
 pub fn on_event(_attr: TokenStream, item: TokenStream) -> TokenStream {
     item
@@ -2964,12 +2978,16 @@ fn flow(attr: Tokens, item: Tokens, flow: Flow) -> syn::Result<Tokens> {
                         #m::Report,
                     > {
                         #(
-                            if let ::core::result::Result::Ok(::core::option::Option::Some(event)) =
-                                #m::__decode::<#event_types>(event)
-                            {
-                                return #m::__answered::<<Self as #m::Policy>::Target, _>(
-                                    <#self_ty>::#event_methods(self, &event, ctx),
-                                );
+                            match #m::__decode::<#event_types>(event) {
+                                ::core::result::Result::Ok(::core::option::Option::Some(event)) => {
+                                    return #m::__answered::<<Self as #m::Policy>::Target, _>(
+                                        <#self_ty>::#event_methods(self, &event, ctx),
+                                    );
+                                }
+                                ::core::result::Result::Ok(::core::option::Option::None) => {}
+                                ::core::result::Result::Err(error) => {
+                                    return ::core::result::Result::Err(#m::Report::of(&error));
+                                }
                             }
                         )*
                         let _ = (event, ctx);

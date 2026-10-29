@@ -18,7 +18,9 @@
 //! - **A failing step keeps every write before it**: nothing is rolled
 //!   back. The failure goes back to the caller with the path to the step
 //!   ([`Failure::Downstream`]). A refused command of a policy that does not
-//!   answer refusals is dead-lettered and its position moves past it; a bug
+//!   answer refusals is dead-lettered and its position moves past it, and
+//!   so is a policy's own error ([`StepError::PolicyFailed`], a defect,
+//!   dead-lettered by its code and args); a bug
 //!   (a malformed policy book, the depth limit) or a store failure holds
 //!   the position, so [`Kernel::resume`] runs the step again, deduplicated
 //!   by its derived command id.
@@ -52,7 +54,7 @@ use angzarr_router::policy::address_refusal_fact;
 
 use super::check::{check, check_refusal, Checked, Identified, Sampled};
 use super::coordinator::{deduplicate, dispatch, load, Deduplicated};
-use super::dead_letter::{write_dead_letter, DeadLetterLog};
+use super::dead_letter::{write_dead_letter, write_policy_failure, DeadLetterLog};
 use super::domain::Domain;
 use super::error::{Failure, KernelError, Step, StepError};
 use super::handler::Handler;
@@ -535,7 +537,9 @@ impl<'k> Run<'k> {
     /// router's refusal of the answer (a command outside the policy's
     /// destination or its trigger's edition, with no root or another
     /// correlation) is the policy's bug: dead-lettered, and the position
-    /// stays.
+    /// stays. The policy's own error ([`StepError::PolicyFailed`]) is
+    /// dead-lettered by its code and args, and the position moves past the
+    /// event.
     async fn run_policy<P: Port>(
         &mut self,
         port: &mut P,
@@ -558,6 +562,13 @@ impl<'k> Run<'k> {
         let commands = match policy.dispatch.dispatch(&event) {
             Ok(response) => response.commands,
             Err(error) => {
+                if let Some(failure) = super::route::policy_failure(&error) {
+                    write_policy_failure(self.dead_letters, event, policy.name(), &failure);
+                    port.write_positions(&position)
+                        .await
+                        .map_err(|e| (path.to_vec(), StepError::Kernel(KernelError::Store(e))))?;
+                    return Err((path.to_vec(), StepError::PolicyFailed(failure)));
+                }
                 write_dead_letter(
                     self.dead_letters,
                     CommandBook::default(),

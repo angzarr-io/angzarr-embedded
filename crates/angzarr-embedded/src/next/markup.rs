@@ -675,12 +675,16 @@ impl<C> Refusal<C> {
 
 /// A policy: the kernel's one [`Policy`](super::Policy) trait, which
 /// `#[policy]` implements (answering refusals) and a hand-written policy
-/// implements as it is.
+/// implements as it is. Policies should not fail for business reasons:
+/// they react to events the application's own domains created, so an `Err`
+/// is a bug, dead-lettered as
+/// [`StepError::PolicyFailed`](super::StepError::PolicyFailed).
 pub use super::policy::Policy;
 
 /// What a policy's `#[on_event(E)]` handler returns as its `Ok` (its `Err`
 /// is any [`Diagnostic`](angzarr_embedded_diagnostic::Diagnostic): a bug,
-/// dead-lettered): commands for its target
+/// dead-lettered as
+/// [`StepError::PolicyFailed`](super::StepError::PolicyFailed)): commands for its target
 /// `T`, each with the root of the stream it is for. For a process manager
 /// that is the trigger's correlation ([`PolicyContext::correlation_id`]);
 /// any other root is a policy bug. Each command's type must be one
@@ -1243,7 +1247,7 @@ pub fn __domestic<S: Ingests<F>, F: DomainMessage>(fact: &F) -> Any {
 
 /// A policy's `#[on_event]` handler's answer, as `Policy::on_event` gives
 /// it: its commands, or its error as a report (its code the dead letter's
-/// reason).
+/// reason, its args the letter's metadata).
 #[doc(hidden)]
 pub fn __answered<T: Domain, E: angzarr_embedded_diagnostic::Diagnostic>(
     answer: Result<Commands<T>, E>,

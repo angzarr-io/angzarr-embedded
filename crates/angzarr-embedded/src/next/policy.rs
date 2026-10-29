@@ -36,13 +36,15 @@
 use std::sync::Arc;
 
 use angzarr_embedded_diagnostic::Report;
-use angzarr_proto::v1::{command_page, Command, CommandBook, CommandPage, Cover, EventRef, Uuid};
+use angzarr_proto::v1::{
+    command_page, Command, CommandBook, CommandPage, Cover, EventBook, EventPage, EventRef, Uuid,
+};
 use angzarr_router::error::HandlerError;
 use angzarr_router::policy::PolicyDispatch;
 use prost_types::Any;
 
 use super::check::{check_policy_command, Checked, Malformed};
-use super::dead_letter::{write_dead_letter, DeadLetterLog};
+use super::dead_letter::{write_dead_letter, write_policy_failure, DeadLetterLog};
 use super::domain::Domain;
 use super::handler::{Committed, Handler};
 use super::markup::{self, Commands, PolicyContext, TypeName};
@@ -54,6 +56,13 @@ use super::registry::Registry;
 /// Event → commands: one source domain, one target domain, and the
 /// commands each source event is owed, each with the root of the target
 /// stream it is for. Stateless: what it owes is a function of the event.
+///
+/// **Policies should not fail for business reasons**: they react to events
+/// the application's own domains created, so an `Err` from
+/// [`Policy::on_event`] is a bug. It fails the step as
+/// [`StepError::PolicyFailed`](super::StepError::PolicyFailed), a defect,
+/// dead-lettered by its code and args, its position moved past the
+/// trigger.
 /// Each command is decided by its target and may be refused: a policy that
 /// answers refusals ([`Policy::ANSWERS_REFUSALS`], every marked-up one)
 /// delivers its refusal fact to the source ([`Policy::on_refused`]);
@@ -93,10 +102,13 @@ pub trait Policy: Send + Sync + 'static {
     /// The commands this policy sends for `event` (an event of its source,
     /// packed), each with its target stream's root; `None` for an event it
     /// does not handle; or why it cannot answer the event, a bug (an event
-    /// that cannot happen): its step is dead-lettered with the error's code
-    /// as its reason, and its position moves past the event, as for a
-    /// refused command's step. angzarr-router's `PolicyDispatch::on_event`
-    /// is fallible the same way.
+    /// that cannot happen, or one of a type it handles that does not
+    /// decode): its step fails as
+    /// [`StepError::PolicyFailed`](super::StepError::PolicyFailed), is
+    /// dead-lettered with the error's code as its reason and its args as
+    /// the letter's metadata, and its position moves past the event.
+    /// Policies should not fail for business reasons: they react to events
+    /// the application's own domains created, so an `Err` is a bug.
     fn on_event(
         &self,
         event: &Any,
@@ -209,9 +221,20 @@ impl Order {
 }
 
 /// A policy as a [`Handler`] of its source: each committed event becomes
-/// one [`Order`] per command, handed to `sink` in order.
-pub fn policy<P: Policy, F: FnMut(Order)>(policy: &P, sink: F) -> PolicyHandler<'_, P, F> {
-    PolicyHandler { policy, sink }
+/// one [`Order`] per command, handed to `sink` in order. An event the policy
+/// fails on hands over nothing, and is dead-lettered to `dead_letters` as
+/// the kernel dead-letters a policy's failed step: its error's code as the
+/// reason, its args as the metadata.
+pub fn policy<'p, P: Policy, F: FnMut(Order)>(
+    policy: &'p P,
+    dead_letters: &'p dyn DeadLetterLog,
+    sink: F,
+) -> PolicyHandler<'p, P, F> {
+    PolicyHandler {
+        policy,
+        dead_letters,
+        sink,
+    }
 }
 
 /// A projection as a [`Handler`].
@@ -222,6 +245,7 @@ pub fn projection<P>(projection: &mut P) -> Projector<'_, P> {
 /// See [`policy`].
 pub struct PolicyHandler<'p, P, F> {
     policy: &'p P,
+    dead_letters: &'p dyn DeadLetterLog,
     sink: F,
 }
 
@@ -239,7 +263,19 @@ impl<P: Policy, F: FnMut(Order)> Handler<P::Source> for PolicyHandler<'_, P, F> 
         let commands = match self.policy.on_event(&event, &ctx) {
             Ok(Some(commands)) => commands,
             Ok(None) => return,
-            Err(_) => todo!("handler-context: a policy's error on the Handler path"),
+            Err(failure) => {
+                let trigger = EventBook {
+                    cover: Some(committed.cover.clone()),
+                    pages: vec![EventPage {
+                        sequence: committed.sequence(),
+                        payload: Some(event),
+                        ..EventPage::default()
+                    }],
+                    ..EventBook::default()
+                };
+                write_policy_failure(self.dead_letters, trigger, P::NAME, &failure);
+                return;
+            }
         };
         let target = <P::Target as Domain>::NAME;
         for order in orders(
@@ -357,13 +393,10 @@ pub(crate) fn dispatch<P: Policy>(policy: P) -> PolicyDispatch {
                 meta.correlation_id.unwrap_or_default(),
                 meta.recorded_at.unwrap_or_default(),
             );
-            let commands = match policy.on_event(event, &ctx) {
-                Ok(commands) => commands.map_or_else(Vec::new, Commands::into_orders),
-                Err(_) => todo!(
-                    "handler-context: a policy's error dead-letters its step with its \
-                     reason and moves its position past the event"
-                ),
-            };
+            let commands = policy
+                .on_event(event, &ctx)
+                .map_err(|failure| super::route::policy_failed(&failure))?
+                .map_or_else(Vec::new, Commands::into_orders);
             Ok(commands
                 .into_iter()
                 .map(|(root, command)| CommandBook {

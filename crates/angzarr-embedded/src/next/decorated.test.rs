@@ -2868,6 +2868,32 @@ mod policy_errors {
         assert_eq!(error.args().len(), 1, "its args kept");
     }
 
+    /// An event of a type the policy marks that does not decode is its
+    /// error, a bug: never skipped as an event it does not handle.
+    #[test]
+    fn a_marked_event_that_does_not_decode_is_the_policys_error() {
+        let corrupt = Any {
+            type_url: any(BuyInStarted {
+                wallet: root().value.to_vec(),
+                cents: 30,
+            })
+            .type_url,
+            value: vec![0xff, 0xff, 0xff],
+        };
+        let ctx = PolicyContext::new(trigger(&correlation(1)), correlation(1), at(1));
+        let error = BuyInWallet
+            .on_event(&corrupt, &ctx)
+            .err()
+            .expect("an event it marks that does not decode fails it");
+        assert_eq!(error.code(), "angzarr-embedded-next-payload-decode");
+        assert!(
+            error.args().iter().any(|(name, arg)| *name == "type_url"
+                && matches!(arg, Arg::Str(url) if *url == corrupt.type_url)),
+            "{:?}",
+            error.args()
+        );
+    }
+
     /// The same handler, on an event it can answer, answers its commands.
     #[test]
     fn a_fallible_policy_handlers_commands_are_its_answer() {

@@ -10,7 +10,11 @@
 //! - an ingest that panicked ([`KernelError::IngestPanicked`](super::KernelError::IngestPanicked));
 //! - a policy's book the kernel built malformed (a policy or kernel bug);
 //! - a decide under AGGREGATE_HANDLES that never acknowledged its window
-//!   ([`KernelError::Unresolved`](super::KernelError::Unresolved)).
+//!   ([`KernelError::Unresolved`](super::KernelError::Unresolved));
+//! - a policy that failed on its trigger
+//!   ([`StepError::PolicyFailed`](super::StepError::PolicyFailed)): its
+//!   error's code is the reason and its args the letter's metadata, never
+//!   its English (angzarr decision 14.37).
 //!
 //! Every line starts with [`DEAD_LETTER_PREFIX`]: **anything arriving there
 //! almost certainly indicates a problem**, never business as usual, so an
@@ -18,7 +22,10 @@
 
 use std::sync::Mutex;
 
-use angzarr_proto::v1::{AngzarrDeadLetter, CommandBook};
+use angzarr_embedded_diagnostic::Diagnostic;
+use angzarr_proto::v1::{AngzarrDeadLetter, CommandBook, EventBook};
+
+use super::route::flat_args;
 
 /// The start of every dead-letter line.
 pub const DEAD_LETTER_PREFIX: &str = "DEAD LETTER (almost certainly a bug; \
@@ -31,15 +38,34 @@ pub trait DeadLetterLog: Send + Sync {
 }
 
 /// A dead letter as one line: [`DEAD_LETTER_PREFIX`], the component that
-/// produced it, the reason, and the command's id and stream when the letter
-/// holds a command. Built from angzarr's own `AngzarrDeadLetter`, so a
-/// line and an angzarr DLQ entry say the same things.
+/// produced it, the reason, its metadata as `name=value` in name order, and
+/// the command's id and stream when the letter holds a command, or the
+/// event's sequence and stream when it holds events. Built from angzarr's
+/// own `AngzarrDeadLetter`, so a line and an angzarr DLQ entry say the same
+/// things.
 pub fn dead_letter_line(letter: &AngzarrDeadLetter) -> String {
     use angzarr_proto::v1::angzarr_dead_letter::Payload;
     let mut line = format!(
         "{DEAD_LETTER_PREFIX} {}: {}",
         letter.source_component, letter.rejection_reason
     );
+    let mut metadata: Vec<_> = letter.metadata.iter().collect();
+    metadata.sort();
+    for (name, value) in metadata {
+        line.push_str(&format!(" {name}={value}"));
+    }
+    if let Some(Payload::RejectedEvents(book)) = &letter.payload {
+        if let (Some(page), Some(cover)) = (book.pages.first(), &book.cover) {
+            line.push_str(&format!(" (event {} of {}", page.sequence, cover.domain));
+            if let Some(root) = &cover.root {
+                line.push_str(&format!(" {root}"));
+            }
+            if let Some(edition) = &cover.edition {
+                line.push_str(&format!(" in {edition}"));
+            }
+            line.push(')');
+        }
+    }
     if let Some(Payload::RejectedCommand(book)) = &letter.payload {
         if let Some(id) = book.page.as_ref().and_then(|p| p.command_id.as_ref()) {
             line.push_str(&format!(" (command {id}"));
@@ -70,6 +96,24 @@ pub(crate) fn write_dead_letter(
         payload: Some(angzarr_proto::v1::angzarr_dead_letter::Payload::RejectedCommand(book)),
         rejection_reason: reason.to_string(),
         source_component: component.to_string(),
+        ..AngzarrDeadLetter::default()
+    }));
+}
+
+/// Write the dead letter for policy `policy`'s `failure` on the event
+/// `trigger` holds: the failure's code as the reason and its args as the
+/// metadata.
+pub(crate) fn write_policy_failure(
+    log: &dyn DeadLetterLog,
+    trigger: EventBook,
+    policy: &str,
+    failure: &dyn Diagnostic,
+) {
+    log.write(&dead_letter_line(&AngzarrDeadLetter {
+        payload: Some(angzarr_proto::v1::angzarr_dead_letter::Payload::RejectedEvents(trigger)),
+        rejection_reason: failure.code().to_string(),
+        metadata: flat_args(failure).into_iter().collect(),
+        source_component: policy.to_string(),
         ..AngzarrDeadLetter::default()
     }));
 }

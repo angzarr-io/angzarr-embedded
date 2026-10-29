@@ -521,7 +521,8 @@ pub trait Policy: Send + Sync + 'static {
     const NAME: &'static str;            // its commands' component; its position's handler
     type Source: Domain; type Target: Domain;
     const ANSWERS_REFUSALS: bool = false; // every marked-up policy answers them
-    fn on_event(&self, event: &Any, ctx: &PolicyContext) -> Option<Commands<Self::Target>>;
+    fn on_event(&self, event: &Any, ctx: &PolicyContext)
+        -> Result<Option<Commands<Self::Target>>, Report>;
     fn on_refused(&self, refusal: &Refusal) -> Any { /* CommandRefused, passed through */ }
 }
 pub trait Projection<D: Domain> { fn project(&mut self, c: &Committed<'_, D>); }
@@ -579,6 +580,15 @@ kernel.resume(&store, &sampled, &mut projections).await?;                       
   the cycle check for a chain that may legitimately revisit a stream.
 - **Targeting from the event**: `on_event` receives the event with its
   trigger and correlation, so a policy may forward only some events.
+- **A policy's error is a bug.** Policies should not fail for business
+  reasons: they react to events the application's own domains created, so
+  an `Err` is a bug. `on_event`'s error (a marked-up policy's handler's,
+  or a marked event that does not decode) and an error of the source's
+  `#[on_refused]` handler fail the step as `StepError::PolicyFailed`, a
+  defect (`Recovery::Bug`), never a business `Rejected`: the step is
+  dead-lettered with the error's code as its reason and its args as the
+  letter's metadata, never its English, and the policy's position moves
+  past the trigger, so nothing runs it again.
 - **Re-runs always deduplicate** (see [below](#re-runs)).
 - **Propagating one aggregate into another** (hatpick's list into its draw
   systems) is a policy whose target records the change in its own events.
@@ -717,11 +727,13 @@ nothing written, and the kernel writes one line to the application's
 pub const DEAD_LETTER_PREFIX: &str =
     "DEAD LETTER (almost certainly a bug; nothing was written and nothing will retry):";
 pub trait DeadLetterLog: Send + Sync { fn write(&self, line: &str); }
-pub fn dead_letter_line(letter: &AngzarrDeadLetter) -> String;   // prefix, component, reason, command
+pub fn dead_letter_line(letter: &AngzarrDeadLetter) -> String;   // prefix, component, reason, metadata, command or event
 ```
 
 Cases: a panicking ingest; a policy's book the kernel built malformed; a
-decide under AGGREGATE_HANDLES that never acknowledged its window. **Every
+decide under AGGREGATE_HANDLES that never acknowledged its window; a
+policy that failed on its trigger, whose line is its error's code and args
+(`name=value`), never its English, and the trigger's place. **Every
 line starts with the prefix**: anything arriving there almost certainly
 indicates a problem, so an operator alerts on it. The line is built from
 angzarr's own `AngzarrDeadLetter`, so it says what an angzarr DLQ entry
@@ -1028,7 +1040,9 @@ runs it in full); angzarr-embedded tests the kernel over it, not the store.
   a store error keeps its angzarr-ports code and args.
 - **handle.test.rs**: the chain as committed steps. A policy's events
   carry its derived command id as causation and no trigger; **a rejected
-  policy step keeps the command's commit and is dead-lettered**; a chain
+  policy step keeps the command's commit and is dead-lettered**; **a
+  policy's error is dead-lettered as `PolicyFailed`, by its code and args,
+  and its position moves past the trigger**; a chain
   deeper than its limit is refused; a command to an edition never forked
   is refused and writes nothing; a policy's target is in its source's
   edition; each step loads what the steps before it committed; **every
@@ -1049,4 +1063,5 @@ runs it in full); angzarr-embedded tests the kernel over it, not the store.
   after reopening runs what a crash left owed; **a command's round trips
   to SQLite are measured**, not budgeted.
 - **dead_letter.test.rs**: a dead-letter line starts with the warning
-  prefix and names the command; a panicking ingest aborts and is logged.
+  prefix and names the command, or the event, and its metadata; a
+  panicking ingest aborts and is logged.

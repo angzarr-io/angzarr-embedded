@@ -293,6 +293,70 @@ pub fn rejection(rejection: &dyn Diagnostic, refusal: Option<Any>) -> HandlerErr
     })
 }
 
+/// The router's code for a policy's own failure (its `on_event`'s error, a
+/// marked event that does not decode, or its source's `#[on_refused]`
+/// handler's error): the kernel's
+/// [`StepError::PolicyFailed`](super::StepError::PolicyFailed), a defect.
+pub(crate) const POLICY_FAILED: &str = "ANGZARR_EMBEDDED_POLICY_FAILED";
+
+/// The metadata key a policy's failure carries its own code under: no arg
+/// name has a hyphen, so it never meets one of the failure's args.
+const POLICY_REASON: &str = "policy-reason";
+
+/// A diagnostic's args, flattened as angzarr carries them (decision
+/// 14.37): each by its name, a wrapped cause as its code under the arg's
+/// name and each of its args under `<name>.<arg>`.
+pub(crate) fn flat_args(diagnostic: &dyn Diagnostic) -> Vec<(String, String)> {
+    let mut flat = Vec::new();
+    for (name, arg) in diagnostic.args() {
+        match arg {
+            Arg::Int(n) => flat.push((name.to_string(), n.to_string())),
+            Arg::Uint(n) => flat.push((name.to_string(), n.to_string())),
+            Arg::Str(s) => flat.push((name.to_string(), s)),
+            Arg::Nested(cause) => {
+                flat.push((name.to_string(), cause.code().to_string()));
+                flat.extend(
+                    flat_args(cause.as_ref())
+                        .into_iter()
+                        .map(|(inner, value)| (format!("{name}.{inner}"), value)),
+                );
+            }
+        }
+    }
+    flat
+}
+
+/// A policy's `failure`, as the router carries it: INTERNAL under
+/// [`POLICY_FAILED`], the failure's code and flattened args as metadata.
+pub(crate) fn policy_failed(failure: &dyn Diagnostic) -> HandlerError {
+    let extras = std::iter::once((POLICY_REASON.to_string(), failure.code().to_string()))
+        .chain(flat_args(failure));
+    HandlerError::Coded(CodedError::internal(
+        POLICY_FAILED,
+        &failure.to_string(),
+        extras,
+    ))
+}
+
+/// The policy's failure the router carries, if `error` is one: its code
+/// and args, as [`policy_failed`] packed them.
+pub(crate) fn policy_failure(error: &CodedError) -> Option<Report> {
+    if error.code != POLICY_FAILED {
+        return None;
+    }
+    let reason = error.extras.get(POLICY_REASON).cloned().unwrap_or_default();
+    Some(
+        error
+            .extras
+            .iter()
+            .filter(|(name, _)| name.as_str() != POLICY_REASON)
+            .fold(
+                Report::new(intern(&reason), error.message.clone()),
+                |report, (name, value)| report.arg(intern(name), value.as_str()),
+            ),
+    )
+}
+
 /// The type URL of the page a fact handler that records no event answers
 /// with: the router's fact record always holds one payload. Never written
 /// and never folded.

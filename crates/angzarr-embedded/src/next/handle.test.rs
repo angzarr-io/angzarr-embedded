@@ -481,10 +481,12 @@ impl crate::next::Policy for Unlucky {
 }
 
 /// A policy's error is a bug its step cannot run past: the step is
-/// dead-lettered with the error's code as its reason, the call fails
-/// downstream with it, and the policy's position moves past the trigger,
-/// as for a refused command's step, so nothing runs it again. The
-/// command's commit stands, and the next event is handled as usual.
+/// dead-lettered with the error's code as its reason and its args, never
+/// its English, the call fails downstream with it as
+/// [`StepError::PolicyFailed`], a defect (not a business rejection), and
+/// the policy's position moves past the trigger, as for a refused
+/// command's step, so nothing runs it again. The command's commit stands,
+/// and the next event is handled as usual.
 #[test]
 fn a_policys_error_dead_letters_its_step_and_moves_its_position_past_it() {
     let plain = registry();
@@ -504,9 +506,17 @@ fn a_policys_error_dead_letters_its_step_and_moves_its_position_past_it() {
     let Failure::Downstream { error, .. } = &failure else {
         panic!("a downstream failure: {failure:?}");
     };
-    assert!(
-        matches!(error, StepError::Rejected(r) if angzarr_embedded_diagnostic::Diagnostic::code(r) == "toy-unlucky-deposit"),
-        "{error:?}"
+    let StepError::PolicyFailed(report) = error else {
+        panic!("the policy's error, its own kind: {error:?}");
+    };
+    assert_eq!(
+        angzarr_embedded_diagnostic::Diagnostic::code(report),
+        "toy-unlucky-deposit"
+    );
+    assert_eq!(
+        failure.recovery(),
+        crate::next::Recovery::Bug,
+        "a defect, alertable, not a business refusal"
     );
     assert_eq!(
         slice(&store, &cover("account", 1)).next_sequence,
@@ -518,8 +528,13 @@ fn a_policys_error_dead_letters_its_step_and_moves_its_position_past_it() {
     assert_eq!(lines.len(), 1, "the failed step, dead-lettered: {lines:?}");
     assert!(lines[0].starts_with(crate::next::DEAD_LETTER_PREFIX));
     assert!(
-        lines[0].contains("unlucky: toy-unlucky-deposit"),
-        "the policy, and its error's code as the reason: {}",
+        lines[0].contains("unlucky: toy-unlucky-deposit cents=13"),
+        "the policy, its error's code as the reason, and its args: {}",
+        lines[0]
+    );
+    assert!(
+        !lines[0].contains("cannot happen"),
+        "no English: {}",
         lines[0]
     );
     assert_eq!(
@@ -760,7 +775,8 @@ fn a_policys_orders_are_indexed_and_keep_the_triggers_correlation() {
     opened(&store, &registry, 1, 0);
     let source = account_stream(&store, &registry);
     let mut orders = Vec::new();
-    let mut handler = crate::next::policy(&TwoLedgers, |order| orders.push(order));
+    let log = MemoryDeadLetters::new();
+    let mut handler = crate::next::policy(&TwoLedgers, &log, |order| orders.push(order));
     source.dispatch(1, &registry, &mut [&mut handler]).unwrap();
     assert_eq!(
         orders
@@ -772,6 +788,43 @@ fn a_policys_orders_are_indexed_and_keep_the_triggers_correlation() {
     let correlation = source.events()[1].correlation_id().clone();
     assert!(orders.iter().all(|o| *o.correlation_id() == correlation));
     assert_ne!(correlation, crate::next::v1::Uuid::default());
+}
+
+/// A policy's error, on the handler path, hands over no order: the step
+/// is dead-lettered as the kernel's is, the policy named, its error's code
+/// as the reason and its args, never its English.
+#[test]
+fn a_policys_error_as_a_handler_of_its_source_is_dead_lettered() {
+    let registry = registry();
+    let unused = MemoryDeadLetters::new();
+    let kernel = Kernel::new(&registry, &unused);
+    let store = MemoryStore::new();
+    opened(&store, &registry, 1, 0);
+    let deposited = slice(&store, &cover("account", 1)).next_sequence;
+    kernel
+        .handle::<Account, _, _>(&store, deposit(3, 13), &at(30), &mut ())
+        .ready()
+        .expect("deposited, with no policy registered");
+    let source = account_stream(&store, &registry);
+    let log = MemoryDeadLetters::new();
+    let mut orders = Vec::new();
+    let mut handler = crate::next::policy(&Unlucky, &log, |order| orders.push(order));
+    source
+        .dispatch(deposited, &registry, &mut [&mut handler])
+        .unwrap();
+    assert!(orders.is_empty(), "no order for the event it failed on");
+    let lines = log.lines();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].starts_with(crate::next::DEAD_LETTER_PREFIX));
+    assert!(
+        lines[0].contains(&format!(
+            "unlucky: toy-unlucky-deposit cents=13 (event {deposited} of account {})",
+            cover("account", 1).root.unwrap()
+        )),
+        "the policy, its error's code and args, and the trigger: {}",
+        lines[0]
+    );
+    assert!(!lines[0].contains("cannot happen"), "{}", lines[0]);
 }
 
 /// Two ledgers per account event: orders are indexed in target order.

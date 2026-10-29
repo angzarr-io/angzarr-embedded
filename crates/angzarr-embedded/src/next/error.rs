@@ -67,6 +67,13 @@ pub enum StepError {
     /// A kernel fault at that step. A malformed policy book is a bug here,
     /// not the caller's: it is also written to the dead-letter log.
     Kernel(KernelError),
+    /// The policy itself failed: its `on_event` (or its source's
+    /// `#[on_refused]` handler) answered an error, or a marked event did
+    /// not decode. A defect, never a business refusal: policies react to
+    /// events the application's own domains recorded, so an error is a
+    /// bug. Its report (code and args) is the dead letter's reason, and the
+    /// policy's position moved past the trigger.
+    PolicyFailed(Report),
 }
 
 /// A fault outside any domain's rules.
@@ -286,6 +293,7 @@ impl StepError {
     pub fn recovery(&self) -> Recovery {
         match self {
             StepError::Rejected(_) => Recovery::Business,
+            StepError::PolicyFailed(_) => Recovery::Bug,
             StepError::Kernel(KernelError::Malformed(_)) => Recovery::Bug,
             StepError::Kernel(error) => error.recovery(),
         }
@@ -389,7 +397,7 @@ impl<R: Diagnostic> Diagnostic for Failure<R> {
 impl fmt::Display for StepError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            StepError::Rejected(rejection) => rejection.fmt(f),
+            StepError::Rejected(rejection) | StepError::PolicyFailed(rejection) => rejection.fmt(f),
             StepError::Kernel(error) => error.fmt(f),
         }
     }
@@ -398,14 +406,14 @@ impl fmt::Display for StepError {
 impl Diagnostic for StepError {
     fn code(&self) -> &'static str {
         match self {
-            StepError::Rejected(rejection) => rejection.code(),
+            StepError::Rejected(rejection) | StepError::PolicyFailed(rejection) => rejection.code(),
             StepError::Kernel(error) => error.code(),
         }
     }
 
     fn args(&self) -> Vec<(&'static str, Arg)> {
         match self {
-            StepError::Rejected(rejection) => rejection.args(),
+            StepError::Rejected(rejection) | StepError::PolicyFailed(rejection) => rejection.args(),
             StepError::Kernel(error) => error.args(),
         }
     }
