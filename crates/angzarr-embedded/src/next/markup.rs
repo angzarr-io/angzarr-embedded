@@ -678,29 +678,12 @@ impl<X> From<X> for Failed<X> {
     }
 }
 
+/// The refusal's English, or the bug's.
 impl<X: fmt::Display> fmt::Display for Failed<X> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Failed::Rejected { rejection, .. } => rejection.fmt(f),
             Failed::Bug(report) => report.fmt(f),
-        }
-    }
-}
-
-impl<X: angzarr_embedded_diagnostic::Diagnostic> angzarr_embedded_diagnostic::Diagnostic
-    for Failed<X>
-{
-    fn code(&self) -> &'static str {
-        match self {
-            Failed::Rejected { rejection, .. } => rejection.code(),
-            Failed::Bug(report) => report.code(),
-        }
-    }
-
-    fn args(&self) -> Vec<(&'static str, angzarr_embedded_diagnostic::Arg)> {
-        match self {
-            Failed::Rejected { rejection, .. } => rejection.args(),
-            Failed::Bug(report) => report.args(),
         }
     }
 }

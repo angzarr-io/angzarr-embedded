@@ -2410,6 +2410,16 @@ mod failed {
         assert!(log.lines().is_empty(), "a refusal is not dead-lettered");
     }
 
+    /// A failure reads as its refusal's English, or its bug's.
+    #[test]
+    fn a_failure_reads_as_its_refusal_or_its_bug() {
+        let refused: Failed<Refused> = Failed::from(Refused::AlreadyOpen);
+        let broke: Failed<Refused> = Failed::bug(&MeterBroke { seat: 4 });
+
+        assert_eq!(refused.to_string(), "the wallet is already open");
+        assert_eq!(broke.to_string(), "the meter at seat 4 broke");
+    }
+
     /// `?` on the domain's own rejection inside a handler returning
     /// `Failed` refuses with it, FAILED_PRECONDITION; and a handler still
     /// returning its rejection as is refuses as before.

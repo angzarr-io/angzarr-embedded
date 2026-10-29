@@ -108,6 +108,22 @@ fn failed_of_another_name_is_not_unwrapped() {
 }
 
 #[test]
+fn a_failed_of_two_arguments_is_not_unwrapped() {
+    let error = lamp(quote! {
+        impl Lamp {
+            #[handles_cmd(On)]
+            fn on(&self, cmd: On, ctx: &Context) -> Result<Lit, Refused> { todo!() }
+            #[handles_cmd(Off)]
+            fn off(&self, cmd: Off, ctx: &Context) -> Result<Dark, Failed<Refused, Other>> { todo!() }
+        }
+    });
+    assert!(
+        error.contains("disagree on the rejection: `Failed < Refused , Other >` here"),
+        "{error}"
+    );
+}
+
+#[test]
 fn a_refusing_handler_may_fail_with_its_choice() {
     domain(
         quote!(domain = "lamp"),
