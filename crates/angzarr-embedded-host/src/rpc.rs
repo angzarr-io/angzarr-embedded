@@ -48,32 +48,10 @@ pub(crate) async fn connect_unix(socket: PathBuf) -> Result<Channel, tonic::tran
 /// (google/rpc/error_details.proto): how a gRPC status's details travel.
 /// A non-OK status from a child carries a `Status` in its details, whose
 /// own details are an `ErrorInfo` (the coded error's reason and metadata)
-/// and, for a refusal, the typed refusal. Two messages of a schema that
-/// does not change, written out rather than taken from a crate.
+/// and, for a refusal, the typed refusal. The messages are tonic-types'
+/// maintained prost types, re-exported here.
 pub mod google_rpc {
-    use std::collections::HashMap;
-
-    /// `google.rpc.Status`.
-    #[derive(Clone, PartialEq, prost::Message)]
-    pub struct Status {
-        #[prost(int32, tag = "1")]
-        pub code: i32,
-        #[prost(string, tag = "2")]
-        pub message: String,
-        #[prost(message, repeated, tag = "3")]
-        pub details: Vec<prost_types::Any>,
-    }
-
-    /// `google.rpc.ErrorInfo`.
-    #[derive(Clone, PartialEq, prost::Message)]
-    pub struct ErrorInfo {
-        #[prost(string, tag = "1")]
-        pub reason: String,
-        #[prost(string, tag = "2")]
-        pub domain: String,
-        #[prost(map = "string, string", tag = "3")]
-        pub metadata: HashMap<String, String>,
-    }
+    pub use tonic_types::pb::{ErrorInfo, Status};
 
     /// `ErrorInfo`'s fully-qualified name, as a type URL ends.
     pub const ERROR_INFO_NAME: &str = "google.rpc.ErrorInfo";

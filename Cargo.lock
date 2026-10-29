@@ -80,6 +80,7 @@ dependencies = [
  "tonic",
  "tonic-build",
  "tonic-prost",
+ "tonic-types",
  "tower",
 ]
 
@@ -2085,6 +2086,17 @@ checksum = "f63c616ffaa648f7c5dd5657e97d9a285fcb44ff3b70da761d436f5a13ff7be6"
 dependencies = [
  "bytes",
  "prost",
+ "tonic",
+]
+
+[[package]]
+name = "tonic-types"
+version = "0.14.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4c7673cdf53817d382bad8ecb56507b4595a2adb07ef16bf0dd965ef48c1fced"
+dependencies = [
+ "prost",
+ "prost-types",
  "tonic",
 ]
 

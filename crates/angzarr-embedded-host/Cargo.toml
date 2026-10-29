@@ -13,8 +13,8 @@ rust-version = "1.85"
 # this crate needs a gRPC client (tonic, with its prost codec), the async
 # runtime it runs on (tokio), and the connector glue for a Unix socket
 # (tower, hyper-util), all of which tonic itself depends on; google.rpc's
-# Status and ErrorInfo are two hand-written prost messages (src/rpc.rs), not
-# a crate. serde derives the config. The handler it builds is angzarr-router's CommandHandler,
+# Status and ErrorInfo come from tonic-types (its maintained prost types,
+# at tonic's version). serde derives the config. The handler it builds is angzarr-router's CommandHandler,
 # on the router's types, so angzarr-router and angzarr-proto are pinned at
 # the revs the router itself names: ONE angzarr-proto in the graph.
 [dependencies]
@@ -36,6 +36,7 @@ serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 tonic = { version = "0.14", default-features = false, features = ["codegen", "transport"] }
 tonic-prost = "0.14"
+tonic-types = "0.14"
 tower = { version = "0.5", default-features = false, features = ["util"] }
 # `run` reads the application's angzarr.toml, which the CLI writes.
 toml = "0.9"
