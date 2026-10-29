@@ -15,6 +15,7 @@
 //! - any other status keeps its gRPC code and its ErrorInfo's reason.
 
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use angzarr_router::error::{codes as router_codes, extras, CodedError, GrpcCode};
 use angzarr_router::pb;
@@ -50,6 +51,9 @@ pub mod causes {
     pub const NOT_RUNNING: &str = "not-running";
     /// The call did not reach the child, or its answer did not come back.
     pub const TRANSPORT: &str = "transport";
+    /// The child did not answer within the call timeout
+    /// (`Supervision::call_timeout_ms`).
+    pub const TIMEOUT: &str = "timeout";
 }
 
 /// Whether a remote handler's error is worth retrying: the child was
@@ -70,13 +74,26 @@ struct Remote {
     descriptor: pb::ComponentDescriptor,
     link: Arc<Link>,
     runtime: tokio::runtime::Handle,
+    call_timeout: Duration,
 }
 
 /// The connection to a domain's current child, which its supervisor sets
 /// when a child comes up and clears when it exits.
-#[derive(Default)]
 pub(crate) struct Link {
     pub(crate) client: RwLock<Option<CommandHandlerServiceClient<Channel>>>,
+    /// How many children have come up: the supervisor counts each one
+    /// after setting its client, so a watcher that sees `n` reaches the
+    /// `n`th child.
+    pub(crate) generation: tokio::sync::watch::Sender<u64>,
+}
+
+impl Default for Link {
+    fn default() -> Self {
+        Link {
+            client: RwLock::new(None),
+            generation: tokio::sync::watch::channel(0).0,
+        }
+    }
 }
 
 impl RemoteCommandHandler {
@@ -85,6 +102,7 @@ impl RemoteCommandHandler {
         descriptor: pb::ComponentDescriptor,
         link: Arc<Link>,
         runtime: tokio::runtime::Handle,
+        call_timeout: Duration,
     ) -> Self {
         RemoteCommandHandler {
             inner: Arc::new(Remote {
@@ -92,8 +110,15 @@ impl RemoteCommandHandler {
                 descriptor,
                 link,
                 runtime,
+                call_timeout,
             }),
         }
+    }
+
+    /// Watches how many children of this domain have come up.
+    #[cfg(test)]
+    pub(crate) fn generations(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.inner.link.generation.subscribe()
     }
 }
 
@@ -132,7 +157,7 @@ impl CommandHandler for RemoteCommandHandler {
     }
 
     /// `CommandHandlerService.Handle` on the child, blocking until it
-    /// answers. Safe to call from inside a tokio runtime: the call runs on
+    /// answers or the call timeout passes (retryable). Safe to call from inside a tokio runtime: the call runs on
     /// the host's own.
     fn dispatch(
         &self,
@@ -150,13 +175,15 @@ impl CommandHandler for RemoteCommandHandler {
             return Err(unavailable(domain, causes::NOT_RUNNING));
         };
         let req = req.clone();
+        let call_timeout = self.inner.call_timeout;
         let (answer, answered) = std::sync::mpsc::sync_channel(1);
         self.inner.runtime.spawn(async move {
-            let _ = answer.send(client.handle(req).await);
+            let _ = answer.send(tokio::time::timeout(call_timeout, client.handle(req)).await);
         });
         match answered.recv() {
-            Ok(Ok(response)) => Ok(response.into_inner()),
-            Ok(Err(status)) => Err(status_to_coded(domain, &status)),
+            Ok(Ok(Ok(response))) => Ok(response.into_inner()),
+            Ok(Ok(Err(status))) => Err(status_to_coded(domain, &status)),
+            Ok(Err(_elapsed)) => Err(unavailable(domain, causes::TIMEOUT)),
             // The host's runtime stopped, dropping the call.
             Err(_) => Err(unavailable(domain, causes::TRANSPORT)),
         }

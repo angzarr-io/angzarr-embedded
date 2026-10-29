@@ -127,6 +127,7 @@ impl Host {
                             descriptor,
                             link,
                             runtime.handle().clone(),
+                            Duration::from_millis(config.supervision.call_timeout_ms),
                         ),
                         stop: Some(stop),
                         ended,
@@ -285,6 +286,7 @@ impl Supervisor {
                     }
                     backoff = initial;
                     self.set_client(Some(child.client.clone()));
+                    self.link.generation.send_modify(|n| *n += 1);
                     // The child's stdout after its handshake is its own
                     // output: passed on to the host's stderr, and drained so
                     // the child never blocks on a full pipe.

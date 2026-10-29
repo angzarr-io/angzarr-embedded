@@ -15,6 +15,7 @@
 //!   `TABLE_FULL`, metadata `seats = 6`) and the typed refusal
 //!   [`refusal`] in its details;
 //! - `...Die`: the process exits with code 7, mid-call;
+//! - `...Hang`: never answers;
 //! - anything else: one event book on the command's cover, rules version
 //!   `pid-<its pid>`.
 //!
@@ -115,6 +116,8 @@ pub(crate) fn config(domains: Vec<DomainConfig>) -> HostConfig {
             initial_backoff_ms: 50,
             max_backoff_ms: 200,
             shutdown_grace_ms: 3_000,
+            terminate_grace_ms: 3_000,
+            call_timeout_ms: 20_000,
             socket_dir: None,
         },
     }
@@ -240,6 +243,9 @@ impl CommandHandlerService for Fake {
             .unwrap_or_default();
         if type_url.ends_with("Refuse") {
             return Err(refused());
+        }
+        if type_url.ends_with("Hang") {
+            std::future::pending::<()>().await;
         }
         if type_url.ends_with("Die") {
             std::process::exit(7);

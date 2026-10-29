@@ -176,20 +176,51 @@ fn a_dead_child_is_retryable_then_restarted() {
         .expect_err("the child died mid-call");
     assert!(is_retryable(&died), "{died:?}");
 
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let answered = loop {
-        match handler.dispatch(&command("player", "/examples.blackjack.SitDown")) {
-            Ok(response) => break response,
-            Err(error) => {
-                assert!(is_retryable(&error), "{error:?}");
-                assert!(Instant::now() < deadline, "not restarted in time");
-                std::thread::sleep(Duration::from_millis(50));
-            }
-        }
-    };
+    // The second child coming up is awaited, not polled for: the
+    // supervisor counts each child once its client is set. The timeout is
+    // a safety net for a broken restart, never the way the test passes.
+    let mut generations = handler.generations();
+    let restarted = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap()
+        .block_on(async {
+            tokio::time::timeout(Duration::from_secs(20), generations.wait_for(|n| *n >= 2))
+                .await
+                .map(|seen| seen.is_ok())
+        });
+    assert_eq!(restarted, Ok(true), "the child was restarted");
+    let answered = handler
+        .dispatch(&command("player", "/examples.blackjack.SitDown"))
+        .expect("the restarted child answers");
     assert!(answered.rules_version.starts_with("pid-"));
     assert_ne!(answered.rules_version, first, "a new child answered");
     assert!(!alive(&first));
+    host.shutdown();
+}
+
+/// A child that never answers fails the call retryably once the call
+/// timeout passes, rather than blocking the caller; the child is left to
+/// its supervisor.
+#[test]
+fn a_hung_child_times_out_retryably() {
+    let mut config = config(vec![player(mode::SERVE)]);
+    config.supervision.call_timeout_ms = 300;
+    let host = Host::start(config).unwrap();
+    let handler = host.handler("player").unwrap();
+    let started = Instant::now();
+    let hung = handler
+        .dispatch(&command("player", "/examples.blackjack.Hang"))
+        .expect_err("timed out");
+    assert!(started.elapsed() >= Duration::from_millis(300));
+    assert!(is_retryable(&hung), "{hung:?}");
+    assert_eq!(
+        hung.extras.get(crate::remote::CAUSE).map(String::as_str),
+        Some(crate::remote::causes::TIMEOUT)
+    );
+    assert!(handler
+        .dispatch(&command("player", "/examples.blackjack.SitDown"))
+        .is_ok());
     host.shutdown();
 }
 

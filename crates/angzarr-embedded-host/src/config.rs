@@ -102,8 +102,14 @@ pub struct Supervision {
     /// The longest wait between restarts.
     pub max_backoff_ms: u64,
     /// How long a child has, once its stdin is closed at shutdown, to exit
-    /// before it is killed.
+    /// before it is sent SIGTERM.
     pub shutdown_grace_ms: u64,
+    /// How long a child has, once sent SIGTERM, to exit before it is
+    /// killed (SIGKILL).
+    pub terminate_grace_ms: u64,
+    /// How long a dispatch waits for the child's answer; past it, the call
+    /// fails retryably (`cause = timeout`).
+    pub call_timeout_ms: u64,
     /// The directory the host puts the children's sockets in. When absent,
     /// `$XDG_RUNTIME_DIR` if it is set, absolute and short enough, else
     /// `/tmp`: never `$TMPDIR`, which may be deep. A Unix socket's path is
@@ -120,6 +126,8 @@ impl Default for Supervision {
             initial_backoff_ms: 100,
             max_backoff_ms: 5_000,
             shutdown_grace_ms: 5_000,
+            terminate_grace_ms: 2_000,
+            call_timeout_ms: 30_000,
             socket_dir: None,
         }
     }
