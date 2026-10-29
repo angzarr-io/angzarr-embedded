@@ -28,19 +28,7 @@ pub enum WireError {
 
 impl fmt::Display for WireError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            WireError::Missing { message, field } => {
-                write!(f, "{message}.{field} is required and absent")
-            }
-            WireError::UnknownEnum {
-                message,
-                field,
-                value,
-            } => write!(
-                f,
-                "{message}.{field} holds {value}, which no variant defines"
-            ),
-        }
+        angzarr_embedded_diagnostic::display(self, f)
     }
 }
 

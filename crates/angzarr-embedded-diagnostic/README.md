@@ -17,8 +17,9 @@ pub enum Arg { Int(i64), Uint(u64), Str(String), Nested(Box<dyn Diagnostic>) }
   `angzarr-embedded-yaml-too-new`. A code is never reused for another meaning.
 - **The args** are data: numbers, ids, paths, the text that was read.
   Never English. A wrapped cause is `Arg::Nested`.
-- **`Display`** is the English fallback, for logs and for a code no catalog
-  has.
+- **`Display`** is the code, then ` name=value` for each arg, a nested
+  cause as `name=<its code>` and `name.<arg>=value` (angzarr decision
+  14.37): never English. `display(d, f)` writes it.
 
 Each crate ships an en-US Fluent catalog,
 `crates/<crate>/locales/en-US/<crate>.ftl`, with a message for every code.
@@ -27,6 +28,6 @@ and passes the args by name, rendering a nested cause first.
 
 A game's own errors implement `Diagnostic` too, with codes starting with the
 game's name. Where an angzarr-embedded error holds a game's error (a migration step's,
-a content decoder's) it keeps it as a `Report`: the code, args and English
-captured, so the holder stays `Clone` and `Eq`. `Report::new(code,
-english).arg(name, value)` raises one without an error type of its own.
+a content decoder's) it keeps it as a `Report`: the code and args
+captured, so the holder stays `Clone` and `Eq`. `Report::new(code).arg(name,
+value)` raises one without an error type of its own.

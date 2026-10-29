@@ -102,9 +102,12 @@ flowchart TB
 
 ## Design constraints
 
-- **angzarr-embedded does no I/O**, keeps no infrastructure and never retries. Its
-  failures say whether to retry (`Recovery`), and a retry is always safe
-  (it starts at the deduplication lookup).
+- **angzarr-embedded does no I/O** and keeps no infrastructure. Its failures
+  say whether to retry (`Recovery`), and a retry is always safe (it starts
+  at the deduplication lookup). The kernel retries a step's retryable
+  failure itself, capped, then dead-letters it
+  ([retrying](#retrying-capped-then-dead-lettered)); its timer and the
+  jitter's randomness are the application's (`Wait`), injected.
 - **Pure and deterministic.** No clock, no randomness, no I/O and no
   hash-map iteration in the kernel (maps keyed by `Cover` are lookup only,
   since prost types have no ordering). The application samples the instant
@@ -430,53 +433,50 @@ and rules version. `Kernel::handle_any` handles books for such a domain.
 
 **Dispatch.** The kernel hands the router the `ContextualCommand`: the
 usable snapshot and the events after it (upcast), the command with its ids
-and its handling resolved, and the nonce. An unknown command type is the
-router's NO_HANDLER_REGISTERED, an unknown fact type NO_FACT_HANDLER. A
-handler's refusal comes back as a business rejection carrying the refusal's
-code, args and typed refusal object: the caller's `Failure::Rejected(Rejected)`.
-Which it is goes by its gRPC status (the owner's ruling, 2026-10-29).
-Under a code of the handler's own, the **business set** (FAILED_PRECONDITION,
-INVALID_ARGUMENT, NOT_FOUND, ALREADY_EXISTS, OUT_OF_RANGE,
-PERMISSION_DENIED) is a rejection, `Recovery::Business`, never
-dead-lettered; the **bug set** (INTERNAL, UNKNOWN, DATA_LOSS) is its bug;
-any other status (UNAVAILABLE, ABORTED, DEADLINE_EXCEEDED,
-RESOURCE_EXHAUSTED, UNIMPLEMENTED, ...) keeps its classification, a bug
-too. Under a code of the router's, only a FAILED_PRECONDITION is a
-rejection (a process manager with no instance); its INVALID_ARGUMENT and
-NOT_FOUND are the sender's to fix, and its failed INTERNAL is a bug.
-angzarr-router's `GrpcCode` has no ALREADY_EXISTS, OUT_OF_RANGE,
-PERMISSION_DENIED or UNKNOWN: a remote child's ALREADY_EXISTS,
-OUT_OF_RANGE and PERMISSION_DENIED arrive FAILED_PRECONDITION, its
-UNKNOWN, DEADLINE_EXCEEDED and RESOURCE_EXHAUSTED (and an UNAVAILABLE it
-sent with its reason) INTERNAL. A handler fails deliberately as a bug with
-angzarr-router's `CodedError::bug` (decision 14.37), which answers
-UNHANDLED_HANDLER_ERROR with the handler's own code and args as its cause
-(`cause=<code>`, `cause.<arg>=<value>`); an error without a code of its
-own is UNHANDLED_HANDLER_ERROR too, a remote child's included:
-`KernelError::Router`, `Recovery::Bug`,
-[dead-lettered](#dead-letters-a-logger) by its code and args, and as a
-policy's step the policy's position moves past the trigger, as for a
-policy's own error: the dead letter is the record to replay
-([`OnPolicyBug`](#a-policys-bug-and-its-position) says otherwise). Every
-other reason the router refuses with is `KernelError::Router`,
-forwarded under an angzarr-embedded code of its own
-(`angzarr-embedded-next-<reason>`), each with its own message. A remote
-handler that cannot be reached (`REMOTE_HANDLER_UNAVAILABLE`) is
-`KernelError::HandlerUnavailable`, retried: a policy's step keeps its
-position, and `resume` runs it again.
+and its handling resolved, the nonce, and the instant the input is
+accepted at (`ContextualCommand.recorded_at`). An unknown command type is
+the router's UNKNOWN_COMMAND_TYPE, an unknown fact type NO_FACT_HANDLER, a
+refusal its source has no handler for NO_REFUSAL_HANDLER: the router's own
+errors on malformed input, INTERNAL, bugs.
+
+**Four classes of error, by gRPC status** (decision 14.37 and the owner's
+rulings of 2026-10-29), read in one place (`route::class`):
+
+| Class | Statuses | What the kernel does |
+|---|---|---|
+| business, fatal | FAILED_PRECONDITION, INVALID_ARGUMENT, NOT_FOUND, ALREADY_EXISTS, OUT_OF_RANGE, PERMISSION_DENIED | a rejection, `Failure::Rejected(Rejected)`, `Recovery::Business`: to the caller, or the issuing policy's refusal path; never retried, never dead-lettered |
+| business, immediate | ABORTED (a stale or overlapping command, a lost race, or a handler's own choice) | back to an outside caller at once, to reload (`Recovery::Retry`), never dead-lettered; a policy's step, whose caller is the kernel, is reloaded and run again under the capped backoff, then dead-lettered |
+| bug, fatal | INTERNAL, UNKNOWN, DATA_LOSS | `KernelError::Router`, `Recovery::Bug`, dead-lettered at once |
+| bug, retryable | every other status (UNAVAILABLE, UNIMPLEMENTED; a remote child's DEADLINE_EXCEEDED, RESOURCE_EXHAUSTED and the rest arrive UNAVAILABLE) | retried under the capped backoff, then dead-lettered; `Recovery::Retry` |
+
+A handler's refusal carries its code and args (a typed refusal is keyed
+COMMAND_REFUSED, its object's type as `refusal_type`, the object beside).
+A handler fails deliberately as a bug with angzarr-router's
+`CodedError::bug`, which answers UNHANDLED_HANDLER_ERROR with the
+handler's own code and args as its cause (`cause=<code>`,
+`cause.<arg>=<value>`); the router catches a handler's panic, its cause
+HANDLER_PANICKED, and an error without a code of its own is
+UNHANDLED_HANDLER_ERROR too. Every router reason is forwarded under an
+angzarr-embedded code of its own (`angzarr-embedded-next-<reason>`), each
+with its own message; a handler's own code that no catalog holds is
+`angzarr-embedded-next-unhandled-handler-error` with that code its
+`cause`. A remote handler that cannot be reached
+(`REMOTE_HANDLER_UNAVAILABLE`) is `KernelError::HandlerUnavailable`, a
+retryable bug.
 
 **What a handler reads.** The router's `CommandContext`: the stream, the
 input's command id, correlation and fact origin, the conflict under
-AGGREGATE_HANDLES. The instant its events are recorded at
-(`max(Sampled::now, the stream's last)`) is the kernel's, read through
-`recorded_at()` (and a marked-up handler's `Context`) until the router's
-`ContextualCommand` carries it.
+AGGREGATE_HANDLES, and the instant the input was accepted at, its
+`recorded_at` (`max(Sampled::now, the stream's last)`): the kernel stamps
+it on the `ContextualCommand`, the events are recorded at it, and a
+marked-up handler's `Context` reads it there.
 
 **Facts** are recorded, never refused: a fact handler returns its events
 (the router's `FactRecord`: the first as the record, the rest as its flags).
-A panicking fact handler is a bug: the kernel catches it, fails the chain
-(`KernelError::IngestPanicked`, `Recovery::Bug`), writes nothing and logs a
-[dead letter](#dead-letters-a-logger).
+A panicking fact handler is a bug: the router catches it
+(UNHANDLED_HANDLER_ERROR, cause HANDLER_PANICKED), the chain fails
+(`KernelError::Router`, `Recovery::Bug`), nothing is written, and the
+kernel logs a [dead letter](#dead-letters-a-logger).
 
 **Business output is payloads only.** The kernel builds the pages: their
 sequences and their `EventMeta` (`Identified::meta`).
@@ -616,9 +616,9 @@ kernel.resume(&store, &sampled, &mut projections).await?;                       
   refused command of a type it translates that does not decode) and an error of
   the source's `#[on_refused]` handler fail the step as `StepError::PolicyFailed`, a
   defect (`Recovery::Bug`), never a business `Rejected`: the step is
-  dead-lettered with the error's code as its reason and its args as the
-  letter's metadata, never its English, and the policy's position moves
-  past the trigger, so nothing runs it again.
+  dead-lettered with the error's code and args as its reason, never
+  English, and the policy's position moves past the trigger, so nothing
+  runs it again.
 - <a id="a-policys-bug-and-its-position"></a>**A policy's bug and its
   position** are a setting: `Kernel::on_policy_bug(OnPolicyBug)`, one for
   every policy. A policy step that hits a bug (the policy's own error,
@@ -717,8 +717,9 @@ stream, by sequence. SQLite's migration 0004 drops the released 0002's
 **Errors** are angzarr-ports' `StoreError`, codes `angzarr-ports-*`: the
 kernel forwards each as `KernelError::Store` with its code and args, and
 angzarr-embedded carries the catalog for them (`locales/en-US/angzarr-ports.ftl`).
-A store's own failure is a `Cause` (its code and English) inside
-`Unavailable` or `Unreadable`.
+A store's own failure is a `Cause` (its code and args) inside
+`Unavailable` or `Unreadable`; a driver's error carries its text verbatim
+as `ext_err_txt` and SQLite's primary result code as `errno`.
 
 **Opt-in capabilities**, each a trait of its own with its own section of
 the suite: `Purge` (a stream, its snapshot, its command ids and every
@@ -766,24 +767,39 @@ nothing written, and the kernel writes one line to the application's
 `DeadLetterLog`:
 
 ```rust
-pub const DEAD_LETTER_PREFIX: &str =
-    "DEAD LETTER (almost certainly a bug; nothing was written and nothing will retry):";
+pub const DEAD_LETTER_PREFIX: &str = "DEAD_LETTER";
 pub trait DeadLetterLog: Send + Sync { fn write(&self, line: &str); }
-pub fn dead_letter_line(letter: &AngzarrDeadLetter) -> String;   // prefix, component, reason, metadata, command or event
+pub fn dead_letter_line(letter: &AngzarrDeadLetter) -> String;   // prefix, component, reason's code and args, retry_count, command or event
 ```
 
-Cases: a panicking ingest; a policy's book the kernel built malformed; a
-decide under AGGREGATE_HANDLES that never acknowledged its window; a
-policy that failed on its trigger, whose line is its error's code and args
-(`name=value`), never its English, and the trigger's place; a handler
-that failed under a code of its own outside the business set, or under
-a code of the router's failed INTERNAL, whose line is that code and
-its args (a handler's bug: UNHANDLED_HANDLER_ERROR, its own code and args
-as `cause` and `cause.<arg>`), never its English, and the command. **Every
-line starts with the prefix**: anything arriving there almost certainly
-indicates a problem, so an operator alerts on it. The line is built from
-angzarr's own `AngzarrDeadLetter`, so it says what an angzarr DLQ entry
-would. angzarr-embedded never answers PARKED.
+A letter's reason is its error's `Diagnostic` (`AngzarrDeadLetter.reason`):
+its code and its args, never English (decision 14.37); the line is keys
+and values only. Cases: a handler's bug (a fatal bug's status, a panic
+included), and the router's own error on malformed input; a policy's
+book the kernel built malformed; a decide under AGGREGATE_HANDLES that
+never acknowledged its window; a policy that failed on its trigger; a
+step whose retryable failure outlasted its retries, with their count
+(`EventProcessingFailedDetails.retry_count`). **Every line starts with the
+prefix**: anything arriving there almost certainly indicates a problem, so
+an operator alerts on it. The line is built from angzarr's own
+`AngzarrDeadLetter`, so it says what an angzarr DLQ entry would.
+angzarr-embedded never answers PARKED.
+
+## Retrying, capped, then dead-lettered
+
+A step's retryable failure (a retryable bug; as a policy's step, ABORTED
+too) is run again by the kernel, from its load and deduplication, after a
+backoff, up to a cap; then it is dead-lettered with its retry count, the
+caller still gets it, and a policy's position does what `OnPolicyBug`
+says. `Kernel::on_retryable(OnRetryable { max_retries, initial_backoff,
+multiplier, max_backoff, jitter })`: retry `n` (from 0) waits
+`initial_backoff * multiplier^n`, at most `max_backoff`, less up to
+`jitter` of it at random. On by default (3 retries, from 100 ms,
+doubling, at most 5 s, a fifth at random); `max_retries = 0` turns it
+off. `Kernel::wait_with(&dyn Wait)` sets the timer and the jitter's draw:
+the kernel's own sleeps on a thread of its own; a test injects its own.
+The host reads `[retry]` (`max_retries`, `initial_backoff_ms`,
+`multiplier`, `max_backoff_ms`, `jitter`).
 
 **Trigger edges are tracing.** No event records the edge from a trigger
 to the policy command it set off (angzarr decision 13.3; angzarr sends it
@@ -801,9 +817,10 @@ names the trigger; angzarr-embedded has no tracing dependency and reports it now
 | `KernelError::UnknownType` | a command or fact type the domain does not decode, after upcasting | `Invalid` |
 | `KernelError::InvalidPayload` | a command or fact that decodes but is not a valid domain value (`WireError`: a required field absent, an undefined enum value) | `Invalid` |
 | `KernelError::Stale`, `Unresolved` | re-read and re-issue | `Retry` |
-| `KernelError::Router` | the router refused, or a handler failed under a code of its own (never under a business status: that is `Rejected`) | a handler's own code `Bug` (`Business` under a business status, though the kernel makes that `Rejected`); of the router's codes, by gRPC status: INTERNAL (dead-lettered, a handler's bug), DATA_LOSS and UNIMPLEMENTED `Bug`, ABORTED `Retry`, INVALID_ARGUMENT and NOT_FOUND `Invalid` |
+| `KernelError::Router` | the router's error, or a handler's failure (never under a business status: that is `Rejected`) | by its status's class: a fatal bug `Bug` (dead-lettered), ABORTED and a retryable bug `Retry` |
+| `KernelError::HandlerUnavailable` | a remote handler that could not be reached | `Retry` |
 | `StoreError::Conflict`, `Unavailable` | run again with the same command id (step 3 makes it safe) | `Retry` |
-| `IngestPanicked`, `Upcast`, `WrongDomain`, `ChainTooDeep`, `BeforeSnapshot`, `UnregisteredDomain` (a stored stream of a domain the application did not register; an incoming book for one is `Malformed`), `Replay(..)`, `StoreError::Discontinuous`, `Unreadable` | a bug or a misconfiguration | `Bug` |
+| `Upcast`, `WrongDomain`, `ChainTooDeep`, `BeforeSnapshot`, `UnregisteredDomain` (a stored stream of a domain the application did not register; an incoming book for one is `Malformed`), `Replay(..)`, `StoreError::Discontinuous`, `Unreadable` | a bug or a misconfiguration | `Bug` |
 
 A duplicate is not an error: it is `Handled::Duplicate`. Each error becomes
 a `Diagnostic` with the implementation (codes under `angzarr-embedded-next-*`,

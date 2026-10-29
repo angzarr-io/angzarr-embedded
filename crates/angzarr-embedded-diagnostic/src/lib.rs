@@ -8,8 +8,9 @@
 //! which each crate with codes exports, embedded, as `EN_US`: the crate's
 //! name and the catalog's text (`angzarr_embedded::EN_US`, `angzarr_embedded_yaml::EN_US`, ...).
 //! A dependent adds those to its own catalog to render angzarr-embedded's diagnostics.
-//! The English `Display` every error keeps is the fallback, for logs and for
-//! a code no catalog has.
+//! An error's `Display` is its code then its args, never English (angzarr
+//! decision 14.37): [`display`] writes it, for logs; English is rendered
+//! only where the error is shown, from a catalog keyed by the code.
 //!
 //! The rules:
 //!
@@ -25,7 +26,7 @@
 //! A game's own errors implement [`Diagnostic`] the same way, with codes
 //! starting with the game's name. Where an angzarr-embedded error carries a game's
 //! error (a migration step's, a decoder's) it holds it as a [`Report`]: the
-//! code, args and English captured, so the error stays `Clone` and `Eq`.
+//! code and args captured, so the error stays `Clone` and `Eq`.
 //!
 //! [`code`]: Diagnostic::code
 //! [`args`]: Diagnostic::args
@@ -33,7 +34,7 @@
 use std::fmt;
 
 /// An error a player may read: a stable code and its named data. `Display`
-/// is the English fallback.
+/// is the code then the args ([`display`]), never English.
 pub trait Diagnostic: fmt::Debug + fmt::Display {
     /// The message id: kebab-case, starting with the crate's name, never
     /// reused.
@@ -114,23 +115,22 @@ impl From<char> for Arg {
     }
 }
 
-/// A diagnostic captured as data: its code, its args and its English. How
-/// an angzarr-embedded error holds a game's error, keeping the holder `Clone` and
-/// `Eq`. Also a quick way for a game to raise one without an error type of
-/// its own:
+/// A diagnostic captured as data: its code and its args. How an
+/// angzarr-embedded error holds a game's error, keeping the holder `Clone`
+/// and `Eq`. Also a quick way for a game to raise one without an error type
+/// of its own:
 ///
 /// ```
 /// use angzarr_embedded_diagnostic::{Diagnostic, Report};
 ///
-/// let e = Report::new("my-game-unknown-unit", "no unit \"ogre\"").arg("unit", "ogre");
+/// let e = Report::new("my-game-unknown-unit").arg("unit", "ogre");
 /// assert_eq!(e.code(), "my-game-unknown-unit");
-/// assert_eq!(e.to_string(), "no unit \"ogre\"");
+/// assert_eq!(e.to_string(), "my-game-unknown-unit unit=ogre");
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Report {
     code: &'static str,
     args: Vec<(&'static str, Held)>,
-    english: String,
 }
 
 /// An [`Arg`], owned and comparable.
@@ -163,12 +163,11 @@ impl Held {
 }
 
 impl Report {
-    /// A diagnostic with no args yet, and its English.
-    pub fn new(code: &'static str, english: impl Into<String>) -> Report {
+    /// A diagnostic with no args yet.
+    pub fn new(code: &'static str) -> Report {
         Report {
             code,
             args: Vec::new(),
-            english: english.into(),
         }
     }
 
@@ -187,15 +186,40 @@ impl Report {
                 .into_iter()
                 .map(|(name, arg)| (name, Held::of(arg)))
                 .collect(),
-            english: d.to_string(),
         }
     }
 }
 
 impl fmt::Display for Report {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.english)
+        display(self, f)
     }
+}
+
+/// `d` as every error displays itself (angzarr decision 14.37): its code,
+/// then ` name=value` for each arg in order, a wrapped cause as its code
+/// under the arg's name and each of its own args under `<name>.<arg>`, as
+/// angzarr flattens a cause on the wire. Never English: an error's
+/// `Display` calls this.
+pub fn display(d: &dyn Diagnostic, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.write_str(d.code())?;
+    write_args(d, "", f)
+}
+
+/// `d`'s args, each name after `prefix`.
+fn write_args(d: &dyn Diagnostic, prefix: &str, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    for (name, arg) in d.args() {
+        match arg {
+            Arg::Int(n) => write!(f, " {prefix}{name}={n}")?,
+            Arg::Uint(n) => write!(f, " {prefix}{name}={n}")?,
+            Arg::Str(s) => write!(f, " {prefix}{name}={s}")?,
+            Arg::Nested(cause) => {
+                write!(f, " {prefix}{name}={}", cause.code())?;
+                write_args(cause.as_ref(), &format!("{prefix}{name}."), f)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 impl std::error::Error for Report {}

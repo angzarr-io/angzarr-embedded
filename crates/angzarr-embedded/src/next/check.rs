@@ -108,61 +108,7 @@ pub enum Malformed {
 
 impl fmt::Display for Malformed {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Malformed::NoCover => f.write_str("the book has no cover"),
-            Malformed::UnknownDomain { domain } => write!(f, "no domain \"{domain}\" is registered"),
-            Malformed::NoRoot => f.write_str("the cover has no root"),
-            Malformed::BadRoot { len } => write!(f, "the root is {len} bytes, not a UUID's 16"),
-            Malformed::EmptyEdition => {
-                f.write_str("the edition is set but empty: the main timeline is the unset edition")
-            }
-            Malformed::NoPage => f.write_str("the book has no page"),
-            Malformed::NoBody => f.write_str("the page has neither a command nor a fact"),
-            Malformed::NoPayload => f.write_str("the command or fact has no payload"),
-            Malformed::BadCommandId { len } => {
-                write!(f, "the command id is {len} bytes, not a UUID's 16")
-            }
-            Malformed::BadCorrelationId { len } => {
-                write!(f, "the correlation id is {len} bytes, not a UUID's 16")
-            }
-            Malformed::CausationFromOutside => f.write_str(
-                "a client's book names a causation: only the kernel's chain issues policy commands",
-            ),
-            Malformed::IdOnPolicyCommand => f.write_str(
-                "a policy's book names its own ids: the kernel derives them from the trigger",
-            ),
-            Malformed::FactFromPolicy => {
-                f.write_str("a policy's book holds a fact: a policy never injects one")
-            }
-            Malformed::HandlingOnPolicyCommand => {
-                f.write_str("a policy's book has handling: its target stamps its own head")
-            }
-            Malformed::BadTrigger(error) => {
-                write!(f, "the policy command's trigger cannot name a command id: {error}")
-            }
-            Malformed::FactWithoutOrigin => f.write_str("a fact without its origin"),
-            Malformed::EmptyExternalId => {
-                f.write_str("the fact's external id is empty: it is the fact's identity")
-            }
-            Malformed::CommandWithFactOrigin => f.write_str("a command with a fact origin"),
-            Malformed::FactCommandIdNotDerived => f.write_str(
-                "the fact's command id is not the one derived from its external id",
-            ),
-            Malformed::HandlingOnFact => f.write_str(
-                "a fact with handling: a fact is never checked against a sequence nor conflict-resolved",
-            ),
-            Malformed::UnknownConflictResolution { value } => {
-                write!(f, "conflict resolution {value} is not one this build knows")
-            }
-            Malformed::UnsupportedConflictResolution { domain, requested } => write!(
-                f,
-                "domain \"{domain}\"'s state does not support {}",
-                requested.as_str_name()
-            ),
-            Malformed::RefusalMisaddressed => f.write_str(
-                "the refusal fact is for another stream than the one its trigger names",
-            ),
-        }
+        angzarr_embedded_diagnostic::display(self, f)
     }
 }
 

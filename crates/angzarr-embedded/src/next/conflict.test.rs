@@ -347,7 +347,7 @@ fn an_old_command_type_has_its_current_types_resolution() {
         .register::<Shelf>(
             Rulebook::new("v1", ()),
             Upcaster::new("shelf-upcaster", "shelf").rule::<OldNote, shelf::Note>(|_| {
-                Err(angzarr_embedded_diagnostic::Report::new("toy-no", "no"))
+                Err(angzarr_embedded_diagnostic::Report::new("toy-no"))
             }),
             crate::next::toys::handlers::<crate::next::toys::Shelf>((), "v1"),
         )

@@ -101,37 +101,7 @@ impl From<Report> for MigrationError {
 
 impl fmt::Display for MigrationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            MigrationError::RenameNotAMapping { from } => {
-                write!(f, "rename {from:?}: not a mapping")
-            }
-            MigrationError::RenameTargetExists { from, to } => {
-                write!(f, "rename {from:?} to {to:?}: {to:?} is already there")
-            }
-            MigrationError::MoveEmptyPath { from, to } => {
-                write!(f, "move {from} to {to}: empty key path")
-            }
-            MigrationError::MoveNotAMapping { from, to } => {
-                write!(f, "move {from} to {to}: not a mapping")
-            }
-            MigrationError::MoveThroughNotAMapping { from, to, key } => {
-                write!(f, "move {from} to {to}: {key:?}: not a mapping")
-            }
-            MigrationError::MoveTargetExists { from, to, key } => {
-                write!(f, "move {from} to {to}: {key:?} is already there")
-            }
-            MigrationError::DefaultNotAMapping { key } => {
-                write!(f, "default {key:?}: not a mapping")
-            }
-            MigrationError::RemoveNotAMapping { key } => write!(f, "remove {key:?}: not a mapping"),
-            MigrationError::MapNotAMapping { key } => write!(f, "map over {key:?}: not a mapping"),
-            MigrationError::MapNotASequence { key } => {
-                write!(f, "map over {key:?}: not a sequence")
-            }
-            MigrationError::Item { key, index, error } => write!(f, "{key}[{index}]: {error}"),
-            MigrationError::RootNotAMapping => f.write_str("the step left the root not a mapping"),
-            MigrationError::Game(report) => write!(f, "{report}"),
-        }
+        angzarr_embedded_diagnostic::display(self, f)
     }
 }
 
@@ -229,19 +199,7 @@ pub enum ChainProblem {
 
 impl fmt::Display for ChainError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} migrations: ", self.kind)?;
-        match self.problem {
-            ChainProblem::Duplicate { from } => write!(f, "two steps from version {from}"),
-            ChainProblem::BeyondCurrent { from, current } => {
-                write!(
-                    f,
-                    "a step from version {from}, but the current version is {current}"
-                )
-            }
-            ChainProblem::Gap { from } => {
-                write!(f, "no step from version {from} to {}", u64::from(from) + 1)
-            }
-        }
+        angzarr_embedded_diagnostic::display(self, f)
     }
 }
 
@@ -399,38 +357,9 @@ pub enum BadVersion {
     },
 }
 
-impl fmt::Display for BadVersion {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("`version` must be a non-negative integer, not ")?;
-        match self {
-            BadVersion::Empty => f.write_str("an empty value"),
-            BadVersion::Sequence => f.write_str("a sequence"),
-            BadVersion::Mapping => f.write_str("a mapping"),
-            BadVersion::NotAnInteger { text } => write!(f, "{text:?}"),
-            BadVersion::TooLarge { text } => write!(f, "{text:?} (too large)"),
-        }
-    }
-}
-
 impl fmt::Display for LoadProblem {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            LoadProblem::Yaml(e) => write!(f, "{e}"),
-            LoadProblem::NotAMapping => f.write_str("the root must be a mapping with a `version`"),
-            LoadProblem::BadVersion(bad) => write!(f, "{bad}"),
-            LoadProblem::TooNew { found, current } => write!(
-                f,
-                "version {found} was written by a newer build; this build reads up to version {current}"
-            ),
-            LoadProblem::TooOld { found, oldest } => write!(
-                f,
-                "version {found} is older than this build migrates; the oldest it reads is version {oldest}"
-            ),
-            LoadProblem::Step { from, error } => {
-                write!(f, "migrating version {from} to {}: {error}", u64::from(*from) + 1)
-            }
-            LoadProblem::Decode(e) => write!(f, "{e}"),
-        }
+        angzarr_embedded_diagnostic::display(self, f)
     }
 }
 
@@ -487,11 +416,7 @@ impl Diagnostic for LoadProblem {
 
 impl fmt::Display for LoadError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} document", self.kind)?;
-        if let Some(source) = &self.source {
-            write!(f, " {source}")?;
-        }
-        write!(f, ": {}", self.problem)
+        angzarr_embedded_diagnostic::display(self, f)
     }
 }
 

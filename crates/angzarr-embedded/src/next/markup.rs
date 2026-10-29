@@ -81,36 +81,41 @@ pub use angzarr_router::domain::{CommandContext, Conflict};
 ///   refused command's), `correlation_id` and, for a fact, `fact_origin`.
 ///   Nothing the router knows of the input is withheld, and nothing it
 ///   knows is kept twice.
-/// - [`Context::recorded_at`]: what the router does not carry, the instant
-///   the events will be recorded at (sampled by the application and
-///   injected, so the handler stays pure: there is no wall clock).
-#[derive(Clone, Debug)]
+/// - [`Context::recorded_at`]: the instant the input was accepted and its
+///   events will be recorded at, the router's `recorded_at`
+///   (`ContextualCommand.recorded_at`, decision 14.37), sampled by the
+///   application and stamped by the kernel, so the handler stays pure:
+///   there is no wall clock.
+#[derive(Clone, Debug, Default)]
 pub struct Context {
-    recorded_at: Timestamp,
     /// angzarr-router's context of the input this handler decides.
     pub command: CommandContext,
 }
 
 impl Context {
     /// A context for a handler's own unit tests, recorded at `recorded_at`
-    /// with the router's default context ([`Context::with_command`] sets
-    /// it); the kernel builds the real one from what angzarr-router hands
-    /// the handler.
+    /// with the router's default context otherwise
+    /// ([`Context::with_command`] sets it); the kernel builds the real one
+    /// from what angzarr-router hands the handler.
     pub fn new(recorded_at: Timestamp) -> Context {
         Context {
-            recorded_at,
-            command: CommandContext::default(),
+            command: CommandContext {
+                recorded_at: Some(recorded_at),
+                ..CommandContext::default()
+            },
         }
     }
 
-    /// This context, with `command` as the router's context of the input.
+    /// This context, with `command` as the router's context of the input,
+    /// its instant included.
     pub fn with_command(self, command: CommandContext) -> Context {
-        Context { command, ..self }
+        Context { command }
     }
 
-    /// When the events will be recorded (non-decreasing within the stream).
+    /// When the events will be recorded (non-decreasing within the stream):
+    /// the router's `recorded_at`.
     pub fn recorded_at(&self) -> Timestamp {
-        self.recorded_at
+        self.command.recorded_at.unwrap_or_default()
     }
 }
 
@@ -477,24 +482,30 @@ pub trait Refusing<C: DomainMessage>: Domain {
 pub type Refuses<A, C> = <A as Refusing<C>>::Refuses;
 
 /// A typed refusal object, packed: one of a command's `refuses` types (a
-/// [`DomainMessage`] of the command's own domain, and a
-/// [`Diagnostic`](angzarr_embedded_diagnostic::Diagnostic), whose message is the
-/// refusal's), with its diagnostic.
+/// [`DomainMessage`] of the command's own domain). Keyed, as on the wire,
+/// COMMAND_REFUSED with the object's full type name as `refusal_type`
+/// (decision 14.37): the object is the refusal's data.
 #[derive(Clone, PartialEq, Debug)]
 pub struct TypedRefusal {
     object: Any,
-    report: Report,
 }
 
+/// The code a typed refusal is keyed under: angzarr's COMMAND_REFUSED.
+const COMMAND_REFUSED: &str = "angzarr-embedded-next-command-refused";
+
 impl TypedRefusal {
-    /// `object`, packed, with its diagnostic.
+    /// `object`, packed.
     pub fn of<T: DomainMessage + angzarr_embedded_diagnostic::Diagnostic>(
         object: &T,
     ) -> TypedRefusal {
         TypedRefusal {
             object: __pack(object),
-            report: Report::of(object),
         }
+    }
+
+    /// The object's full type name: its `refusal_type`.
+    fn refusal_type(&self) -> &str {
+        super::payload::type_name(&self.object.type_url)
     }
 
     /// The object, as `T`, if it is one.
@@ -528,14 +539,18 @@ impl<R> From<R> for Rejection<R> {
 }
 
 impl<R: angzarr_embedded_diagnostic::Diagnostic> Rejection<R> {
-    /// As a refused policy receives it: the typed object packed (unset for a
-    /// message), and the en-US message.
+    /// As a refused policy receives it, the oneof: the typed object
+    /// packed, or a message-only refusal's code and args.
     pub fn response(&self) -> v1::RefusalResponse {
         v1::RefusalResponse {
-            reason: self
-                .refusal()
-                .cloned()
-                .map(v1::refusal_response::Reason::Refusal),
+            reason: Some(match self {
+                Rejection::Typed(typed) => {
+                    v1::refusal_response::Reason::Refusal(typed.object.clone())
+                }
+                Rejection::Message(_) => {
+                    v1::refusal_response::Reason::Diagnostic(super::route::diagnostic(self))
+                }
+            }),
         }
     }
 }
@@ -550,12 +565,9 @@ impl<R> Rejection<R> {
     }
 }
 
-impl<R: fmt::Display> fmt::Display for Rejection<R> {
+impl<R: angzarr_embedded_diagnostic::Diagnostic> fmt::Display for Rejection<R> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Rejection::Message(rejection) => rejection.fmt(f),
-            Rejection::Typed(typed) => typed.report.fmt(f),
-        }
+        angzarr_embedded_diagnostic::display(self, f)
     }
 }
 
@@ -565,14 +577,14 @@ impl<R: angzarr_embedded_diagnostic::Diagnostic> angzarr_embedded_diagnostic::Di
     fn code(&self) -> &'static str {
         match self {
             Rejection::Message(rejection) => rejection.code(),
-            Rejection::Typed(typed) => typed.report.code(),
+            Rejection::Typed(_) => COMMAND_REFUSED,
         }
     }
 
     fn args(&self) -> Vec<(&'static str, angzarr_embedded_diagnostic::Arg)> {
         match self {
             Rejection::Message(rejection) => rejection.args(),
-            Rejection::Typed(typed) => typed.report.args(),
+            Rejection::Typed(typed) => vec![("refusal_type", typed.refusal_type().into())],
         }
     }
 }
@@ -675,9 +687,13 @@ impl<C> Refusal<C> {
         }
     }
 
-    /// The refusal's message.
-    pub fn message(&self) -> &str {
-        ""
+    /// A refusal without a typed object: its code and args (decision
+    /// 14.37), never English; `None` for a typed one.
+    pub fn diagnostic(&self) -> Option<&angzarr_proto::v1::Diagnostic> {
+        match self.response.reason.as_ref()? {
+            v1::refusal_response::Reason::Diagnostic(diagnostic) => Some(diagnostic),
+            v1::refusal_response::Reason::Refusal(_) => None,
+        }
     }
 }
 
@@ -1028,27 +1044,30 @@ pub trait Routed: Domain {
     ) -> angzarr_router::domain::DomainDispatch<Self::State>;
 }
 
-/// The context a handler reads: the router's, and the instant its events
-/// will be recorded at.
+/// The context a handler reads: the router's, its instant included.
 fn context_of(cctx: angzarr_router::domain::CommandContext) -> Context {
-    Context::new(super::route::recorded_at()).with_command(cctx)
+    Context { command: cctx }
 }
 
-/// The input `any` as a `T`, or the router's refusal of a payload that does
-/// not decode as the type it names.
+/// The input `any` as a `T`, or the router's ANY_DECODE_FAILED for a
+/// payload that is not one: malformed input, a bug (INTERNAL), never a
+/// refusal (decision 14.37). Bytes that do not decode carry prost's text
+/// as `ext_err_txt`; a payload of another type, or not a valid `T`, its
+/// type alone.
 fn input<T: DomainMessage>(any: &Any) -> Result<T, angzarr_router::error::HandlerError> {
+    use angzarr_router::error::{codes, extras, CodedError, GrpcCode, HandlerError};
+    let message_type = || super::payload::type_name(&any.type_url).to_string();
     match __decode::<T>(any) {
         Ok(Some(value)) => Ok(value),
-        Ok(None) | Err(_) => Err(angzarr_router::error::HandlerError::Coded(
-            angzarr_router::error::CodedError::rejection(
-                angzarr_router::error::BusinessStatus::InvalidArgument,
-                angzarr_router::error::codes::ANY_DECODE_FAILED,
-                [(
-                    angzarr_router::error::extras::TYPE_URL.to_string(),
-                    any.type_url.clone(),
-                )],
-            ),
+        Err(PayloadError::Decode { error, .. }) => Err(HandlerError::Coded(
+            CodedError::undecodable(&message_type(), &error),
         )),
+        Ok(None) | Err(_) => Err(HandlerError::Coded(CodedError {
+            code: codes::ANY_DECODE_FAILED.to_string(),
+            extras: [(extras::MESSAGE_TYPE.to_string(), message_type())].into(),
+            grpc: GrpcCode::Internal,
+            refusal: None,
+        })),
     }
 }
 
@@ -1120,11 +1139,7 @@ where
         steps += 1;
         if steps > STEP_LIMIT {
             return Err(angzarr_router::error::HandlerError::Coded(
-                super::route::internal(
-                    super::route::TOO_MANY_STEPS,
-                    "the decision ran more continuation steps than its limit",
-                    [],
-                ),
+                super::route::internal(super::route::TOO_MANY_STEPS, []),
             ));
         }
         emit = next(&working, &ctx).map_err(refuse)?;
@@ -1134,7 +1149,8 @@ where
 /// A fact handler's result, run as one decision on a working copy of
 /// `state`: its events, then each continuation step's on the copy with
 /// them applied. Infallible; more than [`STEP_LIMIT`] steps is a bug,
-/// which panics (the kernel's `IngestPanicked`, dead-lettered).
+/// which panics: the router catches it, a bug, and the kernel dead-letters
+/// it.
 #[doc(hidden)]
 pub fn __fact<A, F, Rr>(
     any: &Any,
@@ -1261,7 +1277,7 @@ pub fn __translating<C: DomainMessage>(
 
 /// A translating callback's answer, as `Policy::on_refused` gives it: its
 /// fact, one its source `S` ingests, packed; or its error as a report (its
-/// code the dead letter's reason, its args the letter's metadata).
+/// code and args the dead letter's reason).
 #[doc(hidden)]
 pub fn __domestic<S: Ingests<F>, F: DomainMessage, E: angzarr_embedded_diagnostic::Diagnostic>(
     answer: Result<F, E>,
@@ -1273,7 +1289,7 @@ pub fn __domestic<S: Ingests<F>, F: DomainMessage, E: angzarr_embedded_diagnosti
 
 /// A policy's `#[on_event]` handler's answer, as `Policy::on_event` gives
 /// it: its commands, or its error as a report (its code the dead letter's
-/// reason, its args the letter's metadata).
+/// reason, with its args).
 #[doc(hidden)]
 pub fn __answered<T: Domain, E: angzarr_embedded_diagnostic::Diagnostic>(
     answer: Result<Commands<T>, E>,

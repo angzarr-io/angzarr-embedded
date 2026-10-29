@@ -16,20 +16,20 @@ rust-version = "1.85"
 # this deliberately: see docs/design/audit.md, *Layering*.
 [dependencies]
 angzarr-embedded-diagnostic = { path = "../angzarr-embedded-diagnostic" }
-angzarr-proto = { git = "https://github.com/angzarr-io/angzarr-project", rev = "5f88d678a53427bf9ef4b3061aa30863007d1ba1" }
+angzarr-proto = { git = "https://github.com/angzarr-io/angzarr-project", rev = "a1293eae1da37a95b58eb6081b066846876b5cca" }
 prost = "0.14"
 prost-types = "0.14"
 # angzarr's shared storage contract (one async trait set, its errors and
 # codes): angzarr-embedded's store ports are these, pinned with angzarr-proto at the
 # same rev of angzarr-project's spec line, so both share one set of wire
 # types.
-angzarr-ports = { git = "https://github.com/angzarr-io/angzarr-project", rev = "5f88d678a53427bf9ef4b3061aa30863007d1ba1" }
+angzarr-ports = { git = "https://github.com/angzarr-io/angzarr-project", rev = "a1293eae1da37a95b58eb6081b066846876b5cca" }
 # angzarr's shared client router: business dispatch (handlers, typed
 # refusals and the refusal path, deduplication, a process manager's start
 # rule, a policy's commands kept in its trigger's edition, their root and
 # correlation), implemented once for every runtime. The kernel calls it and
 # keeps the check, identification, the store writes, positions and resume.
-angzarr-router = { git = "https://github.com/angzarr-io/angzarr-router", rev = "089f7b02f538a75b7fbfce389be945080e193e5d" }
+angzarr-router = { git = "https://github.com/angzarr-io/angzarr-router", rev = "3b1ad294d1a67ec94e90282c76b8a4eca40e13ab" }
 
 # The kernel's tests run on angzarr-ports' MemoryStore and, on a tokio
 # runtime, on the shared SQLite adapter (sqlite.test.rs); and a decorated
@@ -37,7 +37,7 @@ angzarr-router = { git = "https://github.com/angzarr-io/angzarr-router", rev = "
 # names `::angzarr-embedded`.
 [dev-dependencies]
 angzarr-embedded = { path = "." }
-angzarr-ports = { git = "https://github.com/angzarr-io/angzarr-project", rev = "5f88d678a53427bf9ef4b3061aa30863007d1ba1", features = ["memory"] }
+angzarr-ports = { git = "https://github.com/angzarr-io/angzarr-project", rev = "a1293eae1da37a95b58eb6081b066846876b5cca", features = ["memory"] }
 angzarr-embedded-macros = { path = "../angzarr-embedded-macros" }
 angzarr-store-sqlite = { path = "../angzarr-store-sqlite" }
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }

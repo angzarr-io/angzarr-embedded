@@ -270,7 +270,7 @@ fn a_store_that_cannot_open_fails_the_run() {
     config.store.path = dir.join("no/such/dir/app.db");
     let failed = run(written(&dir, &config), nothing).err();
     assert!(
-        matches!(&failed, Some(HostError::Store { cause }) if cause != &Report::new("", "")),
+        matches!(&failed, Some(HostError::Store { cause }) if cause != &Report::new("")),
         "{failed:?}"
     );
 }

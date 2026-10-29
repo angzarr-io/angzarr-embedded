@@ -4,25 +4,22 @@
 //!
 //! What comes back is in the router's terms:
 //!
-//! - a business status (the owner's ruling, 2026-10-29:
-//!   FAILED_PRECONDITION, INVALID_ARGUMENT, NOT_FOUND, ALREADY_EXISTS,
-//!   OUT_OF_RANGE, PERMISSION_DENIED) is a refusal: its
-//!   `google.rpc.ErrorInfo` detail's reason and metadata are the code and
-//!   extras, its message the message, and its other detail, an `Any`, the
-//!   typed refusal ([`CodedError::refusal`]). ALREADY_EXISTS, OUT_OF_RANGE
-//!   and PERMISSION_DENIED, which angzarr-router's `GrpcCode` has no
-//!   variant for, arrive FAILED_PRECONDITION; the kernel takes a reason of
-//!   the child's own under any of them as its refusal;
+//! - every status keeps its gRPC code, so the status decides the error's
+//!   class (decision 14.37), and its `google.rpc.ErrorInfo` detail's
+//!   reason and metadata are the code and extras. The status's message is
+//!   never forwarded: no text crosses;
+//! - a business status (FAILED_PRECONDITION, INVALID_ARGUMENT, NOT_FOUND,
+//!   ALREADY_EXISTS, OUT_OF_RANGE, PERMISSION_DENIED) is a refusal, and its
+//!   other detail, an `Any`, the typed refusal ([`CodedError::refusal`]);
+//!   any other status carries no typed refusal;
 //! - a child that is not running, a connection that fails, and an
-//!   UNAVAILABLE (or other transient) status are [`codes::REMOTE_HANDLER_UNAVAILABLE`],
-//!   which [`is_retryable`] says to retry: the child is being restarted, and
-//!   resuming by position retries the input once it is back;
-//! - any other status keeps its gRPC code, INTERNAL where angzarr-router's
-//!   `GrpcCode` has no variant for it (UNKNOWN, DEADLINE_EXCEEDED,
-//!   RESOURCE_EXHAUSTED, an UNAVAILABLE the child sent), and its
-//!   ErrorInfo's reason, and carries no typed refusal: the kernel takes a
-//!   reason of the child's own under it as the child's bug, never a
-//!   refusal.
+//!   UNAVAILABLE status with no details are
+//!   [`codes::REMOTE_HANDLER_UNAVAILABLE`], which [`is_retryable`] says to
+//!   retry: the child is being restarted. A transport's failure carries the
+//!   transport's text verbatim as [`EXT_ERR_TXT`], a third party's;
+//! - a status angzarr-router's `GrpcCode` has no variant for (CANCELLED,
+//!   UNAUTHENTICATED) arrives UNAVAILABLE: a retryable bug, as the owner
+//!   ruled.
 
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -46,14 +43,13 @@ pub mod codes {
     pub const REMOTE_HANDLER_UNAVAILABLE: &str = "REMOTE_HANDLER_UNAVAILABLE";
 }
 
-/// The static message of [`codes::REMOTE_HANDLER_UNAVAILABLE`], in the
-/// router's style: the code and extras are what a reader keys on.
-pub const REMOTE_HANDLER_UNAVAILABLE_MESSAGE: &str =
-    "the remote handler's process is not reachable";
-
 /// The extras key naming why a remote handler was unreachable, one of the
 /// [`causes`]. The domain is under the router's `extras::DOMAIN`.
 pub const CAUSE: &str = "cause";
+
+/// The extras key a transport's failure carries its text under, verbatim:
+/// a third party's (tonic's, hyper's) words, never angzarr's.
+pub const EXT_ERR_TXT: &str = "ext_err_txt";
 
 /// The values of [`CAUSE`].
 pub mod causes {
@@ -218,7 +214,11 @@ pub(crate) fn status_to_coded(domain: &str, status: &tonic::Status) -> CodedErro
         && (status.code() == Code::Unavailable
             || (status.code() == Code::Unknown && std::error::Error::source(status).is_some()));
     if transport {
-        return unavailable(domain, causes::TRANSPORT);
+        let mut error = unavailable(domain, causes::TRANSPORT);
+        error
+            .extras
+            .insert(EXT_ERR_TXT.to_string(), transport_text(status));
+        return error;
     }
     let is_info = |detail: &&prost_types::Any| {
         angzarr_router::type_name_from_url(&detail.type_url) == ERROR_INFO_NAME
@@ -235,16 +235,20 @@ pub(crate) fn status_to_coded(domain: &str, status: &tonic::Status) -> CodedErro
     let grpc = match status.code() {
         Code::InvalidArgument => GrpcCode::InvalidArgument,
         Code::NotFound => GrpcCode::NotFound,
-        // The business set's statuses angzarr-router's GrpcCode has no
-        // variant for: a refusal all the same.
-        Code::FailedPrecondition
-        | Code::AlreadyExists
-        | Code::OutOfRange
-        | Code::PermissionDenied => GrpcCode::FailedPrecondition,
+        Code::FailedPrecondition => GrpcCode::FailedPrecondition,
+        Code::AlreadyExists => GrpcCode::AlreadyExists,
+        Code::OutOfRange => GrpcCode::OutOfRange,
+        Code::PermissionDenied => GrpcCode::PermissionDenied,
         Code::Aborted => GrpcCode::Aborted,
         Code::Unimplemented => GrpcCode::Unimplemented,
         Code::DataLoss => GrpcCode::DataLoss,
-        _ => GrpcCode::Internal,
+        Code::Internal => GrpcCode::Internal,
+        Code::Unknown => GrpcCode::Unknown,
+        Code::DeadlineExceeded => GrpcCode::DeadlineExceeded,
+        Code::ResourceExhausted => GrpcCode::ResourceExhausted,
+        // The statuses angzarr-router's GrpcCode has no variant for
+        // (CANCELLED, UNAUTHENTICATED): retryable bugs, as UNAVAILABLE is.
+        _ => GrpcCode::Unavailable,
     };
     let (code, extras) = match info {
         Some(info) => (info.reason, info.metadata.into_iter().collect()),
@@ -258,12 +262,16 @@ pub(crate) fn status_to_coded(domain: &str, status: &tonic::Status) -> CodedErro
         extras,
         grpc,
         // Only a business status carries its typed object to a policy.
-        refusal: refusal.filter(|_| {
-            matches!(
-                grpc,
-                GrpcCode::FailedPrecondition | GrpcCode::InvalidArgument | GrpcCode::NotFound
-            )
-        }),
+        refusal: refusal.filter(|_| grpc.is_business_refusal()),
+    }
+}
+
+/// The transport's own text for a status the call failed with on the
+/// way: its source's, else the status's message (tonic's).
+fn transport_text(status: &tonic::Status) -> String {
+    match std::error::Error::source(status) {
+        Some(source) => source.to_string(),
+        None => status.message().to_string(),
     }
 }
 

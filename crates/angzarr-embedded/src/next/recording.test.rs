@@ -4,7 +4,7 @@
 //! kernel's tests see that each handling step is one write, and what is
 //! left after a step fails.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use angzarr_ports::memory::MemoryStore;
@@ -31,8 +31,9 @@ pub struct WriteRecord {
 #[derive(Default)]
 struct Log {
     writes: Vec<WriteRecord>,
-    /// The writes (by order made, from 0) that fail, landing nothing.
-    failing: BTreeSet<usize>,
+    /// The writes (by order made, from 0) that fail, landing nothing, and
+    /// with what.
+    failing: BTreeMap<usize, StoreError>,
 }
 
 /// A `MemoryStore` whose writes are recorded. Clones share one store and
@@ -74,11 +75,18 @@ impl Recording {
             .collect()
     }
 
-    /// The `n`th write made from now on (from 0) fails, landing nothing.
+    /// The `n`th write made from now on (from 0) fails, landing nothing:
+    /// the store could not say.
     pub fn fail_write(&self, n: usize) {
+        self.fail_write_with(n, injected());
+    }
+
+    /// The `n`th write made from now on (from 0) fails with `error`,
+    /// landing nothing.
+    pub fn fail_write_with(&self, n: usize, error: StoreError) {
         let mut log = self.log();
         let at = log.writes.len() + n;
-        log.failing.insert(at);
+        log.failing.insert(at, error);
     }
 
     fn log(&self) -> MutexGuard<'_, Log> {
@@ -104,8 +112,8 @@ impl EventStore for Recording {
             log.writes.push(record);
             log.writes.len() - 1
         };
-        if self.log().failing.contains(&index) {
-            return Err(injected());
+        if let Some(error) = self.log().failing.get(&index).cloned() {
+            return Err(error);
         }
         let written = self.inner.write(write).await?;
         self.log().writes[index].landed = true;

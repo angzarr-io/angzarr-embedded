@@ -465,11 +465,7 @@ impl crate::next::Policy for Unlucky {
             return Ok(None);
         };
         if cents == 13 {
-            return Err(crate::next::markup::Report::new(
-                "toy-unlucky-deposit",
-                "a deposit of 13 cents cannot happen",
-            )
-            .arg("cents", cents));
+            return Err(crate::next::markup::Report::new("toy-unlucky-deposit").arg("cents", cents));
         }
         let record = ledger::Record {
             source_sequence: ctx.trigger().sequence,
@@ -759,7 +755,8 @@ fn a_policy_book_for_an_unregistered_target_is_a_dead_lettered_bug() {
     assert_eq!(lines.len(), 1);
     assert!(lines[0].starts_with(crate::next::DEAD_LETTER_PREFIX));
     assert!(
-        lines[0].contains("bookkeeping: no domain \"ledger\" is registered"),
+        lines[0]
+            .contains("bookkeeping: angzarr-embedded-next-malformed-unknown-domain domain=ledger"),
         "{}",
         lines[0]
     );
@@ -926,7 +923,7 @@ fn a_policys_error_as_a_handler_of_its_source_is_dead_lettered() {
     assert!(lines[0].starts_with(crate::next::DEAD_LETTER_PREFIX));
     assert!(
         lines[0].contains(&format!(
-            "unlucky: toy-unlucky-deposit cents=13 (event {deposited} of account {})",
+            "unlucky: toy-unlucky-deposit cents=13 sequence={deposited} stream=account/{}",
             cover("account", 1).root.unwrap()
         )),
         "the policy, its error's code and args, and the trigger: {}",
@@ -1101,7 +1098,7 @@ fn a_step_the_store_failed_is_resumed_by_position() {
     let mut registry = registry();
     registry.policy(Bookkeeping);
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log);
+    let kernel = Kernel::new(&registry, &log).on_retryable(crate::next::toys::no_retries());
     let store = Recording::new();
     opened(&store, &registry, 1, 0);
     let account = cover("account", 1);
@@ -1299,11 +1296,7 @@ impl crate::next::Policy for UnansweringBookkeeping {
             .as_ref()
             .and_then(|book| book.pages.first())
             .map_or(0, |page| page.sequence);
-        Err(crate::next::markup::Report::new(
-            "toy-unanswerable-refusal",
-            "a refused record cannot happen",
-        )
-        .arg("trigger", trigger))
+        Err(crate::next::markup::Report::new("toy-unanswerable-refusal").arg("trigger", trigger))
     }
 }
 
@@ -1474,7 +1467,7 @@ fn a_retry_after_a_crash_settles_what_its_stream_still_owes() {
     let mut registry = registry();
     registry.policy(Bookkeeping);
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log);
+    let kernel = Kernel::new(&registry, &log).on_retryable(crate::next::toys::no_retries());
     let store = Recording::new();
     opened(&store, &plain, 1, 0);
     store.fail_write(1);
@@ -1555,7 +1548,7 @@ fn a_resumed_step_that_already_landed_is_a_duplicate() {
 fn a_store_that_cannot_write_fails_the_command_with_nothing_written() {
     let registry = registry();
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log);
+    let kernel = Kernel::new(&registry, &log).on_retryable(crate::next::toys::no_retries());
     let store = Recording::new();
     store.fail_write(0);
     let failure = kernel
@@ -1643,4 +1636,139 @@ fn a_projection_that_fails_is_reported_and_the_commit_stands() {
         3,
         "the commit stands"
     );
+}
+
+/// Waits that complete at once, kept; every jitter draw 0.
+#[derive(Default)]
+struct Waits(std::sync::Mutex<Vec<std::time::Duration>>);
+
+impl crate::next::Wait for Waits {
+    fn wait(
+        &self,
+        backoff: std::time::Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        self.0.lock().unwrap().push(backoff);
+        Box::pin(std::future::ready(()))
+    }
+
+    fn draw(&self) -> f64 {
+        0.0
+    }
+}
+
+/// A policy's step whose write fails once with `error` is reloaded and
+/// run again after one backoff: it lands, and nothing is dead-lettered.
+fn a_policy_step_failing_once_lands_on_its_retry(error: crate::next::StoreError) {
+    let mut registry = registry();
+    registry.policy(Bookkeeping);
+    let log = MemoryDeadLetters::new();
+    let waits = Waits::default();
+    let kernel = Kernel::new(&registry, &log).wait_with(&waits);
+    let store = Recording::new();
+    opened(&store, &registry, 1, 0);
+    store.fail_write_with(1, error);
+    kernel
+        .handle::<Account, _, _>(&store, deposit(3, 25), &at(30), &mut ())
+        .ready()
+        .unwrap();
+    assert_eq!(
+        pages(store.inner(), &ledger_cover()).len(),
+        3,
+        "the deposit's step landed on its retry"
+    );
+    assert_eq!(waits.0.lock().unwrap().len(), 1);
+    assert!(log.lines().is_empty(), "{:?}", log.lines());
+}
+
+/// A policy's step whose write lost a race (a store conflict, ABORTED) has
+/// the kernel for its caller: reloaded and run again.
+#[test]
+fn a_policy_steps_lost_race_is_reloaded_and_run_again() {
+    a_policy_step_failing_once_lands_on_its_retry(crate::next::StoreError::Conflict {
+        stream: Box::new(ledger_cover()),
+        expected: 2,
+        actual: 3,
+    });
+}
+
+/// A policy's step whose store could not say is a retryable bug: run again.
+#[test]
+fn a_policy_steps_unavailable_store_is_run_again() {
+    a_policy_step_failing_once_lands_on_its_retry(crate::next::StoreError::Unavailable(
+        angzarr_ports::Cause::new("angzarr-store-sqlite-unavailable", []),
+    ));
+}
+
+/// The kernel's own jitter draws are uniform in `[0, 1)`: in range, spread
+/// over it, and not repeating.
+#[test]
+fn the_kernels_own_draws_are_uniform_in_the_unit_interval() {
+    use crate::next::Wait;
+    let draws: Vec<f64> = (0..2000).map(|_| super::ThreadWait.draw()).collect();
+    assert!(draws.iter().all(|d| (0.0..1.0).contains(d)), "{draws:?}");
+    let mean = draws.iter().sum::<f64>() / draws.len() as f64;
+    assert!((0.4..0.6).contains(&mean), "{mean}");
+    let distinct: std::collections::BTreeSet<u64> = draws.iter().map(|d| d.to_bits()).collect();
+    assert!(distinct.len() > 1900, "{}", distinct.len());
+}
+
+/// The kernel's own wait completes once its backoff has passed, waking the
+/// task that waits.
+#[test]
+fn the_kernels_own_wait_waits_out_its_backoff() {
+    use crate::next::Wait;
+    use std::task::{Context, Poll, Wake, Waker};
+    struct Unpark(std::thread::Thread);
+    impl Wake for Unpark {
+        fn wake(self: std::sync::Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+    let waker = Waker::from(std::sync::Arc::new(Unpark(std::thread::current())));
+    let mut cx = Context::from_waker(&waker);
+    let backoff = std::time::Duration::from_millis(30);
+    let started = std::time::Instant::now();
+    let mut wait = super::ThreadWait.wait(backoff);
+    let mut polls = 0;
+    while wait.as_mut().poll(&mut cx) == Poll::Pending {
+        polls += 1;
+        std::thread::park_timeout(std::time::Duration::from_secs(5));
+    }
+    assert!(started.elapsed() >= backoff, "{:?}", started.elapsed());
+    assert!(polls >= 1, "pending until the backoff passed");
+}
+
+/// A command whose write lost a race (a store conflict, ABORTED) goes back
+/// to its outside caller at once, to reload: never retried, never
+/// dead-lettered.
+#[test]
+fn an_outside_callers_lost_race_goes_back_at_once() {
+    let registry = registry();
+    let log = MemoryDeadLetters::new();
+    let waits = Waits::default();
+    let kernel = Kernel::new(&registry, &log).wait_with(&waits);
+    let store = Recording::new();
+    opened(&store, &registry, 1, 0);
+    store.fail_write_with(
+        0,
+        crate::next::StoreError::Conflict {
+            stream: Box::new(cover("account", 1)),
+            expected: 2,
+            actual: 3,
+        },
+    );
+    let failure = kernel
+        .handle::<Account, _, _>(&store, deposit(3, 25), &at(30), &mut ())
+        .ready()
+        .err()
+        .expect("the race was lost");
+    assert!(
+        matches!(
+            failure,
+            Failure::Kernel(KernelError::Store(crate::next::StoreError::Conflict { .. }))
+        ),
+        "{failure:?}"
+    );
+    assert!(waits.0.lock().unwrap().is_empty(), "not retried");
+    assert!(log.lines().is_empty(), "{:?}", log.lines());
 }

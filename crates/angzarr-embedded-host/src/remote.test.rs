@@ -92,6 +92,8 @@ fn an_unavailable_status_is_retryable() {
         BTreeMap::from([
             (extras::DOMAIN.to_string(), "player".to_string()),
             (CAUSE.to_string(), causes::TRANSPORT.to_string()),
+            // The transport's own text, verbatim: a third party's.
+            (EXT_ERR_TXT.to_string(), "connection refused".to_string()),
         ])
     );
     assert!(is_retryable(&coded));
@@ -152,8 +154,7 @@ fn a_status_without_error_info_is_unhandled() {
 /// Every gRPC code the router has a variant for survives exactly (its
 /// `GrpcCode` has each status of the business set, and UNKNOWN), so the
 /// status decides the class (decision 14.37). A status it has no variant
-/// for keeps its class: DEADLINE_EXCEEDED, RESOURCE_EXHAUSTED and the
-/// remaining ones (CANCELLED, UNAUTHENTICATED) are retryable bugs (the
+/// for (CANCELLED, UNAUTHENTICATED) keeps its class: a retryable bug (the
 /// owner's ruling, 2026-10-29).
 #[test]
 fn each_status_code_maps_to_the_routers() {
@@ -170,23 +171,17 @@ fn each_status_code_maps_to_the_routers() {
         (Code::Internal, GrpcCode::Internal),
         (Code::Unknown, GrpcCode::Unknown),
         (Code::Unavailable, GrpcCode::Unavailable),
+        (Code::DeadlineExceeded, GrpcCode::DeadlineExceeded),
+        (Code::ResourceExhausted, GrpcCode::ResourceExhausted),
     ] {
         let status = status_with_details(code, "m", vec![error_info("SOME_REASON", &[])]);
         assert_eq!(status_to_coded("player", &status).grpc, grpc, "{code:?}");
-    }
-    for code in [Code::DeadlineExceeded, Code::ResourceExhausted] {
-        let status = status_with_details(code, "m", vec![error_info("SOME_REASON", &[])]);
-        assert_eq!(
-            status_to_coded("player", &status).grpc.class(),
-            ErrorClass::Retryable,
-            "{code:?}"
-        );
     }
     for code in [Code::Cancelled, Code::Unauthenticated] {
         let status = status_with_details(code, "m", vec![error_info("SOME_REASON", &[])]);
         assert_eq!(
             status_to_coded("player", &status).grpc.class(),
-            ErrorClass::Retryable,
+            ErrorClass::BugRetryable,
             "{code:?}"
         );
     }
@@ -283,13 +278,11 @@ fn a_childs_bug_status_is_no_refusal() {
     }
 }
 
-/// The retryable statuses keep their class (decision 14.37: UNAVAILABLE,
-/// ABORTED, UNIMPLEMENTED, DEADLINE_EXCEEDED, RESOURCE_EXHAUSTED and the
-/// like are retried): a child's UNAVAILABLE with no details is
-/// unavailability; one it sent with its reason keeps the reason, and with
-/// ABORTED and UNIMPLEMENTED its status; a DEADLINE_EXCEEDED or
-/// RESOURCE_EXHAUSTED keeps the reason, under a retryable status. None
-/// carries a typed refusal.
+/// The retried statuses keep their class (decision 14.37): a child's
+/// UNAVAILABLE with no details is unavailability; one it sent with its
+/// reason, and a DEADLINE_EXCEEDED, RESOURCE_EXHAUSTED or UNIMPLEMENTED,
+/// keeps the reason, a retryable bug; an ABORTED keeps the reason, a
+/// business answer to return at once. None carries a typed refusal.
 #[test]
 fn a_childs_retryable_status_keeps_its_class() {
     let bare = status_to_coded("player", &tonic::Status::unavailable("gone"));
@@ -306,7 +299,11 @@ fn a_childs_retryable_status_keeps_its_class() {
             status_with_details(code, "m", vec![error_info("PLAYER_BUSY", &[]), refusal()]);
         let coded = status_to_coded("player", &status);
         assert_eq!(coded.code, "PLAYER_BUSY", "{code:?}");
-        assert_eq!(coded.grpc.class(), ErrorClass::Retryable, "{code:?}");
+        let class = match code {
+            Code::Aborted => ErrorClass::BusinessImmediate,
+            _ => ErrorClass::BugRetryable,
+        };
+        assert_eq!(coded.grpc.class(), class, "{code:?}");
         assert_eq!(coded.refusal, None, "{code:?}");
     }
 }

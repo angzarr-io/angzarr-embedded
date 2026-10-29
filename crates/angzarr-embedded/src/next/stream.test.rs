@@ -436,7 +436,7 @@ fn every_failure_says_how_to_recover() {
             KernelError::Unreadable {
                 stream: stream.clone(),
                 sequence: 0,
-                reason: Report::new("x-bad", "bad"),
+                reason: Report::new("x-bad"),
             },
         ),
         (
@@ -445,15 +445,8 @@ fn every_failure_says_how_to_recover() {
                 stream: stream.clone(),
                 error: crate::next::UpcastError::Rule {
                     source: String::new(),
-                    error: Report::new("x-bad", "bad"),
+                    error: Report::new("x-bad"),
                 },
-            },
-        ),
-        (
-            Recovery::Bug,
-            KernelError::IngestPanicked {
-                stream: stream.clone(),
-                command_id: command_id(1),
             },
         ),
         (
@@ -566,7 +559,7 @@ fn every_failure_says_how_to_recover() {
         error,
     };
     assert_eq!(
-        downstream(StepError::Rejected(Report::new("x-no", "no"))).recovery(),
+        downstream(StepError::Rejected(Report::new("x-no"))).recovery(),
         Recovery::Business
     );
     assert_eq!(
@@ -747,7 +740,7 @@ fn an_event_the_kernel_cannot_replay_is_its_own_error() {
     let unreadable = KernelError::Unreadable {
         stream: cover("account", 1),
         sequence: 4,
-        reason: Report::new("x-bad", "bad"),
+        reason: Report::new("x-bad"),
     };
     assert_eq!(unreadable.code(), "angzarr-embedded-next-unreadable");
     assert_eq!(

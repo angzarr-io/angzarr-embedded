@@ -244,7 +244,7 @@ fn toy_ctx<'a, D: Domain>(
         command_id: cctx.command_id.unwrap_or_default(),
         correlation_id: cctx.correlation_id.unwrap_or_default(),
         source: cctx.fact_origin,
-        recorded_at: crate::next::recorded_at(),
+        recorded_at: cctx.recorded_at.unwrap_or_default(),
         rules,
         rules_version: version,
         head: cctx.next_sequence,
@@ -1267,10 +1267,19 @@ pub fn handle<D: Domain>(
     sampled: &Sampled,
 ) -> Result<crate::next::Handled, crate::next::Failure<crate::next::Rejected>> {
     let log = crate::next::MemoryDeadLetters::new();
-    let kernel = crate::next::Kernel::new(registry, &log);
+    let kernel = crate::next::Kernel::new(registry, &log).on_retryable(no_retries());
     kernel
         .handle::<D, _, _>(store, book, sampled, &mut ())
         .ready()
+}
+
+/// Retrying turned off: what a test that is not about retrying runs with,
+/// so a retryable failure comes back at once, as it did before.
+pub fn no_retries() -> crate::next::OnRetryable {
+    crate::next::OnRetryable {
+        max_retries: 0,
+        ..crate::next::OnRetryable::default()
+    }
 }
 
 /// `stream`'s pages as stored: empty for no such stream.

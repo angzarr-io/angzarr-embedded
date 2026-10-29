@@ -91,11 +91,11 @@ fn refuses_what_it_does_not_support() {
     }
     assert_eq!(
         parse("a: 1\na: 2\n").unwrap_err().to_string(),
-        "line 2: \"a\" twice"
+        "angzarr-embedded-yaml-duplicate-key line=2 key=a"
     );
     assert_eq!(
         parse("a: &x 1\n").unwrap_err().to_string(),
-        "line 1: anchors (&) aren't supported"
+        "angzarr-embedded-yaml-anchor line=1"
     );
 }
 
@@ -278,7 +278,10 @@ fn double_quotes_take_unicode_cr_and_nul_escapes() {
     }
     let e = parse(&bs(r#"a: "^q""#)).unwrap_err();
     assert_eq!(e.problem, ParseProblem::UnknownEscape { escape: bs("^q") });
-    assert_eq!(e.to_string(), bs("line 1: unknown escape ^q"));
+    assert_eq!(
+        e.to_string(),
+        bs("angzarr-embedded-yaml-unknown-escape line=1 escape=^q")
+    );
     let e = parse(&bs(r#"a: "^uDDE1""#)).unwrap_err();
     assert_eq!(
         e.problem,

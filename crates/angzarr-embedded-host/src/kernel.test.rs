@@ -333,7 +333,9 @@ fn a_remote_internal_failure_under_its_own_code_is_a_dead_lettered_bug() {
     assert_eq!(lines.len(), 1, "{lines:?}");
     assert!(lines[0].starts_with(DEAD_LETTER_PREFIX), "{}", lines[0]);
     assert!(
-        lines[0].contains("player: PLAYER_BROKE seat=3"),
+        lines[0].contains(
+            "player: angzarr-embedded-next-unhandled-handler-error cause=PLAYER_BROKE cause.seat=3"
+        ),
         "{}",
         lines[0]
     );

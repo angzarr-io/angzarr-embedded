@@ -35,7 +35,7 @@ fn damage_shows_the_first_problem_and_counts_the_rest() {
     let one = damage(&["row 1 missing from index i"]);
     assert_eq!(
         one.to_string(),
-        "the database file is damaged: row 1 missing from index i"
+        "angzarr-store-sqlite-damaged first=row 1 missing from index i more=0"
     );
     assert_eq!(one.code(), "angzarr-store-sqlite-damaged");
     let args = one.args();
@@ -49,13 +49,13 @@ fn damage_shows_the_first_problem_and_counts_the_rest() {
     let two = damage(&["a", "b"]);
     assert_eq!(
         two.to_string(),
-        "the database file is damaged: a (and 1 more problem)"
+        "angzarr-store-sqlite-damaged first=a more=1"
     );
     assert_eq!(two.args()[1], ("more", Arg::Uint(1)));
     let three = damage(&["a", "b", "c"]);
     assert_eq!(
         three.to_string(),
-        "the database file is damaged: a (and 2 more problems)"
+        "angzarr-store-sqlite-damaged first=a more=2"
     );
     assert_eq!(three.problems(), ["a", "b", "c"]);
 }
@@ -119,6 +119,8 @@ fn every_cause_has_this_crates_code_once() {
             "angzarr-store-sqlite-undecodable",
             "angzarr-store-sqlite-unmigrated",
             "angzarr-store-sqlite-damaged-file",
+            "angzarr-store-sqlite-no-data-version",
+            "angzarr-store-sqlite-bad-root",
         ]
     );
     assert_eq!(
@@ -126,4 +128,50 @@ fn every_cause_has_this_crates_code_once() {
         [("pending", Arg::Uint(2))],
         "a cause carries its args (decision 14.37)"
     );
+}
+
+/// SQLite's own error, as a cause: its primary result code (the low byte
+/// of the extended code the driver reports) as `errno`, its text verbatim
+/// as `ext_err_txt`, whether the driver's error comes alone or inside the
+/// migrator's.
+#[tokio::test]
+async fn sqlites_error_carries_its_primary_code_and_its_text() {
+    use sqlx::{ConnectOptions, Executor};
+    use std::str::FromStr;
+    let mut conn = sqlx::sqlite::SqliteConnectOptions::from_str("sqlite::memory:")
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    conn.execute("CREATE TABLE t (x INTEGER UNIQUE); INSERT INTO t VALUES (1);")
+        .await
+        .unwrap();
+    let insert = "INSERT INTO t VALUES (1)";
+    let error = sqlx::query(insert)
+        .execute(&mut conn)
+        .await
+        .expect_err("a second 1 violates UNIQUE");
+    let text = error
+        .as_database_error()
+        .expect("SQLite's")
+        .message()
+        .to_string();
+    // SQLITE_CONSTRAINT_UNIQUE is 2067; its primary code, SQLITE_CONSTRAINT, 19.
+    let expected = vec![
+        ("errno", Arg::Uint(19)),
+        ("ext_err_txt", Arg::Str(text.clone())),
+    ];
+    let StoreError::Unavailable(cause) = super::unavailable(error) else {
+        panic!("unavailable");
+    };
+    assert_eq!(cause.args, expected);
+    let again = sqlx::query(insert)
+        .execute(&mut conn)
+        .await
+        .expect_err("still a second 1");
+    let migrating = sqlx::migrate::MigrateError::Execute(again);
+    let StoreError::Unavailable(cause) = super::unavailable(migrating) else {
+        panic!("unavailable");
+    };
+    assert_eq!(cause.args, expected, "the migrator's, the driver's within");
 }

@@ -1,6 +1,6 @@
 //! The host's errors: why a remote domain could not be started. Each is a
-//! code and its args (`angzarr_embedded_diagnostic::Diagnostic`), the English
-//! `Display` only the fallback. A failure once a domain is running is not
+//! code and its args (`angzarr_embedded_diagnostic::Diagnostic`), and its
+//! `Display` is those, never English. A failure once a domain is running is not
 //! one of these: it is the router's [`CodedError`], from
 //! [`RemoteCommandHandler`]'s dispatch.
 //!
@@ -32,19 +32,7 @@ pub enum HandshakeError {
 
 impl fmt::Display for HandshakeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            HandshakeError::Malformed { line } => write!(
-                f,
-                "malformed handshake \"{line}\": expected angzarr-handshake v1 unix:<absolute path>"
-            ),
-            HandshakeError::Timeout { timeout_ms } => {
-                write!(f, "no handshake within {timeout_ms} ms")
-            }
-            HandshakeError::Closed => f.write_str("stdout closed before a handshake"),
-            HandshakeError::Unreadable { kind } => {
-                write!(f, "stdout could not be read ({kind})")
-            }
-        }
+        angzarr_embedded_diagnostic::display(self, f)
     }
 }
 
@@ -116,48 +104,7 @@ pub enum HostError {
 
 impl fmt::Display for HostError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            HostError::DuplicateDomain { domain } => {
-                write!(f, "domain \"{domain}\" is configured twice")
-            }
-            HostError::NoLaunch { domain, language } => write!(
-                f,
-                "domain \"{domain}\": language \"{language}\" has no default launch command; give one"
-            ),
-            HostError::EmptyLaunch { domain } => {
-                write!(f, "domain \"{domain}\": the launch command is empty")
-            }
-            HostError::Spawn {
-                domain,
-                program,
-                kind,
-            } => write!(f, "domain \"{domain}\": could not start \"{program}\" ({kind})"),
-            HostError::Handshake { domain, cause } => {
-                write!(f, "domain \"{domain}\": {cause}")
-            }
-            HostError::Connect { domain, socket } => {
-                write!(f, "domain \"{domain}\": could not connect to {socket}")
-            }
-            HostError::Describe { domain, grpc_code } => write!(
-                f,
-                "domain \"{domain}\": Describe failed with gRPC code {grpc_code}"
-            ),
-            HostError::SocketDirTooLong { dir, max_bytes } => write!(
-                f,
-                "socket_dir \"{dir}\" is too long for a Unix socket path: at most {max_bytes} bytes"
-            ),
-            HostError::ConfigUnreadable { path, kind } => {
-                write!(f, "the config {path} could not be read ({kind})")
-            }
-            HostError::ConfigInvalid { path, offset } => {
-                write!(f, "the config {path} is not valid, at byte {offset}")
-            }
-            HostError::Register { cause } => write!(f, "a domain could not be registered: {cause}"),
-            HostError::Store { cause } => write!(f, "the store could not be opened: {cause}"),
-            HostError::Runtime { kind } => {
-                write!(f, "the host's runtime could not be built ({kind})")
-            }
-        }
+        angzarr_embedded_diagnostic::display(self, f)
     }
 }
 
@@ -279,17 +226,10 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn Diagnostic>> {
             offset: 12,
         }),
         Box::new(HostError::Register {
-            cause: Report::new(
-                "angzarr-embedded-host-duplicate-domain",
-                "domain \"player\" is configured twice",
-            )
-            .arg("domain", "player"),
+            cause: Report::new("angzarr-embedded-host-duplicate-domain").arg("domain", "player"),
         }),
         Box::new(HostError::Store {
-            cause: Report::new(
-                "angzarr-embedded-host-handshake-closed",
-                "stdout closed before a handshake",
-            ),
+            cause: Report::new("angzarr-embedded-host-handshake-closed"),
         }),
         Box::new(HostError::Runtime {
             kind: "Other".to_string(),

@@ -106,7 +106,7 @@ dependencies = [
 [[package]]
 name = "angzarr-ports"
 version = "0.1.0"
-source = "git+https://github.com/angzarr-io/angzarr-project?rev=5f88d678a53427bf9ef4b3061aa30863007d1ba1#5f88d678a53427bf9ef4b3061aa30863007d1ba1"
+source = "git+https://github.com/angzarr-io/angzarr-project?rev=a1293eae1da37a95b58eb6081b066846876b5cca#a1293eae1da37a95b58eb6081b066846876b5cca"
 dependencies = [
  "angzarr-proto",
  "prost",
@@ -116,7 +116,7 @@ dependencies = [
 [[package]]
 name = "angzarr-proto"
 version = "0.1.0"
-source = "git+https://github.com/angzarr-io/angzarr-project?rev=5f88d678a53427bf9ef4b3061aa30863007d1ba1#5f88d678a53427bf9ef4b3061aa30863007d1ba1"
+source = "git+https://github.com/angzarr-io/angzarr-project?rev=a1293eae1da37a95b58eb6081b066846876b5cca#a1293eae1da37a95b58eb6081b066846876b5cca"
 dependencies = [
  "bytes",
  "prost",
@@ -128,7 +128,7 @@ dependencies = [
 [[package]]
 name = "angzarr-router"
 version = "0.1.0"
-source = "git+https://github.com/angzarr-io/angzarr-router?rev=089f7b02f538a75b7fbfce389be945080e193e5d#089f7b02f538a75b7fbfce389be945080e193e5d"
+source = "git+https://github.com/angzarr-io/angzarr-router?rev=3b1ad294d1a67ec94e90282c76b8a4eca40e13ab#3b1ad294d1a67ec94e90282c76b8a4eca40e13ab"
 dependencies = [
  "angzarr-proto",
  "heck 0.5.0",

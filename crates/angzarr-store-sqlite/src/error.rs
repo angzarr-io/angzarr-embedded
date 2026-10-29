@@ -1,13 +1,15 @@
 //! Why SQLite could not answer, and how that reaches the ports.
 //!
 //! In angzarr-ports' style, depending on no diagnostics crate: every error
-//! has a stable kebab-case `code` starting with this crate's name, named
-//! `args` that carry data and never English, and an English `Display`.
-//! What the store answers through the ports is angzarr-ports'
-//! [`StoreError`], whose `Unavailable` and `Unreadable` carry this crate's
-//! failure as a [`Cause`]: its code and its English, no args. So a cause's
-//! message in `locales/en-US/angzarr-store-sqlite.ftl` takes no variables;
-//! the detail is in the English.
+//! has a stable kebab-case `code` starting with this crate's name and named
+//! `args` that carry data, and its `Display` is the code then the args
+//! (` name=value` each), never English (angzarr decision 14.37). What the
+//! store answers through the ports is angzarr-ports' [`StoreError`], whose
+//! `Unavailable` and `Unreadable` carry this crate's failure as a
+//! [`Cause`], its code and args. A third party's error (SQLite's, the
+//! driver's, prost's) is carried as it said it: its text verbatim as
+//! `ext_err_txt`, beside SQLite's primary result code as `errno` where it
+//! gave one.
 
 use std::fmt;
 
@@ -20,7 +22,8 @@ pub enum SqlError {
     /// SQLite's primary result code, when the driver gave one; `detail`
     /// the driver's text, verbatim.
     Unavailable { errno: Option<u64>, detail: String },
-    /// A stored value's bytes do not decode as what was written.
+    /// A stored value's bytes do not decode as what was written: `detail`
+    /// is the decoder's text, verbatim.
     Undecodable { detail: String },
     /// A database opened read-only has `pending` migrations this build
     /// would apply: it is older than the build, or empty with no writer
@@ -29,6 +32,11 @@ pub enum SqlError {
     /// A file too damaged to open: SQLite finds it malformed or no database
     /// at all. `errno` is SQLite's primary result code, `detail` its text.
     DamagedFile { errno: u64, detail: String },
+    /// SQLite answered no row to `PRAGMA data_version`, which always has
+    /// one.
+    NoDataVersion,
+    /// A stored root of `length` bytes, not a UUID's 16.
+    BadRoot { length: usize },
 }
 
 impl SqlError {
@@ -38,36 +46,56 @@ impl SqlError {
             SqlError::Undecodable { .. } => "angzarr-store-sqlite-undecodable",
             SqlError::Unmigrated { .. } => "angzarr-store-sqlite-unmigrated",
             SqlError::DamagedFile { .. } => "angzarr-store-sqlite-damaged-file",
+            SqlError::NoDataVersion => "angzarr-store-sqlite-no-data-version",
+            SqlError::BadRoot { .. } => "angzarr-store-sqlite-bad-root",
         }
     }
 
-    /// As a [`Cause`]: the code and the English.
-    pub fn cause(&self) -> Cause {
-        Cause::new(self.code(), [])
+    /// The message's args, by name.
+    pub fn args(&self) -> Vec<(&'static str, Arg)> {
+        let text = |detail: &str| ("ext_err_txt", Arg::Str(detail.to_string()));
+        match self {
+            SqlError::Unavailable { errno, detail } => errno
+                .map(|errno| ("errno", Arg::Uint(errno)))
+                .into_iter()
+                .chain([text(detail)])
+                .collect(),
+            SqlError::Undecodable { detail } => vec![text(detail)],
+            SqlError::Unmigrated { pending } => vec![("pending", Arg::Uint(*pending as u64))],
+            SqlError::DamagedFile { errno, detail } => {
+                vec![("errno", Arg::Uint(*errno)), text(detail)]
+            }
+            SqlError::NoDataVersion => Vec::new(),
+            SqlError::BadRoot { length } => vec![("length", Arg::Uint(*length as u64))],
+        }
     }
+
+    /// As a [`Cause`]: the code and the args.
+    pub fn cause(&self) -> Cause {
+        Cause::new(self.code(), self.args())
+    }
+}
+
+/// `code`, then each arg as ` name=value`.
+fn write_keyed(
+    f: &mut fmt::Formatter<'_>,
+    code: &str,
+    args: &[(&'static str, Arg)],
+) -> fmt::Result {
+    f.write_str(code)?;
+    for (name, arg) in args {
+        match arg {
+            Arg::Uint(n) => write!(f, " {name}={n}")?,
+            Arg::Str(s) => write!(f, " {name}={s}")?,
+            Arg::Cause(cause) => write!(f, " {name}={}", cause.code)?,
+        }
+    }
+    Ok(())
 }
 
 impl fmt::Display for SqlError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            SqlError::Unavailable { detail, .. } => write!(f, "the database failed: {detail}"),
-            SqlError::Undecodable { detail } => {
-                write!(f, "a stored value does not decode: {detail}")
-            }
-            SqlError::Unmigrated { pending: 1 } => {
-                write!(
-                    f,
-                    "the database, opened to read, has a migration not yet applied"
-                )
-            }
-            SqlError::Unmigrated { pending } => write!(
-                f,
-                "the database, opened to read, has {pending} migrations not yet applied"
-            ),
-            SqlError::DamagedFile { detail, .. } => {
-                write!(f, "the database file is too damaged to open: {detail}")
-            }
-        }
+        write_keyed(f, self.code(), &self.args())
     }
 }
 
@@ -119,12 +147,7 @@ impl Damage {
 
 impl fmt::Display for Damage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "the database file is damaged: {}", self.first())?;
-        match self.more() {
-            0 => Ok(()),
-            1 => write!(f, " (and 1 more problem)"),
-            more => write!(f, " (and {more} more problems)"),
-        }
+        write_keyed(f, self.code(), &self.args())
     }
 }
 
@@ -148,6 +171,8 @@ pub fn errors() -> Vec<SqlError> {
             errno: 26,
             detail: detail(),
         },
+        SqlError::NoDataVersion,
+        SqlError::BadRoot { length: 3 },
     ])
 }
 
@@ -158,16 +183,86 @@ pub fn damage_sample() -> Damage {
     }
 }
 
+/// A third party's error the store meets: its text, and SQLite's primary
+/// result code where it has one.
+pub(crate) trait Driven: fmt::Display {
+    /// SQLite's primary result code, when the error is the database's.
+    fn errno(&self) -> Option<u64> {
+        None
+    }
+
+    /// Its text, verbatim: the database's own message, when it is the
+    /// database's.
+    fn text(&self) -> String {
+        self.to_string()
+    }
+}
+
+impl Driven for sqlx::Error {
+    fn errno(&self) -> Option<u64> {
+        self.as_database_error()
+            .and_then(|e| e.code())
+            .and_then(|code| code.parse::<u64>().ok())
+            .map(|code| code & 0xff)
+    }
+
+    fn text(&self) -> String {
+        match self.as_database_error() {
+            Some(database) => database.message().to_string(),
+            None => self.to_string(),
+        }
+    }
+}
+
+impl Driven for sqlx::migrate::MigrateError {
+    fn errno(&self) -> Option<u64> {
+        self.driver().and_then(Driven::errno)
+    }
+
+    fn text(&self) -> String {
+        self.driver().map_or_else(|| self.to_string(), Driven::text)
+    }
+}
+
+/// The migrator's error's own source, the driver's error, when it has one.
+trait Migrating {
+    fn driver(&self) -> Option<&sqlx::Error>;
+}
+
+impl Migrating for sqlx::migrate::MigrateError {
+    fn driver(&self) -> Option<&sqlx::Error> {
+        match self {
+            sqlx::migrate::MigrateError::Execute(error)
+            | sqlx::migrate::MigrateError::ExecuteMigration(error, _) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl Driven for sea_query::error::Error {}
+
+impl Driven for &str {}
+
 /// The database's failure, as the port's: the store could not say
-/// (`Recovery::Retry`).
-pub(crate) fn unavailable(detail: impl fmt::Display) -> StoreError {
+/// (`Recovery::Retry`), with the driver's code and text.
+pub(crate) fn unavailable(error: impl Driven) -> StoreError {
     StoreError::Unavailable(
         SqlError::Unavailable {
-            errno: None,
-            detail: detail.to_string(),
+            errno: error.errno(),
+            detail: error.text(),
         }
         .cause(),
     )
+}
+
+/// A stored root of `length` bytes, not 16.
+pub(crate) fn bad_root(length: usize) -> StoreError {
+    StoreError::Unavailable(SqlError::BadRoot { length }.cause())
+}
+
+/// SQLite answered no row to `PRAGMA data_version`.
+pub(crate) fn no_data_version() -> StoreError {
+    StoreError::Unavailable(SqlError::NoDataVersion.cause())
 }
 
 /// A database opened read-only that is not migrated: only a store opened
@@ -183,7 +278,8 @@ pub(crate) fn damaged(errno: u64, detail: String) -> StoreError {
     StoreError::Unavailable(SqlError::DamagedFile { errno, detail }.cause())
 }
 
-/// A stored value that does not decode (`Recovery::Bug`, as `Unreadable`).
+/// A stored value that does not decode (`Recovery::Bug`, as `Unreadable`),
+/// with prost's text.
 pub(crate) fn undecodable(error: prost::DecodeError) -> Cause {
     SqlError::Undecodable {
         detail: error.to_string(),

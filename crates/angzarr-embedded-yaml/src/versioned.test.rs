@@ -67,7 +67,10 @@ fn chains_must_be_whole() {
         .step(2, ok)
         .build()
         .unwrap_err();
-    assert_eq!(e.to_string(), "toy migrations: no step from version 1 to 2");
+    assert_eq!(
+        e.to_string(),
+        "angzarr-embedded-yaml-chain-gap kind=toy from=1 to=2"
+    );
 }
 
 // The toy schema's history:
@@ -164,7 +167,7 @@ fn problem(text: &str) -> LoadProblem {
 
 /// A game's own error, with the game's own code.
 fn missing() -> Report {
-    Report::new("toy-missing-key", "`missing` is missing").arg("key", "missing")
+    Report::new("toy-missing-key").arg("key", "missing")
 }
 
 #[test]
@@ -237,12 +240,22 @@ fn every_failure_is_a_typed_error() {
     );
     assert_eq!(
         e.to_string(),
-        "toy document bad.yaml: migrating version 0 to 1: rename \"hp\" to \"health\": \"health\" is already there"
+        "angzarr-embedded-yaml-load-failed-at kind=toy source=bad.yaml \
+         problem=angzarr-embedded-yaml-step-failed problem.from=0 problem.to=1 \
+         problem.error=angzarr-embedded-yaml-rename-target-exists problem.error.from=hp \
+         problem.error.to=health"
     );
     let e = toy()
         .load(None, "version: 0\nunits: [{hp: 1}, {hp: 2, health: 2}]\n")
         .unwrap_err();
-    assert_eq!(e.to_string(), "toy document: migrating version 0 to 1: units[1]: rename \"hp\" to \"health\": \"health\" is already there");
+    assert_eq!(
+        e.to_string(),
+        "angzarr-embedded-yaml-load-failed kind=toy problem=angzarr-embedded-yaml-step-failed \
+         problem.from=0 problem.to=1 problem.error=angzarr-embedded-yaml-map-item \
+         problem.error.key=units problem.error.index=1 \
+         problem.error.error=angzarr-embedded-yaml-rename-target-exists \
+         problem.error.error.from=hp problem.error.error.to=health"
+    );
 
     // A step that breaks the root.
     fn clobber(doc: &mut Value) -> Result<(), MigrationError> {
@@ -274,13 +287,18 @@ fn every_failure_is_a_typed_error() {
     }
     assert_eq!(
         e.to_string(),
-        "toy document ogre.yaml: `missing` is missing"
+        "angzarr-embedded-yaml-load-failed-at kind=toy source=ogre.yaml problem=toy-missing-key \
+         problem.key=missing"
     );
 
     // The error messages name the problem.
     assert_eq!(
-        toy().load(Some("new.yaml"), "version: 7\n").unwrap_err().to_string(),
-        "toy document new.yaml: version 7 was written by a newer build; this build reads up to version 3"
+        toy()
+            .load(Some("new.yaml"), "version: 7\n")
+            .unwrap_err()
+            .to_string(),
+        "angzarr-embedded-yaml-load-failed-at kind=toy source=new.yaml \
+         problem=angzarr-embedded-yaml-too-new problem.found=7 problem.current=3"
     );
 }
 
@@ -413,7 +431,7 @@ fn fixtures_must_migrate_to_their_expected_trees() {
         "{failures:?}"
     );
     assert!(
-        named("broken.yaml: version 9 was written by a newer build"),
+        named("broken.yaml problem=angzarr-embedded-yaml-too-new problem.found=9"),
         "{failures:?}"
     );
     assert!(loader.check_fixtures(&[]).is_err());
@@ -466,7 +484,7 @@ fn a_game_step_raises_its_own_code() {
     fn needs_a_number(doc: &mut Value) -> Result<(), MigrationError> {
         match doc.get("hp").and_then(Value::as_str) {
             Some(hp) if hp.parse::<u32>().is_ok() => Ok(()),
-            hp => Err(Report::new("toy-hp-not-a-number", "hp is not a number")
+            hp => Err(Report::new("toy-hp-not-a-number")
                 .arg("hp", hp.unwrap_or(""))
                 .into()),
         }
@@ -483,7 +501,8 @@ fn a_game_step_raises_its_own_code() {
     assert!(matches!(&error.args()[..], [("hp", Arg::Str(hp))] if hp == "lots"));
     assert_eq!(
         e.to_string(),
-        "toy document: migrating version 0 to 1: hp is not a number"
+        "angzarr-embedded-yaml-load-failed kind=toy problem=angzarr-embedded-yaml-step-failed \
+         problem.from=0 problem.to=1 problem.error=toy-hp-not-a-number problem.error.hp=lots"
     );
     assert_eq!(e.code(), "angzarr-embedded-yaml-load-failed");
     assert_eq!(e.problem.code(), "angzarr-embedded-yaml-step-failed");
@@ -599,7 +618,7 @@ fn a_load_error_gives_its_cause_as_its_source() {
     assert_eq!(yaml, crate::parse("a: [1\n").unwrap_err().to_string());
     assert_eq!(
         source("version: 0\nhp: 1\nhealth: 2\n").as_deref(),
-        Some("rename \"hp\" to \"health\": \"health\" is already there")
+        Some("angzarr-embedded-yaml-rename-target-exists from=hp to=health")
     );
     let decode = toy()
         .load_as(None, V0, |doc| {
@@ -608,7 +627,7 @@ fn a_load_error_gives_its_cause_as_its_source() {
         .unwrap_err();
     assert_eq!(
         decode.source().map(|s| s.to_string()).as_deref(),
-        Some("`missing` is missing")
+        Some("toy-missing-key key=missing")
     );
     assert!(source("version: 9\n").is_none());
     assert!(source("- a\n").is_none());

@@ -1,31 +1,11 @@
 use std::sync::Arc;
 
 use angzarr_router::PayloadUpcaster;
-use prost_types::{Any, Timestamp};
+use prost_types::Any;
 
-use super::{is_nothing, recorded_at, recording, CommandUpcaster, Delivery, NOTHING};
+use super::{is_nothing, CommandUpcaster, NOTHING};
 use crate::next::toys::account_upcaster;
 use crate::next::v1::EventPage;
-
-fn at(seconds: i64) -> Delivery {
-    Delivery {
-        recorded_at: Timestamp { seconds, nanos: 0 },
-    }
-}
-
-/// The instant a dispatch records at is what handlers read inside it, the
-/// one outside it again after, nested or not.
-#[test]
-fn a_dispatchs_instant_is_read_inside_it_only() {
-    assert_eq!(recorded_at(), Timestamp::default(), "outside any dispatch");
-    let inner = recording(at(5), || {
-        let nested = recording(at(7), recorded_at);
-        (recorded_at(), nested)
-    });
-    assert_eq!(inner.0.seconds, 5, "restored after the nested one");
-    assert_eq!(inner.1.seconds, 7);
-    assert_eq!(recorded_at(), Timestamp::default(), "reset after");
-}
 
 /// A fact's record of nothing is known by its type URL alone.
 #[test]

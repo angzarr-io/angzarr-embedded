@@ -348,7 +348,10 @@ fn edit_errors_name_the_path() {
     );
     let e = d.remove(&["b", "x"], 0).unwrap_err();
     assert_eq!(e.path, vec!["b".to_string(), "x".to_string()]);
-    assert_eq!(e.to_string(), "b.x: not found");
+    assert_eq!(
+        e.to_string(),
+        "angzarr-embedded-yaml-edit-not-found path=b.x"
+    );
 }
 
 #[test]

@@ -20,7 +20,7 @@ impl Diagnostic for Inner {
 
 #[test]
 fn a_report_captures_code_args_and_nested_causes() {
-    let r = Report::new("test-outer", "outer: inner")
+    let r = Report::new("test-outer")
         .arg("path", "a/b.yaml")
         .arg("cause", Arg::nested(&Inner));
     let again = Report::of(&r);
@@ -77,7 +77,7 @@ fn a_report_is_its_code_and_args_and_keeps_no_rendered_text() {
 /// from a catalog keyed by the code, where the report is shown.
 #[test]
 fn a_reports_display_is_its_code_and_args_flattened() {
-    let r = Report::new("test-outer", "outer: inner")
+    let r = Report::new("test-outer")
         .arg("path", "a/b.yaml")
         .arg("count", 2u32)
         .arg("delta", -1i32)

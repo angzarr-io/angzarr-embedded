@@ -124,12 +124,6 @@ pub enum KernelError {
         stream: Cover,
         error: UpcastError,
     },
-    /// An ingest panicked: a bug, never a business rejection. The chain was
-    /// aborted, nothing was written, and the dead-letter log has the fact.
-    IngestPanicked {
-        stream: Cover,
-        command_id: Uuid,
-    },
     /// A book or a log for `stream` was given to an `expected` domain's
     /// code.
     WrongDomain {
@@ -262,15 +256,19 @@ pub enum ChainProblem {
 }
 
 /// What to do about a failure: retry, fix the request, or give up, and
-/// why. angzarr-embedded never retries anything itself.
+/// why. The kernel retries a step's [`Recovery::Retry`] itself, with
+/// backoff, up to a cap, then dead-letters it
+/// ([`OnRetryable`](super::OnRetryable)); the others it never retries.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Recovery {
     /// Run the command again, with the same command id, in a fresh unit of
     /// work: a store conflict, a stale or unresolved command (re-read and
-    /// re-issue against the new head), the store unavailable, a gap (catch
-    /// the target up first). Safe, because a retry starts at the
-    /// deduplication lookup: if the first attempt committed after all, the
-    /// retry is answered DUPLICATE.
+    /// re-issue against the new head), the store unavailable, a handler
+    /// that could not be reached or answered under a retryable status
+    /// (UNAVAILABLE, ABORTED, UNIMPLEMENTED and the like), a gap (catch the
+    /// target up first). Safe, because a retry starts at the deduplication
+    /// lookup: if the first attempt committed after all, the retry is
+    /// answered DUPLICATE.
     Retry,
     /// The domain said no: a rejection, at the origin or downstream. The
     /// same command will be refused the same way; tell the person.
@@ -278,13 +276,12 @@ pub enum Recovery {
     /// The caller's book was malformed, or names a payload type the domain
     /// does not decode (angzarr's INVALID_ARGUMENT). Fix the request.
     Invalid,
-    /// A bug or a misconfiguration: a malformed policy book, a panicking
-    /// ingest, a handler's failure under a code of its own outside the
-    /// business set (INTERNAL, UNKNOWN, DATA_LOSS, or another status that
-    /// is no refusal), a discontinuous append, a key of the wrong domain, a
-    /// chain too deep, unknown rules, a log that does not replay, an event
-    /// the store cannot read back. Retrying will not help; an operator
-    /// must.
+    /// A bug or a misconfiguration: a malformed policy book, a handler's
+    /// bug or panic (a status of the bug class: INTERNAL, UNKNOWN,
+    /// DATA_LOSS), the router's own error on malformed input, a
+    /// discontinuous append, a key of the wrong domain, a chain too deep,
+    /// unknown rules, a log that does not replay, an event the store cannot
+    /// read back. Retrying will not help; an operator must.
     Bug,
 }
 
@@ -321,7 +318,6 @@ impl KernelError {
             KernelError::Router(error) => router_recovery(error),
             KernelError::HandlerUnavailable { .. } => Recovery::Retry,
             KernelError::Upcast { .. }
-            | KernelError::IngestPanicked { .. }
             | KernelError::WrongDomain { .. }
             | KernelError::ChainTooDeep { .. }
             | KernelError::TooManySteps { .. }
@@ -349,29 +345,9 @@ fn stream(cover: &Cover) -> Arg {
 
 // ---------------------------------------------------------------- Failure
 
-impl<R: fmt::Display> fmt::Display for Failure<R> {
+impl<R: Diagnostic> fmt::Display for Failure<R> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Failure::Rejected(rejection) => rejection.fmt(f),
-            Failure::Downstream { path, error } => write!(
-                f,
-                "a policy command down the chain failed, at depth {}: {error}",
-                path.len()
-            ),
-            Failure::Kernel(error) => error.fmt(f),
-            Failure::Projection { failures, .. } => match failures.as_slice() {
-                [(projector, error)] => write!(
-                    f,
-                    "the command committed, then projector {projector} failed: {error}"
-                ),
-                [(projector, error), ..] => write!(
-                    f,
-                    "the command committed, then {} projectors failed, the first {projector}: {error}",
-                    failures.len()
-                ),
-                [] => f.write_str("the command committed"),
-            },
-        }
+        angzarr_embedded_diagnostic::display(self, f)
     }
 }
 
@@ -406,10 +382,7 @@ impl<R: Diagnostic> Diagnostic for Failure<R> {
 
 impl fmt::Display for StepError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            StepError::Rejected(rejection) | StepError::PolicyFailed(rejection) => rejection.fmt(f),
-            StepError::Kernel(error) => error.fmt(f),
-        }
+        angzarr_embedded_diagnostic::display(self, f)
     }
 }
 
@@ -433,90 +406,7 @@ impl Diagnostic for StepError {
 
 impl fmt::Display for KernelError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            KernelError::Malformed(m) => m.fmt(f),
-            KernelError::Stale {
-                stream,
-                expected,
-                actual,
-            } => write!(
-                f,
-                "stream {} is at {actual}, not the {expected} expected: re-read and re-issue",
-                cover_text(stream)
-            ),
-            KernelError::Unresolved {
-                stream,
-                expected,
-                actual,
-            } => write!(
-                f,
-                "decide never acknowledged the window of stream {} from {expected} to {actual}",
-                cover_text(stream)
-            ),
-            KernelError::UnknownType { stream, type_url } => write!(
-                f,
-                "stream {}'s domain does not decode the type {type_url}",
-                cover_text(stream)
-            ),
-            KernelError::InvalidPayload {
-                stream,
-                type_url,
-                reason,
-            } => write!(
-                f,
-                "a {type_url} for stream {} is not a valid value: {reason}",
-                cover_text(stream)
-            ),
-            KernelError::Upcast { stream, error } => write!(
-                f,
-                "upcasting a payload for stream {} failed: {error}",
-                cover_text(stream)
-            ),
-            KernelError::IngestPanicked { stream, command_id } => write!(
-                f,
-                "ingesting fact {command_id} into stream {} panicked: a bug",
-                cover_text(stream)
-            ),
-            KernelError::WrongDomain { stream, expected } => write!(
-                f,
-                "stream {} was given to the {expected} domain's code",
-                cover_text(stream)
-            ),
-            KernelError::ChainTooDeep { limit } => {
-                write!(f, "the command chain went deeper than its limit of {limit}")
-            }
-            KernelError::TooManySteps { stream, limit } => write!(
-                f,
-                "the decision on stream {} ran more than its limit of {limit} continuation steps",
-                cover_text(stream)
-            ),
-            KernelError::BeforeSnapshot { stream, first } => write!(
-                f,
-                "stream {} holds its events from {first} on only, after its snapshot",
-                cover_text(stream)
-            ),
-            KernelError::UnregisteredDomain { domain } => write!(
-                f,
-                "a stored {domain} stream was read, but no domain \"{domain}\" is registered"
-            ),
-            KernelError::Replay(error) => error.fmt(f),
-            KernelError::Unreadable {
-                stream,
-                sequence,
-                reason,
-            } => write!(
-                f,
-                "event {sequence} of stream {} cannot be replayed: {reason}",
-                cover_text(stream)
-            ),
-            KernelError::Store(error) => error.fmt(f),
-            KernelError::Router(error) => error.fmt(f),
-            KernelError::HandlerUnavailable { stream, cause } => write!(
-                f,
-                "the handler of stream {} could not be reached ({cause}): run it again",
-                cover_text(stream)
-            ),
-        }
+        angzarr_embedded_diagnostic::display(self, f)
     }
 }
 
@@ -529,7 +419,6 @@ impl Diagnostic for KernelError {
             KernelError::UnknownType { .. } => "angzarr-embedded-next-unknown-type",
             KernelError::InvalidPayload { .. } => "angzarr-embedded-next-invalid-payload",
             KernelError::Upcast { .. } => "angzarr-embedded-next-upcast",
-            KernelError::IngestPanicked { .. } => "angzarr-embedded-next-ingest-panicked",
             KernelError::WrongDomain { .. } => "angzarr-embedded-next-wrong-domain",
             KernelError::ChainTooDeep { .. } => "angzarr-embedded-next-chain-too-deep",
             KernelError::TooManySteps { .. } => "angzarr-embedded-next-too-many-steps",
@@ -538,8 +427,7 @@ impl Diagnostic for KernelError {
             KernelError::Replay(error) => error.code(),
             KernelError::Unreadable { .. } => "angzarr-embedded-next-unreadable",
             KernelError::Store(error) => error.code(),
-            KernelError::Router(error) => super::route::reason_code(&error.code)
-                .unwrap_or("angzarr-embedded-next-unhandled-handler-error"),
+            KernelError::Router(error) => router_diagnostic(error).0,
             KernelError::HandlerUnavailable { .. } => "angzarr-embedded-next-handler-unavailable",
         }
     }
@@ -580,13 +468,6 @@ impl Diagnostic for KernelError {
             KernelError::Upcast { stream: s, error } => {
                 vec![("stream", stream(s)), ("error", Arg::nested(error))]
             }
-            KernelError::IngestPanicked {
-                stream: s,
-                command_id,
-            } => vec![
-                ("stream", stream(s)),
-                ("command_id", command_id.to_string().into()),
-            ],
             KernelError::WrongDomain {
                 stream: s,
                 expected,
@@ -614,7 +495,7 @@ impl Diagnostic for KernelError {
                 ("reason", Arg::nested(reason)),
             ],
             KernelError::Store(error) => store_args(error),
-            KernelError::Router(error) => super::route::router_args(error),
+            KernelError::Router(error) => router_diagnostic(error).1,
             KernelError::HandlerUnavailable { stream: s, cause } => {
                 vec![("stream", stream(s)), ("cause", cause.as_str().into())]
             }
@@ -622,29 +503,44 @@ impl Diagnostic for KernelError {
     }
 }
 
-/// What to do about the router's refusal, by its gRPC code; a code the
-/// router does not know (a handler's own) is a business refusal under a
-/// business status ([`is_rejection`](super::route::is_rejection)) and a
-/// bug under any other.
+/// What to do about the router's error: its status decides its class
+/// (angzarr-router's `ErrorClass`, decision 14.37). A business refusal is
+/// the caller's to hear, a fatal bug an operator's; ABORTED (reload) and a
+/// retryable bug are run again.
 fn router_recovery(error: &angzarr_router::error::CodedError) -> Recovery {
-    use angzarr_router::error::GrpcCode;
-    if super::route::reason_code(&error.code).is_none() {
-        return match super::route::is_rejection(error) {
-            true => Recovery::Business,
-            false => Recovery::Bug,
-        };
+    use angzarr_router::error::ErrorClass;
+    match error.grpc.class() {
+        ErrorClass::BusinessFatal => Recovery::Business,
+        ErrorClass::BugFatal => Recovery::Bug,
+        ErrorClass::BusinessImmediate | ErrorClass::BugRetryable => Recovery::Retry,
     }
-    match error.grpc {
-        GrpcCode::Internal | GrpcCode::Unknown | GrpcCode::DataLoss | GrpcCode::Unimplemented => {
-            Recovery::Bug
+}
+
+/// A router error's code and args, as the kernel's: the router's reason
+/// under angzarr-embedded's code ([`reason_code`](super::route::reason_code)),
+/// its metadata the args; a handler's own reason, which no catalog of
+/// angzarr-embedded's holds, as an unhandled handler error with that reason
+/// its `cause` and its metadata under `cause.<name>`, as the router answers
+/// a handler's bug.
+fn router_diagnostic(
+    error: &angzarr_router::error::CodedError,
+) -> (&'static str, Vec<(&'static str, Arg)>) {
+    match super::route::reason_code(&error.code) {
+        Some(code) => (code, super::route::router_args(error)),
+        None => {
+            let mut args = vec![("cause", Arg::Str(error.code.clone()))];
+            args.extend(error.extras.iter().map(|(name, value)| {
+                (
+                    super::route::intern(&format!("cause.{name}")),
+                    Arg::Str(value.clone()),
+                )
+            }));
+            (
+                super::route::reason_code(angzarr_router::error::codes::UNHANDLED_HANDLER_ERROR)
+                    .unwrap_or_default(),
+                args,
+            )
         }
-        GrpcCode::FailedPrecondition => Recovery::Business,
-        GrpcCode::Aborted | GrpcCode::Unavailable => Recovery::Retry,
-        GrpcCode::InvalidArgument
-        | GrpcCode::NotFound
-        | GrpcCode::AlreadyExists
-        | GrpcCode::OutOfRange
-        | GrpcCode::PermissionDenied => Recovery::Invalid,
     }
 }
 
@@ -652,27 +548,7 @@ fn router_recovery(error: &angzarr_router::error::CodedError) -> Recovery {
 
 impl fmt::Display for ReplayError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ReplayError::OutOfSequence { index, found } => write!(
-                f,
-                "page {index} of the log claims sequence {found}, not the one due"
-            ),
-            ReplayError::RecordedBackwards { sequence } => write!(
-                f,
-                "event {sequence} was recorded before the event before it"
-            ),
-            ReplayError::IncompleteMeta { sequence, field } => write!(
-                f,
-                "event {sequence}'s metadata lacks a well-formed {field}"
-            ),
-            ReplayError::WrongDomain { found, expected } => {
-                write!(f, "a {found} log was given to the {expected} domain's code")
-            }
-            ReplayError::UnknownRules { sequence, version } => write!(
-                f,
-                "event {sequence} was decided under rules {version}, which the rulebook does not hold"
-            ),
-        }
+        angzarr_embedded_diagnostic::display(self, f)
     }
 }
 
@@ -725,18 +601,25 @@ pub(crate) fn store_recovery(error: &StoreError) -> Recovery {
 /// A store error's args as angzarr-embedded's diagnostics carry them: angzarr-ports'
 /// args by name, unchanged (`StoreError::args`), a `Uint` as a `Uint`, a
 /// `Str` as a `Str`, and a wrapped `Cause` (the adapter's own code and
-/// English) as a nested report under that code.
+/// args) as a nested report under that code.
 pub(crate) fn store_args(error: &StoreError) -> Vec<(&'static str, Arg)> {
-    error
-        .args()
-        .into_iter()
+    ported_args(error.args())
+}
+
+/// angzarr-ports' args as angzarr-embedded's.
+fn ported_args(args: Vec<(&'static str, angzarr_ports::Arg)>) -> Vec<(&'static str, Arg)> {
+    args.into_iter()
         .map(|(name, arg)| {
             let arg = match arg {
                 angzarr_ports::Arg::Uint(n) => Arg::Uint(n),
                 angzarr_ports::Arg::Str(s) => Arg::Str(s),
-                angzarr_ports::Arg::Cause(cause) => {
-                    Arg::Nested(Box::new(Report::new(cause.code, cause.code)))
-                }
+                angzarr_ports::Arg::Cause(cause) => Arg::Nested(Box::new(
+                    ported_args(cause.args)
+                        .into_iter()
+                        .fold(Report::new(cause.code), |report, (name, arg)| {
+                            report.arg(name, arg)
+                        }),
+                )),
             };
             (name, arg)
         })
@@ -759,22 +642,11 @@ pub(crate) fn unreadable(stream: &Cover, sequence: u64, reason: Report) -> Kerne
 
 impl fmt::Display for PayloadError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            PayloadError::UnknownType { type_url } => {
-                write!(f, "no decoder for the type {type_url}")
-            }
-            PayloadError::Decode { type_url, error } => {
-                write!(f, "a payload of type {type_url} does not decode: {error}")
-            }
-            PayloadError::Invalid { type_url, reason } => {
-                write!(
-                    f,
-                    "a payload of type {type_url} is not a valid value: {reason}"
-                )
-            }
-        }
+        angzarr_embedded_diagnostic::display(self, f)
     }
 }
+
+impl std::error::Error for PayloadError {}
 
 impl Diagnostic for PayloadError {
     fn code(&self) -> &'static str {
@@ -800,12 +672,7 @@ impl Diagnostic for PayloadError {
 
 impl fmt::Display for UpcastError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            UpcastError::Payload(error) => error.fmt(f),
-            UpcastError::Rule { source, error } => {
-                write!(f, "the upcast rule from {source} failed: {error}")
-            }
-        }
+        angzarr_embedded_diagnostic::display(self, f)
     }
 }
 
@@ -830,24 +697,7 @@ impl Diagnostic for UpcastError {
 
 impl fmt::Display for UpcastChainError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let domain = &self.domain;
-        match &self.problem {
-            ChainProblem::Duplicate { source } => write!(
-                f,
-                "domain {domain}'s upcaster has two typed rules from {source}: the second never runs"
-            ),
-            ChainProblem::OutOfOrder {
-                source,
-                produced_by,
-            } => write!(
-                f,
-                "domain {domain}'s upcaster registers the rule from {source} before the rule from {produced_by}, which produces it"
-            ),
-            ChainProblem::DeadEnd { source, ends_at } => write!(
-                f,
-                "domain {domain}'s upcaster takes {source} to {ends_at}, which the domain does not decode"
-            ),
-        }
+        angzarr_embedded_diagnostic::display(self, f)
     }
 }
 

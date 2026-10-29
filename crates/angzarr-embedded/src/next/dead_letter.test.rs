@@ -124,3 +124,53 @@ fn a_panicking_ingests_dead_letter_carries_its_code_not_english() {
         lines[0]
     );
 }
+
+/// A step whose retryable failure outlasted its retries is dead-lettered
+/// with its command, its failure's code and args as the reason and as the
+/// processing failure's, transient, with how many retries it had; its line
+/// shows the count.
+#[test]
+fn a_retried_steps_dead_letter_holds_its_command_failure_and_retry_count() {
+    use crate::next::v1::angzarr_dead_letter::RejectionDetails;
+    use crate::next::v1::EventProcessingFailedDetails;
+    use angzarr_embedded_diagnostic::Report;
+    let book = check(
+        command(
+            cover("account", 1),
+            pack(&account::cmd::Deposit { cents: 1 }),
+        )
+        .id(5),
+        &registry(),
+    )
+    .unwrap()
+    .identify(&at(30))
+    .to_book();
+    let failure = Report::new("toy-down").arg("seat", 3u32);
+    let letter = super::retries_exhausted(book.clone(), "account", &failure, 3);
+    let reason = Diagnostic {
+        code: "toy-down".to_string(),
+        args: [("seat".to_string(), "3".to_string())].into(),
+    };
+    assert_eq!(
+        letter.payload,
+        Some(angzarr_dead_letter::Payload::RejectedCommand(book))
+    );
+    assert_eq!(letter.reason, Some(reason.clone()));
+    assert_eq!(
+        letter.rejection_details,
+        Some(RejectionDetails::EventProcessingFailed(
+            EventProcessingFailedDetails {
+                failure: Some(reason),
+                retry_count: 3,
+                is_transient: true,
+                ..EventProcessingFailedDetails::default()
+            }
+        ))
+    );
+    assert_eq!(letter.source_component, "account");
+    let line = dead_letter_line(&letter);
+    assert!(
+        line.contains("account: toy-down seat=3 retry_count=3 command_id="),
+        "{line}"
+    );
+}

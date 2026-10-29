@@ -44,7 +44,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use angzarr_embedded::next::OnPolicyBug;
+use angzarr_embedded::next::{OnPolicyBug, OnRetryable};
 use serde::{Deserialize, Serialize};
 
 use crate::error::HostError;
@@ -111,13 +111,33 @@ pub struct RetryConfig {
 }
 
 impl Default for RetryConfig {
+    /// The kernel's own defaults.
     fn default() -> Self {
+        let kernel = OnRetryable::default();
         RetryConfig {
-            max_retries: 3,
-            initial_backoff_ms: 100,
-            multiplier: 2.0,
-            max_backoff_ms: 5_000,
-            jitter: 0.2,
+            max_retries: kernel.max_retries,
+            initial_backoff_ms: millis(kernel.initial_backoff),
+            multiplier: kernel.multiplier,
+            max_backoff_ms: millis(kernel.max_backoff),
+            jitter: kernel.jitter,
+        }
+    }
+}
+
+/// `duration` in whole milliseconds.
+fn millis(duration: std::time::Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+impl RetryConfig {
+    /// As the kernel's [`OnRetryable`].
+    pub fn on_retryable(&self) -> OnRetryable {
+        OnRetryable {
+            max_retries: self.max_retries,
+            initial_backoff: std::time::Duration::from_millis(self.initial_backoff_ms),
+            multiplier: self.multiplier,
+            max_backoff: std::time::Duration::from_millis(self.max_backoff_ms),
+            jitter: self.jitter,
         }
     }
 }

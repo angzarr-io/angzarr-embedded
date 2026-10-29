@@ -55,40 +55,6 @@ pub enum ParseProblem {
     UnterminatedQuote,
 }
 
-impl fmt::Display for ParseProblem {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ParseProblem::LoneCarriageReturn => {
-                f.write_str("a carriage return without a line feed: lines end in \\n or \\r\\n")
-            }
-            ParseProblem::TabIndent => f.write_str("tabs can't indent"),
-            ParseProblem::NonAsciiIndent { character } => {
-                write!(f, "indentation is ASCII spaces only, not {}", code_point(*character))
-            }
-            ParseProblem::DocumentMarker { marker } => write!(f, "one document per file: no {marker}"),
-            ParseProblem::Anchor => f.write_str("anchors (&) aren't supported"),
-            ParseProblem::Alias => f.write_str("aliases (*) aren't supported"),
-            ParseProblem::Tag => f.write_str("tags (!) aren't supported"),
-            ParseProblem::BlockScalar => f.write_str("block scalars (| and >) aren't supported"),
-            ParseProblem::UnexpectedIndent => f.write_str("unexpected indentation"),
-            ParseProblem::ExpectedKeyValue { found } => write!(f, "expected `key: value`, found {found:?}"),
-            ParseProblem::KeyNotScalar => f.write_str("keys must be scalars"),
-            ParseProblem::DuplicateKey { key } => write!(f, "{key:?} twice"),
-            ParseProblem::Unexpected { found } => write!(f, "unexpected {found:?}"),
-            ParseProblem::ExpectedSeqSeparator => f.write_str("expected , or ] in a flow sequence"),
-            ParseProblem::ExpectedColon => f.write_str("expected : in a flow mapping"),
-            ParseProblem::ExpectedMapSeparator => f.write_str("expected , or } in a flow mapping"),
-            ParseProblem::BadUnicodeEscape { escape } => write!(
-                f,
-                "bad escape {escape}: \\u takes 4 hex digits and \\U 8, naming a Unicode scalar value; \
-                 surrogates are refused (write \\U0001F5E1, not \\uD83D\\uDDE1)"
-            ),
-            ParseProblem::UnknownEscape { escape } => write!(f, "unknown escape {escape}"),
-            ParseProblem::UnterminatedQuote => f.write_str("unterminated quote"),
-        }
-    }
-}
-
 /// `U+00A0`: how a message names a character that may not show.
 fn code_point(c: char) -> String {
     format!("U+{:04X}", c as u32)
@@ -96,7 +62,7 @@ fn code_point(c: char) -> String {
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "line {}: {}", self.line, self.problem)
+        angzarr_embedded_diagnostic::display(self, f)
     }
 }
 
