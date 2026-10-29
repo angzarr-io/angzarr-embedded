@@ -65,6 +65,18 @@ impl AsRef<Path> for Database {
     }
 }
 
+impl Drop for Database {
+    fn drop(&mut self) {
+        if self.0.is_dir() {
+            let _ = std::fs::remove_dir_all(&self.0);
+            return;
+        }
+        for file in with_wal(&self.0) {
+            let _ = std::fs::remove_file(file);
+        }
+    }
+}
+
 /// The database file at `path` and its WAL files.
 fn with_wal(path: &Path) -> [PathBuf; 3] {
     ["", "-wal", "-shm"].map(|suffix| {
@@ -97,20 +109,6 @@ fn a_directory_made_at_a_database_path_is_gone_once_dropped() {
     assert!(!path.exists(), "{} was left behind", path.display());
 }
 
-/// Remove the database at `path`, and its WAL files if a connection is yet
-/// to let them go.
-fn remove(path: &Path) {
-    std::fs::remove_file(path).unwrap();
-    for suffix in ["-wal", "-shm"] {
-        let mut file = path.as_os_str().to_owned();
-        file.push(suffix);
-        match std::fs::remove_file(&file) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            other => other.unwrap(),
-        }
-    }
-}
-
 /// The `tasks` stream `n`, on the main timeline.
 fn stream(n: u8) -> StreamRef<'static> {
     main_stream("tasks", n)
@@ -136,11 +134,13 @@ async fn pages(store: &SqliteStore, stream: StreamRef<'_>) -> Vec<EventPage> {
 
 // ------------------------------------------------------- the ports' suite
 
-/// Two handles on one new file: two connections, as two processes have.
-async fn pair() -> (SqliteStore, SqliteStore) {
-    let path = database();
-    let a = SqliteStore::open(&path).await.unwrap();
-    let b = SqliteStore::open(&path).await.unwrap();
+/// Two handles on one new file at `path`: two connections, as two
+/// processes have. Called as `pair(&database())` in a check's one
+/// statement, the guard is a temporary of that statement, so it drops, and
+/// removes the file, once the check is done with the stores.
+async fn pair(path: &Path) -> (SqliteStore, SqliteStore) {
+    let a = SqliteStore::open(path).await.unwrap();
+    let b = SqliteStore::open(path).await.unwrap();
     (a, b)
 }
 
@@ -199,7 +199,7 @@ mod base {
 
 mod pair {
     use super::*;
-    angzarr_ports::store_contract!(pair, #[tokio::test], pair().await);
+    angzarr_ports::store_contract!(pair, #[tokio::test], pair(&database()).await);
 }
 
 mod purge {
@@ -245,7 +245,7 @@ mod editions_outbox {
 /// YET, owner ruling 2026-10-28).
 mod read {
     use super::*;
-    checks!(pair().await;
+    checks!(pair(&database()).await;
         a_read_unit_sees_the_store_as_it_began,
         a_read_unit_heads_and_snapshots_as_it_began,
         #[ignore = "editions are not implemented yet in the SQLite adapter (owner ruling 2026-10-28); a follow-up; MemoryStore covers them"]
@@ -255,7 +255,7 @@ mod read {
 
 mod read_purge {
     use super::*;
-    angzarr_ports::store_contract!(read_purge, #[tokio::test], pair().await);
+    angzarr_ports::store_contract!(read_purge, #[tokio::test], pair(&database()).await);
 }
 
 /// NOT IMPLEMENTED YET (owner ruling 2026-10-28). The `read_forks`
@@ -280,7 +280,7 @@ mod watch {
 
 mod watch_pair {
     use super::*;
-    angzarr_ports::store_contract!(watch_pair, #[tokio::test], pair().await);
+    angzarr_ports::store_contract!(watch_pair, #[tokio::test], pair(&database()).await);
 }
 
 mod until_time {
@@ -346,7 +346,6 @@ async fn what_was_written_survives_reopening_the_file() {
     assert_eq!(store.read_snapshot(s).await, Ok(Some(snapshot(1, "v1"))));
     assert_eq!(store.covers("tasks").await, Ok(covers(&[s])));
     drop(store);
-    remove(&path);
 }
 
 #[tokio::test]
@@ -356,7 +355,6 @@ async fn reopening_a_migrated_file_migrates_nothing_twice() {
     let store = SqliteStore::open(&path).await.unwrap();
     assert_eq!(store.covers("tasks").await, Ok(vec![]));
     drop(store);
-    remove(&path);
 }
 
 #[tokio::test]
@@ -385,7 +383,6 @@ async fn stores_opening_a_new_file_at_once_all_open_it_migrated() {
         let store = SqliteStore::open(&path).await.unwrap();
         assert_eq!(store.covers("tasks").await, Ok(vec![]));
         drop(store);
-        remove(&path);
     }
 }
 
@@ -406,7 +403,6 @@ async fn a_write_holds_no_transaction_open_after_it_returns() {
     assert!(started.elapsed() < BUSY_TIMEOUT, "it waited on a lock");
     assert_eq!(pages(&a, s).await.len(), 2);
     drop((a, b));
-    remove(&path);
 }
 
 /// Two handles on one file writing one stream at once: SQLite's write lock
@@ -431,7 +427,6 @@ async fn two_handles_writing_one_stream_at_once_land_one_and_refuse_the_other() 
     );
     assert_eq!(pages(&a, s).await.len(), 1);
     drop((a, b));
-    remove(&path);
 }
 
 // ------------------------------------------------------------- editions
@@ -579,7 +574,6 @@ async fn reading_what_is_there_but_no_database_fails() {
     let dir = database();
     std::fs::create_dir(&dir).unwrap();
     let opened = SqliteStore::open_existing(&dir).await.map(drop);
-    std::fs::remove_dir(&dir).unwrap();
     assert_eq!(
         opened.map_err(|e| code(&e)),
         Err(Some("angzarr-store-sqlite-unavailable"))
@@ -595,7 +589,6 @@ async fn reading_finds_what_was_written() {
         append(&store, s, 0, &[page(0, 1)]).await.unwrap();
     }
     assert_eq!(tasks_in(&path).await, Ok(covers(&[s])));
-    remove(&path);
 }
 
 #[tokio::test]
@@ -623,7 +616,6 @@ async fn a_read_only_file_in_a_read_only_directory_opens_for_reading() {
     writer.conn.into_inner().close().await.unwrap();
     mode(&dir, 0o755);
     mode(&path, 0o644);
-    std::fs::remove_dir_all(&dir).unwrap();
     assert_eq!(read.unwrap().pages, [page(0, 1)]);
     assert_eq!(
         written.as_ref().map_err(code),
@@ -658,7 +650,6 @@ async fn reading_a_database_older_than_the_build_fails_at_once() {
     );
     assert_eq!(waits.load(Ordering::Relaxed), 0);
     assert_eq!(journal_mode(&path).await, "delete");
-    remove(&path);
 }
 
 // --------------------------------------- reading a file a writer is making
@@ -720,7 +711,6 @@ async fn reading_a_file_created_but_not_yet_in_wal_waits_for_its_writer() {
     let store = read.unwrap().expect("the database its writer made");
     assert_eq!(store.covers("tasks").await, Ok(vec![]));
     drop((store, writer));
-    remove(&path);
 }
 
 #[tokio::test]
@@ -734,7 +724,6 @@ async fn reading_a_file_its_writer_is_migrating_waits_for_the_commit() {
     let store = read.unwrap().expect("the database its writer made");
     assert_eq!(store.covers("tasks").await, Ok(vec![]));
     drop((store, writer));
-    remove(&path);
 }
 
 #[tokio::test]
@@ -757,7 +746,6 @@ async fn reading_a_file_whose_writer_never_finishes_fails_unmigrated() {
     );
     assert!((1..=5).contains(&waits.load(Ordering::Relaxed)));
     assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
-    remove(&path);
 }
 
 #[tokio::test]
@@ -785,7 +773,6 @@ async fn a_database_whose_migrations_disagree_opens_neither_way() {
         conn.close().await.unwrap();
         let written = SqliteStore::open(&path).await.map(drop);
         let read = SqliteStore::open_existing(&path).await.map(drop);
-        remove(&path);
         assert_eq!(
             written.map_err(|e| code(&e)),
             Err(Some("angzarr-store-sqlite-unavailable")),
@@ -817,7 +804,6 @@ async fn a_store_opens_and_reads_while_another_holds_the_write_lock() {
     assert_eq!(reader.covers("tasks").await, Ok(covers(&[s])));
     assert_eq!(read_only.covers("tasks").await, Ok(covers(&[s])));
     drop((reader, read_only));
-    remove(&path);
 }
 
 // ------------------------------------------------------------ journal mode
@@ -827,7 +813,6 @@ async fn an_opened_file_is_in_wal_mode() {
     let path = database();
     drop(SqliteStore::open(&path).await.unwrap());
     assert_eq!(journal_mode(&path).await, "wal");
-    remove(&path);
 }
 
 #[tokio::test]
@@ -836,7 +821,6 @@ async fn opening_a_migrated_file_in_rollback_mode_moves_it_to_wal() {
     migrated_in_rollback_mode(&path).await;
     drop(SqliteStore::open(&path).await.unwrap());
     assert_eq!(journal_mode(&path).await, "wal");
-    remove(&path);
 }
 
 #[tokio::test]
@@ -854,7 +838,6 @@ async fn moving_into_wal_waits_for_a_writer_to_let_go() {
     drop(opened.unwrap());
     drop(writer);
     assert_eq!(journal_mode(&path).await, "wal");
-    remove(&path);
 }
 
 #[tokio::test]
@@ -863,7 +846,6 @@ async fn reading_a_file_in_rollback_mode_leaves_its_journal_mode() {
     migrated_in_rollback_mode(&path).await;
     assert_eq!(tasks_in(&path).await, Ok(vec![]));
     assert_eq!(journal_mode(&path).await, "delete");
-    remove(&path);
 }
 
 #[tokio::test]
@@ -889,7 +871,6 @@ async fn stores_opening_a_file_in_rollback_mode_at_once_all_move_it_to_wal() {
         ];
         assert_eq!(opened, [const { Ok(()) }; 8]);
         assert_eq!(journal_mode(&path).await, "wal");
-        remove(&path);
     }
 }
 
@@ -983,7 +964,6 @@ async fn a_migrated_database_keeps_no_store_wide_position() {
         ],
         "the events columns"
     );
-    remove(&path);
 }
 
 /// The released schema: migrations 0001 and 0002, as the released adapter
@@ -1122,7 +1102,6 @@ async fn a_database_at_the_released_schema_opens_migrated_and_reads_its_events_b
         "the released events, then the new"
     );
     drop(store);
-    remove(&path);
 }
 
 /// A released database opened read-only is not migrated by the read: it is
@@ -1137,7 +1116,6 @@ async fn a_database_opened_read_only_at_the_released_schema_is_refused_unmigrate
         opened.map_err(|e| code(&e)),
         Err(Some("angzarr-store-sqlite-unmigrated"))
     );
-    remove(&path);
 }
 
 // --------------------------------------------------------------- integrity
@@ -1156,7 +1134,6 @@ async fn a_healthy_database_is_intact_however_it_is_opened() {
     let mut memory = SqliteStore::open_in_memory().await.unwrap();
     assert_eq!(memory.integrity_check().await, Ok(Integrity::Intact));
     drop((store, read_only));
-    remove(&path);
 }
 
 #[tokio::test]
@@ -1176,7 +1153,6 @@ async fn checking_a_read_only_store_waits_on_no_writer() {
 
     end(writing, true).await;
     drop((writer, read_only));
-    remove(&path);
 }
 
 /// Change the page of `path` holding `index`'s root with `tamper`: the
@@ -1227,7 +1203,6 @@ async fn check_damaged(tamper: impl FnOnce(&mut [u8])) -> Vec<Damage> {
             other => panic!("the damaged index went unseen: {other:?}"),
         }
     }
-    remove(&path);
     found
 }
 
@@ -1285,7 +1260,6 @@ async fn a_check_that_cannot_run_is_a_failure_not_damage() {
     );
     held.rollback().await.unwrap();
     drop(holder);
-    remove(&path);
 }
 
 // ------------------------------------------------- too damaged to open
@@ -1307,7 +1281,7 @@ async fn damaged_copy(tamper: impl FnOnce(&mut Vec<u8>)) -> Database {
     conn.close().await.unwrap();
     let copy = database();
     std::fs::copy(&original, &copy).unwrap();
-    remove(&original);
+    drop(original);
     let mut bytes = std::fs::read(&copy).unwrap();
     tamper(&mut bytes);
     std::fs::write(&copy, bytes).unwrap();
@@ -1340,7 +1314,6 @@ async fn open_damaged(tamper: impl FnOnce(&mut Vec<u8>)) -> Vec<(Option<&'static
         found.push((code(&error), message));
     }
     assert_eq!(std::fs::read(&path).unwrap(), before, "an open changed it");
-    remove(&path);
     found
 }
 
@@ -1439,7 +1412,6 @@ async fn a_purge_that_fails_part_way_deletes_nothing() {
     );
     assert_whole(&store, s, "after the failed purge").await;
     drop(store);
-    remove(&path);
 }
 
 /// A second store on `path` whose connection waits on no lock: whatever it
@@ -1491,7 +1463,6 @@ async fn a_purge_racing_an_append_lands_after_it_and_purges_it() {
         })
     );
     drop((writer, purger, hasty));
-    remove(&path);
 }
 
 #[tokio::test]
@@ -1531,7 +1502,6 @@ async fn an_append_racing_a_purge_lands_after_it_on_a_new_stream() {
     assert_eq!(pages(&writer, s).await, [page(0, 2)]);
     assert_eq!(writer.covers("tasks").await, Ok(covers(&[s])));
     drop((store, writer, hasty));
-    remove(&path);
 }
 
 // ------------------------------------------------------- reading at once
@@ -1587,7 +1557,6 @@ async fn a_read_outside_a_unit_is_one_moment_across_a_purge() {
         }
     })
     .await;
-    remove(&path);
 }
 
 /// A read on its own is one moment: an append committing between its
@@ -1605,7 +1574,6 @@ async fn a_read_outside_a_unit_is_one_moment_across_an_append() {
         }
     })
     .await;
-    remove(&path);
 }
 
 // --------------------------------------------------- reading one moment
@@ -1622,7 +1590,6 @@ async fn on_file<F>(
     let writer = SqliteStore::open(&path).await.unwrap();
     let reader = open_reader(&path).await;
     check((reader, writer)).await;
-    remove(&path);
 }
 
 async fn writable(path: &Path) -> SqliteStore {
@@ -1720,7 +1687,6 @@ async fn a_writer_waits_on_no_open_read_unit() {
         assert_eq!(second.read(s, 0, None).await, Ok(Slice::default()));
     }
     drop((writable_reader, read_only_reader, hasty));
-    remove(&path);
 }
 
 // ------------------------------------------------------ refused writes
@@ -1749,7 +1715,7 @@ async fn a_refused_write_leaves_no_event_row() {
 mod watch_on_file {
     use angzarr_ports::contract as checks;
 
-    use super::{database, on_file, read_only_store, remove, writable, SqliteStore};
+    use super::{database, on_file, read_only_store, writable, SqliteStore};
 
     #[tokio::test]
     async fn a_change_token_changes_when_another_handle_commits() {
@@ -1776,7 +1742,6 @@ mod watch_on_file {
             SqliteStore::open(&path).await.unwrap(),
         )
         .await;
-        remove(&path);
     }
 }
 
@@ -1799,7 +1764,6 @@ async fn a_change_token_waits_on_no_writer() {
     assert_ne!(read_only.change_token().await, Ok(read_only_before));
     assert_eq!(pages(&writer, s).await.len(), 1);
     drop((writer, hasty, read_only));
-    remove(&path);
 }
 
 #[tokio::test]
@@ -1810,7 +1774,6 @@ async fn a_change_token_holds_across_a_write_rolled_back_elsewhere() {
     end(inserting(&path, &page(0, 1)).await, false).await;
     assert_eq!(watcher.change_token().await, Ok(before));
     drop(watcher);
-    remove(&path);
 }
 
 #[tokio::test]
