@@ -79,6 +79,22 @@ pub struct Kernel<'k> {
     registry: &'k Registry,
     dead_letters: &'k dyn DeadLetterLog,
     limit: usize,
+    policy_bug: OnPolicyBug,
+}
+
+/// What a policy step that hits a bug does with the policy's position on
+/// its source, once the step is dead-lettered: the policy's own error
+/// ([`StepError::PolicyFailed`]) and a handler's bug in the step (a
+/// [`KernelError::Router`] the kernel dead-letters) alike.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum OnPolicyBug {
+    /// Move the position past the trigger: the dead letter is the record
+    /// to replay, and [`Kernel::resume`] does not run the step again.
+    #[default]
+    MovePast,
+    /// Keep the position at the trigger, so [`Kernel::resume`] runs the
+    /// step again (and dead-letters it again while the bug stands).
+    Stay,
 }
 
 /// angzarr's code for a projector failure: google.rpc.Code INTERNAL.
@@ -137,7 +153,21 @@ impl<'k> Kernel<'k> {
             registry,
             dead_letters,
             limit: DEFAULT_DEPTH_LIMIT,
+            policy_bug: OnPolicyBug::default(),
         }
+    }
+
+    /// Does `policy_bug` with a policy's position when one of its steps
+    /// hits a bug ([`OnPolicyBug::MovePast`] unless told otherwise).
+    pub fn on_policy_bug(mut self, policy_bug: OnPolicyBug) -> Kernel<'k> {
+        self.policy_bug = policy_bug;
+        self
+    }
+
+    /// What this kernel does with a policy's position when one of its
+    /// steps hits a bug.
+    pub fn policy_bug(&self) -> OnPolicyBug {
+        self.policy_bug
     }
 
     /// Chains at most `limit` policy steps deep.

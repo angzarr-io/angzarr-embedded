@@ -477,15 +477,11 @@ fn every_failure_says_how_to_recover() {
         ),
         (
             Recovery::Business,
-            KernelError::Router(CodedError::rejection_precondition_failed(
-                "PLAYER_BROKE",
-                "",
-                [],
-            )),
+            KernelError::Router(CodedError::rejection("PLAYER_BROKE", "", [])),
         ),
         (
             Recovery::Bug,
-            KernelError::Router(CodedError::internal("PLAYER_BROKE", "", [])),
+            KernelError::Router(CodedError::bug("PLAYER_BROKE", "", [])),
         ),
         (
             Recovery::Bug,
@@ -493,11 +489,7 @@ fn every_failure_says_how_to_recover() {
         ),
         (
             Recovery::Bug,
-            KernelError::Router(CodedError::rejection_invalid_argument(
-                "PLAYER_BROKE",
-                "",
-                [],
-            )),
+            KernelError::Router(CodedError::invalid_argument("PLAYER_BROKE", "", [])),
         ),
         (
             Recovery::Retry,
@@ -505,7 +497,7 @@ fn every_failure_says_how_to_recover() {
         ),
         (
             Recovery::Invalid,
-            KernelError::Router(CodedError::rejection_invalid_argument(
+            KernelError::Router(CodedError::invalid_argument(
                 codes::MISSING_COMMAND_BOOK,
                 "",
                 [],

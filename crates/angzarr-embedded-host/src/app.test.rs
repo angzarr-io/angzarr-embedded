@@ -173,6 +173,27 @@ fn the_store_is_the_configured_sqlite_file() {
     drop(app);
 }
 
+/// The kernel the app hands out does with a policy's bug what the
+/// config's `[policy] on_bug` says; the default when it is left out.
+#[test]
+fn the_kernel_follows_the_configs_policy_setting() {
+    use angzarr_embedded::next::OnPolicyBug;
+    let dir = scratch("policy");
+    let path = dir.join("angzarr.toml");
+    std::fs::write(&path, "[store]\nin_memory = true\n").unwrap();
+    let app = run(&path, nothing).unwrap();
+    assert_eq!(app.kernel().policy_bug(), OnPolicyBug::MovePast);
+    drop(app);
+    std::fs::write(
+        &path,
+        "[store]\nin_memory = true\n\n[policy]\non_bug = \"stay\"\n",
+    )
+    .unwrap();
+    let app = run(&path, nothing).unwrap();
+    assert_eq!(app.kernel().policy_bug(), OnPolicyBug::Stay);
+    drop(app);
+}
+
 #[test]
 fn a_missing_config_is_unreadable() {
     let dir = scratch("missing");

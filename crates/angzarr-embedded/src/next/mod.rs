@@ -118,7 +118,8 @@ pub use error::{
 };
 pub use fixture::{assert_replay_fixtures, check_replay_fixtures, ReplayFixture};
 pub use handle::{
-    Handled, Kernel, Project, ProjectionRoute, ProjectorFailure, Recorded, DEFAULT_DEPTH_LIMIT,
+    Handled, Kernel, OnPolicyBug, Project, ProjectionRoute, ProjectorFailure, Recorded,
+    DEFAULT_DEPTH_LIMIT,
 };
 pub use handler::{Committed, Handler};
 pub use payload::{decode_as, pack, type_name, Decoder, Payload};
@@ -384,7 +385,7 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn angzarr_embedded_diagnostic::D
     }));
     for (reason, _) in route::REASONS {
         samples.push(Box::new(KernelError::Router(
-            angzarr_router::error::CodedError::internal(reason, reason, []),
+            angzarr_router::error::CodedError::bug(reason, reason, []),
         )));
     }
     samples.push(Box::new(missing));

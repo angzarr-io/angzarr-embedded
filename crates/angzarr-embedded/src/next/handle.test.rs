@@ -10,7 +10,8 @@ use crate::next::toys::prelude::*;
 use crate::next::v1::event_meta::Causation;
 use crate::next::v1::{CommandBook, EventMeta, EventRef};
 use crate::next::{
-    ids, Failure, Kernel, KernelError, MemoryDeadLetters, Payload, Recovery, Step, StepError,
+    ids, Failure, Kernel, KernelError, MemoryDeadLetters, OnPolicyBug, Payload, Recovery, Step,
+    StepError,
 };
 
 use crate::next::toys::{
@@ -564,6 +565,113 @@ fn a_policys_error_dead_letters_its_step_and_moves_its_position_past_it() {
         before + 2
     );
     assert_eq!(log.lines().len(), 1, "nothing more dead-lettered");
+}
+
+/// What a kernel does with a policy's bug unless told otherwise: it moves
+/// the policy's position past the trigger.
+#[test]
+fn a_kernel_moves_a_policys_position_past_its_bug_by_default() {
+    let registry = registry();
+    let log = MemoryDeadLetters::new();
+    assert_eq!(OnPolicyBug::default(), OnPolicyBug::MovePast);
+    assert_eq!(
+        Kernel::new(&registry, &log).policy_bug(),
+        OnPolicyBug::MovePast
+    );
+    assert_eq!(
+        Kernel::new(&registry, &log)
+            .on_policy_bug(OnPolicyBug::Stay)
+            .policy_bug(),
+        OnPolicyBug::Stay
+    );
+}
+
+/// Under [`OnPolicyBug::Stay`], a policy's error is still dead-lettered
+/// and fails the call as [`StepError::PolicyFailed`], but the policy's
+/// position stays at the trigger, so a resume runs the step again (and
+/// dead-letters it again).
+#[test]
+fn under_stay_a_policys_error_holds_its_position() {
+    let plain = registry();
+    let mut registry = registry();
+    registry.policy(Unlucky);
+    let log = MemoryDeadLetters::new();
+    let kernel = Kernel::new(&registry, &log).on_policy_bug(OnPolicyBug::Stay);
+    let store = MemoryStore::new();
+    opened(&store, &plain, 1, 0);
+    let held = position(&store, "unlucky", &cover("account", 1));
+
+    let failure = kernel
+        .handle::<Account, _, _>(&store, deposit(3, 13), &at(30), &mut ())
+        .ready()
+        .err()
+        .expect("the policy's error fails the call");
+    assert!(
+        matches!(
+            &failure,
+            Failure::Downstream {
+                error: StepError::PolicyFailed(_),
+                ..
+            }
+        ),
+        "{failure:?}"
+    );
+    assert_eq!(log.lines().len(), 1, "dead-lettered: {:?}", log.lines());
+    assert_eq!(
+        position(&store, "unlucky", &cover("account", 1)),
+        held,
+        "the position stays"
+    );
+
+    let resumed = kernel.resume(&store, &at(31), &mut ()).ready();
+    assert!(
+        matches!(
+            &resumed,
+            Err(Failure::Downstream {
+                error: StepError::PolicyFailed(_),
+                ..
+            })
+        ),
+        "the step runs again: {:?}",
+        resumed.as_ref().err()
+    );
+    assert_eq!(log.lines().len(), 2, "dead-lettered again");
+}
+
+/// Under [`OnPolicyBug::Stay`], a policy's refusal answer that fails is
+/// still dead-lettered as [`StepError::PolicyFailed`], but the policy's
+/// position stays at the trigger.
+#[test]
+fn under_stay_a_policys_refusal_answer_error_holds_its_position() {
+    let plain = registry();
+    let mut registry = registry();
+    registry.policy(UnansweringBookkeeping);
+    let log = MemoryDeadLetters::new();
+    let kernel = Kernel::new(&registry, &log).on_policy_bug(OnPolicyBug::Stay);
+    let store = MemoryStore::new();
+    opened(&store, &plain, 1, 0);
+    let held = position(&store, "unanswering-bookkeeping", &cover("account", 1));
+    let failure = kernel
+        .handle::<Account, _, _>(&store, deposit(3, LEDGER_LIMIT + 1), &at(30), &mut ())
+        .ready()
+        .err()
+        .expect("the answer's error fails the call");
+    assert!(
+        matches!(
+            &failure,
+            Failure::Downstream {
+                error: StepError::PolicyFailed(_),
+                ..
+            }
+        ),
+        "{failure:?}"
+    );
+    assert_eq!(log.lines().len(), 1, "dead-lettered: {:?}", log.lines());
+    assert_eq!(
+        position(&store, "unanswering-bookkeeping", &cover("account", 1)),
+        held,
+        "the position stays"
+    );
 }
 
 #[test]

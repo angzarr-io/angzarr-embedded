@@ -23,6 +23,9 @@
 //!
 //! [store]
 //! path = "angzarr.db"          # SQLite; `in_memory = true` for none on disk
+//!
+//! [policy]
+//! on_bug = "move_past"         # or "stay": see `PolicyConfig`
 //! ```
 //!
 //! A domain's language picks its default launch command and nothing else:
@@ -32,6 +35,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use angzarr_embedded::next::OnPolicyBug;
 use serde::{Deserialize, Serialize};
 
 use crate::error::HostError;
@@ -65,6 +69,32 @@ pub struct HostConfig {
     /// The store [`crate::run`] opens.
     #[serde(default)]
     pub store: StoreConfig,
+    /// What the kernel does when a policy's step hits a bug.
+    #[serde(default)]
+    pub policy: PolicyConfig,
+}
+
+/// The `[policy]` table: how the kernel treats a policy whose step hits a
+/// bug. Every key has a default, so the table may be left out.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct PolicyConfig {
+    /// What a policy step that hits a bug (the policy's own error, or a
+    /// handler's bug in the step) does with the policy's position once the
+    /// step is dead-lettered: `"move_past"` the trigger (the default: the
+    /// dead letter is the record to replay) or `"stay"` at it, so a resume
+    /// runs the step again. The kernel's
+    /// [`OnPolicyBug`](angzarr_embedded::next::OnPolicyBug).
+    #[serde(with = "OnBug")]
+    pub on_bug: OnPolicyBug,
+}
+
+/// [`OnPolicyBug`]'s TOML form: `"move_past"` or `"stay"`.
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "OnPolicyBug", rename_all = "snake_case")]
+enum OnBug {
+    MovePast,
+    Stay,
 }
 
 /// The `[store]` table: the application's SQLite store.

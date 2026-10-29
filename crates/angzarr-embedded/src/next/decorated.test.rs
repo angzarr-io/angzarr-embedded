@@ -3591,6 +3591,60 @@ mod refusal_flow {
         assert_eq!(log.lines().len(), 1, "nothing dead-lettered again");
     }
 
+    /// Under `OnPolicyBug::Stay`, the source's `#[on_refused]` handler's
+    /// error is still the policy's failure, dead-lettered, but the
+    /// policy's position stays at the trigger, so a resume runs the step
+    /// again and dead-letters it again.
+    #[test]
+    fn under_stay_a_refusal_handlers_error_holds_the_policys_position() {
+        use ::angzarr_embedded::next::{Kernel, OnPolicyBug};
+        let (registry, store) = funded(false, 7);
+        let log = MemoryDeadLetters::new();
+        let kernel = Kernel::new(&registry, &log).on_policy_bug(OnPolicyBug::Stay);
+        let sampled = Sampled {
+            now: at(2),
+            command_id: Uuid::from_bytes([0x72; 16]),
+        };
+        let failure = ready(kernel.handle::<BuyIn, _, _>(
+            &store,
+            start(&correlation(9), 2, 30),
+            &sampled,
+            &mut (),
+        ))
+        .err()
+        .expect("the refusal handler's error fails the call");
+        assert!(
+            matches!(
+                &failure,
+                Failure::Downstream {
+                    error: StepError::PolicyFailed(_),
+                    ..
+                }
+            ),
+            "{failure:?}"
+        );
+        assert_eq!(log.lines().len(), 1, "{:?}", log.lines());
+        let resumed = ready(kernel.resume(&store, &sampled, &mut ()))
+            .err()
+            .expect("the position stayed, so the step runs again");
+        assert!(
+            matches!(
+                &resumed,
+                Failure::Downstream {
+                    error: StepError::PolicyFailed(_),
+                    ..
+                }
+            ),
+            "{resumed:?}"
+        );
+        assert_eq!(
+            log.lines().len(),
+            2,
+            "dead-lettered again: {:?}",
+            log.lines()
+        );
+    }
+
     /// The refusal fact's id is the refused command's id, and its origin's
     /// external id that id's canonical text.
     #[test]
@@ -4329,10 +4383,10 @@ mod router {
         );
     }
 
-    /// A remote handler that fails every command under a code of its own,
-    /// one the router does not know (`PLAYER_BROKE`, with a `seat` arg),
-    /// answered with `grpc`.
+    /// A remote handler that fails every command under `code` (with a
+    /// `seat` arg), answered with `grpc`.
     struct Faulty {
+        code: &'static str,
         grpc: ::angzarr_embedded::next::angzarr_router::error::GrpcCode,
     }
 
@@ -4354,7 +4408,7 @@ mod router {
         > {
             Err(
                 ::angzarr_embedded::next::angzarr_router::error::CodedError {
-                    code: "PLAYER_BROKE".to_string(),
+                    code: self.code.to_string(),
                     message: "the player's handler broke".to_string(),
                     extras: [("seat".to_string(), "3".to_string())].into(),
                     grpc: self.grpc,
@@ -4373,12 +4427,21 @@ mod router {
         }
     }
 
-    /// A registry with [`Faulty`] answering `grpc` as the remote domain,
+    /// A registry with [`Faulty`] answering `grpc` under a code of its own,
+    /// one the router does not know (`PLAYER_BROKE`), as the remote domain,
     /// and a policy sending it a `Note` on each wallet's `Held`.
     fn faulty(grpc: ::angzarr_embedded::next::angzarr_router::error::GrpcCode) -> Registry {
+        faulty_under("PLAYER_BROKE", grpc)
+    }
+
+    /// [`faulty`], its handler failing under `code`.
+    fn faulty_under(
+        code: &'static str,
+        grpc: ::angzarr_embedded::next::angzarr_router::error::GrpcCode,
+    ) -> Registry {
         use ::angzarr_embedded::next::angzarr_router::router::CommandHandler;
         let mut registry = registry();
-        let faulty: Box<dyn CommandHandler> = Box::new(Faulty { grpc });
+        let faulty: Box<dyn CommandHandler> = Box::new(Faulty { code, grpc });
         registry.command_handler("remote", faulty).unwrap();
         registry.policy_dispatch(
             PolicyDispatch::new("wallet-remote", "wallet", "remote").on_event(
@@ -4442,7 +4505,8 @@ mod router {
     /// FAILED_PRECONDITION, is a bug, never a rejection: the router's
     /// error, `Recovery::Bug`, dead-lettered by its code and args (no
     /// English), at the origin and as a policy's step, whose position
-    /// stays, so a resume runs the step again.
+    /// moves past the trigger, as for a policy's own error: the dead
+    /// letter is the record to replay, so a resume does not run it again.
     #[test]
     fn an_unknown_code_failed_with_another_status_is_a_dead_lettered_bug() {
         use ::angzarr_embedded::next::angzarr_router::error::GrpcCode;
@@ -4535,12 +4599,154 @@ mod router {
 
             let log = MemoryDeadLetters::new();
             let kernel = ::angzarr_embedded::next::Kernel::new(&registry, &log);
+            let resumed = ready(kernel.resume(&store, &sampled, &mut ()))
+                .expect("{grpc:?}: nothing left owed");
             assert!(
-                ready(kernel.resume(&store, &sampled, &mut ())).is_err(),
-                "{grpc:?}: the position stayed, so the step runs again"
+                resumed.steps().is_empty(),
+                "{grpc:?}: the position moved past the trigger"
             );
-            dead_lettered(&log.lines());
+            assert!(log.lines().is_empty(), "{grpc:?}: {:?}", log.lines());
         }
+    }
+
+    /// Under `OnPolicyBug::Stay`, a handler's bug in a policy's step is
+    /// still dead-lettered, but the policy's position stays at the
+    /// trigger, so a resume runs the step again and dead-letters it again.
+    #[test]
+    fn under_stay_a_handlers_bug_in_a_policys_step_holds_its_position() {
+        use ::angzarr_embedded::next::angzarr_router::error::GrpcCode;
+        use ::angzarr_embedded::next::{Kernel, OnPolicyBug, StepError};
+        let registry = faulty(GrpcCode::Internal);
+        let store = Mem::new();
+        let log = MemoryDeadLetters::new();
+        let kernel = Kernel::new(&registry, &log).on_policy_bug(OnPolicyBug::Stay);
+        let run = |n: u8, book| {
+            let sampled = Sampled {
+                now: at(i64::from(n)),
+                command_id: Uuid::from_bytes([0x70 | n; 16]),
+            };
+            ready(kernel.handle::<Wallet, _, _>(&store, book, &sampled, &mut ()))
+        };
+        run(1, send("wallet", 1, any(Open { bonus: 50 }), None)).unwrap();
+        let held = run(2, send("wallet", 2, any(Hold { cents: 5 }), None))
+            .err()
+            .expect("the policy's step fails");
+        assert!(
+            matches!(
+                &held,
+                Failure::Downstream {
+                    error: StepError::Kernel(KernelError::Router(e)),
+                    ..
+                } if e.code == "PLAYER_BROKE"
+            ),
+            "{held:?}"
+        );
+        assert_eq!(log.lines().len(), 1, "{:?}", log.lines());
+        let sampled = Sampled {
+            now: at(9),
+            command_id: Uuid::from_bytes([0x79; 16]),
+        };
+        assert!(
+            ready(kernel.resume(&store, &sampled, &mut ())).is_err(),
+            "the position stayed, so the step runs again"
+        );
+        assert_eq!(
+            log.lines().len(),
+            2,
+            "dead-lettered again: {:?}",
+            log.lines()
+        );
+    }
+
+    /// A code the router knows, failed INTERNAL (UNHANDLED_HANDLER_ERROR:
+    /// what a handler's error without a code of its own becomes, a remote
+    /// child's included), is a bug too: `Recovery::Bug`, dead-lettered by
+    /// its code and args, at the origin and as a policy's step, whose
+    /// position moves past the trigger.
+    #[test]
+    fn a_routers_internal_code_is_a_dead_lettered_bug() {
+        use ::angzarr_embedded::next::angzarr_router::error::{codes, GrpcCode};
+        use ::angzarr_embedded::next::StepError;
+        let registry = faulty_under(codes::UNHANDLED_HANDLER_ERROR, GrpcCode::Internal);
+        let store = Mem::new();
+        let log = MemoryDeadLetters::new();
+        let kernel = ::angzarr_embedded::next::Kernel::new(&registry, &log);
+        let sampled = Sampled {
+            now: at(9),
+            command_id: Uuid::from_bytes([0x79; 16]),
+        };
+        let dead_lettered = |lines: &[String]| {
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            assert!(
+                lines[0].starts_with(::angzarr_embedded::next::DEAD_LETTER_PREFIX),
+                "{}",
+                lines[0]
+            );
+            assert!(
+                lines[0].contains("remote: UNHANDLED_HANDLER_ERROR seat=3"),
+                "its code and args: {}",
+                lines[0]
+            );
+            assert!(lines[0].contains("(command "), "the command: {}", lines[0]);
+        };
+
+        let origin = ready(kernel.handle_any(
+            &store,
+            send("remote", 3, any(Note {}), None),
+            &sampled,
+            &mut (),
+        ))
+        .err()
+        .expect("failed");
+        assert!(
+            matches!(
+                &origin,
+                Failure::Kernel(KernelError::Router(e)) if e.code == "UNHANDLED_HANDLER_ERROR"
+            ),
+            "{origin:?}"
+        );
+        assert_eq!(origin.recovery(), Recovery::Bug);
+        dead_lettered(&log.lines());
+
+        handle_in::<Wallet>(
+            &store,
+            &registry,
+            &log,
+            1,
+            send("wallet", 1, any(Open { bonus: 50 }), None),
+        )
+        .unwrap();
+        let log = MemoryDeadLetters::new();
+        let held = handle_in::<Wallet>(
+            &store,
+            &registry,
+            &log,
+            2,
+            send("wallet", 2, any(Hold { cents: 5 }), None),
+        )
+        .err()
+        .expect("the policy's step fails");
+        assert!(
+            matches!(
+                &held,
+                Failure::Downstream {
+                    error: StepError::Kernel(KernelError::Router(e)),
+                    ..
+                } if e.code == "UNHANDLED_HANDLER_ERROR"
+            ),
+            "{held:?}"
+        );
+        assert_eq!(held.recovery(), Recovery::Bug);
+        dead_lettered(&log.lines());
+
+        let log = MemoryDeadLetters::new();
+        let kernel = ::angzarr_embedded::next::Kernel::new(&registry, &log);
+        let resumed = ready(kernel.resume(&store, &sampled, &mut ())).expect("nothing left owed");
+        assert!(
+            resumed.steps().is_empty(),
+            "the position moved past the trigger"
+        );
+        assert!(log.lines().is_empty(), "{:?}", log.lines());
     }
 
     /// A source whose fact handler fails with a fault of the router's own
@@ -4570,7 +4776,7 @@ mod router {
                 .and_then(|c| c.page.as_ref())
                 .is_some_and(|p| matches!(p.body, Some(pb::command_page::Body::Fact(_))));
             match fact {
-                true => Err(CodedError::internal(
+                true => Err(CodedError::bug(
                     codes::UNHANDLED_HANDLER_ERROR,
                     "the fact handler failed",
                     [],
@@ -4589,13 +4795,11 @@ mod router {
         }
     }
 
-    /// A refusal fact its source fails on with any fault but having no
-    /// handler for it fails the step: it is not dead-lettered as an
-    /// unhandled refusal.
-    #[test]
-    fn a_refusal_fact_its_source_fails_on_fails_the_step() {
+    /// A registry with [`Picky`] as the source of a policy that sends the
+    /// wallet a `Hold` it refuses on each `Noted`, and a store with the
+    /// wallet opened.
+    fn picky() -> (Registry, Mem) {
         use ::angzarr_embedded::next::angzarr_router::router::CommandHandler;
-        use ::angzarr_embedded::next::StepError;
         let mut registry = registry();
         let picky: Box<dyn CommandHandler> = Box::new(Picky);
         registry.command_handler("picky", picky).unwrap();
@@ -4626,6 +4830,32 @@ mod router {
             send("wallet", 1, any(Open { bonus: 50 }), None),
         )
         .unwrap();
+        (registry, store)
+    }
+
+    /// The refusal fact's step failing on [`Picky`]'s fact handler.
+    fn assert_the_fact_step_failed<R: fmt::Debug>(failed: &Failure<R>) {
+        use ::angzarr_embedded::next::StepError;
+        assert!(
+            matches!(
+                failed,
+                Failure::Downstream {
+                    error: StepError::Kernel(KernelError::Router(e)),
+                    ..
+                } if e.code == "UNHANDLED_HANDLER_ERROR"
+            ),
+            "{failed:?}"
+        );
+    }
+
+    /// A refusal fact its source fails on with a bug, not for having no
+    /// handler for it, fails the step as that bug: dead-lettered as the
+    /// source's handler's bug (never as an unhandled refusal), and the
+    /// policy's position moves past the trigger.
+    #[test]
+    fn a_refusal_fact_its_source_fails_on_fails_the_step() {
+        let (registry, store) = picky();
+        let log = MemoryDeadLetters::new();
         let kernel = ::angzarr_embedded::next::Kernel::new(&registry, &log);
         let sampled = Sampled {
             now: at(9),
@@ -4639,17 +4869,58 @@ mod router {
         ))
         .err()
         .expect("the refusal fact's step fails");
+        assert_the_fact_step_failed(&failed);
+        let lines = log.lines();
+        assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(
-            matches!(
-                &failed,
-                Failure::Downstream {
-                    error: StepError::Kernel(KernelError::Router(e)),
-                    ..
-                } if e.code == "UNHANDLED_HANDLER_ERROR"
-            ),
-            "{failed:?}"
+            lines[0].contains("picky: UNHANDLED_HANDLER_ERROR"),
+            "the source's handler's bug: {}",
+            lines[0]
+        );
+
+        let log = MemoryDeadLetters::new();
+        let kernel = ::angzarr_embedded::next::Kernel::new(&registry, &log);
+        let resumed = ready(kernel.resume(&store, &sampled, &mut ())).expect("nothing left owed");
+        assert!(
+            resumed.steps().is_empty(),
+            "the position moved past the trigger"
         );
         assert!(log.lines().is_empty(), "{:?}", log.lines());
+    }
+
+    /// Under `OnPolicyBug::Stay`, a refusal fact its source fails on with a
+    /// bug is still dead-lettered, but the policy's position stays, so a
+    /// resume runs the step again.
+    #[test]
+    fn under_stay_a_refusal_fact_its_source_fails_on_holds_the_position() {
+        use ::angzarr_embedded::next::{Kernel, OnPolicyBug};
+        let (registry, store) = picky();
+        let log = MemoryDeadLetters::new();
+        let kernel = Kernel::new(&registry, &log).on_policy_bug(OnPolicyBug::Stay);
+        let sampled = Sampled {
+            now: at(9),
+            command_id: Uuid::from_bytes([0x79; 16]),
+        };
+        let failed = ready(kernel.handle_any(
+            &store,
+            send("picky", 2, any(Note {}), None),
+            &sampled,
+            &mut (),
+        ))
+        .err()
+        .expect("the refusal fact's step fails");
+        assert_the_fact_step_failed(&failed);
+        assert_eq!(log.lines().len(), 1, "{:?}", log.lines());
+        let resumed = ready(kernel.resume(&store, &sampled, &mut ()))
+            .err()
+            .expect("the position stayed, so the step runs again");
+        assert_the_fact_step_failed(&resumed);
+        assert_eq!(
+            log.lines().len(),
+            2,
+            "dead-lettered again: {:?}",
+            log.lines()
+        );
     }
 
     /// A domain's input goes through the router too: a command type the

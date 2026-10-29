@@ -55,6 +55,7 @@ fn the_domain_tables_deserialize() {
                 ..Supervision::default()
             },
             store: StoreConfig::default(),
+            policy: PolicyConfig::default(),
         }
     );
 }
@@ -84,6 +85,9 @@ fn the_documented_toml_reads() {
 
         [store]
         path = "angzarr.db"
+
+        [policy]
+        on_bug = "move_past"
     "#;
     let config: HostConfig = toml::from_str(text).unwrap();
     assert_eq!(config.domains.len(), 3);
@@ -96,6 +100,7 @@ fn the_documented_toml_reads() {
     assert_eq!(config.supervision.handshake_timeout_ms, 10_000);
     assert_eq!(config.supervision.call_timeout_ms, 30_000);
     assert_eq!(config.store, StoreConfig::default());
+    assert_eq!(config.policy.on_bug, OnPolicyBug::MovePast);
     let memory: HostConfig = toml::from_str("[store]\nin_memory = true\n").unwrap();
     assert!(memory.store.in_memory);
     assert!(memory.domains.is_empty());
@@ -112,6 +117,48 @@ fn an_unknown_key_is_refused() {
     }"#;
     assert!(serde_json::from_str::<HostConfig>(text).is_err());
     assert!(serde_json::from_str::<HostConfig>(r#"{ "domains": [] }"#).is_err());
+}
+
+/// `[policy] on_bug` is what a policy step that hits a bug does with the
+/// policy's position: `"move_past"` the trigger (the default, when the key
+/// or the table is left out) or `"stay"` at it, so a resume runs it again.
+#[test]
+fn the_policy_table_sets_what_a_policy_bug_does_with_the_position() {
+    let on_bug = |text: &str| toml::from_str::<HostConfig>(text).map(|c| c.policy.on_bug);
+    assert_eq!(
+        on_bug("[policy]\non_bug = \"stay\"\n"),
+        Ok(OnPolicyBug::Stay)
+    );
+    assert_eq!(
+        on_bug("[policy]\non_bug = \"move_past\"\n"),
+        Ok(OnPolicyBug::MovePast)
+    );
+    assert_eq!(on_bug("[policy]\n"), Ok(OnPolicyBug::MovePast));
+    assert_eq!(on_bug(""), Ok(OnPolicyBug::MovePast));
+    assert_eq!(PolicyConfig::default().on_bug, OnPolicyBug::MovePast);
+}
+
+/// An `on_bug` that is neither `"move_past"` nor `"stay"` is refused, and
+/// so is an unknown key in `[policy]`.
+#[test]
+fn a_bad_policy_setting_is_refused() {
+    assert!(toml::from_str::<HostConfig>("[policy]\non_bug = \"sometimes\"\n").is_err());
+    assert!(toml::from_str::<HostConfig>("[policy]\non_bug = \"MovePast\"\n").is_err());
+    assert!(toml::from_str::<HostConfig>("[policy]\non_bugs = \"stay\"\n").is_err());
+}
+
+/// The setting writes back as it reads.
+#[test]
+fn the_policy_setting_round_trips() {
+    let config = HostConfig {
+        policy: PolicyConfig {
+            on_bug: OnPolicyBug::Stay,
+        },
+        ..HostConfig::default()
+    };
+    let text = toml::to_string(&config).unwrap();
+    assert!(text.contains("on_bug = \"stay\""), "{text}");
+    assert_eq!(toml::from_str::<HostConfig>(&text).unwrap(), config);
 }
 
 #[test]

@@ -295,8 +295,7 @@ pub fn rejection(rejection: &dyn Diagnostic, refusal: Option<Any>) -> HandlerErr
         };
         (name.to_string(), value)
     });
-    let error =
-        CodedError::rejection_precondition_failed(rejection.code(), &rejection.to_string(), extras);
+    let error = CodedError::rejection(rejection.code(), &rejection.to_string(), extras);
     HandlerError::Coded(match refusal {
         Some(object) => error.with_refusal(object),
         None => error,
@@ -341,11 +340,7 @@ pub(crate) fn flat_args(diagnostic: &dyn Diagnostic) -> Vec<(String, String)> {
 pub(crate) fn policy_failed(failure: &dyn Diagnostic) -> HandlerError {
     let extras = std::iter::once((POLICY_REASON.to_string(), failure.code().to_string()))
         .chain(flat_args(failure));
-    HandlerError::Coded(CodedError::internal(
-        POLICY_FAILED,
-        &failure.to_string(),
-        extras,
-    ))
+    HandlerError::Coded(CodedError::bug(POLICY_FAILED, &failure.to_string(), extras))
 }
 
 /// The policy's failure the router carries, if `error` is one: its code
@@ -459,7 +454,7 @@ impl angzarr_router::PayloadUpcaster for CommandUpcaster {
                 UpcastError::Payload(e) => (payload.type_url.clone(), Report::of(e)),
                 UpcastError::Rule { source, error } => (source.clone(), error.clone()),
             };
-            CodedError::internal(
+            CodedError::bug(
                 UPCAST_FAILED,
                 &reason.to_string(),
                 [
