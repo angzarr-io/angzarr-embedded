@@ -34,6 +34,12 @@ impl AsRef<Path> for Scratch {
     }
 }
 
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 #[test]
 fn a_scratch_directory_is_gone_once_dropped() {
     let dir = scratch("dropped");
@@ -165,7 +171,6 @@ fn the_store_is_the_configured_sqlite_file() {
         .collect();
     assert_eq!(events, [Some(noted(0)), Some(noted(1))]);
     drop(app);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
