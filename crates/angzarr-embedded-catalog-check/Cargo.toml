@@ -19,7 +19,7 @@ angzarr-embedded-diagnostic = { path = "../angzarr-embedded-diagnostic" }
 angzarr-embedded-graph = { path = "../angzarr-embedded-graph" }
 angzarr-store-sqlite = { path = "../angzarr-store-sqlite" }
 # angzarr-ports' Arg, to read the adapter's errors, which are in its style.
-angzarr-ports = { git = "https://github.com/angzarr-io/angzarr-project", rev = "581d23eead50c581fb6df21fd6cc4b468407616b" }
+angzarr-ports = { git = "https://github.com/angzarr-io/angzarr-project", rev = "57f029d09d531f4825bc215499cdeabde01538dc" }
 angzarr-embedded-yaml = { path = "../angzarr-embedded-yaml" }
 fluent-syntax = "0.12"
 

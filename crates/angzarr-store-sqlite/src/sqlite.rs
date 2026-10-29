@@ -724,15 +724,6 @@ impl<C: DerefMut<Target = SqliteConnection>> Exec<'_, C> {
         rows::snapshot(&cover, &bytes).map(Some)
     }
 
-    async fn commit_position(&mut self) -> Result<u64, StoreError> {
-        let rows = self.rows(statements::COMMIT_POSITION, []).await?;
-        let next: i64 = match rows.first() {
-            Some(row) => row.try_get(0).map_err(unavailable)?,
-            None => 0,
-        };
-        Ok(next.unsigned_abs())
-    }
-
     /// The events of a write: checked against the stream as read in its
     /// edition, then inserted at the commit position, raised once.
     async fn append(&mut self, append: Append<'_>) -> Result<u64, StoreError> {
@@ -942,10 +933,6 @@ impl EventStore for SqliteStore {
 
     async fn covers(&self, domain: &str) -> Result<Vec<Cover>, StoreError> {
         self.conn.exec().await.covers(domain).await
-    }
-
-    async fn commit_position(&self) -> Result<u64, StoreError> {
-        self.conn.exec().await.commit_position().await
     }
 }
 

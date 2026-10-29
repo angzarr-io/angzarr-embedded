@@ -139,10 +139,6 @@ impl EventStore for Recording {
     async fn covers(&self, domain: &str) -> Result<Vec<Cover>, StoreError> {
         self.inner.covers(domain).await
     }
-
-    async fn commit_position(&self) -> Result<u64, StoreError> {
-        self.inner.commit_position().await
-    }
 }
 
 impl SnapshotStore for Recording {

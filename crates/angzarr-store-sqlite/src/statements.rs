@@ -105,9 +105,6 @@ pub(crate) const CORRELATED_STREAMS: &str =
      AND (edition = '' OR edition = ?2) AND (?3 IS NULL OR domain = ?3) \
      ORDER BY domain, root";
 
-/// Row `(next)`: the store's commit position, the next a write lands at.
-pub(crate) const COMMIT_POSITION: &str = "SELECT next FROM commit_position";
-
 /// Raise the commit position past a write's events: row `(position)`, the
 /// one they land at.
 pub(crate) const RAISE_COMMIT_POSITION: &str =

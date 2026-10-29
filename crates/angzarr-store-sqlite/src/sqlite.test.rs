@@ -2,8 +2,10 @@
 //! but editions, the same checks `MemoryStore` passes, so angzarr-embedded and angzarr
 //! behave alike over either; then what is particular to a store on a file:
 //! opening, WAL, migrations (an existing database's included), integrity,
-//! damage, purges and reads racing writers, the commit position as stamped,
-//! change tokens, and `Send`.
+//! damage, purges and reads racing writers, change tokens, and `Send`.
+//! There is no store-wide position (decision 14.35): ordering is per
+//! stream, and a migrated database keeps no trace of the released
+//! adapter's commit position.
 //!
 //! **Editions are per-stream forks only** in this adapter: an edition
 //! stream is forked by a creation event as its first own event, at or below
@@ -134,7 +136,6 @@ mod base {
         a_store_keeps_the_newest_snapshot_per_stream,
         a_position_is_zero_until_put_then_the_last_put,
         positions_are_per_handler_and_per_stream,
-        the_commit_position_rises_with_every_commit,
         a_write_lands_its_events_and_positions_together,
         a_refused_write_lands_nothing,
         a_position_only_write_is_a_step_with_no_stream,
@@ -159,7 +160,6 @@ mod purge {
 /// ruling 2026-10-28). The `editions` section needs the `Editions` port,
 /// which this store does not implement, so its checks cannot be stamped
 /// here; this placeholder names them, ignored, until they are:
-/// `fork_point_is_mains_first_sequence_after_a_commit_position`,
 /// `list_editions_derives_each_edition_from_its_fork_events`,
 /// `an_edition_deletion_is_recorded_like_any_event`,
 /// `a_deleted_stream_is_removed_with_every_row_of_it`,
@@ -871,6 +871,65 @@ fn every_migration_runs_inside_the_open_transaction() {
 //   nothing again.
 // - A store opened read-only never migrates: a released database read that
 //   way is refused as unmigrated until a writer has opened it.
+// - A new 0004 drops 0002's store-wide commit position (decision 14.35:
+//   ordering is per stream, there is no global position): the
+//   `commit_position` table and `events.position` (SQLite's DROP COLUMN,
+//   3.35 and later). 0002 itself stays, byte for byte.
+
+/// The tables of the database at `path`, and the columns of its `events`,
+/// each sorted.
+async fn schema(path: &Path) -> (Vec<String>, Vec<String>) {
+    let mut conn = raw(path).await;
+    let tables =
+        sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+            .fetch_all(&mut conn)
+            .await
+            .unwrap();
+    let columns = sqlx::query_scalar("SELECT name FROM pragma_table_info('events') ORDER BY name")
+        .fetch_all(&mut conn)
+        .await
+        .unwrap();
+    conn.close().await.unwrap();
+    (tables, columns)
+}
+
+/// What 0002 added and 0004 drops: nothing of either is left.
+fn assert_no_store_wide_position((tables, columns): &(Vec<String>, Vec<String>)) {
+    assert!(
+        !tables.iter().any(|t| t == "commit_position"),
+        "no commit_position table: {tables:?}"
+    );
+    assert!(
+        !columns.iter().any(|c| c == "position"),
+        "events has no position column: {columns:?}"
+    );
+}
+
+/// A database the store makes, migrated, keeps no store-wide position:
+/// no `commit_position` table, no `position` column on `events`, and
+/// every other column the store reads still there.
+#[tokio::test]
+async fn a_migrated_database_keeps_no_store_wide_position() {
+    let path = database();
+    drop(SqliteStore::open(&path).await.unwrap());
+    let found = schema(&path).await;
+    assert_no_store_wide_position(&found);
+    assert_eq!(
+        found.1,
+        [
+            "command_id",
+            "correlation_id",
+            "domain",
+            "edition",
+            "page",
+            "recorded_at",
+            "root",
+            "sequence"
+        ],
+        "the events columns"
+    );
+    remove(&path);
+}
 
 /// The released schema: migrations 0001 and 0002, as the released adapter
 /// applied them.
@@ -884,7 +943,8 @@ fn released() -> Migrator {
 /// A database at `path` exactly as the released adapter left it: migrated
 /// to 0002, in WAL, holding `tasks` stream 1 with two events of correlation
 /// `0xC1`, committed in one append at commit position 1 (so the position's
-/// one row says 2, the next).
+/// one row says 2, the next). The position is populated as the released
+/// adapter left it, so the migration dropping it drops real data.
 async fn released_database(path: &Path) -> Vec<EventPage> {
     let mut conn = SqliteConnectOptions::new()
         .filename(path)
@@ -951,8 +1011,8 @@ fn the_released_migrations_are_unchanged() {
 /// A database the released adapter made opens migrated, its events served
 /// by every port as if this adapter had written them: the pages back as
 /// written, found by correlation and by time (the backfilled columns), no
-/// handler positioned, the outbox empty, the commit position as the old row
-/// said.
+/// handler positioned, the outbox empty, the stream continuing at its own
+/// next sequence; and the released commit position gone, table and column.
 #[tokio::test]
 async fn a_database_at_the_released_schema_opens_migrated_and_reads_its_events_by_correlation_and_time(
 ) {
@@ -984,8 +1044,14 @@ async fn a_database_at_the_released_schema_opens_migrated_and_reads_its_events_b
     };
     assert_eq!(store.position(key).await, Ok(0), "no handler positioned");
     assert_eq!(store.pending(10).await, Ok(vec![]), "the outbox empty");
-    assert_eq!(store.commit_position().await, Ok(2), "as the old row said");
+    let next = correlated(2, 3, 0xC1);
+    assert_eq!(
+        append(&store, s, 2, std::slice::from_ref(&next)).await,
+        Ok(3),
+        "the stream continues at its own next sequence"
+    );
     drop(store);
+    assert_no_store_wide_position(&schema(&path).await);
     // Reopened, nothing is migrated or filled again, and all of it holds.
     let store = SqliteStore::open(&path).await.unwrap();
     assert_eq!(
@@ -994,6 +1060,11 @@ async fn a_database_at_the_released_schema_opens_migrated_and_reads_its_events_b
             .await
             .map(|books| books.len()),
         Ok(1)
+    );
+    assert_eq!(
+        pages(&store, s).await,
+        [written.as_slice(), &[next]].concat(),
+        "the released events, then the new"
     );
     drop(store);
     remove(&path);
@@ -1597,96 +1668,23 @@ async fn a_writer_waits_on_no_open_read_unit() {
     remove(&path);
 }
 
-// ------------------------------------------------------ commit position
+// ------------------------------------------------------ refused writes
 
-/// The ports' two-handle commit position check on a file, the second
-/// handle opened to write or only to read.
-mod position_on_file {
-    use angzarr_ports::contract as checks;
-
-    use super::{on_file, read_only_store, writable};
-
-    #[tokio::test]
-    async fn the_commit_position_counts_every_handles_commits() {
-        on_file(
-            writable,
-            checks::the_commit_position_counts_every_handles_commits,
-        )
-        .await;
-    }
-
-    #[tokio::test]
-    async fn a_read_only_stores_commit_position_counts_every_handles_commits() {
-        on_file(
-            read_only_store,
-            checks::the_commit_position_counts_every_handles_commits,
-        )
-        .await;
-    }
-}
-
-/// Every event's commit position, as `(domain, sequence, position)`, in
-/// domain and sequence order.
-async fn positions(store: &mut SqliteStore) -> Vec<(String, i64, i64)> {
-    sqlx::query_as("SELECT domain, sequence, position FROM events ORDER BY domain, sequence")
-        .fetch_all(store.conn.get_mut())
-        .await
-        .unwrap()
-}
-
+/// A refused write lands nothing on the file: no event row at all, not
+/// even one a read would not show.
 #[tokio::test]
-async fn every_event_is_stamped_with_the_position_it_was_committed_at() {
-    let path = database();
-    let mut store = SqliteStore::open(&path).await.unwrap();
-    let empty = store.commit_position().await.unwrap();
-    append(
-        &store,
-        main_stream("account", 1),
-        0,
-        &[page(0, 1), page(1, 1)],
-    )
-    .await
-    .unwrap();
-    let first = store.commit_position().await.unwrap();
-    append(&store, main_stream("ledger", 1), 0, &[page(0, 2)])
-        .await
-        .unwrap();
-    let second = store.commit_position().await.unwrap();
-    let stamped = positions(&mut store).await;
-    let at = |i: usize| u64::try_from(stamped[i].2).unwrap();
-    assert_eq!(stamped.len(), 3);
-    assert_eq!(at(0), at(1), "one write, one position");
-    assert!(
-        empty <= at(0) && at(0) < first,
-        "{empty} <= {} < {first}",
-        at(0)
-    );
-    assert!(
-        first <= at(2) && at(2) < second,
-        "{first} <= {} < {second}",
-        at(2)
-    );
-    // Kept on the file, and never lowered by a purge.
-    store.purge(main_stream("account", 1)).await.unwrap();
-    drop(store);
-    let reopened = SqliteStore::open(&path).await.unwrap();
-    assert_eq!(reopened.commit_position().await, Ok(second));
-    drop(reopened);
-    remove(&path);
-}
-
-/// A refused write lands nothing: no event stamped, no position moved.
-#[tokio::test]
-async fn a_refused_write_stamps_nothing_and_moves_no_position() {
+async fn a_refused_write_leaves_no_event_row() {
     let mut store = SqliteStore::open_in_memory().await.unwrap();
-    let before = store.commit_position().await.unwrap();
     let refused = append(&store, main_stream("account", 1), 3, &[page(3, 1)]).await;
     assert!(
         matches!(refused, Err(StoreError::Conflict { .. })),
         "{refused:?}"
     );
-    assert_eq!(store.commit_position().await, Ok(before));
-    assert_eq!(positions(&mut store).await, vec![]);
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")
+        .fetch_one(store.conn.get_mut())
+        .await
+        .unwrap();
+    assert_eq!(rows, 0);
 }
 
 // ------------------------------------------------------------- watching
@@ -1881,14 +1879,15 @@ async fn a_fork_lands_at_or_below_mains_head_once() {
 }
 
 /// Every statement a handle sends is counted, `BEGIN` and `COMMIT`
-/// included: a write of one event to a stream is five (`BEGIN`, its head,
-/// the commit position, the insert, `COMMIT`); a read of it from 0 is one.
+/// included: a write of one event to a stream is four (`BEGIN`, its head,
+/// the insert, `COMMIT`); a read of it from 0 is one. There is no
+/// store-wide position to raise (decision 14.35).
 #[tokio::test]
 async fn a_handle_counts_the_statements_it_sends() {
     let store = SqliteStore::open_in_memory().await.unwrap();
     assert_eq!(store.round_trips(), 0);
     append(&store, stream(1), 0, &[page(0, 1)]).await.unwrap();
-    assert_eq!(store.round_trips(), 5);
+    assert_eq!(store.round_trips(), 4);
     store.read(stream(1), 0, None).await.unwrap();
-    assert_eq!(store.round_trips(), 6);
+    assert_eq!(store.round_trips(), 5);
 }

@@ -250,10 +250,6 @@ mod dedup {
         ) -> Result<Vec<crate::next::v1::Cover>, crate::next::StoreError> {
             self.store.covers(domain).await
         }
-
-        async fn commit_position(&self) -> Result<u64, crate::next::StoreError> {
-            self.store.commit_position().await
-        }
     }
 
     impl crate::next::SnapshotStore for CommitLandsAfterFirstRead {
