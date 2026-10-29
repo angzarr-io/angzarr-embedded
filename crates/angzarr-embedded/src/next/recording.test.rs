@@ -45,10 +45,7 @@ pub struct Recording {
 
 /// The failure a test injects: the store could not say.
 fn injected() -> StoreError {
-    StoreError::Unavailable(Cause::new(
-        "angzarr-store-sqlite-unavailable",
-        "injected by the test",
-    ))
+    StoreError::Unavailable(Cause::new("angzarr-store-sqlite-unavailable", []))
 }
 
 impl Recording {

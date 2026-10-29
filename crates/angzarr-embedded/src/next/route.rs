@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex};
 use angzarr_embedded_diagnostic::{Arg, Diagnostic, Report};
 use angzarr_proto::v1::ConflictResolution;
 use angzarr_router::domain::DomainDispatch;
-use angzarr_router::error::{CodedError, GrpcCode, HandlerError};
+use angzarr_router::error::{BusinessStatus, CodedError, GrpcCode, HandlerError};
 use angzarr_router::rebuild::{FoldFailure, Rebuilder};
 use prost::Message;
 use prost_types::{Any, Timestamp};
@@ -161,10 +161,8 @@ const EXTRAS: &[&str] = &[
     angzarr_router::error::extras::ACTUAL_DOMAIN,
     angzarr_router::error::extras::EXPECTED_EDITION,
     angzarr_router::error::extras::ACTUAL_EDITION,
-    angzarr_router::error::extras::REASON,
     angzarr_router::error::extras::FIRST_SEQUENCE,
     angzarr_router::error::extras::LAST_SEQUENCE,
-    angzarr_router::error::extras::FOLD_MESSAGE,
 ];
 
 /// `error`'s metadata as args, by the router's own key names.
@@ -215,12 +213,13 @@ impl Rejected {
     /// The router's rejection, in the kernel's terms.
     pub(crate) fn of(error: &CodedError) -> Rejected {
         let report = match reason_code(&error.code) {
-            Some(code) => router_args(error).into_iter().fold(
-                Report::new(code, error.message.clone()),
-                |report, (name, arg)| report.arg(name, arg),
-            ),
+            Some(code) => router_args(error)
+                .into_iter()
+                .fold(Report::new(code, String::new()), |report, (name, arg)| {
+                    report.arg(name, arg)
+                }),
             None => error.extras.iter().fold(
-                Report::new(intern(&error.code), error.message.clone()),
+                Report::new(intern(&error.code), String::new()),
                 |report, (name, value)| report.arg(intern(name), value.as_str()),
             ),
         };
@@ -233,6 +232,17 @@ impl Rejected {
     /// The refusal as a report: its code, args and English.
     pub fn report(&self) -> &Report {
         &self.report
+    }
+
+    /// As a refused policy receives it, angzarr's `RefusalResponse`: the
+    /// typed refusal object, or an untyped refusal's code and args.
+    pub fn response(&self) -> angzarr_proto::v1::RefusalResponse {
+        angzarr_proto::v1::RefusalResponse {
+            reason: self
+                .refusal
+                .clone()
+                .map(angzarr_proto::v1::refusal_response::Reason::Refusal),
+        }
     }
 
     /// The typed refusal object, packed, if the handler refused with one.
@@ -311,7 +321,7 @@ pub fn rejection(rejection: &dyn Diagnostic, refusal: Option<Any>) -> HandlerErr
         };
         (name.to_string(), value)
     });
-    let error = CodedError::rejection(rejection.code(), &rejection.to_string(), extras);
+    let error = CodedError::rejection(BusinessStatus::FailedPrecondition, rejection.code(), extras);
     HandlerError::Coded(match refusal {
         Some(object) => error.with_refusal(object),
         None => error,
@@ -324,12 +334,11 @@ pub fn rejection(rejection: &dyn Diagnostic, refusal: Option<Any>) -> HandlerErr
 /// UNHANDLED_HANDLER_ERROR with the handler's code as its cause.
 pub(crate) fn internal(
     code: &str,
-    message: &str,
+    _message: &str,
     extras: impl IntoIterator<Item = (String, String)>,
 ) -> CodedError {
     CodedError {
         code: code.to_string(),
-        message: message.to_string(),
         extras: extras.into_iter().collect(),
         grpc: GrpcCode::Internal,
         refusal: None,
@@ -390,7 +399,7 @@ pub(crate) fn policy_failure(error: &CodedError) -> Option<Report> {
             .iter()
             .filter(|(name, _)| name.as_str() != POLICY_REASON)
             .fold(
-                Report::new(intern(&reason), error.message.clone()),
+                Report::new(intern(&reason), String::new()),
                 |report, (name, value)| report.arg(intern(name), value.as_str()),
             ),
     )
@@ -464,6 +473,9 @@ const UPCAST_FAILED: &str = "ANGZARR_EMBEDDED_UPCAST_FAILED";
 /// The failed upcast's source type, in its metadata.
 const UPCAST_SOURCE: &str = "source";
 
+/// The failed upcast rule's own code, in its metadata.
+const UPCAST_REASON: &str = "reason";
+
 /// The upcast failure the router carries, if `error` is one: the rule from
 /// its source and the rule's own reason.
 pub(crate) fn upcast_failure(error: &CodedError) -> Option<UpcastError> {
@@ -471,10 +483,10 @@ pub(crate) fn upcast_failure(error: &CodedError) -> Option<UpcastError> {
         return None;
     }
     let extra = |key: &str| error.extras.get(key).cloned().unwrap_or_default();
-    let reason = extra(angzarr_router::error::extras::REASON);
+    let reason = extra(UPCAST_REASON);
     Some(UpcastError::Rule {
         source: extra(UPCAST_SOURCE),
-        error: Report::new(intern(&reason), error.message.clone()),
+        error: Report::new(intern(&reason), String::new()),
     })
 }
 
@@ -493,10 +505,7 @@ impl angzarr_router::PayloadUpcaster for CommandUpcaster {
                 &reason.to_string(),
                 [
                     (UPCAST_SOURCE.to_string(), source),
-                    (
-                        angzarr_router::error::extras::REASON.to_string(),
-                        reason.code().to_string(),
-                    ),
+                    (UPCAST_REASON.to_string(), reason.code().to_string()),
                 ],
             )
         })
@@ -535,9 +544,9 @@ pub(crate) fn table<D: Domain>(
                 if is_nothing(page) {
                     continue;
                 }
-                let failed = |message: String| FoldFailure {
+                let failed = |_message: String| FoldFailure {
                     page_index: Some(index),
-                    message,
+                    cause: None,
                 };
                 let sent = page.payload.clone().unwrap_or_default();
                 let any = fold_upcaster

@@ -532,8 +532,10 @@ impl<R: angzarr_embedded_diagnostic::Diagnostic> Rejection<R> {
     /// message), and the en-US message.
     pub fn response(&self) -> v1::RefusalResponse {
         v1::RefusalResponse {
-            refusal: self.refusal().cloned(),
-            message: self.to_string(),
+            reason: self
+                .refusal()
+                .cloned()
+                .map(v1::refusal_response::Reason::Refusal),
         }
     }
 }
@@ -667,12 +669,15 @@ impl<C> Refusal<C> {
     /// The typed refusal object, as `T`, if the target refused with one
     /// and it is a `T`.
     pub fn refusal<T: DomainMessage>(&self) -> Option<T> {
-        __decode(self.response.refusal.as_ref()?).ok().flatten()
+        match self.response.reason.as_ref()? {
+            v1::refusal_response::Reason::Refusal(object) => __decode(object).ok().flatten(),
+            v1::refusal_response::Reason::Diagnostic(_) => None,
+        }
     }
 
     /// The refusal's message.
     pub fn message(&self) -> &str {
-        &self.response.message
+        ""
     }
 }
 
@@ -785,7 +790,7 @@ impl PolicyContext {
 /// `RefusalResponse` and `Refusal`, decision 14.31), as angzarr-router
 /// carries them.
 pub mod v1 {
-    pub use angzarr_router::pb::{CommandRefused, Refusal, RefusalResponse};
+    pub use angzarr_router::pb::{refusal_response, CommandRefused, Refusal, RefusalResponse};
 }
 
 /// A projector written in the markup (`#[projector]`): one source domain,
@@ -1035,9 +1040,9 @@ fn input<T: DomainMessage>(any: &Any) -> Result<T, angzarr_router::error::Handle
     match __decode::<T>(any) {
         Ok(Some(value)) => Ok(value),
         Ok(None) | Err(_) => Err(angzarr_router::error::HandlerError::Coded(
-            angzarr_router::error::CodedError::invalid_argument(
+            angzarr_router::error::CodedError::rejection(
+                angzarr_router::error::BusinessStatus::InvalidArgument,
                 angzarr_router::error::codes::ANY_DECODE_FAILED,
-                "the payload does not decode as its type",
                 [(
                     angzarr_router::error::extras::TYPE_URL.to_string(),
                     any.type_url.clone(),
@@ -1222,7 +1227,13 @@ pub fn __pass_through(refusal: &v1::Refusal) -> Any {
     });
     super::payload::pack(&v1::CommandRefused {
         command: refusal.command.clone(),
-        refusal: refusal.response.as_ref().and_then(|r| r.refusal.clone()),
+        refusal: refusal
+            .response
+            .as_ref()
+            .and_then(|r| match r.reason.as_ref()? {
+                v1::refusal_response::Reason::Refusal(object) => Some(object.clone()),
+                v1::refusal_response::Reason::Diagnostic(_) => None,
+            }),
         trigger,
     })
 }

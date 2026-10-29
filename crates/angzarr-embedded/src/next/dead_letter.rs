@@ -28,9 +28,8 @@
 
 use std::sync::Mutex;
 
-use angzarr_embedded_diagnostic::Diagnostic;
 use angzarr_proto::v1::angzarr_dead_letter::Payload;
-use angzarr_proto::v1::{AngzarrDeadLetter, CommandBook};
+use angzarr_proto::v1::{AngzarrDeadLetter, CommandBook, Diagnostic};
 use angzarr_router::error::CodedError;
 
 use super::route::flat_args;
@@ -54,7 +53,11 @@ pub trait DeadLetterLog: Send + Sync {
 pub fn dead_letter_line(letter: &AngzarrDeadLetter) -> String {
     let mut line = format!(
         "{DEAD_LETTER_PREFIX} {}: {}",
-        letter.source_component, letter.rejection_reason
+        letter.source_component,
+        letter
+            .reason
+            .as_ref()
+            .map_or("", |reason| reason.code.as_str())
     );
     let mut metadata: Vec<_> = letter.metadata.iter().collect();
     metadata.sort();
@@ -101,7 +104,10 @@ pub(crate) fn write_dead_letter(
 ) {
     log.write(&dead_letter_line(&AngzarrDeadLetter {
         payload: Some(Payload::RejectedCommand(book)),
-        rejection_reason: reason.to_string(),
+        reason: Some(Diagnostic {
+            code: reason.to_string(),
+            args: Default::default(),
+        }),
         source_component: component.to_string(),
         ..AngzarrDeadLetter::default()
     }));
@@ -115,11 +121,14 @@ pub(crate) fn write_policy_failure(
     log: &dyn DeadLetterLog,
     payload: Payload,
     component: &str,
-    failure: &dyn Diagnostic,
+    failure: &dyn angzarr_embedded_diagnostic::Diagnostic,
 ) {
     log.write(&dead_letter_line(&AngzarrDeadLetter {
         payload: Some(payload),
-        rejection_reason: failure.code().to_string(),
+        reason: Some(Diagnostic {
+            code: failure.code().to_string(),
+            args: Default::default(),
+        }),
         metadata: flat_args(failure).into_iter().collect(),
         source_component: component.to_string(),
         ..AngzarrDeadLetter::default()
@@ -137,7 +146,10 @@ pub(crate) fn write_handler_fault(
 ) {
     log.write(&dead_letter_line(&AngzarrDeadLetter {
         payload: Some(Payload::RejectedCommand(book)),
-        rejection_reason: error.code.clone(),
+        reason: Some(Diagnostic {
+            code: error.code.clone(),
+            args: Default::default(),
+        }),
         metadata: error.extras.clone().into_iter().collect(),
         source_component: component.to_string(),
         ..AngzarrDeadLetter::default()

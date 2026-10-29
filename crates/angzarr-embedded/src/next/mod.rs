@@ -294,17 +294,11 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn angzarr_embedded_diagnostic::D
             found: 3,
         },
         StoreError::MalformedStream { stream: boxed() },
-        StoreError::Unavailable(Cause::new(
-            "angzarr-store-sqlite-unavailable",
-            "the database failed: disk I/O error",
-        )),
+        StoreError::Unavailable(Cause::new("angzarr-store-sqlite-unavailable", [])),
         StoreError::Unreadable {
             stream: boxed(),
             sequence: 0,
-            reason: Cause::new(
-                "angzarr-store-sqlite-undecodable",
-                "a stored value does not decode: buffer underflow",
-            ),
+            reason: Cause::new("angzarr-store-sqlite-undecodable", []),
         },
         StoreError::EditionNotForked { stream: boxed() },
         StoreError::EditionNotFound {

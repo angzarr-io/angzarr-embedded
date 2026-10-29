@@ -37,7 +37,7 @@
 use std::convert::Infallible;
 use std::fmt;
 
-use ::angzarr_embedded::next::markup::v1::RefusalResponse;
+use ::angzarr_embedded::next::markup::v1::{refusal_response, RefusalResponse};
 use ::angzarr_embedded::next::markup::{
     self, assert_step_idempotent, CommandContext, CommandRefused, Commands, Context, DomainMessage,
     Emit, Policy, PolicyContext, ProcessManager, ProjectionContext, Record, Refusal, Refuses,
@@ -1267,16 +1267,31 @@ fn opened(registry: &Registry, bonus: i64) -> Stream<Wallet> {
 
 /// The refusal `failure` is, as its caller receives it: its code and its
 /// English.
-fn rejection(failure: Failure<Rejected>) -> (&'static str, String) {
+fn rejection(failure: Failure<Rejected>) -> (&'static str, Vec<(&'static str, String)>) {
     match failure {
         Failure::Rejected(rejected) => said(&rejected),
         other => panic!("refused by the domain, not {other:?}"),
     }
 }
 
-/// What `diagnostic` says: its code and its English.
-fn said(diagnostic: &dyn Diagnostic) -> (&'static str, String) {
-    (diagnostic.code(), diagnostic.to_string())
+/// What `diagnostic` says: its code and its args, each as text, by name
+/// (decision 14.37: a key and a map, never its English). An arg the
+/// router carried is text; the handler's own may be a number.
+fn said(diagnostic: &dyn Diagnostic) -> (&'static str, Vec<(&'static str, String)>) {
+    let args = diagnostic
+        .args()
+        .into_iter()
+        .map(|(name, arg)| {
+            let text = match arg {
+                Arg::Int(n) => n.to_string(),
+                Arg::Uint(n) => n.to_string(),
+                Arg::Str(s) => s,
+                Arg::Nested(cause) => cause.code().to_string(),
+            };
+            (name, text)
+        })
+        .collect();
+    (diagnostic.code(), args)
 }
 
 /// The wallet as its fields would be: open, not closed, not rewarded,
@@ -1299,8 +1314,32 @@ fn context(n: u8) -> Context {
         cover: Some(wallet().cover().clone()),
         command_id: Some(Uuid::from_bytes([n; 16])),
         correlation_id: Some(Uuid::from_bytes([n; 16])),
+        recorded_at: Some(at(i64::from(n))),
         ..CommandContext::default()
     })
+}
+
+mod context_instant {
+    use super::*;
+
+    /// A handler's instant is the router's, `ctx.command.recorded_at`: the
+    /// `ContextualCommand.recorded_at` the kernel stamped (decision 14.37).
+    /// The context keeps no instant of its own beside it, so the two never
+    /// disagree.
+    #[test]
+    fn a_contexts_instant_is_the_routers() {
+        let ctx = Context::new(at(5));
+        assert_eq!(
+            ctx.command.recorded_at,
+            Some(at(5)),
+            "a unit test's instant is the router's field"
+        );
+        let ctx = ctx.with_command(CommandContext {
+            recorded_at: Some(at(9)),
+            ..CommandContext::default()
+        });
+        assert_eq!(ctx.recorded_at(), at(9));
+    }
 }
 
 mod route {
@@ -1339,9 +1378,9 @@ mod route {
 
     /// A type URL no handler is marked for (a command the proto declares
     /// and the markup does not handle, or another domain's) is the router's
-    /// NO_HANDLER_REGISTERED, not a rejection, and reaches no handler.
+    /// UNKNOWN_COMMAND_TYPE, not a rejection, and reaches no handler.
     #[test]
-    fn an_unmarked_type_url_is_the_routers_no_handler_registered() {
+    fn an_unmarked_type_url_is_the_routers_unknown_command_type() {
         let registry = registry();
         let mut wallet = opened(&registry, 0);
 
@@ -1349,13 +1388,13 @@ mod route {
 
         match refused {
             Err(Failure::Kernel(KernelError::Router(e))) => {
-                assert_eq!(e.code, "NO_HANDLER_REGISTERED");
+                assert_eq!(e.code, "UNKNOWN_COMMAND_TYPE");
                 assert_eq!(
                     e.extras.get("type_url").map(String::as_str),
                     Some("/toy.tally.cmd.v1.Count")
                 );
             }
-            other => panic!("the router's NO_HANDLER_REGISTERED, not {other:?}"),
+            other => panic!("the router's UNKNOWN_COMMAND_TYPE, not {other:?}"),
         }
         assert_eq!(wallet.len(), 2, "nothing was committed");
     }
@@ -2880,7 +2919,8 @@ mod policy_errors {
     use super::*;
 
     /// A marked-up policy's handler that fails answers its error: its
-    /// code, its args and its English, for the kernel to dead-letter.
+    /// code and its args, for the kernel to dead-letter; its `Display` is
+    /// those, never English (decision 14.37).
     #[test]
     fn a_policy_handlers_error_is_its_answer() {
         let started = any(BuyInStarted {
@@ -2894,12 +2934,9 @@ mod policy_errors {
             .expect("the handler failed");
         assert_eq!(
             said(&error),
-            (
-                "toy-buyin-no-stake",
-                "a buy-in started with no stake".to_string()
-            )
+            ("toy-buyin-no-stake", vec![("cents", "0".to_string())])
         );
-        assert_eq!(error.args().len(), 1, "its args kept");
+        assert_eq!(error.to_string(), "toy-buyin-no-stake cents=0");
     }
 
     /// An event of a type the policy marks that does not decode is its
@@ -3085,6 +3122,41 @@ mod handler_context {
 
 mod typed_refusals {
     use super::*;
+    use ::angzarr_embedded::next::v1::Diagnostic as WireDiagnostic;
+
+    /// A refusal's response is the oneof (decision 14.37): a typed
+    /// refusal's object, or an untyped refusal's diagnostic, its code and
+    /// args; never English. As the markup builds it and as the kernel hands
+    /// it to a refused policy alike.
+    #[test]
+    fn a_refusals_response_is_its_object_or_its_diagnostic() {
+        let overdrawn = || {
+            Some(refusal_response::Reason::Diagnostic(WireDiagnostic {
+                code: "toy-wallet-overdrawn".to_string(),
+                args: [("short".to_string(), "20".to_string())].into(),
+            }))
+        };
+        let message = Rejection::<Refused>::Message(Refused::Overdrawn { short: 20 });
+        assert_eq!(message.response().reason, overdrawn());
+
+        let registry = registry();
+        let mut wallet = opened(&registry, 10);
+        let Err(Failure::Rejected(untyped)) =
+            run(&mut wallet, &registry, 2, any(Withdraw { cents: 30 }))
+        else {
+            panic!("refused");
+        };
+        assert_eq!(untyped.response().reason, overdrawn());
+        let mut closed = super::wallet();
+        let Err(Failure::Rejected(typed)) = run(&mut closed, &registry, 1, any(Hold { cents: 1 }))
+        else {
+            panic!("refused");
+        };
+        assert_eq!(
+            typed.response().reason,
+            Some(refusal_response::Reason::Refusal(any(WalletClosed {})))
+        );
+    }
 
     /// A handler with `refuses` refuses with one of its typed objects, as
     /// the caller receives it; the wallet records nothing.
@@ -3106,7 +3178,8 @@ mod typed_refusals {
         assert_eq!(wallet.len(), 2, "nothing was recorded");
     }
 
-    /// As a refused policy receives it: the object packed, and its message.
+    /// As a refused policy receives it: the object packed; its `Display` is
+    /// its code and args, never English (decision 14.37).
     #[test]
     fn a_typed_refusals_response_packs_its_object_and_message() {
         let registry = registry();
@@ -3117,10 +3190,7 @@ mod typed_refusals {
         };
         assert_eq!(
             (rejection.refusal_object().cloned(), rejection.to_string()),
-            (
-                Some(any(WalletClosed {})),
-                "the wallet is closed".to_string()
-            )
+            (Some(any(WalletClosed {})), "toy-wallet-closed".to_string())
         );
     }
 
@@ -3143,7 +3213,7 @@ mod typed_refusals {
         );
         assert_eq!(
             (rejection.refusal_object().cloned(), rejection.to_string()),
-            (None, "20 cents short".to_string())
+            (None, "toy-wallet-overdrawn short=20".to_string())
         );
     }
 
@@ -3193,8 +3263,9 @@ fn hold_refusal(c: &Uuid, cents: i64, response: RefusalResponse) -> markup::v1::
 
 fn insufficient(short: i64) -> RefusalResponse {
     RefusalResponse {
-        refusal: Some(any(InsufficientFunds { short })),
-        message: format!("{short} cents short of the hold"),
+        reason: Some(refusal_response::Reason::Refusal(any(InsufficientFunds {
+            short,
+        }))),
     }
 }
 
@@ -3371,14 +3442,14 @@ mod policy_refusals {
         );
         match unhandled {
             Err(Failure::Kernel(KernelError::Router(e))) => {
-                assert_eq!(e.code, "NO_FACT_HANDLER");
+                assert_eq!(e.code, "NO_REFUSAL_HANDLER");
                 assert_eq!(
                     e.extras.get("command_type").map(String::as_str),
                     Some("/toy.wallet.cmd.v1.Withdraw")
                 );
             }
-            Err(other) => panic!("the router's NO_FACT_HANDLER, not {other}"),
-            Ok(_) => panic!("the router's NO_FACT_HANDLER, not handled"),
+            Err(other) => panic!("the router's NO_REFUSAL_HANDLER, not {other}"),
+            Ok(_) => panic!("the router's NO_REFUSAL_HANDLER, not handled"),
         }
     }
 
@@ -3714,6 +3785,54 @@ mod refusal_flow {
         let lines = log.lines();
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(lines[0].contains(" to wallet "), "{lines:?}");
+    }
+
+    /// The dead letter of a refusal with no path carries the code of what
+    /// was missing (the router's `NO_REFUSAL_HANDLER`, as angzarr-embedded's
+    /// code), never rendered English.
+    #[test]
+    fn a_refusal_with_no_handlers_dead_letter_carries_its_code() {
+        let (registry, store) = funded(false, 50);
+        let log = MemoryDeadLetters::new();
+        let _ = settle_in::<Wallet>(
+            &store,
+            &registry,
+            &log,
+            2,
+            send("wallet", 2, any(Hold { cents: 5 }), Some(correlation(5))),
+        );
+        let lines = log.lines();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains("angzarr-embedded-next-no-refusal-handler"),
+            "{lines:?}"
+        );
+        assert!(!lines[0].contains("nothing handles"), "{lines:?}");
+    }
+
+    /// The dead letter of a malformed policy book carries the error's code
+    /// and its args, never its rendered English.
+    #[test]
+    fn a_malformed_policy_books_dead_letter_carries_its_code_and_args() {
+        let mut registry = registry();
+        registry.policy(WalletBuyIn);
+        let (_, store) = funded(false, 50);
+        let log = MemoryDeadLetters::new();
+        let _ = settle_in::<Wallet>(
+            &store,
+            &registry,
+            &log,
+            2,
+            send("wallet", 2, any(Hold { cents: 5 }), Some(correlation(6))),
+        );
+        let lines = log.lines();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains("angzarr-embedded-next-malformed-unknown-domain"),
+            "{lines:?}"
+        );
+        assert!(lines[0].contains("buyin"), "{lines:?}");
+        assert!(!lines[0].contains("is registered"), "{lines:?}");
     }
 
     /// A step that fails mid-way keeps the commits before it: no rollback.
@@ -4229,6 +4348,80 @@ mod router {
         );
     }
 
+    /// A [`Remote`] that keeps the `ContextualCommand.recorded_at` of each
+    /// input it is handed.
+    struct Clocked(std::sync::Arc<std::sync::Mutex<Vec<Option<Timestamp>>>>);
+
+    impl ::angzarr_embedded::next::angzarr_router::router::CommandHandler for Clocked {
+        fn name(&self) -> &str {
+            "remote"
+        }
+
+        fn command_types(&self) -> Vec<String> {
+            Remote.command_types()
+        }
+
+        fn dispatch(
+            &self,
+            req: &pb::ContextualCommand,
+        ) -> Result<
+            pb::CommandHandlerResponse,
+            ::angzarr_embedded::next::angzarr_router::error::CodedError,
+        > {
+            self.0.lock().unwrap().push(req.recorded_at);
+            Remote.dispatch(req)
+        }
+
+        fn component_descriptor(
+            &self,
+        ) -> Result<
+            pb::ComponentDescriptor,
+            ::angzarr_embedded::next::angzarr_router::error::CodedError,
+        > {
+            Remote.component_descriptor()
+        }
+    }
+
+    /// The kernel stamps the input's acceptance time on the
+    /// `ContextualCommand` it hands the handler (decision 14.37,
+    /// `ContextualCommand.recorded_at`), and its events carry that same
+    /// instant as their `EventMeta.recorded_at`, held to `max(the stream's
+    /// last, now)`: a later input sampled earlier is stamped at the last.
+    #[test]
+    fn the_kernel_stamps_the_inputs_acceptance_time_on_the_contextual_command() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut registry = Registry::new();
+        registry
+            .command_handler("remote", Clocked(std::sync::Arc::clone(&seen)))
+            .unwrap();
+        let store = Mem::new();
+        let log = MemoryDeadLetters::new();
+        let kernel = ::angzarr_embedded::next::Kernel::new(&registry, &log);
+        let sampled = |now| Sampled {
+            now,
+            command_id: Uuid::from_bytes([0x74; 16]),
+        };
+        let note = |id| send("remote", id, any(Note {}), Some(correlation(4)));
+        ready(kernel.handle_any(&store, note(4), &sampled(at(9)), &mut ())).unwrap();
+        ready(kernel.handle_any(&store, note(5), &sampled(at(5)), &mut ())).unwrap();
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [Some(at(9)), Some(at(9))],
+            "stamped on the input, held to the stream's last"
+        );
+        let remote_cover = Cover {
+            domain: "remote".to_string(),
+            root: Some(root()),
+            edition: None,
+        };
+        let written = pages(&store, &remote_cover).expect("the remote's stream");
+        let stamped: Vec<_> = written
+            .iter()
+            .map(|page| page.meta.as_ref().and_then(|m| m.recorded_at))
+            .collect();
+        assert_eq!(stamped, [Some(at(9)), Some(at(9))], "the events' instant");
+    }
+
     /// A remote handler that cannot be reached, until `up`: it answers
     /// angzarr-embedded-host's `REMOTE_HANDLER_UNAVAILABLE` (ABORTED, its
     /// cause in its metadata); reached, it answers as [`Remote`].
@@ -4258,7 +4451,6 @@ mod router {
             }
             Err(CodedError {
                 code: "REMOTE_HANDLER_UNAVAILABLE".to_string(),
-                message: "the remote handler is not running".to_string(),
                 extras: [
                     ("domain".to_string(), "remote".to_string()),
                     ("cause".to_string(), "not-running".to_string()),
@@ -4432,7 +4624,6 @@ mod router {
         faulty_with(
             ::angzarr_embedded::next::angzarr_router::error::CodedError {
                 code: code.to_string(),
-                message: "the player's handler broke".to_string(),
                 extras: [("seat".to_string(), "3".to_string())].into(),
                 grpc,
                 refusal: None,
@@ -4745,7 +4936,6 @@ mod router {
         use ::angzarr_embedded::next::StepError;
         let registry = faulty_with(CodedError::bug(
             "PLAYER_BROKE",
-            "the player's handler broke",
             [("seat".to_string(), "3".to_string())],
         ));
         let store = Mem::new();
@@ -4858,11 +5048,7 @@ mod router {
                 .and_then(|c| c.page.as_ref())
                 .is_some_and(|p| matches!(p.body, Some(pb::command_page::Body::Fact(_))));
             match fact {
-                true => Err(CodedError::bug(
-                    "PICKY_FACT_BROKE",
-                    "the fact handler failed",
-                    [],
-                )),
+                true => Err(CodedError::bug("PICKY_FACT_BROKE", [])),
                 false => Remote.dispatch(req),
             }
         }
@@ -5006,9 +5192,9 @@ mod router {
     }
 
     /// A domain's input goes through the router too: a command type the
-    /// wallet has no handler for is the router's `NO_HANDLER_REGISTERED`.
+    /// wallet has no handler for is the router's `UNKNOWN_COMMAND_TYPE`.
     #[test]
-    fn a_domains_unknown_command_is_the_routers_no_handler_registered() {
+    fn a_domains_unknown_command_is_the_routers_unknown_command_type() {
         let registry = registry();
         let store = Mem::new();
         let log = MemoryDeadLetters::new();
@@ -5023,10 +5209,24 @@ mod router {
         };
         assert_eq!(
             router_reason(&failed),
-            Some("NO_HANDLER_REGISTERED"),
+            Some("UNKNOWN_COMMAND_TYPE"),
             "{failed}"
         );
         assert_eq!(pages(&store, wallet().cover()), None);
+        // The router's own error on malformed input is a bug (INTERNAL;
+        // the owner's ruling, 2026-10-29): alerted and dead-lettered under
+        // the kernel's code, with its args, never a refusal.
+        assert_eq!(failed.recovery(), Recovery::Bug);
+        let lines = log.lines();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains("angzarr-embedded-next-unknown-command-type"),
+            "{lines:?}"
+        );
+        assert!(
+            lines[0].contains("type_url=/toy.lamp.cmd.v1.SwitchOn"),
+            "{lines:?}"
+        );
     }
 }
 

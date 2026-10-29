@@ -2,29 +2,27 @@ use angzarr_ports::{Arg, StoreError};
 
 use super::{causes, damaged, unavailable, Damage, SqlError};
 
+/// An error's `Display` is its code, then its args (` name=value` each),
+/// never English (decision 14.37): text is rendered only where it is
+/// shown, from the catalog. The driver's own text is not an arg.
 #[test]
-fn an_error_renders_its_english_fallback_with_its_detail() {
-    assert_eq!(
-        SqlError::Unavailable {
-            detail: "disk I/O error".to_string()
-        }
-        .to_string(),
-        "the database failed: disk I/O error"
-    );
-    assert_eq!(
-        SqlError::Undecodable {
-            detail: "buffer underflow".to_string()
-        }
-        .to_string(),
-        "a stored value does not decode: buffer underflow"
-    );
-    assert_eq!(
-        SqlError::Unmigrated { pending: 1 }.to_string(),
-        "the database, opened to read, has a migration not yet applied"
-    );
+fn an_error_displays_its_code_and_args_never_english() {
     assert_eq!(
         SqlError::Unmigrated { pending: 2 }.to_string(),
-        "the database, opened to read, has 2 migrations not yet applied"
+        "angzarr-store-sqlite-unmigrated pending=2"
+    );
+    let unavailable = SqlError::Unavailable {
+        detail: "disk I/O error".to_string(),
+    }
+    .to_string();
+    assert!(
+        unavailable.starts_with("angzarr-store-sqlite-unavailable"),
+        "{unavailable}"
+    );
+    assert!(!unavailable.contains("disk I/O error"), "{unavailable}");
+    assert!(
+        !unavailable.contains("the database failed"),
+        "{unavailable}"
     );
 }
 
@@ -62,21 +60,25 @@ fn damage_shows_the_first_problem_and_counts_the_rest() {
 }
 
 /// A failure reaches the ports as angzarr-ports' `StoreError`, this crate's
-/// code and English its `Cause`.
+/// code its `Cause`; the driver's text stays in the adapter's own log and
+/// never travels, in an arg or anywhere else (decision 14.37).
 #[test]
-fn a_failure_reaches_the_ports_with_this_crates_code_as_its_cause() {
+fn a_failure_reaches_the_ports_with_this_crates_code_and_no_driver_text() {
     let StoreError::Unavailable(cause) = unavailable("disk I/O error") else {
         panic!("unavailable");
     };
     assert_eq!(cause.code, "angzarr-store-sqlite-unavailable");
-    assert_eq!(cause.message, "the database failed: disk I/O error");
+    assert!(
+        !format!("{cause:?}").contains("disk I/O error"),
+        "{cause:?}"
+    );
     let StoreError::Unavailable(cause) = damaged("file is not a database".to_string()) else {
         panic!("unavailable");
     };
     assert_eq!(cause.code, "angzarr-store-sqlite-damaged-file");
-    assert_eq!(
-        cause.message,
-        "the database file is too damaged to open: file is not a database"
+    assert!(
+        !format!("{cause:?}").contains("file is not a database"),
+        "{cause:?}"
     );
 }
 
@@ -93,7 +95,8 @@ fn every_cause_has_this_crates_code_once() {
         ]
     );
     assert_eq!(
-        SqlError::Unmigrated { pending: 2 }.cause().message,
-        "the database, opened to read, has 2 migrations not yet applied"
+        SqlError::Unmigrated { pending: 2 }.cause().args,
+        [("pending", Arg::Uint(2))],
+        "a cause carries its args (decision 14.37)"
     );
 }

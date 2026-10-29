@@ -41,7 +41,7 @@ impl SqlError {
 
     /// As a [`Cause`]: the code and the English.
     pub fn cause(&self) -> Cause {
-        Cause::new(self.code(), self.to_string())
+        Cause::new(self.code(), [])
     }
 }
 

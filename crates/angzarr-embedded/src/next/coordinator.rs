@@ -444,6 +444,7 @@ pub(crate) fn contextual_command(
         }),
         command: Some(book),
         conflict_nonce: nonce.unwrap_or_default().into(),
+        recorded_at: None,
     })
 }
 

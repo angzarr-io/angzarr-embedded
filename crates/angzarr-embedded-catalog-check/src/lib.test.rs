@@ -67,9 +67,22 @@ struct Ported {
     args: Vec<(&'static str, angzarr_ports::Arg)>,
 }
 
+/// Its English, where the error has one; else its code and args (decision
+/// 14.37: an adapter's cause carries no English).
 impl fmt::Display for Ported {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.english)
+        if !self.english.is_empty() {
+            return f.write_str(&self.english);
+        }
+        f.write_str(self.code)?;
+        for (name, arg) in &self.args {
+            match arg {
+                angzarr_ports::Arg::Uint(n) => write!(f, " {name}={n}")?,
+                angzarr_ports::Arg::Str(s) => write!(f, " {name}={s}")?,
+                angzarr_ports::Arg::Cause(cause) => write!(f, " {name}={}", cause.code)?,
+            }
+        }
+        Ok(())
     }
 }
 
@@ -87,8 +100,8 @@ impl Diagnostic for Ported {
                     angzarr_ports::Arg::Str(s) => Arg::Str(s.clone()),
                     angzarr_ports::Arg::Cause(cause) => Arg::nested(&Ported {
                         code: cause.code,
-                        english: cause.message.clone(),
-                        args: Vec::new(),
+                        english: String::new(),
+                        args: cause.args.clone(),
                     }),
                 };
                 (*name, arg)
@@ -105,8 +118,8 @@ fn sqlite_samples() -> Vec<Box<dyn Diagnostic>> {
         .map(|cause| -> Box<dyn Diagnostic> {
             Box::new(Ported {
                 code: cause.code,
-                english: cause.message,
-                args: Vec::new(),
+                english: String::new(),
+                args: cause.args,
             })
         })
         .collect();
@@ -587,7 +600,12 @@ fn every_router_reason_has_its_own_code_and_message() {
             "angzarr-embedded-next-{}",
             reason.to_ascii_lowercase().replace('_', "-")
         );
-        let error = KernelError::Router(CodedError::invalid_argument(&reason, "", []));
+        let error = KernelError::Router(CodedError {
+            code: reason.clone(),
+            extras: Default::default(),
+            grpc: angzarr_embedded::next::angzarr_router::error::GrpcCode::Internal,
+            refusal: None,
+        });
         if error.code() != expected {
             problems.push(format!("{reason} is {}, not {expected}", error.code()));
         }

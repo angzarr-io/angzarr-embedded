@@ -128,7 +128,7 @@ impl Handled {
                     .map(|f| v1::ProjectorFailure {
                         projector: f.projector.to_string(),
                         code: INTERNAL,
-                        message: f.error.to_string(),
+                        diagnostic: None,
                     })
                     .collect(),
             },
@@ -628,12 +628,7 @@ impl<'k> Run<'k> {
                         .map_err(|e| (path.to_vec(), StepError::Kernel(KernelError::Store(e))))?;
                     return Err((path.to_vec(), StepError::PolicyFailed(failure)));
                 }
-                write_dead_letter(
-                    self.dead_letters,
-                    CommandBook::default(),
-                    policy.name(),
-                    &error.message,
-                );
+                write_dead_letter(self.dead_letters, CommandBook::default(), policy.name(), "");
                 return Err((path.to_vec(), StepError::Kernel(KernelError::Router(error))));
             }
         };
@@ -689,10 +684,7 @@ impl<'k> Run<'k> {
                     let refusal = markup::v1::Refusal {
                         event: Some(event.clone()),
                         command: Some(delivered.to_book()),
-                        response: Some(markup::v1::RefusalResponse {
-                            refusal: rejected.refusal_object().cloned(),
-                            message: rejected.to_string(),
-                        }),
+                        response: Some(rejected.response()),
                     };
                     let ctx = self.refused.take().unwrap_or_default();
                     match self
@@ -806,7 +798,7 @@ impl<'k> Run<'k> {
                 .map_err(|e| StepError::Kernel(KernelError::Store(e)))?;
             return Err(StepError::PolicyFailed(failure));
         }
-        if error.code != codes::NO_FACT_HANDLER {
+        if error.code != codes::NO_FACT_HANDLER && error.code != codes::NO_REFUSAL_HANDLER {
             if super::route::is_handler_fault(&error) {
                 past_bug(self.policy_bug, port, positions)
                     .await
@@ -814,12 +806,8 @@ impl<'k> Run<'k> {
             }
             return Err(StepError::Kernel(KernelError::Router(error)));
         }
-        write_dead_letter(
-            self.dead_letters,
-            fact.to_book(),
-            fact.domain(),
-            &error.message,
-        );
+        // The router answers a refusal with no path INTERNAL, a bug: the
+        // dispatch dead-lettered it already.
         port.write_positions(positions)
             .await
             .map_err(|e| StepError::Kernel(KernelError::Store(e)))?;

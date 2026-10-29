@@ -510,7 +510,7 @@ impl fmt::Display for KernelError {
                 cover_text(stream)
             ),
             KernelError::Store(error) => error.fmt(f),
-            KernelError::Router(error) => f.write_str(&error.message),
+            KernelError::Router(error) => error.fmt(f),
             KernelError::HandlerUnavailable { stream, cause } => write!(
                 f,
                 "the handler of stream {} could not be reached ({cause}): run it again",
@@ -635,10 +635,16 @@ fn router_recovery(error: &angzarr_router::error::CodedError) -> Recovery {
         };
     }
     match error.grpc {
-        GrpcCode::Internal | GrpcCode::DataLoss | GrpcCode::Unimplemented => Recovery::Bug,
+        GrpcCode::Internal | GrpcCode::Unknown | GrpcCode::DataLoss | GrpcCode::Unimplemented => {
+            Recovery::Bug
+        }
         GrpcCode::FailedPrecondition => Recovery::Business,
-        GrpcCode::Aborted => Recovery::Retry,
-        GrpcCode::InvalidArgument | GrpcCode::NotFound => Recovery::Invalid,
+        GrpcCode::Aborted | GrpcCode::Unavailable => Recovery::Retry,
+        GrpcCode::InvalidArgument
+        | GrpcCode::NotFound
+        | GrpcCode::AlreadyExists
+        | GrpcCode::OutOfRange
+        | GrpcCode::PermissionDenied => Recovery::Invalid,
     }
 }
 
@@ -729,7 +735,7 @@ pub(crate) fn store_args(error: &StoreError) -> Vec<(&'static str, Arg)> {
                 angzarr_ports::Arg::Uint(n) => Arg::Uint(n),
                 angzarr_ports::Arg::Str(s) => Arg::Str(s),
                 angzarr_ports::Arg::Cause(cause) => {
-                    Arg::Nested(Box::new(Report::new(cause.code, cause.message)))
+                    Arg::Nested(Box::new(Report::new(cause.code, cause.code)))
                 }
             };
             (name, arg)

@@ -255,7 +255,6 @@ pub(crate) fn status_to_coded(domain: &str, status: &tonic::Status) -> CodedErro
     };
     CodedError {
         code,
-        message: status.message().to_string(),
         extras,
         grpc,
         // Only a business status carries its typed object to a policy.
@@ -272,7 +271,6 @@ pub(crate) fn status_to_coded(domain: &str, status: &tonic::Status) -> CodedErro
 pub(crate) fn unavailable(domain: &str, cause: &str) -> CodedError {
     CodedError {
         code: codes::REMOTE_HANDLER_UNAVAILABLE.to_string(),
-        message: REMOTE_HANDLER_UNAVAILABLE_MESSAGE.to_string(),
         extras: [
             (extras::DOMAIN.to_string(), domain.to_string()),
             (CAUSE.to_string(), cause.to_string()),
