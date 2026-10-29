@@ -1301,5 +1301,5 @@ pub struct NoSnapshot {}
 
 impl prost::Name for NoSnapshot {
     const NAME: &'static str = "NoSnapshot";
-    const PACKAGE: &'static str = "annals.next.markup";
+    const PACKAGE: &'static str = "angzarr_embedded.next.markup";
 }

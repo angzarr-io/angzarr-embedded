@@ -4,7 +4,7 @@ Status: **implemented** in `crates/angzarr-embedded/src/next/`, pinned by the te
 beside it (`*.test.rs`). It is angzarr-embedded's one kernel.
 
 The wire contract is angzarr's protos on angzarr-project's spec line
-(`spec/20261019-draft`, the crate pinned at **581d23e**): `EventMeta.causation`
+(`spec/20261019-draft`, the crate pinned at **57f029d**): `EventMeta.causation`
 is the event's direct cause, with one arm, `command_id` (a process manager
 is a domain whose inputs are commands and facts, so no event is caused by
 another event); one `command_id` per command, deduplication on the events,
@@ -599,7 +599,6 @@ pub trait EventStore {
     fn head(&self, stream: StreamRef<'_>) -> impl Future<Output = Result<Head, StoreError>>;
     fn find_command(&self, stream: StreamRef<'_>, command_id: Uuid) -> impl Future<Output = Result<Vec<EventPage>, StoreError>>;
     fn covers(&self, domain: &str) -> impl Future<Output = Result<Vec<Cover>, StoreError>>;
-    fn commit_position(&self) -> impl Future<Output = Result<u64, StoreError>>;
 }
 pub struct Write<'a> { events: Option<Append<'a>>, positions: &'a [(PositionKey<'a>, u64)], outbox: &'a [OutboxEntry] }
 pub trait SnapshotStore { /* read_snapshot, write_snapshot: its own call, never in a write */ }
@@ -630,7 +629,6 @@ replay is the kernel's `KernelError::Unreadable`; the store's
 | `page` | the `EventPage` bytes as written |
 | `command_id` | `EventMeta.causation.command_id` |
 | `correlation_id`, `recorded_at` | the rest of `EventMeta`, for `ReadByCorrelation` and `ReadUntilTime` |
-| `position` | the commit position the write landed at |
 
 Unique on (`domain`, `edition`, `root`, `sequence`); a **non-unique index on
 (`domain`, `edition`, `root`, `command_id`)** for `find_command`. There is no
@@ -638,9 +636,9 @@ commands table and no claim: "already applied?" is "does the stream hold
 events with this command id?", atomic with the write because the id is
 written with the events.
 
-**The commit position** is global and monotonic: it rises with every write
-that lands an event, through any handle, and never falls, a purge
-included.
+**There is no store-wide position** (decision 14.35): ordering is per
+stream, by sequence. SQLite's migration 0004 drops the released 0002's
+`commit_position` table and `events.position` column.
 
 **Errors** are angzarr-ports' `StoreError`, codes `angzarr-ports-*`: the
 kernel forwards each as `KernelError::Store` with its code and args, and

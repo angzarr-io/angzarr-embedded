@@ -9,9 +9,8 @@
 //! `BEGIN` held open over many reads.
 //! A file is kept in WAL mode, so once it is made a reader waits on no
 //! writer. A change token is the connection's `PRAGMA data_version` with
-//! its `total_changes()`. The commit position is a one-row table raised once
-//! by each commit that appends an event, and every event row is stamped
-//! with the position it landed at.
+//! its `total_changes()`. There is no store-wide position (decision 14.35):
+//! ordering is per stream, by sequence.
 
 use std::future::Future;
 use std::ops::DerefMut;
@@ -546,7 +545,7 @@ const SQLITE_NOTADB: i32 = 26;
 // the base ports need them: an edition stream's first own event is its
 // creation (`meta.EditionCreated`), it reads main below its fork, then its
 // own; a write of anything else to an unforked one is refused. The
-// administration of editions (the `Editions` port: time-based forks,
+// administration of editions (the `Editions` port:
 // listing, deletion and removal) is not implemented yet (the owner's
 // ruling, 2026-10-28): a follow-up.
 
@@ -725,7 +724,7 @@ impl<C: DerefMut<Target = SqliteConnection>> Exec<'_, C> {
     }
 
     /// The events of a write: checked against the stream as read in its
-    /// edition, then inserted at the commit position, raised once.
+    /// edition, then inserted.
     async fn append(&mut self, append: Append<'_>) -> Result<u64, StoreError> {
         let Append {
             stream,
@@ -756,8 +755,9 @@ impl<C: DerefMut<Target = SqliteConnection>> Exec<'_, C> {
                     (false, false) if !pages.is_empty() => {
                         return Err(StoreError::edition_not_forked(stream))
                     }
-                    // A fork lands at its fork sequence: main's head, or
-                    // (the time-based option) any sequence below it.
+                    // A fork lands at its fork sequence, as stated
+                    // (`EditionCreated.parent_sequence`): main's head or
+                    // any sequence below it.
                     (false, true) if expected <= actual => {
                         return self.insert(stream, expected, pages).await;
                     }
@@ -771,8 +771,8 @@ impl<C: DerefMut<Target = SqliteConnection>> Exec<'_, C> {
         self.insert(stream, expected, pages).await
     }
 
-    /// `pages`, continuing the stream from `expected`, inserted at the
-    /// commit position, raised once: the stream's new length.
+    /// `pages`, continuing the stream from `expected`, inserted: the
+    /// stream's new length.
     async fn insert(
         &mut self,
         stream: StreamRef<'_>,
@@ -787,16 +787,9 @@ impl<C: DerefMut<Target = SqliteConnection>> Exec<'_, C> {
         if pages.is_empty() {
             return Ok(expected);
         }
-        let raised = self.rows(statements::RAISE_COMMIT_POSITION, []).await?;
-        let position: i64 = match raised.first() {
-            Some(row) => row.try_get(0).map_err(unavailable)?,
-            None => 0,
-        };
         let cover = stream.to_cover();
-        self.built_execute(statements::insert_pages::<SqliteDialect>(
-            &cover, pages, position,
-        )?)
-        .await?;
+        self.built_execute(statements::insert_pages::<SqliteDialect>(&cover, pages)?)
+            .await?;
         Ok(expected + pages.len() as u64)
     }
 
@@ -856,7 +849,7 @@ fn is_creation(page: &EventPage) -> bool {
 impl EventStore for SqliteStore {
     /// One `BEGIN IMMEDIATE` transaction, begun and committed inside the
     /// call: the stream's length checked against `expected` under the write
-    /// lock, its pages inserted with the commit position (raised once), the
+    /// lock, its pages inserted, the
     /// positions upserted and the outbox entries kept. Nothing is held open
     /// after it returns; a failure lands nothing.
     async fn write(&self, write: Write<'_>) -> Result<Written, StoreError> {

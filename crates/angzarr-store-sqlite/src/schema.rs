@@ -13,7 +13,6 @@ pub(crate) enum Events {
     Sequence,
     CommandId,
     Page,
-    Position,
     CorrelationId,
     RecordedAt,
 }

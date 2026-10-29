@@ -448,8 +448,8 @@ async fn inserting(path: &Path, page: &EventPage) -> SqliteConnection {
         .await
         .unwrap();
     sqlx::query(
-        "INSERT INTO events (domain, edition, root, sequence, command_id, page, position) \
-         VALUES ('tasks', '', ?, ?, NULL, ?, 0)",
+        "INSERT INTO events (domain, edition, root, sequence, command_id, page) \
+         VALUES ('tasks', '', ?, ?, NULL, ?)",
     )
     .bind(vec![1u8; 16])
     .bind(i64::try_from(page.sequence).unwrap())
@@ -1832,8 +1832,9 @@ fn every_change_token_is_a_send_future() {
 
 // ------------------------------------------------- forks and round trips
 
-/// A fork lands at its fork sequence, main's head or below it (the
-/// time-based option); past main's head it is a conflict. Once forked, a
+/// A fork lands at its fork sequence as stated
+/// (`EditionCreated.parent_sequence`), main's head or below it; past main's
+/// head it is a conflict. Once forked, a
 /// second creation is refused; main is never forked into; an empty write
 /// to an unforked edition stream checks main's head and writes nothing.
 #[tokio::test]

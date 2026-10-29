@@ -105,11 +105,6 @@ pub(crate) const CORRELATED_STREAMS: &str =
      AND (edition = '' OR edition = ?2) AND (?3 IS NULL OR domain = ?3) \
      ORDER BY domain, root";
 
-/// Raise the commit position past a write's events: row `(position)`, the
-/// one they land at.
-pub(crate) const RAISE_COMMIT_POSITION: &str =
-    "UPDATE commit_position SET next = next + 1 RETURNING next - 1";
-
 /// Row `(next)`: a handler's position (`?4`) on a stream.
 pub(crate) const POSITION: &str = "SELECT next FROM positions \
      WHERE domain = ?1 AND edition = ?2 AND root = ?3 AND handler = ?4";
@@ -193,12 +188,10 @@ fn snapshot_of_stream<D: Dialect>(cover: &Cover) -> Condition {
     )
 }
 
-/// `pages`, as the rows they are stored as, stamped with the commit
-/// `position` they land at: one statement.
+/// `pages`, as the rows they are stored as: one statement.
 pub(crate) fn insert_pages<D: Dialect>(
     cover: &Cover,
     pages: &[EventPage],
-    position: i64,
 ) -> Result<InsertStatement, StoreError> {
     let mut insert = Query::insert()
         .into_table(Events::Table)
@@ -209,7 +202,6 @@ pub(crate) fn insert_pages<D: Dialect>(
             Events::Sequence,
             Events::CommandId,
             Events::Page,
-            Events::Position,
             Events::CorrelationId,
             Events::RecordedAt,
         ])
@@ -229,7 +221,6 @@ pub(crate) fn insert_pages<D: Dialect>(
                 sequence_column(page.sequence).into(),
                 command_id.into(),
                 page.encode_to_vec().into(),
-                position.into(),
                 correlation_id.into(),
                 recorded_at.into(),
             ])

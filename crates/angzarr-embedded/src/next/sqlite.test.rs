@@ -469,7 +469,7 @@ async fn the_same_command_through_two_handles_on_one_file_applies_once() {
 /// command on a stream with history and no policy needs the snapshot
 /// read, the events read (whose pages answer the dedup lookup when no
 /// snapshot hides them) and the step's one write (`BEGIN IMMEDIATE`, the
-/// length check, the inserts with the commit position, `COMMIT`), whatever
+/// length check, the inserts, `COMMIT`), whatever
 /// the stream's length. Run with `--ignored` to print it; it fails only if
 /// a command's cost grows with the stream's length.
 #[tokio::test]

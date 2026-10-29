@@ -23,7 +23,7 @@
 //! its own; an edition stream with none of its own reads as main's, and
 //! anything else written to it first is refused
 //! (`StoreError::EditionNotForked`). The edition administration, the
-//! [`Editions`](angzarr_ports::Editions) port (listing, time-based forks,
+//! [`Editions`](angzarr_ports::Editions) port (listing,
 //! deletion and removal), is NOT IMPLEMENTED YET (the owner's ruling,
 //! 2026-10-28: a follow-up; `MemoryStore` covers it meanwhile), and the
 //! suite's checks of it are ignored here.
