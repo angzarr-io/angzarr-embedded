@@ -44,13 +44,9 @@ pre-commit:
       # warning, and refused on the default branch (`just test-commit`).
       priority: 5
       run: just test-commit
-    mutants:
-      # cargo mutants over the staged diff, judged per tier by the repository's
-      # mutation_thresholds; last, because it is the slowest. A red commit's
-      # mutants cannot be judged, so off the default branch it passes, saying
-      # so (`just mutants-staged`).
-      priority: 6
-      run: just mutants-staged
+    # No mutation testing here: it is too slow for every commit, so it is
+    # judged once per push (pre-push `mutants`). `just mutants-staged` runs it
+    # over the staged diff by hand.
 
 # Red tests never reach the default branch. A merge commit into it is tested
 # as a commit is (pre-merge-commit); a push to it is refused unless the whole
@@ -63,6 +59,9 @@ pre-merge-commit:
       run: just test-commit
 
 pre-push:
+  # One at a time, tests first, stopping at the first failure: a push whose
+  # tests fail is not worth mutating. Each command reads the pushed refs.
+  piped: true
   commands:
     tests:
       # git's pushed refs are on stdin, and {1} is the remote's name.
@@ -71,9 +70,21 @@ pre-push:
       # (`git push origin feature:main` from main changes none); a `{files}`
       # in `run` is what turns that off, so `files` names one that is always
       # there, and push-check ignores it.
+      priority: 1
       use_stdin: true
       files: echo justfile
       run: just push-check {1} {files}
+    mutants:
+      # cargo mutants over what each pushed ref adds (from the remote's tip,
+      # or for a new branch from its merge base with the default branch),
+      # judged per tier by the repository's mutation_thresholds. A red
+      # commit's mutants cannot be judged, so pushed to a branch other than
+      # the default one it passes, saying so (`just mutants-push`). stdin and
+      # `files` as for `tests`.
+      priority: 2
+      use_stdin: true
+      files: echo justfile
+      run: just mutants-push {1} {files}
 
 post-merge:
   commands:

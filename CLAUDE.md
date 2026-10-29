@@ -180,7 +180,7 @@ on a failure, a `FAIL` line, the extract worth reading, and the full log in
 `target/logs/<gate>.log`. `VERBOSE=1 just <gate>` shows the full output.
 `just test` runs cargo-nextest.
 
-## The pre-commit gates are in gates/; the justfile gives their parameters
+## The git-hook gates are in gates/; the justfile gives their parameters
 
 The gates and their recipes are `gates/gates.just` and
 `gates/lefthook.yml`: the justfile imports the one and lefthook.yml extends
@@ -193,7 +193,9 @@ them), and again after a change to the gates names a new hook
 (`gates/MIGRATING.md`). They came from the shared gates repository that
 taskloom and ctxloom-rs also copied; a change here does not reach them.
 
-lefthook runs the gates one at a time, stopping at the first failure. A
+lefthook runs the gates one at a time, stopping at the first failure.
+Gates 1 to 5 run at pre-commit; mutation (6) is too slow for every commit
+and runs at pre-push, after the push's tests (`just push-check`). A
 failing gate is a finding: fix the cause and commit again; never
 `--no-verify`, and never weaken a gate to get through.
 
@@ -213,11 +215,16 @@ failing gate is a finding: fix the cause and commit again; never
    tests (failing tests, not a failed build) are committed on a branch other
    than the default one, with a warning that it cannot merge until they
    pass, and refused on the default branch.
-6. **mutants**: `just mutants-staged` runs `cargo mutants --in-diff` over
-   the staged diff in that tree and holds every crate's new code to a 90%
-   kill rate (`mutation_thresholds`; a new crate gets a threshold there
-   before it gets code). The last run's mutants.out is kept in
-   `target/logs/mutants-staged/`. A mutant judged equivalent is excluded by
+6. **mutants** (pre-push): `just mutants-push` runs `cargo mutants
+   --in-diff` over what each pushed ref adds (the diff from the remote's
+   tip of that ref, or for a new branch from its merge base with the
+   default branch, to the commit pushed), in that commit's tree, and holds
+   every crate's new code to a 90% kill rate (`mutation_thresholds`; a new
+   crate gets a threshold there before it gets code). Red tests pushed to a
+   branch other than the default one are not judged and pass with a
+   warning. The last run's mutants.out is kept in
+   `target/logs/mutants-push/`. `just mutants-staged` makes the same
+   judgement over the staged diff, by hand. A mutant judged equivalent is excluded by
    an `exclude_re` in `.cargo/mutants.toml` matching that one mutant, with a
    comment saying why: not `#[mutants::skip]`, which needs the `mutants`
    crate as a dependency, and never a lowered threshold.
