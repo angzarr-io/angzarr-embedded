@@ -277,9 +277,9 @@ pub(crate) fn is_rejection(error: &CodedError) -> bool {
 /// [`KernelError::Router`](super::KernelError::Router) (never a refusal:
 /// that is [`Rejected`]), is a handler's bug: a code of its own (never a
 /// policy's failure, [`POLICY_FAILED`]), or one of the router's failed
-/// INTERNAL (UNHANDLED_HANDLER_ERROR: what a handler's error without a
-/// code of its own becomes). The kernel dead-letters it by its code and
-/// args, and a policy's step moves the policy's position past it unless
+/// INTERNAL (UNHANDLED_HANDLER_ERROR: a handler's bug, its own code and
+/// args as its `cause`, or an error without a code of its own). The kernel
+/// dead-letters it by its code and args, the cause among them, and a policy's step moves the policy's position past it unless
 /// the kernel says to stay ([`OnPolicyBug`](super::OnPolicyBug)).
 pub(crate) fn is_handler_fault(error: &CodedError) -> bool {
     error.code != POLICY_FAILED
@@ -304,6 +304,24 @@ pub fn rejection(rejection: &dyn Diagnostic, refusal: Option<Any>) -> HandlerErr
         Some(object) => error.with_refusal(object),
         None => error,
     })
+}
+
+/// One of angzarr-embedded's own failures, INTERNAL under its own `code`
+/// ([`POLICY_FAILED`], [`TOO_MANY_STEPS`], an upcast's failure): never a
+/// handler's bug, which angzarr-router's `CodedError::bug` answers as
+/// UNHANDLED_HANDLER_ERROR with the handler's code as its cause.
+pub(crate) fn internal(
+    code: &str,
+    message: &str,
+    extras: impl IntoIterator<Item = (String, String)>,
+) -> CodedError {
+    CodedError {
+        code: code.to_string(),
+        message: message.to_string(),
+        extras: extras.into_iter().collect(),
+        grpc: GrpcCode::Internal,
+        refusal: None,
+    }
 }
 
 /// The router's code for a policy's own failure (its `on_event`'s error, a
@@ -344,7 +362,7 @@ pub(crate) fn flat_args(diagnostic: &dyn Diagnostic) -> Vec<(String, String)> {
 pub(crate) fn policy_failed(failure: &dyn Diagnostic) -> HandlerError {
     let extras = std::iter::once((POLICY_REASON.to_string(), failure.code().to_string()))
         .chain(flat_args(failure));
-    HandlerError::Coded(CodedError::bug(POLICY_FAILED, &failure.to_string(), extras))
+    HandlerError::Coded(internal(POLICY_FAILED, &failure.to_string(), extras))
 }
 
 /// The policy's failure the router carries, if `error` is one: its code
@@ -458,7 +476,7 @@ impl angzarr_router::PayloadUpcaster for CommandUpcaster {
                 UpcastError::Payload(e) => (payload.type_url.clone(), Report::of(e)),
                 UpcastError::Rule { source, error } => (source.clone(), error.clone()),
             };
-            CodedError::bug(
+            internal(
                 UPCAST_FAILED,
                 &reason.to_string(),
                 [

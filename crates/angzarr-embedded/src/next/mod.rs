@@ -384,9 +384,11 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn angzarr_embedded_diagnostic::D
         failures: vec![("balances", report())],
     }));
     for (reason, _) in route::REASONS {
-        samples.push(Box::new(KernelError::Router(
-            angzarr_router::error::CodedError::bug(reason, reason, []),
-        )));
+        samples.push(Box::new(KernelError::Router(route::internal(
+            reason,
+            reason,
+            [],
+        ))));
     }
     samples.push(Box::new(missing));
     samples.push(Box::new(WireError::UnknownEnum {

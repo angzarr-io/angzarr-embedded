@@ -587,7 +587,7 @@ fn every_router_reason_has_its_own_code_and_message() {
             "angzarr-embedded-next-{}",
             reason.to_ascii_lowercase().replace('_', "-")
         );
-        let error = KernelError::Router(CodedError::bug(&reason, "", []));
+        let error = KernelError::Router(CodedError::invalid_argument(&reason, "", []));
         if error.code() != expected {
             problems.push(format!("{reason} is {}, not {expected}", error.code()));
         }

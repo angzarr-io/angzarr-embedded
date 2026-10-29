@@ -437,8 +437,11 @@ code, args and typed refusal object: the caller's `Failure::Rejected(Rejected)`.
 A rejection is a FAILED_PRECONDITION, whatever its code: errors are
 defects unless deliberately refused. A handler's own code under any other
 status (INTERNAL, or any other) is its bug, and so is a code of the
-router's failed INTERNAL (UNHANDLED_HANDLER_ERROR: what a handler's error
-without a code of its own becomes, a remote child's included):
+router's failed INTERNAL. A handler fails deliberately as a bug with
+angzarr-router's `CodedError::bug` (decision 14.37), which answers
+UNHANDLED_HANDLER_ERROR with the handler's own code and args as its cause
+(`cause=<code>`, `cause.<arg>=<value>`); an error without a code of its
+own is UNHANDLED_HANDLER_ERROR too, a remote child's included:
 `KernelError::Router`, `Recovery::Bug`,
 [dead-lettered](#dead-letters-a-logger) by its code and args, and as a
 policy's step the policy's position moves past the trigger, as for a
@@ -764,7 +767,8 @@ policy that failed on its trigger, whose line is its error's code and args
 (`name=value`), never its English, and the trigger's place; a handler
 that failed under a code of its own, not as a FAILED_PRECONDITION, or
 under a code of the router's failed INTERNAL, whose line is that code and
-its args, never its English, and the command. **Every
+its args (a handler's bug: UNHANDLED_HANDLER_ERROR, its own code and args
+as `cause` and `cause.<arg>`), never its English, and the command. **Every
 line starts with the prefix**: anything arriving there almost certainly
 indicates a problem, so an operator alerts on it. The line is built from
 angzarr's own `AngzarrDeadLetter`, so it says what an angzarr DLQ entry

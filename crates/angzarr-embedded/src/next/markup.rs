@@ -1115,7 +1115,7 @@ where
         steps += 1;
         if steps > STEP_LIMIT {
             return Err(angzarr_router::error::HandlerError::Coded(
-                angzarr_router::error::CodedError::bug(
+                super::route::internal(
                     super::route::TOO_MANY_STEPS,
                     "the decision ran more continuation steps than its limit",
                     [],
