@@ -39,9 +39,9 @@ use std::fmt;
 
 use ::angzarr_embedded::next::markup::v1::RefusalResponse;
 use ::angzarr_embedded::next::markup::{
-    self, assert_step_idempotent, CommandRefused, Commands, Context, DomainMessage, Emit, Policy,
-    PolicyContext, ProcessManager, ProjectionContext, Record, Refusal, Refuses, Refusing,
-    Rejection, TypeName, MARKUP_RULES_VERSION, STEP_LIMIT,
+    self, assert_step_idempotent, CommandContext, CommandRefused, Commands, Context, DomainMessage,
+    Emit, Policy, PolicyContext, ProcessManager, ProjectionContext, Record, Refusal, Refuses,
+    Refusing, Rejection, TypeName, MARKUP_RULES_VERSION, STEP_LIMIT,
 };
 use ::angzarr_embedded::next::v1::event_meta::Causation;
 use ::angzarr_embedded::next::v1::{
@@ -775,9 +775,29 @@ impl Wallet {
     #[handles_cmd(Note)]
     fn note(&self, _cmd: Note, ctx: &Context) -> Result<Noted, Refused> {
         Ok(Noted {
-            root: ctx.stream().root.clone().unwrap_or_default().value.to_vec(),
-            command_id: ctx.command_id().value.to_vec(),
-            correlation_id: ctx.correlation_id().value.to_vec(),
+            root: ctx
+                .command
+                .cover
+                .clone()
+                .unwrap_or_default()
+                .root
+                .unwrap_or_default()
+                .value
+                .to_vec(),
+            command_id: ctx
+                .command
+                .command_id
+                .clone()
+                .unwrap_or_default()
+                .value
+                .to_vec(),
+            correlation_id: ctx
+                .command
+                .correlation_id
+                .clone()
+                .unwrap_or_default()
+                .value
+                .to_vec(),
         })
     }
 
@@ -948,7 +968,7 @@ impl Ladder {
 // ---------------------------------------------------------------- the pot
 
 /// An aggregate whose handlers read angzarr-router's whole
-/// `CommandContext` through their [`Context`]: a stake decided under
+/// `CommandContext`, their [`Context`]'s `command`: a stake decided under
 /// AGGREGATE_HANDLES reads the window it did not see and, when told to,
 /// acknowledges it; a mark records the stream's root; a peek records what
 /// the router knows of the input.
@@ -969,7 +989,7 @@ impl Pot {
                 window: 0,
             });
         }
-        let window = match &ctx.conflict {
+        let window = match &ctx.command.conflict {
             Some(conflict) => {
                 conflict.resolve_conflicts(conflict.window(), conflict.nonce());
                 conflict.window().len() as u32
@@ -985,7 +1005,7 @@ impl Pot {
     /// The stream's root and domain, from the router's cover.
     #[handles_cmd(Mark)]
     fn mark(&self, _cmd: Mark, ctx: &Context) -> Result<Marked, Infallible> {
-        let cover = ctx.cover.clone().unwrap_or_default();
+        let cover = ctx.command.cover.clone().unwrap_or_default();
         Ok(Marked {
             root: cover.root.unwrap_or_default().value.to_vec(),
             domain: cover.domain,
@@ -997,11 +1017,11 @@ impl Pot {
     #[handles_cmd(Peek)]
     fn peek(&self, _cmd: Peek, ctx: &Context) -> Result<Peeked, Infallible> {
         Ok(Peeked {
-            next_sequence: ctx.next_sequence,
-            had_prior_events: ctx.had_prior_events,
-            expected_sequence: ctx.expected_sequence,
-            resolution: ctx.conflict_resolution as i32,
-            conflict: ctx.conflict.is_some(),
+            next_sequence: ctx.command.next_sequence,
+            had_prior_events: ctx.command.had_prior_events,
+            expected_sequence: ctx.command.expected_sequence,
+            resolution: ctx.command.conflict_resolution as i32,
+            conflict: ctx.command.conflict.is_some(),
         })
     }
 
@@ -1270,12 +1290,12 @@ fn holding(cents: i64, moved: i64) -> Wallet {
 }
 
 fn context(n: u8) -> Context {
-    Context::new(
-        at(i64::from(n)),
-        wallet().cover().clone(),
-        Uuid::from_bytes([n; 16]),
-        Uuid::from_bytes([n; 16]),
-    )
+    Context::new(at(i64::from(n))).with_command(CommandContext {
+        cover: Some(wallet().cover().clone()),
+        command_id: Some(Uuid::from_bytes([n; 16])),
+        correlation_id: Some(Uuid::from_bytes([n; 16])),
+        ..CommandContext::default()
+    })
 }
 
 mod route {
@@ -2228,7 +2248,9 @@ impl BuyIn {
     fn expired(&self, _fact: BuyInExpired, ctx: &Context) -> Record<Self> {
         Record::of(Expired {
             external_id: ctx
-                .fact_origin()
+                .command
+                .fact_origin
+                .as_ref()
                 .map(|origin| origin.external_id.clone())
                 .unwrap_or_default(),
         })
@@ -2862,8 +2884,8 @@ mod policy_errors {
     }
 }
 
-/// Every handler reads angzarr-router's whole `CommandContext` through its
-/// `Context`: under AGGREGATE_HANDLES the conflict window and nonce it must
+/// Every handler reads angzarr-router's whole `CommandContext`, its
+/// `Context`'s `command`: under AGGREGATE_HANDLES the conflict window and nonce it must
 /// acknowledge, and under any resolution the stream's cover, the next
 /// sequence, whether the stream has history, the expected sequence and the
 /// resolution.

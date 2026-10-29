@@ -49,7 +49,7 @@
 
 use std::fmt;
 
-use angzarr_proto::v1::{Cover, EventBook, EventRef, FactOrigin, Uuid};
+use angzarr_proto::v1::{Cover, EventBook, EventRef, Uuid};
 use prost_types::{Any, Timestamp};
 
 use super::domain::Domain;
@@ -61,92 +61,56 @@ use super::wire::WireError;
 /// the expansion needs no dependency of its user's.
 pub use angzarr_embedded_diagnostic::Report;
 
+/// angzarr-router's context of the input a handler decides, and its
+/// conflict under AGGREGATE_HANDLES: a [`Context`]'s `command`.
+pub use angzarr_router::domain::{CommandContext, Conflict};
+
 /// What a handler, or a continuation step, reads besides the instance and
 /// its input, all read-only: the ONE handler context of every domain, an
-/// aggregate's and a process manager's alike. The instant its events will
-/// be recorded at (sampled by the application and injected, so the handler
-/// stays pure: there is no wall clock), the stream it decides, and the input's
-/// identity: its command id (a client's, the one the application minted,
-/// a policy's derived one, or, for a fact, the one derived from its origin;
-/// a refusal fact's is the refused command's), its correlation, and, for a
-/// fact, its origin.
+/// aggregate's and a process manager's alike.
 ///
-/// It is also angzarr-router's whole
-/// [`CommandContext`](angzarr_router::domain::CommandContext), through
-/// `Deref`: `ctx.cover` (the stream's domain and root), `ctx.next_sequence`,
-/// `ctx.had_prior_events`, `ctx.expected_sequence`,
-/// `ctx.conflict_resolution`, `ctx.conflict` (under AGGREGATE_HANDLES, the
-/// window the command did not see and the nonce the handler hands back
-/// through `resolve_conflicts`), `ctx.command_id`, `ctx.correlation_id` and
-/// `ctx.fact_origin`. Nothing the router knows of the input is withheld.
-#[derive(Clone, PartialEq, Debug)]
+/// - [`Context::command`]: angzarr-router's whole
+///   [`CommandContext`](angzarr_router::domain::CommandContext), as the
+///   router hands it to the handler: `cover` (the stream's domain and
+///   root), `next_sequence`, `had_prior_events`, `expected_sequence`,
+///   `conflict_resolution`, `conflict` (under AGGREGATE_HANDLES, the window
+///   the command did not see and the nonce the handler hands back through
+///   `resolve_conflicts`), and the input's identity: `command_id` (a
+///   client's, the one the application minted, a policy's derived one, or,
+///   for a fact, the one derived from its origin; a refusal fact's is the
+///   refused command's), `correlation_id` and, for a fact, `fact_origin`.
+///   Nothing the router knows of the input is withheld, and nothing it
+///   knows is kept twice.
+/// - [`Context::recorded_at`]: what the router does not carry, the instant
+///   the events will be recorded at (sampled by the application and
+///   injected, so the handler stays pure: there is no wall clock).
+#[derive(Clone, Debug)]
 pub struct Context {
     recorded_at: Timestamp,
-    stream: Cover,
-    command_id: Uuid,
-    correlation_id: Uuid,
-    fact_origin: Option<FactOrigin>,
+    /// angzarr-router's context of the input this handler decides.
+    pub command: CommandContext,
 }
 
 impl Context {
-    /// A context for a handler's own unit tests; the kernel builds the real
-    /// one from what angzarr-router hands the handler.
-    pub fn new(
-        recorded_at: Timestamp,
-        stream: Cover,
-        command_id: Uuid,
-        correlation_id: Uuid,
-    ) -> Context {
+    /// A context for a handler's own unit tests, recorded at `recorded_at`
+    /// with the router's default context ([`Context::with_command`] sets
+    /// it); the kernel builds the real one from what angzarr-router hands
+    /// the handler.
+    pub fn new(recorded_at: Timestamp) -> Context {
         Context {
             recorded_at,
-            stream,
-            command_id,
-            correlation_id,
-            fact_origin: None,
+            command: CommandContext::default(),
         }
     }
 
-    /// This context, for a fact from `origin`.
-    pub fn with_fact_origin(self, origin: FactOrigin) -> Context {
-        Context {
-            fact_origin: Some(origin),
-            ..self
-        }
+    /// This context, with `command` as the router's context of the input.
+    pub fn with_command(self, command: CommandContext) -> Context {
+        Context { command, ..self }
     }
 
     /// When the events will be recorded (non-decreasing within the stream).
     pub fn recorded_at(&self) -> Timestamp {
         self.recorded_at
-    }
-
-    /// The stream being decided.
-    pub fn stream(&self) -> &Cover {
-        &self.stream
-    }
-
-    /// The input's command id.
-    pub fn command_id(&self) -> &Uuid {
-        &self.command_id
-    }
-
-    /// The input's correlation: as sent, else its command id (for a process
-    /// manager, else its root).
-    pub fn correlation_id(&self) -> &Uuid {
-        &self.correlation_id
-    }
-
-    /// A fact's origin; `None` for a command.
-    pub fn fact_origin(&self) -> Option<&FactOrigin> {
-        self.fact_origin.as_ref()
-    }
-}
-
-/// The router's context of the input this handler decides.
-impl std::ops::Deref for Context {
-    type Target = angzarr_router::domain::CommandContext;
-
-    fn deref(&self) -> &Self::Target {
-        todo!("handler-context: the router's CommandContext in the markup's Context")
     }
 }
 
@@ -1050,22 +1014,10 @@ pub trait Routed: Domain {
     ) -> angzarr_router::domain::DomainDispatch<Self::State>;
 }
 
-/// The context a handler reads: the input's stream and identity, as the
-/// router delivers them, and the instant its events will be recorded at.
-fn context_of(cctx: &angzarr_router::domain::CommandContext) -> Context {
-    let delivery = super::route::delivery();
-    let context = Context::new(
-        delivery.recorded_at,
-        cctx.cover.clone().unwrap_or(delivery.stream),
-        cctx.command_id.clone().unwrap_or(delivery.command_id),
-        cctx.correlation_id
-            .clone()
-            .unwrap_or(delivery.correlation_id),
-    );
-    match cctx.fact_origin.clone() {
-        Some(origin) => context.with_fact_origin(origin),
-        None => context,
-    }
+/// The context a handler reads: the router's, and the instant its events
+/// will be recorded at.
+fn context_of(cctx: angzarr_router::domain::CommandContext) -> Context {
+    Context::new(super::route::recorded_at()).with_command(cctx)
 }
 
 /// The input `any` as a `T`, or the router's refusal of a payload that does
@@ -1135,7 +1087,7 @@ where
 {
     let refuse =
         |rejection: Rejection<R>| super::route::rejection(&rejection, rejection.refusal().cloned());
-    let ctx = context_of(&cctx);
+    let ctx = context_of(cctx);
     let command = input::<C>(any)?;
     let mut emit = handler(state, command, &ctx)
         .map_err(|e| refuse(e.into()))?
@@ -1181,7 +1133,7 @@ where
     F: DomainMessage,
     Rr: Records<A>,
 {
-    let ctx = context_of(&cctx);
+    let ctx = context_of(cctx);
     let fact = input::<F>(any)?;
     Ok(fact_record::<A>(record(
         state,
@@ -1204,15 +1156,14 @@ where
     Rr: Records<A>,
 {
     let delivery = super::route::delivery();
-    let mut ctx = Context::new(
-        delivery.recorded_at,
-        delivery.stream,
-        delivery.command_id,
-        delivery.correlation_id,
-    );
-    if let Some(origin) = delivery.fact_origin {
-        ctx = ctx.with_fact_origin(origin);
-    }
+    let ctx =
+        Context::new(delivery.recorded_at).with_command(angzarr_router::domain::CommandContext {
+            cover: Some(delivery.stream),
+            command_id: Some(delivery.command_id),
+            correlation_id: Some(delivery.correlation_id),
+            fact_origin: delivery.fact_origin,
+            ..Default::default()
+        });
     let book = refused.command.clone().unwrap_or_default();
     let command = input::<C>(command_payload(&book).unwrap_or(&Any::default()))?;
     let refused = CommandRefused {
@@ -1250,7 +1201,7 @@ where
         assert!(
             steps <= STEP_LIMIT,
             "the fact on stream {} ran more than its limit of {STEP_LIMIT} continuation steps",
-            super::error::cover_text(ctx.stream())
+            super::error::cover_text(&ctx.command.cover.clone().unwrap_or_default())
         );
         record = next(&working, ctx);
     }

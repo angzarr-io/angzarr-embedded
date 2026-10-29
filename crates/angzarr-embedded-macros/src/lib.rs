@@ -297,8 +297,13 @@
 //! ## Context, rejections and domain types
 //!
 //! Every domain handler and step takes the one `Context`: the instant its
-//! events will be recorded at, the stream it decides, and the input's
-//! identity (its command id, its correlation, and a fact's origin).
+//! events will be recorded at (`ctx.recorded_at()`), and, as its public
+//! field `ctx.command`, angzarr-router's whole `CommandContext` for the
+//! input: the stream it decides (`ctx.command.cover`), the next sequence,
+//! whether the stream has history, the sequence the command was issued
+//! against, its conflict resolution, under AGGREGATE_HANDLES the conflict
+//! to acknowledge (`ctx.command.conflict`), and the input's identity (its
+//! command id, its correlation, and a fact's origin).
 //!
 //! Commands and events are **domain types** (angzarr-codegen's domain
 //! layer), each a `DomainMessage` naming the prost message it travels as.
