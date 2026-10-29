@@ -22,6 +22,7 @@ Every error is localizable: a stable code and named args (see
 |---|---|
 | [`angzarr-embedded`](crates/angzarr-embedded) | event-sourcing kernel on angzarr's proto types (`angzarr_embedded::next`): decide, emit, apply, replay; angzarr's local runtime |
 | [`angzarr-embedded-diagnostic`](crates/angzarr-embedded-diagnostic) | localizable errors: every error has a stable code and named args for a Fluent catalog |
+| [`angzarr-embedded-host`](crates/angzarr-embedded-host) | remote domains as child processes (the go-plugin model): launched from a `[[domain]]` config, handshaken, reached by gRPC on a Unix socket, supervised, and handed back as angzarr-router `CommandHandler`s |
 | [`angzarr-embedded-graph`](crates/angzarr-embedded-graph) | typed-id graph with tags, queries and Dijkstra search |
 | [`angzarr-embedded-yaml`](crates/angzarr-embedded-yaml) | a strict YAML subset, read and written; versioned documents with registered migrations |
 | [`angzarr-store-sqlite`](crates/angzarr-store-sqlite) | angzarr-ports on SQLite, the one SQLite adapter angzarr-embedded and angzarr share: a leaf (nothing of angzarr-embedded), sea-query statements on sqlx, with its migrations; held to the ports' conformance suite |
@@ -55,9 +56,9 @@ Some of angzarr-embedded's crates depend on `angzarr-proto`, angzarr's wire type
 which is AGPL-3.0-only. In a normal build (dev-dependencies, which only
 tests build, aside):
 
-- **Carry angzarr-proto:** `angzarr-embedded`, which depends on it directly, and
-  `angzarr-store-sqlite`, which depends on angzarr-ports (AGPL-3.0-only
-  too). A binary that links any of these is effectively AGPL-3.0-only:
+- **Carry angzarr-proto:** `angzarr-embedded` and `angzarr-embedded-host`,
+  which depend on it directly, and `angzarr-store-sqlite`, which depends on
+  angzarr-ports (AGPL-3.0-only too). A binary that links any of these is effectively AGPL-3.0-only:
   their source stays BSD-3-Clause, but the linked whole carries
   angzarr-proto's terms.
 - **BSD-3-Clause only:** `angzarr-embedded-diagnostic`, `angzarr-embedded-graph`,

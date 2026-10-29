@@ -17,6 +17,7 @@ rust-version = "1.85"
 angzarr-embedded = { path = "../angzarr-embedded" }
 angzarr-embedded-diagnostic = { path = "../angzarr-embedded-diagnostic" }
 angzarr-embedded-graph = { path = "../angzarr-embedded-graph" }
+angzarr-embedded-host = { path = "../angzarr-embedded-host" }
 angzarr-store-sqlite = { path = "../angzarr-store-sqlite" }
 # angzarr-ports' Arg, to read the adapter's errors, which are in its style.
 angzarr-ports = { git = "https://github.com/angzarr-io/angzarr-project", rev = "55eab0f7225ecd5ed63aa74a766d2f16b2735be2" }

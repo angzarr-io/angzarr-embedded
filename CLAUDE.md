@@ -19,7 +19,8 @@ knows nothing about any application that uses it, so anything specific to
 one belongs in that application's repository, not here.
 
 Every crate has zero third-party dependencies, except angzarr-embedded,
-angzarr-store-sqlite, angzarr-embedded-catalog-check and angzarr-embedded-macros. A crate may
+angzarr-embedded-host, angzarr-store-sqlite, angzarr-embedded-catalog-check
+and angzarr-embedded-macros. A crate may
 depend on another crate in this workspace, as angzarr-embedded-catalog-check does.
 
 angzarr-embedded-catalog-check is test-only: its one dev-dependency, `fluent-syntax`
@@ -64,7 +65,20 @@ is a LEAF: it depends on nothing of angzarr-embedded (its own test,
 follow angzarr-ports' style rather than `angzarr_embedded_diagnostic`'s. It lives here
 for the POC, beside its first user; it can move to angzarr-project unchanged.
 
-Protobuf code lives in angzarr-embedded (angzarr's types); every other crate stays
+angzarr-embedded-host depends on `angzarr-router` and `angzarr-proto`
+(pinned at the revs the router names, so its graph holds one angzarr-proto),
+`tonic` and `tonic-prost` (its gRPC client, and in its tests the fake
+child's server), `tonic-types` (google.rpc's Status and ErrorInfo), `tokio`,
+`tower` and `hyper-util` (the runtime and the Unix-socket connector), and
+`serde` (its config), because a remote domain is a child process speaking
+gRPC on a Unix socket: hand-rolling HTTP/2 would be a second, unchecked
+implementation of gRPC. Its stubs are written by `tonic-build`'s manual
+builder from the router's Rust types, so no `io.angzarr.v1` message is
+generated twice. Nothing else in the workspace depends on it but the catalog
+check's tests.
+
+Protobuf code lives in angzarr-embedded (angzarr's types) and
+angzarr-embedded-host (the service stubs); every other crate stays
 dependency-free except as above.
 
 ## Licence: BSD-3-Clause; not published

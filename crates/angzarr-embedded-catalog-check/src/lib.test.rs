@@ -29,6 +29,10 @@ fn samples() -> Vec<(&'static str, Vec<Box<dyn Diagnostic>>)> {
             "angzarr-embedded-graph",
             angzarr_embedded_graph::diagnostic_samples(),
         ),
+        (
+            "angzarr-embedded-host",
+            angzarr_embedded_host::diagnostic_samples(),
+        ),
         ("angzarr-store-sqlite", sqlite_samples()),
         (
             "angzarr-embedded-yaml",
@@ -42,6 +46,7 @@ fn exported() -> Vec<(&'static str, &'static str)> {
     vec![
         angzarr_embedded::EN_US,
         angzarr_embedded_graph::EN_US,
+        angzarr_embedded_host::EN_US,
         angzarr_store_sqlite::EN_US,
         angzarr_embedded_yaml::EN_US,
     ]

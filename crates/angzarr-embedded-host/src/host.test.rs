@@ -1,0 +1,351 @@
+use std::time::{Duration, Instant};
+
+use angzarr_router::error::GrpcCode;
+use angzarr_router::pb;
+use angzarr_router::router::CommandHandler;
+use prost_types::Any;
+
+use super::*;
+use crate::config::DomainConfig;
+use crate::error::HandshakeError;
+use crate::fake_child::{self, config, domain, mode};
+use crate::remote::is_retryable;
+
+fn command(domain: &str, type_url: &str) -> pb::ContextualCommand {
+    pb::ContextualCommand {
+        command: Some(pb::CommandBook {
+            cover: Some(pb::Cover {
+                domain: domain.to_string(),
+                ..Default::default()
+            }),
+            page: Some(pb::CommandPage {
+                body: Some(pb::command_page::Body::Command(pb::Command {
+                    payload: Some(Any {
+                        type_url: type_url.to_string(),
+                        value: Vec::new(),
+                    }),
+                })),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+fn player(mode: &str) -> DomainConfig {
+    domain("player", "player", mode)
+}
+
+fn started(domains: Vec<DomainConfig>) -> Host {
+    Host::start(config(domains)).expect("the host starts")
+}
+
+/// The fake's `pid-<n>` rules version, from its descriptor.
+fn pid_of(handler: &RemoteCommandHandler) -> String {
+    handler.component_descriptor().unwrap().rules_version
+}
+
+/// Whether the process `pid-<n>` names is running (a zombie is not).
+fn alive(pid: &str) -> bool {
+    let pid = pid.strip_prefix("pid-").unwrap();
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        stat.rsplit_once(") ")
+            .is_some_and(|(_, rest)| !rest.starts_with('Z'))
+    })
+}
+
+/// Describe's descriptor is the handler's: its name, its kind.
+#[test]
+fn start_describes_each_remote_domain() {
+    let host = started(vec![player(mode::SERVE)]);
+    let handlers = host.handlers();
+    assert_eq!(handlers.len(), 1);
+    let handler = &handlers[0];
+    assert_eq!(handler.name(), "player");
+    assert_eq!(handler.kind(), pb::ComponentKind::Aggregate);
+    let descriptor = handler.component_descriptor().unwrap();
+    assert_eq!(descriptor.name, "player");
+    assert_eq!(descriptor.kind, pb::ComponentKind::Aggregate as i32);
+    assert!(descriptor.rules_version.starts_with("pid-"));
+    assert_eq!(handler.command_types(), Vec::<String>::new());
+    assert_eq!(host.handler("player").unwrap().name(), "player");
+    assert!(host.handler("table").is_none());
+    host.shutdown();
+}
+
+/// Every domain the config names, each with its own child, in order; the
+/// in-process ones are not launched and get no handler.
+#[test]
+fn in_process_domains_are_left_to_the_caller() {
+    let table = DomainConfig {
+        name: "table".to_string(),
+        language: "rust".to_string(),
+        launch: None,
+        entry: Vec::new(),
+        dir: None,
+        env: Default::default(),
+    };
+    let host = started(vec![
+        table,
+        player(mode::SERVE),
+        domain("dealer", "dealer", mode::SERVE),
+    ]);
+    let names: Vec<String> = host
+        .handlers()
+        .iter()
+        .map(|h| h.name().to_string())
+        .collect();
+    assert_eq!(names, ["player", "dealer"]);
+    let (player, dealer) = (
+        host.handler("player").unwrap(),
+        host.handler("dealer").unwrap(),
+    );
+    assert_ne!(pid_of(&player), pid_of(&dealer));
+    host.shutdown();
+}
+
+/// `Handle` on the wire: the command reaches the child and its answer comes
+/// back whole.
+#[test]
+fn a_command_round_trips_through_the_child() {
+    let host = started(vec![player(mode::SERVE)]);
+    let handler = host.handler("player").unwrap();
+    let response = handler
+        .dispatch(&command("player", "/examples.blackjack.SitDown"))
+        .expect("dispatched");
+    let events = response.events.expect("events");
+    assert_eq!(events.cover.unwrap().domain, "player");
+    assert_eq!(response.rules_version, pid_of(&handler));
+    host.shutdown();
+}
+
+/// The kernel may dispatch from inside its own tokio runtime: the call must
+/// neither panic nor deadlock there.
+#[test]
+fn dispatch_works_inside_a_tokio_runtime() {
+    let host = started(vec![player(mode::SERVE)]);
+    let handler = host.handler("player").unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let response = runtime
+        .block_on(async { handler.dispatch(&command("player", "/examples.blackjack.SitDown")) });
+    assert!(response.is_ok(), "{response:?}");
+    host.shutdown();
+}
+
+/// A child's FAILED_PRECONDITION, with its typed refusal in the details,
+/// is the router's refusal.
+#[test]
+fn a_refusal_comes_back_as_the_routers_refusal() {
+    let host = started(vec![player(mode::SERVE)]);
+    let refused = host
+        .handler("player")
+        .unwrap()
+        .dispatch(&command("player", "/examples.blackjack.Refuse"))
+        .expect_err("refused");
+    assert_eq!(refused.grpc, GrpcCode::FailedPrecondition);
+    assert_eq!(refused.code, "TABLE_FULL");
+    assert_eq!(refused.message, "table is full");
+    assert_eq!(refused.extras.get("seats").map(String::as_str), Some("6"));
+    assert_eq!(refused.refusal.as_deref(), Some(&fake_child::refusal()));
+    assert_eq!(
+        refused.refusal_response().unwrap().refusal,
+        Some(fake_child::refusal())
+    );
+    assert!(!is_retryable(&refused));
+    host.shutdown();
+}
+
+/// A child that dies is unreachable, which is retryable; it is restarted,
+/// as a new process, and the same handler reaches it.
+#[test]
+fn a_dead_child_is_retryable_then_restarted() {
+    let host = started(vec![player(mode::SERVE)]);
+    let handler = host.handler("player").unwrap();
+    let first = pid_of(&handler);
+    let died = handler
+        .dispatch(&command("player", "/examples.blackjack.Die"))
+        .expect_err("the child died mid-call");
+    assert!(is_retryable(&died), "{died:?}");
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let answered = loop {
+        match handler.dispatch(&command("player", "/examples.blackjack.SitDown")) {
+            Ok(response) => break response,
+            Err(error) => {
+                assert!(is_retryable(&error), "{error:?}");
+                assert!(Instant::now() < deadline, "not restarted in time");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    };
+    assert!(answered.rules_version.starts_with("pid-"));
+    assert_ne!(answered.rules_version, first, "a new child answered");
+    assert!(!alive(&first));
+    host.shutdown();
+}
+
+/// Chatter on stdout before the handshake is skipped.
+#[test]
+fn stdout_before_the_handshake_is_skipped() {
+    let host = started(vec![player(mode::NOISY)]);
+    assert!(host
+        .handler("player")
+        .unwrap()
+        .dispatch(&command("player", "/examples.blackjack.SitDown"))
+        .is_ok());
+    host.shutdown();
+}
+
+#[test]
+fn a_child_that_never_handshakes_fails_start() {
+    let mut config = config(vec![player(mode::SILENT)]);
+    config.supervision.handshake_timeout_ms = 500;
+    let started = Instant::now();
+    assert_eq!(
+        Host::start(config).err(),
+        Some(HostError::Handshake {
+            domain: "player".to_string(),
+            cause: HandshakeError::Timeout { timeout_ms: 500 },
+        })
+    );
+    assert!(started.elapsed() >= Duration::from_millis(500));
+}
+
+#[test]
+fn a_malformed_handshake_fails_start() {
+    assert_eq!(
+        Host::start(config(vec![player(mode::MALFORMED)])).err(),
+        Some(HostError::Handshake {
+            domain: "player".to_string(),
+            cause: HandshakeError::Malformed {
+                line: fake_child::MALFORMED_LINE.to_string(),
+            },
+        })
+    );
+}
+
+/// The config's launch is what runs: a program that does not exist fails
+/// start by name, where the default (uv) would have been tried otherwise.
+#[test]
+fn the_configured_launch_is_what_runs() {
+    let mut player = player(mode::SERVE);
+    player.launch = Some(vec!["/nonexistent/angzarr-player".to_string()]);
+    assert_eq!(
+        Host::start(config(vec![player])).err(),
+        Some(HostError::Spawn {
+            domain: "player".to_string(),
+            program: "/nonexistent/angzarr-player".to_string(),
+            kind: "NotFound".to_string(),
+        })
+    );
+}
+
+/// A child must describe the domain it was launched for.
+#[test]
+fn a_child_describing_another_component_fails_start() {
+    assert_eq!(
+        Host::start(config(vec![domain("player", "table", mode::SERVE)])).err(),
+        Some(HostError::NameMismatch {
+            domain: "player".to_string(),
+            described: "table".to_string(),
+        })
+    );
+}
+
+#[test]
+fn a_domain_configured_twice_is_refused() {
+    assert_eq!(
+        Host::start(config(vec![player(mode::SERVE), player(mode::SERVE)])).err(),
+        Some(HostError::DuplicateDomain {
+            domain: "player".to_string(),
+        })
+    );
+}
+
+/// A start that fails leaves no child behind: the domains that came up
+/// before the failing one are stopped.
+#[test]
+fn a_failed_start_stops_the_children_it_started() {
+    let tag = format!("failed-start-{}", std::process::id());
+    let mut config = config(vec![
+        domain("dealer", "dealer", mode::SERVE),
+        player(mode::MALFORMED),
+    ]);
+    for domain in &mut config.domains {
+        domain.env.insert(TAG_ENV.to_string(), tag.clone());
+    }
+    assert!(Host::start(config).is_err());
+    assert_eq!(
+        running_with_tag(&tag),
+        0,
+        "a child outlived the failed start"
+    );
+}
+
+/// Shutdown closes the child's stdin, and the child exits by itself.
+#[test]
+fn shutdown_closes_stdin_and_the_child_exits() {
+    let host = started(vec![player(mode::SERVE)]);
+    let pid = pid_of(&host.handler("player").unwrap());
+    let started = Instant::now();
+    assert_eq!(
+        host.shutdown(),
+        vec![("player".to_string(), ChildExit::Exited(Some(0)))]
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(3_000),
+        "exited before the grace ran out"
+    );
+    assert!(!alive(&pid));
+}
+
+/// A child that ignores its stdin's end is killed once the grace runs out.
+#[test]
+fn a_child_ignoring_stdin_eof_is_killed_after_the_grace() {
+    let mut config = config(vec![player(mode::STUBBORN)]);
+    config.supervision.shutdown_grace_ms = 300;
+    let host = Host::start(config).unwrap();
+    let pid = pid_of(&host.handler("player").unwrap());
+    assert_eq!(
+        host.shutdown(),
+        vec![("player".to_string(), ChildExit::Killed)]
+    );
+    assert!(!alive(&pid));
+}
+
+/// Dropping the host stops its children as shutdown does.
+#[test]
+fn dropping_the_host_stops_its_children() {
+    let host = started(vec![player(mode::SERVE)]);
+    let pid = pid_of(&host.handler("player").unwrap());
+    drop(host);
+    assert!(!alive(&pid));
+}
+
+/// A variable the tests set on a child to find it again.
+const TAG_ENV: &str = "ANGZARR_FAKE_TAG";
+
+/// How many running (not zombie) processes have `ANGZARR_FAKE_TAG=tag` in
+/// their environment.
+fn running_with_tag(tag: &str) -> usize {
+    let wanted = format!("{TAG_ENV}={tag}");
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return 0;
+    };
+    entries
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let Some(pid) = e.file_name().to_str().map(str::to_string) else {
+                return false;
+            };
+            pid.bytes().all(|b| b.is_ascii_digit())
+                && alive(&format!("pid-{pid}"))
+                && std::fs::read(e.path().join("environ"))
+                    .is_ok_and(|env| env.split(|&b| b == 0).any(|var| var == wanted.as_bytes()))
+        })
+        .count()
+}
