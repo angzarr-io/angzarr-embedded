@@ -88,12 +88,15 @@
 //! - [`on_refused`]`(Cmd)`, one per command of another domain that a policy
 //!   sent on this domain's behalf and whose refusals it handles: a fact
 //!   handler, `fn(&self, refused: CommandRefused<Cmd>, ctx: &Context) ->
-//!   R` (see *Refusals*).
+//!   Result<R, E>`, always a `Result`, its `ctx` the router's context of
+//!   the refusal fact: it cannot refuse, but its `Err` (any `Diagnostic`)
+//!   is a bug, dead-lettered as its policy's failure,
+//!   `StepError::PolicyFailed` (see *Refusals*).
 //!
 //!   The marker says which a method is, and the macro holds the signature
-//!   to it: a `#[handles_cmd]` without a `Result`, a `#[handles_fact]` or
-//!   `#[on_refused]` with one (or with an `Emit`, whose steps may refuse),
-//!   does not compile.
+//!   to it: a `#[handles_cmd]` or `#[on_refused]` without a `Result`, a
+//!   `#[handles_fact]` with one, or either fact handler with an `Emit`,
+//!   whose steps may refuse, does not compile.
 //! - [`applies`]`(Event)`, one per event: `fn(&mut self, event: Event)`.
 //!
 //! There are no other markers on a domain. Stateless rules are not a
@@ -280,7 +283,10 @@
 //!   types to do so. Which refusals a domain handles is inferred from its
 //!   `#[on_refused]` handlers (`REFUSALS` lists them): one with no handler
 //!   is caught at run time: the steps before it stay committed, and the
-//!   refusal fact is dead-lettered and alerted. A `CommandRefused` from outside a policy is
+//!   refusal fact is dead-lettered and alerted. The handler's `Err` is a
+//!   bug, as a policy's own is: the step fails as `StepError::PolicyFailed`,
+//!   is dead-lettered by its code and args, and the policy's position
+//!   moves past the trigger. A `CommandRefused` from outside a policy is
 //!   accepted when its trigger names the receiving stream.
 //! - **Translate**, for each command the policy has a callback for:
 //!   `#[on_refused(Hold)] fn(&self, refusal: &Refusal<Hold>) -> F` on the
@@ -1420,8 +1426,12 @@
 //!     }
 //!
 //!     #[on_refused(SwitchOn)]
-//!     fn switch_on_refused(&self, _refused: CommandRefused<SwitchOn>, _ctx: &Context) -> Record<Self> {
-//!         Record::of(Lost)
+//!     fn switch_on_refused(
+//!         &self,
+//!         _refused: CommandRefused<SwitchOn>,
+//!         _ctx: &Context,
+//!     ) -> Result<Record<Self>, Infallible> {
+//!         Ok(Record::of(Lost))
 //!     }
 //!
 //!     #[applies(TimerStarted)]
@@ -1866,8 +1876,12 @@
 //!     }
 //!
 //!     #[on_refused(SwitchOn)]
-//!     fn switch_on_refused(&self, _refused: CommandRefused<SwitchOn>, _ctx: &Context) -> Record<Self> {
-//!         Record::of(Lost)
+//!     fn switch_on_refused(
+//!         &self,
+//!         _refused: CommandRefused<SwitchOn>,
+//!         _ctx: &Context,
+//!     ) -> Result<Record<Self>, Infallible> {
+//!         Ok(Record::of(Lost))
 //!     }
 //!
 //!     #[applies(TimerStarted)]
@@ -1962,8 +1976,12 @@
 //!     }
 //!
 //!     #[on_refused(SwitchOn)]
-//!     fn switch_on_refused(&self, _refused: CommandRefused<SwitchOn>, _ctx: &Context) -> Record<Self> {
-//!         Record::of(Lost)
+//!     fn switch_on_refused(
+//!         &self,
+//!         _refused: CommandRefused<SwitchOn>,
+//!         _ctx: &Context,
+//!     ) -> Result<Record<Self>, Infallible> {
+//!         Ok(Record::of(Lost))
 //!     }
 //!
 //!     #[applies(TimerStarted)]
@@ -2041,8 +2059,9 @@
 //! use angzarr_embedded::next::markup::process_manager_root;
 //! ```
 //!
-//! A refusal handler (`#[on_refused]` on a domain) is a fact handler: it
-//! cannot refuse, so a `Result` does not compile.
+//! A refusal handler (`#[on_refused]` on a domain) is a fact handler that
+//! always returns `Result`: it cannot refuse, but its `Err` is a bug, its
+//! policy's failure. One returning a bare record does not compile.
 //!
 //! ```compile_fail
 //! # use std::convert::Infallible;
@@ -2118,8 +2137,8 @@
 //!     }
 //!
 //!     #[on_refused(SwitchOn)]
-//!     fn switch_on_refused(&self, _refused: CommandRefused<SwitchOn>, _ctx: &Context) -> Result<Lost, Infallible> {
-//!         Ok(Lost)
+//!     fn switch_on_refused(&self, _refused: CommandRefused<SwitchOn>, _ctx: &Context) -> Record<Self> {
+//!         Record::of(Lost)
 //!     }
 //!
 //!     #[applies(TimerStarted)]
@@ -2239,8 +2258,12 @@
 //!     }
 //!
 //!     #[on_refused(SwitchOn)]
-//!     fn switch_on_refused(&self, _refused: CommandRefused<SwitchOn>, _ctx: &Context) -> Record<Self> {
-//!         Record::of(Lost)
+//!     fn switch_on_refused(
+//!         &self,
+//!         _refused: CommandRefused<SwitchOn>,
+//!         _ctx: &Context,
+//!     ) -> Result<Record<Self>, Infallible> {
+//!         Ok(Record::of(Lost))
 //!     }
 //!
 //!     #[applies(TimerStarted)]
@@ -2372,8 +2395,12 @@
 //!     }
 //!
 //!     #[on_refused(SwitchOn)]
-//!     fn switch_on_refused(&self, _refused: CommandRefused<SwitchOn>, _ctx: &Context) -> Record<Self> {
-//!         Record::of(Lost)
+//!     fn switch_on_refused(
+//!         &self,
+//!         _refused: CommandRefused<SwitchOn>,
+//!         _ctx: &Context,
+//!     ) -> Result<Record<Self>, Infallible> {
+//!         Ok(Record::of(Lost))
 //!     }
 //!
 //!     #[applies(TimerStarted)]
@@ -2505,8 +2532,12 @@
 //!     }
 //!
 //!     #[on_refused(SwitchOn)]
-//!     fn switch_on_refused(&self, _refused: CommandRefused<SwitchOn>, _ctx: &Context) -> Record<Self> {
-//!         Record::of(Lost)
+//!     fn switch_on_refused(
+//!         &self,
+//!         _refused: CommandRefused<SwitchOn>,
+//!         _ctx: &Context,
+//!     ) -> Result<Record<Self>, Infallible> {
+//!         Ok(Record::of(Lost))
 //!     }
 //!
 //!     #[applies(TimerStarted)]
@@ -2638,8 +2669,12 @@
 //!     }
 //!
 //!     #[on_refused(SwitchOn)]
-//!     fn switch_on_refused(&self, _refused: CommandRefused<SwitchOn>, _ctx: &Context) -> Record<Self> {
-//!         Record::of(Lost)
+//!     fn switch_on_refused(
+//!         &self,
+//!         _refused: CommandRefused<SwitchOn>,
+//!         _ctx: &Context,
+//!     ) -> Result<Record<Self>, Infallible> {
+//!         Ok(Record::of(Lost))
 //!     }
 //!
 //!     #[applies(TimerStarted)]
@@ -2727,8 +2762,9 @@ pub fn handles_fact(_attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 /// On a domain: the handler of the refusal of the policy command `Cmd` it
-/// caused, passed through (`#[on_refused(Cmd)]`, an infallible fact
-/// handler of `markup::CommandRefused<Cmd>`). On a policy: the translating
+/// caused, passed through (`#[on_refused(Cmd)]`, a fact handler of
+/// `markup::CommandRefused<Cmd>` that always returns `Result`, its `Err` a
+/// bug, its policy's failure). On a policy: the translating
 /// callback for `Cmd`, returning a fact of the source. Inert: the
 /// component's macro reads it.
 #[proc_macro_attribute]
@@ -3229,10 +3265,24 @@ fn check_signature(x: &Marked<'_>) -> syn::Result<()> {
             }
             Ok(())
         }
-        _ if outer == Some("Result") => fail(
-            "a fact handler returns no `Result`: a fact cannot be refused \
-             (`#[on_refused]` on a domain is a fact handler)",
-        ),
+        "on_refused" => {
+            let Some((_, args)) = output.as_ref().filter(|(name, _)| name == "Result") else {
+                return fail(
+                    "an `#[on_refused]` handler returns `Result<Record<Self>, E>`: its `Err`, \
+                     a bug, is dead-lettered as its policy's failure",
+                );
+            };
+            match args.first().and_then(last_ident) {
+                Some(ok) if ok == "Emit" => fail(
+                    "an `#[on_refused]` handler records a `Record`, not an `Emit`, whose \
+                     steps may refuse",
+                ),
+                _ => Ok(()),
+            }
+        }
+        _ if outer == Some("Result") => {
+            fail("a fact handler returns no `Result`: a fact cannot be refused")
+        }
         _ if outer == Some("Emit") => {
             fail("a fact handler returns a `Record`, not an `Emit`, whose steps may refuse")
         }
@@ -3472,8 +3522,8 @@ fn domain(attr: Tokens, item: Tokens, kind: Kind) -> syn::Result<Tokens> {
         let (ty, method) = (&x.args.ty, call(x));
         let name = full_name(ty);
         quote! {
-            .on_refused(#name, |refused, state| {
-                #m::__on_refused::<#self_ty, #ty, _>(refused, state, <#self_ty>::#method)
+            .on_refused(#name, |refused, state, cctx| {
+                #m::__on_refused::<#self_ty, #ty, _, _>(refused, state, cctx, <#self_ty>::#method)
             })
         }
     });

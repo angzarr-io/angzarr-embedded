@@ -51,7 +51,7 @@ use ::angzarr_embedded::next::v1::{
 use ::angzarr_embedded::next::{
     pack, type_name, Any, Decoder, Domain, Envelope, Executed, Failure, Handled, KernelError,
     MemoryDeadLetters, Payload, PayloadError, Recovery, Registry, Rejected, Rulebook, Sampled,
-    State, Stream, Timestamp, Upcaster, WireError,
+    State, StepError, Stream, Timestamp, Upcaster, WireError,
 };
 use angzarr_embedded_diagnostic::{Arg, Diagnostic, Report};
 use angzarr_embedded_macros::{
@@ -296,6 +296,8 @@ mod wire {
         BuyInFailed {
             #[prost(int64, tag = "1")]
             short: i64,
+            #[prost(bool, tag = "2")]
+            had_history: bool,
         }
     );
     message!(
@@ -423,7 +425,10 @@ domain_type!(BuyInHeld { cents: i64 });
 domain_type!(Expired {
     external_id: String
 });
-domain_type!(BuyInFailed { short: i64 });
+domain_type!(BuyInFailed {
+    short: i64,
+    had_history: bool
+});
 domain_type!(HoldWasLost { short: i64 });
 domain_type!(Stake {
     cents: i64,
@@ -2257,15 +2262,30 @@ impl BuyIn {
     }
 
     /// The wallet refused the hold BuyInWallet sent: passed through, its
-    /// typed refusal object unpacked here.
+    /// typed refusal object unpacked here, and whether the buy-in had
+    /// history read from the router's context. A wallet short by exactly
+    /// 23 cannot happen: the handler's error, a bug.
     #[on_refused(Hold)]
-    fn hold_refused(&self, refused: CommandRefused<Hold>, _ctx: &Context) -> Record<Self> {
-        Record::of(BuyInFailed {
-            short: refused
-                .refusal::<InsufficientFunds>()
-                .map(|object| object.short)
-                .unwrap_or_default(),
-        })
+    fn hold_refused(
+        &self,
+        refused: CommandRefused<Hold>,
+        ctx: &Context,
+    ) -> Result<Record<Self>, Report> {
+        let short = refused
+            .refusal::<InsufficientFunds>()
+            .map(|object| object.short)
+            .unwrap_or_default();
+        if short == 23 {
+            return Err(Report::new(
+                "toy-buyin-impossible-short",
+                "a wallet short by 23 cannot happen",
+            )
+            .arg("short", short));
+        }
+        Ok(Record::of(BuyInFailed {
+            short,
+            had_history: ctx.command.had_prior_events,
+        }))
     }
 
     /// The same refusal, translated by the policy into the buy-in's own
@@ -3248,8 +3268,11 @@ mod policy_refusals {
         let pages = pages(&store, &buy_in_cover(&correlation(2))).expect("the buy-in");
         assert_eq!(
             pages[1].payload,
-            Some(any(BuyInFailed { short: 20 })),
-            "the handler read the typed refusal object"
+            Some(any(BuyInFailed {
+                short: 20,
+                had_history: true
+            })),
+            "the handler read the typed refusal object, and the router's context"
         );
     }
 
@@ -3436,6 +3459,63 @@ mod refusal_flow {
             Some(2),
             "the wallet recorded nothing of the hold"
         );
+    }
+
+    /// The source's `#[on_refused]` handler's error is the policy's failure,
+    /// a bug: the step fails as `PolicyFailed`, a defect, is dead-lettered
+    /// with the error's code and args (no English), records nothing, and
+    /// the policy's position moves past the trigger, so a resume does not
+    /// run it again.
+    #[test]
+    fn a_refusal_handlers_error_dead_letters_its_step_as_the_policys_failure() {
+        let (registry, store) = funded(false, 7);
+        let log = MemoryDeadLetters::new();
+        let failure = settle_in::<BuyIn>(&store, &registry, &log, 2, start(&correlation(9), 2, 30))
+            .err()
+            .expect("the refusal handler's error fails the call");
+        let Failure::Downstream { error, .. } = &failure else {
+            panic!("a downstream failure: {failure:?}");
+        };
+        let StepError::PolicyFailed(report) = error else {
+            panic!("the policy's failure: {error:?}");
+        };
+        assert_eq!(report.code(), "toy-buyin-impossible-short");
+        assert_eq!(failure.recovery(), Recovery::Bug);
+        assert_eq!(
+            buy_in_events(&store, &correlation(9)),
+            buy_in(&["BuyInStarted"]),
+            "the refusal step recorded nothing"
+        );
+        let lines = log.lines();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains("toy-buyin-impossible-short short=23"),
+            "its code and args: {}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains("cannot happen"),
+            "no English: {}",
+            lines[0]
+        );
+
+        let sampled = Sampled {
+            now: at(9),
+            command_id: Uuid::from_bytes([0x79; 16]),
+        };
+        let resumed = ready(
+            ::angzarr_embedded::next::Kernel::new(&registry, &log).resume(
+                &store,
+                &sampled,
+                &mut (),
+            ),
+        )
+        .expect("nothing left owed");
+        assert!(
+            resumed.steps().is_empty(),
+            "the position moved past the trigger"
+        );
+        assert_eq!(log.lines().len(), 1, "nothing dead-lettered again");
     }
 
     /// The refusal fact's id is the refused command's id, and its origin's

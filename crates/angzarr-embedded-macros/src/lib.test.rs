@@ -143,11 +143,39 @@ fn a_fact_handler_returning_a_result_is_refused() {
 fn a_fact_handler_returning_an_emit_is_refused() {
     let error = lamp(quote! {
         impl Lamp {
-            #[on_refused(On)]
-            fn on_refused(&self, refused: CommandRefused<On>, ctx: &Context) -> Emit<Self> { todo!() }
+            #[handles_fact(Cut)]
+            fn cut(&self, fact: Cut, ctx: &Context) -> Emit<Self> { todo!() }
         }
     });
     assert!(error.contains("not an `Emit`"), "{error}");
+}
+
+#[test]
+fn an_on_refused_handler_returning_no_result_is_refused() {
+    let error = lamp(quote! {
+        impl Lamp {
+            #[on_refused(On)]
+            fn on_refused(&self, refused: CommandRefused<On>, ctx: &Context) -> Record<Self> { todo!() }
+        }
+    });
+    assert!(
+        error.contains("an `#[on_refused]` handler returns `Result<Record<Self>, E>`"),
+        "{error}"
+    );
+}
+
+#[test]
+fn an_on_refused_handler_returning_an_emit_is_refused() {
+    let error = lamp(quote! {
+        impl Lamp {
+            #[on_refused(On)]
+            fn on_refused(&self, refused: CommandRefused<On>, ctx: &Context) -> Result<Emit<Self>, Report> { todo!() }
+        }
+    });
+    assert!(
+        error.contains("an `#[on_refused]` handler records a `Record`, not an `Emit`"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -197,7 +225,7 @@ fn a_process_manager_with_only_refusal_handlers_still_skips_for_no_instance() {
         quote! {
             impl Timer {
                 #[on_refused(On)]
-                fn on_refused(&self, refused: CommandRefused<On>, ctx: &Context) -> Record<Self> { todo!() }
+                fn on_refused(&self, refused: CommandRefused<On>, ctx: &Context) -> Result<Record<Self>, Infallible> { todo!() }
             }
         },
         Kind::ProcessManager,

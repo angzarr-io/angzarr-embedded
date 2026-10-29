@@ -23,7 +23,8 @@
 use std::sync::Mutex;
 
 use angzarr_embedded_diagnostic::Diagnostic;
-use angzarr_proto::v1::{AngzarrDeadLetter, CommandBook, EventBook};
+use angzarr_proto::v1::angzarr_dead_letter::Payload;
+use angzarr_proto::v1::{AngzarrDeadLetter, CommandBook};
 
 use super::route::flat_args;
 
@@ -44,7 +45,6 @@ pub trait DeadLetterLog: Send + Sync {
 /// own `AngzarrDeadLetter`, so a line and an angzarr DLQ entry say the same
 /// things.
 pub fn dead_letter_line(letter: &AngzarrDeadLetter) -> String {
-    use angzarr_proto::v1::angzarr_dead_letter::Payload;
     let mut line = format!(
         "{DEAD_LETTER_PREFIX} {}: {}",
         letter.source_component, letter.rejection_reason
@@ -93,27 +93,28 @@ pub(crate) fn write_dead_letter(
     reason: &str,
 ) {
     log.write(&dead_letter_line(&AngzarrDeadLetter {
-        payload: Some(angzarr_proto::v1::angzarr_dead_letter::Payload::RejectedCommand(book)),
+        payload: Some(Payload::RejectedCommand(book)),
         rejection_reason: reason.to_string(),
         source_component: component.to_string(),
         ..AngzarrDeadLetter::default()
     }));
 }
 
-/// Write the dead letter for policy `policy`'s `failure` on the event
-/// `trigger` holds: the failure's code as the reason and its args as the
-/// metadata.
+/// Write the dead letter for `component`'s `failure`, a policy's (its
+/// `on_event`'s on the trigger event `payload` holds, or its source's
+/// `#[on_refused]` handler's on the refusal fact): the failure's code as
+/// the reason and its args as the metadata.
 pub(crate) fn write_policy_failure(
     log: &dyn DeadLetterLog,
-    trigger: EventBook,
-    policy: &str,
+    payload: Payload,
+    component: &str,
     failure: &dyn Diagnostic,
 ) {
     log.write(&dead_letter_line(&AngzarrDeadLetter {
-        payload: Some(angzarr_proto::v1::angzarr_dead_letter::Payload::RejectedEvents(trigger)),
+        payload: Some(payload),
         rejection_reason: failure.code().to_string(),
         metadata: flat_args(failure).into_iter().collect(),
-        source_component: policy.to_string(),
+        source_component: component.to_string(),
         ..AngzarrDeadLetter::default()
     }));
 }

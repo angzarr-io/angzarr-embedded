@@ -49,6 +49,7 @@ use angzarr_proto::v1::{
     FactOrigin, Outcome,
 };
 
+use angzarr_proto::v1::angzarr_dead_letter::Payload;
 use angzarr_router::error::codes;
 use angzarr_router::policy::address_refusal_fact;
 
@@ -563,7 +564,12 @@ impl<'k> Run<'k> {
             Ok(response) => response.commands,
             Err(error) => {
                 if let Some(failure) = super::route::policy_failure(&error) {
-                    write_policy_failure(self.dead_letters, event, policy.name(), &failure);
+                    write_policy_failure(
+                        self.dead_letters,
+                        Payload::RejectedEvents(event),
+                        policy.name(),
+                        &failure,
+                    );
                     port.write_positions(&position)
                         .await
                         .map_err(|e| (path.to_vec(), StepError::Kernel(KernelError::Store(e))))?;
@@ -656,7 +662,9 @@ impl<'k> Run<'k> {
     /// `refusal` addressed by the router, as a step of its own in the
     /// stream of the triggering event, with the refused command's id and
     /// correlation. A refusal its source has no handler for is
-    /// dead-lettered, and writes only `positions`.
+    /// dead-lettered, and writes only `positions`; one whose handler fails
+    /// is the policy's failure ([`StepError::PolicyFailed`]), dead-lettered
+    /// by its code and args, and writes only `positions`.
     async fn refusal_step<P: Port>(
         &mut self,
         port: &mut P,
@@ -698,24 +706,36 @@ impl<'k> Run<'k> {
             StepError::Kernel(KernelError::Malformed(m))
         })?;
         let fact = checked.identify(self.sampled);
-        match self.step(port, fact.clone(), positions).await {
-            Ok(stepped) => Ok(stepped),
-            Err(Failure::Kernel(KernelError::Router(error)))
-                if error.code == codes::NO_FACT_HANDLER =>
-            {
-                write_dead_letter(
-                    self.dead_letters,
-                    fact.to_book(),
-                    fact.domain(),
-                    &error.message,
-                );
-                port.write_positions(positions)
-                    .await
-                    .map_err(|e| StepError::Kernel(KernelError::Store(e)))?;
-                Ok(Stepped::Nothing)
-            }
-            Err(failure) => Err(step_error(failure)),
+        let error = match self.step(port, fact.clone(), positions).await {
+            Ok(stepped) => return Ok(stepped),
+            Err(Failure::Kernel(KernelError::Router(error))) => error,
+            Err(failure) => return Err(step_error(failure)),
+        };
+        if let Some(failure) = super::route::policy_failure(&error) {
+            write_policy_failure(
+                self.dead_letters,
+                Payload::RejectedCommand(fact.to_book()),
+                fact.domain(),
+                &failure,
+            );
+            port.write_positions(positions)
+                .await
+                .map_err(|e| StepError::Kernel(KernelError::Store(e)))?;
+            return Err(StepError::PolicyFailed(failure));
         }
+        if error.code != codes::NO_FACT_HANDLER {
+            return Err(StepError::Kernel(KernelError::Router(error)));
+        }
+        write_dead_letter(
+            self.dead_letters,
+            fact.to_book(),
+            fact.domain(),
+            &error.message,
+        );
+        port.write_positions(positions)
+            .await
+            .map_err(|e| StepError::Kernel(KernelError::Store(e)))?;
+        Ok(Stepped::Nothing)
     }
 
     /// `command` as a step of its own in the stream it names: load,

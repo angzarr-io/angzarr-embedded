@@ -126,8 +126,10 @@ pub(crate) fn unknown_domain(domain: &str) -> KernelError {
 
 /// The router's refusal `error` of an input to `command`'s stream, in the
 /// kernel's terms: a business refusal is [`Failure::Rejected`]; a decision
-/// past its step limit [`KernelError::TooManySteps`]; anything else the
-/// router's own fault, [`KernelError::Router`].
+/// past its step limit [`KernelError::TooManySteps`]; anything else, a
+/// policy's failure in its source's `#[on_refused]` handler included (the
+/// chain makes it [`StepError::PolicyFailed`](super::StepError::PolicyFailed)),
+/// [`KernelError::Router`].
 pub(crate) fn refused(command: &Identified, error: CodedError) -> Failure<Rejected> {
     if error.code == route::TOO_MANY_STEPS {
         return Failure::Kernel(KernelError::TooManySteps {
@@ -147,7 +149,7 @@ pub(crate) fn refused(command: &Identified, error: CodedError) -> Failure<Reject
             error,
         });
     }
-    if route::is_rejection(&error) {
+    if error.code != route::POLICY_FAILED && route::is_rejection(&error) {
         return Failure::Rejected(Rejected::of(&error));
     }
     Failure::Kernel(KernelError::Router(error))
@@ -355,13 +357,7 @@ pub(crate) fn dispatch(
         conflict_nonce: nonce.unwrap_or_default().into(),
     };
     let answered = catch_unwind(AssertUnwindSafe(|| {
-        let delivery = route::Delivery {
-            recorded_at,
-            stream: identified.cover().clone(),
-            command_id: identified.command_id().clone(),
-            correlation_id: identified.correlation_id().clone(),
-            fact_origin: identified.body().source().cloned(),
-        };
+        let delivery = route::Delivery { recorded_at };
         route::recording(delivery, || handler.dispatch(&contextual))
     }));
     let answered = match answered {

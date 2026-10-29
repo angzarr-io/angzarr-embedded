@@ -369,18 +369,14 @@ pub(crate) fn is_nothing(page: &angzarr_proto::v1::EventPage) -> bool {
 
 // ------------------------------------------------------------- recorded_at
 
-/// The input being dispatched, as the kernel delivers it: when it will be
-/// recorded, its stream and its identity. Set by the kernel around each
-/// dispatch; a handler's context reads `recorded_at` here (the router's
-/// `ContextualCommand` has no field for it yet), and a passed-through
-/// refusal's handler, which the router hands no context, reads all of it.
+/// The input being dispatched, as the kernel delivers it: what the
+/// router's `CommandContext` does not carry, when it will be recorded. Set
+/// by the kernel around each dispatch; a handler's context reads
+/// `recorded_at` here (the router's `ContextualCommand` has no field for it
+/// yet).
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Delivery {
     pub(crate) recorded_at: Timestamp,
-    pub(crate) stream: angzarr_proto::v1::Cover,
-    pub(crate) command_id: angzarr_proto::v1::Uuid,
-    pub(crate) correlation_id: angzarr_proto::v1::Uuid,
-    pub(crate) fact_origin: Option<angzarr_proto::v1::FactOrigin>,
 }
 
 thread_local! {

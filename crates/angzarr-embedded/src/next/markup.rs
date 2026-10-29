@@ -576,9 +576,12 @@ impl<R: angzarr_embedded_diagnostic::Diagnostic> angzarr_embedded_diagnostic::Di
 }
 
 /// The pass-through refusal fact, as the policy's SOURCE domain's handler
-/// for it reads it: `#[on_refused(C)]`, an ordinary, infallible fact
-/// handler, `fn(&self, refused: CommandRefused<C>, ctx: &Context) ->
-/// Record<Self>` (or a shape). The macro dispatches angzarr's
+/// for it reads it: `#[on_refused(C)]`, a fact handler,
+/// `fn(&self, refused: CommandRefused<C>, ctx: &Context) ->
+/// Result<Record<Self>, E>` (or a shape), `ctx` the router's context of
+/// the refusal fact. It cannot refuse; its `Err`, any `Diagnostic`, is a
+/// bug, its policy's failure
+/// ([`StepError::PolicyFailed`](super::StepError::PolicyFailed)). The macro dispatches angzarr's
 /// `CommandRefused` fact by the refused command's type to the handler for
 /// it: which refusals a domain handles is inferred from its handlers, so a
 /// `CommandRefused` for a command it has no handler for is caught at run
@@ -1147,27 +1150,24 @@ where
 }
 
 /// A passed-through refusal's handler (`#[on_refused(C)]` on a domain),
-/// for the router's `CommandRefused` of a `C`: run as a fact handler's.
+/// for the router's `CommandRefused` of a `C`, with the router's context
+/// of the refusal fact: run as a fact handler's. Its error is a bug, the
+/// policy's failure, as the router carries it
+/// ([`StepError::PolicyFailed`](super::StepError::PolicyFailed)).
 #[doc(hidden)]
-pub fn __on_refused<A, C, Rr>(
+pub fn __on_refused<A, C, Rr, E>(
     refused: &v1::CommandRefused,
     state: &A,
-    handler: impl FnOnce(&A, CommandRefused<C>, &Context) -> Rr,
+    cctx: CommandContext,
+    handler: impl FnOnce(&A, CommandRefused<C>, &Context) -> Result<Rr, E>,
 ) -> Result<angzarr_router::domain::FactRecord, angzarr_router::error::HandlerError>
 where
     A: Domain<State = A, Rules = ()> + Clone,
     C: DomainMessage,
     Rr: Records<A>,
+    E: angzarr_embedded_diagnostic::Diagnostic,
 {
-    let delivery = super::route::delivery();
-    let ctx =
-        Context::new(delivery.recorded_at).with_command(angzarr_router::domain::CommandContext {
-            cover: Some(delivery.stream),
-            command_id: Some(delivery.command_id),
-            correlation_id: Some(delivery.correlation_id),
-            fact_origin: delivery.fact_origin,
-            ..Default::default()
-        });
+    let ctx = context_of(cctx);
     let book = refused.command.clone().unwrap_or_default();
     let command = input::<C>(command_payload(&book).unwrap_or(&Any::default()))?;
     let refused = CommandRefused {
@@ -1176,11 +1176,9 @@ where
         refusal: refused.refusal.clone(),
         trigger: refused.trigger.clone().unwrap_or_default(),
     };
-    Ok(fact_record::<A>(record(
-        state,
-        &ctx,
-        handler(state, refused, &ctx),
-    )))
+    let recorded =
+        handler(state, refused, &ctx).map_err(|failure| super::route::policy_failed(&failure))?;
+    Ok(fact_record::<A>(record(state, &ctx, recorded)))
 }
 
 /// A fact's record run as one decision on a working copy of `state`.

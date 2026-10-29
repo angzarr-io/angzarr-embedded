@@ -10,7 +10,6 @@ use crate::next::v1::EventPage;
 fn at(seconds: i64) -> Delivery {
     Delivery {
         recorded_at: Timestamp { seconds, nanos: 0 },
-        ..Delivery::default()
     }
 }
 

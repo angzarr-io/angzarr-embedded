@@ -36,6 +36,7 @@
 use std::sync::Arc;
 
 use angzarr_embedded_diagnostic::Report;
+use angzarr_proto::v1::angzarr_dead_letter::Payload as Letter;
 use angzarr_proto::v1::{
     command_page, Command, CommandBook, CommandPage, Cover, EventBook, EventPage, EventRef, Uuid,
 };
@@ -273,7 +274,12 @@ impl<P: Policy, F: FnMut(Order)> Handler<P::Source> for PolicyHandler<'_, P, F> 
                     }],
                     ..EventBook::default()
                 };
-                write_policy_failure(self.dead_letters, trigger, P::NAME, &failure);
+                write_policy_failure(
+                    self.dead_letters,
+                    Letter::RejectedEvents(trigger),
+                    P::NAME,
+                    &failure,
+                );
                 return;
             }
         };
