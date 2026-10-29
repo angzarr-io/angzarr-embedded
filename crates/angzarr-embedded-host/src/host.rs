@@ -80,6 +80,11 @@ impl Host {
     /// child already started stopped again, when any domain's config is
     /// refused or any child fails to come up the first time.
     pub fn start(config: HostConfig) -> Result<Host, HostError> {
+        Host::start_with(config, Hooks::default())
+    }
+
+    /// [`Host::start`], its supervisors held at `hooks`' points.
+    fn start_with(config: HostConfig, hooks: Hooks) -> Result<Host, HostError> {
         let mut names = BTreeSet::new();
         let mut remote = Vec::new();
         for domain in &config.domains {
@@ -119,6 +124,7 @@ impl Host {
                 supervision: config.supervision.clone(),
                 socket_dir: socket_dir.clone(),
                 link: link.clone(),
+                hooks: hooks.clone(),
             };
             runtime.spawn(async move {
                 let _ = end.send(supervisor.run(stopped, up).await);
@@ -282,6 +288,25 @@ struct Up {
     socket: PathBuf,
 }
 
+/// Where a test holds every supervisor, to force an interleaving rather
+/// than wait for it: none outside the tests.
+#[derive(Clone, Default)]
+struct Hooks {
+    /// Awaited by a supervisor once it has told `start` its first child is
+    /// up, before it does anything else.
+    #[cfg(test)]
+    reported_up: Option<Arc<tokio::sync::Notify>>,
+}
+
+impl Hooks {
+    async fn reported_up(&self) {
+        #[cfg(test)]
+        if let Some(hold) = &self.reported_up {
+            hold.notified().await;
+        }
+    }
+}
+
 /// One remote domain's supervisor: it starts the child, restarts it when it
 /// exits, and stops it when told.
 struct Supervisor {
@@ -290,6 +315,7 @@ struct Supervisor {
     supervision: Supervision,
     socket_dir: PathBuf,
     link: Arc<Link>,
+    hooks: Hooks,
 }
 
 impl Supervisor {
@@ -313,6 +339,7 @@ impl Supervisor {
                 Ok(mut child) => {
                     if let Some(up) = up.take() {
                         let _ = up.send(Ok(child.descriptor.clone()));
+                        self.hooks.reported_up().await;
                     }
                     backoff = initial;
                     self.set_client(Some(child.client.clone()));

@@ -164,6 +164,25 @@ fn a_refusal_comes_back_as_the_routers_refusal() {
     host.shutdown();
 }
 
+/// The handler start hands back reaches its child the moment start
+/// returns: the supervisor, held right after telling start the child is up,
+/// has published the child's connection already.
+#[test]
+fn a_handler_reaches_its_child_as_soon_as_start_returns() {
+    let hold = Arc::new(tokio::sync::Notify::new());
+    let hooks = Hooks {
+        reported_up: Some(hold.clone()),
+    };
+    let host = Host::start_with(config(vec![player(mode::SERVE)]), hooks).expect("the host starts");
+    let answered = host
+        .handler("player")
+        .unwrap()
+        .dispatch(&command("player", "/examples.blackjack.SitDown"));
+    hold.notify_one();
+    assert!(answered.is_ok(), "{answered:?}");
+    host.shutdown();
+}
+
 /// A child that dies is unreachable, which is retryable; it is restarted,
 /// as a new process, and the same handler reaches it.
 #[test]
