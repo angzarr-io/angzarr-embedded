@@ -4575,6 +4575,263 @@ mod router {
         );
     }
 
+    /// A remote handler down for its first `down_for` dispatches
+    /// (REMOTE_HANDLER_UNAVAILABLE, retryable), then up; `calls` counts
+    /// every dispatch.
+    struct Recovering {
+        down_for: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl ::angzarr_embedded::next::angzarr_router::router::CommandHandler for Recovering {
+        fn name(&self) -> &str {
+            "remote"
+        }
+
+        fn command_types(&self) -> Vec<String> {
+            Remote.command_types()
+        }
+
+        fn dispatch(
+            &self,
+            req: &pb::ContextualCommand,
+        ) -> Result<
+            pb::CommandHandlerResponse,
+            ::angzarr_embedded::next::angzarr_router::error::CodedError,
+        > {
+            use std::sync::atomic::Ordering::SeqCst;
+            self.calls.fetch_add(1, SeqCst);
+            let down = self
+                .down_for
+                .fetch_update(SeqCst, SeqCst, |n| n.checked_sub(1))
+                .is_ok();
+            let up = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(!down));
+            Flaky { up }.dispatch(req)
+        }
+
+        fn component_descriptor(
+            &self,
+        ) -> Result<
+            pb::ComponentDescriptor,
+            ::angzarr_embedded::next::angzarr_router::error::CodedError,
+        > {
+            Remote.component_descriptor()
+        }
+    }
+
+    /// The backoffs the kernel waited out, in order; each wait completes at
+    /// once.
+    #[derive(Default)]
+    struct Waits(std::sync::Mutex<Vec<std::time::Duration>>);
+
+    impl ::angzarr_embedded::next::Wait for Waits {
+        fn wait(
+            &self,
+            backoff: std::time::Duration,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+            self.0.lock().unwrap().push(backoff);
+            Box::pin(std::future::ready(()))
+        }
+    }
+
+    /// Retries 3 times, from 10 ms, at most 25 ms apart.
+    fn capped() -> ::angzarr_embedded::next::OnRetryable {
+        ::angzarr_embedded::next::OnRetryable {
+            max_retries: 3,
+            initial_backoff: std::time::Duration::from_millis(10),
+            max_backoff: std::time::Duration::from_millis(25),
+        }
+    }
+
+    /// The wallets' registry, with [`Recovering`] as the remote domain,
+    /// down for `down_for` dispatches, and a policy sending it a `Note` on
+    /// each wallet's `Held`; and its dispatch count.
+    fn recovering(down_for: usize) -> (Registry, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use ::angzarr_embedded::next::angzarr_router::router::CommandHandler;
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut registry = registry();
+        let remote: Box<dyn CommandHandler> = Box::new(Recovering {
+            down_for: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(down_for)),
+            calls: std::sync::Arc::clone(&calls),
+        });
+        registry.command_handler("remote", remote).unwrap();
+        registry.policy_dispatch(
+            PolicyDispatch::new("wallet-remote", "wallet", "remote").on_event(
+                "toy.wallet.v1.Held",
+                |_, source| {
+                    Ok(vec![pb::CommandBook {
+                        cover: Some(pb::Cover {
+                            domain: "remote".to_string(),
+                            root: source.and_then(|c| c.root.clone()),
+                            edition: None,
+                        }),
+                        page: Some(pb::CommandPage {
+                            body: Some(pb::command_page::Body::Command(pb::Command {
+                                payload: Some(any(Note {})),
+                            })),
+                            ..Default::default()
+                        }),
+                        handling: None,
+                    }])
+                },
+            ),
+        );
+        (registry, calls)
+    }
+
+    /// A retryable failure (decision 14.37's third class) is retried with
+    /// backoff, doubling up to its most, as many times as the cap allows,
+    /// then dead-lettered as a visible failure under its key and args,
+    /// with how many times it was retried; the caller still gets it.
+    #[test]
+    fn a_retryable_failure_is_retried_with_backoff_up_to_the_cap_then_dead_lettered() {
+        use std::sync::atomic::Ordering::SeqCst;
+        use std::time::Duration;
+        let (registry, calls) = recovering(usize::MAX);
+        let store = Mem::new();
+        let log = MemoryDeadLetters::new();
+        let waits = Waits::default();
+        let kernel =
+            ::angzarr_embedded::next::Kernel::new(&registry, &log).on_retryable(capped(), &waits);
+        let sampled = Sampled {
+            now: at(9),
+            command_id: Uuid::from_bytes([0x79; 16]),
+        };
+        let failed = ready(kernel.handle_any(
+            &store,
+            send("remote", 3, any(Note {}), None),
+            &sampled,
+            &mut (),
+        ))
+        .err()
+        .expect("still unreachable after the cap");
+        assert!(
+            matches!(
+                &failed,
+                Failure::Kernel(KernelError::HandlerUnavailable { .. })
+            ),
+            "{failed:?}"
+        );
+        assert_eq!(calls.load(SeqCst), 4, "the first attempt and 3 retries");
+        assert_eq!(
+            *waits.0.lock().unwrap(),
+            [
+                Duration::from_millis(10),
+                Duration::from_millis(20),
+                Duration::from_millis(25)
+            ],
+            "doubling, up to its most"
+        );
+        let lines = log.lines();
+        assert_eq!(lines.len(), 1, "dead-lettered once, visibly: {lines:?}");
+        assert!(
+            lines[0].contains("angzarr-embedded-next-handler-unavailable"),
+            "its key: {lines:?}"
+        );
+        assert!(
+            lines[0].contains("cause=not-running"),
+            "its args: {lines:?}"
+        );
+        assert!(lines[0].contains("retry_count=3"), "{lines:?}");
+    }
+
+    /// As a policy's step, the same: retried up to the cap, then
+    /// dead-lettered, and the dead letter is the record to replay: the
+    /// policy's position moves past the trigger, so a resume does not run
+    /// the step again.
+    #[test]
+    fn a_policy_steps_retryable_failure_is_dead_lettered_after_the_cap() {
+        use ::angzarr_embedded::next::StepError;
+        use std::sync::atomic::Ordering::SeqCst;
+        let (registry, calls) = recovering(usize::MAX);
+        let store = Mem::new();
+        let log = MemoryDeadLetters::new();
+        let waits = Waits::default();
+        let kernel =
+            ::angzarr_embedded::next::Kernel::new(&registry, &log).on_retryable(capped(), &waits);
+        let sampled = |n: u8| Sampled {
+            now: at(i64::from(n)),
+            command_id: Uuid::from_bytes([n; 16]),
+        };
+        ready(kernel.handle_any(
+            &store,
+            send("wallet", 1, any(Open { bonus: 50 }), None),
+            &sampled(1),
+            &mut (),
+        ))
+        .unwrap();
+        let held = ready(kernel.handle_any(
+            &store,
+            send("wallet", 2, any(Hold { cents: 5 }), None),
+            &sampled(2),
+            &mut (),
+        ))
+        .err()
+        .expect("the policy's step is unreachable");
+        assert!(
+            matches!(
+                &held,
+                Failure::Downstream {
+                    error: StepError::Kernel(KernelError::HandlerUnavailable { .. }),
+                    ..
+                }
+            ),
+            "{held:?}"
+        );
+        assert_eq!(calls.load(SeqCst), 4);
+        assert_eq!(waits.0.lock().unwrap().len(), 3);
+        let lines = log.lines();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains("angzarr-embedded-next-handler-unavailable"),
+            "{lines:?}"
+        );
+        ready(kernel.resume(&store, &sampled(3), &mut ())).unwrap();
+        assert_eq!(calls.load(SeqCst), 4, "moved past: not run again");
+    }
+
+    /// A retryable failure that clears within the cap writes nothing extra:
+    /// no dead letter, the step's events once, and only the backoffs it
+    /// needed.
+    #[test]
+    fn a_success_within_the_cap_writes_nothing_extra() {
+        use std::sync::atomic::Ordering::SeqCst;
+        use std::time::Duration;
+        let (registry, calls) = recovering(2);
+        let store = Mem::new();
+        let log = MemoryDeadLetters::new();
+        let waits = Waits::default();
+        let kernel =
+            ::angzarr_embedded::next::Kernel::new(&registry, &log).on_retryable(capped(), &waits);
+        let sampled = Sampled {
+            now: at(9),
+            command_id: Uuid::from_bytes([0x79; 16]),
+        };
+        let handled = ready(kernel.handle_any(
+            &store,
+            send("remote", 3, any(Note {}), None),
+            &sampled,
+            &mut (),
+        ));
+        assert!(
+            matches!(handled, Ok(Handled::Applied(_))),
+            "{:?}",
+            handled.err()
+        );
+        assert_eq!(calls.load(SeqCst), 3);
+        assert_eq!(
+            *waits.0.lock().unwrap(),
+            [Duration::from_millis(10), Duration::from_millis(20)]
+        );
+        assert!(log.lines().is_empty(), "{:?}", log.lines());
+        let remote_cover = Cover {
+            domain: "remote".to_string(),
+            root: Some(root()),
+            edition: None,
+        };
+        assert_eq!(pages(&store, &remote_cover).map(|p| p.len()), Some(1));
+    }
+
     /// A remote handler that fails every command with `error`.
     struct Faulty {
         error: ::angzarr_embedded::next::angzarr_router::error::CodedError,

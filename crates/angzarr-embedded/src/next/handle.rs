@@ -83,6 +83,46 @@ pub struct Kernel<'k> {
     dead_letters: &'k dyn DeadLetterLog,
     limit: usize,
     policy_bug: OnPolicyBug,
+    retry: Option<(OnRetryable, &'k dyn Wait)>,
+}
+
+/// What the kernel does with a step's retryable failure (decision 14.37's
+/// third class, the kernel's [`Recovery::Retry`](super::Recovery::Retry):
+/// UNAVAILABLE, ABORTED, UNIMPLEMENTED, DEADLINE_EXCEEDED,
+/// RESOURCE_EXHAUSTED and the like): run the step again after a backoff,
+/// up to `max_retries` times, then dead-letter it, visibly, under its key.
+/// The backoff starts at `initial_backoff` and doubles each retry, up to
+/// `max_backoff`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OnRetryable {
+    /// Retries after the first attempt; 0 dead-letters at the first
+    /// failure.
+    pub max_retries: u32,
+    /// The wait before the first retry.
+    pub initial_backoff: std::time::Duration,
+    /// The longest wait between retries.
+    pub max_backoff: std::time::Duration,
+}
+
+impl Default for OnRetryable {
+    /// Three retries, from 100 ms, at most 5 s apart.
+    fn default() -> Self {
+        OnRetryable {
+            max_retries: 3,
+            initial_backoff: std::time::Duration::from_millis(100),
+            max_backoff: std::time::Duration::from_secs(5),
+        }
+    }
+}
+
+/// How the kernel waits out a backoff: the application's timer (the
+/// kernel has no runtime of its own, and stays deterministic under test).
+pub trait Wait: Send + Sync {
+    /// A future that completes once `backoff` has passed.
+    fn wait(
+        &self,
+        backoff: std::time::Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>>;
 }
 
 /// What a policy step that hits a bug does with the policy's position on
@@ -157,7 +197,22 @@ impl<'k> Kernel<'k> {
             dead_letters,
             limit: DEFAULT_DEPTH_LIMIT,
             policy_bug: OnPolicyBug::default(),
+            retry: None,
         }
+    }
+
+    /// Retries a step's retryable failure as `retry` says, waiting out
+    /// each backoff with `wait`, then dead-letters it. Unset, a retryable
+    /// failure goes back to the caller at once, and nothing is
+    /// dead-lettered.
+    pub fn on_retryable(mut self, retry: OnRetryable, wait: &'k dyn Wait) -> Kernel<'k> {
+        self.retry = Some((retry, wait));
+        self
+    }
+
+    /// How this kernel retries a step's retryable failure, if it does.
+    pub fn retryable(&self) -> Option<OnRetryable> {
+        self.retry.map(|(retry, _)| retry)
     }
 
     /// Does `policy_bug` with a policy's position when one of its steps

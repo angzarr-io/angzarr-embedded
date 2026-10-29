@@ -194,6 +194,36 @@ fn the_kernel_follows_the_configs_policy_setting() {
     drop(app);
 }
 
+/// The kernel the app hands out retries a step's retryable failure as the
+/// config's `[retry]` says (its defaults when it is left out), waiting out
+/// each backoff on the app's runtime, then dead-letters it.
+#[test]
+fn the_kernel_follows_the_configs_retry_setting() {
+    use angzarr_embedded::next::OnRetryable;
+    use std::time::Duration;
+    let dir = scratch("retry");
+    let path = dir.join("angzarr.toml");
+    std::fs::write(&path, "[store]\nin_memory = true\n").unwrap();
+    let app = run(&path, nothing).unwrap();
+    assert_eq!(app.kernel().retryable(), Some(OnRetryable::default()));
+    drop(app);
+    std::fs::write(
+        &path,
+        "[store]\nin_memory = true\n\n[retry]\nmax_retries = 5\ninitial_backoff_ms = 50\nmax_backoff_ms = 1000\n",
+    )
+    .unwrap();
+    let app = run(&path, nothing).unwrap();
+    assert_eq!(
+        app.kernel().retryable(),
+        Some(OnRetryable {
+            max_retries: 5,
+            initial_backoff: Duration::from_millis(50),
+            max_backoff: Duration::from_millis(1_000),
+        })
+    );
+    drop(app);
+}
+
 #[test]
 fn a_missing_config_is_unreadable() {
     let dir = scratch("missing");

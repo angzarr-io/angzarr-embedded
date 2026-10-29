@@ -27,6 +27,11 @@
 //! [policy]
 //! on_bug = "move_past"         # a policy step's bug, dead-lettered, moves its
 //!                              # position past the trigger; "stay" keeps it
+//!
+//! [retry]
+//! max_retries = 3              # a retryable failure is retried this often,
+//! initial_backoff_ms = 100     # waiting this long first, doubling,
+//! max_backoff_ms = 5000        # at most this long, then dead-lettered
 //! ```
 //!
 //! A domain's language picks its default launch command and nothing else:
@@ -73,6 +78,36 @@ pub struct HostConfig {
     /// What the kernel does when a policy's step hits a bug.
     #[serde(default)]
     pub policy: PolicyConfig,
+    /// How the kernel retries a step's retryable failure.
+    #[serde(default)]
+    pub retry: RetryConfig,
+}
+
+/// The `[retry]` table: how the kernel retries a step whose failure is
+/// retryable (UNAVAILABLE, ABORTED, UNIMPLEMENTED, DEADLINE_EXCEEDED,
+/// RESOURCE_EXHAUSTED and the like), with backoff, before it dead-letters
+/// it. The kernel's
+/// [`OnRetryable`](angzarr_embedded::next::OnRetryable). Every key has a
+/// default, so the table may be left out.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct RetryConfig {
+    /// Retries after the first attempt, then the step is dead-lettered.
+    pub max_retries: u32,
+    /// The wait before the first retry; each retry doubles it.
+    pub initial_backoff_ms: u64,
+    /// The longest wait between retries.
+    pub max_backoff_ms: u64,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        RetryConfig {
+            max_retries: 3,
+            initial_backoff_ms: 100,
+            max_backoff_ms: 5_000,
+        }
+    }
 }
 
 /// The `[policy]` table: how the kernel treats a policy whose step hits a

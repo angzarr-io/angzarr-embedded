@@ -118,8 +118,8 @@ pub use error::{
 };
 pub use fixture::{assert_replay_fixtures, check_replay_fixtures, ReplayFixture};
 pub use handle::{
-    Handled, Kernel, OnPolicyBug, Project, ProjectionRoute, ProjectorFailure, Recorded,
-    DEFAULT_DEPTH_LIMIT,
+    Handled, Kernel, OnPolicyBug, OnRetryable, Project, ProjectionRoute, ProjectorFailure,
+    Recorded, Wait, DEFAULT_DEPTH_LIMIT,
 };
 pub use handler::{Committed, Handler};
 pub use payload::{decode_as, pack, type_name, Decoder, Payload};

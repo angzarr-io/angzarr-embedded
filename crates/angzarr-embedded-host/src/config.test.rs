@@ -56,6 +56,7 @@ fn the_domain_tables_deserialize() {
             },
             store: StoreConfig::default(),
             policy: PolicyConfig::default(),
+            retry: RetryConfig::default(),
         }
     );
 }
@@ -88,6 +89,11 @@ fn the_documented_toml_reads() {
 
         [policy]
         on_bug = "move_past"
+
+        [retry]
+        max_retries = 3
+        initial_backoff_ms = 100
+        max_backoff_ms = 5000
     "#;
     let config: HostConfig = toml::from_str(text).unwrap();
     assert_eq!(config.domains.len(), 3);
@@ -101,6 +107,7 @@ fn the_documented_toml_reads() {
     assert_eq!(config.supervision.call_timeout_ms, 30_000);
     assert_eq!(config.store, StoreConfig::default());
     assert_eq!(config.policy.on_bug, OnPolicyBug::MovePast);
+    assert_eq!(config.retry, RetryConfig::default());
     let memory: HostConfig = toml::from_str("[store]\nin_memory = true\n").unwrap();
     assert!(memory.store.in_memory);
     assert!(memory.domains.is_empty());
@@ -145,6 +152,39 @@ fn a_bad_policy_setting_is_refused() {
     assert!(toml::from_str::<HostConfig>("[policy]\non_bug = \"sometimes\"\n").is_err());
     assert!(toml::from_str::<HostConfig>("[policy]\non_bug = \"MovePast\"\n").is_err());
     assert!(toml::from_str::<HostConfig>("[policy]\non_bugs = \"stay\"\n").is_err());
+}
+
+/// `[retry]` is how the kernel retries a step's retryable failure before
+/// it dead-letters it: `max_retries`, `initial_backoff_ms` and
+/// `max_backoff_ms`, each with a default (3, 100 and 5000) when left out,
+/// as the whole table may be; an unknown key is refused.
+#[test]
+fn the_retry_table_sets_the_cap_and_the_backoff() {
+    let retry = |text: &str| toml::from_str::<HostConfig>(text).map(|c| c.retry);
+    assert_eq!(
+        retry("[retry]\nmax_retries = 5\ninitial_backoff_ms = 50\nmax_backoff_ms = 1000\n"),
+        Ok(RetryConfig {
+            max_retries: 5,
+            initial_backoff_ms: 50,
+            max_backoff_ms: 1_000,
+        })
+    );
+    assert_eq!(
+        retry("[retry]\nmax_retries = 0\n"),
+        Ok(RetryConfig {
+            max_retries: 0,
+            ..RetryConfig::default()
+        })
+    );
+    let defaults = RetryConfig {
+        max_retries: 3,
+        initial_backoff_ms: 100,
+        max_backoff_ms: 5_000,
+    };
+    assert_eq!(retry(""), Ok(defaults.clone()));
+    assert_eq!(RetryConfig::default(), defaults);
+    assert!(retry("[retry]\nretries = 5\n").is_err());
+    assert!(retry("[retry]\nmax_retries = -1\n").is_err());
 }
 
 /// The setting writes back as it reads.

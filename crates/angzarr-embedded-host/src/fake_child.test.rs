@@ -120,6 +120,7 @@ pub(crate) fn config(domains: Vec<DomainConfig>) -> HostConfig {
     HostConfig {
         store: Default::default(),
         policy: Default::default(),
+        retry: Default::default(),
         domains,
         supervision: Supervision {
             handshake_timeout_ms: 20_000,
