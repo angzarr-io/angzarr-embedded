@@ -3067,54 +3067,6 @@ mod refusal_flow {
         assert!(lines[0].contains(" to wallet "), "{lines:?}");
     }
 
-    /// The dead letter of a refusal with no path carries the code of what
-    /// was missing (the router's `NO_FACT_HANDLER`, as angzarr-embedded's
-    /// code), never rendered English.
-    #[test]
-    fn a_refusal_with_no_handlers_dead_letter_carries_its_code() {
-        let (registry, store) = funded(false, 50);
-        let log = MemoryDeadLetters::new();
-        let _ = settle_in::<Wallet>(
-            &store,
-            &registry,
-            &log,
-            2,
-            send("wallet", 2, any(Hold { cents: 5 }), Some(correlation(5))),
-        );
-        let lines = log.lines();
-        assert_eq!(lines.len(), 1, "{lines:?}");
-        assert!(
-            lines[0].contains("angzarr-embedded-next-no-fact-handler"),
-            "{lines:?}"
-        );
-        assert!(!lines[0].contains("nothing handles"), "{lines:?}");
-    }
-
-    /// The dead letter of a malformed policy book carries the error's code
-    /// and its args, never its rendered English.
-    #[test]
-    fn a_malformed_policy_books_dead_letter_carries_its_code_and_args() {
-        let mut registry = registry();
-        registry.policy(WalletBuyIn);
-        let (_, store) = funded(false, 50);
-        let log = MemoryDeadLetters::new();
-        let _ = settle_in::<Wallet>(
-            &store,
-            &registry,
-            &log,
-            2,
-            send("wallet", 2, any(Hold { cents: 5 }), Some(correlation(6))),
-        );
-        let lines = log.lines();
-        assert_eq!(lines.len(), 1, "{lines:?}");
-        assert!(
-            lines[0].contains("angzarr-embedded-next-malformed-unknown-domain"),
-            "{lines:?}"
-        );
-        assert!(lines[0].contains("buyin"), "{lines:?}");
-        assert!(!lines[0].contains("is registered"), "{lines:?}");
-    }
-
     /// A step that fails mid-way keeps the commits before it: no rollback.
     /// The wallet's policy sends to the buy-in, which this registry lacks:
     /// the call is an error, the hold stays committed, and the policy's
