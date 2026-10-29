@@ -5,7 +5,7 @@
 //! bug that panics) and the toys' account, ledger and bookkeeping policy.
 
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -220,14 +220,49 @@ async fn count(store: &SqliteStore, registry: &Registry, stream: &Cover) -> i64 
         .n
 }
 
-/// A database file of this test run's own (left in the temp directory).
-fn database() -> PathBuf {
+/// A database file of this test run's own, removed with its WAL files when
+/// the guard drops, the test passing or not. Declared before the stores on
+/// it, it drops after them.
+fn database() -> Database {
     static RUN: AtomicUsize = AtomicUsize::new(0);
-    std::env::temp_dir().join(format!(
+    Database(std::env::temp_dir().join(format!(
         "angzarr-embedded-kernel-on-sqlite-{}-{}.db",
         std::process::id(),
         RUN.fetch_add(1, Ordering::Relaxed)
-    ))
+    )))
+}
+
+/// A database file's path, the file and its WAL files removed on drop.
+struct Database(PathBuf);
+
+impl std::ops::Deref for Database {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+/// The database file at `path` and its WAL files.
+fn with_wal(path: &Path) -> [PathBuf; 3] {
+    ["", "-wal", "-shm"].map(|suffix| {
+        let mut file = path.as_os_str().to_owned();
+        file.push(suffix);
+        PathBuf::from(file)
+    })
+}
+
+#[test]
+fn a_database_and_its_wal_files_are_gone_once_dropped() {
+    let path = database();
+    let files = with_wal(&path);
+    for file in &files {
+        std::fs::write(file, "").unwrap();
+    }
+    drop(path);
+    for file in &files {
+        assert!(!file.exists(), "{} was left behind", file.display());
+    }
 }
 
 fn ledger_cover() -> Cover {
