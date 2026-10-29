@@ -377,23 +377,6 @@ pub(crate) fn answered(
         .collect()
 }
 
-/// The refused command's context, from the command `refusal` carries as
-/// the kernel delivered it: its target's cover and its identity (its
-/// derived command id and the trigger's correlation). A policy's command
-/// carries no handling and is never a fact, and what only the target's
-/// dispatch knew (its next sequence, whether it had history, a conflict) is
-/// not carried: those stay default.
-fn refused_context(refusal: &markup::v1::Refusal) -> CommandContext {
-    let book = refusal.command.clone().unwrap_or_default();
-    let page = book.page.unwrap_or_default();
-    CommandContext {
-        cover: book.cover,
-        command_id: page.command_id,
-        correlation_id: page.correlation_id,
-        ..CommandContext::default()
-    }
-}
-
 /// `policy` as angzarr-router's table: each event type it handles (its
 /// `EVENTS`, or every event of its source for a hand-written one) runs
 /// [`Policy::on_event`] with the trigger's place and metadata, each command
@@ -460,9 +443,9 @@ pub(crate) fn dispatch<P: Policy>(policy: P) -> PolicyDispatch {
         };
         for command_type in translated {
             let policy = Arc::clone(&policy);
-            table = table.on_refused(&command_type, move |refusal| {
+            table = table.on_refused(&command_type, move |refusal, ctx| {
                 policy
-                    .on_refused(refusal, &refused_context(refusal))
+                    .on_refused(refusal, ctx)
                     .map_err(|failure| super::route::policy_failed(&failure))
             });
         }

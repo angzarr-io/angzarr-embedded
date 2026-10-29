@@ -1199,9 +1199,10 @@ impl crate::next::Policy for UnansweringBookkeeping {
     }
 }
 
-/// A policy's refusal answer reads the refused command's context: the
-/// target's stream, the command's derived id and the trigger's
-/// correlation.
+/// A policy's refusal answer reads the refused command's context, whole,
+/// as its target's handler was handed it: the target's stream, its next
+/// sequence and history, the sequence and resolution it was decided under,
+/// the command's derived id and the trigger's correlation.
 #[test]
 fn a_policys_refusal_answer_reads_the_refused_commands_context() {
     let plain = registry();
@@ -1213,7 +1214,11 @@ fn a_policys_refusal_answer_reads_the_refused_commands_context() {
     let store = MemoryStore::new();
     opened(&store, &plain, 1, 0);
     kernel
-        .handle::<Account, _, _>(&store, deposit(3, LEDGER_LIMIT + 1), &at(30), &mut ())
+        .handle::<Account, _, _>(&store, deposit(3, 5), &at(30), &mut ())
+        .ready()
+        .unwrap();
+    kernel
+        .handle::<Account, _, _>(&store, deposit(4, LEDGER_LIMIT + 1), &at(31), &mut ())
         .ready()
         .unwrap();
     let refusals = refusals.lock().unwrap();
@@ -1222,8 +1227,22 @@ fn a_policys_refusal_answer_reads_the_refused_commands_context() {
     };
     let trigger = EventRef {
         stream: Some(cover("account", 1)),
-        sequence: 2,
+        sequence: 3,
     };
+    assert_eq!(
+        (
+            ctx.next_sequence,
+            ctx.had_prior_events,
+            ctx.expected_sequence
+        ),
+        (1, true, 1),
+        "the ledger as its handler saw it: one record before, decided at its head"
+    );
+    assert_eq!(
+        ctx.conflict_resolution,
+        crate::next::v1::ConflictResolution::Strict
+    );
+    assert!(ctx.conflict.is_none(), "STRICT has no conflict");
     assert_eq!(
         ctx.cover,
         Some(ledger_cover()),
@@ -1234,7 +1253,7 @@ fn a_policys_refusal_answer_reads_the_refused_commands_context() {
         Some(ids::policy_command_id(&trigger, "answering-bookkeeping", 0).unwrap()),
         "the refused command's derived id"
     );
-    let correlation = pages(&store, &cover("account", 1))[2]
+    let correlation = pages(&store, &cover("account", 1))[3]
         .meta
         .clone()
         .and_then(|meta| meta.correlation_id);

@@ -674,7 +674,10 @@ impl<'k> Run<'k> {
         positions: &[(&str, &Cover, u64)],
     ) -> Result<Stepped, StepError> {
         let kernel = |error| StepError::Kernel(KernelError::Router(error));
-        let answer = match policy.dispatch.dispatch_refusal(refusal) {
+        let answer = match policy
+            .dispatch
+            .dispatch_refusal(refusal, &markup::CommandContext::default())
+        {
             Ok(answer) => answer,
             Err(error) => {
                 let Some(failure) = super::route::policy_failure(&error) else {

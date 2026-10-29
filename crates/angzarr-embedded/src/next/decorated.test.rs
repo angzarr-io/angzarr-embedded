@@ -3256,6 +3256,29 @@ mod policy_refusals {
         );
     }
 
+    /// A refused command of a type the policy translates that does not
+    /// decode is its error, a bug: never passed through as one it does not
+    /// translate.
+    #[test]
+    fn a_translated_refused_command_that_does_not_decode_is_the_policys_error() {
+        let mut refusal = hold_refusal(&correlation(1), 30, insufficient(20));
+        let corrupt = Any {
+            type_url: any(Hold { cents: 30 }).type_url,
+            value: vec![0xff, 0xff, 0xff],
+        };
+        refusal.command = Some(send("wallet", 9, corrupt.clone(), Some(correlation(1))));
+        let error = TranslatingBuyInWallet
+            .on_refused(&refusal, &CommandContext::default())
+            .expect_err("a command it translates that does not decode fails it");
+        assert_eq!(error.code(), "angzarr-embedded-next-payload-decode");
+        let args = error.args();
+        assert!(
+            args.iter().any(|(name, arg)| *name == "type_url"
+                && matches!(arg, Arg::Str(url) if *url == corrupt.type_url)),
+            "{args:?}"
+        );
+    }
+
     /// A policy's constants: what events it handles, and what it translates, the
     /// latter derived from its `#[on_refused]` callbacks.
     #[test]
