@@ -131,8 +131,10 @@ impl Default for OnRetryable {
 /// How the kernel waits out a backoff, and draws its jitter: the
 /// application's timer and randomness. The kernel's own
 /// ([`Kernel::new`]'s) sleeps on a thread of its own and draws from the
-/// standard library's hasher seeds; a test injects its own, so its waits
-/// are exact.
+/// standard library's hasher seeds; on wasm32, which has no threads, it
+/// waits not at all, so a retry runs at once, and an application there
+/// that wants the backoff injects its timer ([`Kernel::wait_with`]); a
+/// test injects its own, so its waits are exact.
 pub trait Wait: Send + Sync {
     /// A future that completes once `backoff` has passed.
     fn wait(
@@ -160,13 +162,37 @@ impl OnRetryable {
     }
 }
 
-/// The kernel's own [`Wait`] on a target with threads (`threads`), or
-/// without them.
-const THREADS: bool = true;
+/// Whether the target can spawn a thread: every one but wasm32
+/// (`wasm32-unknown-unknown` panics on a spawn).
+const THREADS: bool = cfg!(not(target_arch = "wasm32"));
 
+/// The kernel's own [`Wait`] on a target with threads ([`ThreadWait`]),
+/// or without them ([`NoWait`]).
 fn default_wait(threads: bool) -> &'static dyn Wait {
-    let _ = threads;
-    &ThreadWait
+    match threads {
+        true => &ThreadWait,
+        false => &NoWait,
+    }
+}
+
+/// The kernel's own [`Wait`] without threads (wasm32): each wait completes
+/// at once, whatever its backoff, so a retry runs straight after the
+/// failure, never panicking on a thread's spawn. An application there
+/// that wants the backoff waited out injects its own timer
+/// ([`Kernel::wait_with`]). It draws as [`ThreadWait`] does.
+struct NoWait;
+
+impl Wait for NoWait {
+    fn wait(
+        &self,
+        _backoff: std::time::Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(std::future::ready(()))
+    }
+
+    fn draw(&self) -> f64 {
+        ThreadWait.draw()
+    }
 }
 
 /// The kernel's own [`Wait`]: each wait on a thread of its own, which
