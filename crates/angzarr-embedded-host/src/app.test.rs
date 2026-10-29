@@ -8,12 +8,40 @@ use super::*;
 use crate::config::HostConfig;
 use crate::fake_child::{config, domain, mode, noted};
 
-/// A directory of this test's own, emptied.
-fn scratch(name: &str) -> PathBuf {
+/// A directory of this test's own, emptied, and removed with what is in it
+/// when the guard drops, the test passing or not.
+fn scratch(name: &str) -> Scratch {
     let dir = std::env::temp_dir().join(format!("angzarr-host-app-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    dir
+    Scratch(dir)
+}
+
+/// A scratch directory, removed on drop.
+struct Scratch(PathBuf);
+
+impl std::ops::Deref for Scratch {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl AsRef<Path> for Scratch {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+#[test]
+fn a_scratch_directory_is_gone_once_dropped() {
+    let dir = scratch("dropped");
+    std::fs::write(dir.join("angzarr.toml"), "").unwrap();
+    let path = dir.to_path_buf();
+    assert!(path.is_dir());
+    drop(dir);
+    assert!(!path.exists(), "{} was left behind", path.display());
 }
 
 /// `config` written as the TOML the CLI writes, into `dir`.
