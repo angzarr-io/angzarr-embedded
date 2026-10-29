@@ -62,7 +62,8 @@ use super::registry::Registry;
 /// [`Policy::on_event`] is a bug. It fails the step as
 /// [`StepError::PolicyFailed`](super::StepError::PolicyFailed), a defect,
 /// dead-lettered by its code and args, its position moved past the
-/// trigger.
+/// trigger (unless the kernel says to stay:
+/// [`Kernel::on_policy_bug`](super::Kernel::on_policy_bug)).
 /// Each command is decided by its target and may be refused: a policy that
 /// answers refusals ([`Policy::ANSWERS_REFUSALS`], every marked-up one)
 /// delivers its refusal fact to the source ([`Policy::on_refused`]);

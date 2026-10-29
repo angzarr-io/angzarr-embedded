@@ -275,11 +275,15 @@ pub(crate) fn is_rejection(error: &CodedError) -> bool {
 
 /// Whether the router's `error`, which the kernel keeps as
 /// [`KernelError::Router`](super::KernelError::Router) (never a refusal:
-/// that is [`Rejected`]), is a handler's own fault: a code neither the
-/// router's nor a policy's failure ([`POLICY_FAILED`]). The kernel
-/// dead-letters it by its code and args.
+/// that is [`Rejected`]), is a handler's bug: a code of its own (never a
+/// policy's failure, [`POLICY_FAILED`]), or one of the router's failed
+/// INTERNAL (UNHANDLED_HANDLER_ERROR: what a handler's error without a
+/// code of its own becomes). The kernel dead-letters it by its code and
+/// args, and a policy's step moves the policy's position past it unless
+/// the kernel says to stay ([`OnPolicyBug`](super::OnPolicyBug)).
 pub(crate) fn is_handler_fault(error: &CodedError) -> bool {
-    reason_code(&error.code).is_none() && error.code != POLICY_FAILED
+    error.code != POLICY_FAILED
+        && (reason_code(&error.code).is_none() || error.grpc == GrpcCode::Internal)
 }
 
 /// A handler's refusal `rejection`, with its typed refusal object, as the

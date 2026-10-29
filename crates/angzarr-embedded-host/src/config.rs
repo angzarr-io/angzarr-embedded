@@ -25,7 +25,8 @@
 //! path = "angzarr.db"          # SQLite; `in_memory = true` for none on disk
 //!
 //! [policy]
-//! on_bug = "move_past"         # or "stay": see `PolicyConfig`
+//! on_bug = "move_past"         # a policy step's bug, dead-lettered, moves its
+//!                              # position past the trigger; "stay" keeps it
 //! ```
 //!
 //! A domain's language picks its default launch command and nothing else:

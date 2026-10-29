@@ -20,10 +20,13 @@
 //!   ([`Failure::Downstream`]). A refused command of a policy that does not
 //!   answer refusals is dead-lettered and its position moves past it, and
 //!   so is a policy's own error ([`StepError::PolicyFailed`], a defect,
-//!   dead-lettered by its code and args); a bug
-//!   (a malformed policy book, the depth limit) or a store failure holds
-//!   the position, so [`Kernel::resume`] runs the step again, deduplicated
-//!   by its derived command id.
+//!   dead-lettered by its code and args) and a handler's bug in the step
+//!   (a [`KernelError::Router`] dead-lettered by its code and args), unless
+//!   the kernel keeps the position at the trigger for those two
+//!   ([`OnPolicyBug::Stay`]); any other bug (a malformed policy book, the
+//!   depth limit) or a store failure holds the position, so
+//!   [`Kernel::resume`] runs the step again, deduplicated by its derived
+//!   command id.
 //! - **A refused command of a policy that answers refusals** (every
 //!   marked-up one) is no failure: the policy's refusal fact goes to the
 //!   stream of the triggering event as a step of its own, with the refused
@@ -444,6 +447,19 @@ fn step_error(failure: Failure<Rejected>) -> StepError {
     }
 }
 
+/// Write `positions` past a policy step's bug, already dead-lettered,
+/// unless `policy_bug` keeps them at the trigger ([`OnPolicyBug::Stay`]).
+async fn past_bug<P: Port>(
+    policy_bug: OnPolicyBug,
+    port: &mut P,
+    positions: &[(&str, &Cover, u64)],
+) -> Result<(), super::StoreError> {
+    match policy_bug {
+        OnPolicyBug::MovePast => port.write_positions(positions).await,
+        OnPolicyBug::Stay => Ok(()),
+    }
+}
+
 /// The typed stream a step leaves, for a typed domain: the stream as
 /// loaded with `pages` folded on.
 fn typed(
@@ -475,6 +491,7 @@ struct Run<'k> {
     sampled: &'k Sampled,
     dead_letters: &'k dyn DeadLetterLog,
     limit: usize,
+    policy_bug: OnPolicyBug,
     /// Mints each delivery's conflict nonce.
     nonces: u64,
     /// The streams to settle, the path to each, and which of its events:
@@ -502,6 +519,7 @@ impl<'k> Run<'k> {
             sampled,
             dead_letters: kernel.dead_letters,
             limit: kernel.limit,
+            policy_bug: kernel.policy_bug,
             nonces: 0,
             queue: VecDeque::new(),
             recorded: Recorded::default(),
@@ -572,9 +590,10 @@ impl<'k> Run<'k> {
     /// router's refusal of the answer (a command outside the policy's
     /// destination or its trigger's edition, with no root or another
     /// correlation) is the policy's bug: dead-lettered, and the position
-    /// stays. The policy's own error ([`StepError::PolicyFailed`]) is
-    /// dead-lettered by its code and args, and the position moves past the
-    /// event.
+    /// stays. The policy's own error ([`StepError::PolicyFailed`]) and a
+    /// handler's bug in one of its steps are dead-lettered by their code
+    /// and args, and the position moves past the event (or stays, under
+    /// [`OnPolicyBug::Stay`]).
     async fn run_policy<P: Port>(
         &mut self,
         port: &mut P,
@@ -604,7 +623,7 @@ impl<'k> Run<'k> {
                         policy.name(),
                         &failure,
                     );
-                    port.write_positions(&position)
+                    past_bug(self.policy_bug, port, &position)
                         .await
                         .map_err(|e| (path.to_vec(), StepError::Kernel(KernelError::Store(e))))?;
                     return Err((path.to_vec(), StepError::PolicyFailed(failure)));
@@ -687,6 +706,14 @@ impl<'k> Run<'k> {
                         Err(error) => return Err((path, error)),
                     }
                 }
+                Err(Failure::Kernel(KernelError::Router(error)))
+                    if super::route::is_handler_fault(&error) =>
+                {
+                    past_bug(self.policy_bug, port, &position)
+                        .await
+                        .map_err(|e| store(path.clone(), e))?;
+                    return Err((path, StepError::Kernel(KernelError::Router(error))));
+                }
                 Err(failure) => return Err((path, step_error(failure))),
             }
         }
@@ -700,7 +727,9 @@ impl<'k> Run<'k> {
     /// refused command's id and correlation. A refusal its source has no handler for is
     /// dead-lettered, and writes only `positions`; one whose handler fails
     /// is the policy's failure ([`StepError::PolicyFailed`]), dead-lettered
-    /// by its code and args, and writes only `positions`.
+    /// by its code and args, and one its source's handler fails on with a
+    /// bug is dead-lettered as that bug: both write only `positions`, unless
+    /// the kernel says to stay ([`OnPolicyBug::Stay`]).
     async fn refusal_step<P: Port>(
         &mut self,
         port: &mut P,
@@ -723,7 +752,7 @@ impl<'k> Run<'k> {
                     policy.name(),
                     &failure,
                 );
-                port.write_positions(positions)
+                past_bug(self.policy_bug, port, positions)
                     .await
                     .map_err(|e| StepError::Kernel(KernelError::Store(e)))?;
                 return Err(StepError::PolicyFailed(failure));
@@ -772,12 +801,17 @@ impl<'k> Run<'k> {
                 fact.domain(),
                 &failure,
             );
-            port.write_positions(positions)
+            past_bug(self.policy_bug, port, positions)
                 .await
                 .map_err(|e| StepError::Kernel(KernelError::Store(e)))?;
             return Err(StepError::PolicyFailed(failure));
         }
         if error.code != codes::NO_FACT_HANDLER {
+            if super::route::is_handler_fault(&error) {
+                past_bug(self.policy_bug, port, positions)
+                    .await
+                    .map_err(|e| StepError::Kernel(KernelError::Store(e)))?;
+            }
             return Err(StepError::Kernel(KernelError::Router(error)));
         }
         write_dead_letter(

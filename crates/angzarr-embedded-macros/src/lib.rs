@@ -264,7 +264,8 @@
 //! `StepError::PolicyFailed`, a defect (never the business `Rejected`):
 //! the step is dead-lettered with the error's code as its reason and its
 //! args as the letter's metadata, never its English, and the policy's
-//! position moves past the event.
+//! position moves past the event (unless the kernel says to stay:
+//! `Kernel::on_policy_bug`).
 //!
 //! ## Refusals
 //!

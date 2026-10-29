@@ -13,8 +13,8 @@ use std::path::Path;
 
 use angzarr_embedded::next::v1::{CommandBook, Cover, EventPage};
 use angzarr_embedded::next::{
-    EventStore, Failure, Handled, Kernel, KernelError, MemoryDeadLetters, Registry, Rejected,
-    Sampled, StoreError, StreamRef,
+    EventStore, Failure, Handled, Kernel, KernelError, MemoryDeadLetters, OnPolicyBug, Registry,
+    Rejected, Sampled, StoreError, StreamRef,
 };
 use angzarr_embedded_diagnostic::Report;
 use angzarr_store_sqlite::SqliteStore;
@@ -42,6 +42,7 @@ pub fn run(
         offset: e.span().map_or(0, |span| span.start as u64),
     })?;
     let store_config = config.store.clone();
+    let policy_bug = config.policy.on_bug;
     let host = Host::start(config)?;
     let mut registry = Registry::new();
     host.register(&mut registry)
@@ -69,6 +70,7 @@ pub fn run(
         host,
         registry,
         dead_letters: MemoryDeadLetters::new(),
+        policy_bug,
         store,
         runtime,
     })
@@ -83,14 +85,17 @@ pub struct App {
     host: Host,
     registry: Registry,
     dead_letters: MemoryDeadLetters,
+    /// The config's `[policy] on_bug`.
+    policy_bug: OnPolicyBug,
     store: SqliteStore,
     runtime: tokio::runtime::Runtime,
 }
 
 impl App {
-    /// The kernel over this application's registry and dead letters.
+    /// The kernel over this application's registry and dead letters,
+    /// doing with a policy's bug what the config's `[policy] on_bug` says.
     pub fn kernel(&self) -> Kernel<'_> {
-        Kernel::new(&self.registry, &self.dead_letters)
+        Kernel::new(&self.registry, &self.dead_letters).on_policy_bug(self.policy_bug)
     }
 
     /// The application's store.

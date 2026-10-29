@@ -436,10 +436,15 @@ handler's refusal comes back as a business rejection carrying the refusal's
 code, args and typed refusal object: the caller's `Failure::Rejected(Rejected)`.
 A rejection is a FAILED_PRECONDITION, whatever its code: errors are
 defects unless deliberately refused. A handler's own code under any other
-status (INTERNAL, or any other) is its bug: `KernelError::Router`,
-`Recovery::Bug`, [dead-lettered](#dead-letters-a-logger) by its code and
-args, and as a policy's step its position stays, so `resume` runs it
-again. Every other reason the router refuses with is `KernelError::Router`,
+status (INTERNAL, or any other) is its bug, and so is a code of the
+router's failed INTERNAL (UNHANDLED_HANDLER_ERROR: what a handler's error
+without a code of its own becomes, a remote child's included):
+`KernelError::Router`, `Recovery::Bug`,
+[dead-lettered](#dead-letters-a-logger) by its code and args, and as a
+policy's step the policy's position moves past the trigger, as for a
+policy's own error: the dead letter is the record to replay
+([`OnPolicyBug`](#a-policys-bug-and-its-position) says otherwise). Every
+other reason the router refuses with is `KernelError::Router`,
 forwarded under an angzarr-embedded code of its own
 (`angzarr-embedded-next-<reason>`), each with its own message. A remote
 handler that cannot be reached (`REMOTE_HANDLER_UNAVAILABLE`) is
@@ -561,9 +566,12 @@ kernel.resume(&store, &sampled, &mut projections).await?;                       
   The call fails with the path to the step (`Failure::Downstream { path,
   error }`, the path a list of `Step { stream, cause }`). A refused command
   of a policy that does not answer refusals is dead-lettered and its
-  position moves past it; a bug (a malformed policy book, the depth limit)
-  or a store failure writes nothing more: the position stays where the
-  last committed step put it, and `resume` runs the step again.
+  position moves past it. A policy's own error and a handler's bug in the
+  step are dead-lettered and move it past too, unless the kernel says to
+  stay ([below](#a-policys-bug-and-its-position)). Any other bug (a
+  malformed policy book, the depth limit, the router refusing the policy's
+  answer) or a store failure writes nothing more: the position stays where
+  the last committed step put it, and `resume` runs the step again.
 - **A refusal is a fact.** A policy that answers refusals (every marked-up
   one) is not failed by its target's refusal: its `on_refused` answer goes
   to the stream of the triggering event as a fact, a step of its own,
@@ -597,6 +605,18 @@ kernel.resume(&store, &sampled, &mut projections).await?;                       
   dead-lettered with the error's code as its reason and its args as the
   letter's metadata, never its English, and the policy's position moves
   past the trigger, so nothing runs it again.
+- <a id="a-policys-bug-and-its-position"></a>**A policy's bug and its
+  position** are a setting: `Kernel::on_policy_bug(OnPolicyBug)`, one for
+  every policy. A policy step that hits a bug (the policy's own error,
+  `StepError::PolicyFailed`, or a handler's bug in the step, a
+  dead-lettered `KernelError::Router`) is dead-lettered either way; under
+  `OnPolicyBug::MovePast` (the default) the policy's position moves past
+  the trigger, the dead letter being the record to replay, and under
+  `OnPolicyBug::Stay` it stays at the trigger, so `resume` runs the step
+  again and dead-letters it again while the bug stands. The host reads it
+  from `angzarr.toml`'s `[policy] on_bug = "move_past" | "stay"`
+  (`move_past` when left out); the host has no other configuration
+  source.
 - **Re-runs always deduplicate** (see [below](#re-runs)).
 - **Propagating one aggregate into another** (hatpick's list into its draw
   systems) is a policy whose target records the change in its own events.
@@ -742,8 +762,9 @@ Cases: a panicking ingest; a policy's book the kernel built malformed; a
 decide under AGGREGATE_HANDLES that never acknowledged its window; a
 policy that failed on its trigger, whose line is its error's code and args
 (`name=value`), never its English, and the trigger's place; a handler
-that failed under a code of its own, not as a FAILED_PRECONDITION, whose
-line is that code and its args, never its English, and the command. **Every
+that failed under a code of its own, not as a FAILED_PRECONDITION, or
+under a code of the router's failed INTERNAL, whose line is that code and
+its args, never its English, and the command. **Every
 line starts with the prefix**: anything arriving there almost certainly
 indicates a problem, so an operator alerts on it. The line is built from
 angzarr's own `AngzarrDeadLetter`, so it says what an angzarr DLQ entry
@@ -765,7 +786,7 @@ names the trigger; angzarr-embedded has no tracing dependency and reports it now
 | `KernelError::UnknownType` | a command or fact type the domain does not decode, after upcasting | `Invalid` |
 | `KernelError::InvalidPayload` | a command or fact that decodes but is not a valid domain value (`WireError`: a required field absent, an undefined enum value) | `Invalid` |
 | `KernelError::Stale`, `Unresolved` | re-read and re-issue | `Retry` |
-| `KernelError::Router` | the router refused, or a handler failed under a code of its own (never FAILED_PRECONDITION: that is `Rejected`) | a handler's own code `Bug`; of the router's codes, by gRPC status: INTERNAL, DATA_LOSS and UNIMPLEMENTED `Bug`, ABORTED `Retry`, INVALID_ARGUMENT and NOT_FOUND `Invalid` |
+| `KernelError::Router` | the router refused, or a handler failed under a code of its own (never FAILED_PRECONDITION: that is `Rejected`) | a handler's own code `Bug`; of the router's codes, by gRPC status: INTERNAL (dead-lettered, a handler's bug), DATA_LOSS and UNIMPLEMENTED `Bug`, ABORTED `Retry`, INVALID_ARGUMENT and NOT_FOUND `Invalid` |
 | `StoreError::Conflict`, `Unavailable` | run again with the same command id (step 3 makes it safe) | `Retry` |
 | `IngestPanicked`, `Upcast`, `WrongDomain`, `ChainTooDeep`, `BeforeSnapshot`, `UnregisteredDomain` (a stored stream of a domain the application did not register; an incoming book for one is `Malformed`), `Replay(..)`, `StoreError::Discontinuous`, `Unreadable` | a bug or a misconfiguration | `Bug` |
 
@@ -1053,7 +1074,8 @@ runs it in full); angzarr-embedded tests the kernel over it, not the store.
   carry its derived command id as causation and no trigger; **a rejected
   policy step keeps the command's commit and is dead-lettered**; **a
   policy's error is dead-lettered as `PolicyFailed`, by its code and args,
-  and its position moves past the trigger**; a chain
+  and its position moves past the trigger, or under `OnPolicyBug::Stay`
+  stays at it**; a chain
   deeper than its limit is refused; a command to an edition never forked
   is refused and writes nothing; a policy's target is in its source's
   edition; each step loads what the steps before it committed; **every
@@ -1069,7 +1091,10 @@ runs it in full); angzarr-embedded tests the kernel over it, not the store.
   (pass-through `CommandRefused` or a translated fact to the source, a
   refusal no handler takes dead-lettered), a failing step keeping the
   commits before it, and **a handler's own code is a rejection only as a
-  FAILED_PRECONDITION; under any other status it is a dead-lettered bug**.
+  FAILED_PRECONDITION; under any other status it is a dead-lettered bug,
+  as is a code of the router's failed INTERNAL, and as a policy's step
+  its position moves past the trigger, or under `OnPolicyBug::Stay` stays
+  at it**.
 - **sqlite.test.rs**: the kernel over angzarr-store-sqlite on a file: a
   command and its policy step each commit and survive reopening; resume
   after reopening runs what a crash left owed; **a command's round trips
