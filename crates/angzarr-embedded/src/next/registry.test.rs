@@ -63,7 +63,14 @@ fn commutative_is_the_default_where_the_state_declares_units_else_strict() {
 fn misconfiguration_is_refused_at_registration() {
     let mut registry = registry();
     assert_eq!(
-        registry.register::<Account>(fees(), Upcaster::new("u", "account")),
+        registry.register::<Account>(
+            fees(),
+            Upcaster::new("u", "account"),
+            crate::next::toys::handlers::<crate::next::toys::Account>(
+                crate::next::toys::Fees { withdrawal: 1 },
+                "v2"
+            )
+        ),
         Err(Misconfigured::AlreadyRegistered {
             domain: "account".to_string()
         })
@@ -71,14 +78,25 @@ fn misconfiguration_is_refused_at_registration() {
 
     let mut fresh = Registry::new();
     assert_eq!(
-        fresh.register::<Account>(fees(), Upcaster::new("u", "ledger")),
+        fresh.register::<Account>(
+            fees(),
+            Upcaster::new("u", "ledger"),
+            crate::next::toys::handlers::<crate::next::toys::Account>(
+                crate::next::toys::Fees { withdrawal: 1 },
+                "v2"
+            )
+        ),
         Err(Misconfigured::UpcasterForAnotherDomain {
             domain: "account".to_string(),
             upcaster: "ledger".to_string()
         })
     );
     assert_eq!(
-        fresh.register::<Shelf>(Rulebook::new("", ()), Upcaster::new("u", "shelf")),
+        fresh.register::<Shelf>(
+            Rulebook::new("", ()),
+            Upcaster::new("u", "shelf"),
+            crate::next::toys::handlers::<crate::next::toys::Shelf>((), "v1")
+        ),
         Err(Misconfigured::EmptyRulesVersion {
             domain: "shelf".to_string()
         })
@@ -89,7 +107,7 @@ fn misconfiguration_is_refused_at_registration() {
 #[test]
 fn a_configured_resolution_the_state_lacks_is_refused() {
     use crate::next::toys::account::AccountState;
-    use crate::next::{Domain, IngestCtx, Tx};
+    use crate::next::Domain;
 
     /// An account configured COMMUTATIVE although its state has no units.
     struct Eager;
@@ -103,17 +121,15 @@ fn a_configured_resolution_the_state_lacks_is_refused() {
         const NAME: &'static str = "eager";
         const CONFLICT_RESOLUTION: Option<ConflictResolution> =
             Some(ConflictResolution::Commutative);
-        fn decide(c: &Self::Command, _: &mut Tx<'_, Self>) -> Result<(), Self::Rejection> {
-            match *c {}
-        }
-        fn ingest(_: &AccountState, f: &Self::Fact, _: &IngestCtx<'_, Self>) -> Vec<Self::Event> {
-            match *f {}
-        }
         fn apply(_: &mut AccountState, _: &Self::Event, (): &()) {}
     }
 
     assert_eq!(
-        Registry::new().register::<Eager>(Rulebook::new("v1", ()), Upcaster::new("u", "eager")),
+        Registry::new().register::<Eager>(
+            Rulebook::new("v1", ()),
+            Upcaster::new("u", "eager"),
+            |t| t
+        ),
         Err(Misconfigured::UnsupportedResolution {
             domain: "eager".to_string(),
             command_type: None,
@@ -192,21 +208,6 @@ fn a_state_descriptor_without_the_implicit_base_is_refused() {
 
         const NAME: &'static str = "bad";
 
-        fn decide(
-            cmd: &std::convert::Infallible,
-            _: &mut crate::next::Tx<'_, Self>,
-        ) -> Result<(), std::convert::Infallible> {
-            match *cmd {}
-        }
-
-        fn ingest(
-            _: &StrictOnly,
-            fact: &std::convert::Infallible,
-            _: &crate::next::IngestCtx<'_, Self>,
-        ) -> Vec<std::convert::Infallible> {
-            match *fact {}
-        }
-
         fn apply(_: &mut StrictOnly, event: &std::convert::Infallible, (): &()) {
             match *event {}
         }
@@ -216,7 +217,8 @@ fn a_state_descriptor_without_the_implicit_base_is_refused() {
     assert_eq!(
         registry.register::<Bad>(
             crate::next::Rulebook::new("v1", ()),
-            crate::next::Upcaster::new("u", "bad")
+            crate::next::Upcaster::new("u", "bad"),
+            |t| t
         ),
         Err(crate::next::Misconfigured::BadStateDescriptor {
             domain: "bad".to_string()
@@ -277,21 +279,6 @@ fn a_state_descriptor_naming_another_type_than_its_snapshot_is_refused() {
 
         const NAME: &'static str = "bad";
 
-        fn decide(
-            cmd: &std::convert::Infallible,
-            _: &mut crate::next::Tx<'_, Self>,
-        ) -> Result<(), std::convert::Infallible> {
-            match *cmd {}
-        }
-
-        fn ingest(
-            _: &Misnamed,
-            fact: &std::convert::Infallible,
-            _: &crate::next::IngestCtx<'_, Self>,
-        ) -> Vec<std::convert::Infallible> {
-            match *fact {}
-        }
-
         fn apply(_: &mut Misnamed, event: &std::convert::Infallible, (): &()) {
             match *event {}
         }
@@ -301,10 +288,137 @@ fn a_state_descriptor_naming_another_type_than_its_snapshot_is_refused() {
     assert_eq!(
         registry.register::<Bad>(
             crate::next::Rulebook::new("v1", ()),
-            crate::next::Upcaster::new("u", "bad")
+            crate::next::Upcaster::new("u", "bad"),
+            |t| t
         ),
         Err(crate::next::Misconfigured::BadStateDescriptor {
             domain: "bad".to_string()
         })
     );
+}
+
+/// A hand-written handler whose registration hello is `hello`, of `kind`.
+struct Hello {
+    hello: Result<angzarr_router::pb::ComponentDescriptor, angzarr_router::error::CodedError>,
+    kind: angzarr_router::pb::ComponentKind,
+}
+
+impl angzarr_router::router::CommandHandler for Hello {
+    fn name(&self) -> &str {
+        "hello"
+    }
+
+    fn kind(&self) -> angzarr_router::pb::ComponentKind {
+        self.kind
+    }
+
+    fn command_types(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn dispatch(
+        &self,
+        _: &angzarr_router::pb::ContextualCommand,
+    ) -> Result<angzarr_router::pb::CommandHandlerResponse, angzarr_router::error::CodedError> {
+        Ok(Default::default())
+    }
+
+    fn component_descriptor(
+        &self,
+    ) -> Result<angzarr_router::pb::ComponentDescriptor, angzarr_router::error::CodedError> {
+        self.hello.clone()
+    }
+}
+
+fn hello(
+    state: Option<crate::next::v1::StateDescriptor>,
+) -> angzarr_router::pb::ComponentDescriptor {
+    angzarr_router::pb::ComponentDescriptor {
+        name: "hello".to_string(),
+        rules_version: "h1".to_string(),
+        state,
+        ..Default::default()
+    }
+}
+
+fn base_state() -> crate::next::v1::StateDescriptor {
+    use crate::next::v1::{ConflictResolution, StateDescriptor, StateOptions};
+    StateDescriptor {
+        type_url: "/toy.hello.v1.State".to_string(),
+        options: Some(StateOptions {
+            conflict_resolutions: vec![
+                ConflictResolution::Strict as i32,
+                ConflictResolution::AggregateHandles as i32,
+            ],
+        }),
+    }
+}
+
+/// A handler registers on what its hello says: refused without a rules
+/// version or a state, a process manager's kind kept.
+#[test]
+fn a_command_handler_registers_by_its_hello() {
+    use angzarr_router::error::{codes, CodedError};
+    use angzarr_router::pb::ComponentKind;
+    let refused = |hello: Result<_, CodedError>| {
+        crate::next::Registry::new()
+            .command_handler(
+                "hello",
+                Hello {
+                    hello,
+                    kind: ComponentKind::Aggregate,
+                },
+            )
+            .err()
+    };
+    assert_eq!(
+        refused(Err(CodedError::invalid_argument(
+            codes::MISSING_RULES_VERSION,
+            "",
+            []
+        ))),
+        Some(Misconfigured::EmptyRulesVersion {
+            domain: "hello".to_string()
+        })
+    );
+    assert_eq!(
+        refused(Err(CodedError::invalid_argument(
+            codes::MISSING_STATE_TYPE,
+            "",
+            []
+        ))),
+        Some(Misconfigured::BadStateDescriptor {
+            domain: "hello".to_string()
+        })
+    );
+    assert_eq!(
+        refused(Ok(hello(None))),
+        Some(Misconfigured::BadStateDescriptor {
+            domain: "hello".to_string()
+        })
+    );
+
+    let mut registry = crate::next::Registry::new();
+    registry
+        .command_handler(
+            "hello",
+            Hello {
+                hello: Ok(hello(Some(base_state()))),
+                kind: ComponentKind::ProcessManager,
+            },
+        )
+        .unwrap();
+    assert!(registry.is_process_manager("hello"));
+    assert_eq!(registry.rules_version("hello"), Some("h1"));
+    let mut aggregate = crate::next::Registry::new();
+    aggregate
+        .command_handler(
+            "hello",
+            Hello {
+                hello: Ok(hello(Some(base_state()))),
+                kind: ComponentKind::Aggregate,
+            },
+        )
+        .unwrap();
+    assert!(!aggregate.is_process_manager("hello"));
 }

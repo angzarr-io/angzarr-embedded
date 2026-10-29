@@ -5,15 +5,17 @@
 
 use angzarr_proto::v1::{ConflictResolution, EventPage, Snapshot};
 
-use crate::next::check::Identified;
+use crate::next::check::{Identified, Sampled};
+use crate::next::dead_letter::DeadLetterLog;
 use crate::next::domain::Domain;
-use crate::next::error::KernelError;
+use crate::next::error::{Failure, KernelError};
 use crate::next::registry::Registry;
+use crate::next::route::Rejected;
 use crate::next::store::{Store, StorePort};
 use crate::next::stream::Stream;
 use crate::next::toys::ready;
 
-use super::{deduplicate, load, prepare, Contextual, Deduplicated, Novel, Prepared};
+use super::{deduplicate, dispatch, load, Contextual, Deduplicated, Novel};
 
 /// Steps 3 and 4 over a store.
 pub struct Coordinator<'s, S> {
@@ -32,7 +34,7 @@ impl<'s, S: Store> Coordinator<'s, S> {
     }
 
     /// Step 3: load, then look the command id up.
-    pub fn deduplicate(&mut self, command: Identified) -> Result<Deduplicated, KernelError> {
+    pub fn deduplicate(&mut self, command: Identified) -> Result<Deduplicated, Failure<Rejected>> {
         ready(deduplicate(
             &mut StorePort(self.store),
             self.registry,
@@ -88,18 +90,54 @@ impl Contextual {
         self.nonce.is_some()
     }
 
-    /// Step 5's first half, typed.
+    /// The stream as step 3 loaded it, typed, beside the command.
     pub fn decode<D: Domain>(self, registry: &Registry) -> Result<Prepared<D>, KernelError> {
-        prepare(self, None, registry)
+        let stream = match &self.snapshot {
+            Some(snapshot) => {
+                let floor = self.last_recorded_at.filter(|_| self.pages.is_empty());
+                Stream::resume(
+                    self.command.cover().clone(),
+                    snapshot,
+                    floor,
+                    &self.pages,
+                    registry,
+                )?
+            }
+            None => Stream::replay(self.command.cover().clone(), &self.pages, registry)?,
+        };
+        Ok(Prepared {
+            contextual: self,
+            stream,
+        })
     }
+}
+
+/// A loaded command and its typed stream.
+pub struct Prepared<D: Domain> {
+    contextual: Contextual,
+    stream: Stream<D>,
 }
 
 impl<D: Domain> Prepared<D> {
     pub fn command(&self) -> &Identified {
-        &self.command
+        &self.contextual.command
     }
 
     pub fn stream(&self) -> &Stream<D> {
         &self.stream
+    }
+
+    /// Step 5: through the router, the stamped events.
+    pub fn decide(
+        &self,
+        sampled: &Sampled,
+        registry: &Registry,
+        dead_letters: &dyn DeadLetterLog,
+    ) -> Result<Vec<angzarr_proto::v1::EventPage>, Failure<Rejected>> {
+        dispatch(&self.contextual, sampled, registry, dead_letters)
+    }
+
+    pub fn into_stream(self) -> Stream<D> {
+        self.stream
     }
 }

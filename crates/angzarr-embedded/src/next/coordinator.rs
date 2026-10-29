@@ -1,92 +1,73 @@
-//! Steps 3 to 5 of the pipeline: the in-process coordinator.
+//! Steps 3 to 5 of the pipeline: the in-process coordinator, over
+//! angzarr-router.
 //!
 //! angzarr's aggregate coordinator is a service that loads a stream, checks
 //! or stamps the command's expected sequence and hands a
-//! `ContextualCommand` to business code. angzarr-embedded has no service and sends
-//! nothing: the chain does the same steps in process, through the store,
-//! domain-blind (it sees `Cover`s, pages and
-//! the [`Registry`], never a domain's types):
+//! `ContextualCommand` to business code. angzarr-embedded has no service and
+//! sends nothing: the chain does the same steps in process, through the
+//! store, domain-blind (it sees `Cover`s, pages and the [`Registry`], never
+//! a domain's types), and hands the `ContextualCommand` to the domain's
+//! router (its `CommandHandler`), which owns the business rules:
 //!
-//! 3. [`deduplicate`]: **load the stream first** (resolve the
-//!    conflict resolution: the book's, the command type's, the domain's,
-//!    else COMMUTATIVE where the state supports it and STRICT otherwise,
+//! 3. [`deduplicate`]: **load the stream first** (resolve the conflict
+//!    resolution: the book's, the command type's, the domain's, else
+//!    COMMUTATIVE where the state supports it and STRICT otherwise,
 //!    [`Registry::resolve`]; then the newest usable snapshot (under the
 //!    current rules and state type, and below the head) and the events
-//!    after it), **then** look the command id up: does the addressed
-//!    stream already hold events with this command id? Then the command
-//!    was applied: answered [`Deduplicated::Duplicate`] with those events,
+//!    after it), **then** look the command id up (the store's
+//!    `find_command`), and ask the router to admit the input: it decides
+//!    what an input meets before its handler runs (a refusal fact's
+//!    address, deduplication by the events found, a process manager's
+//!    start rule). Events found are answered [`Deduplicated::Duplicate`],
 //!    and nothing below runs. The load comes first so that a concurrent
 //!    commit of the same command (a retry racing its original) can never
 //!    slip between the two reads unseen: if it lands after the load, either
 //!    the lookup sees its events, or this command's append, expecting the
 //!    head it loaded, fails as a conflict and the retry then finds the
-//!    duplicate. (Lookup first, the original could commit between the
-//!    lookup and the load, and the retry would append after it: applied
-//!    twice.) Before the sequence check, so a retry of an applied STRICT
+//!    duplicate. Before the sequence check, so a retry of an applied STRICT
 //!    command whose expected sequence is now stale is a duplicate, never
 //!    stale.
-//! 4. [`load`]: stamp an absent
-//!    expected sequence with the head, or check a present one: under
-//!    STRICT it must be the head ([`KernelError::Stale`]); under
-//!    AGGREGATE_HANDLES and COMMUTATIVE the events from it to the head are
-//!    the window, delivered as events (the snapshot used is at or below
-//!    expected−1, so none of the window is hidden in snapshot state), with
-//!    a [`Nonce`]. An expected sequence past the head is stale under every
+//! 4. [`load`]: stamp an absent expected sequence with the head, or check a
+//!    present one: under STRICT it must be the head ([`KernelError::Stale`]);
+//!    under AGGREGATE_HANDLES and COMMUTATIVE the events from it to the head
+//!    are the window, delivered as events (the snapshot used is at or below
+//!    expected−1, so none of the window is hidden in snapshot state), with a
+//!    nonce. An expected sequence past the head is stale under every
 //!    resolution.
-//!
-//! Then the typed step, which needs `D`:
-//!
-//! 5. Decode ([`prepare`]): the snapshot's state (discarded, and the
-//!    stream replayed, on a rules-version or state-type mismatch), the
-//!    events and the command's payload, each through the domain's upcaster
-//!    and decoded strictly; then [`Prepared::decide`] runs decide or ingest
-//!    and stamps the events.
-//!
-//! In a chain, steps 3 and 4 consult the chain's staged
-//! streams before the store, so a later step sees an earlier step's
-//! uncommitted events (and its command ids). A stream the chain already
-//! holds was loaded when the chain first touched it, so its lookup still
-//! follows its load.
+//! 5. [`dispatch`]: the `ContextualCommand` (the stream's snapshot and
+//!    events, upcast; the book with its ids and its handling resolved; the
+//!    nonce) through the router, whose handler decides or records; the
+//!    kernel stamps every event it answers with the input's
+//!    [`Identified::meta`]. A panicking fact handler is caught.
 
-use std::any::Any as AnyType;
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 
-use angzarr_proto::v1::{ConflictResolution, EventBook, EventPage, FactOrigin, Snapshot};
+use angzarr_proto::v1::{ConflictResolution, EventBook, EventPage, Handling, Snapshot};
+use angzarr_router::domain::{Admission, Arrival, StreamStatus};
+use angzarr_router::error::{codes, CodedError};
+use angzarr_router::pb::ContextualCommand;
 use prost_types::Timestamp;
 
 use super::check::{Body, Identified, Malformed, Sampled};
 use super::dead_letter::{write_dead_letter, DeadLetterLog};
-use super::domain::{Conflicts, Decision, Domain, IngestCtx, State, Tx};
-use super::error::{Failure, KernelError, PayloadError};
-use super::payload::Payload;
+use super::error::{Failure, KernelError};
+use super::markup::STEP_LIMIT;
 use super::registry::Registry;
-use super::store::StoreError;
-use super::store::{produced_by, Port};
-use super::stream::{Envelope, Stream};
+use super::route::{self, Rejected};
+use super::store::Port;
 
-/// The in-process conflict nonce (angzarr's `ContextualCommand.conflict_nonce`):
-/// minted by the coordinator per delivery under AGGREGATE_HANDLES and
-/// COMMUTATIVE, handed to decide with the window under AGGREGATE_HANDLES
-/// (the kernel keeps it under COMMUTATIVE and acknowledges it itself when
-/// the units are disjoint), and given back through
-/// [`Tx::resolve_conflicts`](super::Tx::resolve_conflicts) as decide's
-/// declaration that it examined the window. Not constructible, clonable or
-/// copyable outside the kernel, so a decide cannot satisfy the check
-/// without having received it. A counter, not a random value: the kernel
-/// stays deterministic.
-#[derive(PartialEq, Eq, Debug)]
-pub struct Nonce(pub(crate) u64);
-
-/// What deduplication found.
+/// What step 3 found.
 pub(crate) enum Deduplicated {
     /// The stream holds this command's events already: they are the
     /// answer (angzarr's DUPLICATE), in sequence order, in an `EventBook`
     /// for the addressed stream.
     Duplicate { events: EventBook },
-    /// Nothing found: the command goes on to [`load`]. A
-    /// command whose earlier decision emitted nothing lands here again (an
-    /// accepted cost: it is decided again, against the stream as it is
-    /// now).
+    /// A process manager's fact for a stream with no instance, of a type
+    /// that does not start one: skipped, answered applied with no events.
+    Skipped,
+    /// Nothing found: the command goes on to [`load`]. A command whose
+    /// earlier decision emitted nothing lands here again (an accepted cost:
+    /// it is decided again, against the stream as it is now).
     Novel(Box<Novel>),
 }
 
@@ -108,8 +89,7 @@ pub(crate) struct Loaded {
 }
 
 /// A command with its stream's history and its handling resolved: angzarr's
-/// `ContextualCommand`, in process. Domain-blind still: the history is
-/// pages.
+/// `ContextualCommand`, in process. Domain-blind: the history is pages.
 pub(crate) struct Contextual {
     pub(crate) command: Identified,
     /// Never UNSPECIFIED.
@@ -126,74 +106,13 @@ pub(crate) struct Contextual {
     /// The last event's `recorded_at`: the floor for the next.
     pub(crate) last_recorded_at: Option<Timestamp>,
     /// Under AGGREGATE_HANDLES and COMMUTATIVE; `None` under STRICT.
-    pub(crate) nonce: Option<Nonce>,
+    pub(crate) nonce: Option<Vec<u8>>,
 }
 
 impl Contextual {
     /// The stream's next sequence.
     pub fn head(&self) -> u64 {
         self.head
-    }
-}
-
-/// The decoded input: a command for decide, or a fact for ingest.
-pub(crate) enum Input<D: Domain> {
-    Command(D::Command),
-    Fact(D::Fact, FactOrigin),
-}
-
-/// A command ready for business code: its stream at the head, its decoded
-/// input, and its resolved handling.
-pub(crate) struct Prepared<D: Domain> {
-    pub(crate) command: Identified,
-    pub(crate) input: Input<D>,
-    pub(crate) stream: Stream<D>,
-    pub(crate) resolution: ConflictResolution,
-    pub(crate) expected: u64,
-    pub(crate) nonce: Option<Nonce>,
-}
-
-impl<D: Domain> Prepared<D> {
-    /// Step 5's second half: the body arm picks the pipeline.
-    ///
-    /// - A command is decided in a staging [`Tx`](super::Tx), against the
-    ///   head. Under AGGREGATE_HANDLES decide is handed the window and the
-    ///   nonce and must give the nonce back
-    ///   ([`KernelError::Unresolved`] otherwise). Under COMMUTATIVE the
-    ///   kernel resolves: `window = changed(state at expected, head)`,
-    ///   `mine = changed(head, head with the events)`, both by the state's
-    ///   generated [`State::changed`](super::State::changed); the events are
-    ///   kept iff the two [do not overlap](super::Units::overlaps), else
-    ///   [`KernelError::Stale`].
-    /// - A fact is ingested ([`Domain::ingest`](super::Domain::ingest),
-    ///   with an [`IngestCtx`](super::IngestCtx)). A panic is caught: the
-    ///   chain fails with [`KernelError::IngestPanicked`] and `dead_letters`
-    ///   gets a line ([`dead_letter_line`](super::dead_letter_line)).
-    ///
-    /// Every event is stamped with [`Identified::meta`], at `recorded_at =
-    /// max(sampled.now, the stream's last)` and the current rules version.
-    pub fn decide(
-        &mut self,
-        sampled: &Sampled,
-        registry: &Registry,
-        dead_letters: &dyn DeadLetterLog,
-    ) -> Result<Decision<D>, Failure<D::Rejection>> {
-        decide_on(
-            &self.stream,
-            &self.command,
-            &self.input,
-            self.resolution,
-            self.expected,
-            self.nonce.take(),
-            sampled,
-            registry,
-            dead_letters,
-        )
-    }
-
-    /// The stream, to commit the decision to.
-    pub fn into_stream(self) -> Stream<D> {
-        self.stream
     }
 }
 
@@ -205,58 +124,80 @@ pub(crate) fn unknown_domain(domain: &str) -> KernelError {
     })
 }
 
-/// The refusal for running `D`'s typed code when the registry does not hold
-/// `D`: the application's misconfiguration.
-fn unregistered<D: Domain>() -> KernelError {
-    KernelError::UnregisteredDomain {
-        domain: D::NAME.to_string(),
+/// The router's refusal `error` of an input to `command`'s stream, in the
+/// kernel's terms: a business refusal is [`Failure::Rejected`]; a decision
+/// past its step limit [`KernelError::TooManySteps`]; anything else the
+/// router's own fault, [`KernelError::Router`].
+pub(crate) fn refused(command: &Identified, error: CodedError) -> Failure<Rejected> {
+    if error.code == route::TOO_MANY_STEPS {
+        return Failure::Kernel(KernelError::TooManySteps {
+            stream: command.cover().clone(),
+            limit: STEP_LIMIT,
+        });
     }
+    if error.code == route::HANDLER_UNAVAILABLE {
+        return Failure::Kernel(KernelError::HandlerUnavailable {
+            stream: command.cover().clone(),
+            cause: error.extras.get("cause").cloned().unwrap_or_default(),
+        });
+    }
+    if let Some(error) = route::upcast_failure(&error) {
+        return Failure::Kernel(KernelError::Upcast {
+            stream: command.cover().clone(),
+            error,
+        });
+    }
+    if route::is_rejection(&error) {
+        return Failure::Rejected(Rejected::of(&error));
+    }
+    Failure::Kernel(KernelError::Router(error))
 }
 
-/// Step 3 over `port`: load the stream, then look the command up.
+/// Step 3 over `port`: load the stream, look the command up, and have the
+/// router admit it.
 pub(crate) async fn deduplicate<P: Port>(
     port: &mut P,
     registry: &Registry,
     command: Identified,
-) -> Result<Deduplicated, KernelError> {
-    let loaded = read(port, registry, &command).await?;
-    match find_duplicate(port, &command, &[])
+) -> Result<Deduplicated, Failure<Rejected>> {
+    let loaded = read(port, registry, &command)
         .await
-        .map_err(KernelError::Store)?
-    {
-        Some(events) => Ok(Deduplicated::Duplicate { events }),
-        None => Ok(Deduplicated::Novel(Box::new(Novel { command, loaded }))),
+        .map_err(Failure::Kernel)?;
+    let recorded = port
+        .find_command(command.cover(), command.command_id())
+        .await
+        .map_err(|e| Failure::Kernel(KernelError::Store(e)))?;
+    let handler = registry
+        .handler(command.domain())
+        .ok_or_else(|| Failure::Kernel(unknown_domain(command.domain())))?;
+    let book = command.to_book();
+    let arrival = Arrival {
+        command: &book,
+        recorded: &recorded,
+        stream: StreamStatus {
+            exists: loaded.head > 0,
+        },
+    };
+    match handler.admit(&arrival) {
+        Ok(Admission::Duplicate(pages)) => Ok(Deduplicated::Duplicate {
+            events: EventBook {
+                cover: Some(command.cover().clone()),
+                snapshot: None,
+                next_sequence: pages.last().map_or(0, |p| p.sequence + 1),
+                pages,
+            },
+        }),
+        Ok(Admission::Skip) => Ok(Deduplicated::Skipped),
+        Ok(Admission::Dispatch) => Ok(Deduplicated::Novel(Box::new(Novel { command, loaded }))),
+        Err(error) => Err(refused(&command, error)),
     }
-}
-
-/// The lookup half of step 3: the command's events on its stream, also
-/// among `staged` (a chain's uncommitted pages of the same stream), as
-/// the duplicate's answer; `None` if there are none. Only ever run after
-/// the stream was loaded (here, or earlier in the same chain).
-pub(crate) async fn find_duplicate<P: Port>(
-    port: &mut P,
-    command: &Identified,
-    staged: &[EventPage],
-) -> Result<Option<EventBook>, StoreError> {
-    let id = command.command_id();
-    let mut pages = port.find_command(command.cover(), id).await?;
-    pages.extend(staged.iter().filter(|p| produced_by(p, id)).cloned());
-    Ok(pages
-        .last()
-        .map(|p| p.sequence + 1)
-        .map(|next_sequence| EventBook {
-            cover: Some(command.cover().clone()),
-            snapshot: None,
-            pages,
-            next_sequence,
-        }))
 }
 
 /// The command's resolution ([`Registry::resolve`]): never UNSPECIFIED.
 /// The configuration per command type is looked up by the command's
 /// current type, after the domain's upcaster, so an old type has the
 /// setting of the type it upcasts to. A payload whose upcast fails is
-/// looked up as sent; decoding then reports the failure.
+/// looked up as sent; the router then reports the failure.
 pub(crate) fn resolution(
     registry: &Registry,
     command: &Identified,
@@ -279,7 +220,7 @@ pub(crate) fn expect(
     resolution: ConflictResolution,
     head: u64,
     nonces: &mut u64,
-) -> Result<(u64, Option<Nonce>), KernelError> {
+) -> Result<(u64, Option<Vec<u8>>), KernelError> {
     let expected = command.expected_sequence().unwrap_or(head);
     if expected > head || (resolution == ConflictResolution::Strict && expected != head) {
         return Err(KernelError::Stale {
@@ -290,7 +231,7 @@ pub(crate) fn expect(
     }
     let nonce = (resolution != ConflictResolution::Strict).then(|| {
         *nonces += 1;
-        Nonce(*nonces)
+        nonces.to_be_bytes().to_vec()
     });
     Ok((expected, nonce))
 }
@@ -356,238 +297,135 @@ pub(crate) fn load(novel: Novel, nonces: &mut u64) -> Result<Contextual, KernelE
     })
 }
 
-/// Step 5's first half: the stream as `D` (`staged`, a chain's
-/// `Stream<D>`, if it has one; else from the snapshot or from 0) and the
-/// command's input, upcast and decoded.
-pub(crate) fn prepare<D: Domain>(
-    command: Contextual,
-    staged: Option<Box<dyn AnyType + Send>>,
-    registry: &Registry,
-) -> Result<Prepared<D>, KernelError> {
-    let cover = command.command.cover().clone();
-    let wrong = || KernelError::WrongDomain {
-        stream: cover.clone(),
-        expected: D::NAME,
-    };
-    if cover.domain != D::NAME {
-        return Err(wrong());
-    }
-    let stream = match (staged, &command.snapshot) {
-        (Some(staged), _) => *staged.downcast::<Stream<D>>().map_err(|_| wrong())?,
-        (None, Some(snapshot)) => {
-            // The stream's last instant is the floor only if no event
-            // follows the snapshot; otherwise the events carry their own.
-            let floor = command
-                .last_recorded_at
-                .filter(|_| command.pages.is_empty());
-            Stream::resume(cover, snapshot, floor, &command.pages, registry)?
-        }
-        (None, None) => Stream::replay(cover, &command.pages, registry)?,
-    };
-    let input = decode_input::<D>(&command.command, registry)?;
-    Ok(Prepared {
-        command: command.command,
-        input,
-        stream,
-        resolution: command.resolution,
-        expected: command.expected,
-        nonce: command.nonce,
-    })
-}
-
-/// The command's payload through `D`'s upcaster, decoded strictly.
-pub(crate) fn decode_input<D: Domain>(
-    command: &Identified,
-    registry: &Registry,
-) -> Result<Input<D>, KernelError> {
-    let stream = || command.cover().clone();
-    let upcaster = registry
-        .upcaster(D::NAME)
-        .ok_or_else(|| unregistered::<D>())?;
-    let payload = upcaster
-        .upcast_command(command.payload())
-        .map_err(|error| KernelError::Upcast {
-            stream: stream(),
-            error,
-        })?;
-    let input = match command.body() {
-        Body::Command { .. } => D::Command::from_any(&payload).map(Input::Command),
-        Body::Fact { source, .. } => {
-            D::Fact::from_any(&payload).map(|fact| Input::Fact(fact, source.clone()))
-        }
-    };
-    input.map_err(|e| match e {
-        PayloadError::UnknownType { type_url } | PayloadError::Decode { type_url, .. } => {
-            KernelError::UnknownType {
-                stream: stream(),
-                type_url,
-            }
-        }
-        PayloadError::Invalid { type_url, reason } => KernelError::InvalidPayload {
-            stream: stream(),
-            type_url,
-            reason,
-        },
-    })
-}
-
-/// Step 5's second half on `stream` (see [`Prepared::decide`]).
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn decide_on<D: Domain>(
-    stream: &Stream<D>,
-    command: &Identified,
-    input: &Input<D>,
-    resolution: ConflictResolution,
-    expected: u64,
-    nonce: Option<Nonce>,
+/// Step 5: `command` through its domain's router, against its stream's
+/// history: the events it answers, stamped at `recorded_at = max(sampled
+/// now, the stream's last)` with the domain's rules version, from the
+/// head on. A panicking fact handler fails the chain
+/// ([`KernelError::IngestPanicked`]) and `dead_letters` gets a line; a
+/// panicking command handler panics on.
+pub(crate) fn dispatch(
+    command: &Contextual,
     sampled: &Sampled,
     registry: &Registry,
     dead_letters: &dyn DeadLetterLog,
-) -> Result<Decision<D>, Failure<D::Rejection>> {
+) -> Result<Vec<EventPage>, Failure<Rejected>> {
+    let identified = &command.command;
+    let domain = identified.domain();
     let kernel = Failure::Kernel;
-    let cover = stream.cover();
-    let head = stream.len();
-    let recorded_at = crate::next::not_before(stream.last_recorded_at().as_ref(), sampled.now);
-    let (rules_version, rules) = registry
-        .rules::<D>()
-        .ok_or_else(|| kernel(unregistered::<D>()))?
-        .current();
-    let events = match input {
-        Input::Fact(fact, source) => {
-            let ctx = IngestCtx {
-                stream: cover,
-                recorded_at,
-                command_id: command.command_id(),
-                correlation_id: command.correlation_id(),
-                source,
-                rules,
-                rules_version,
-                head,
-            };
-            match catch_unwind(AssertUnwindSafe(|| D::ingest(stream.state(), fact, &ctx))) {
-                Ok(events) => events,
-                Err(_) => {
-                    write_dead_letter(dead_letters, command.to_book(), D::NAME, "ingest panicked");
-                    return Err(kernel(KernelError::IngestPanicked {
-                        stream: cover.clone(),
-                        command_id: command.command_id().clone(),
-                    }));
-                }
-            }
+    let handler = registry
+        .handler(domain)
+        .ok_or_else(|| kernel(unknown_domain(domain)))?;
+    let recorded_at = crate::next::not_before(command.last_recorded_at.as_ref(), sampled.now);
+    let upcaster = registry.upcaster(domain);
+    let pages = command
+        .pages
+        .iter()
+        .map(|page| match upcaster {
+            Some(upcaster) => upcaster.upcast_page(page),
+            None => Ok(page.clone()),
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| {
+            kernel(KernelError::Upcast {
+                stream: identified.cover().clone(),
+                error,
+            })
+        })?;
+    // At the head there is no window: nothing for COMMUTATIVE to compare,
+    // so the command is handed over as STRICT, with no nonce.
+    let (resolution, nonce) = match command.resolution {
+        ConflictResolution::Commutative if command.expected == command.head => {
+            (ConflictResolution::Strict, None)
         }
-        Input::Command(cmd) => {
-            let given = nonce.as_ref().map(|n| n.0);
-            let conflicts = match nonce {
-                Some(nonce) if resolution == ConflictResolution::AggregateHandles => {
-                    let start = expected.checked_sub(stream.first()).ok_or_else(|| {
-                        kernel(KernelError::BeforeSnapshot {
-                            stream: cover.clone(),
-                            first: stream.first(),
-                        })
-                    })?;
-                    Some(Conflicts {
-                        window: &stream.events()[start as usize..],
-                        nonce,
-                    })
-                }
-                _ => None,
-            };
-            let mut tx = Tx {
-                committed: stream.state(),
-                staged: None,
-                rules,
-                rules_version,
-                stream: cover,
-                head,
-                recorded_at,
-                command_id: command.command_id(),
-                correlation_id: command.correlation_id(),
-                causation_id: command.causation_id(),
-                conflicts,
-                resolved: None,
-                events: Vec::new(),
-                fault: None,
-            };
-            let decided = D::decide(cmd, &mut tx);
-            if let Some(fault) = tx.fault.take() {
-                return Err(kernel(fault));
-            }
-            decided.map_err(Failure::Rejected)?;
-            let stale = |unresolved: bool| {
-                let (stream, actual) = (cover.clone(), head);
-                kernel(if unresolved {
-                    KernelError::Unresolved {
-                        stream,
-                        expected,
-                        actual,
-                    }
-                } else {
-                    KernelError::Stale {
-                        stream,
-                        expected,
-                        actual,
-                    }
-                })
-            };
-            match resolution {
-                ConflictResolution::AggregateHandles
-                    if tx.resolved.as_ref().map(|n| n.0) != given =>
-                {
-                    write_dead_letter(
-                        dead_letters,
-                        command.to_book(),
-                        D::NAME,
-                        "decide never acknowledged its conflict window",
-                    );
-                    return Err(stale(true));
-                }
-                ConflictResolution::Commutative if expected < head => {
-                    let before = stream.state_at(expected, registry).map_err(kernel)?;
-                    let window = D::State::changed(&before, stream.state());
-                    let mine = D::State::changed(stream.state(), tx.state());
-                    if window.overlaps(&mine) {
-                        return Err(stale(false));
-                    }
-                }
-                _ => {}
-            }
-            tx.events
-        }
+        resolution => (resolution, command.nonce.clone()),
     };
-    let meta = command.meta(recorded_at, rules_version);
-    let events = (head..)
-        .zip(events)
-        .map(|(sequence, event)| Envelope::stamped(sequence, meta.clone(), event))
-        .collect::<Result<_, _>>()
-        .map_err(|e| kernel(KernelError::Replay(e)))?;
-    Ok(Decision {
-        stream: cover.clone(),
-        head,
-        command_id: command.command_id().clone(),
-        events,
-    })
-}
-
-/// A step's stream after it, and the pages it adds.
-pub(crate) type Stepped<D> = (Stream<D>, Vec<EventPage>);
-
-/// Step 5 for a chain: prepare, decide, commit in memory; the stream
-/// after, and the pages to append.
-pub(crate) fn run_step<D: Domain>(
-    command: Contextual,
-    staged: Option<Box<dyn AnyType + Send>>,
-    registry: &Registry,
-    sampled: &Sampled,
-    dead_letters: &dyn DeadLetterLog,
-) -> Result<Stepped<D>, Failure<D::Rejection>> {
-    let mut prepared = prepare::<D>(command, staged, registry).map_err(Failure::Kernel)?;
-    let decision = prepared.decide(sampled, registry, dead_letters)?;
-    let pages = decision.events().iter().map(Envelope::page).collect();
-    let mut stream = prepared.into_stream();
-    stream
-        .commit(decision, registry, &mut [])
-        .map_err(Failure::Kernel)?;
-    Ok((stream, pages))
+    let mut book = identified.to_book();
+    book.handling = Some(Handling {
+        expected_sequence: Some(command.expected),
+        conflict_resolution: resolution as i32,
+    });
+    let contextual = ContextualCommand {
+        events: Some(EventBook {
+            cover: Some(identified.cover().clone()),
+            snapshot: command.snapshot.clone(),
+            pages,
+            next_sequence: command.head,
+        }),
+        command: Some(book),
+        conflict_nonce: nonce.unwrap_or_default().into(),
+    };
+    let answered = catch_unwind(AssertUnwindSafe(|| {
+        let delivery = route::Delivery {
+            recorded_at,
+            stream: identified.cover().clone(),
+            command_id: identified.command_id().clone(),
+            correlation_id: identified.correlation_id().clone(),
+            fact_origin: identified.body().source().cloned(),
+        };
+        route::recording(delivery, || handler.dispatch(&contextual))
+    }));
+    let answered = match answered {
+        Ok(answered) => answered,
+        Err(panic) if matches!(identified.body(), Body::Fact { .. }) => {
+            drop(panic);
+            write_dead_letter(
+                dead_letters,
+                identified.to_book(),
+                domain,
+                "ingest panicked",
+            );
+            return Err(kernel(KernelError::IngestPanicked {
+                stream: identified.cover().clone(),
+                command_id: identified.command_id().clone(),
+            }));
+        }
+        Err(panic) => resume_unwind(panic),
+    };
+    let response = answered.map_err(|error| {
+        if error.code == codes::CONFLICT_UNRESOLVED {
+            write_dead_letter(
+                dead_letters,
+                identified.to_book(),
+                domain,
+                "decide never acknowledged its conflict window",
+            );
+        }
+        let (stream, expected, actual) =
+            (identified.cover().clone(), command.expected, command.head);
+        match error.code.as_str() {
+            codes::CONFLICT_OVERLAP => Failure::Kernel(KernelError::Stale {
+                stream,
+                expected,
+                actual,
+            }),
+            codes::CONFLICT_UNRESOLVED => Failure::Kernel(KernelError::Unresolved {
+                stream,
+                expected,
+                actual,
+            }),
+            _ => refused(identified, error),
+        }
+    })?;
+    let rules_version = registry
+        .rules_version(domain)
+        .map(str::to_string)
+        .unwrap_or(response.rules_version);
+    let meta = identified.meta(recorded_at, &rules_version);
+    Ok((command.head..)
+        .zip(
+            response
+                .events
+                .unwrap_or_default()
+                .pages
+                .into_iter()
+                .filter(|page| !route::is_nothing(page)),
+        )
+        .map(|(sequence, page)| EventPage {
+            sequence,
+            meta: Some(meta.clone()),
+            ..page
+        })
+        .collect())
 }
 
 #[cfg(test)]

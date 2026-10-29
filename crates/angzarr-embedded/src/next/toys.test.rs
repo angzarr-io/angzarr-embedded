@@ -20,14 +20,15 @@ use std::task::{Context, Poll, Waker};
 
 pub use angzarr_ports::memory::MemoryStore;
 
+use crate::next::angzarr_router::domain::{CommandContext, Conflict, DomainDispatch, FactRecord};
 use crate::next::markup::{Commands, PolicyContext};
 use crate::next::v1::{
     command_page, Command, CommandBook, CommandPage, ConflictResolution, Cover, EventPage,
     EventRef, Fact, FactOrigin, Handling, StateDescriptor, StateOptions, Uuid,
 };
 use crate::next::{
-    ids, pack, Any, Decoder, Domain, IngestCtx, Key, Payload, PayloadError, Policy, Registry,
-    Rulebook, Sampled, State, Timestamp, Tx, UnitPath, Units, Upcaster,
+    ids, pack, Any, Decoder, Domain, Key, Misconfigured, Payload, PayloadError, Policy, Registry,
+    Rulebook, Sampled, State, Timestamp, UnitPath, Units, Upcaster,
 };
 use crate::next::{EventStore, ListStreams, PositionKey, PositionStore, Store, StreamRef};
 use angzarr_embedded_diagnostic::{Arg, Diagnostic, Report};
@@ -196,47 +197,169 @@ impl Edit for CommandBook {
     }
 }
 
+// ---------------------------------------------------------------- handlers
+
+/// What a toy's handler reads besides the state and its input: the
+/// router's `CommandContext` (the stream, the input's ids, a fact's origin,
+/// the conflict under AGGREGATE_HANDLES), the instant the kernel records at,
+/// and the current rules. (A fixture standing in for a domain's handlers.)
+pub struct ToyCtx<'a, D: Domain> {
+    pub stream: Cover,
+    pub command_id: Uuid,
+    pub correlation_id: Uuid,
+    pub source: Option<FactOrigin>,
+    pub recorded_at: Timestamp,
+    pub rules: &'a D::Rules,
+    pub rules_version: &'a str,
+    /// The stream's next sequence.
+    pub head: u64,
+    pub conflict: Option<Conflict>,
+}
+
+/// A toy domain's handlers, written against the state: its command
+/// handler, which may refuse, and its fact handler, which may not.
+/// Registered on the router's table by [`register`].
+pub trait Toy: Domain<Rules: Clone> {
+    fn decide(
+        cmd: &Self::Command,
+        state: &Self::State,
+        ctx: &ToyCtx<'_, Self>,
+    ) -> Result<Vec<Self::Event>, Self::Rejection>;
+
+    fn ingest(state: &Self::State, fact: &Self::Fact, ctx: &ToyCtx<'_, Self>) -> Vec<Self::Event> {
+        let _ = (state, fact, ctx);
+        unreachable!("{} takes no facts", Self::NAME)
+    }
+}
+
+/// The router's context, with the kernel's instant and the rules, as a
+/// toy reads it.
+fn toy_ctx<'a, D: Domain>(
+    cctx: CommandContext,
+    rules: &'a D::Rules,
+    version: &'a str,
+) -> ToyCtx<'a, D> {
+    ToyCtx {
+        stream: cctx.cover.unwrap_or_default(),
+        command_id: cctx.command_id.unwrap_or_default(),
+        correlation_id: cctx.correlation_id.unwrap_or_default(),
+        source: cctx.fact_origin,
+        recorded_at: crate::next::recorded_at(),
+        rules,
+        rules_version: version,
+        head: cctx.next_sequence,
+        conflict: cctx.conflict,
+    }
+}
+
+/// `D`'s handlers under `rules` (current `version`), on the router's table.
+pub fn handlers<D: Toy>(
+    rules: D::Rules,
+    version: &str,
+) -> impl FnOnce(DomainDispatch<D::State>) -> DomainDispatch<D::State>
+where
+    D::Rules: Clone,
+{
+    let version = version.to_string();
+    move |mut table| {
+        for url in <D::Command as Payload>::type_urls() {
+            let (rules, version) = (rules.clone(), version.clone());
+            table = table.on_command(crate::next::type_name(&url), move |any, state, cctx| {
+                let cmd = D::Command::from_any(any).expect("the router routed it by type");
+                let ctx = toy_ctx::<D>(cctx, &rules, &version);
+                match D::decide(&cmd, state, &ctx) {
+                    Ok(events) => Ok(Some(crate::next::v1::EventBook {
+                        pages: events
+                            .iter()
+                            .map(|e| EventPage {
+                                payload: Some(e.to_any()),
+                                ..EventPage::default()
+                            })
+                            .collect(),
+                        ..Default::default()
+                    })),
+                    Err(rejection) => Err(crate::next::rejection(&rejection, None)),
+                }
+            });
+        }
+        for url in <D::Fact as Payload>::type_urls() {
+            let (rules, version) = (rules.clone(), version.clone());
+            table = table.on_fact_with_context(
+                crate::next::type_name(&url),
+                move |any, state, cctx| {
+                    let fact = D::Fact::from_any(any).expect("the router routed it by type");
+                    let ctx = toy_ctx::<D>(cctx, &rules, &version);
+                    let mut events = D::ingest(state, &fact, &ctx)
+                        .into_iter()
+                        .map(|e| e.to_any());
+                    let record = events.next().expect("a toy's fact records an event");
+                    Ok(FactRecord {
+                        fact: record,
+                        flags: events.collect(),
+                    })
+                },
+            );
+        }
+        table
+    }
+}
+
+/// Register toy `D` with `rules` and `upcaster`, its handlers [`handlers`].
+pub fn register<D: Toy>(
+    registry: &mut Registry,
+    rules: Rulebook<D::Rules>,
+    upcaster: Upcaster,
+) -> Result<(), Misconfigured>
+where
+    D::Rules: Clone,
+{
+    let (version, current) = rules.current();
+    let handlers = handlers::<D>(current.clone(), version);
+    registry.register::<D>(rules, upcaster, handlers)
+}
+
 /// The registry every test runs: the three toys, each with an upcaster
 /// that has no rules (registering the account's v0 rules is
 /// [`registry_with_upcasters`]'s).
 pub fn registry() -> Registry {
     let mut registry = Registry::new();
-    registry
-        .register::<Account>(fees(), Upcaster::new("account-upcaster", "account"))
-        .unwrap();
-    registry
-        .register::<Shelf>(
-            Rulebook::new("v1", ()),
-            Upcaster::new("shelf-upcaster", "shelf"),
-        )
-        .unwrap();
-    registry
-        .register::<Ledger>(
-            Rulebook::new("v1", ()),
-            Upcaster::new("ledger-upcaster", "ledger"),
-        )
-        .unwrap();
+    register::<Account>(
+        &mut registry,
+        fees(),
+        Upcaster::new("account-upcaster", "account"),
+    )
+    .unwrap();
+    register::<Shelf>(
+        &mut registry,
+        Rulebook::new("v1", ()),
+        Upcaster::new("shelf-upcaster", "shelf"),
+    )
+    .unwrap();
+    register::<Ledger>(
+        &mut registry,
+        Rulebook::new("v1", ()),
+        Upcaster::new("ledger-upcaster", "ledger"),
+    )
+    .unwrap();
     registry
 }
 
 /// [`registry`], the account upcasting its v0 command and event.
 pub fn registry_with_upcasters() -> Registry {
     let mut registry = Registry::new();
-    registry
-        .register::<Account>(fees(), account_upcaster())
-        .unwrap();
-    registry
-        .register::<Shelf>(
-            Rulebook::new("v1", ()),
-            Upcaster::new("shelf-upcaster", "shelf"),
-        )
-        .unwrap();
-    registry
-        .register::<Ledger>(
-            Rulebook::new("v1", ()),
-            Upcaster::new("ledger-upcaster", "ledger"),
-        )
-        .unwrap();
+    register::<Account>(&mut registry, fees(), account_upcaster()).unwrap();
+    register::<Shelf>(
+        &mut registry,
+        Rulebook::new("v1", ()),
+        Upcaster::new("shelf-upcaster", "shelf"),
+    )
+    .unwrap();
+    register::<Ledger>(
+        &mut registry,
+        Rulebook::new("v1", ()),
+        Upcaster::new("ledger-upcaster", "ledger"),
+    )
+    .unwrap();
     registry
 }
 
@@ -553,69 +676,6 @@ impl Domain for Account {
 
     const NAME: &'static str = "account";
 
-    fn decide(cmd: &AccountCmd, tx: &mut Tx<'_, Self>) -> Result<(), Refused> {
-        let s = tx.state();
-        match *cmd {
-            AccountCmd::Open => {
-                if s.open {
-                    return Err(Refused::AlreadyOpen);
-                }
-                tx.emit(AccountEvent::Opened);
-            }
-            AccountCmd::Deposit(cents) => {
-                if !s.open {
-                    return Err(Refused::NotOpen);
-                }
-                tx.emit(AccountEvent::Deposited(cents));
-            }
-            AccountCmd::Withdraw(cents) => {
-                let total = cents + tx.rules().withdrawal;
-                if total > s.cents {
-                    return Err(Refused::Overdrawn {
-                        short: total - s.cents,
-                    });
-                }
-                tx.emit(AccountEvent::Withdrew(cents));
-            }
-            AccountCmd::Sweep => {
-                let all = s.cents - tx.rules().withdrawal;
-                if all > 0 {
-                    tx.emit(AccountEvent::Withdrew(all));
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// A payment is recorded whether or not the account is open (never
-    /// refused), with what the read-only context says about it. A payment
-    /// of a negative amount is a provider bug this toy does not handle:
-    /// it panics, standing in for an ingest bug.
-    fn ingest(
-        s: &AccountState,
-        fact: &AccountFact,
-        ctx: &IngestCtx<'_, Self>,
-    ) -> Vec<AccountEvent> {
-        let AccountFact::PaymentReceived(cents) = *fact;
-        assert!(cents >= 0, "toy ingest bug: a negative payment");
-        // What the rest of the context says, pinned here: a wrong value is a
-        // panic, so the ingest tests fail on it.
-        assert_eq!(ctx.stream().domain, "account");
-        assert_eq!(
-            ctx.command_id(),
-            &ids::fact_command_id(&ctx.source().external_id)
-        );
-        assert!(ctx.correlation_id().is_well_formed());
-        assert_eq!(ctx.rules(), &Fees { withdrawal: 1 }, "the current rules");
-        vec![AccountEvent::Received(account::Received {
-            cents,
-            external_id: ctx.source().external_id.clone(),
-            recorded_seconds: ctx.recorded_at().seconds,
-            rules_version: ctx.rules_version().to_string(),
-            matched: s.open,
-        })]
-    }
-
     /// The fee is the rules': replaying under the wrong rules would give
     /// the wrong balance.
     fn apply(s: &mut AccountState, e: &AccountEvent, rules: &Fees) {
@@ -632,6 +692,68 @@ impl Domain for Account {
                 s.received.insert(r.external_id.clone(), r.clone());
             }
         }
+    }
+}
+
+impl Toy for Account {
+    fn decide(
+        cmd: &AccountCmd,
+        s: &AccountState,
+        ctx: &ToyCtx<'_, Self>,
+    ) -> Result<Vec<AccountEvent>, Refused> {
+        Ok(match *cmd {
+            AccountCmd::Open => {
+                if s.open {
+                    return Err(Refused::AlreadyOpen);
+                }
+                vec![AccountEvent::Opened]
+            }
+            AccountCmd::Deposit(cents) => {
+                if !s.open {
+                    return Err(Refused::NotOpen);
+                }
+                vec![AccountEvent::Deposited(cents)]
+            }
+            AccountCmd::Withdraw(cents) => {
+                let total = cents + ctx.rules.withdrawal;
+                if total > s.cents {
+                    return Err(Refused::Overdrawn {
+                        short: total - s.cents,
+                    });
+                }
+                vec![AccountEvent::Withdrew(cents)]
+            }
+            AccountCmd::Sweep => {
+                let all = s.cents - ctx.rules.withdrawal;
+                match all > 0 {
+                    true => vec![AccountEvent::Withdrew(all)],
+                    false => Vec::new(),
+                }
+            }
+        })
+    }
+
+    /// A payment is recorded whether or not the account is open (never
+    /// refused), with what the context says about it. A payment of a
+    /// negative amount is a provider bug this toy does not handle: it
+    /// panics, standing in for a fact handler's bug.
+    fn ingest(s: &AccountState, fact: &AccountFact, ctx: &ToyCtx<'_, Self>) -> Vec<AccountEvent> {
+        let AccountFact::PaymentReceived(cents) = *fact;
+        assert!(cents >= 0, "toy ingest bug: a negative payment");
+        let source = ctx.source.clone().expect("a fact has its origin");
+        // What the rest of the context says, pinned here: a wrong value is a
+        // panic, so the fact tests fail on it.
+        assert_eq!(ctx.stream.domain, "account");
+        assert_eq!(ctx.command_id, ids::fact_command_id(&source.external_id));
+        assert!(ctx.correlation_id.is_well_formed());
+        assert_eq!(ctx.rules, &Fees { withdrawal: 1 }, "the current rules");
+        vec![AccountEvent::Received(account::Received {
+            cents,
+            external_id: source.external_id.clone(),
+            recorded_seconds: ctx.recorded_at.seconds,
+            rules_version: ctx.rules_version.to_string(),
+            matched: s.open,
+        })]
     }
 }
 
@@ -824,7 +946,12 @@ impl Payload for ShelfCmd {
     }
 
     fn type_urls() -> Vec<String> {
-        Vec::new()
+        Decoder::<ShelfCmd>::new()
+            .on::<shelf::Set>(ShelfCmd::Set)
+            .on::<shelf::Columns>(|c| ShelfCmd::Columns(c.columns))
+            .on::<shelf::Cooldown>(|c| ShelfCmd::Cooldown(c.days))
+            .on::<shelf::Note>(|n| ShelfCmd::Note(n.note))
+            .type_urls()
     }
 }
 
@@ -869,34 +996,6 @@ impl Domain for Shelf {
     const CONFLICT_RESOLUTION_BY_COMMAND: &'static [(&'static str, ConflictResolution)] =
         &[("toy.shelf.cmd.v1.Note", ConflictResolution::Strict)];
 
-    fn decide(cmd: &ShelfCmd, tx: &mut Tx<'_, Self>) -> Result<(), Infallible> {
-        let event = match cmd {
-            ShelfCmd::Set(set) => {
-                let mut window = None;
-                if let Some(conflicts) = tx.conflicts() {
-                    window = Some(conflicts.window.len() as u64);
-                    if set.resolve {
-                        tx.resolve_conflicts(conflicts.window, conflicts.nonce);
-                    }
-                }
-                ShelfEvent::WasSet(shelf::WasSet {
-                    item: set.item.clone(),
-                    count: set.count,
-                    window,
-                })
-            }
-            ShelfCmd::Columns(columns) => ShelfEvent::ColumnsSet(columns.clone()),
-            ShelfCmd::Cooldown(days) => ShelfEvent::CooldownSet(*days),
-            ShelfCmd::Note(note) => ShelfEvent::Noted(note.clone()),
-        };
-        tx.emit(event);
-        Ok(())
-    }
-
-    fn ingest(_: &ShelfState, fact: &Infallible, _: &IngestCtx<'_, Self>) -> Vec<ShelfEvent> {
-        match *fact {}
-    }
-
     fn apply(s: &mut ShelfState, e: &ShelfEvent, (): &()) {
         match e {
             ShelfEvent::WasSet(set) => {
@@ -910,6 +1009,35 @@ impl Domain for Shelf {
             }
             ShelfEvent::Noted(note) => s.notes = note.clone(),
         }
+    }
+}
+
+impl Toy for Shelf {
+    fn decide(
+        cmd: &ShelfCmd,
+        _: &ShelfState,
+        ctx: &ToyCtx<'_, Self>,
+    ) -> Result<Vec<ShelfEvent>, Infallible> {
+        let event = match cmd {
+            ShelfCmd::Set(set) => {
+                let mut window = None;
+                if let Some(conflict) = &ctx.conflict {
+                    window = Some(conflict.window().len() as u64);
+                    if set.resolve {
+                        conflict.resolve_conflicts(conflict.window(), conflict.nonce());
+                    }
+                }
+                ShelfEvent::WasSet(shelf::WasSet {
+                    item: set.item.clone(),
+                    count: set.count,
+                    window,
+                })
+            }
+            ShelfCmd::Columns(columns) => ShelfEvent::ColumnsSet(columns.clone()),
+            ShelfCmd::Cooldown(days) => ShelfEvent::CooldownSet(*days),
+            ShelfCmd::Note(note) => ShelfEvent::Noted(note.clone()),
+        };
+        Ok(vec![event])
     }
 }
 
@@ -1075,28 +1203,25 @@ impl Domain for Ledger {
 
     const NAME: &'static str = "ledger";
 
-    fn decide(cmd: &ledger::Record, tx: &mut Tx<'_, Self>) -> Result<(), TooLarge> {
-        if cmd.cents > LEDGER_LIMIT {
-            return Err(TooLarge);
-        }
-        tx.emit(ledger::Recorded {
-            source_sequence: cmd.source_sequence,
-            cents: cmd.cents,
-        });
-        Ok(())
-    }
-
-    fn ingest(
-        _: &LedgerState,
-        fact: &Infallible,
-        _: &IngestCtx<'_, Self>,
-    ) -> Vec<ledger::Recorded> {
-        match *fact {}
-    }
-
     fn apply(s: &mut LedgerState, e: &ledger::Recorded, (): &()) {
         s.next_source = e.source_sequence + 1;
         s.total += e.cents;
+    }
+}
+
+impl Toy for Ledger {
+    fn decide(
+        cmd: &ledger::Record,
+        _: &LedgerState,
+        _: &ToyCtx<'_, Self>,
+    ) -> Result<Vec<ledger::Recorded>, TooLarge> {
+        if cmd.cents > LEDGER_LIMIT {
+            return Err(TooLarge);
+        }
+        Ok(vec![ledger::Recorded {
+            source_sequence: cmd.source_sequence,
+            cents: cmd.cents,
+        }])
     }
 }
 
@@ -1135,7 +1260,7 @@ pub fn handle<D: Domain>(
     registry: &Registry,
     book: CommandBook,
     sampled: &Sampled,
-) -> Result<crate::next::Handled, crate::next::Failure<D::Rejection>> {
+) -> Result<crate::next::Handled, crate::next::Failure<crate::next::Rejected>> {
     let log = crate::next::MemoryDeadLetters::new();
     let kernel = crate::next::Kernel::new(registry, &log);
     kernel

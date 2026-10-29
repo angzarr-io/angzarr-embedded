@@ -38,7 +38,7 @@ mod empty {
 
     use angzarr_proto::v1::{ConflictResolution, StateDescriptor, StateOptions};
 
-    use crate::next::{Domain, IngestCtx, Registry, Rulebook, State, Tx, Upcaster};
+    use crate::next::{Domain, Registry, Rulebook, State, Upcaster};
 
     #[derive(Clone, PartialEq, prost::Message)]
     pub struct Nothing {}
@@ -84,14 +84,6 @@ mod empty {
 
         const NAME: &'static str = "ledger";
 
-        fn decide(cmd: &Infallible, _: &mut Tx<'_, Self>) -> Result<(), Infallible> {
-            match *cmd {}
-        }
-
-        fn ingest(_: &Nothing, fact: &Infallible, _: &IngestCtx<'_, Self>) -> Vec<Infallible> {
-            match *fact {}
-        }
-
         fn apply(_: &mut Nothing, event: &Infallible, (): &()) {
             match *event {}
         }
@@ -100,7 +92,7 @@ mod empty {
     pub fn registry() -> Registry {
         let mut registry = Registry::new();
         registry
-            .register::<Ledger>(Rulebook::new("v1", ()), Upcaster::new("u", "ledger"))
+            .register::<Ledger>(Rulebook::new("v1", ()), Upcaster::new("u", "ledger"), |t| t)
             .unwrap();
         registry
     }

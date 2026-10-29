@@ -164,8 +164,9 @@
 //! from a policy) already happened and is never refused: its handler
 //! returns no `Result` and always records an outcome, a refusal included,
 //! as an event (`PayoutRefused`). A fact's step cannot fail; only a bug
-//! can. The router hands a fact to
-//! `Domain::ingest`, a command to `Domain::decide`.
+//! can. angzarr-router hands a fact to its fact handler, a command to its
+//! command handler, each registered on the router's table by the
+//! expansion (`markup::Routed`).
 //!
 //! A fact's continuations are infallible too: its handler returns a
 //! `Record<Self>`, `Record::of(e).then(Self::step)`, whose step is
@@ -211,10 +212,14 @@
 //!
 //! What sets it apart, `markup::ProcessManager`:
 //!
-//! - **Its root is the correlation**, unchanged. An input addressed to it
-//!   names the instance in its cover; a correlation left unset is given
-//!   the root, and one set to anything else is malformed.
-//! - **The start rule.** Only an input marked `starts`
+//! - **Its root is the one its input names.** An input addressed to it
+//!   names the instance in its cover, whatever its correlation: one
+//!   instance may take inputs of several correlations, its events carrying
+//!   each input's. A correlation left unset is given the root. A policy
+//!   names the root of every command it sends; "the root is the
+//!   correlation" is a convention it may follow.
+//! - **The start rule**, angzarr-router's, on the router's process-manager
+//!   table. Only an input marked `starts`
 //!   (`#[handles_cmd(StartBuyIn, starts)]`, `#[handles_fact(F, starts)]`)
 //!   may start an instance; `STARTS` lists them. Any other input for a
 //!   correlation with no instance is not delivered: a fact is skipped
@@ -359,31 +364,29 @@
 //!     type Rules = ();
 //!     const NAME: &'static str = "wallet";
 //!
-//!     fn decide(command: &Command, tx: &mut Tx<'_, Self>) -> Result<(), Rejection<Refused>> {
-//!         let ctx = Context::new(tx.recorded_at(), tx.stream().clone(),
-//!                                tx.command_id().clone(), tx.correlation_id().clone());
-//!         let mut emit = match command {
-//!             Command::Deposit(cmd) => Emits::into_emit(tx.state().deposit(cmd.clone(), &ctx)?),
-//!             ..
-//!         };
-//!         // Apply each event to the staged instance (tx.emit records it);
-//!         // while there is a continuation, run it on tx.state() and loop,
-//!         // up to STEP_LIMIT steps.
-//!         ..
-//!     }
-//!
-//!     fn ingest(state: &Self, fact: &Fact, ctx: &IngestCtx<'_, Self>) -> Vec<Event> {
-//!         // As decide, on a working copy of `state`: the fact handler's
-//!         // (or the refusal handler's) events, then its continuations'
-//!         // (which return no Result).
-//!         ..
-//!     }
-//!
 //!     fn apply(state: &mut Self, event: &Event, (): &()) {
 //!         match event {
 //!             Event::Deposited(event) => state.deposited(event.clone()),
 //!             ..
 //!         }
+//!     }
+//! }
+//!
+//! // Every marked handler, registered on angzarr-router's table for the
+//! // domain (`DomainDispatch<Wallet>`, which the registry builds, folding
+//! // with `apply`): each command handler by its command's full name, run by
+//! // `markup::__command` (the handler's events, then each continuation on a
+//! // working copy with them applied, up to STEP_LIMIT steps; a refusal as
+//! // the router's business rejection, its typed object packed); each fact
+//! // handler by `markup::__fact`; each `#[on_refused(C)]` by the router's
+//! // `on_refused`; a process manager's `starts` inputs by `starts`.
+//! impl markup::Routed for Wallet {
+//!     fn route(table: DomainDispatch<Wallet>) -> DomainDispatch<Wallet> {
+//!         table
+//!             .on_command("toy.wallet.cmd.v1.Deposit", |any, state, cctx| {
+//!                 markup::__command::<Wallet, _, Deposit, _, _>(any, &*state, cctx, Wallet::deposit)
+//!             })
+//!             ..
 //!     }
 //! }
 //!
@@ -1959,8 +1962,8 @@
 //! }
 //! ```
 //!
-//! Nor is there a root derived for it: its root is the correlation,
-//! unchanged.
+//! Nor is there a root derived for it: its root is the one its input
+//! names.
 //!
 //! ```compile_fail
 //! # use std::convert::Infallible;
@@ -2679,8 +2682,8 @@ pub fn aggregate(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 /// Marks an inherent impl as a PROCESS MANAGER: a domain, marked up as an
 /// aggregate is (the same arguments, markers and expansion), plus
-/// `markup::ProcessManager`: its root is the correlation, and only an
-/// input marked `starts` may start an instance (see the crate docs).
+/// `markup::ProcessManager`: only an input marked `starts` may start an
+/// instance, by angzarr-router's start rule (see the crate docs).
 #[proc_macro_attribute]
 pub fn process_manager(attr: TokenStream, item: TokenStream) -> TokenStream {
     domain(attr.into(), item.into(), Kind::ProcessManager)
@@ -3414,25 +3417,33 @@ fn domain(attr: Tokens, item: Tokens, kind: Kind) -> syn::Result<Tokens> {
     ];
 
     let call = |x: &Marked<'_>| x.method.sig.ident.clone();
-    let command_arms = of("handles_cmd").map(|x| {
-        let (v, method) = (variant(&x.args.ty, "").expect("checked"), call(x));
+    let full_name =
+        |ty: &Type| quote!(&#m::TypeName::of::<<#ty as #m::DomainMessage>::Wire>().full_name());
+    let command_routes = of("handles_cmd").map(|x| {
+        let (ty, method) = (&x.args.ty, call(x));
+        let name = full_name(ty);
         quote! {
-            #command_set::#v(input) => {
-                let handled = <#self_ty>::#method(tx.state(), ::core::clone::Clone::clone(input), &ctx);
-                #m::__decide(tx, &ctx, handled)
-            }
+            .on_command(#name, |any, state, cctx| {
+                #m::__command::<#self_ty, _, #ty, _, _>(any, &*state, cctx, <#self_ty>::#method)
+            })
         }
     });
-    let fact_arms = of("handles_fact").map(|x| {
-        let (v, method) = (variant(&x.args.ty, "").expect("checked"), call(x));
+    let fact_routes = of("handles_fact").map(|x| {
+        let (ty, method) = (&x.args.ty, call(x));
+        let name = full_name(ty);
         quote! {
-            #fact_set::#v(input) => #m::__ingest(state, &ctx, <#self_ty>::#method(state, ::core::clone::Clone::clone(input), &ctx)),
+            .on_fact_with_context(#name, |any, state, cctx| {
+                #m::__fact::<#self_ty, #ty, _>(any, state, cctx, <#self_ty>::#method)
+            })
         }
     });
-    let refusal_arms = of("on_refused").map(|x| {
-        let (v, method) = (variant(&x.args.ty, "Refused").expect("checked"), call(x));
+    let refusal_routes = of("on_refused").map(|x| {
+        let (ty, method) = (&x.args.ty, call(x));
+        let name = full_name(ty);
         quote! {
-            #fact_set::#v(refused, _) => #m::__ingest(state, &ctx, <#self_ty>::#method(state, ::core::clone::Clone::clone(refused), &ctx)),
+            .on_refused(#name, |refused, state| {
+                #m::__on_refused::<#self_ty, #ty, _>(refused, state, <#self_ty>::#method)
+            })
         }
     });
     let apply_arms = of("applies").map(|x| {
@@ -3441,66 +3452,30 @@ fn domain(attr: Tokens, item: Tokens, kind: Kind) -> syn::Result<Tokens> {
             #event_set::#v(event) => <#self_ty>::#method(state, ::core::clone::Clone::clone(event)),
         }
     });
-    let decide_body = if commands.is_empty() {
-        quote!(match *command {})
-    } else {
-        quote!(match command { #(#command_arms)* })
-    };
-    let ingest_body = if facts.is_empty() && refusals.is_empty() {
-        quote!(match *fact {})
-    } else {
-        quote!(match fact { #(#fact_arms)* #(#refusal_arms)* })
-    };
     let apply_body = if events.is_empty() {
         quote!(match *event {})
     } else {
         quote!(match event { #(#apply_arms)* })
     };
 
-    // A process manager's start rule, before any handler.
-    let (decide_start, ingest_start, process_manager) = match kind {
-        Kind::Aggregate => (quote!(), quote!(), quote!()),
+    // A process manager's starting inputs, which the router's start rule
+    // reads.
+    let (start_routes, process_manager) = match kind {
+        Kind::Aggregate => (Vec::new(), quote!()),
         Kind::ProcessManager => {
-            let starting = |marker: &'static str, set: &Ident, refused: bool| {
-                let arms = of(marker).map(|x| {
-                    let v = variant(&x.args.ty, "").expect("checked");
-                    let starts = x.args.starts.is_some();
-                    quote!(#set::#v(..) => #starts,)
-                });
-                let refused = refused.then(|| {
-                    let arms = of("on_refused").map(|x| {
-                        let v = variant(&x.args.ty, "Refused").expect("checked");
-                        quote!(#set::#v(..) => false,)
-                    });
-                    quote!(#(#arms)*)
-                });
-                quote!(#(#arms)* #refused)
-            };
-            let command_starts = starting("handles_cmd", &command_set, false);
-            let fact_starts = starting("handles_fact", &fact_set, true);
-            let starts = methods
+            let starts: Vec<&Type> = methods
                 .iter()
                 .filter(|x| x.args.starts.is_some())
-                .map(|x| &x.args.ty);
+                .map(|x| &x.args.ty)
+                .collect();
             (
-                if commands.is_empty() {
-                    quote!()
-                } else {
-                    quote! {
-                        if !#m::__decided_instance(tx) && !(match command { #command_starts }) {
-                            return ::core::result::Result::Err(#m::__no_instance(tx));
-                        }
-                    }
-                },
-                if facts.is_empty() && refusals.is_empty() {
-                    quote!()
-                } else {
-                    quote! {
-                        if !#m::__ingested_instance(ctx) && !(match fact { #fact_starts }) {
-                            return ::std::vec::Vec::new();
-                        }
-                    }
-                },
+                starts
+                    .iter()
+                    .map(|ty| {
+                        let name = full_name(ty);
+                        quote!(.starts(#name))
+                    })
+                    .collect(),
                 quote! {
                     impl #m::ProcessManager for #self_ty {
                         const STARTS: &'static [#m::TypeName] = &[
@@ -3682,33 +3657,21 @@ fn domain(attr: Tokens, item: Tokens, kind: Kind) -> syn::Result<Tokens> {
 
             const NAME: &'static str = #domain;
 
-            fn decide(
-                command: &#command_set,
-                tx: &mut ::angzarr_embedded::next::Tx<'_, Self>,
-            ) -> ::core::result::Result<(), #rejection_ty> {
-                #decide_start
-                let ctx = #m::__context(tx);
-                #decide_body
-            }
-
-            fn ingest(
-                state: &Self,
-                fact: &#fact_set,
-                ctx: &::angzarr_embedded::next::IngestCtx<'_, Self>,
-            ) -> ::std::vec::Vec<#event_set> {
-                #ingest_start
-                let ctx = #m::__fact_context(ctx);
-                #ingest_body
-            }
-
             fn apply(state: &mut Self, event: &#event_set, _rules: &()) {
                 #apply_body
             }
+        }
 
-            fn refusal(rejection: &#rejection_ty) -> ::core::option::Option<::angzarr_embedded::next::Any> {
-                rejection.refusal().cloned()
+        impl #m::Routed for #self_ty {
+            fn route(
+                table: ::angzarr_embedded::next::angzarr_router::domain::DomainDispatch<Self>,
+            ) -> ::angzarr_embedded::next::angzarr_router::domain::DomainDispatch<Self> {
+                table
+                    #(#command_routes)*
+                    #(#fact_routes)*
+                    #(#refusal_routes)*
+                    #(#start_routes)*
             }
-
         }
 
         #process_manager

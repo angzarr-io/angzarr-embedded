@@ -32,7 +32,7 @@ fn shelf_events(handled: &Handled) -> Vec<ShelfEvent> {
     payloads(&handled.books())
 }
 
-fn stale(expected: u64, actual: u64) -> Failure<std::convert::Infallible> {
+fn stale(expected: u64, actual: u64) -> Failure<crate::next::Rejected> {
     Failure::Kernel(KernelError::Stale {
         stream: cover("shelf", 3),
         expected,
@@ -218,17 +218,6 @@ fn an_expected_sequence_past_the_head_is_stale() {
     }
 }
 
-/// Units from paths written as text (no bytes keys).
-fn units(paths: &[&str]) -> Units {
-    paths
-        .iter()
-        .map(|p| match p.strip_prefix('*') {
-            Some(rest) => UnitPath::field(rest).wildcard(),
-            None => UnitPath::field(p),
-        })
-        .collect()
-}
-
 #[test]
 fn unit_paths_follow_angzarrs_syntax() {
     let items = UnitPath::field("items");
@@ -253,28 +242,6 @@ fn unit_paths_follow_angzarrs_syntax() {
     );
     assert_eq!(path(&UnitPath::field("notes").wildcard()), "*notes");
     assert!(UnitPath::unknown().is_wildcard());
-}
-
-#[test]
-fn units_overlap_by_angzarrs_rule() {
-    let overlaps = |a: &[&str], b: &[&str]| units(a).overlaps(&units(b));
-    let path = |p: &str| UnitPath::field(p);
-    assert!(path("items[42]").overlaps(&path("items[42].weight")));
-    assert!(path("items[42].weight").overlaps(&path("items[42]")));
-    assert!(!path("items[4]").overlaps(&path("items[42]")));
-    assert!(!path("item").overlaps(&path("items")));
-    assert!(path("settings").overlaps(&path("settings.cooldown_days")));
-
-    assert!(overlaps(&["items[a]"], &["items[a]", "columns"]));
-    assert!(!overlaps(&["items[a]"], &["items[b]", "columns"]));
-    assert!(overlaps(&["*notes"], &["items[b]"]), "unmarked: fail-safe");
-    assert!(overlaps(&["items[b]"], &["*notes"]));
-    assert!(!overlaps(&["*notes"], &[]), "nothing to overlap");
-    assert!(!overlaps(&[], &["items[a]"]), "an empty window commutes");
-    assert!(
-        Units::everything().overlaps(&units(&["columns"])),
-        "a state without units changes everything"
-    );
 }
 
 #[test]
@@ -330,6 +297,7 @@ fn an_old_command_type_has_its_current_types_resolution() {
             Rulebook::new("v1", ()),
             Upcaster::new("shelf-upcaster", "shelf")
                 .rule::<OldNote, shelf::Note>(|old| Ok(shelf::Note { note: old.text })),
+            crate::next::toys::handlers::<crate::next::toys::Shelf>((), "v1"),
         )
         .unwrap();
     let store = MemoryStore::new();
@@ -381,6 +349,7 @@ fn an_old_command_type_has_its_current_types_resolution() {
             Upcaster::new("shelf-upcaster", "shelf").rule::<OldNote, shelf::Note>(|_| {
                 Err(angzarr_embedded_diagnostic::Report::new("toy-no", "no"))
             }),
+            crate::next::toys::handlers::<crate::next::toys::Shelf>((), "v1"),
         )
         .unwrap();
     assert!(matches!(
@@ -400,8 +369,9 @@ fn an_old_command_type_has_its_current_types_resolution() {
 mod tally {
     use std::convert::Infallible;
 
+    use crate::next::angzarr_router::domain::DomainDispatch;
     use crate::next::v1::{ConflictResolution, StateDescriptor, StateOptions};
-    use crate::next::{pack, Decoder, Domain, IngestCtx, Payload, PayloadError, State, Tx};
+    use crate::next::{pack, Decoder, Domain, Payload, PayloadError, State};
 
     #[derive(Clone, PartialEq, prost::Message)]
     pub struct Tally {
@@ -474,18 +444,23 @@ mod tally {
 
         const NAME: &'static str = "tally";
 
-        fn decide(_: &Count, tx: &mut Tx<'_, Self>) -> Result<(), Infallible> {
-            tx.emit(Count {});
-            Ok(())
-        }
-
-        fn ingest(_: &Tally, fact: &Infallible, _: &IngestCtx<'_, Self>) -> Vec<Count> {
-            match *fact {}
-        }
-
         fn apply(state: &mut Tally, _: &Count, (): &()) {
             state.count += 1;
         }
+    }
+
+    /// The counter's one handler, on the router's table: every count
+    /// counts.
+    pub fn handlers(table: DomainDispatch<Tally>) -> DomainDispatch<Tally> {
+        table.on_command("toy.tally.v1.Count", |_, _, _| {
+            Ok(Some(crate::next::v1::EventBook {
+                pages: vec![crate::next::v1::EventPage {
+                    payload: Some(pack(&Count {})),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }))
+        })
     }
 }
 
@@ -497,6 +472,7 @@ fn a_commutative_command_at_the_head_has_no_window_whatever_its_units() {
         .register::<tally::Counter>(
             Rulebook::new("v1", ()),
             Upcaster::new("tally-upcaster", "tally"),
+            tally::handlers,
         )
         .unwrap();
     let store = MemoryStore::new();

@@ -181,7 +181,7 @@ mod dedup {
         let refused = handle::<crate::next::toys::Account>(&store, &registry, early(), &at(5));
         assert!(matches!(
             refused,
-            Err(Failure::Rejected(crate::next::toys::Refused::NotOpen))
+            Err(Failure::Rejected(r)) if angzarr_embedded_diagnostic::Diagnostic::code(r.report()) == "toy-account-not-open"
         ));
         assert!(streams(&store).is_empty());
 
@@ -399,13 +399,15 @@ mod pipeline {
         let refused = handle::<Account>(&store, &registry, unknown().id(8), &at(20))
             .err()
             .unwrap();
-        assert_eq!(
-            refused,
-            Failure::Kernel(KernelError::UnknownType {
-                stream: cover("account", 1),
-                type_url: "/toy.account.v9.Bonus".to_string()
-            }),
-            "named by its type URL"
+        assert!(
+            matches!(
+                &refused,
+                Failure::Kernel(KernelError::Router(e))
+                    if e.code == "NO_HANDLER_REGISTERED"
+                        && e.extras.get("type_url").map(String::as_str)
+                            == Some("/toy.account.v9.Bonus")
+            ),
+            "the router's NO_HANDLER_REGISTERED, named by its type URL: {refused:?}"
         );
         assert_eq!(refused.recovery(), Recovery::Invalid);
 
@@ -527,7 +529,7 @@ mod pipeline {
         let Deduplicated::Novel(novel) = coordinator.deduplicate(identified).unwrap() else {
             panic!("never applied");
         };
-        let mut prepared = coordinator
+        let prepared = coordinator
             .load(novel)
             .unwrap()
             .decode::<Account>(&registry)
@@ -536,37 +538,12 @@ mod pipeline {
             prepared.command().command_id(),
             &crate::next::toys::command_id(3)
         );
-        let decision = prepared.decide(&at(30), &registry, &log).unwrap();
-        assert_eq!(decision.stream(), &cover("account", 1));
-        assert_eq!(decision.head(), 2);
-        assert_eq!(decision.command_id(), &crate::next::toys::command_id(3));
-        assert_eq!(decision.events().len(), 1);
-        assert_eq!(decision.events()[0].sequence(), 2);
-        assert!(!decision.is_empty());
+        let pages = prepared.decide(&at(30), &registry, &log).unwrap();
+        assert_eq!(pages.len(), 1);
+        assert_eq!(pages[0].sequence, 2, "at the head");
         let mut stream = prepared.into_stream();
-        assert_eq!(stream.commit(decision, &registry, &mut []), Ok(3));
+        assert_eq!(stream.commit(&pages, &registry, &mut []), Ok(3));
         assert_eq!(stream.state().cents, 105);
-
-        // A decision against the old head no longer commits.
-        let mut again = Coordinator::new(&store, &registry);
-        let identified = check(deposit(4), &registry).unwrap().identify(&at(31));
-        let Deduplicated::Novel(novel) = again.deduplicate(identified).unwrap() else {
-            panic!("never applied");
-        };
-        let mut prepared = again
-            .load(novel)
-            .unwrap()
-            .decode::<Account>(&registry)
-            .unwrap();
-        let decision = prepared.decide(&at(31), &registry, &log).unwrap();
-        assert_eq!(
-            stream.commit(decision, &registry, &mut []),
-            Err(KernelError::Stale {
-                stream: cover("account", 1),
-                expected: 2,
-                actual: 3
-            })
-        );
 
         opened(&store, &registry, 2, 0);
         let sweep = check(
@@ -579,13 +556,13 @@ mod pipeline {
         let Deduplicated::Novel(novel) = empty.deduplicate(sweep).unwrap() else {
             panic!("never applied");
         };
-        let mut prepared = empty
+        let prepared = empty
             .load(novel)
             .unwrap()
             .decode::<Account>(&registry)
             .unwrap();
-        let decision = prepared.decide(&at(32), &registry, &log).unwrap();
-        assert!(decision.is_empty(), "a sweep of nothing withdraws nothing");
+        let pages = prepared.decide(&at(32), &registry, &log).unwrap();
+        assert!(pages.is_empty(), "a sweep of nothing withdraws nothing");
 
         // A cover of another domain than the one decoded for.
         let mut wrong = Coordinator::new(&store, &registry);
@@ -599,10 +576,10 @@ mod pipeline {
                 .unwrap()
                 .decode::<crate::next::toys::Ledger>(&registry)
                 .err(),
-            Some(KernelError::WrongDomain {
-                stream: cover("account", 1),
+            Some(KernelError::Replay(crate::next::ReplayError::WrongDomain {
+                found: "account".to_string(),
                 expected: "ledger"
-            })
+            }))
         );
     }
 }

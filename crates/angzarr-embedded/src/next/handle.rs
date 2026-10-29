@@ -43,20 +43,24 @@ use std::collections::VecDeque;
 use std::convert::Infallible;
 
 use angzarr_proto::v1::{
-    self as v1, command_page, CommandBook, CommandPage, Cover, DeliveryOutcome, EventBook,
-    EventPage, EventRef, Fact, FactOrigin, Outcome,
+    self as v1, CommandBook, CommandPage, Cover, DeliveryOutcome, EventBook, EventPage, EventRef,
+    FactOrigin, Outcome,
 };
 
+use angzarr_router::error::codes;
+use angzarr_router::policy::address_refusal_fact;
+
 use super::check::{check, check_refusal, Checked, Identified, Sampled};
-use super::coordinator::{deduplicate, load, run_step, unknown_domain, Deduplicated};
+use super::coordinator::{deduplicate, dispatch, load, Deduplicated};
 use super::dead_letter::{write_dead_letter, DeadLetterLog};
 use super::domain::Domain;
 use super::error::{Failure, KernelError, Step, StepError};
 use super::handler::Handler;
-use super::markup::{self, PolicyContext, ProjectionContext};
+use super::markup::{self, ProjectionContext};
 use super::payload::type_name;
-use super::policy::{orders, projection, Projection};
-use super::registry::{Registry, StepFailure};
+use super::policy::{answered, projection, Projection};
+use super::registry::{PolicyEntry, Registry};
+use super::route::Rejected;
 use super::store::{Port, Store, StorePort};
 use super::stream::{Envelope, Stream};
 use angzarr_embedded_diagnostic::Report;
@@ -157,21 +161,55 @@ impl<'k> Kernel<'k> {
         book: CommandBook,
         sampled: &Sampled,
         projections: &mut Ps,
-    ) -> Result<Handled, Failure<D::Rejection>>
+    ) -> Result<Handled, Failure<Rejected>>
     where
         D: Domain,
         S: Store,
         Ps: Project,
     {
         let checked = self.check::<D>(book)?;
+        self.handle_checked(store, checked, sampled, projections)
+            .await
+    }
+
+    /// Handle one book for whatever registered domain's stream it names, as
+    /// [`Kernel::handle`] does: for a domain registered as a bare
+    /// `CommandHandler` ([`Registry::command_handler`]), which has no
+    /// typed [`Domain`].
+    pub async fn handle_any<S, Ps>(
+        &self,
+        store: &S,
+        book: CommandBook,
+        sampled: &Sampled,
+        projections: &mut Ps,
+    ) -> Result<Handled, Failure<Rejected>>
+    where
+        S: Store,
+        Ps: Project,
+    {
+        let checked =
+            check(book, self.registry).map_err(|m| Failure::Kernel(KernelError::Malformed(m)))?;
+        self.handle_checked(store, checked, sampled, projections)
+            .await
+    }
+
+    /// [`Kernel::handle`] from step 2 on.
+    async fn handle_checked<S, Ps>(
+        &self,
+        store: &S,
+        checked: Checked,
+        sampled: &Sampled,
+        projections: &mut Ps,
+    ) -> Result<Handled, Failure<Rejected>>
+    where
+        S: Store,
+        Ps: Project,
+    {
         let mut port = StorePort(store);
         let mut run = Run::new(self, sampled);
         let identified = checked.identify(sampled);
         let cover = identified.cover().clone();
-        let novel = match deduplicate(&mut port, self.registry, identified)
-            .await
-            .map_err(Failure::Kernel)?
-        {
+        let novel = match deduplicate(&mut port, self.registry, identified).await? {
             Deduplicated::Duplicate { events } => {
                 // A retry settles what its own events still owe, as the
                 // original would have: never the stream's older history.
@@ -189,18 +227,23 @@ impl<'k> Kernel<'k> {
                 }
                 return Ok(Handled::Duplicate(events));
             }
+            Deduplicated::Skipped => {
+                return self
+                    .finish(Handled::Applied(Recorded::default()), projections)
+                    .await
+            }
             Deduplicated::Novel(novel) => novel,
         };
         let contextual = load(*novel, &mut run.nonces).map_err(Failure::Kernel)?;
         let head = contextual.head();
-        let (stream, pages) =
-            run_step::<D>(contextual, None, self.registry, sampled, self.dead_letters)?;
+        let pages = dispatch(&contextual, sampled, self.registry, self.dead_letters)?;
+        let stream = typed(&contextual, &pages, self.registry).map_err(Failure::Kernel)?;
         if !pages.is_empty() {
             port.write(&cover, head, &pages, &[])
                 .await
                 .map_err(|e| Failure::Kernel(KernelError::Store(e)))?;
         }
-        run.record(cover.clone(), head, Box::new(stream), pages);
+        run.record(cover.clone(), head, stream, pages);
         run.queue.push_back((cover, Vec::new(), Some(head)));
         let settled = run.settle(&mut port).await.map_err(downstream);
         let recorded = run.recorded;
@@ -228,7 +271,7 @@ impl<'k> Kernel<'k> {
     {
         let mut port = StorePort(store);
         let mut run = Run::new(self, sampled);
-        let mut sources: Vec<&'static str> = Vec::new();
+        let mut sources: Vec<&str> = Vec::new();
         for policy in self.registry.all_policies() {
             if !sources.contains(&policy.source()) {
                 sources.push(policy.source());
@@ -334,7 +377,7 @@ impl<'k> Kernel<'k> {
     }
 
     /// Step 1 for a `D` stream: the book checked, and naming a `D` stream.
-    fn check<D: Domain>(&self, book: CommandBook) -> Result<Checked, Failure<D::Rejection>> {
+    fn check<D: Domain>(&self, book: CommandBook) -> Result<Checked, Failure<Rejected>> {
         let checked =
             check(book, self.registry).map_err(|m| Failure::Kernel(KernelError::Malformed(m)))?;
         if checked.domain() != D::NAME {
@@ -358,6 +401,29 @@ impl<'k> Kernel<'k> {
     }
 }
 
+/// A step's failure, as the chain carries it: a rejection as its report.
+fn step_error(failure: Failure<Rejected>) -> StepError {
+    match failure {
+        Failure::Rejected(rejected) => StepError::Rejected(rejected.report().clone()),
+        Failure::Kernel(error) => StepError::Kernel(error),
+        Failure::Downstream { error, .. } => error,
+        Failure::Projection { .. } => unreachable!("a chain step runs no projector"),
+    }
+}
+
+/// The typed stream a step leaves, for a typed domain: the stream as
+/// loaded with `pages` folded on.
+fn typed(
+    loaded: &super::coordinator::Contextual,
+    pages: &[EventPage],
+    registry: &Registry,
+) -> Result<Option<Box<dyn AnyType + Send>>, KernelError> {
+    registry
+        .typed_replay(loaded.command.domain())
+        .map(|replay| replay(loaded, pages, registry))
+        .transpose()
+}
+
 /// A chain's failure, as the caller's: the path to the failing step, and
 /// why.
 fn downstream<R>((path, error): (Vec<Step>, StepError)) -> Failure<R> {
@@ -376,7 +442,7 @@ struct Run<'k> {
     sampled: &'k Sampled,
     dead_letters: &'k dyn DeadLetterLog,
     limit: usize,
-    /// Mints each delivery's [`Nonce`](super::Nonce).
+    /// Mints each delivery's conflict nonce.
     nonces: u64,
     /// The streams to settle, the path to each, and which of its events:
     /// those a step just wrote (`Some(from)`, from that sequence on), or
@@ -443,58 +509,70 @@ impl<'k> Run<'k> {
         let slice = port.read_from(source, from).await.map_err(store)?;
         let upcaster = registry.upcaster(&source.domain);
         for page in &slice.pages {
-            let trigger = EventRef {
-                stream: Some(source.clone()),
-                sequence: page.sequence,
-            };
-            let meta = page.meta.clone().unwrap_or_default();
-            let ctx = PolicyContext::new(
-                trigger,
-                meta.correlation_id.clone().unwrap_or_default(),
-                meta.recorded_at.unwrap_or_default(),
-            );
-            let sent = page.payload.clone().unwrap_or_default();
             let event = match upcaster {
-                Some(upcaster) => upcaster.upcast_event(&sent).map_err(|error| {
+                Some(upcaster) => upcaster.upcast_page(page).map_err(|error| {
                     let error = KernelError::Upcast {
                         stream: source.clone(),
                         error,
                     };
                     (path.to_vec(), StepError::Kernel(error))
                 })?,
-                None => sent,
+                None => page.clone(),
             };
             for (k, policy) in policies.iter().enumerate() {
                 if page.sequence < positions[k] {
                     continue;
                 }
-                let ran = self
-                    .run_policy(port, *policy, source, page, &event, &ctx, path)
-                    .await;
-                ran?;
+                self.run_policy(port, policy, source, &event, path).await?;
             }
         }
         Ok(())
     }
 
-    /// One policy on one event of `source`: each command it sends a step
-    /// of its own, its position written with the last (or alone, when no
-    /// step writes it).
-    #[allow(clippy::too_many_arguments)]
+    /// One policy on one event of `source` (`page`, upcast), through the
+    /// router: each command it answers a step of its own, its position
+    /// written with the last (or alone, when no step writes it). The
+    /// router's refusal of the answer (a command outside the policy's
+    /// destination or its trigger's edition, with no root or another
+    /// correlation) is the policy's bug: dead-lettered, and the position
+    /// stays.
     async fn run_policy<P: Port>(
         &mut self,
         port: &mut P,
-        policy: &dyn super::registry::ErasedPolicy,
+        policy: &PolicyEntry,
         source: &Cover,
         page: &EventPage,
-        event: &prost_types::Any,
-        ctx: &PolicyContext,
         path: &[Step],
     ) -> Result<(), Failed> {
         let next = page.sequence + 1;
         let position = [(policy.name(), source, next)];
-        let commands = policy.on_event(event, ctx);
-        let orders = orders(policy.name(), policy.target(), source, ctx, commands);
+        let trigger = EventRef {
+            stream: Some(source.clone()),
+            sequence: page.sequence,
+        };
+        let event = EventBook {
+            cover: Some(source.clone()),
+            pages: vec![page.clone()],
+            ..EventBook::default()
+        };
+        let commands = match policy.dispatch.dispatch(&event) {
+            Ok(response) => response.commands,
+            Err(error) => {
+                write_dead_letter(
+                    self.dead_letters,
+                    CommandBook::default(),
+                    policy.name(),
+                    &error.message,
+                );
+                return Err((path.to_vec(), StepError::Kernel(KernelError::Router(error))));
+            }
+        };
+        let correlation = page
+            .meta
+            .as_ref()
+            .and_then(|m| m.correlation_id.clone())
+            .unwrap_or_default();
+        let orders = answered(policy.name(), &trigger, &correlation, commands);
         let store = |path: Vec<Step>, e| (path, StepError::Kernel(KernelError::Store(e)));
         if orders.is_empty() {
             return port
@@ -525,38 +603,29 @@ impl<'k> Run<'k> {
             match self.step(port, delivered.clone(), positions).await {
                 Ok(Stepped::Wrote(cover, head)) => self.queue.push_back((cover, path, Some(head))),
                 Ok(Stepped::Nothing) => {}
-                Err(StepFailure {
-                    error: StepError::Rejected(report),
-                    refusal,
-                }) => {
-                    if !policy.answers_refusals() {
+                Err(Failure::Rejected(rejected)) => {
+                    if !policy.answers_refusals {
                         write_dead_letter(
                             self.dead_letters,
                             order.book(),
                             policy.name(),
-                            &report.to_string(),
+                            &rejected.to_string(),
                         );
                         port.write_positions(&position)
                             .await
                             .map_err(|e| store(path.clone(), e))?;
-                        return Err((path, StepError::Rejected(report)));
+                        return Err((path, StepError::Rejected(rejected.report().clone())));
                     }
-                    let event = EventBook {
-                        cover: Some(source.clone()),
-                        pages: vec![page.clone()],
-                        ..EventBook::default()
-                    };
                     let refusal = markup::v1::Refusal {
-                        event: Some(event),
+                        event: Some(event.clone()),
                         command: Some(delivered.to_book()),
                         response: Some(markup::v1::RefusalResponse {
-                            refusal,
-                            message: report.to_string(),
+                            refusal: rejected.refusal_object().cloned(),
+                            message: rejected.to_string(),
                         }),
                     };
-                    let answer = policy.on_refused(&refusal);
                     match self
-                        .refusal_step(port, policy.name(), &delivered, answer, positions)
+                        .refusal_step(port, policy, &refusal, &delivered, positions)
                         .await
                     {
                         Ok(Stepped::Wrote(cover, head)) => {
@@ -566,31 +635,34 @@ impl<'k> Run<'k> {
                         Err(error) => return Err((path, error)),
                     }
                 }
-                Err(failure) => return Err((path, failure.error)),
+                Err(failure) => return Err((path, step_error(failure))),
             }
         }
         Ok(())
     }
 
-    /// `delivered`'s refusal fact, `answer` the policy's payload for it, as
-    /// a step of its own in the stream of the triggering event, with the
-    /// refused command's id and correlation. A refusal its source has no
-    /// handler for is dead-lettered, and writes only `positions`.
+    /// `delivered`'s refusal fact, the policy's OnRefused answer to
+    /// `refusal` addressed by the router, as a step of its own in the
+    /// stream of the triggering event, with the refused command's id and
+    /// correlation. A refusal its source has no handler for is
+    /// dead-lettered, and writes only `positions`.
     async fn refusal_step<P: Port>(
         &mut self,
         port: &mut P,
-        policy: &'static str,
+        policy: &PolicyEntry,
+        refusal: &markup::v1::Refusal,
         delivered: &Identified,
-        answer: prost_types::Any,
         positions: &[(&str, &Cover, u64)],
     ) -> Result<Stepped, StepError> {
+        let kernel = |error| StepError::Kernel(KernelError::Router(error));
+        let answer = policy.dispatch.dispatch_refusal(refusal).map_err(kernel)?;
+        let addressed = address_refusal_fact(refusal, &answer).map_err(kernel)?;
         let trigger = delivered.causation_id().cloned().unwrap_or_default();
+        let page = addressed.page.unwrap_or_default();
         let book = CommandBook {
-            cover: trigger.stream.clone(),
+            cover: addressed.cover,
             page: Some(CommandPage {
-                body: Some(command_page::Body::Fact(Fact {
-                    payload: Some(answer),
-                })),
+                body: page.body,
                 fact_origin: Some(FactOrigin {
                     external_id: delivered.command_id().to_string(),
                     description: format!(
@@ -611,51 +683,44 @@ impl<'k> Run<'k> {
             delivered.command_id().clone(),
         )
         .map_err(|m| {
-            write_dead_letter(self.dead_letters, book, policy, &m.to_string());
+            write_dead_letter(self.dead_letters, book, policy.name(), &m.to_string());
             StepError::Kernel(KernelError::Malformed(m))
         })?;
         let fact = checked.identify(self.sampled);
         match self.step(port, fact.clone(), positions).await {
             Ok(stepped) => Ok(stepped),
-            Err(StepFailure {
-                error: StepError::Kernel(KernelError::UnknownType { type_url, .. }),
-                ..
-            }) => {
+            Err(Failure::Kernel(KernelError::Router(error)))
+                if error.code == codes::NO_FACT_HANDLER =>
+            {
                 write_dead_letter(
                     self.dead_letters,
                     fact.to_book(),
                     fact.domain(),
-                    &format!("nothing handles the refusal of {type_url}"),
+                    &error.message,
                 );
                 port.write_positions(positions)
                     .await
                     .map_err(|e| StepError::Kernel(KernelError::Store(e)))?;
                 Ok(Stepped::Nothing)
             }
-            Err(failure) => Err(failure.error),
+            Err(failure) => Err(step_error(failure)),
         }
     }
 
     /// `command` as a step of its own in the stream it names: load,
-    /// deduplicate, decide or ingest, and write its events with
+    /// deduplicate, dispatch through the router, and write its events with
     /// `positions` (or `positions` alone, when it writes no event).
     async fn step<P: Port>(
         &mut self,
         port: &mut P,
         command: Identified,
         positions: &[(&str, &Cover, u64)],
-    ) -> Result<Stepped, StepFailure> {
-        let kernel = |error| StepFailure {
-            error: StepError::Kernel(error),
-            refusal: None,
-        };
+    ) -> Result<Stepped, Failure<Rejected>> {
+        let kernel = Failure::Kernel;
         let store = |e| kernel(KernelError::Store(e));
         let cover = command.cover().clone();
-        let novel = match deduplicate(port, self.registry, command)
-            .await
-            .map_err(kernel)?
-        {
-            Deduplicated::Duplicate { .. } => {
+        let novel = match deduplicate(port, self.registry, command).await? {
+            Deduplicated::Duplicate { .. } | Deduplicated::Skipped => {
                 if !positions.is_empty() {
                     port.write_positions(positions).await.map_err(store)?;
                 }
@@ -665,23 +730,14 @@ impl<'k> Run<'k> {
         };
         let contextual = load(*novel, &mut self.nonces).map_err(kernel)?;
         let head = contextual.head();
-        let typed = self
-            .registry
-            .step(&cover.domain)
-            .ok_or_else(|| kernel(unknown_domain(&cover.domain)))?;
-        let (stream, pages) = typed(
-            contextual,
-            None,
-            self.registry,
-            self.sampled,
-            self.dead_letters,
-        )?;
+        let pages = dispatch(&contextual, self.sampled, self.registry, self.dead_letters)?;
         if pages.is_empty() {
             if !positions.is_empty() {
                 port.write_positions(positions).await.map_err(store)?;
             }
             return Ok(Stepped::Nothing);
         }
+        let stream = typed(&contextual, &pages, self.registry).map_err(kernel)?;
         port.write(&cover, head, &pages, positions)
             .await
             .map_err(store)?;
@@ -694,7 +750,7 @@ impl<'k> Run<'k> {
         &mut self,
         cover: Cover,
         head: u64,
-        stream: Box<dyn AnyType + Send>,
+        stream: Option<Box<dyn AnyType + Send>>,
         pages: Vec<EventPage>,
     ) {
         if pages.is_empty() {
@@ -724,6 +780,9 @@ impl<'k> Run<'k> {
                 pages,
             }),
         }
+        let Some(stream) = stream else {
+            return;
+        };
         match self.recorded.streams.iter_mut().find(|(c, ..)| *c == cover) {
             Some((_, _, held)) => *held = stream,
             None => self.recorded.streams.push((cover, head, stream)),

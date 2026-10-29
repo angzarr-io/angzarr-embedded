@@ -204,7 +204,11 @@ fn a_process_manager_with_only_refusal_handlers_still_skips_for_no_instance() {
     )
     .expect("expands")
     .to_string();
-    assert!(expanded.contains("__ingested_instance"), "{expanded}");
+    // The router's process-manager table skips a fact for a stream with no
+    // instance, of a type that starts none: the expansion routes the refusal
+    // and declares no starting input.
+    assert!(expanded.contains(". on_refused ("), "{expanded}");
+    assert!(!expanded.contains(". starts ("), "{expanded}");
 }
 
 #[test]

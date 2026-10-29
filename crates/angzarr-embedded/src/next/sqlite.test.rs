@@ -20,10 +20,9 @@ use crate::next::v1::{
     StateDescriptor, StateOptions, Uuid,
 };
 use crate::next::{
-    pack, Any, Domain, EventStore, Failure, Handled, IngestCtx, Kernel, KernelError,
-    MemoryDeadLetters, Payload, PayloadError, PositionKey, PositionStore, Recovery, Registry,
-    Rulebook, Sampled, SnapshotStore, State, StoreError, Stream, StreamRef, Timestamp, Tx,
-    Upcaster,
+    pack, Any, Domain, EventStore, Failure, Handled, Kernel, KernelError, MemoryDeadLetters,
+    Payload, PayloadError, PositionKey, PositionStore, Recovery, Registry, Rejected, Rulebook,
+    Sampled, SnapshotStore, State, StoreError, Stream, StreamRef, Timestamp, Upcaster,
 };
 
 /// A message in `tally.v1`.
@@ -135,27 +134,37 @@ impl Domain for Tally {
     type Rules = ();
     const NAME: &'static str = "tally";
 
-    /// A negative `n` is a bug in this toy: decide panics, as a domain's
-    /// bug would.
-    fn decide(cmd: &Add, tx: &mut Tx<'_, Self>) -> Result<(), Never> {
-        assert!(cmd.n >= 0, "a tally never adds a negative");
-        tx.emit(Added { n: cmd.n });
-        Ok(())
-    }
-
-    fn ingest(_: &Count, fact: &std::convert::Infallible, _: &IngestCtx<'_, Self>) -> Vec<Added> {
-        match *fact {}
-    }
-
     fn apply(state: &mut Count, event: &Added, _: &()) {
         state.n += event.n;
     }
 }
 
+/// The tally's handler, on the router's table. A negative `n` is a bug
+/// in this toy: the handler panics, as a domain's bug would.
+fn tally_handlers(
+    table: crate::next::angzarr_router::domain::DomainDispatch<Count>,
+) -> crate::next::angzarr_router::domain::DomainDispatch<Count> {
+    table.on_command("tally.v1.Add", |any, _, _| {
+        let cmd = Add::from_any(any).expect("routed by type");
+        assert!(cmd.n >= 0, "a tally never adds a negative");
+        Ok(Some(crate::next::v1::EventBook {
+            pages: vec![crate::next::v1::EventPage {
+                payload: Some(Added { n: cmd.n }.to_any()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }))
+    })
+}
+
 fn registry() -> Registry {
     let mut registry = Registry::new();
     registry
-        .register::<Tally>(Rulebook::new("v1", ()), Upcaster::new("tally-up", "tally"))
+        .register::<Tally>(
+            Rulebook::new("v1", ()),
+            Upcaster::new("tally-up", "tally"),
+            tally_handlers,
+        )
         .unwrap();
     registry
 }
@@ -188,7 +197,7 @@ async fn handle<D: Domain>(
     store: &SqliteStore,
     registry: &Registry,
     book: CommandBook,
-) -> Result<Handled, Failure<D::Rejection>> {
+) -> Result<Handled, Failure<Rejected>> {
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(registry, &log);
     kernel

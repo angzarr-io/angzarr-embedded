@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
+use angzarr_ports::angzarr_proto::v1::meta::EditionCreated;
 use angzarr_ports::angzarr_proto::v1::{Cover, EventBook, EventPage, Snapshot};
 use angzarr_ports::{
     Append, ChangeToken, EventStore, Head, ListStreams, Outbox, OutboxEntry, PositionKey,
@@ -757,9 +758,21 @@ impl<C: DerefMut<Target = SqliteConnection>> Exec<'_, C> {
                     }
                     // A fork lands at its fork sequence, as stated
                     // (`EditionCreated.parent_sequence`): main's head or
-                    // any sequence below it.
-                    (false, true) if expected <= actual => {
-                        return self.insert(stream, expected, pages).await;
+                    // any sequence below it. A creation stating another
+                    // sequence than its own is malformed (14.36).
+                    (false, true) => {
+                        let page = &pages[0];
+                        let stated = parent_sequence(page);
+                        if stated != page.sequence {
+                            return Err(StoreError::malformed_creation(
+                                stream,
+                                page.sequence,
+                                stated,
+                            ));
+                        }
+                        if expected <= actual {
+                            return self.insert(stream, expected, pages).await;
+                        }
                     }
                     _ => {}
                 }
@@ -837,6 +850,15 @@ fn head_after(last: Option<&EventPage>) -> Head {
             .and_then(|page| page.meta.as_ref())
             .and_then(|meta| meta.recorded_at),
     }
+}
+
+/// The sequence a creation page's `EditionCreated` states as its fork
+/// point (0 for one that does not decode, which no fork states).
+fn parent_sequence(page: &EventPage) -> u64 {
+    page.payload
+        .as_ref()
+        .and_then(|p| EditionCreated::decode(p.value.as_slice()).ok())
+        .map_or(0, |created| created.parent_sequence)
 }
 
 /// Whether `page` is a stream's creation in its edition.

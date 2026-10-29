@@ -32,7 +32,6 @@
 
 use std::future::Future;
 
-use angzarr_proto::v1::event_meta::Causation;
 use angzarr_proto::v1::{Cover, EventPage, Snapshot, Uuid};
 
 pub use angzarr_ports::{
@@ -40,15 +39,6 @@ pub use angzarr_ports::{
     PositionStore, Purge, ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, Slice,
     SnapshotStore, Store, StoreError, StreamRef, Watch, Write, Written,
 };
-
-/// Whether `page` was produced by the command `command_id`: what
-/// deduplication looks for among a step's pages.
-pub(crate) fn produced_by(page: &EventPage, command_id: &Uuid) -> bool {
-    matches!(
-        page.meta.as_ref().and_then(|m| m.causation.as_ref()),
-        Some(Causation::CommandId(id)) if id == command_id
-    )
-}
 
 /// The store operations a step makes, keyed by the wire `Cover` the kernel
 /// carries. A stream with no events reads as an empty slice at 0.

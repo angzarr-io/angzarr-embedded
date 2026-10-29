@@ -33,7 +33,11 @@
 //! and keeps its invites to itself. A target is sent commands for the
 //! source events it was targeted for, in source order.
 
+use std::sync::Arc;
+
 use angzarr_proto::v1::{command_page, Command, CommandBook, CommandPage, Cover, EventRef, Uuid};
+use angzarr_router::error::HandlerError;
+use angzarr_router::policy::PolicyDispatch;
 use prost_types::Any;
 
 use super::check::{check_policy_command, Checked, Malformed};
@@ -41,7 +45,7 @@ use super::dead_letter::{write_dead_letter, DeadLetterLog};
 use super::domain::Domain;
 use super::handler::{Committed, Handler};
 use super::markup::{self, Commands, PolicyContext, TypeName};
-use super::payload::Payload;
+use super::payload::{type_name, Payload};
 use super::registry::Registry;
 
 // ---------------------------------------------------------------- policies
@@ -113,7 +117,7 @@ pub trait Projection<D: Domain> {
 /// One command a policy owes one target, before the kernel books it.
 /// Built only by the kernel, from a committed event.
 pub struct Order {
-    pub(crate) policy: &'static str,
+    pub(crate) policy: String,
     pub(crate) cover: Cover,
     pub(crate) command: Any,
     pub(crate) trigger: EventRef,
@@ -156,7 +160,7 @@ impl Order {
             self.book(),
             registry,
             self.trigger.clone(),
-            self.policy,
+            &self.policy,
             self.index,
             self.correlation_id.clone(),
         )
@@ -173,7 +177,7 @@ impl Order {
             write_dead_letter(
                 dead_letters,
                 self.book(),
-                self.policy,
+                &self.policy,
                 &malformed.to_string(),
             )
         })
@@ -264,7 +268,7 @@ pub(crate) fn cover_in(domain: &str, source: &Cover, root: &Uuid) -> Cover {
 /// `source`, its `commands` to `target`'s streams in order, the `index`th
 /// command's index `index`.
 pub(crate) fn orders(
-    policy: &'static str,
+    policy: &str,
     target: &str,
     source: &Cover,
     ctx: &PolicyContext,
@@ -273,7 +277,7 @@ pub(crate) fn orders(
     (0..)
         .zip(commands)
         .map(|(index, (root, command))| Order {
-            policy,
+            policy: policy.to_string(),
             cover: cover_in(target, source, &root),
             command,
             trigger: ctx.trigger().clone(),
@@ -281,4 +285,103 @@ pub(crate) fn orders(
             correlation_id: ctx.correlation_id().clone(),
         })
         .collect()
+}
+
+/// The orders policy `policy` owes for `trigger` (in `correlation_id`):
+/// the router's answer, `books`, each the target's stream (the router held
+/// it to the trigger's edition, a named root and the trigger's
+/// correlation) and its command, in order.
+pub(crate) fn answered(
+    policy: &str,
+    trigger: &EventRef,
+    correlation_id: &Uuid,
+    books: Vec<CommandBook>,
+) -> Vec<Order> {
+    (0..)
+        .zip(books)
+        .map(|(index, book)| Order {
+            policy: policy.to_string(),
+            cover: book.cover.unwrap_or_default(),
+            command: match book.page.and_then(|p| p.body) {
+                Some(command_page::Body::Command(command)) => command.payload.unwrap_or_default(),
+                Some(command_page::Body::Fact(fact)) => fact.payload.unwrap_or_default(),
+                None => Any::default(),
+            },
+            trigger: trigger.clone(),
+            index,
+            correlation_id: correlation_id.clone(),
+        })
+        .collect()
+}
+
+/// `policy` as angzarr-router's table: each event type it handles (its
+/// `EVENTS`, or every event of its source for a hand-written one) runs
+/// [`Policy::on_event`] with the trigger's place and metadata, each command
+/// for the target's stream at the root it names; and, for a policy that
+/// answers refusals, each command type it translates (its `TRANSLATES`, or
+/// every command of its target for a hand-written one) is answered by
+/// [`Policy::on_refused`]. The router holds the answer to the policy's one
+/// destination, the trigger's edition, a named root and the trigger's
+/// correlation.
+pub(crate) fn dispatch<P: Policy>(policy: P) -> PolicyDispatch {
+    let policy = Arc::new(policy);
+    let target = <P::Target as Domain>::NAME;
+    let mut table = PolicyDispatch::new(P::NAME, <P::Source as Domain>::NAME, target);
+    let events: Vec<String> = match P::EVENTS.is_empty() {
+        true => <<P::Source as Domain>::Event as Payload>::type_urls()
+            .iter()
+            .map(|url| type_name(url).to_string())
+            .collect(),
+        false => P::EVENTS.iter().map(TypeName::full_name).collect(),
+    };
+    for event_type in events {
+        let policy = Arc::clone(&policy);
+        table = table.on_event_with_context(&event_type, move |event, page| {
+            let meta = page.meta.cloned().unwrap_or_default();
+            let ctx = PolicyContext::new(
+                EventRef {
+                    stream: page.cover.cloned(),
+                    sequence: page.sequence,
+                },
+                meta.correlation_id.unwrap_or_default(),
+                meta.recorded_at.unwrap_or_default(),
+            );
+            let commands = policy
+                .on_event(event, &ctx)
+                .map_or_else(Vec::new, Commands::into_orders);
+            Ok(commands
+                .into_iter()
+                .map(|(root, command)| CommandBook {
+                    cover: Some(Cover {
+                        domain: target.to_string(),
+                        root: Some(root),
+                        edition: None,
+                    }),
+                    page: Some(CommandPage {
+                        body: Some(command_page::Body::Command(Command {
+                            payload: Some(command),
+                        })),
+                        ..CommandPage::default()
+                    }),
+                    handling: None,
+                })
+                .collect())
+        });
+    }
+    if P::ANSWERS_REFUSALS {
+        let translated: Vec<String> = match P::TRANSLATES.is_empty() {
+            true => <<P::Target as Domain>::Command as Payload>::type_urls()
+                .iter()
+                .map(|url| type_name(url).to_string())
+                .collect(),
+            false => P::TRANSLATES.iter().map(TypeName::full_name).collect(),
+        };
+        for command_type in translated {
+            let policy = Arc::clone(&policy);
+            table = table.on_refused(&command_type, move |refusal| {
+                Ok::<_, HandlerError>(policy.on_refused(refusal))
+            });
+        }
+    }
+    table
 }

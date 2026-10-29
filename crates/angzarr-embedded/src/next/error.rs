@@ -168,6 +168,15 @@ pub enum KernelError {
     /// handler's bug, FAILED_PRECONDITION a business refusal, ABORTED a
     /// stale command, anything else the sender's to fix.
     Router(angzarr_router::error::CodedError),
+    /// The domain's handler could not be reached (a remote handler whose
+    /// process is not running, or whose transport failed: its
+    /// `REMOTE_HANDLER_UNAVAILABLE`). Nothing ran and nothing was written:
+    /// run it again, as [`Kernel::resume`](super::Kernel::resume) does for
+    /// a policy's step.
+    HandlerUnavailable {
+        stream: Cover,
+        cause: String,
+    },
 }
 
 /// Why a log could not be replayed.
@@ -292,6 +301,7 @@ impl KernelError {
             KernelError::Stale { .. } | KernelError::Unresolved { .. } => Recovery::Retry,
             KernelError::Store(error) => store_recovery(error),
             KernelError::Router(error) => router_recovery(error),
+            KernelError::HandlerUnavailable { .. } => Recovery::Retry,
             KernelError::Upcast { .. }
             | KernelError::IngestPanicked { .. }
             | KernelError::WrongDomain { .. }
@@ -482,7 +492,12 @@ impl fmt::Display for KernelError {
                 cover_text(stream)
             ),
             KernelError::Store(error) => error.fmt(f),
-            KernelError::Router(error) => write!(f, "{} ({})", error.message, error.code),
+            KernelError::Router(error) => f.write_str(&error.message),
+            KernelError::HandlerUnavailable { stream, cause } => write!(
+                f,
+                "the handler of stream {} could not be reached ({cause}): run it again",
+                cover_text(stream)
+            ),
         }
     }
 }
@@ -505,7 +520,9 @@ impl Diagnostic for KernelError {
             KernelError::Replay(error) => error.code(),
             KernelError::Unreadable { .. } => "angzarr-embedded-next-unreadable",
             KernelError::Store(error) => error.code(),
-            KernelError::Router(_) => "angzarr-embedded-next-router",
+            KernelError::Router(error) => super::route::reason_code(&error.code)
+                .unwrap_or("angzarr-embedded-next-unhandled-handler-error"),
+            KernelError::HandlerUnavailable { .. } => "angzarr-embedded-next-handler-unavailable",
         }
     }
 
@@ -579,7 +596,10 @@ impl Diagnostic for KernelError {
                 ("reason", Arg::nested(reason)),
             ],
             KernelError::Store(error) => store_args(error),
-            KernelError::Router(error) => vec![("reason", error.code.as_str().into())],
+            KernelError::Router(error) => super::route::router_args(error),
+            KernelError::HandlerUnavailable { stream: s, cause } => {
+                vec![("stream", stream(s)), ("cause", cause.as_str().into())]
+            }
         }
     }
 }

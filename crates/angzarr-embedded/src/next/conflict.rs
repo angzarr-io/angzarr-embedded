@@ -18,8 +18,10 @@
 //! generated code, until the generator exists.
 //!
 //! This module is the generated code's interface: the path type it builds
-//! ([`UnitPath`], with [`Key`]), the set it returns ([`Units`]), and the
-//! overlap rule the kernel applies to two sets.
+//! ([`UnitPath`], with [`Key`]) and the set it returns ([`Units`]). The
+//! overlap rule two sets are compared by is angzarr-router's, which
+//! resolves COMMUTATIVE (`DomainDispatch::with_commutative`): the kernel
+//! hands it each set's paths as text.
 //!
 //! **The risk.** decide runs on the head, so the invariants it checks still
 //! hold; what no structural comparison sees is a value derived from, or
@@ -127,22 +129,6 @@ impl UnitPath {
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
-
-    /// Whether two units name overlapping state: they are equal, or one is
-    /// a prefix of the other ending at a `.` or `[` boundary
-    /// (`items[42]` overlaps `items[42].weight`; `items[4]` does not
-    /// overlap `items[42]`). A coarser unit always overlaps the finer
-    /// units inside it, which makes every fallback sound. Wildcards are
-    /// [`Units::overlaps`]'s concern.
-    pub fn overlaps(&self, other: &UnitPath) -> bool {
-        let (short, long) = if self.0.len() <= other.0.len() {
-            (&self.0, &other.0)
-        } else {
-            (&other.0, &self.0)
-        };
-        long.starts_with(short)
-            && (long.len() == short.len() || matches!(long[short.len()], b'.' | b'['))
-    }
 }
 
 /// For messages and logs: the path as text, any bytes key shown lossily.
@@ -172,19 +158,6 @@ impl Units {
 
     pub fn iter(&self) -> impl Iterator<Item = &UnitPath> {
         self.0.iter()
-    }
-
-    /// Whether two sets overlap (`options.proto`, *Overlap*): one holds a
-    /// wildcard and the other is non-empty, or a unit of one
-    /// [overlaps](UnitPath::overlaps) a unit of the other. An empty set
-    /// overlaps nothing, so an empty window or a command that changes
-    /// nothing always commutes.
-    pub fn overlaps(&self, other: &Units) -> bool {
-        let wild = |units: &Units| units.iter().any(UnitPath::is_wildcard);
-        if self.is_empty() || other.is_empty() {
-            return false;
-        }
-        wild(self) || wild(other) || self.iter().any(|a| other.iter().any(|b| a.overlaps(b)))
     }
 }
 

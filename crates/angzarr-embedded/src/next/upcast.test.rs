@@ -128,15 +128,18 @@ fn an_old_command_is_upcast_then_decided() {
         pack(&account::cmd::v0::Credit { euros: 2 }),
     )
     .id(6);
-    assert_eq!(
-        handle::<Account>(&store, &without, old, &at(21))
-            .err()
-            .unwrap(),
-        Failure::Kernel(KernelError::UnknownType {
-            stream: cover("account", 1),
-            type_url: "/toy.account.cmd.v0.Credit".to_string()
-        }),
-        "no upcaster path: refused, naming the type URL"
+    let refused = handle::<Account>(&store, &without, old, &at(21))
+        .err()
+        .unwrap();
+    assert!(
+        matches!(
+            &refused,
+            Failure::Kernel(KernelError::Router(e))
+                if e.code == "NO_HANDLER_REGISTERED"
+                    && e.extras.get("type_url").map(String::as_str)
+                        == Some("/toy.account.cmd.v0.Credit")
+        ),
+        "no upcaster path: the router's NO_HANDLER_REGISTERED, naming the type URL: {refused:?}"
     );
 }
 
@@ -144,7 +147,16 @@ fn an_old_command_is_upcast_then_decided() {
 fn an_upcaster_is_checked_whole() {
     let problems = |upcaster: Upcaster| -> Vec<ChainProblem> {
         let mut registry = Registry::new();
-        registry.register::<Account>(fees(), upcaster).unwrap();
+        registry
+            .register::<Account>(
+                fees(),
+                upcaster,
+                crate::next::toys::handlers::<crate::next::toys::Account>(
+                    crate::next::toys::Fees { withdrawal: 1 },
+                    "v2",
+                ),
+            )
+            .unwrap();
         registry
             .check()
             .err()
@@ -184,7 +196,16 @@ fn an_upcaster_is_checked_whole() {
 fn an_upcaster_is_checked_for_order_and_untyped_rules_are_not_followed() {
     let problems = |upcaster: Upcaster| -> Vec<ChainProblem> {
         let mut registry = Registry::new();
-        registry.register::<Account>(fees(), upcaster).unwrap();
+        registry
+            .register::<Account>(
+                fees(),
+                upcaster,
+                crate::next::toys::handlers::<crate::next::toys::Account>(
+                    crate::next::toys::Fees { withdrawal: 1 },
+                    "v2",
+                ),
+            )
+            .unwrap();
         registry
             .check()
             .err()
@@ -263,7 +284,16 @@ fn an_upcast_rule_reports_its_own_failure_and_bytes_it_cannot_read() {
 
     let registry = {
         let mut registry = Registry::new();
-        registry.register::<Account>(fees(), refusing).unwrap();
+        registry
+            .register::<Account>(
+                fees(),
+                refusing,
+                crate::next::toys::handlers::<crate::next::toys::Account>(
+                    crate::next::toys::Fees { withdrawal: 1 },
+                    "v2",
+                ),
+            )
+            .unwrap();
         registry
     };
     let store = MemoryStore::new();
@@ -306,7 +336,16 @@ fn an_upcaster_names_itself_and_each_problem_once() {
     assert_eq!(account_upcaster().name(), "account-upcaster");
     let problems = |upcaster: Upcaster| -> Vec<ChainProblem> {
         let mut registry = Registry::new();
-        registry.register::<Account>(fees(), upcaster).unwrap();
+        registry
+            .register::<Account>(
+                fees(),
+                upcaster,
+                crate::next::toys::handlers::<crate::next::toys::Account>(
+                    crate::next::toys::Fees { withdrawal: 1 },
+                    "v2",
+                ),
+            )
+            .unwrap();
         registry
             .check()
             .err()

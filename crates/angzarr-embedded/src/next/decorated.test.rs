@@ -49,9 +49,9 @@ use ::angzarr_embedded::next::v1::{
     EventPage, EventRef, Fact, FactOrigin, StateDescriptor, StateOptions, Uuid,
 };
 use ::angzarr_embedded::next::{
-    pack, type_name, Any, Decoder, Domain, Envelope, Executed, Failure, Handled, IngestCtx,
-    KernelError, MemoryDeadLetters, Payload, PayloadError, Recovery, Registry, Rulebook, Sampled,
-    State, Stream, Timestamp, Tx, Upcaster, WireError,
+    pack, type_name, Any, Decoder, Domain, Envelope, Executed, Failure, Handled, KernelError,
+    MemoryDeadLetters, Payload, PayloadError, Recovery, Registry, Rejected, Rulebook, Sampled,
+    State, Stream, Timestamp, Upcaster, WireError,
 };
 use angzarr_embedded_diagnostic::{Arg, Diagnostic, Report};
 use angzarr_embedded_macros::{
@@ -957,18 +957,25 @@ impl Domain for Tally {
 
     const NAME: &'static str = "tally";
 
-    fn decide(_: &Count, tx: &mut Tx<'_, Self>) -> Result<(), Infallible> {
-        tx.emit(Counted {});
-        Ok(())
-    }
-
-    fn ingest(_: &TallyState, fact: &Infallible, _: &IngestCtx<'_, Self>) -> Vec<Counted> {
-        match *fact {}
-    }
-
     fn apply(state: &mut TallyState, _: &Counted, (): &()) {
         state.count += 1;
     }
+}
+
+/// The tally's handler, written by hand as angzarr-router's table: every
+/// count counts.
+fn tally_handlers(
+    table: ::angzarr_embedded::next::angzarr_router::domain::DomainDispatch<TallyState>,
+) -> ::angzarr_embedded::next::angzarr_router::domain::DomainDispatch<TallyState> {
+    table.on_command("toy.tally.cmd.v1.Count", |_, _, _| {
+        Ok(Some(EventBook {
+            pages: vec![EventPage {
+                payload: Some(Counted {}.to_any()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }))
+    })
 }
 
 // ---------------------------------------------------------------- running them
@@ -990,6 +997,7 @@ fn configured(config: WalletConfig) -> Registry {
         .register::<Tally>(
             Rulebook::new("v1", ()),
             Upcaster::new("tally-upcaster", "tally"),
+            tally_handlers,
         )
         .unwrap();
     registry
@@ -1037,7 +1045,7 @@ fn execute<D: Domain>(
     registry: &Registry,
     n: u8,
     book: CommandBook,
-) -> Result<Vec<Any>, Failure<D::Rejection>> {
+) -> Result<Vec<Any>, Failure<Rejected>> {
     let sampled = Sampled {
         now: at(i64::from(n)),
         command_id: Uuid::from_bytes([0x07; 16]),
@@ -1078,7 +1086,7 @@ fn run<D: Domain>(
     registry: &Registry,
     n: u8,
     payload: Any,
-) -> Result<Vec<Any>, Failure<D::Rejection>> {
+) -> Result<Vec<Any>, Failure<Rejected>> {
     execute(stream, registry, n, send(D::NAME, n, payload, None))
 }
 
@@ -1093,12 +1101,18 @@ fn opened(registry: &Registry, bonus: i64) -> Stream<Wallet> {
     wallet
 }
 
-/// The domain's own rejection, a message only, that `failure` is.
-fn rejection<R: fmt::Debug>(failure: Failure<Rejection<R>>) -> R {
+/// The refusal `failure` is, as its caller receives it: its code and its
+/// English.
+fn rejection(failure: Failure<Rejected>) -> (&'static str, String) {
     match failure {
-        Failure::Rejected(Rejection::Message(r)) => r,
-        other => panic!("refused by the domain with a message, not {other:?}"),
+        Failure::Rejected(rejected) => said(&rejected),
+        other => panic!("refused by the domain, not {other:?}"),
     }
+}
+
+/// What `diagnostic` says: its code and its English.
+fn said(diagnostic: &dyn Diagnostic) -> (&'static str, String) {
+    (diagnostic.code(), diagnostic.to_string())
 }
 
 /// The wallet as its fields would be: open, not closed, not rewarded,
@@ -1160,20 +1174,24 @@ mod route {
     }
 
     /// A type URL no handler is marked for (a command the proto declares
-    /// and the markup does not handle, or another domain's) is the kernel's
-    /// unknown type, not a rejection, and reaches no handler.
+    /// and the markup does not handle, or another domain's) is the router's
+    /// NO_HANDLER_REGISTERED, not a rejection, and reaches no handler.
     #[test]
-    fn an_unmarked_type_url_is_an_unknown_type() {
+    fn an_unmarked_type_url_is_the_routers_no_handler_registered() {
         let registry = registry();
         let mut wallet = opened(&registry, 0);
 
         let refused = run(&mut wallet, &registry, 2, pack(&Count {}));
 
         match refused {
-            Err(Failure::Kernel(KernelError::UnknownType { type_url, .. })) => {
-                assert_eq!(type_url, "/toy.tally.cmd.v1.Count");
+            Err(Failure::Kernel(KernelError::Router(e))) => {
+                assert_eq!(e.code, "NO_HANDLER_REGISTERED");
+                assert_eq!(
+                    e.extras.get("type_url").map(String::as_str),
+                    Some("/toy.tally.cmd.v1.Count")
+                );
             }
-            other => panic!("an unknown type, not {other:?}"),
+            other => panic!("the router's NO_HANDLER_REGISTERED, not {other:?}"),
         }
         assert_eq!(wallet.len(), 2, "nothing was committed");
     }
@@ -1411,10 +1429,10 @@ mod continuation {
 
         assert_eq!(
             refused.map_err(rejection),
-            Err(Refused::OverLimit {
+            Err(said(&Refused::OverLimit {
                 cents: 1505,
                 limit: 1000
-            })
+            }))
         );
         assert_eq!(wallet.len(), 2, "nothing was committed");
         assert_eq!(wallet.state(), &before, "nothing was applied");
@@ -1540,10 +1558,10 @@ mod construction {
         assert_eq!(rebuilt.state().config, WalletConfig { limit: 60 });
         assert_eq!(
             refused.map_err(rejection),
-            Err(Refused::OverLimit {
+            Err(said(&Refused::OverLimit {
                 cents: 70,
                 limit: 60
-            })
+            }))
         );
     }
 
@@ -1572,10 +1590,10 @@ mod construction {
         assert_eq!(resumed.state().config, WalletConfig { limit: 60 });
         assert_eq!(
             refused.map_err(rejection),
-            Err(Refused::OverLimit {
+            Err(said(&Refused::OverLimit {
                 cents: 70,
                 limit: 60
-            })
+            }))
         );
     }
 }
@@ -1633,7 +1651,7 @@ mod facts {
 
         assert_eq!(
             command.map_err(rejection),
-            Err(Refused::Overdrawn { short: 20 })
+            Err(said(&Refused::Overdrawn { short: 20 }))
         );
         assert_eq!(
             recorded,
@@ -1769,7 +1787,7 @@ mod replay {
 
         assert_eq!(
             refused.map_err(rejection),
-            Err(Refused::Overdrawn { short: 10 })
+            Err(said(&Refused::Overdrawn { short: 10 }))
         );
         assert_eq!(withdrew, Ok(vec![any(Withdrew { cents: 20 })]));
         assert_eq!(rebuilt.state(), &holding(30, 2));
@@ -1845,10 +1863,10 @@ mod rejection {
         let again = run(&mut wallet, &registry, 2, any(Open { bonus: 5 }));
         let overdrawn = run(&mut wallet, &registry, 3, any(Withdraw { cents: 8 }));
 
-        assert_eq!(again.map_err(rejection), Err(Refused::AlreadyOpen));
+        assert_eq!(again.map_err(rejection), Err(said(&Refused::AlreadyOpen)));
         assert_eq!(
             overdrawn.map_err(rejection),
-            Err(Refused::Overdrawn { short: 3 })
+            Err(said(&Refused::Overdrawn { short: 3 }))
         );
         assert_eq!(wallet.len(), 2, "nothing was committed");
         assert_eq!(wallet.state(), &before, "nothing was applied");
@@ -2254,7 +2272,7 @@ fn handle_in<D: Domain>(
     log: &MemoryDeadLetters,
     n: u8,
     book: CommandBook,
-) -> Result<Handled, Failure<D::Rejection>> {
+) -> Result<Handled, Failure<Rejected>> {
     let sampled = Sampled {
         now: at(i64::from(n)),
         command_id: Uuid::from_bytes([0x70 | n; 16]),
@@ -2413,23 +2431,43 @@ mod process_manager {
         assert!(log.lines().is_empty());
     }
 
-    /// A command whose correlation is set to anything but its cover's root
-    /// names no instance: malformed. Its code is pinned as a string.
+    /// In memory, the router's start rule reads whether the stream holds
+    /// an instance: a non-starting command is refused on an empty stream,
+    /// and decided once a starting one made the instance.
     #[test]
-    fn a_correlation_other_than_the_root_is_malformed() {
+    fn a_streams_instance_is_what_the_start_rule_reads() {
         let registry = buy_ins();
-        let store = Mem::new();
         let log = MemoryDeadLetters::new();
-        let mut astray = start(&correlation(4), 2, 0);
-        astray.page.as_mut().unwrap().correlation_id = Some(correlation(5));
-        let Err(refused) = handle_in::<BuyIn>(&store, &registry, &log, 2, astray) else {
-            panic!("a correlation that is not the root is malformed");
+        let mut buy_in = Stream::<BuyIn>::new(correlation(11), None).unwrap();
+        let sampled = Sampled {
+            now: at(3),
+            command_id: Uuid::from_bytes([0x73; 16]),
         };
-        assert_eq!(
-            refused.code(),
-            "angzarr-embedded-next-malformed-root-not-correlation"
-        );
-        assert_eq!(refused.recovery(), Recovery::Invalid);
+        let held = |n| {
+            command_to(
+                buy_in_cover(&correlation(11)),
+                n,
+                any(RecordHeld { cents: 5 }),
+                Some(correlation(11)),
+            )
+        };
+        let refused = buy_in
+            .execute(held(2), &registry, &sampled, &log, &mut [])
+            .expect_err("no instance");
+        assert_eq!(refused.code(), "angzarr-embedded-next-pm-no-instance");
+        buy_in
+            .execute(
+                start(&correlation(11), 3, 0),
+                &registry,
+                &sampled,
+                &log,
+                &mut [],
+            )
+            .unwrap();
+        assert!(buy_in
+            .execute(held(4), &registry, &sampled, &log, &mut [])
+            .is_ok());
+        assert_eq!(buy_in.len(), 2);
     }
 
     /// A correlation left unset is given the root: the buy-in's events
@@ -2621,12 +2659,12 @@ mod typed_refusals {
         let mut wallet = opened(&registry, 10);
         let refused = run(&mut wallet, &registry, 2, any(Hold { cents: 30 }));
         match refused {
-            Err(Failure::Rejected(Rejection::Typed(typed))) => {
+            Err(Failure::Rejected(typed)) => {
                 assert_eq!(
-                    typed.object::<InsufficientFunds>(),
+                    typed.refusal::<InsufficientFunds>(),
                     Some(InsufficientFunds { short: 20 })
                 );
-                assert_eq!(typed.object::<WalletClosed>(), None);
+                assert_eq!(typed.refusal::<WalletClosed>(), None);
             }
             other => panic!("a typed refusal, not {other:?}"),
         }
@@ -2643,11 +2681,11 @@ mod typed_refusals {
             panic!("refused");
         };
         assert_eq!(
-            rejection.response(),
-            RefusalResponse {
-                refusal: Some(any(WalletClosed {})),
-                message: "the wallet is closed".to_string(),
-            }
+            (rejection.refusal_object().cloned(), rejection.to_string()),
+            (
+                Some(any(WalletClosed {})),
+                "the wallet is closed".to_string()
+            )
         );
     }
 
@@ -2662,16 +2700,15 @@ mod typed_refusals {
         else {
             panic!("refused");
         };
-        assert_eq!(
-            rejection,
-            Rejection::Message(Refused::Overdrawn { short: 20 })
+        assert_eq!(said(&rejection), said(&Refused::Overdrawn { short: 20 }));
+        assert!(
+            matches!(&rejection.args()[..], [("short", Arg::Str(short))] if short == "20"),
+            "its args, as the router carried them: {:?}",
+            rejection.args()
         );
         assert_eq!(
-            rejection.response(),
-            RefusalResponse {
-                refusal: None,
-                message: "20 cents short".to_string(),
-            }
+            (rejection.refusal_object().cloned(), rejection.to_string()),
+            (None, "20 cents short".to_string())
         );
     }
 
@@ -2840,11 +2877,15 @@ mod policy_refusals {
             fact_to(buy_in_cover(&correlation(8)), refused, "refusal-8"),
         );
         match unhandled {
-            Err(Failure::Kernel(KernelError::UnknownType { type_url, .. })) => {
-                assert_eq!(type_url, "/toy.wallet.cmd.v1.Withdraw");
+            Err(Failure::Kernel(KernelError::Router(e))) => {
+                assert_eq!(e.code, "NO_FACT_HANDLER");
+                assert_eq!(
+                    e.extras.get("command_type").map(String::as_str),
+                    Some("/toy.wallet.cmd.v1.Withdraw")
+                );
             }
-            Err(other) => panic!("an unknown type, not {other}"),
-            Ok(_) => panic!("an unknown type, not handled"),
+            Err(other) => panic!("the router's NO_FACT_HANDLER, not {other}"),
+            Ok(_) => panic!("the router's NO_FACT_HANDLER, not handled"),
         }
     }
 
@@ -2903,7 +2944,7 @@ fn settle_in<D: Domain>(
     log: &MemoryDeadLetters,
     n: u8,
     book: CommandBook,
-) -> Result<::angzarr_embedded::next::Recorded, Failure<D::Rejection>> {
+) -> Result<::angzarr_embedded::next::Recorded, Failure<Rejected>> {
     let sampled = Sampled {
         now: at(i64::from(n)),
         command_id: Uuid::from_bytes([0x70 | n; 16]),
@@ -3450,6 +3491,393 @@ mod router {
             error.extras.get("actual_domain").map(String::as_str),
             Some("lamp")
         );
+        let args = KernelError::Router(error.clone()).args();
+        assert!(
+            args.iter()
+                .any(|(name, arg)| *name == "actual_domain"
+                    && matches!(arg, Arg::Str(d) if d == "lamp")),
+            "the router's metadata, as args: {args:?}"
+        );
+    }
+
+    /// A handler the kernel knows only as angzarr-router's `CommandHandler`
+    /// (a remote one, say), written by hand: its registration hello names
+    /// its state and its rules version; it answers every command with one
+    /// `Noted` event.
+    struct Remote;
+
+    impl ::angzarr_embedded::next::angzarr_router::router::CommandHandler for Remote {
+        fn name(&self) -> &str {
+            "remote"
+        }
+
+        fn command_types(&self) -> Vec<String> {
+            vec!["toy.wallet.cmd.v1.Note".to_string()]
+        }
+
+        fn dispatch(
+            &self,
+            req: &pb::ContextualCommand,
+        ) -> Result<
+            pb::CommandHandlerResponse,
+            ::angzarr_embedded::next::angzarr_router::error::CodedError,
+        > {
+            let next = req.events.as_ref().map_or(0, |b| b.next_sequence);
+            Ok(pb::CommandHandlerResponse {
+                events: Some(pb::EventBook {
+                    pages: vec![pb::EventPage {
+                        payload: Some(any(Noted {
+                            root: vec![next as u8],
+                            command_id: Vec::new(),
+                            correlation_id: Vec::new(),
+                        })),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }),
+                rules_version: "remote-1".to_string(),
+            })
+        }
+
+        fn component_descriptor(
+            &self,
+        ) -> Result<
+            pb::ComponentDescriptor,
+            ::angzarr_embedded::next::angzarr_router::error::CodedError,
+        > {
+            Ok(pb::ComponentDescriptor {
+                name: "remote".to_string(),
+                kind: pb::ComponentKind::Aggregate as i32,
+                rules_version: "remote-1".to_string(),
+                state: Some(StateDescriptor {
+                    type_url: "/toy.remote.v1.State".to_string(),
+                    options: Some(StateOptions {
+                        conflict_resolutions: vec![
+                            ConflictResolution::Strict as i32,
+                            ConflictResolution::AggregateHandles as i32,
+                        ],
+                    }),
+                }),
+                ..Default::default()
+            })
+        }
+    }
+
+    /// A hand-written `CommandHandler`, boxed as `dyn`, registers as a
+    /// domain: the kernel dispatches its commands through it, stamps and
+    /// writes what it answers, and deduplicates a retry.
+    #[test]
+    fn a_boxed_command_handler_registers_as_a_domain() {
+        use ::angzarr_embedded::next::angzarr_router::router::CommandHandler;
+        let mut registry = Registry::new();
+        let remote: Box<dyn CommandHandler> = Box::new(Remote);
+        registry.command_handler("remote", remote).unwrap();
+        let store = Mem::new();
+        let log = MemoryDeadLetters::new();
+        let kernel = ::angzarr_embedded::next::Kernel::new(&registry, &log);
+        let note = || send("remote", 4, any(Note {}), Some(correlation(4)));
+        let sampled = Sampled {
+            now: at(9),
+            command_id: Uuid::from_bytes([0x74; 16]),
+        };
+        let handled = ready(kernel.handle_any(&store, note(), &sampled, &mut ())).unwrap();
+        assert!(matches!(handled, Handled::Applied(_)));
+        let remote_cover = Cover {
+            domain: "remote".to_string(),
+            root: Some(root()),
+            edition: None,
+        };
+        let written = pages(&store, &remote_cover).expect("the remote's stream");
+        assert_eq!(written.len(), 1);
+        assert_eq!(
+            written[0].payload,
+            Some(any(Noted {
+                root: vec![0],
+                command_id: Vec::new(),
+                correlation_id: Vec::new(),
+            }))
+        );
+        let meta = written[0].meta.clone().expect("stamped");
+        assert_eq!(meta.rules_version, "remote-1");
+        assert_eq!(
+            meta.causation,
+            Some(Causation::CommandId(Uuid::from_bytes([4; 16])))
+        );
+        assert_eq!(meta.correlation_id, Some(correlation(4)));
+        let again = ready(kernel.handle_any(&store, note(), &sampled, &mut ())).unwrap();
+        assert!(
+            matches!(again, Handled::Duplicate(_)),
+            "a retry is a duplicate"
+        );
+        assert_eq!(
+            registry.command_handler("remote", Remote),
+            Err(::angzarr_embedded::next::Misconfigured::AlreadyRegistered {
+                domain: "remote".to_string()
+            })
+        );
+    }
+
+    /// A remote handler that cannot be reached, until `up`: it answers
+    /// angzarr-embedded-host's `REMOTE_HANDLER_UNAVAILABLE` (ABORTED, its
+    /// cause in its metadata); reached, it answers as [`Remote`].
+    struct Flaky {
+        up: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl ::angzarr_embedded::next::angzarr_router::router::CommandHandler for Flaky {
+        fn name(&self) -> &str {
+            "remote"
+        }
+
+        fn command_types(&self) -> Vec<String> {
+            Remote.command_types()
+        }
+
+        fn dispatch(
+            &self,
+            req: &pb::ContextualCommand,
+        ) -> Result<
+            pb::CommandHandlerResponse,
+            ::angzarr_embedded::next::angzarr_router::error::CodedError,
+        > {
+            use ::angzarr_embedded::next::angzarr_router::error::{CodedError, GrpcCode};
+            if self.up.load(std::sync::atomic::Ordering::SeqCst) {
+                return Remote.dispatch(req);
+            }
+            Err(CodedError {
+                code: "REMOTE_HANDLER_UNAVAILABLE".to_string(),
+                message: "the remote handler is not running".to_string(),
+                extras: [
+                    ("domain".to_string(), "remote".to_string()),
+                    ("cause".to_string(), "not-running".to_string()),
+                ]
+                .into(),
+                grpc: GrpcCode::Aborted,
+                refusal: None,
+            })
+        }
+
+        fn component_descriptor(
+            &self,
+        ) -> Result<
+            pb::ComponentDescriptor,
+            ::angzarr_embedded::next::angzarr_router::error::CodedError,
+        > {
+            Remote.component_descriptor()
+        }
+    }
+
+    /// An unreachable remote handler is a retryable failure, never a
+    /// rejection: at the origin the caller retries; as a policy's step the
+    /// position holds, nothing is dead-lettered, and a resume runs the step
+    /// again once the handler is reachable.
+    #[test]
+    fn an_unreachable_remote_handler_is_retried_by_position() {
+        use ::angzarr_embedded::next::angzarr_router::router::CommandHandler;
+        use ::angzarr_embedded::next::StepError;
+        let up = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut registry = registry();
+        let flaky: Box<dyn CommandHandler> = Box::new(Flaky { up: up.clone() });
+        registry.command_handler("remote", flaky).unwrap();
+        registry.policy_dispatch(
+            PolicyDispatch::new("wallet-remote", "wallet", "remote").on_event(
+                "toy.wallet.v1.Held",
+                |_, source| {
+                    Ok(vec![pb::CommandBook {
+                        cover: Some(pb::Cover {
+                            domain: "remote".to_string(),
+                            root: source.and_then(|c| c.root.clone()),
+                            edition: None,
+                        }),
+                        page: Some(pb::CommandPage {
+                            body: Some(pb::command_page::Body::Command(pb::Command {
+                                payload: Some(any(Note {})),
+                            })),
+                            ..Default::default()
+                        }),
+                        handling: None,
+                    }])
+                },
+            ),
+        );
+        let store = Mem::new();
+        let log = MemoryDeadLetters::new();
+        let kernel = ::angzarr_embedded::next::Kernel::new(&registry, &log);
+        let sampled = Sampled {
+            now: at(9),
+            command_id: Uuid::from_bytes([0x79; 16]),
+        };
+
+        let origin = ready(kernel.handle_any(
+            &store,
+            send("remote", 3, any(Note {}), None),
+            &sampled,
+            &mut (),
+        ))
+        .err()
+        .expect("unreachable");
+        assert!(
+            matches!(
+                &origin,
+                Failure::Kernel(KernelError::HandlerUnavailable { cause, .. }) if cause == "not-running"
+            ),
+            "{origin:?}"
+        );
+        assert_eq!(origin.recovery(), Recovery::Retry);
+        assert_eq!(origin.code(), "angzarr-embedded-next-handler-unavailable");
+
+        handle_in::<Wallet>(
+            &store,
+            &registry,
+            &log,
+            1,
+            send("wallet", 1, any(Open { bonus: 50 }), None),
+        )
+        .unwrap();
+        let held = handle_in::<Wallet>(
+            &store,
+            &registry,
+            &log,
+            2,
+            send("wallet", 2, any(Hold { cents: 5 }), None),
+        )
+        .err()
+        .expect("the policy's step is unreachable");
+        assert!(
+            matches!(
+                &held,
+                Failure::Downstream {
+                    error: StepError::Kernel(KernelError::HandlerUnavailable { .. }),
+                    ..
+                }
+            ),
+            "{held:?}"
+        );
+        assert_eq!(held.recovery(), Recovery::Retry);
+        assert!(log.lines().is_empty(), "retryable: nothing dead-lettered");
+        let remote_cover = Cover {
+            domain: "remote".to_string(),
+            root: Some(root()),
+            edition: None,
+        };
+        assert_eq!(pages(&store, &remote_cover), None);
+
+        up.store(true, std::sync::atomic::Ordering::SeqCst);
+        ready(kernel.resume(&store, &sampled, &mut ())).unwrap();
+        assert_eq!(
+            pages(&store, &remote_cover).map(|p| p.len()),
+            Some(1),
+            "resumed by position once reachable"
+        );
+    }
+
+    /// A source whose fact handler fails with a fault of the router's own
+    /// (UNHANDLED_HANDLER_ERROR): its commands answer as [`Remote`]'s.
+    struct Picky;
+
+    impl ::angzarr_embedded::next::angzarr_router::router::CommandHandler for Picky {
+        fn name(&self) -> &str {
+            "picky"
+        }
+
+        fn command_types(&self) -> Vec<String> {
+            Remote.command_types()
+        }
+
+        fn dispatch(
+            &self,
+            req: &pb::ContextualCommand,
+        ) -> Result<
+            pb::CommandHandlerResponse,
+            ::angzarr_embedded::next::angzarr_router::error::CodedError,
+        > {
+            use ::angzarr_embedded::next::angzarr_router::error::{codes, CodedError};
+            let fact = req
+                .command
+                .as_ref()
+                .and_then(|c| c.page.as_ref())
+                .is_some_and(|p| matches!(p.body, Some(pb::command_page::Body::Fact(_))));
+            match fact {
+                true => Err(CodedError::internal(
+                    codes::UNHANDLED_HANDLER_ERROR,
+                    "the fact handler failed",
+                    [],
+                )),
+                false => Remote.dispatch(req),
+            }
+        }
+
+        fn component_descriptor(
+            &self,
+        ) -> Result<
+            pb::ComponentDescriptor,
+            ::angzarr_embedded::next::angzarr_router::error::CodedError,
+        > {
+            Remote.component_descriptor()
+        }
+    }
+
+    /// A refusal fact its source fails on with any fault but having no
+    /// handler for it fails the step: it is not dead-lettered as an
+    /// unhandled refusal.
+    #[test]
+    fn a_refusal_fact_its_source_fails_on_fails_the_step() {
+        use ::angzarr_embedded::next::angzarr_router::router::CommandHandler;
+        use ::angzarr_embedded::next::StepError;
+        let mut registry = registry();
+        let picky: Box<dyn CommandHandler> = Box::new(Picky);
+        registry.command_handler("picky", picky).unwrap();
+        registry.policy_dispatch(
+            PolicyDispatch::new("picky-wallet", "picky", "wallet").on_event(
+                "toy.wallet.v1.Noted",
+                |_, _| {
+                    Ok(vec![pb::CommandBook {
+                        cover: Some(wallet_cover("wallet")),
+                        page: Some(pb::CommandPage {
+                            body: Some(pb::command_page::Body::Command(pb::Command {
+                                payload: Some(any(Hold { cents: 1000 })),
+                            })),
+                            ..Default::default()
+                        }),
+                        handling: None,
+                    }])
+                },
+            ),
+        );
+        let store = Mem::new();
+        let log = MemoryDeadLetters::new();
+        handle_in::<Wallet>(
+            &store,
+            &registry,
+            &log,
+            1,
+            send("wallet", 1, any(Open { bonus: 50 }), None),
+        )
+        .unwrap();
+        let kernel = ::angzarr_embedded::next::Kernel::new(&registry, &log);
+        let sampled = Sampled {
+            now: at(9),
+            command_id: Uuid::from_bytes([0x79; 16]),
+        };
+        let failed = ready(kernel.handle_any(
+            &store,
+            send("picky", 2, any(Note {}), None),
+            &sampled,
+            &mut (),
+        ))
+        .err()
+        .expect("the refusal fact's step fails");
+        assert!(
+            matches!(
+                &failed,
+                Failure::Downstream {
+                    error: StepError::Kernel(KernelError::Router(e)),
+                    ..
+                } if e.code == "UNHANDLED_HANDLER_ERROR"
+            ),
+            "{failed:?}"
+        );
+        assert!(log.lines().is_empty(), "{:?}", log.lines());
     }
 
     /// A domain's input goes through the router too: a command type the
@@ -3608,7 +4036,7 @@ fn handle_async(
     n: u8,
     payload: Any,
     root: Uuid,
-) -> Result<Handled, Failure<Rejection<Refused>>> {
+) -> Result<Handled, Failure<Rejected>> {
     let sampled = Sampled {
         now: at(i64::from(n)),
         command_id: Uuid::from_bytes([n; 16]),

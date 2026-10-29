@@ -42,14 +42,12 @@ angzarr-embedded-next-malformed-fact-command-id-not-derived = the fact's command
 angzarr-embedded-next-malformed-handling-on-fact = a fact with handling: a fact is never checked against a sequence nor conflict-resolved
 angzarr-embedded-next-malformed-unknown-conflict-resolution = conflict resolution { $value } is not one this build knows
 angzarr-embedded-next-malformed-unsupported-conflict-resolution = domain "{ $domain }"'s state does not support { $requested }
-angzarr-embedded-next-malformed-root-not-correlation = the book's correlation is not its root: a process manager's root is its correlation
 angzarr-embedded-next-malformed-refusal-misaddressed = the refusal fact is for another stream than the one its trigger names
 
 angzarr-embedded-next-projection-failed = the command committed, then { $failures ->
     [one] projector { $projector } failed: { $error }
    *[other] { $failures } projectors failed, the first { $projector }: { $error }
 }
-angzarr-embedded-next-pm-no-instance = process manager stream { $stream } has no instance, and only a starting input starts one
 angzarr-embedded-next-downstream = a policy command down the chain failed, at depth { $depth }: { $error }
 angzarr-embedded-next-stale = stream { $stream } is at { $actual }, not the { $expected } expected: re-read and re-issue
 angzarr-embedded-next-unresolved = decide never acknowledged the window of stream { $stream } from { $expected } to { $actual }
@@ -62,7 +60,7 @@ angzarr-embedded-next-chain-too-deep = the command chain went deeper than its li
 angzarr-embedded-next-too-many-steps = the decision on stream { $stream } ran more than its limit of { $limit } continuation steps
 angzarr-embedded-next-before-snapshot = stream { $stream } holds its events from { $first } on only, after its snapshot
 angzarr-embedded-next-unregistered-domain = a stored { $domain } stream was read, but no domain "{ $domain }" is registered
-angzarr-embedded-next-router = the router refused it: { $reason }
+angzarr-embedded-next-handler-unavailable = the handler of stream { $stream } could not be reached ({ $cause }): run it again
 
 angzarr-embedded-next-replay-out-of-sequence = page { $index } of the log claims sequence { $found }, not the one due
 angzarr-embedded-next-replay-recorded-backwards = event { $sequence } was recorded before the event before it
@@ -89,3 +87,30 @@ angzarr-embedded-next-misconfigured-bad-state-descriptor = domain "{ $domain }"'
 angzarr-embedded-next-misconfigured-unsupported-resolution = domain "{ $domain }" is configured { $resolution }, which its state does not support
 angzarr-embedded-next-misconfigured-unsupported-command-resolution = domain "{ $domain }" configures { $command_type } { $resolution }, which its state does not support
 
+# angzarr-router's refusals, one code per reason.
+angzarr-embedded-next-any-decode-failed = a payload did not decode as the type it names: send a payload of its type
+angzarr-embedded-next-no-handler-registered = no handler is registered for this input's type: send a type the domain handles, or register a handler for it
+angzarr-embedded-next-missing-command-book = the request carries no command: send the command
+angzarr-embedded-next-missing-command-page = the command carries no page: send the command's page
+angzarr-embedded-next-missing-command-payload = the command's page carries no typed payload: send its payload
+angzarr-embedded-next-persisted-event-corrupt = a stored event or snapshot does not decode: restore it, or add the upcaster it needs
+angzarr-embedded-next-unhandled-handler-error = a handler failed with an error it does not classify: a bug in the handler
+angzarr-embedded-next-missing-event-book-cover = the events carry no cover: a bug in the runtime
+angzarr-embedded-next-empty-policy-source = a policy was given no event: a bug in the runtime
+angzarr-embedded-next-duplicate-registration = a business process registers one component: register the other in its own
+angzarr-embedded-next-no-handlers-registered = no component is registered: register one
+angzarr-embedded-next-duplicate-command-handler = a type is handled twice, as a current type and an upcaster's source: drop one
+angzarr-embedded-next-no-fact-handler = no handler is registered for this fact's type: register one, or stop sending it
+angzarr-embedded-next-conflict-unresolved = the handler never acknowledged the events it did not see: a bug in the handler; re-read and re-issue
+angzarr-embedded-next-conflict-overlap = the command's changes overlap changes it did not see: re-read and re-issue
+angzarr-embedded-next-conflict-resolution-unsupported = the domain does not support the conflict resolution asked for: ask for another
+angzarr-embedded-next-missing-rules-version = a component registers with its rules version: give it one
+angzarr-embedded-next-missing-state-type = a component with state registers its state's type: give it one
+angzarr-embedded-next-policy-command-outside-destination = a policy sent a command to a domain other than its one destination: a bug in the policy
+angzarr-embedded-next-policy-command-outside-edition = a policy sent a command into an edition other than its trigger's: a bug in the policy
+angzarr-embedded-next-policy-command-no-root = a policy sent a command naming no root: a bug in the policy, which names the root of every command
+angzarr-embedded-next-policy-command-other-correlation = a policy sent a command in a correlation other than its trigger's: a bug in the policy
+angzarr-embedded-next-malformed-refusal-fact = a policy answered a refusal with something other than a bare fact: a bug in the policy
+angzarr-embedded-next-pm-no-instance = the process manager has no instance here, and only a starting input starts one: start it first
+angzarr-embedded-next-refusal-fact-wrong-stream = a refusal fact was addressed to a stream other than its trigger's: a bug in the runtime
+angzarr-embedded-next-starting-types-on-non-pm = only a process manager declares starting types: drop them, or make it a process manager

@@ -24,7 +24,9 @@
 //!   `#[on_refused]` handler reads it, and a refusal as a translating
 //!   policy's callback reads it.
 //! - [`ProcessManager`]: what sets a process manager, a domain, apart: its
-//!   root is the correlation, and its starting inputs.
+//!   starting inputs.
+//! - [`Routed`]: a marked-up domain's handlers, registered on
+//!   angzarr-router's table.
 //! - [`Policy`], [`Commands`] and [`PolicyContext`]: a policy, its output
 //!   and its handler's context. [`Decides`] and [`Ingests`] say what a
 //!   domain takes, for the checks on a policy.
@@ -63,8 +65,7 @@ pub use angzarr_embedded_diagnostic::Report;
 /// its input, all read-only: the ONE handler context of every domain, an
 /// aggregate's and a process manager's alike. The instant its events will
 /// be recorded at (sampled by the application and injected, so the handler
-/// stays pure: there is no wall clock), the stream it decides (for a
-/// process manager, its root is the correlation), and the input's
+/// stays pure: there is no wall clock), the stream it decides, and the input's
 /// identity: its command id (a client's, the one the application minted,
 /// a policy's derived one, or, for a fact, the one derived from its origin;
 /// a refusal fact's is the refused command's), its correlation, and, for a
@@ -79,8 +80,8 @@ pub struct Context {
 }
 
 impl Context {
-    /// A context for a handler's own unit tests; the router builds the real
-    /// one from the input's `Tx`.
+    /// A context for a handler's own unit tests; the kernel builds the real
+    /// one from what angzarr-router hands the handler.
     pub fn new(
         recorded_at: Timestamp,
         stream: Cover,
@@ -437,25 +438,26 @@ pub const MARKUP_RULES_VERSION: &str = "markup-1";
 /// the two things that set a PM apart. Registered with
 /// [`Registry::process_manager`](super::Registry::process_manager).
 ///
-/// - **Its root is the correlation**, unchanged. A command or fact
-///   addressed to it names the instance in its cover: a `correlation_id`
-///   left unset is given the root, and one set to anything else is
-///   malformed (`angzarr-embedded-next-malformed-root-not-correlation`).
-/// - **The start rule.** Only an input type it declares as starting
-///   (`#[handles_cmd(C, starts)]`, `#[handles_fact(F, starts)]`) may start
-///   an instance. Any other input for a correlation with no instance is
+/// - **Its root is the one its input names.** A command or fact addressed
+///   to it names the instance in its cover, whatever its correlation (one
+///   instance may take inputs of several correlations); a `correlation_id`
+///   left unset is given the root.
+/// - **The start rule**, angzarr-router's. Only an input type it declares
+///   as starting (`#[handles_cmd(C, starts)]`, `#[handles_fact(F, starts)]`)
+///   may start an instance. Any other input for a stream with no instance is
 ///   not delivered, decided before the handler by the type after
 ///   upcasting: a FACT is skipped silently (applied, no events, nothing
-///   dead-lettered), and a COMMAND is refused (`angzarr-embedded-next-pm-no-instance`,
-///   a business refusal, so a policy's refused command yields its refusal
-///   fact like any other), recording nothing.
+///   dead-lettered), and a COMMAND is refused (`PM_NO_INSTANCE`, forwarded
+///   as `angzarr-embedded-next-pm-no-instance`, a business refusal, so a
+///   policy's refused command yields its refusal fact like any other),
+///   recording nothing.
 ///
 /// A process manager whose `STARTS` is empty can never start an instance;
 /// angzarr-embedded does not refuse one (no compile error, no check): the warning is
 /// angzarr-cli's.
 ///
-/// angzarr-embedded applies both rules: the first in [`check`](super::check), the
-/// second in the generated `Domain` impl, before the handler.
+/// The kernel registers it on the router's process-manager table, which
+/// applies the start rule.
 pub trait ProcessManager: Domain<State = Self, Rules = ()> {
     /// The input types (commands and facts) that may start an instance,
     /// in marker order: angzarr's `ComponentDescriptor.starting_types`.
@@ -528,15 +530,11 @@ impl TypedRefusal {
 /// - [`Rejection::Typed`]: a handler with `refuses` refused with one of
 ///   its listed objects.
 ///
-/// - [`Rejection::NoInstance`]: a command for a process manager's
-///   correlation with no instance, of a type that does not start one.
-///
 /// Either way the refusing domain records nothing.
 #[derive(Clone, PartialEq, Debug)]
 pub enum Rejection<R> {
     Message(R),
     Typed(TypedRefusal),
-    NoInstance { stream: Cover },
 }
 
 /// A message-only refusal: a handler's or a step's `Err` of the domain's
@@ -563,7 +561,7 @@ impl<R> Rejection<R> {
     pub fn refusal(&self) -> Option<&Any> {
         match self {
             Rejection::Typed(typed) => Some(&typed.object),
-            Rejection::Message(_) | Rejection::NoInstance { .. } => None,
+            Rejection::Message(_) => None,
         }
     }
 }
@@ -573,11 +571,6 @@ impl<R: fmt::Display> fmt::Display for Rejection<R> {
         match self {
             Rejection::Message(rejection) => rejection.fmt(f),
             Rejection::Typed(typed) => typed.report.fmt(f),
-            Rejection::NoInstance { stream } => write!(
-                f,
-                "process manager stream {} has no instance, and only a starting input starts one",
-                super::error::cover_text(stream)
-            ),
         }
     }
 }
@@ -589,7 +582,6 @@ impl<R: angzarr_embedded_diagnostic::Diagnostic> angzarr_embedded_diagnostic::Di
         match self {
             Rejection::Message(rejection) => rejection.code(),
             Rejection::Typed(typed) => typed.report.code(),
-            Rejection::NoInstance { .. } => "angzarr-embedded-next-pm-no-instance",
         }
     }
 
@@ -597,9 +589,6 @@ impl<R: angzarr_embedded_diagnostic::Diagnostic> angzarr_embedded_diagnostic::Di
         match self {
             Rejection::Message(rejection) => rejection.args(),
             Rejection::Typed(typed) => typed.report.args(),
-            Rejection::NoInstance { stream } => {
-                vec![("stream", super::error::cover_text(stream).into())]
-            }
         }
     }
 }
@@ -800,68 +789,10 @@ impl PolicyContext {
 }
 
 /// angzarr's refusal messages (`io.angzarr.v1`'s `CommandRefused`,
-/// `RefusalResponse` and `Refusal`, decision 14.31), wire-identical, field
-/// for field. The angzarr-proto revision angzarr-embedded pins predates them; when
-/// angzarr-embedded moves to one that has them, these are angzarr-proto's and this
-/// module goes.
+/// `RefusalResponse` and `Refusal`, decision 14.31), as angzarr-router
+/// carries them.
 pub mod v1 {
-    use angzarr_proto::v1::{CommandBook, EventBook, EventRef};
-    use prost_types::Any;
-
-    /// The standard refusal fact a pass-through policy delivers to its
-    /// source.
-    #[derive(Clone, PartialEq, prost::Message)]
-    pub struct CommandRefused {
-        /// The refused command, as delivered (identity stamped).
-        #[prost(message, optional, tag = "1")]
-        pub command: Option<CommandBook>,
-        /// The target's typed refusal object, packed; unset if none.
-        #[prost(message, optional, tag = "2")]
-        pub refusal: Option<Any>,
-        /// The policy's triggering event: the stream the fact is for.
-        #[prost(message, optional, tag = "3")]
-        pub trigger: Option<EventRef>,
-    }
-
-    impl prost::Name for CommandRefused {
-        const NAME: &'static str = "CommandRefused";
-        const PACKAGE: &'static str = "io.angzarr.v1";
-    }
-
-    /// A target's refusal, as the refused policy receives it.
-    #[derive(Clone, PartialEq, prost::Message)]
-    pub struct RefusalResponse {
-        /// The typed refusal object, packed; unset if none.
-        #[prost(message, optional, tag = "1")]
-        pub refusal: Option<Any>,
-        /// The refusal's message.
-        #[prost(string, tag = "2")]
-        pub message: String,
-    }
-
-    impl prost::Name for RefusalResponse {
-        const NAME: &'static str = "RefusalResponse";
-        const PACKAGE: &'static str = "io.angzarr.v1";
-    }
-
-    /// `PolicyService.OnRefused`'s input.
-    #[derive(Clone, PartialEq, prost::Message)]
-    pub struct Refusal {
-        /// The triggering event's book.
-        #[prost(message, optional, tag = "1")]
-        pub event: Option<EventBook>,
-        /// The refused command, as delivered.
-        #[prost(message, optional, tag = "2")]
-        pub command: Option<CommandBook>,
-        /// The target's refusal.
-        #[prost(message, optional, tag = "3")]
-        pub response: Option<RefusalResponse>,
-    }
-
-    impl prost::Name for Refusal {
-        const NAME: &'static str = "Refusal";
-        const PACKAGE: &'static str = "io.angzarr.v1";
-    }
+    pub use angzarr_router::pb::{CommandRefused, Refusal, RefusalResponse};
 }
 
 /// A projector written in the markup (`#[projector]`): one source domain,
@@ -1087,85 +1018,130 @@ fn command_payload(book: &angzarr_proto::v1::CommandBook) -> Option<&Any> {
     }
 }
 
-/// The context a command handler reads, from its `Tx`.
-#[doc(hidden)]
-pub fn __context<A: Domain>(tx: &super::domain::Tx<'_, A>) -> Context {
-    Context::new(
-        tx.recorded_at,
-        tx.stream.clone(),
-        tx.command_id.clone(),
-        tx.correlation_id.clone(),
-    )
+/// A marked-up domain's handlers, as angzarr-router dispatches them: what
+/// `#[aggregate]` and `#[process_manager]` generate, each marked handler
+/// registered on the router's table for the domain (`on_command`,
+/// `on_fact_with_context`, `on_refused`; a process manager's starting
+/// inputs `starts`).
+pub trait Routed: Domain {
+    /// `table`, with every marked handler registered on it.
+    fn route(
+        table: angzarr_router::domain::DomainDispatch<Self::State>,
+    ) -> angzarr_router::domain::DomainDispatch<Self::State>;
 }
 
-/// The context a fact handler reads, from its `IngestCtx`.
-#[doc(hidden)]
-pub fn __fact_context<A: Domain>(ctx: &super::domain::IngestCtx<'_, A>) -> Context {
-    Context::new(
-        ctx.recorded_at,
-        ctx.stream.clone(),
-        ctx.command_id.clone(),
-        ctx.correlation_id.clone(),
-    )
-    .with_fact_origin(ctx.source.clone())
-}
-
-/// Whether the stream a command is decided on holds an instance: any
-/// event at all.
-#[doc(hidden)]
-pub fn __decided_instance<A: Domain>(tx: &super::domain::Tx<'_, A>) -> bool {
-    tx.head > 0
-}
-
-/// Whether the stream a fact is ingested into holds an instance.
-#[doc(hidden)]
-pub fn __ingested_instance<A: Domain>(ctx: &super::domain::IngestCtx<'_, A>) -> bool {
-    ctx.head > 0
-}
-
-/// The refusal of a command that does not start a process manager, for a
-/// correlation with no instance.
-#[doc(hidden)]
-pub fn __no_instance<A: Domain, R>(tx: &super::domain::Tx<'_, A>) -> Rejection<R> {
-    Rejection::NoInstance {
-        stream: tx.stream.clone(),
+/// The context a handler reads: the input's stream and identity, as the
+/// router delivers them, and the instant its events will be recorded at.
+fn context_of(cctx: &angzarr_router::domain::CommandContext) -> Context {
+    let delivery = super::route::delivery();
+    let context = Context::new(
+        delivery.recorded_at,
+        cctx.cover.clone().unwrap_or(delivery.stream),
+        cctx.command_id.clone().unwrap_or(delivery.command_id),
+        cctx.correlation_id
+            .clone()
+            .unwrap_or(delivery.correlation_id),
+    );
+    match cctx.fact_origin.clone() {
+        Some(origin) => context.with_fact_origin(origin),
+        None => context,
     }
 }
 
-/// A command handler's result, run as one decision: its events emitted
-/// through `tx` (folded into the staged instance), then each continuation
-/// step on the staged instance, until there is none. A rejection anywhere
-/// refuses it all; more than [`STEP_LIMIT`] steps is the kernel's
-/// [`KernelError::TooManySteps`](super::KernelError::TooManySteps).
+/// The input `any` as a `T`, or the router's refusal of a payload that does
+/// not decode as the type it names.
+fn input<T: DomainMessage>(any: &Any) -> Result<T, angzarr_router::error::HandlerError> {
+    match __decode::<T>(any) {
+        Ok(Some(value)) => Ok(value),
+        Ok(None) | Err(_) => Err(angzarr_router::error::HandlerError::Coded(
+            angzarr_router::error::CodedError::invalid_argument(
+                angzarr_router::error::codes::ANY_DECODE_FAILED,
+                "the payload does not decode as its type",
+                [(
+                    angzarr_router::error::extras::TYPE_URL.to_string(),
+                    any.type_url.clone(),
+                )],
+            ),
+        )),
+    }
+}
+
+/// `events`, packed, as the book a handler answers the router with.
+fn book<A: Domain>(events: Vec<A::Event>) -> EventBook {
+    EventBook {
+        pages: events
+            .iter()
+            .map(|event| angzarr_proto::v1::EventPage {
+                payload: Some(event.to_any()),
+                ..Default::default()
+            })
+            .collect(),
+        ..EventBook::default()
+    }
+}
+
+/// `events` as the router records a fact: the first event as the record,
+/// the rest as its flags; nothing, as the record of no event.
+fn fact_record<A: Domain>(events: Vec<A::Event>) -> angzarr_router::domain::FactRecord {
+    let mut events = events.iter().map(|event| event.to_any());
+    let fact = events.next().unwrap_or_else(|| Any {
+        type_url: super::route::NOTHING.to_string(),
+        value: Vec::new(),
+    });
+    angzarr_router::domain::FactRecord {
+        fact,
+        flags: events.collect(),
+    }
+}
+
+/// A command handler's result, run as one decision: its events, then each
+/// continuation step on a working copy of `state` with every event so far
+/// applied, until there is none. A rejection anywhere refuses it all, as
+/// the router carries a business refusal; more than [`STEP_LIMIT`] steps is
+/// the kernel's [`KernelError::TooManySteps`](super::KernelError::TooManySteps).
 #[doc(hidden)]
-pub fn __decide<A, O, E>(
-    tx: &mut super::domain::Tx<'_, A>,
-    ctx: &Context,
-    handled: Result<O, E>,
-) -> Result<(), A::Rejection>
+pub fn __command<A, R, C, O, E>(
+    any: &Any,
+    state: &A,
+    cctx: angzarr_router::domain::CommandContext,
+    handler: impl FnOnce(&A, C, &Context) -> Result<O, E>,
+) -> Result<Option<EventBook>, angzarr_router::error::HandlerError>
 where
-    A: Domain<State = A>,
+    A: Domain<State = A, Rules = (), Rejection = Rejection<R>> + Clone,
+    R: angzarr_embedded_diagnostic::Diagnostic,
+    C: DomainMessage,
     O: Emits<A>,
     E: Into<A::Rejection>,
 {
-    let mut emit = handled.map_err(Into::into)?.into_emit();
+    let refuse =
+        |rejection: Rejection<R>| super::route::rejection(&rejection, rejection.refusal().cloned());
+    let ctx = context_of(&cctx);
+    let command = input::<C>(any)?;
+    let mut emit = handler(state, command, &ctx)
+        .map_err(|e| refuse(e.into()))?
+        .into_emit();
+    let mut working = state.clone();
+    let mut events = Vec::new();
     let mut steps = 0;
     loop {
         for event in std::mem::take(&mut emit.events) {
-            tx.emit(event);
+            A::apply(&mut working, &event, &());
+            events.push(event);
         }
         let Some(next) = emit.next.take() else {
-            return Ok(());
+            return Ok(Some(book::<A>(events)));
         };
         steps += 1;
         if steps > STEP_LIMIT {
-            tx.fault = Some(super::error::KernelError::TooManySteps {
-                stream: tx.stream.clone(),
-                limit: STEP_LIMIT,
-            });
-            return Ok(());
+            return Err(angzarr_router::error::HandlerError::Coded(
+                angzarr_router::error::CodedError::internal(
+                    super::route::TOO_MANY_STEPS,
+                    "the decision ran more continuation steps than its limit",
+                    [],
+                ),
+            ));
         }
-        emit = next(tx.state(), ctx)?;
+        emit = next(&working, &ctx).map_err(refuse)?;
     }
 }
 
@@ -1174,10 +1150,69 @@ where
 /// them applied. Infallible; more than [`STEP_LIMIT`] steps is a bug,
 /// which panics (the kernel's `IngestPanicked`, dead-lettered).
 #[doc(hidden)]
-pub fn __ingest<A, R>(state: &A, ctx: &Context, recorded: R) -> Vec<A::Event>
+pub fn __fact<A, F, Rr>(
+    any: &Any,
+    state: &A,
+    cctx: angzarr_router::domain::CommandContext,
+    handler: impl FnOnce(&A, F, &Context) -> Rr,
+) -> Result<angzarr_router::domain::FactRecord, angzarr_router::error::HandlerError>
 where
     A: Domain<State = A, Rules = ()> + Clone,
-    R: Records<A>,
+    F: DomainMessage,
+    Rr: Records<A>,
+{
+    let ctx = context_of(&cctx);
+    let fact = input::<F>(any)?;
+    Ok(fact_record::<A>(record(
+        state,
+        &ctx,
+        handler(state, fact, &ctx),
+    )))
+}
+
+/// A passed-through refusal's handler (`#[on_refused(C)]` on a domain),
+/// for the router's `CommandRefused` of a `C`: run as a fact handler's.
+#[doc(hidden)]
+pub fn __on_refused<A, C, Rr>(
+    refused: &v1::CommandRefused,
+    state: &A,
+    handler: impl FnOnce(&A, CommandRefused<C>, &Context) -> Rr,
+) -> Result<angzarr_router::domain::FactRecord, angzarr_router::error::HandlerError>
+where
+    A: Domain<State = A, Rules = ()> + Clone,
+    C: DomainMessage,
+    Rr: Records<A>,
+{
+    let delivery = super::route::delivery();
+    let mut ctx = Context::new(
+        delivery.recorded_at,
+        delivery.stream,
+        delivery.command_id,
+        delivery.correlation_id,
+    );
+    if let Some(origin) = delivery.fact_origin {
+        ctx = ctx.with_fact_origin(origin);
+    }
+    let book = refused.command.clone().unwrap_or_default();
+    let command = input::<C>(command_payload(&book).unwrap_or(&Any::default()))?;
+    let refused = CommandRefused {
+        command,
+        target: book.cover.unwrap_or_default(),
+        refusal: refused.refusal.clone(),
+        trigger: refused.trigger.clone().unwrap_or_default(),
+    };
+    Ok(fact_record::<A>(record(
+        state,
+        &ctx,
+        handler(state, refused, &ctx),
+    )))
+}
+
+/// A fact's record run as one decision on a working copy of `state`.
+fn record<A, Rr>(state: &A, ctx: &Context, recorded: Rr) -> Vec<A::Event>
+where
+    A: Domain<State = A, Rules = ()> + Clone,
+    Rr: Records<A>,
 {
     let mut working = state.clone();
     let mut events = Vec::new();

@@ -487,6 +487,10 @@ fn a_policy_book_for_an_unregistered_target_is_a_dead_lettered_bug() {
         .register::<Account>(
             crate::next::toys::fees(),
             crate::next::Upcaster::new("u", "account"),
+            crate::next::toys::handlers::<crate::next::toys::Account>(
+                crate::next::toys::Fees { withdrawal: 1 },
+                "v2",
+            ),
         )
         .unwrap();
     let log = MemoryDeadLetters::new();
@@ -1139,21 +1143,6 @@ impl crate::next::Domain for Impostor {
     type Rules = ();
 
     const NAME: &'static str = "account";
-
-    fn decide(
-        cmd: &std::convert::Infallible,
-        _: &mut crate::next::Tx<'_, Self>,
-    ) -> Result<(), std::convert::Infallible> {
-        match *cmd {}
-    }
-
-    fn ingest(
-        _: &crate::next::toys::LedgerState,
-        fact: &std::convert::Infallible,
-        _: &crate::next::IngestCtx<'_, Self>,
-    ) -> Vec<std::convert::Infallible> {
-        match *fact {}
-    }
 
     fn apply(_: &mut crate::next::toys::LedgerState, event: &std::convert::Infallible, (): &()) {
         match *event {}

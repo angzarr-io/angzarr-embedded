@@ -26,22 +26,22 @@
 //!    correlation (given, else the command id; a reaction's trigger's) and,
 //!    for a reaction, the command's own causation (its trigger: transport
 //!    and trace metadata, never stamped on its events). An [`Identified`].
-//! 3. **Load, then deduplicate**: the
-//!    snapshot and newer events are loaded first; then, does the addressed
-//!    stream already hold events with this command id? Answered
-//!    [`Handled::Duplicate`] with them, and nothing below runs. (Loading
-//!    first closes the race in which a retry's lookup misses an original
-//!    that commits before the retry loads.)
+//! 3. **Load, then admit**: the snapshot and newer events are loaded
+//!    first; then the command id is looked up on the addressed stream, and
+//!    angzarr-router admits the input (a refusal fact's address,
+//!    deduplication by the events found, a process manager's start rule).
+//!    Events found are answered [`Handled::Duplicate`], and nothing below
+//!    runs. (Loading first closes the race in which a retry's lookup misses
+//!    an original that commits before the retry loads.)
 //! 4. **Resolve**: the expected sequence stamped or
 //!    checked, against the head step 3 loaded, under the resolved
 //!    [`ConflictResolution`](v1::ConflictResolution) (STRICT refuses a stale
-//!    one here); the window and a [`Nonce`] otherwise.
-//! 5. **Decode, then decide or ingest**: the snapshot (discarded on a rules-version or
-//!    state-type mismatch), the events and the command, each upcast by type
-//!    URL; then the body arm picks the pipeline: a command is decided
-//!    ([`Domain::decide`], fallible, staging in a [`Tx`]), a fact ingested
-//!    ([`Domain::ingest`], infallible, with a read-only [`IngestCtx`]).
-//!    Business output is payloads only: the kernel stamps every event's
+//!    one here); the window and a nonce otherwise.
+//! 5. **Dispatch**: angzarr-router's `CommandHandler` for the domain gets
+//!    the `ContextualCommand` (the snapshot, the events, upcast, and the
+//!    command, its handling resolved) and runs its handler: a command's,
+//!    which may refuse ([`Rejected`]), or a fact's, which may not. Business
+//!    output is payloads only: the kernel stamps every event's
 //!    [`EventMeta`](v1::EventMeta).
 //!
 //! Each step's output type is the next step's only input, so the order
@@ -49,8 +49,8 @@
 //!
 //! Each step is ONE atomic write to the store (no unit of work): one
 //! stream's events at the length it was loaded at, with the step's
-//! positions. Then every [`Policy`] for the source's domain runs on the
-//! written events, each of its commands a step of its own in its target,
+//! positions. Then every [`Policy`] for the source's domain runs, through
+//! angzarr-router's `PolicyDispatch`, on the written events, each of its commands a step of its own in its target,
 //! depth first, with the policy's position written with it; a step that
 //! fails keeps every write before it ([`Failure`], with the path to the
 //! failing [`Step`]), and what is owed is resumed by position
@@ -75,6 +75,7 @@ pub mod markup;
 mod payload;
 mod policy;
 mod registry;
+mod route;
 mod store;
 mod stream;
 mod upcast;
@@ -109,9 +110,8 @@ pub use angzarr_ports;
 pub use angzarr_router;
 pub use check::{check, Body, Checked, Identified, Malformed, Sampled};
 pub use conflict::{Key, UnitPath, Units};
-pub use coordinator::Nonce;
 pub use dead_letter::{dead_letter_line, DeadLetterLog, MemoryDeadLetters, DEAD_LETTER_PREFIX};
-pub use domain::{Conflicts, Decision, Domain, IngestCtx, State, Tx};
+pub use domain::{Domain, State};
 pub use error::{
     ChainProblem, Failure, KernelError, PayloadError, Recovery, ReplayError, Step, StepError,
     UpcastChainError, UpcastError,
@@ -126,6 +126,7 @@ pub use policy::{
     policy, projection, target_cover, Order, Policy, PolicyHandler, Projection, Projector,
 };
 pub use registry::{Aggregate, Misconfigured, Registry};
+pub use route::{recorded_at, rejection, Rejected};
 pub use store::{
     Append, ChangeToken, EventStore, Head, ListStreams, Outbox, OutboxEntry, PositionKey,
     PositionStore, Purge, ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, Slice,
@@ -197,7 +198,6 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn angzarr_embedded_diagnostic::D
         Malformed::FactCommandIdNotDerived,
         Malformed::HandlingOnFact,
         Malformed::UnknownConflictResolution { value: 9 },
-        Malformed::RootNotCorrelation,
         Malformed::RefusalMisaddressed,
         Malformed::UnsupportedConflictResolution {
             domain: domain(),
@@ -256,11 +256,10 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn angzarr_embedded_diagnostic::D
                 type_url: "/toy.v9.Bonus".to_string(),
             }),
         },
-        KernelError::Router(angzarr_router::error::CodedError::internal(
-            angzarr_router::error::codes::POLICY_COMMAND_NO_ROOT,
-            angzarr_router::error::messages::POLICY_COMMAND_NO_ROOT,
-            [],
-        )),
+        KernelError::HandlerUnavailable {
+            stream: stream(),
+            cause: "not-running".to_string(),
+        },
     ];
     let replay = [
         ReplayError::OutOfSequence { index: 1, found: 2 },
@@ -383,9 +382,11 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn angzarr_embedded_diagnostic::D
         committed: Vec::new(),
         failures: vec![("balances", report())],
     }));
-    samples.push(Box::new(markup::Rejection::<WireError>::NoInstance {
-        stream: stream(),
-    }));
+    for (reason, _) in route::REASONS {
+        samples.push(Box::new(KernelError::Router(
+            angzarr_router::error::CodedError::internal(reason, reason, []),
+        )));
+    }
     samples.push(Box::new(missing));
     samples.push(Box::new(WireError::UnknownEnum {
         message: "toy.v1.Closed",

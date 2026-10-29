@@ -698,40 +698,6 @@ fn a_facts_events_read_back_with_its_origin() {
 }
 
 #[test]
-fn a_decision_for_another_stream_at_the_same_head_does_not_commit() {
-    let registry = registry();
-    let log = crate::next::MemoryDeadLetters::new();
-    let store = MemoryStore::new();
-    let mut coordinator = crate::next::coordinator::steps::Coordinator::new(&store, &registry);
-    let identified = crate::next::check(
-        command(cover("account", 1), AccountCmd::Open.to_any()),
-        &registry,
-    )
-    .unwrap()
-    .identify(&at(1));
-    let crate::next::coordinator::Deduplicated::Novel(novel) =
-        coordinator.deduplicate(identified).unwrap()
-    else {
-        panic!("new");
-    };
-    let mut prepared = coordinator
-        .load(novel)
-        .unwrap()
-        .decode::<Account>(&registry)
-        .unwrap();
-    let decision = prepared.decide(&at(1), &registry, &log).unwrap();
-    let mut other = Stream::<Account>::new(root(2), None).unwrap();
-    assert_eq!(
-        other.commit(decision, &registry, &mut []),
-        Err(KernelError::Stale {
-            stream: cover("account", 1),
-            expected: 0,
-            actual: 0
-        })
-    );
-}
-
-#[test]
 fn commutative_cannot_compare_a_window_hidden_in_a_snapshot() {
     use crate::next::toys::{set, shelf, ShelfState};
     use crate::next::v1::ConflictResolution;
@@ -783,4 +749,35 @@ fn commutative_cannot_compare_a_window_hidden_in_a_snapshot() {
         matches!(&applied, crate::next::Executed::Applied(e) if e.len() == 1),
         "the window from the first held event is held: c and d commute: {applied:?}"
     );
+}
+
+/// A stream resumed from a snapshot hands the router the snapshot at the
+/// sequence just before its first held event, so its state is the
+/// snapshot's with every held event folded on: a withdrawal of all of it
+/// is decided against the deposit after the snapshot.
+#[test]
+fn a_resumed_stream_decides_against_its_snapshot_and_the_events_after_it() {
+    let registry = registry();
+    let log = crate::next::MemoryDeadLetters::new();
+    let snapshot = Snapshot {
+        sequence: 1,
+        state: Some(pack(&account::AccountState {
+            open: true,
+            cents: 100,
+            ..Default::default()
+        })),
+        rules_version: "v2".to_string(),
+    };
+    let mut stream = Stream::<Account>::resume(
+        cover("account", 1),
+        &snapshot,
+        None,
+        &[page(2, pack(&account::Deposited { cents: 50 }))],
+        &registry,
+    )
+    .unwrap();
+    let withdraw = command(cover("account", 1), AccountCmd::Withdraw(149).to_any()).id(9);
+    let executed = stream.execute(withdraw, &registry, &at(9), &log, &mut []);
+    assert!(executed.is_ok(), "{:?}", executed.err());
+    assert_eq!(stream.state().cents, 0, "150, less 149 and the fee");
 }

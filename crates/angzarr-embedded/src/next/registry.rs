@@ -15,26 +15,29 @@
 use std::any::Any as AnyType;
 use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-use angzarr_proto::v1::{ConflictResolution, EventPage, Snapshot, StateDescriptor, Uuid};
-use prost_types::Any;
+use angzarr_proto::v1::{ConflictResolution, EventPage, Snapshot, StateDescriptor};
+use angzarr_router::domain::DomainDispatch;
+use angzarr_router::policy::PolicyDispatch;
+use angzarr_router::router::CommandHandler;
 
-use angzarr_embedded_diagnostic::{Arg, Diagnostic, Report};
+use angzarr_embedded_diagnostic::{Arg, Diagnostic};
 
-use super::check::Sampled;
-use super::coordinator::{run_step, Contextual};
-use super::dead_letter::DeadLetterLog;
+use super::coordinator::Contextual;
 use super::domain::{Domain, State};
-use super::error::{Failure, StepError, UpcastChainError};
+use super::error::{KernelError, UpcastChainError};
 use super::markup::{self, AsyncProjector, Projecting, ProjectionContext};
 use super::payload::{type_name, Payload};
+use super::route;
+use super::stream::Stream;
 use super::upcast::Upcaster;
 use super::version::Rulebook;
 
 /// One domain's entry.
 struct Entry {
-    /// `D::State::descriptor()`, as generated.
+    /// The state's descriptor: generated (`D::State::descriptor()`), or a
+    /// hand-built handler's.
     state: StateDescriptor,
     /// The resolutions it lists, read once at registration.
     supported: Vec<ConflictResolution>,
@@ -42,27 +45,33 @@ struct Entry {
     component: Option<ConflictResolution>,
     /// `D::CONFLICT_RESOLUTION_BY_COMMAND`, by full type name.
     by_command: BTreeMap<String, ConflictResolution>,
-    /// The rulebook's current version.
+    /// The current rules version.
     rules_version: String,
-    /// The `Rulebook<D::Rules>`, boxed.
-    rules: Box<dyn AnyType + Send + Sync>,
-    upcaster: Upcaster,
-    /// The current event, command and fact type URLs: what an upcast chain
-    /// must end at.
-    current: fn() -> Vec<String>,
-    /// `D`'s typed step 5, erased: [`typed_step::<D>`].
-    step: TypedStep,
-    /// A marked-up domain's factory: every fresh `D::State`, boxed.
-    fresh: Option<Fresh>,
-    /// Whether it is a process manager: its root is the correlation.
+    /// What dispatches the domain's inputs: angzarr-router's.
+    handler: Box<dyn CommandHandler>,
+    /// What only a typed domain has: its rulebook, upcaster, payload types,
+    /// factory and typed replay.
+    typed: Option<Typed>,
+    /// Whether it is a process manager: an absent correlation is its root.
     process_manager: bool,
 }
 
-/// A marked-up domain's factory, erased: a `Factory<D::State>`, boxed.
-type Fresh = Box<dyn AnyType + Send + Sync>;
+/// A typed [`Domain`]'s parts, erased.
+struct Typed {
+    /// The `Arc<Rulebook<D::Rules>>`, boxed.
+    rules: Box<dyn AnyType + Send + Sync>,
+    upcaster: Arc<Upcaster>,
+    /// The current event, command and fact type URLs: what an upcast chain
+    /// must end at.
+    current: fn() -> Vec<String>,
+    /// Every fresh `D::State`: a `Factory<D::State>`, boxed.
+    fresh: Box<dyn AnyType + Send + Sync>,
+    /// The chain's `Stream<D>` after a step: [`replay::<D>`].
+    replay: TypedReplay,
+}
 
 /// A factory of `S`.
-type Factory<S> = Box<dyn Fn() -> S + Send + Sync>;
+type Factory<S> = Arc<dyn Fn() -> S + Send + Sync>;
 
 /// A marked-up projector, erased, its one instance held here: out of the
 /// lock while it runs.
@@ -72,46 +81,25 @@ pub(crate) struct ProjectorEntry {
     pub(crate) instance: Mutex<Option<Box<dyn ErasedProjector>>>,
 }
 
-/// A registered [`Policy`](super::Policy), its types erased, held in the
+/// A registered policy, as angzarr-router dispatches it, held in the
 /// registry's one list in registration order.
-pub(crate) trait ErasedPolicy: Send + Sync {
-    /// Its name: its commands' component and its position's handler.
-    fn name(&self) -> &'static str;
-    /// The domain whose events it handles.
-    fn source(&self) -> &'static str;
-    /// The domain it sends commands to.
-    fn target(&self) -> &'static str;
-    /// Whether its refused command is answered by its refusal fact.
-    fn answers_refusals(&self) -> bool;
-    /// The commands it sends for `event`, each with its target's root.
-    fn on_event(&self, event: &Any, ctx: &super::markup::PolicyContext) -> Vec<(Uuid, Any)>;
-    /// Its refusal fact's payload for `refusal`.
-    fn on_refused(&self, refusal: &super::markup::v1::Refusal) -> Any;
+pub(crate) struct PolicyEntry {
+    pub(crate) dispatch: PolicyDispatch,
+    /// Whether a refusal of its command is answered by its refusal fact
+    /// (the router's OnRefused); a policy that does not has its refused
+    /// command fail the step.
+    pub(crate) answers_refusals: bool,
 }
 
-impl<P: super::Policy> ErasedPolicy for P {
-    fn name(&self) -> &'static str {
-        P::NAME
+impl PolicyEntry {
+    /// Its name: its commands' component and its position's handler.
+    pub(crate) fn name(&self) -> &str {
+        self.dispatch.name()
     }
 
-    fn source(&self) -> &'static str {
-        <P::Source as Domain>::NAME
-    }
-
-    fn target(&self) -> &'static str {
-        <P::Target as Domain>::NAME
-    }
-
-    fn answers_refusals(&self) -> bool {
-        P::ANSWERS_REFUSALS
-    }
-
-    fn on_event(&self, event: &Any, ctx: &super::markup::PolicyContext) -> Vec<(Uuid, Any)> {
-        super::Policy::on_event(self, event, ctx).map_or_else(Vec::new, |c| c.into_orders())
-    }
-
-    fn on_refused(&self, refusal: &super::markup::v1::Refusal) -> Any {
-        super::Policy::on_refused(self, refusal)
+    /// The domain whose events it handles.
+    pub(crate) fn source(&self) -> &str {
+        self.dispatch.input_domain()
     }
 }
 
@@ -119,7 +107,7 @@ impl<P: super::Policy> ErasedPolicy for P {
 pub(crate) trait ErasedProjector: Send {
     fn project<'a>(
         &'a mut self,
-        event: &'a Any,
+        event: &'a prost_types::Any,
         ctx: &'a ProjectionContext,
     ) -> Option<Projecting<'a>>;
 }
@@ -127,59 +115,38 @@ pub(crate) trait ErasedProjector: Send {
 impl<P: AsyncProjector> ErasedProjector for P {
     fn project<'a>(
         &'a mut self,
-        event: &'a Any,
+        event: &'a prost_types::Any,
         ctx: &'a ProjectionContext,
     ) -> Option<Projecting<'a>> {
         AsyncProjector::project(self, event, ctx)
     }
 }
 
-/// A domain's typed step 5, its types erased so a chain can run a policy's
-/// command in a target it knows only by name: decode (from the chain's
-/// staged `Stream<D>`, boxed, when it has one), decide or ingest, and hand
-/// back the stream after (boxed) and the pages to append. A rejection
-/// comes back as its report.
-pub(crate) type TypedStep = fn(
-    Contextual,
-    Option<Box<dyn AnyType + Send>>,
-    &Registry,
-    &Sampled,
-    &dyn DeadLetterLog,
-) -> Result<(Box<dyn AnyType + Send>, Vec<EventPage>), StepFailure>;
+/// A typed domain's stream after a step, its type erased so a chain can
+/// hold it for a domain it knows only by name: the stream as the step
+/// loaded it ([`Contextual`]) with the step's `pages` folded on, a
+/// `Stream<D>`, boxed.
+pub(crate) type TypedReplay =
+    fn(&Contextual, &[EventPage], &Registry) -> Result<Box<dyn AnyType + Send>, KernelError>;
 
-/// Why a typed step failed: the error, and for a rejection the typed
-/// refusal object it carries, packed ([`Domain::refusal`]), which a refused
-/// policy receives.
-pub(crate) struct StepFailure {
-    pub(crate) error: StepError,
-    pub(crate) refusal: Option<Any>,
-}
-
-/// [`TypedStep`] for `D`.
-fn typed_step<D: Domain>(
-    command: Contextual,
-    staged: Option<Box<dyn AnyType + Send>>,
+/// [`TypedReplay`] for `D`.
+fn replay<D: Domain>(
+    loaded: &Contextual,
+    pages: &[EventPage],
     registry: &Registry,
-    sampled: &Sampled,
-    dead_letters: &dyn DeadLetterLog,
-) -> Result<(Box<dyn AnyType + Send>, Vec<EventPage>), StepFailure> {
-    let (stream, pages) =
-        run_step::<D>(command, staged, registry, sampled, dead_letters).map_err(|failure| {
-            let plain = |error| StepFailure {
-                error,
-                refusal: None,
-            };
-            match failure {
-                Failure::Rejected(rejection) => StepFailure {
-                    error: StepError::Rejected(Report::of(&rejection)),
-                    refusal: D::refusal(&rejection),
-                },
-                Failure::Kernel(error) => plain(StepError::Kernel(error)),
-                Failure::Downstream { error, .. } => plain(error),
-                Failure::Projection { .. } => unreachable!("a chain step runs no projector"),
-            }
-        })?;
-    Ok((Box::new(stream), pages))
+) -> Result<Box<dyn AnyType + Send>, KernelError> {
+    let cover = loaded.command.cover().clone();
+    let mut stream = match &loaded.snapshot {
+        Some(snapshot) => {
+            // The stream's last instant is the floor only if no event
+            // follows the snapshot; otherwise the events carry their own.
+            let floor = loaded.last_recorded_at.filter(|_| loaded.pages.is_empty());
+            Stream::<D>::resume(cover, snapshot, floor, &loaded.pages, registry)?
+        }
+        None => Stream::<D>::replay(cover, &loaded.pages, registry)?,
+    };
+    stream.extend(pages, registry)?;
+    Ok(Box::new(stream))
 }
 
 /// Why a domain could not be registered: angzarr refuses the same
@@ -304,8 +271,37 @@ impl Diagnostic for Misconfigured {
 pub struct Registry {
     domains: BTreeMap<String, Entry>,
     /// The registered policies, in registration order: the one list.
-    policies: Vec<Box<dyn ErasedPolicy>>,
+    policies: Vec<PolicyEntry>,
     projectors: Vec<ProjectorEntry>,
+}
+
+/// The resolutions `state` lists, refused unless every one is a resolution
+/// and the implicit base (STRICT and AGGREGATE_HANDLES) is there.
+fn supported(
+    domain: &str,
+    state: &StateDescriptor,
+) -> Result<Vec<ConflictResolution>, Misconfigured> {
+    let bad = || Misconfigured::BadStateDescriptor {
+        domain: domain.to_string(),
+    };
+    let listed = state
+        .options
+        .as_ref()
+        .map(|o| o.conflict_resolutions.as_slice())
+        .unwrap_or_default();
+    let mut supported = Vec::with_capacity(listed.len());
+    for value in listed {
+        match ConflictResolution::try_from(*value) {
+            Ok(ConflictResolution::Unspecified) | Err(_) => return Err(bad()),
+            Ok(resolution) => supported.push(resolution),
+        }
+    }
+    if !supported.contains(&ConflictResolution::Strict)
+        || !supported.contains(&ConflictResolution::AggregateHandles)
+    {
+        return Err(bad());
+    }
+    Ok(supported)
 }
 
 impl Registry {
@@ -314,15 +310,34 @@ impl Registry {
     }
 
     /// Register `D` under `D::NAME`, with its rules (whose current version
-    /// is stamped on every event) and its upcaster (for events and,
-    /// discouraged, commands). Fills the entry from `D::State`'s generated
-    /// descriptor, as `registry.register::<D>()` fills angzarr's
-    /// `ComponentDescriptor.state`, and refuses configuration the state
-    /// does not support.
+    /// is stamped on every event, and under which each event folds), its
+    /// upcaster (for events and, discouraged, commands), and its handlers:
+    /// `handlers` registers them on the router's table for `D`
+    /// (`DomainDispatch`, over `D::State`, already folding, restoring
+    /// snapshots and resolving COMMUTATIVE through `D`), with
+    /// `on_command`, `on_fact` and `on_refused`. Fills the entry from
+    /// `D::State`'s generated descriptor, as `registry.register::<D>()`
+    /// fills angzarr's `ComponentDescriptor.state`, and refuses
+    /// configuration the state does not support.
     pub fn register<D: Domain>(
         &mut self,
         rules: Rulebook<D::Rules>,
         upcaster: Upcaster,
+        handlers: impl FnOnce(DomainDispatch<D::State>) -> DomainDispatch<D::State>,
+    ) -> Result<(), Misconfigured> {
+        let fresh: Factory<D::State> = Arc::new(D::State::default);
+        self.typed::<D>(rules, upcaster, fresh, false, handlers)
+    }
+
+    /// Register typed `D`, built fresh by `fresh`, a process manager if
+    /// `process_manager`, its handlers registered by `handlers`.
+    fn typed<D: Domain>(
+        &mut self,
+        rules: Rulebook<D::Rules>,
+        upcaster: Upcaster,
+        fresh: Factory<D::State>,
+        process_manager: bool,
+        handlers: impl FnOnce(DomainDispatch<D::State>) -> DomainDispatch<D::State>,
     ) -> Result<(), Misconfigured> {
         let domain = D::NAME.to_string();
         if self.domains.contains_key(&domain) {
@@ -344,25 +359,7 @@ impl Registry {
         {
             return Err(Misconfigured::BadStateDescriptor { domain });
         }
-        let listed = state
-            .options
-            .as_ref()
-            .map(|o| o.conflict_resolutions.as_slice())
-            .unwrap_or_default();
-        let mut supported = Vec::with_capacity(listed.len());
-        for value in listed {
-            match ConflictResolution::try_from(*value) {
-                Ok(ConflictResolution::Unspecified) | Err(_) => {
-                    return Err(Misconfigured::BadStateDescriptor { domain })
-                }
-                Ok(resolution) => supported.push(resolution),
-            }
-        }
-        if !supported.contains(&ConflictResolution::Strict)
-            || !supported.contains(&ConflictResolution::AggregateHandles)
-        {
-            return Err(Misconfigured::BadStateDescriptor { domain });
-        }
+        let supported = supported(&domain, &state)?;
         let unsupported = |command_type: Option<&str>, resolution: ConflictResolution| {
             Misconfigured::UnsupportedResolution {
                 domain: domain.clone(),
@@ -382,25 +379,86 @@ impl Registry {
             }
             by_command.insert(command_type.to_string(), *resolution);
         }
+        let rules = Arc::new(rules);
+        let upcaster = Arc::new(upcaster);
+        let table = route::table::<D>(
+            Arc::clone(&rules),
+            Arc::clone(&upcaster),
+            Arc::clone(&fresh),
+            process_manager,
+        );
         let entry = Entry {
             state,
             supported,
             component: D::CONFLICT_RESOLUTION,
             by_command,
             rules_version: rules.current().0.to_string(),
-            rules: Box::new(rules),
-            upcaster,
-            current: || {
-                let mut urls = D::Event::type_urls();
-                urls.extend(D::Command::type_urls());
-                urls.extend(D::Fact::type_urls());
-                urls
-            },
-            step: typed_step::<D>,
-            fresh: None,
-            process_manager: false,
+            handler: Box::new(handlers(table)),
+            typed: Some(Typed {
+                rules: Box::new(rules),
+                upcaster,
+                current: || {
+                    let mut urls = D::Event::type_urls();
+                    urls.extend(D::Command::type_urls());
+                    urls.extend(D::Fact::type_urls());
+                    urls
+                },
+                fresh: Box::new(fresh),
+                replay: replay::<D>,
+            }),
+            process_manager,
         };
         self.domains.insert(domain, entry);
+        Ok(())
+    }
+
+    /// Register `handler` as domain `domain`: any angzarr-router
+    /// `CommandHandler` (a `DomainDispatch` built by hand, or a handler in
+    /// another process behind one). The kernel knows only what its
+    /// registration hello (`ComponentDescriptor`) says: its state's
+    /// descriptor and its rules version, which its events are stamped with.
+    /// Its streams are dispatched like any domain's; with no typed
+    /// [`Domain`] behind it, a chain holds no typed stream of it
+    /// ([`Recorded::events`](super::Recorded::events) is `None`).
+    pub fn command_handler(
+        &mut self,
+        domain: &str,
+        handler: impl CommandHandler + 'static,
+    ) -> Result<(), Misconfigured> {
+        let name = domain.to_string();
+        if self.domains.contains_key(&name) {
+            return Err(Misconfigured::AlreadyRegistered { domain: name });
+        }
+        let descriptor = handler.component_descriptor().map_err(|error| {
+            match error.code == angzarr_router::error::codes::MISSING_RULES_VERSION {
+                true => Misconfigured::EmptyRulesVersion {
+                    domain: name.clone(),
+                },
+                false => Misconfigured::BadStateDescriptor {
+                    domain: name.clone(),
+                },
+            }
+        })?;
+        let state = descriptor
+            .state
+            .ok_or_else(|| Misconfigured::BadStateDescriptor {
+                domain: name.clone(),
+            })?;
+        let supported = supported(&name, &state)?;
+        let process_manager = handler.kind() == angzarr_router::pb::ComponentKind::ProcessManager;
+        self.domains.insert(
+            name,
+            Entry {
+                state,
+                supported,
+                component: None,
+                by_command: BTreeMap::new(),
+                rules_version: descriptor.rules_version,
+                handler: Box::new(handler),
+                typed: None,
+                process_manager,
+            },
+        );
         Ok(())
     }
 
@@ -414,7 +472,9 @@ impl Registry {
     /// that changes.
     ///
     /// This is the whole registration of a marked-up aggregate, with no
-    /// error path: its rules are `()`, recorded under the fixed
+    /// error path: its handlers are the router's table its markup
+    /// generates ([`Routed`](super::markup::Routed)), its rules are `()`,
+    /// recorded under the fixed
     /// [`MARKUP_RULES_VERSION`](super::markup::MARKUP_RULES_VERSION), and
     /// its upcaster an empty one unless [`Aggregate::upcaster`] gives one.
     /// What [`Registry::register`] would refuse (a domain registered twice,
@@ -424,15 +484,14 @@ impl Registry {
     /// It returns the registration, to give an upcaster; it derefs to the
     /// registry, so registrations chain:
     /// `registry.aggregate::<Wallet>(f).upcaster(u).aggregate::<Lamp>(g)`.
-    ///
     pub fn aggregate<D>(
         &mut self,
         factory: impl Fn() -> D + Send + Sync + 'static,
     ) -> Aggregate<'_, D>
     where
-        D: Domain<State = D, Rules = ()>,
+        D: Domain<State = D, Rules = ()> + markup::Routed,
     {
-        self.marked_up::<D>(factory, false);
+        self.marked_up::<D>(Arc::new(factory), Upcaster::new(D::NAME, D::NAME), false);
         Aggregate {
             registry: self,
             domain: std::marker::PhantomData,
@@ -443,85 +502,96 @@ impl Registry {
     /// with `factory`, which builds every fresh instance. A process manager
     /// is a domain, registered as [`Registry::aggregate`] registers one
     /// (the markup's rules version, an empty upcaster, a second
-    /// registration PANICS at startup), plus the two rules of
-    /// [`ProcessManager`](super::markup::ProcessManager): an input
-    /// addressed to it must name the instance its correlation names
-    /// ([`check`](super::check) refuses any other), and only a starting
-    /// input type may start an instance (its generated `Domain` impl).
-    pub fn process_manager<P: super::markup::ProcessManager>(
+    /// registration PANICS at startup), on the router's process-manager
+    /// table: only a starting input type may start an instance.
+    pub fn process_manager<P>(
         &mut self,
         factory: impl Fn() -> P + Send + Sync + 'static,
-    ) -> &mut Self {
-        self.marked_up::<P>(factory, true);
+    ) -> &mut Self
+    where
+        P: super::markup::ProcessManager + markup::Routed,
+    {
+        self.marked_up::<P>(Arc::new(factory), Upcaster::new(P::NAME, P::NAME), true);
         self
     }
 
-    /// Register `D`, marked up, with `factory`; a process manager if `pm`.
-    /// A registration [`Registry::register`] refuses panics: a bug in the
-    /// composition root.
-    fn marked_up<D>(&mut self, factory: impl Fn() -> D + Send + Sync + 'static, pm: bool)
+    /// Register `D`, marked up, with `factory` and `upcaster`; a process
+    /// manager if `pm`. A registration [`Registry::register`] refuses
+    /// panics: a bug in the composition root.
+    fn marked_up<D>(&mut self, factory: Factory<D>, upcaster: Upcaster, pm: bool)
     where
-        D: Domain<State = D, Rules = ()>,
+        D: Domain<State = D, Rules = ()> + markup::Routed,
     {
         let rules = Rulebook::new(markup::MARKUP_RULES_VERSION, ());
-        if let Err(problem) = self.register::<D>(rules, Upcaster::new(D::NAME, D::NAME)) {
+        if let Err(problem) = self.typed::<D>(rules, upcaster, factory, pm, D::route) {
             panic!("{problem}");
         }
-        let entry = self
-            .domains
-            .get_mut(D::NAME)
-            .expect("the domain was just registered");
-        let factory: Factory<D> = Box::new(factory);
-        entry.fresh = Some(Box::new(factory));
-        entry.process_manager = pm;
     }
 
-    /// Register `policy`, written by hand or marked up (`#[policy]`): ONE
-    /// list, in registration order, which is the order the kernel runs
-    /// every policy of a source in, for each of its events. Registering one
-    /// twice (by name) PANICS at startup.
+    /// Register `policy`, written by hand or marked up (`#[policy]`), as the
+    /// router's table for it ([`PolicyDispatch`]): ONE list, in
+    /// registration order, which is the order the kernel runs every policy
+    /// of a source in, for each of its events. Registering one twice (by
+    /// name) PANICS at startup.
     pub fn policy<P: super::Policy>(&mut self, policy: P) -> &mut Self {
-        if self.policies.iter().any(|entry| entry.name() == P::NAME) {
-            panic!("policy \"{}\" is registered already", P::NAME);
-        }
-        self.policies.push(Box::new(policy));
-        self
+        let answers_refusals = P::ANSWERS_REFUSALS;
+        self.push_policy(super::policy::dispatch(policy), answers_refusals)
     }
 
     /// Register a policy built as angzarr-router's dispatch table, written
     /// by hand: in the ONE list, beside every other policy, its source its
-    /// input domain and its target its output domain. The kernel runs it
-    /// through the router, which holds its commands to the trigger's
-    /// edition, root and correlation.
-    pub fn policy_dispatch(
-        &mut self,
-        dispatch: angzarr_router::policy::PolicyDispatch,
-    ) -> &mut Self {
-        let _ = dispatch;
-        unimplemented!("red: the kernel does not run angzarr-router's PolicyDispatch yet")
+    /// input domain and its target its output domain. Its refused commands
+    /// are answered by its OnRefused. Registering one twice (by name)
+    /// PANICS at startup.
+    pub fn policy_dispatch(&mut self, dispatch: PolicyDispatch) -> &mut Self {
+        self.push_policy(dispatch, true)
+    }
+
+    fn push_policy(&mut self, dispatch: PolicyDispatch, answers_refusals: bool) -> &mut Self {
+        if self
+            .policies
+            .iter()
+            .any(|entry| entry.name() == dispatch.name())
+        {
+            panic!("policy \"{}\" is registered already", dispatch.name());
+        }
+        self.policies.push(PolicyEntry {
+            dispatch,
+            answers_refusals,
+        });
+        self
     }
 
     /// The policies of `source`'s events, in registration order.
     pub(crate) fn policies<'r>(
         &'r self,
         source: &'r str,
-    ) -> impl Iterator<Item = &'r dyn ErasedPolicy> + 'r {
+    ) -> impl Iterator<Item = &'r PolicyEntry> + 'r {
         self.policies
             .iter()
-            .map(|entry| &**entry)
             .filter(move |entry| entry.source() == source)
     }
 
     /// Every registered policy, in registration order.
-    pub(crate) fn all_policies(&self) -> impl Iterator<Item = &dyn ErasedPolicy> {
-        self.policies.iter().map(|entry| &**entry)
+    pub(crate) fn all_policies(&self) -> impl Iterator<Item = &PolicyEntry> {
+        self.policies.iter()
+    }
+
+    /// `domain`'s handler: what the kernel dispatches its inputs through.
+    pub(crate) fn handler(&self, domain: &str) -> Option<&dyn CommandHandler> {
+        self.domains.get(domain).map(|e| &*e.handler)
+    }
+
+    /// `domain`'s typed replay, for a typed domain.
+    pub(crate) fn typed_replay(&self, domain: &str) -> Option<TypedReplay> {
+        self.domains.get(domain)?.typed.as_ref().map(|t| t.replay)
     }
 
     /// Register `projector`, the ONE instance of a marked-up projector
     /// (`#[projector]`) this process runs, holding its ports. The kernel
     /// ([`Kernel::handle`](super::Kernel::handle)) runs it after each commit that records its source's events, and
     /// awaits it before the call returns: a failure is the caller's error
-    /// ([`Failure::Projection`]; the events stay committed), and does not
+    /// ([`Failure::Projection`](super::Failure::Projection); the events stay committed), and does not
     /// stop the other projectors. Registering one twice PANICS at startup.
     pub fn projector<P: AsyncProjector>(&mut self, projector: P) -> &mut Self {
         if self.projectors.iter().any(|entry| entry.name == P::NAME) {
@@ -539,8 +609,8 @@ impl Registry {
     pub(crate) fn fresh<D: Domain>(&self) -> D::State {
         self.domains
             .get(D::NAME)
-            .and_then(|entry| entry.fresh.as_ref())
-            .and_then(|fresh| fresh.downcast_ref::<Factory<D::State>>())
+            .and_then(|entry| entry.typed.as_ref())
+            .and_then(|typed| typed.fresh.downcast_ref::<Factory<D::State>>())
             .map_or_else(D::State::default, |factory| factory())
     }
 
@@ -601,12 +671,22 @@ impl Registry {
 
     /// `D`'s rulebook, if `D` is registered.
     pub fn rules<D: Domain>(&self) -> Option<&Rulebook<D::Rules>> {
-        self.domains.get(D::NAME)?.rules.downcast_ref()
+        self.domains
+            .get(D::NAME)?
+            .typed
+            .as_ref()?
+            .rules
+            .downcast_ref::<Arc<Rulebook<D::Rules>>>()
+            .map(|rules| &**rules)
     }
 
     /// `domain`'s upcaster, if registered.
     pub fn upcaster(&self, domain: &str) -> Option<&Upcaster> {
-        self.domains.get(domain).map(|e| &e.upcaster)
+        self.domains
+            .get(domain)?
+            .typed
+            .as_ref()
+            .map(|t| &*t.upcaster)
     }
 
     /// Whether a load may start from `snapshot` of a `domain` stream: its
@@ -631,7 +711,8 @@ impl Registry {
         let problems: Vec<UpcastChainError> = self
             .domains
             .values()
-            .filter_map(|entry| entry.upcaster.check(&(entry.current)()).err())
+            .filter_map(|entry| entry.typed.as_ref())
+            .filter_map(|typed| typed.upcaster.check(&(typed.current)()).err())
             .flatten()
             .collect();
         if problems.is_empty() {
@@ -639,11 +720,6 @@ impl Registry {
         } else {
             Err(problems)
         }
-    }
-
-    /// `domain`'s typed step 5, erased.
-    pub(crate) fn step(&self, domain: &str) -> Option<TypedStep> {
-        self.domains.get(domain).map(|e| e.step)
     }
 
     /// The registered domains, in name order.
@@ -665,7 +741,7 @@ pub struct Aggregate<'r, D: Domain> {
     domain: std::marker::PhantomData<fn() -> D>,
 }
 
-impl<'r, D: Domain> Aggregate<'r, D> {
+impl<'r, D: Domain<State = D, Rules = ()> + markup::Routed> Aggregate<'r, D> {
     /// Read the aggregate's old events through `upcaster` (its domain must
     /// be `D::NAME`; another panics, as a composition-root bug).
     pub fn upcaster(self, upcaster: super::Upcaster) -> Aggregate<'r, D> {
@@ -676,8 +752,17 @@ impl<'r, D: Domain> Aggregate<'r, D> {
                 upcaster.domain()
             );
         }
-        if let Some(entry) = self.registry.domains.get_mut(D::NAME) {
-            entry.upcaster = upcaster;
+        let process_manager = self.registry.is_process_manager(D::NAME);
+        let fresh = self
+            .registry
+            .domains
+            .remove(D::NAME)
+            .and_then(|entry| entry.typed)
+            .and_then(|typed| typed.fresh.downcast::<Factory<D>>().ok())
+            .map(|fresh| *fresh);
+        if let Some(fresh) = fresh {
+            self.registry
+                .marked_up::<D>(fresh, upcaster, process_manager);
         }
         self
     }

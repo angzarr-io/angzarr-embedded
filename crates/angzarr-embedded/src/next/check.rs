@@ -99,9 +99,6 @@ pub enum Malformed {
         domain: String,
         requested: ConflictResolution,
     },
-    /// A book for a process manager whose correlation is set to anything
-    /// but its cover's root: a process manager's root is its correlation.
-    RootNotCorrelation,
     /// A refusal fact (angzarr's `CommandRefused`) for a stream other than
     /// the one its trigger names, domain, root and edition: a refusal fact
     /// is accepted only by the exact stream of the policy's triggering
@@ -162,9 +159,6 @@ impl fmt::Display for Malformed {
                 "domain \"{domain}\"'s state does not support {}",
                 requested.as_str_name()
             ),
-            Malformed::RootNotCorrelation => f.write_str(
-                "the book's correlation is not its root: a process manager's root is its correlation",
-            ),
             Malformed::RefusalMisaddressed => f.write_str(
                 "the refusal fact is for another stream than the one its trigger names",
             ),
@@ -211,7 +205,6 @@ impl Diagnostic for Malformed {
             Malformed::UnsupportedConflictResolution { .. } => {
                 "angzarr-embedded-next-malformed-unsupported-conflict-resolution"
             }
-            Malformed::RootNotCorrelation => "angzarr-embedded-next-malformed-root-not-correlation",
             Malformed::RefusalMisaddressed => {
                 "angzarr-embedded-next-malformed-refusal-misaddressed"
             }
@@ -483,20 +476,10 @@ fn parse(
         Body::Command { payload }
     };
 
-    // A process manager's root is its correlation: a set correlation, or a
-    // reaction's (its trigger's), must be the root.
+    // An input to a process manager whose correlation is unset is given
+    // its cover's root (decision 14.31); a set one is kept, whatever it is
+    // (decision 14.36).
     let process_manager = registry.is_process_manager(&cover.domain);
-    if process_manager {
-        let given = match &entry {
-            Entry::Client => correlation_id.as_ref(),
-            Entry::Policy { correlation_id, .. } | Entry::Refusal { correlation_id, .. } => {
-                Some(correlation_id)
-            }
-        };
-        if given.is_some_and(|c| *c != root) {
-            return Err(Malformed::RootNotCorrelation);
-        }
-    }
     if let Body::Fact { payload, .. } = &body {
         if !refusal_addressed(payload, &cover) {
             return Err(Malformed::RefusalMisaddressed);

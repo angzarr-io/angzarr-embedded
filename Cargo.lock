@@ -25,7 +25,7 @@ dependencies = [
  "angzarr-embedded-diagnostic",
  "angzarr-embedded-macros",
  "angzarr-ports",
- "angzarr-proto 0.1.0 (git+https://github.com/angzarr-io/angzarr-project?rev=55eab0f7225ecd5ed63aa74a766d2f16b2735be2)",
+ "angzarr-proto",
  "angzarr-router",
  "angzarr-store-sqlite",
  "prost",
@@ -81,7 +81,7 @@ name = "angzarr-ports"
 version = "0.1.0"
 source = "git+https://github.com/angzarr-io/angzarr-project?rev=55eab0f7225ecd5ed63aa74a766d2f16b2735be2#55eab0f7225ecd5ed63aa74a766d2f16b2735be2"
 dependencies = [
- "angzarr-proto 0.1.0 (git+https://github.com/angzarr-io/angzarr-project?rev=55eab0f7225ecd5ed63aa74a766d2f16b2735be2)",
+ "angzarr-proto",
  "prost",
  "prost-types",
 ]
@@ -99,23 +99,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "angzarr-proto"
-version = "0.1.0"
-source = "git+https://github.com/angzarr-io/angzarr-project?rev=581d23eead50c581fb6df21fd6cc4b468407616b#581d23eead50c581fb6df21fd6cc4b468407616b"
-dependencies = [
- "bytes",
- "prost",
- "prost-build",
- "prost-types",
- "uuid",
-]
-
-[[package]]
 name = "angzarr-router"
 version = "0.1.0"
-source = "git+https://github.com/angzarr-io/angzarr-router?rev=e3b6d2884cb660dc0ae0fd4a6129eed333905ae1#e3b6d2884cb660dc0ae0fd4a6129eed333905ae1"
+source = "git+https://github.com/angzarr-io/angzarr-router?rev=6be9159962b4d3beffa3936855a55b6469ca0cc7#6be9159962b4d3beffa3936855a55b6469ca0cc7"
 dependencies = [
- "angzarr-proto 0.1.0 (git+https://github.com/angzarr-io/angzarr-project?rev=581d23eead50c581fb6df21fd6cc4b468407616b)",
+ "angzarr-proto",
  "heck 0.5.0",
  "prost",
  "prost-build",

@@ -8,13 +8,14 @@ use prost::{Message, Name};
 use prost_types::Timestamp;
 
 use super::check::{check, Malformed, Sampled};
-use super::coordinator::{decide_on, decode_input, expect, resolution};
+use super::coordinator::{dispatch, expect, refused, resolution, unknown_domain, Contextual};
 use super::dead_letter::DeadLetterLog;
-use super::domain::{Decision, Domain, State};
+use super::domain::{Domain, State};
 use super::error::{unreadable, Failure, KernelError, PayloadError, ReplayError};
 use super::handler::{Committed, Handler};
 use super::payload::{pack, type_name, Payload};
 use super::registry::Registry;
+use super::route::Rejected;
 use super::upcast::Upcaster;
 use super::version::Rulebook;
 
@@ -184,7 +185,8 @@ pub enum Executed<'a, E> {
 }
 
 /// A domain's event log and the state folded from it, under one cover
-/// whose domain is `D::NAME`. Its state changes only in [`Stream::commit`].
+/// whose domain is `D::NAME`. Its state changes only as events are committed
+/// to it ([`Stream::execute`]).
 ///
 /// A stream resumed from a snapshot ([`Stream::resume`]) holds only the
 /// events after it: [`Stream::events`] starts at [`Stream::first`], and
@@ -306,37 +308,13 @@ impl<D: Domain> Stream<D> {
         self.events.push(envelope);
     }
 
-    /// The state just before event `sequence` (the state at the head, for
-    /// the head): what COMMUTATIVE compares a window against.
-    pub(crate) fn state_at(
-        &self,
-        sequence: u64,
-        registry: &Registry,
-    ) -> Result<D::State, KernelError> {
-        if sequence < self.first {
-            return Err(KernelError::BeforeSnapshot {
-                stream: self.cover.clone(),
-                first: self.first,
-            });
-        }
-        let (rulebook, _) = Self::typed(registry)?;
-        let mut state = self.base.clone();
-        for envelope in self.events.iter().take_while(|e| e.sequence < sequence) {
-            D::apply(
-                &mut state,
-                &envelope.event,
-                Self::rules_for(rulebook, envelope)?,
-            );
-        }
-        Ok(state)
-    }
-
     /// The whole pipeline on this stream, in memory, with no store: for
     /// tests and in-memory use ([`Kernel::handle`](super::Kernel::handle)
     /// is the full loop, with a store and a chain). [`check`](super::check),
-    /// identify, deduplicate against this stream's own events, resolve the
-    /// handling, decode, decide or ingest, commit, then hand each new event
-    /// to `handlers`. A book for another stream is
+    /// identify, have the router admit it against this stream's own events
+    /// (deduplication, a process manager's start rule), resolve the
+    /// handling, dispatch it through the router, commit, then hand each new
+    /// event to `handlers`. A book for another stream is
     /// [`KernelError::WrongDomain`] or [`KernelError::Stale`].
     pub fn execute(
         &mut self,
@@ -345,7 +323,8 @@ impl<D: Domain> Stream<D> {
         sampled: &Sampled,
         dead_letters: &dyn DeadLetterLog,
         handlers: &mut [&mut dyn Handler<D>],
-    ) -> Result<Executed<'_, D::Event>, Failure<D::Rejection>> {
+    ) -> Result<Executed<'_, D::Event>, Failure<Rejected>> {
+        use angzarr_router::domain::{Admission, Arrival, StreamStatus};
         let kernel = Failure::Kernel;
         let checked =
             check(book, registry).map_err(|m| Failure::Kernel(KernelError::Malformed(m)))?;
@@ -364,51 +343,71 @@ impl<D: Domain> Stream<D> {
                 actual: head,
             }));
         }
+        let handler = registry
+            .handler(D::NAME)
+            .ok_or_else(|| kernel(unknown_domain(D::NAME)))?;
         let found = self.command_run(command.command_id());
-        if !found.is_empty() {
-            return Ok(Executed::Duplicate(&self.events[found]));
+        let recorded: Vec<EventPage> = self.events[found.clone()]
+            .iter()
+            .map(Envelope::page)
+            .collect();
+        let delivered = command.to_book();
+        let arrival = Arrival {
+            command: &delivered,
+            recorded: &recorded,
+            stream: StreamStatus { exists: head > 0 },
+        };
+        match handler.admit(&arrival) {
+            Ok(Admission::Duplicate(_)) => return Ok(Executed::Duplicate(&self.events[found])),
+            Ok(Admission::Skip) => return Ok(Executed::Applied(&[])),
+            Ok(Admission::Dispatch) => {}
+            Err(error) => return Err(refused(&command, error)),
         }
         let resolution = resolution(registry, &command).map_err(kernel)?;
         let mut nonces = head;
         let (expected, nonce) = expect(&command, resolution, head, &mut nonces).map_err(kernel)?;
-        let input = decode_input::<D>(&command, registry).map_err(kernel)?;
-        let decision = decide_on(
-            self,
-            &command,
-            &input,
+        if nonce.is_some() && expected < self.first {
+            // The window starts inside the snapshot: its events are not held.
+            return Err(kernel(KernelError::BeforeSnapshot {
+                stream: self.cover.clone(),
+                first: self.first,
+            }));
+        }
+        let snapshot = (self.first > 0).then(|| Snapshot {
+            sequence: self.first - 1,
+            state: Some(pack(&self.base.to_snapshot())),
+            rules_version: registry
+                .rules_version(D::NAME)
+                .unwrap_or_default()
+                .to_string(),
+        });
+        let contextual = Contextual {
+            command,
             resolution,
             expected,
+            snapshot,
+            pages: self.events.iter().map(Envelope::page).collect(),
+            head,
+            last_recorded_at: self.last_recorded_at,
             nonce,
-            sampled,
-            registry,
-            dead_letters,
-        )?;
+        };
+        let pages = dispatch(&contextual, sampled, registry, dead_letters)?;
         let from = self.events.len();
-        self.commit(decision, registry, handlers).map_err(kernel)?;
+        self.commit(&pages, registry, handlers).map_err(kernel)?;
         Ok(Executed::Applied(&self.events[from..]))
     }
 
-    /// Fold a decision into the stream, then hand each of its events to
-    /// every handler in order, with the state just after it. Refuses a
-    /// decision made against another stream or another head
-    /// ([`KernelError::Stale`]). Returns the new length.
-    pub fn commit(
+    /// Fold `pages`, stamped events continuing the stream, into it, then
+    /// hand each to every handler in order, with the state just after it.
+    /// Returns the new length.
+    pub(crate) fn commit(
         &mut self,
-        decision: Decision<D>,
+        pages: &[EventPage],
         registry: &Registry,
         handlers: &mut [&mut dyn Handler<D>],
     ) -> Result<u64, KernelError> {
-        if decision.stream != self.cover || decision.head != self.len() {
-            return Err(KernelError::Stale {
-                stream: decision.stream,
-                expected: decision.head,
-                actual: self.len(),
-            });
-        }
-        let (rulebook, _) = Self::typed(registry)?;
-        for envelope in decision.events {
-            let rules = Self::rules_for(rulebook, &envelope)?;
-            self.push(envelope, rules);
+        for page in pages {
+            self.fold(std::slice::from_ref(page), registry)?;
             let committed = Committed {
                 cover: &self.cover,
                 envelope: &self.events[self.events.len() - 1],
@@ -419,6 +418,15 @@ impl<D: Domain> Stream<D> {
             }
         }
         Ok(self.len())
+    }
+
+    /// Fold `pages` onto the end of the stream: a chain's step.
+    pub(crate) fn extend(
+        &mut self,
+        pages: &[EventPage],
+        registry: &Registry,
+    ) -> Result<(), KernelError> {
+        self.fold(pages, registry)
     }
 
     /// Rebuild a stream from its whole stored log, from a fresh state (the

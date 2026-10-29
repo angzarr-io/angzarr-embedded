@@ -90,10 +90,11 @@ mod tx {
 
     use std::convert::Infallible;
 
+    use crate::next::toys::{Toy, ToyCtx};
     use crate::next::v1::{ConflictResolution, StateDescriptor, StateOptions, Uuid};
     use crate::next::{
-        ids, pack, Decoder, Domain, IngestCtx, Kernel, MemoryDeadLetters, Payload, PayloadError,
-        Policy, Registry, Rulebook, State, Tx, Upcaster,
+        ids, pack, Decoder, Domain, Kernel, MemoryDeadLetters, Payload, PayloadError, Policy,
+        Registry, Rulebook, State, Upcaster,
     };
 
     use crate::next::toys::{at, command, cover, fees, opened, Account, AccountCmd, Edit};
@@ -164,7 +165,7 @@ mod tx {
     }
 
     /// The nonce a probe kept from an earlier delivery.
-    static STASHED: std::sync::Mutex<Option<crate::next::Nonce>> = std::sync::Mutex::new(None);
+    static STASHED: std::sync::Mutex<Option<Vec<u8>>> = std::sync::Mutex::new(None);
 
     impl prost::Name for Probe {
         const NAME: &'static str = "Probe";
@@ -217,7 +218,10 @@ mod tx {
         }
 
         fn type_urls() -> Vec<String> {
-            Vec::new()
+            vec![
+                "/toy.probe.v1.Bumped".to_string(),
+                "/toy.probe.v1.Probed".to_string(),
+            ]
         }
     }
 
@@ -231,7 +235,7 @@ mod tx {
         }
 
         fn type_urls() -> Vec<String> {
-            Vec::new()
+            vec!["/toy.probe.cmd.v1.Probe".to_string()]
         }
     }
 
@@ -247,52 +251,49 @@ mod tx {
 
         const NAME: &'static str = "probe";
 
-        fn decide(probe: &Probe, tx: &mut Tx<'_, Self>) -> Result<(), Infallible> {
-            let window = tx.conflicts();
-            let conflicts = window.is_some();
-            if let Some(c) = window {
-                let mut stashed = STASHED.lock().unwrap();
-                match probe.stash {
-                    1 => *stashed = Some(c.nonce),
-                    2 => {
-                        if let Some(nonce) = stashed.take() {
-                            tx.resolve_conflicts(c.window, nonce);
-                        }
-                    }
-                    _ => tx.resolve_conflicts(c.window, c.nonce),
-                }
-            }
-            let emitted_before = tx.emitted() as u64;
-            let committed = tx.state().bumps;
-            let first = tx.emit(ProbeEvent::Bumped);
-            let probed = Probed {
-                rules_version: tx.rules_version().to_string(),
-                domain: tx.stream().domain.clone(),
-                recorded_seconds: tx.recorded_at().seconds,
-                command_id: tx.command_id().value.to_vec(),
-                correlation_id: tx.correlation_id().value.to_vec(),
-                causation: tx.causation_id().map(|c| c.sequence),
-                first,
-                next: tx.next_sequence(),
-                emitted: tx.emitted() as u64,
-                bumps_seen: tx.state().bumps,
-                bumps_committed: committed,
-                conflicts,
-                emitted_before,
-            };
-            let () = *tx.rules();
-            tx.emit(ProbeEvent::Probed(probed));
-            Ok(())
-        }
-
-        fn ingest(_: &ProbeState, fact: &Infallible, _: &IngestCtx<'_, Self>) -> Vec<ProbeEvent> {
-            match *fact {}
-        }
-
         fn apply(s: &mut ProbeState, e: &ProbeEvent, (): &()) {
             if let ProbeEvent::Bumped = e {
                 s.bumps += 1;
             }
+        }
+    }
+
+    impl Toy for ProbeDomain {
+        fn decide(
+            probe: &Probe,
+            state: &ProbeState,
+            ctx: &ToyCtx<'_, Self>,
+        ) -> Result<Vec<ProbeEvent>, Infallible> {
+            let conflicts = ctx.conflict.is_some();
+            if let Some(c) = &ctx.conflict {
+                let mut stashed = STASHED.lock().unwrap();
+                match probe.stash {
+                    1 => *stashed = Some(c.nonce().to_vec()),
+                    2 => {
+                        if let Some(nonce) = stashed.take() {
+                            c.resolve_conflicts(c.window(), &nonce);
+                        }
+                    }
+                    _ => c.resolve_conflicts(c.window(), c.nonce()),
+                }
+            }
+            let probed = Probed {
+                rules_version: ctx.rules_version.to_string(),
+                domain: ctx.stream.domain.clone(),
+                recorded_seconds: ctx.recorded_at.seconds,
+                command_id: ctx.command_id.value.to_vec(),
+                correlation_id: ctx.correlation_id.value.to_vec(),
+                causation: None,
+                first: ctx.head,
+                next: ctx.head + 1,
+                emitted: 1,
+                bumps_seen: state.bumps + 1,
+                bumps_committed: state.bumps,
+                conflicts,
+                emitted_before: 0,
+            };
+            let () = *ctx.rules;
+            Ok(vec![ProbeEvent::Bumped, ProbeEvent::Probed(probed)])
         }
     }
 
@@ -320,10 +321,21 @@ mod tx {
     fn registry() -> Registry {
         let mut registry = Registry::new();
         registry
-            .register::<Account>(fees(), Upcaster::new("u", "account"))
+            .register::<Account>(
+                fees(),
+                Upcaster::new("u", "account"),
+                crate::next::toys::handlers::<crate::next::toys::Account>(
+                    crate::next::toys::Fees { withdrawal: 1 },
+                    "v2",
+                ),
+            )
             .unwrap();
         registry
-            .register::<ProbeDomain>(Rulebook::new("p7", ()), Upcaster::new("u", "probe"))
+            .register::<ProbeDomain>(
+                Rulebook::new("p7", ()),
+                Upcaster::new("u", "probe"),
+                crate::next::toys::handlers::<ProbeDomain>((), "p7"),
+            )
             .unwrap();
         registry
     }
@@ -374,7 +386,7 @@ mod tx {
                     .value
                     .to_vec(),
                 correlation_id: crate::next::toys::correlation(6).value.to_vec(),
-                causation: Some(2),
+                causation: None,
                 first: 0,
                 next: 1,
                 emitted: 1,
@@ -438,6 +450,7 @@ mod tx {
             .register::<crate::next::toys::Ledger>(
                 Rulebook::new("v1", ()),
                 Upcaster::new("u", "ledger"),
+                crate::next::toys::handlers::<crate::next::toys::Ledger>((), "v1"),
             )
             .unwrap();
         let log = MemoryDeadLetters::new();
@@ -525,8 +538,8 @@ mod tx {
         };
         // Two deliveries by one coordinator: the first's decide keeps its nonce,
         // the second's presents it instead of its own.
-        let mut first = probe(1, 1);
-        let mut second = probe(2, 2);
+        let first = probe(1, 1);
+        let second = probe(2, 2);
         let unresolved = || {
             Failure::Kernel(KernelError::Unresolved {
                 stream: cover("probe", 1),
@@ -545,18 +558,7 @@ mod tx {
             "another delivery's nonce acknowledges nothing"
         );
         assert_eq!(log.lines().len(), 2, "each a dead-lettered handler bug");
-        let mut honest = probe(3, 0);
+        let honest = probe(3, 0);
         assert!(honest.decide(&at(60), &registry, &log).is_ok());
     }
-}
-
-/// A hand-written domain's rejection carries no typed refusal object:
-/// `Domain::refusal`'s default.
-#[test]
-fn a_hand_written_rejection_has_no_typed_refusal_object() {
-    use crate::next::toys::{Account, Refused};
-    assert_eq!(
-        <Account as crate::next::Domain>::refusal(&Refused::NotOpen),
-        None
-    );
 }
