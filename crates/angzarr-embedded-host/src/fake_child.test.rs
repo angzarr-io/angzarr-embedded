@@ -14,6 +14,9 @@
 //! - `...Refuse`: FAILED_PRECONDITION, with an ErrorInfo (reason
 //!   `TABLE_FULL`, metadata `seats = 6`) and the typed refusal
 //!   [`refusal`] in its details;
+//! - `...Taken`: ALREADY_EXISTS, with an ErrorInfo (reason `SEAT_TAKEN`,
+//!   metadata `seat = 3`) and the typed refusal [`refusal`]: a business
+//!   refusal under a status angzarr-router's `GrpcCode` has no variant for;
 //! - `...Break`: INTERNAL, with an ErrorInfo (reason `PLAYER_BROKE`, a
 //!   code the router does not know, metadata `seat = 3`): a bug;
 //! - `...Die`: the process exits with code 7, mid-call;
@@ -269,6 +272,9 @@ impl CommandHandlerService for Fake {
         if type_url.ends_with("Refuse") {
             return Err(refused());
         }
+        if type_url.ends_with("Taken") {
+            return Err(taken());
+        }
         if type_url.ends_with("Break") {
             return Err(broke());
         }
@@ -307,6 +313,16 @@ fn refused() -> Status {
         "table is full",
         "TABLE_FULL",
         ("seats", "6"),
+        Some(refusal()),
+    )
+}
+
+fn taken() -> Status {
+    status(
+        tonic::Code::AlreadyExists,
+        "the seat is taken",
+        "SEAT_TAKEN",
+        ("seat", "3"),
         Some(refusal()),
     )
 }
