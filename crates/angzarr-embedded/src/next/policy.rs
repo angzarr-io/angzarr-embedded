@@ -40,7 +40,6 @@ use angzarr_proto::v1::angzarr_dead_letter::Payload as Letter;
 use angzarr_proto::v1::{
     command_page, Command, CommandBook, CommandPage, Cover, EventBook, EventPage, EventRef, Uuid,
 };
-use angzarr_router::error::HandlerError;
 use angzarr_router::policy::PolicyDispatch;
 use prost_types::Any;
 
@@ -48,7 +47,7 @@ use super::check::{check_policy_command, Checked, Malformed};
 use super::dead_letter::{write_dead_letter, write_policy_failure, DeadLetterLog};
 use super::domain::Domain;
 use super::handler::{Committed, Handler};
-use super::markup::{self, Commands, PolicyContext, TypeName};
+use super::markup::{self, CommandContext, Commands, PolicyContext, TypeName};
 use super::payload::{type_name, Payload};
 use super::registry::Registry;
 
@@ -123,8 +122,20 @@ pub trait Policy: Send + Sync + 'static {
     /// `EventRef`. A marked-up policy's `#[on_refused]` callback translates
     /// instead. The chain addresses it to the trigger's stream and stamps
     /// its identity.
-    fn on_refused(&self, refusal: &markup::v1::Refusal) -> Any {
-        markup::__pass_through(refusal)
+    ///
+    /// `ctx` is the refused command's context as the kernel delivered it:
+    /// its target's cover, its command id, its correlation and its
+    /// handling. An error is a bug, as `on_event`'s is: the step fails as
+    /// [`StepError::PolicyFailed`](super::StepError::PolicyFailed), is
+    /// dead-lettered by the error's code and args, and the policy's
+    /// position moves past the trigger.
+    fn on_refused(
+        &self,
+        refusal: &markup::v1::Refusal,
+        ctx: &CommandContext,
+    ) -> Result<Any, Report> {
+        let _ = ctx;
+        Ok(markup::__pass_through(refusal))
     }
 }
 
@@ -433,7 +444,9 @@ pub(crate) fn dispatch<P: Policy>(policy: P) -> PolicyDispatch {
         for command_type in translated {
             let policy = Arc::clone(&policy);
             table = table.on_refused(&command_type, move |refusal| {
-                Ok::<_, HandlerError>(policy.on_refused(refusal))
+                policy
+                    .on_refused(refusal, &CommandContext::default())
+                    .map_err(|failure| super::route::policy_failed(&failure))
             });
         }
     }

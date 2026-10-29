@@ -2992,17 +2992,22 @@ fn flow(attr: Tokens, item: Tokens, flow: Flow) -> syn::Result<Tokens> {
                     ];
                     const ANSWERS_REFUSALS: bool = true;
 
-                    fn on_refused(&self, refusal: &#m::v1::Refusal) -> ::angzarr_embedded::next::Any {
+                    fn on_refused(
+                        &self,
+                        refusal: &#m::v1::Refusal,
+                        ctx: &#m::CommandContext,
+                    ) -> ::core::result::Result<::angzarr_embedded::next::Any, #m::Report> {
                         #(
                             if let ::core::option::Option::Some(refusal) =
                                 #m::__translating::<#commands>(refusal)
                             {
-                                return #m::__domestic::<<Self as #m::Policy>::Source, _>(
-                                    &<#self_ty>::#callback_methods(self, &refusal),
+                                return #m::__domestic::<<Self as #m::Policy>::Source, _, _>(
+                                    <#self_ty>::#callback_methods(self, &refusal, ctx),
                                 );
                             }
                         )*
-                        #m::__pass_through(refusal)
+                        let _ = ctx;
+                        ::core::result::Result::Ok(#m::__pass_through(refusal))
                     }
 
                     fn on_event(

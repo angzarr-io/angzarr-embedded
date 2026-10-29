@@ -230,8 +230,8 @@ fn a_hand_written_policy_passes_a_refusal_through() {
         }),
         ..Default::default()
     };
-    let answer = crate::next::Policy::on_refused(&Bookkeeping, &refusal);
-    assert_eq!(answer, markup::__pass_through(&refusal));
+    let answer = crate::next::Policy::on_refused(&Bookkeeping, &refusal, &Default::default());
+    assert_eq!(answer, Ok(markup::__pass_through(&refusal)));
 }
 
 #[test]
@@ -1126,9 +1126,18 @@ fn a_policy_step_that_decides_no_event_still_moves_its_position() {
 
 /// Account deposits → the ledger, answering its refusals: every refusal it
 /// is handed, kept.
-struct AnsweringBookkeeping(
-    std::sync::Arc<std::sync::Mutex<Vec<crate::next::markup::v1::Refusal>>>,
-);
+/// The refusals a policy was handed, each with the refused command's
+/// context.
+type Answered = std::sync::Arc<
+    std::sync::Mutex<
+        Vec<(
+            crate::next::markup::v1::Refusal,
+            crate::next::markup::CommandContext,
+        )>,
+    >,
+>;
+
+struct AnsweringBookkeeping(Answered);
 
 impl crate::next::Policy for AnsweringBookkeeping {
     const NAME: &'static str = "answering-bookkeeping";
@@ -1144,10 +1153,156 @@ impl crate::next::Policy for AnsweringBookkeeping {
         crate::next::Policy::on_event(&Bookkeeping, event, ctx)
     }
 
-    fn on_refused(&self, refusal: &crate::next::markup::v1::Refusal) -> crate::next::Any {
-        self.0.lock().unwrap().push(refusal.clone());
-        crate::next::markup::__pass_through(refusal)
+    fn on_refused(
+        &self,
+        refusal: &crate::next::markup::v1::Refusal,
+        ctx: &crate::next::markup::CommandContext,
+    ) -> Result<crate::next::Any, crate::next::markup::Report> {
+        self.0.lock().unwrap().push((refusal.clone(), ctx.clone()));
+        Ok(crate::next::markup::__pass_through(refusal))
     }
+}
+
+/// As [`Bookkeeping`], answering refusals; but a refusal of a record for
+/// more than its limit cannot happen, so its answer is its error, a bug.
+struct UnansweringBookkeeping;
+
+impl crate::next::Policy for UnansweringBookkeeping {
+    const NAME: &'static str = "unanswering-bookkeeping";
+    type Source = Account;
+    type Target = Ledger;
+    const ANSWERS_REFUSALS: bool = true;
+
+    fn on_event(
+        &self,
+        event: &crate::next::Any,
+        ctx: &crate::next::markup::PolicyContext,
+    ) -> Result<Option<crate::next::markup::Commands<Ledger>>, crate::next::markup::Report> {
+        crate::next::Policy::on_event(&Bookkeeping, event, ctx)
+    }
+
+    fn on_refused(
+        &self,
+        refusal: &crate::next::markup::v1::Refusal,
+        _ctx: &crate::next::markup::CommandContext,
+    ) -> Result<crate::next::Any, crate::next::markup::Report> {
+        let trigger = refusal
+            .event
+            .as_ref()
+            .and_then(|book| book.pages.first())
+            .map_or(0, |page| page.sequence);
+        Err(crate::next::markup::Report::new(
+            "toy-unanswerable-refusal",
+            "a refused record cannot happen",
+        )
+        .arg("trigger", trigger))
+    }
+}
+
+/// A policy's refusal answer reads the refused command's context: the
+/// target's stream, the command's derived id and the trigger's
+/// correlation.
+#[test]
+fn a_policys_refusal_answer_reads_the_refused_commands_context() {
+    let plain = registry();
+    let mut registry = registry();
+    let refusals = Answered::default();
+    registry.policy(AnsweringBookkeeping(std::sync::Arc::clone(&refusals)));
+    let log = MemoryDeadLetters::new();
+    let kernel = Kernel::new(&registry, &log);
+    let store = MemoryStore::new();
+    opened(&store, &plain, 1, 0);
+    kernel
+        .handle::<Account, _, _>(&store, deposit(3, LEDGER_LIMIT + 1), &at(30), &mut ())
+        .ready()
+        .unwrap();
+    let refusals = refusals.lock().unwrap();
+    let [(_, ctx)] = refusals.as_slice() else {
+        panic!("one refusal: {refusals:?}");
+    };
+    let trigger = EventRef {
+        stream: Some(cover("account", 1)),
+        sequence: 2,
+    };
+    assert_eq!(
+        ctx.cover,
+        Some(ledger_cover()),
+        "the refused command's target"
+    );
+    assert_eq!(
+        ctx.command_id,
+        Some(ids::policy_command_id(&trigger, "answering-bookkeeping", 0).unwrap()),
+        "the refused command's derived id"
+    );
+    let correlation = pages(&store, &cover("account", 1))[2]
+        .meta
+        .clone()
+        .and_then(|meta| meta.correlation_id);
+    assert!(correlation.is_some());
+    assert_eq!(ctx.correlation_id, correlation, "the trigger's correlation");
+}
+
+/// A policy's refusal answer that fails is a bug: the step fails as
+/// [`StepError::PolicyFailed`], a defect, is dead-lettered by the error's
+/// code and args with no English, writes no refusal fact, and the
+/// policy's position moves past the trigger, so the next event is handled
+/// as usual.
+#[test]
+fn a_policys_refusal_answer_error_dead_letters_as_policy_failed() {
+    let plain = registry();
+    let mut registry = registry();
+    registry.policy(UnansweringBookkeeping);
+    let log = MemoryDeadLetters::new();
+    let kernel = Kernel::new(&registry, &log);
+    let store = MemoryStore::new();
+    opened(&store, &plain, 1, 0);
+    let before = slice(&store, &cover("account", 1)).next_sequence;
+    let failure = kernel
+        .handle::<Account, _, _>(&store, deposit(3, LEDGER_LIMIT + 1), &at(30), &mut ())
+        .ready()
+        .err()
+        .expect("the answer's error fails the call");
+    let Failure::Downstream { error, .. } = &failure else {
+        panic!("a downstream failure: {failure:?}");
+    };
+    let StepError::PolicyFailed(report) = error else {
+        panic!("the policy's failure: {error:?}");
+    };
+    assert_eq!(
+        angzarr_embedded_diagnostic::Diagnostic::code(report),
+        "toy-unanswerable-refusal"
+    );
+    assert_eq!(failure.recovery(), Recovery::Bug);
+    assert_eq!(
+        slice(&store, &cover("account", 1)).next_sequence,
+        before + 1,
+        "the deposit stays, and no refusal fact was recorded"
+    );
+    let lines = log.lines();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(
+        lines[0].contains(&format!(
+            "unanswering-bookkeeping: toy-unanswerable-refusal trigger={before}"
+        )),
+        "{}",
+        lines[0]
+    );
+    assert!(!lines[0].contains("cannot happen"), "{}", lines[0]);
+    assert_eq!(
+        position(&store, "unanswering-bookkeeping", &cover("account", 1)),
+        before + 1,
+        "past the trigger"
+    );
+
+    kernel
+        .handle::<Account, _, _>(&store, deposit(4, 5), &at(31), &mut ())
+        .ready()
+        .expect("the next event is handled as usual");
+    assert_eq!(
+        position(&store, "unanswering-bookkeeping", &cover("account", 1)),
+        before + 2
+    );
+    assert_eq!(log.lines().len(), 1, "nothing more dead-lettered");
 }
 
 /// A refusal is handed to its policy with the triggering event: its
@@ -1169,7 +1324,7 @@ fn a_refusal_carries_its_triggering_event() {
         .unwrap();
     let account = cover("account", 1);
     let refusals = refusals.lock().unwrap();
-    let [refusal] = refusals.as_slice() else {
+    let [(refusal, _)] = refusals.as_slice() else {
         panic!("one refusal: {refusals:?}");
     };
     let event = refusal.event.clone().unwrap();

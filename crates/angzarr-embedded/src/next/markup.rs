@@ -1237,10 +1237,16 @@ pub fn __translating<C: DomainMessage>(refusal: &v1::Refusal) -> Option<Refusal<
     })
 }
 
-/// A translating callback's fact, packed: one its source `S` ingests.
+/// A translating callback's answer, as `Policy::on_refused` gives it: its
+/// fact, one its source `S` ingests, packed; or its error as a report (its
+/// code the dead letter's reason, its args the letter's metadata).
 #[doc(hidden)]
-pub fn __domestic<S: Ingests<F>, F: DomainMessage>(fact: &F) -> Any {
-    __pack(fact)
+pub fn __domestic<S: Ingests<F>, F: DomainMessage, E: angzarr_embedded_diagnostic::Diagnostic>(
+    answer: Result<F, E>,
+) -> Result<Any, Report> {
+    answer
+        .map(|fact| __pack(&fact))
+        .map_err(|error| Report::of(&error))
 }
 
 /// A policy's `#[on_event]` handler's answer, as `Policy::on_event` gives

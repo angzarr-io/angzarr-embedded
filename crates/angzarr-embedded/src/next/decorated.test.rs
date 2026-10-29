@@ -2352,14 +2352,28 @@ impl TranslatingBuyInWallet {
         Ok(Commands::none().to(uuid(&event.wallet), Hold { cents: event.cents }))
     }
 
+    /// A wallet short by exactly 23 cannot happen: the callback's error, a
+    /// bug, naming the refused command it read from its context.
     #[on_refused(Hold)]
-    fn hold_refused(&self, refusal: &Refusal<Hold>) -> HoldLost {
-        HoldLost {
-            short: refusal
-                .refusal::<InsufficientFunds>()
-                .map(|object| object.short)
-                .unwrap_or(refusal.command().cents),
+    fn hold_refused(
+        &self,
+        refusal: &Refusal<Hold>,
+        ctx: &CommandContext,
+    ) -> Result<HoldLost, Report> {
+        let short = refusal
+            .refusal::<InsufficientFunds>()
+            .map(|object| object.short)
+            .unwrap_or(refusal.command().cents);
+        if short == 23 {
+            let command = ctx.command_id.clone().unwrap_or_default().to_string();
+            return Err(Report::new(
+                "toy-buyin-wallet-impossible-short",
+                "a wallet short by 23 cannot happen",
+            )
+            .arg("short", short)
+            .arg("command", command));
         }
+        Ok(HoldLost { short })
     }
 }
 
@@ -3195,7 +3209,9 @@ mod policy_refusals {
     #[test]
     fn pass_through_builds_command_refused_for_the_source() {
         let refusal = hold_refusal(&correlation(1), 30, insufficient(20));
-        let fact = BuyInWallet.on_refused(&refusal);
+        let fact = BuyInWallet
+            .on_refused(&refusal, &CommandContext::default())
+            .unwrap();
         assert_eq!(
             fact,
             pack(&markup::v1::CommandRefused {
@@ -3212,8 +3228,31 @@ mod policy_refusals {
     fn translate_answers_the_callbacks_domestic_fact() {
         let refusal = hold_refusal(&correlation(1), 30, insufficient(20));
         assert_eq!(
-            TranslatingBuyInWallet.on_refused(&refusal),
+            TranslatingBuyInWallet
+                .on_refused(&refusal, &CommandContext::default())
+                .unwrap(),
             any(HoldLost { short: 20 })
+        );
+    }
+
+    /// A translating callback's error is its answer, a bug: its code and
+    /// args, the refused command named from the context it was handed.
+    #[test]
+    fn a_translating_callbacks_error_is_its_answer() {
+        let refusal = hold_refusal(&correlation(1), 30, insufficient(23));
+        let ctx = CommandContext {
+            command_id: Some(Uuid::from_bytes([0x09; 16])),
+            ..CommandContext::default()
+        };
+        let error = TranslatingBuyInWallet
+            .on_refused(&refusal, &ctx)
+            .expect_err("the callback failed");
+        assert_eq!(error.code(), "toy-buyin-wallet-impossible-short");
+        let args = error.args();
+        assert!(
+            matches!(args.as_slice(), [("short", Arg::Int(23)), ("command", Arg::Str(id))]
+                if *id == Uuid::from_bytes([0x09; 16]).to_string()),
+            "{args:?}"
         );
     }
 
@@ -3252,7 +3291,12 @@ mod policy_refusals {
         let store = Mem::new();
         let log = MemoryDeadLetters::new();
         handle_in::<BuyIn>(&store, &registry, &log, 2, start(&correlation(2), 2, 30)).unwrap();
-        let refused = BuyInWallet.on_refused(&hold_refusal(&correlation(2), 30, insufficient(20)));
+        let refused = BuyInWallet
+            .on_refused(
+                &hold_refusal(&correlation(2), 30, insufficient(20)),
+                &CommandContext::default(),
+            )
+            .unwrap();
         handle_in::<BuyIn>(
             &store,
             &registry,
@@ -3292,7 +3336,9 @@ mod policy_refusals {
             any(Withdraw { cents: 30 }),
             Some(correlation(8)),
         ));
-        let refused = BuyInWallet.on_refused(&refusal);
+        let refused = BuyInWallet
+            .on_refused(&refusal, &CommandContext::default())
+            .unwrap();
         let unhandled = handle_in::<BuyIn>(
             &store,
             &registry,
@@ -3337,8 +3383,12 @@ mod policy_refusals {
         let store = Mem::new();
         let log = MemoryDeadLetters::new();
         handle_in::<BuyIn>(&store, &registry, &log, 2, start(&correlation(3), 2, 30)).unwrap();
-        let elsewhere =
-            BuyInWallet.on_refused(&hold_refusal(&correlation(4), 30, insufficient(20)));
+        let elsewhere = BuyInWallet
+            .on_refused(
+                &hold_refusal(&correlation(4), 30, insufficient(20)),
+                &CommandContext::default(),
+            )
+            .unwrap();
         let Err(refused) = handle_in::<BuyIn>(
             &store,
             &registry,
