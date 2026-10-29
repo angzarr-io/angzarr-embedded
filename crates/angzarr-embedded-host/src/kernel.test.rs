@@ -12,9 +12,10 @@ use angzarr_embedded::next::v1::{
     StateOptions, Uuid,
 };
 use angzarr_embedded::next::{
-    Any, EventStore, Handled, Kernel, MemoryDeadLetters, Misconfigured, Registry, Sampled,
-    StreamRef, Timestamp,
+    Any, EventStore, Failure, Handled, Kernel, KernelError, MemoryDeadLetters, Misconfigured,
+    Recovery, Registry, Sampled, StreamRef, Timestamp, DEAD_LETTER_PREFIX,
 };
+use angzarr_embedded_diagnostic::{Arg, Diagnostic};
 use angzarr_ports::memory::MemoryStore;
 use angzarr_router::pb::CommandHandlerResponse;
 
@@ -236,6 +237,76 @@ fn a_policy_step_from_an_in_process_domain_reaches_the_remote_one() {
         .map(|p| p.payload)
         .collect();
     assert_eq!(player, [Some(noted(0))]);
+    host.shutdown();
+}
+
+/// A child's FAILED_PRECONDITION is the domain's refusal, through the
+/// kernel: a business rejection under its own code and args.
+#[test]
+fn a_remote_refusal_is_a_business_rejection() {
+    let host = host();
+    let mut registry = Registry::new();
+    host.register(&mut registry).unwrap();
+    let store = MemoryStore::new();
+    let log = MemoryDeadLetters::new();
+    let kernel = Kernel::new(&registry, &log);
+    let refused = block_on(kernel.handle_any(
+        &store,
+        send("player", 1, any("/test.player.v1.Refuse")),
+        &sampled(1),
+        &mut (),
+    ))
+    .err()
+    .expect("refused");
+    let Failure::Rejected(rejected) = &refused else {
+        panic!("a business rejection: {refused:?}");
+    };
+    assert_eq!(rejected.code(), "TABLE_FULL");
+    assert!(
+        matches!(rejected.args().as_slice(), [("seats", Arg::Str(v))] if v == "6"),
+        "its args: {rejected:?}"
+    );
+    assert_eq!(refused.recovery(), Recovery::Business);
+    assert!(log.lines().is_empty(), "{:?}", log.lines());
+    host.shutdown();
+}
+
+/// A child's INTERNAL under a code of its own, one the router does not
+/// know, is a bug through the kernel, never a rejection: the router's
+/// error, `Recovery::Bug`, dead-lettered by its code and args.
+#[test]
+fn a_remote_internal_failure_under_its_own_code_is_a_dead_lettered_bug() {
+    let host = host();
+    let mut registry = Registry::new();
+    host.register(&mut registry).unwrap();
+    let store = MemoryStore::new();
+    let log = MemoryDeadLetters::new();
+    let kernel = Kernel::new(&registry, &log);
+    let failed = block_on(kernel.handle_any(
+        &store,
+        send("player", 1, any("/test.player.v1.Break")),
+        &sampled(1),
+        &mut (),
+    ))
+    .err()
+    .expect("failed");
+    assert!(
+        matches!(&failed, Failure::Kernel(KernelError::Router(e)) if e.code == "PLAYER_BROKE"),
+        "{failed:?}"
+    );
+    assert_eq!(failed.recovery(), Recovery::Bug);
+    let lines = log.lines();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].starts_with(DEAD_LETTER_PREFIX), "{}", lines[0]);
+    assert!(
+        lines[0].contains("player: PLAYER_BROKE seat=3"),
+        "{}",
+        lines[0]
+    );
+    assert!(
+        pages(&store, &cover("player")).is_empty(),
+        "nothing written"
+    );
     host.shutdown();
 }
 

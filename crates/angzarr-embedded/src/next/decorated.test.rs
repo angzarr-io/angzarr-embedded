@@ -4329,6 +4329,214 @@ mod router {
         );
     }
 
+    /// A remote handler that fails every command under a code of its own,
+    /// one the router does not know (`PLAYER_BROKE`, with a `seat` arg),
+    /// answered with `grpc`.
+    struct Faulty {
+        grpc: ::angzarr_embedded::next::angzarr_router::error::GrpcCode,
+    }
+
+    impl ::angzarr_embedded::next::angzarr_router::router::CommandHandler for Faulty {
+        fn name(&self) -> &str {
+            "remote"
+        }
+
+        fn command_types(&self) -> Vec<String> {
+            Remote.command_types()
+        }
+
+        fn dispatch(
+            &self,
+            _: &pb::ContextualCommand,
+        ) -> Result<
+            pb::CommandHandlerResponse,
+            ::angzarr_embedded::next::angzarr_router::error::CodedError,
+        > {
+            Err(
+                ::angzarr_embedded::next::angzarr_router::error::CodedError {
+                    code: "PLAYER_BROKE".to_string(),
+                    message: "the player's handler broke".to_string(),
+                    extras: [("seat".to_string(), "3".to_string())].into(),
+                    grpc: self.grpc,
+                    refusal: None,
+                },
+            )
+        }
+
+        fn component_descriptor(
+            &self,
+        ) -> Result<
+            pb::ComponentDescriptor,
+            ::angzarr_embedded::next::angzarr_router::error::CodedError,
+        > {
+            Remote.component_descriptor()
+        }
+    }
+
+    /// A registry with [`Faulty`] answering `grpc` as the remote domain,
+    /// and a policy sending it a `Note` on each wallet's `Held`.
+    fn faulty(grpc: ::angzarr_embedded::next::angzarr_router::error::GrpcCode) -> Registry {
+        use ::angzarr_embedded::next::angzarr_router::router::CommandHandler;
+        let mut registry = registry();
+        let faulty: Box<dyn CommandHandler> = Box::new(Faulty { grpc });
+        registry.command_handler("remote", faulty).unwrap();
+        registry.policy_dispatch(
+            PolicyDispatch::new("wallet-remote", "wallet", "remote").on_event(
+                "toy.wallet.v1.Held",
+                |_, source| {
+                    Ok(vec![pb::CommandBook {
+                        cover: Some(pb::Cover {
+                            domain: "remote".to_string(),
+                            root: source.and_then(|c| c.root.clone()),
+                            edition: None,
+                        }),
+                        page: Some(pb::CommandPage {
+                            body: Some(pb::command_page::Body::Command(pb::Command {
+                                payload: Some(any(Note {})),
+                            })),
+                            ..Default::default()
+                        }),
+                        handling: None,
+                    }])
+                },
+            ),
+        );
+        registry
+    }
+
+    /// A code the router does not know, refused FAILED_PRECONDITION, is the
+    /// domain's deliberate refusal: a business rejection under its own
+    /// code and args, nothing dead-lettered.
+    #[test]
+    fn an_unknown_code_refused_as_failed_precondition_is_a_rejection() {
+        use ::angzarr_embedded::next::angzarr_router::error::GrpcCode;
+        let registry = faulty(GrpcCode::FailedPrecondition);
+        let store = Mem::new();
+        let log = MemoryDeadLetters::new();
+        let kernel = ::angzarr_embedded::next::Kernel::new(&registry, &log);
+        let sampled = Sampled {
+            now: at(9),
+            command_id: Uuid::from_bytes([0x79; 16]),
+        };
+        let refused = ready(kernel.handle_any(
+            &store,
+            send("remote", 3, any(Note {}), None),
+            &sampled,
+            &mut (),
+        ))
+        .err()
+        .expect("refused");
+        let Failure::Rejected(rejected) = &refused else {
+            panic!("a business rejection: {refused:?}");
+        };
+        assert_eq!(rejected.code(), "PLAYER_BROKE");
+        assert!(
+            matches!(rejected.args().as_slice(), [("seat", Arg::Str(v))] if v == "3"),
+            "its args: {rejected:?}"
+        );
+        assert_eq!(refused.recovery(), Recovery::Business);
+        assert!(log.lines().is_empty(), "{:?}", log.lines());
+    }
+
+    /// A code the router does not know, failed with any status but
+    /// FAILED_PRECONDITION, is a bug, never a rejection: the router's
+    /// error, `Recovery::Bug`, dead-lettered by its code and args (no
+    /// English), at the origin and as a policy's step, whose position
+    /// stays, so a resume runs the step again.
+    #[test]
+    fn an_unknown_code_failed_with_another_status_is_a_dead_lettered_bug() {
+        use ::angzarr_embedded::next::angzarr_router::error::GrpcCode;
+        use ::angzarr_embedded::next::StepError;
+        for grpc in [
+            GrpcCode::Internal,
+            GrpcCode::DataLoss,
+            GrpcCode::Unimplemented,
+            GrpcCode::Aborted,
+            GrpcCode::InvalidArgument,
+            GrpcCode::NotFound,
+        ] {
+            let registry = faulty(grpc);
+            let store = Mem::new();
+            let log = MemoryDeadLetters::new();
+            let kernel = ::angzarr_embedded::next::Kernel::new(&registry, &log);
+            let sampled = Sampled {
+                now: at(9),
+                command_id: Uuid::from_bytes([0x79; 16]),
+            };
+            let dead_lettered = |lines: &[String]| {
+                assert_eq!(lines.len(), 1, "{grpc:?}: {lines:?}");
+                assert!(
+                    lines[0].starts_with(::angzarr_embedded::next::DEAD_LETTER_PREFIX),
+                    "{}",
+                    lines[0]
+                );
+                assert!(
+                    lines[0].contains("remote: PLAYER_BROKE seat=3"),
+                    "{grpc:?}, its code and args: {}",
+                    lines[0]
+                );
+                assert!(!lines[0].contains("broke"), "no English: {}", lines[0]);
+            };
+
+            let origin = ready(kernel.handle_any(
+                &store,
+                send("remote", 3, any(Note {}), None),
+                &sampled,
+                &mut (),
+            ))
+            .err()
+            .expect("failed");
+            assert!(
+                matches!(
+                    &origin,
+                    Failure::Kernel(KernelError::Router(e)) if e.code == "PLAYER_BROKE"
+                ),
+                "{grpc:?}: {origin:?}"
+            );
+            assert_eq!(origin.recovery(), Recovery::Bug, "{grpc:?}");
+            dead_lettered(&log.lines());
+
+            handle_in::<Wallet>(
+                &store,
+                &registry,
+                &log,
+                1,
+                send("wallet", 1, any(Open { bonus: 50 }), None),
+            )
+            .unwrap();
+            let log = MemoryDeadLetters::new();
+            let held = handle_in::<Wallet>(
+                &store,
+                &registry,
+                &log,
+                2,
+                send("wallet", 2, any(Hold { cents: 5 }), None),
+            )
+            .err()
+            .expect("the policy's step fails");
+            assert!(
+                matches!(
+                    &held,
+                    Failure::Downstream {
+                        error: StepError::Kernel(KernelError::Router(e)),
+                        ..
+                    } if e.code == "PLAYER_BROKE"
+                ),
+                "{grpc:?}: {held:?}"
+            );
+            assert_eq!(held.recovery(), Recovery::Bug, "{grpc:?}");
+            dead_lettered(&log.lines());
+
+            let log = MemoryDeadLetters::new();
+            let kernel = ::angzarr_embedded::next::Kernel::new(&registry, &log);
+            assert!(
+                ready(kernel.resume(&store, &sampled, &mut ())).is_err(),
+                "{grpc:?}: the position stayed, so the step runs again"
+            );
+            dead_lettered(&log.lines());
+        }
+    }
+
     /// A source whose fact handler fails with a fault of the router's own
     /// (UNHANDLED_HANDLER_ERROR): its commands answer as [`Remote`]'s.
     struct Picky;

@@ -14,6 +14,8 @@
 //! - `...Refuse`: FAILED_PRECONDITION, with an ErrorInfo (reason
 //!   `TABLE_FULL`, metadata `seats = 6`) and the typed refusal
 //!   [`refusal`] in its details;
+//! - `...Break`: INTERNAL, with an ErrorInfo (reason `PLAYER_BROKE`, a
+//!   code the router does not know, metadata `seat = 3`): a bug;
 //! - `...Die`: the process exits with code 7, mid-call;
 //! - `...Hang`: never answers;
 //! - anything else: one event, [`noted`], on the command's cover, rules
@@ -266,6 +268,9 @@ impl CommandHandlerService for Fake {
         if type_url.ends_with("Refuse") {
             return Err(refused());
         }
+        if type_url.ends_with("Break") {
+            return Err(broke());
+        }
         if type_url.ends_with("Hang") {
             std::future::pending::<()>().await;
         }
@@ -296,25 +301,48 @@ pub(crate) fn noted(next: u64) -> Any {
 }
 
 fn refused() -> Status {
-    let info = ErrorInfo {
-        reason: "TABLE_FULL".to_string(),
-        domain: angzarr_router::error::ERROR_INFO_DOMAIN.to_string(),
-        metadata: [("seats".to_string(), "6".to_string())].into(),
-    };
-    let rpc = RpcStatus {
-        code: tonic::Code::FailedPrecondition as i32,
-        message: "table is full".to_string(),
-        details: vec![
-            Any {
-                type_url: ERROR_INFO_TYPE_URL.to_string(),
-                value: info.encode_to_vec(),
-            },
-            refusal(),
-        ],
-    };
-    Status::with_details(
+    status(
         tonic::Code::FailedPrecondition,
         "table is full",
-        rpc.encode_to_vec().into(),
+        "TABLE_FULL",
+        ("seats", "6"),
+        Some(refusal()),
     )
+}
+
+fn broke() -> Status {
+    status(
+        tonic::Code::Internal,
+        "the player's handler broke",
+        "PLAYER_BROKE",
+        ("seat", "3"),
+        None,
+    )
+}
+
+/// A status as angzarr's client libraries answer one: `code` and
+/// `message`, and in its details an ErrorInfo of `reason` and the one
+/// `metadata` pair, then `typed`, if any.
+fn status(
+    code: tonic::Code,
+    message: &str,
+    reason: &str,
+    metadata: (&str, &str),
+    typed: Option<Any>,
+) -> Status {
+    let info = ErrorInfo {
+        reason: reason.to_string(),
+        domain: angzarr_router::error::ERROR_INFO_DOMAIN.to_string(),
+        metadata: [(metadata.0.to_string(), metadata.1.to_string())].into(),
+    };
+    let info = Any {
+        type_url: ERROR_INFO_TYPE_URL.to_string(),
+        value: info.encode_to_vec(),
+    };
+    let rpc = RpcStatus {
+        code: code as i32,
+        message: message.to_string(),
+        details: std::iter::once(info).chain(typed).collect(),
+    };
+    Status::with_details(code, message, rpc.encode_to_vec().into())
 }
