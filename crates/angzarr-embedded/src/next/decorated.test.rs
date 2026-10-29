@@ -1812,6 +1812,8 @@ mod snapshot {
     }
 
     /// Without `snapshot = ..`, the kernel takes none: every load replays.
+    /// Its state's descriptor names the markup's `NoSnapshot`, in
+    /// angzarr-embedded's own package.
     #[test]
     fn no_snapshot_form_means_no_snapshot() {
         let registry = registry();
@@ -1821,6 +1823,10 @@ mod snapshot {
 
         assert_eq!(on, Ok(vec![any(SwitchedOn {})]));
         assert!(lamp.snapshot(&registry).is_none());
+        assert_eq!(
+            <Lamp as State>::descriptor().type_url,
+            "/angzarr_embedded.next.markup.NoSnapshot"
+        );
     }
 }
 
