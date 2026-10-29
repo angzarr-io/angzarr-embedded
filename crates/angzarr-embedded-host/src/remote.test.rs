@@ -152,8 +152,9 @@ fn a_status_without_error_info_is_unhandled() {
 /// Every gRPC code the router has a variant for survives exactly (its
 /// `GrpcCode` has each status of the business set, and UNKNOWN), so the
 /// status decides the class (decision 14.37). A status it has no variant
-/// for keeps its class: DEADLINE_EXCEEDED and RESOURCE_EXHAUSTED are
-/// retryable; any other is a bug.
+/// for keeps its class: DEADLINE_EXCEEDED, RESOURCE_EXHAUSTED and the
+/// remaining ones (CANCELLED, UNAUTHENTICATED) are retryable bugs (the
+/// owner's ruling, 2026-10-29).
 #[test]
 fn each_status_code_maps_to_the_routers() {
     for (code, grpc) in [
@@ -185,7 +186,7 @@ fn each_status_code_maps_to_the_routers() {
         let status = status_with_details(code, "m", vec![error_info("SOME_REASON", &[])]);
         assert_eq!(
             status_to_coded("player", &status).grpc.class(),
-            ErrorClass::Bug,
+            ErrorClass::Retryable,
             "{code:?}"
         );
     }

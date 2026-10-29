@@ -4680,17 +4680,12 @@ mod router {
         }
     }
 
-    /// The wallets' registry, with [`Recovering`] as the remote domain,
-    /// down for `down_for` dispatches, and a policy sending it a `Note` on
-    /// each wallet's `Held`; and its dispatch count.
-    fn recovering(down_for: usize) -> (Registry, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
-        use ::angzarr_embedded::next::angzarr_router::router::CommandHandler;
-        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    /// The wallets' registry, with `remote` as the remote domain, and a
+    /// policy sending it a `Note` on each wallet's `Held`.
+    fn remote_registry(
+        remote: Box<dyn ::angzarr_embedded::next::angzarr_router::router::CommandHandler>,
+    ) -> Registry {
         let mut registry = registry();
-        let remote: Box<dyn CommandHandler> = Box::new(Recovering {
-            down_for: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(down_for)),
-            calls: std::sync::Arc::clone(&calls),
-        });
         registry.command_handler("remote", remote).unwrap();
         registry.policy_dispatch(
             PolicyDispatch::new("wallet-remote", "wallet", "remote").on_event(
@@ -4713,6 +4708,17 @@ mod router {
                 },
             ),
         );
+        registry
+    }
+
+    /// [`remote_registry`] with [`Recovering`], down for `down_for`
+    /// dispatches; and its dispatch count.
+    fn recovering(down_for: usize) -> (Registry, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let registry = remote_registry(Box::new(Recovering {
+            down_for: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(down_for)),
+            calls: std::sync::Arc::clone(&calls),
+        }));
         (registry, calls)
     }
 
@@ -4907,6 +4913,159 @@ mod router {
             edition: None,
         };
         assert_eq!(pages(&store, &remote_cover).map(|p| p.len()), Some(1));
+    }
+
+    /// A remote handler that fails every command with `error`, counting
+    /// its dispatches.
+    struct Counted {
+        error: ::angzarr_embedded::next::angzarr_router::error::CodedError,
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl ::angzarr_embedded::next::angzarr_router::router::CommandHandler for Counted {
+        fn name(&self) -> &str {
+            "remote"
+        }
+
+        fn command_types(&self) -> Vec<String> {
+            Remote.command_types()
+        }
+
+        fn dispatch(
+            &self,
+            _: &pb::ContextualCommand,
+        ) -> Result<
+            pb::CommandHandlerResponse,
+            ::angzarr_embedded::next::angzarr_router::error::CodedError,
+        > {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(self.error.clone())
+        }
+
+        fn component_descriptor(
+            &self,
+        ) -> Result<
+            pb::ComponentDescriptor,
+            ::angzarr_embedded::next::angzarr_router::error::CodedError,
+        > {
+            Remote.component_descriptor()
+        }
+    }
+
+    /// [`remote_registry`] with [`Counted`] failing every command under its
+    /// own `code` and status `grpc`; and its dispatch count.
+    fn counted(
+        code: &str,
+        grpc: ::angzarr_embedded::next::angzarr_router::error::GrpcCode,
+    ) -> (Registry, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let registry = remote_registry(Box::new(Counted {
+            error: ::angzarr_embedded::next::angzarr_router::error::CodedError {
+                code: code.to_string(),
+                extras: Default::default(),
+                grpc,
+                refusal: None,
+            },
+            calls: std::sync::Arc::clone(&calls),
+        }));
+        (registry, calls)
+    }
+
+    /// ABORTED (a stale or overlapping command, or a handler's own choice)
+    /// is a business answer to return at once to an outside caller, to
+    /// reload: never retried, never dead-lettered (the owner's ruling,
+    /// 2026-10-29).
+    #[test]
+    fn an_aborted_answer_goes_back_to_an_outside_caller_at_once() {
+        use ::angzarr_embedded::next::angzarr_router::error::GrpcCode;
+        use std::sync::atomic::Ordering::SeqCst;
+        let (registry, calls) = counted("SEAT_MOVED", GrpcCode::Aborted);
+        let store = Mem::new();
+        let log = MemoryDeadLetters::new();
+        let waits = Waits::drawing(0.0);
+        let kernel = ::angzarr_embedded::next::Kernel::new(&registry, &log)
+            .on_retryable(capped())
+            .wait_with(&waits);
+        let failed = ready(kernel.handle_any(
+            &store,
+            send("remote", 3, any(Note {}), None),
+            &sampled_at(9),
+            &mut (),
+        ));
+        assert!(failed.is_err());
+        assert_eq!(calls.load(SeqCst), 1, "not retried");
+        assert!(waits.micros().is_empty());
+        assert!(log.lines().is_empty(), "{:?}", log.lines());
+    }
+
+    /// As a policy's step, ABORTED has the kernel for its caller: it
+    /// reloads and runs the step again under the capped backoff, then
+    /// dead-letters it.
+    #[test]
+    fn a_policy_steps_aborted_answer_is_retried_then_dead_lettered() {
+        use ::angzarr_embedded::next::angzarr_router::error::GrpcCode;
+        use std::sync::atomic::Ordering::SeqCst;
+        let (registry, calls) = counted("SEAT_MOVED", GrpcCode::Aborted);
+        let store = Mem::new();
+        let log = MemoryDeadLetters::new();
+        let waits = Waits::drawing(0.0);
+        let kernel = ::angzarr_embedded::next::Kernel::new(&registry, &log)
+            .on_retryable(capped())
+            .wait_with(&waits);
+        ready(kernel.handle_any(
+            &store,
+            send("wallet", 1, any(Open { bonus: 50 }), None),
+            &sampled_at(1),
+            &mut (),
+        ))
+        .unwrap();
+        let held = ready(kernel.handle_any(
+            &store,
+            send("wallet", 2, any(Hold { cents: 5 }), None),
+            &sampled_at(2),
+            &mut (),
+        ));
+        assert!(held.is_err());
+        assert_eq!(calls.load(SeqCst), 4, "the first attempt and 3 retries");
+        assert_eq!(waits.micros(), [10_000, 30_000, 50_000]);
+        let lines = log.lines();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("cause=SEAT_MOVED"), "{lines:?}");
+        assert!(lines[0].contains("retry_count=3"), "{lines:?}");
+    }
+
+    /// A bug of the fatal kind (INTERNAL, UNKNOWN, DATA_LOSS) is
+    /// dead-lettered at once, never retried; any other status that is no
+    /// refusal and not ABORTED (UNAVAILABLE, UNIMPLEMENTED and the rest)
+    /// is a retryable bug: retried, then dead-lettered.
+    #[test]
+    fn a_fatal_bug_is_never_retried_and_a_retryable_one_is() {
+        use ::angzarr_embedded::next::angzarr_router::error::GrpcCode;
+        use std::sync::atomic::Ordering::SeqCst;
+        for (grpc, attempts) in [
+            (GrpcCode::Internal, 1),
+            (GrpcCode::Unknown, 1),
+            (GrpcCode::DataLoss, 1),
+            (GrpcCode::Unavailable, 4),
+            (GrpcCode::Unimplemented, 4),
+        ] {
+            let (registry, calls) = counted("PLAYER_BROKE", grpc);
+            let store = Mem::new();
+            let log = MemoryDeadLetters::new();
+            let waits = Waits::drawing(0.0);
+            let kernel = ::angzarr_embedded::next::Kernel::new(&registry, &log)
+                .on_retryable(capped())
+                .wait_with(&waits);
+            let failed = ready(kernel.handle_any(
+                &store,
+                send("remote", 3, any(Note {}), None),
+                &sampled_at(9),
+                &mut (),
+            ));
+            assert!(failed.is_err(), "{grpc:?}");
+            assert_eq!(calls.load(SeqCst), attempts, "{grpc:?}");
+            assert_eq!(log.lines().len(), 1, "dead-lettered once: {grpc:?}");
+        }
     }
 
     /// A caller's own `expected_sequence` that comes back stale goes back
