@@ -105,6 +105,8 @@ pub(crate) mod recording;
 
 /// angzarr's shared storage contract, as angzarr-embedded uses it.
 pub use angzarr_ports;
+/// angzarr's shared client router, which the kernel dispatches through.
+pub use angzarr_router;
 pub use check::{check, Body, Checked, Identified, Malformed, Sampled};
 pub use conflict::{Key, UnitPath, Units};
 pub use coordinator::Nonce;
@@ -254,6 +256,11 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn angzarr_embedded_diagnostic::D
                 type_url: "/toy.v9.Bonus".to_string(),
             }),
         },
+        KernelError::Router(angzarr_router::error::CodedError::internal(
+            angzarr_router::error::codes::POLICY_COMMAND_NO_ROOT,
+            angzarr_router::error::messages::POLICY_COMMAND_NO_ROOT,
+            [],
+        )),
     ];
     let replay = [
         ReplayError::OutOfSequence { index: 1, found: 2 },

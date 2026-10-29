@@ -96,7 +96,7 @@ async fn pair() -> (SqliteStore, SqliteStore) {
 /// store from `$fresh`, a check carrying its own attributes (an edition
 /// check's `#[ignore]`). The base and read sections are stamped here, not
 /// by `store_contract!`, because each holds edition checks this adapter
-/// does not pass yet; their lists are angzarr-ports' at 4be6a68, kept in
+/// does not pass yet; their lists are angzarr-ports' at 55eab0f, kept in
 /// step by hand when the suite grows.
 macro_rules! checks {
     ($fresh:expr; $($(#[$a:meta])* $check:ident,)*) => {
@@ -130,6 +130,9 @@ mod base {
         an_edition_stream_takes_only_a_fork_as_its_first_own_event,
         #[ignore = "editions are not implemented yet in the SQLite adapter (owner ruling 2026-10-28); a follow-up; MemoryStore covers them"]
         a_forked_stream_reads_main_below_its_fork_then_its_own,
+        a_fork_below_mains_head_lands_at_its_stated_sequence,
+        a_fork_above_mains_head_is_a_conflict,
+        a_creation_stating_another_parent_sequence_is_malformed,
         find_command_finds_a_commands_events_on_its_stream,
         find_command_finds_a_retried_facts_events_by_its_id,
         find_command_finds_a_refusal_fact_on_the_trigger_stream_by_the_refused_id,

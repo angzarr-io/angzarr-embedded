@@ -25,7 +25,8 @@ dependencies = [
  "angzarr-embedded-diagnostic",
  "angzarr-embedded-macros",
  "angzarr-ports",
- "angzarr-proto",
+ "angzarr-proto 0.1.0 (git+https://github.com/angzarr-io/angzarr-project?rev=55eab0f7225ecd5ed63aa74a766d2f16b2735be2)",
+ "angzarr-router",
  "angzarr-store-sqlite",
  "prost",
  "prost-types",
@@ -78,9 +79,9 @@ dependencies = [
 [[package]]
 name = "angzarr-ports"
 version = "0.1.0"
-source = "git+https://github.com/angzarr-io/angzarr-project?rev=57f029d09d531f4825bc215499cdeabde01538dc#57f029d09d531f4825bc215499cdeabde01538dc"
+source = "git+https://github.com/angzarr-io/angzarr-project?rev=55eab0f7225ecd5ed63aa74a766d2f16b2735be2#55eab0f7225ecd5ed63aa74a766d2f16b2735be2"
 dependencies = [
- "angzarr-proto",
+ "angzarr-proto 0.1.0 (git+https://github.com/angzarr-io/angzarr-project?rev=55eab0f7225ecd5ed63aa74a766d2f16b2735be2)",
  "prost",
  "prost-types",
 ]
@@ -88,13 +89,38 @@ dependencies = [
 [[package]]
 name = "angzarr-proto"
 version = "0.1.0"
-source = "git+https://github.com/angzarr-io/angzarr-project?rev=57f029d09d531f4825bc215499cdeabde01538dc#57f029d09d531f4825bc215499cdeabde01538dc"
+source = "git+https://github.com/angzarr-io/angzarr-project?rev=55eab0f7225ecd5ed63aa74a766d2f16b2735be2#55eab0f7225ecd5ed63aa74a766d2f16b2735be2"
 dependencies = [
  "bytes",
  "prost",
  "prost-build",
  "prost-types",
  "uuid",
+]
+
+[[package]]
+name = "angzarr-proto"
+version = "0.1.0"
+source = "git+https://github.com/angzarr-io/angzarr-project?rev=581d23eead50c581fb6df21fd6cc4b468407616b#581d23eead50c581fb6df21fd6cc4b468407616b"
+dependencies = [
+ "bytes",
+ "prost",
+ "prost-build",
+ "prost-types",
+ "uuid",
+]
+
+[[package]]
+name = "angzarr-router"
+version = "0.1.0"
+source = "git+https://github.com/angzarr-io/angzarr-router?rev=e3b6d2884cb660dc0ae0fd4a6129eed333905ae1#e3b6d2884cb660dc0ae0fd4a6129eed333905ae1"
+dependencies = [
+ "angzarr-proto 0.1.0 (git+https://github.com/angzarr-io/angzarr-project?rev=581d23eead50c581fb6df21fd6cc4b468407616b)",
+ "heck 0.5.0",
+ "prost",
+ "prost-build",
+ "prost-types",
+ "tracing",
 ]
 
 [[package]]

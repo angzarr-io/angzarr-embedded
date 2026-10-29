@@ -62,6 +62,7 @@ angzarr-embedded-next-chain-too-deep = the command chain went deeper than its li
 angzarr-embedded-next-too-many-steps = the decision on stream { $stream } ran more than its limit of { $limit } continuation steps
 angzarr-embedded-next-before-snapshot = stream { $stream } holds its events from { $first } on only, after its snapshot
 angzarr-embedded-next-unregistered-domain = a stored { $domain } stream was read, but no domain "{ $domain }" is registered
+angzarr-embedded-next-router = the router refused it: { $reason }
 
 angzarr-embedded-next-replay-out-of-sequence = page { $index } of the log claims sequence { $found }, not the one due
 angzarr-embedded-next-replay-recorded-backwards = event { $sequence } was recorded before the event before it

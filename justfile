@@ -70,9 +70,12 @@ licence-check:
     bullet() { awk -v h="$1" 'index($0, h) == 1 { f = 1; print; next } f && /^(- |$)/ { exit } f' README.md; }
     members=$(cargo metadata -q --no-deps --format-version 1 | jq -r '.packages[].name' | sort -u)
     # The workspace's crates that carry it (angzarr-ports, angzarr's own,
-    # carries it too, and is no member).
-    actual=$(comm -12 <(cargo tree -q --workspace --all-features -e normal,build -i angzarr-proto --prefix none --format '{p}' \
-        | awk '{ print $1 }' | sort -u) <(echo "$members"))
+    # carries it too, and is no member), through any copy of it in the
+    # graph: each pinned rev of angzarr-project is a crate of its own.
+    protos=$(cargo metadata -q --format-version 1 --all-features | jq -r '.packages[] | select(.name == "angzarr-proto") | .id')
+    actual=$(comm -12 <(for proto in $protos; do
+            cargo tree -q --workspace --all-features -e normal,build -i "$proto" --prefix none --format '{p}'
+        done | awk '{ print $1 }' | sort -u) <(echo "$members"))
     bsd=$(comm -23 <(echo "$members") <(echo "$actual"))
     fail=0
     check() {

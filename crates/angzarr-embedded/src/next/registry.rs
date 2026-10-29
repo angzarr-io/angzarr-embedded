@@ -488,6 +488,19 @@ impl Registry {
         self
     }
 
+    /// Register a policy built as angzarr-router's dispatch table, written
+    /// by hand: in the ONE list, beside every other policy, its source its
+    /// input domain and its target its output domain. The kernel runs it
+    /// through the router, which holds its commands to the trigger's
+    /// edition, root and correlation.
+    pub fn policy_dispatch(
+        &mut self,
+        dispatch: angzarr_router::policy::PolicyDispatch,
+    ) -> &mut Self {
+        let _ = dispatch;
+        unimplemented!("red: the kernel does not run angzarr-router's PolicyDispatch yet")
+    }
+
     /// The policies of `source`'s events, in registration order.
     pub(crate) fn policies<'r>(
         &'r self,

@@ -3094,6 +3094,389 @@ mod refusal_flow {
     }
 }
 
+// ------------------------------------------------- through the router
+//
+// The kernel dispatches business through angzarr-router: handlers, typed
+// refusals and the refusal path, deduplication, a process manager's start
+// rule, a policy's commands kept in its trigger's edition, and their root
+// and correlation (decision 14.36, as amended). What is pinned here is
+// what the router owes the kernel's callers: a policy names the root of
+// every command, for any target, and keeps its trigger's correlation; a
+// process manager admits an input whose correlation is not its root, so
+// one instance takes several correlations. And that the kernel runs the
+// router itself: a hand-built `PolicyDispatch`, the router's own table,
+// runs in the chain, and refusals only the router makes reach the caller
+// as `KernelError::Router`, its `CodedError` unchanged.
+
+/// The policy for (buy-in, wallet) that forgets the hold's root: a policy
+/// bug.
+pub struct RootlessHold;
+
+#[policy(name = "rootless-hold", source = BuyIn, target = Wallet)]
+impl RootlessHold {
+    #[on_event(BuyInStarted)]
+    fn started(&self, event: &BuyInStarted, _ctx: &PolicyContext) -> Commands<Wallet> {
+        Commands::none().to(Uuid::default(), Hold { cents: event.cents })
+    }
+}
+
+/// The policy for (wallet, buy-in) that forgets the buy-in's root: a policy
+/// bug, for a process manager as for an aggregate.
+pub struct RootlessRecord;
+
+#[policy(name = "rootless-record", source = Wallet, target = BuyIn)]
+impl RootlessRecord {
+    #[on_event(Held)]
+    fn held(&self, event: &Held, _ctx: &PolicyContext) -> Commands<BuyIn> {
+        Commands::none().to(Uuid::default(), RecordHeld { cents: event.cents })
+    }
+}
+
+/// The root of the one buy-in [`SharedBuyIn`] records every hold on.
+fn shared_buy_in() -> Uuid {
+    Uuid::from_bytes([0x5a; 16])
+}
+
+/// The policy for (wallet, buy-in) that records every hold, whatever its
+/// correlation, on ONE buy-in: the root it names, not the correlation.
+pub struct SharedBuyIn;
+
+#[policy(name = "shared-buyin", source = Wallet, target = BuyIn)]
+impl SharedBuyIn {
+    #[on_event(Held)]
+    fn held(&self, event: &Held, _ctx: &PolicyContext) -> Commands<BuyIn> {
+        Commands::none().to(shared_buy_in(), RecordHeld { cents: event.cents })
+    }
+}
+
+mod router {
+    use super::*;
+    use ::angzarr_embedded::next::angzarr_router::error::HandlerError;
+    use ::angzarr_embedded::next::angzarr_router::pb;
+    use ::angzarr_embedded::next::angzarr_router::policy::PolicyDispatch;
+    use ::angzarr_embedded::next::StepError;
+
+    /// The router's reason (its `CodedError.code`) for `failure`, at the
+    /// origin or down the chain; `None` for a failure the router did not
+    /// make.
+    fn router_reason<R>(failure: &Failure<R>) -> Option<&str> {
+        match failure {
+            Failure::Kernel(KernelError::Router(error))
+            | Failure::Downstream {
+                error: StepError::Kernel(KernelError::Router(error)),
+                ..
+            } => Some(error.code.as_str()),
+            _ => None,
+        }
+    }
+
+    /// The wallet, the buy-in and `policy`, with the wallet at [`root`]
+    /// opened with 50 (command 1, in a correlation of its own).
+    fn opened_with<P: Policy>(policy: P) -> (Registry, Mem) {
+        let mut registry = buy_ins();
+        registry.policy(policy);
+        let store = Mem::new();
+        let log = MemoryDeadLetters::new();
+        handle_in::<Wallet>(
+            &store,
+            &registry,
+            &log,
+            1,
+            send("wallet", 1, any(Open { bonus: 50 }), Some(correlation(15))),
+        )
+        .unwrap();
+        (registry, store)
+    }
+
+    /// The wallet's stream, as the router's wire types name it.
+    fn wallet_cover(domain: &str) -> pb::Cover {
+        pb::Cover {
+            domain: domain.to_string(),
+            root: Some(pb::Uuid {
+                value: root().value.to_vec().into(),
+            }),
+            edition: None,
+        }
+    }
+
+    /// A hand-built policy for (buy-in, wallet), the router's own table: a
+    /// started buy-in holds its stake on the wallet. `astray` edits each
+    /// command before it is answered.
+    fn hold_dispatch(astray: fn(&mut pb::CommandBook)) -> PolicyDispatch {
+        PolicyDispatch::new("hand-built-hold", "buyin", "wallet").on_event(
+            "toy.buyin.v1.BuyInStarted",
+            move |event, _source| -> Result<Vec<pb::CommandBook>, HandlerError> {
+                let started =
+                    <wire::BuyInStarted as prost::Message>::decode(event.value.as_slice())
+                        .map_err(|e| HandlerError::Other(e.to_string()))?;
+                let mut hold = pb::CommandBook {
+                    cover: Some(wallet_cover("wallet")),
+                    page: Some(pb::CommandPage {
+                        body: Some(pb::command_page::Body::Command(pb::Command {
+                            payload: Some(any(Hold {
+                                cents: started.cents,
+                            })),
+                        })),
+                        ..Default::default()
+                    }),
+                    handling: None,
+                };
+                astray(&mut hold);
+                Ok(vec![hold])
+            },
+        )
+    }
+
+    /// The wallet, the buy-in and `dispatch`, with the wallet opened with
+    /// 50.
+    fn opened_with_dispatch(dispatch: PolicyDispatch) -> (Registry, Mem) {
+        let mut registry = buy_ins();
+        registry.policy_dispatch(dispatch);
+        let store = Mem::new();
+        let log = MemoryDeadLetters::new();
+        handle_in::<Wallet>(
+            &store,
+            &registry,
+            &log,
+            1,
+            send("wallet", 1, any(Open { bonus: 50 }), Some(correlation(15))),
+        )
+        .unwrap();
+        (registry, store)
+    }
+
+    /// A policy's command to an aggregate with no root is the policy's bug,
+    /// refused by the router (`POLICY_COMMAND_NO_ROOT`), dead-lettered and
+    /// never delivered; the trigger's step stays committed.
+    #[test]
+    fn a_policy_command_to_an_aggregate_with_no_root_is_refused_no_root() {
+        let (registry, store) = opened_with(RootlessHold);
+        let log = MemoryDeadLetters::new();
+        let Err(failed) =
+            settle_in::<BuyIn>(&store, &registry, &log, 2, start(&correlation(1), 2, 30))
+        else {
+            panic!("a rootless policy command fails its step");
+        };
+        assert_eq!(
+            router_reason(&failed),
+            Some("POLICY_COMMAND_NO_ROOT"),
+            "{failed}"
+        );
+        assert_eq!(failed.recovery(), Recovery::Bug);
+        assert_eq!(
+            buy_in_events(&store, &correlation(1)),
+            buy_in(&["BuyInStarted"]),
+            "the trigger's step stays committed"
+        );
+        assert_eq!(
+            pages(&store, wallet().cover()).map(|p| p.len()),
+            Some(2),
+            "the wallet recorded nothing"
+        );
+        assert_eq!(log.lines().len(), 1, "{:?}", log.lines());
+    }
+
+    /// The same for a process manager's command: there is no default root,
+    /// the trigger's correlation included.
+    #[test]
+    fn a_policy_command_to_a_process_manager_with_no_root_is_refused_no_root() {
+        let (registry, store) = opened_with(RootlessRecord);
+        let log = MemoryDeadLetters::new();
+        let Err(failed) = settle_in::<Wallet>(
+            &store,
+            &registry,
+            &log,
+            2,
+            send("wallet", 2, any(Hold { cents: 5 }), Some(correlation(2))),
+        ) else {
+            panic!("a rootless policy command fails its step");
+        };
+        assert_eq!(
+            router_reason(&failed),
+            Some("POLICY_COMMAND_NO_ROOT"),
+            "{failed}"
+        );
+        assert_eq!(buy_in_events(&store, &correlation(2)), None);
+        assert_eq!(log.lines().len(), 1, "{:?}", log.lines());
+    }
+
+    /// A policy's command carrying a correlation other than its trigger's is
+    /// the policy's bug, refused by the router
+    /// (`POLICY_COMMAND_OTHER_CORRELATION`), and never delivered.
+    #[test]
+    fn a_policy_command_in_another_correlation_is_refused_other_correlation() {
+        let (registry, store) = opened_with_dispatch(hold_dispatch(|hold| {
+            hold.page.as_mut().unwrap().correlation_id = Some(pb::Uuid {
+                value: vec![0xee; 16].into(),
+            });
+        }));
+        let log = MemoryDeadLetters::new();
+        let Err(failed) =
+            settle_in::<BuyIn>(&store, &registry, &log, 2, start(&correlation(3), 2, 30))
+        else {
+            panic!("a policy command in another correlation fails its step");
+        };
+        assert_eq!(
+            router_reason(&failed),
+            Some("POLICY_COMMAND_OTHER_CORRELATION"),
+            "{failed}"
+        );
+        assert_eq!(
+            pages(&store, wallet().cover()).map(|p| p.len()),
+            Some(2),
+            "the wallet recorded nothing"
+        );
+    }
+
+    /// A process manager's input whose correlation is not its root is
+    /// delivered to the root its cover names, keeping its correlation.
+    #[test]
+    fn a_process_manager_input_in_another_correlation_is_admitted() {
+        let registry = buy_ins();
+        let store = Mem::new();
+        let log = MemoryDeadLetters::new();
+        let mut elsewhere = start(&correlation(4), 2, 0);
+        elsewhere.page.as_mut().unwrap().correlation_id = Some(correlation(5));
+        let admitted = handle_in::<BuyIn>(&store, &registry, &log, 2, elsewhere);
+        assert!(
+            admitted.is_ok(),
+            "{:?}",
+            admitted.err().map(|e| e.to_string())
+        );
+        let pages = pages(&store, &buy_in_cover(&correlation(4))).expect("the buy-in");
+        assert_eq!(
+            pages[0]
+                .meta
+                .as_ref()
+                .and_then(|m| m.correlation_id.clone()),
+            Some(correlation(5)),
+            "its events carry its correlation"
+        );
+    }
+
+    /// One process-manager instance takes the inputs of several
+    /// correlations: each hold, in its own correlation, is recorded on the
+    /// one buy-in its policy names, and each event carries its input's
+    /// correlation.
+    #[test]
+    fn several_correlations_reach_one_process_manager_instance() {
+        let (registry, store) = opened_with(SharedBuyIn);
+        let log = MemoryDeadLetters::new();
+        handle_in::<BuyIn>(&store, &registry, &log, 2, start(&shared_buy_in(), 2, 0)).unwrap();
+        for (n, c) in [(3, correlation(1)), (4, correlation(2))] {
+            let settled = settle_in::<Wallet>(
+                &store,
+                &registry,
+                &log,
+                n,
+                send("wallet", n, any(Hold { cents: 5 }), Some(c)),
+            );
+            assert!(
+                settled.is_ok(),
+                "{:?}",
+                settled.err().map(|e| e.to_string())
+            );
+        }
+        let pages = pages(&store, &buy_in_cover(&shared_buy_in())).expect("the buy-in");
+        let correlations: Vec<_> = pages
+            .iter()
+            .map(|p| p.meta.as_ref().and_then(|m| m.correlation_id.clone()))
+            .collect();
+        assert_eq!(
+            correlations,
+            [
+                Some(shared_buy_in()),
+                Some(correlation(1)),
+                Some(correlation(2))
+            ]
+        );
+        assert_eq!(
+            buy_in_events(&store, &shared_buy_in()),
+            buy_in(&["BuyInStarted", "BuyInHeld", "BuyInHeld"])
+        );
+    }
+
+    /// The kernel runs angzarr-router's own `PolicyDispatch`, built by hand:
+    /// its command is delivered as a step of its own.
+    #[test]
+    fn the_kernel_runs_a_hand_built_policy_dispatch() {
+        let (registry, store) = opened_with_dispatch(hold_dispatch(|_| {}));
+        let log = MemoryDeadLetters::new();
+        let settled = settle_in::<BuyIn>(&store, &registry, &log, 2, start(&correlation(6), 2, 30));
+        let Ok(settled) = settled else {
+            panic!("{:?}", settled.err().map(|e| e.to_string()));
+        };
+        assert_eq!(
+            steps(&settled),
+            [
+                ("buyin", "toy.buyin.v1.BuyInStarted"),
+                ("wallet", "toy.wallet.v1.Held"),
+            ]
+            .map(|(domain, event)| (domain.to_string(), vec![event.to_string()]))
+        );
+    }
+
+    /// A refusal only the router makes reaches the caller unchanged: a
+    /// command outside the policy's one destination
+    /// (`POLICY_COMMAND_OUTSIDE_DESTINATION`, naming both domains).
+    #[test]
+    fn a_refusal_only_the_router_makes_reaches_the_caller() {
+        let (registry, store) = opened_with_dispatch(hold_dispatch(|hold| {
+            hold.cover = Some(wallet_cover("lamp"));
+        }));
+        let log = MemoryDeadLetters::new();
+        let Err(failed) =
+            settle_in::<BuyIn>(&store, &registry, &log, 2, start(&correlation(7), 2, 30))
+        else {
+            panic!("a command outside the destination fails its step");
+        };
+        assert_eq!(
+            router_reason(&failed),
+            Some("POLICY_COMMAND_OUTSIDE_DESTINATION"),
+            "{failed}"
+        );
+        let Failure::Downstream {
+            error: StepError::Kernel(KernelError::Router(error)),
+            ..
+        } = &failed
+        else {
+            unreachable!("the router's reason is a downstream router error");
+        };
+        assert_eq!(
+            error.extras.get("expected_domain").map(String::as_str),
+            Some("wallet")
+        );
+        assert_eq!(
+            error.extras.get("actual_domain").map(String::as_str),
+            Some("lamp")
+        );
+    }
+
+    /// A domain's input goes through the router too: a command type the
+    /// wallet has no handler for is the router's `NO_HANDLER_REGISTERED`.
+    #[test]
+    fn a_domains_unknown_command_is_the_routers_no_handler_registered() {
+        let registry = registry();
+        let store = Mem::new();
+        let log = MemoryDeadLetters::new();
+        let Err(failed) = handle_in::<Wallet>(
+            &store,
+            &registry,
+            &log,
+            1,
+            send("wallet", 1, any(SwitchOn {}), None),
+        ) else {
+            panic!("a command the wallet does not handle is refused");
+        };
+        assert_eq!(
+            router_reason(&failed),
+            Some("NO_HANDLER_REGISTERED"),
+            "{failed}"
+        );
+        assert_eq!(pages(&store, wallet().cover()), None);
+    }
+}
+
 // ------------------------------------------------------- the projectors
 //
 // ONE projector instance per process, registered with its ports, run

@@ -162,6 +162,12 @@ pub enum KernelError {
     Replay(ReplayError),
     /// The store's own error, angzarr-ports' (codes `angzarr-ports-*`).
     Store(StoreError),
+    /// angzarr-router refused the input or a policy's answer: its
+    /// `CodedError`, whose `code` (SCREAMING_SNAKE, angzarr's `ErrorInfo`
+    /// reason) is this error's `reason`. INTERNAL is a policy's or a
+    /// handler's bug, FAILED_PRECONDITION a business refusal, ABORTED a
+    /// stale command, anything else the sender's to fix.
+    Router(angzarr_router::error::CodedError),
 }
 
 /// Why a log could not be replayed.
@@ -285,6 +291,7 @@ impl KernelError {
             | KernelError::InvalidPayload { .. } => Recovery::Invalid,
             KernelError::Stale { .. } | KernelError::Unresolved { .. } => Recovery::Retry,
             KernelError::Store(error) => store_recovery(error),
+            KernelError::Router(error) => router_recovery(error),
             KernelError::Upcast { .. }
             | KernelError::IngestPanicked { .. }
             | KernelError::WrongDomain { .. }
@@ -475,6 +482,7 @@ impl fmt::Display for KernelError {
                 cover_text(stream)
             ),
             KernelError::Store(error) => error.fmt(f),
+            KernelError::Router(error) => write!(f, "{} ({})", error.message, error.code),
         }
     }
 }
@@ -497,6 +505,7 @@ impl Diagnostic for KernelError {
             KernelError::Replay(error) => error.code(),
             KernelError::Unreadable { .. } => "angzarr-embedded-next-unreadable",
             KernelError::Store(error) => error.code(),
+            KernelError::Router(_) => "angzarr-embedded-next-router",
         }
     }
 
@@ -570,7 +579,19 @@ impl Diagnostic for KernelError {
                 ("reason", Arg::nested(reason)),
             ],
             KernelError::Store(error) => store_args(error),
+            KernelError::Router(error) => vec![("reason", error.code.as_str().into())],
         }
+    }
+}
+
+/// What to do about the router's refusal, by its gRPC code.
+fn router_recovery(error: &angzarr_router::error::CodedError) -> Recovery {
+    use angzarr_router::error::GrpcCode;
+    match error.grpc {
+        GrpcCode::Internal | GrpcCode::DataLoss | GrpcCode::Unimplemented => Recovery::Bug,
+        GrpcCode::FailedPrecondition => Recovery::Business,
+        GrpcCode::Aborted => Recovery::Retry,
+        GrpcCode::InvalidArgument | GrpcCode::NotFound => Recovery::Invalid,
     }
 }
 

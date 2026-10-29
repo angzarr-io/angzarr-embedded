@@ -4,7 +4,7 @@ Status: **implemented** in `crates/angzarr-embedded/src/next/`, pinned by the te
 beside it (`*.test.rs`). It is angzarr-embedded's one kernel.
 
 The wire contract is angzarr's protos on angzarr-project's spec line
-(`spec/20261019-draft`, the crate pinned at **57f029d**): `EventMeta.causation`
+(`spec/20261019-draft`, the crate pinned at **55eab0f**): `EventMeta.causation`
 is the event's direct cause, with one arm, `command_id` (a process manager
 is a domain whose inputs are commands and facts, so no event is caused by
 another event); one `command_id` per command, deduplication on the events,

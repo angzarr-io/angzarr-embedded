@@ -36,6 +36,13 @@ angzarr-embedded also depends on `angzarr-ports`, pinned at the same rev of
 angzarr-project's spec line: angzarr's shared store contract (one async
 trait set, its errors and codes, its conformance suite), which angzarr-embedded's
 kernel runs on and has no store traits of its own beside.
+angzarr-embedded also depends on `angzarr-router`, a git dependency pinned by
+rev: angzarr's shared client router, through which the kernel dispatches
+business (handlers, typed refusals and the refusal path, deduplication, a
+process manager's start rule, a policy's commands' edition, root and
+correlation), so those rules are implemented once for every runtime. The
+kernel keeps the check, identification, the store writes, positions and
+resume.
 
 angzarr-embedded-macros depends on `syn`, `quote` and `proc-macro2`, because it is a
 procedural macro crate that parses a whole impl (its methods' signatures,
