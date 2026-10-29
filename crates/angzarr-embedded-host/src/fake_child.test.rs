@@ -16,8 +16,8 @@
 //!   [`refusal`] in its details;
 //! - `...Die`: the process exits with code 7, mid-call;
 //! - `...Hang`: never answers;
-//! - anything else: one event book on the command's cover, rules version
-//!   `pid-<its pid>`.
+//! - anything else: one event, [`noted`], on the command's cover, rules
+//!   version `pid-<its pid>`.
 //!
 //! It exits with code 0 when its stdin reaches end of file.
 
@@ -233,6 +233,15 @@ impl ComponentService for Fake {
             name: self.name.clone(),
             kind: pb::ComponentKind::Aggregate as i32,
             rules_version: rules_version(),
+            state: Some(pb::StateDescriptor {
+                type_url: "/test.player.v1.State".to_string(),
+                options: Some(pb::StateOptions {
+                    conflict_resolutions: vec![
+                        pb::ConflictResolution::Strict as i32,
+                        pb::ConflictResolution::AggregateHandles as i32,
+                    ],
+                }),
+            }),
             ..Default::default()
         }))
     }
@@ -244,7 +253,9 @@ impl CommandHandlerService for Fake {
         &self,
         request: Request<pb::ContextualCommand>,
     ) -> Result<Response<pb::CommandHandlerResponse>, Status> {
-        let command = request.into_inner().command.unwrap_or_default();
+        let request = request.into_inner();
+        let next = request.events.as_ref().map_or(0, |b| b.next_sequence);
+        let command = request.command.unwrap_or_default();
         let type_url = command
             .page
             .as_ref()
@@ -263,10 +274,23 @@ impl CommandHandlerService for Fake {
         Ok(Response::new(pb::CommandHandlerResponse {
             events: Some(pb::EventBook {
                 cover: command.cover,
+                pages: vec![pb::EventPage {
+                    payload: Some(noted(next)),
+                    ..Default::default()
+                }],
                 ..Default::default()
             }),
             rules_version: rules_version(),
         }))
+    }
+}
+
+/// The one event a command is answered with: `Noted`, its value the
+/// stream's next sequence when the command arrived.
+pub(crate) fn noted(next: u64) -> Any {
+    Any {
+        type_url: "/test.player.v1.Noted".to_string(),
+        value: next.to_le_bytes().to_vec(),
     }
 }
 

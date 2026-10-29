@@ -65,10 +65,11 @@ is a LEAF: it depends on nothing of angzarr-embedded (its own test,
 follow angzarr-ports' style rather than `angzarr_embedded_diagnostic`'s. It lives here
 for the POC, beside its first user; it can move to angzarr-project unchanged.
 
-angzarr-embedded-host depends on `angzarr-router` and `angzarr-proto`
+angzarr-embedded-host depends on `angzarr-embedded` (the kernel's `Registry`,
+which `Host::register` fills), `angzarr-router` and `angzarr-proto`
 (pinned at the revs the router names, so its graph holds one angzarr-proto),
 `tonic` and `tonic-prost` (its gRPC client, and in its tests the fake
-child's server), `tonic-types` (google.rpc's Status and ErrorInfo), `tokio`,
+child's server), `tokio`,
 `tower` and `hyper-util` (the runtime and the Unix-socket connector),
 `libc` (SIGTERM to a child at shutdown, which tokio cannot send), and
 `serde` (its config), because a remote domain is a child process speaking

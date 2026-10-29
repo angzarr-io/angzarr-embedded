@@ -11,11 +11,12 @@
 //! ```ignore
 //! let config: HostConfig = toml::from_str(include_str!("angzarr.toml"))?;
 //! let host = Host::start(config)?;
-//! let mut registry = Registry::new().domain(table::Table);
-//! for handler in host.handlers() {
-//!     registry = registry.handler(Box::new(handler));
-//! }
-//! // ... run the application; dropping `host` stops the children.
+//! let mut registry = Registry::new();
+//! registry.aggregate::<table::Table>(Default::default)?; // in-process
+//! host.register(&mut registry)?; // every remote domain, by its domain
+//! let kernel = Kernel::new(&registry, &dead_letters);
+//! // ... kernel.handle_any(&store, book, &sampled, &mut ()) for any domain;
+//! // dropping `host` stops the children.
 //! ```
 //!
 //! The host runs its own tokio runtime, on its own threads, so it works the
@@ -28,6 +29,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
+use angzarr_embedded::next::{Misconfigured, Registry};
 use angzarr_router::pb;
 use tokio::io::BufReader;
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
@@ -164,6 +166,19 @@ impl Host {
             .iter()
             .find(|d| d.handler.domain() == domain)
             .map(|d| d.handler.clone())
+    }
+
+    /// Registers every remote domain's handler into `registry`, as the
+    /// domain it is configured for: the kernel then dispatches that
+    /// domain's commands, and its policies' steps into it, through the
+    /// child (`Kernel::handle_any`). In-process domains are registered by
+    /// the caller as ever. Refused as the registry refuses a domain (one
+    /// registered already, a descriptor with no state or rules version).
+    pub fn register(&self, registry: &mut Registry) -> Result<(), Misconfigured> {
+        for domain in &self.domains {
+            registry.command_handler(domain.handler.domain(), domain.handler.clone())?;
+        }
+        Ok(())
     }
 
     /// Stops supervising and stops every child: closes its stdin, waits up
@@ -437,3 +452,7 @@ impl Supervisor {
 #[cfg(test)]
 #[path = "host.test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "kernel.test.rs"]
+mod kernel_tests;

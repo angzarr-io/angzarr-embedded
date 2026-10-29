@@ -62,7 +62,9 @@ dependencies = [
 name = "angzarr-embedded-host"
 version = "0.1.0"
 dependencies = [
+ "angzarr-embedded",
  "angzarr-embedded-diagnostic",
+ "angzarr-ports",
  "angzarr-proto",
  "angzarr-router",
  "hyper-util",
