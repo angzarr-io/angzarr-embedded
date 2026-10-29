@@ -21,7 +21,7 @@ fn an_error_displays_its_code_and_args_never_english() {
     .to_string();
     assert_eq!(
         unavailable,
-        "angzarr-store-sqlite-unavailable ext_err_txt=\"disk I/O error\""
+        "angzarr-store-sqlite-driver-failed ext_err_txt=\"disk I/O error\""
     );
     assert!(
         !unavailable.contains("the database failed"),
@@ -118,6 +118,11 @@ fn a_failure_reaches_the_ports_with_the_drivers_code_and_text() {
     let StoreError::Unavailable(cause) = unavailable("pool timed out") else {
         panic!("unavailable");
     };
+    assert_eq!(
+        cause.code, "angzarr-store-sqlite-driver-failed",
+        "the driver failed before SQLite answered: a key of its own, whose \
+         message names no errno"
+    );
     assert_eq!(
         cause.args,
         [("ext_err_txt", Arg::Str("pool timed out".to_string()))],

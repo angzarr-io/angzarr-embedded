@@ -23,6 +23,10 @@ angzarr-store-sqlite = { path = "../angzarr-store-sqlite" }
 angzarr-ports = { git = "https://github.com/angzarr-io/angzarr-project", rev = "a1293eae1da37a95b58eb6081b066846876b5cca" }
 angzarr-embedded-yaml = { path = "../angzarr-embedded-yaml" }
 fluent-syntax = "0.12"
+# fluent-bundle (Apache-2.0 OR MIT) renders each sample's message with its
+# args, so a message naming an arg its error may not give fails here, not in
+# the client.
+fluent-bundle = "0.16"
 
 [lints]
 workspace = true

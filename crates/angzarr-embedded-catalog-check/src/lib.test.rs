@@ -710,3 +710,124 @@ fn the_checks_catch_what_they_should() {
     assert_eq!(vars, want);
     assert_eq!(problems.len(), 1, "{problems:?}");
 }
+
+/// `code`'s message in `locale`, rendered with `args`: the text, and every
+/// error Fluent reported (a variable the message names and `args` lack is
+/// one). The catalog is the code's owner's ([`owner`]), where it ships or
+/// where a crate carries it ([`CARRIED`]).
+fn render(code: &str, args: &[(&'static str, Arg)], locale: &str) -> (String, Vec<String>) {
+    use fluent_bundle::{FluentArgs, FluentBundle, FluentResource, FluentValue};
+    let mut ignored = Vec::new();
+    let krate = owner(code, catalogs(&mut ignored).keys().map(String::as_str))
+        .unwrap_or_else(|| panic!("{code}: no crate owns it"))
+        .to_string();
+    let carrier = CARRIED
+        .iter()
+        .find(|(owned, _)| *owned == krate)
+        .map_or(krate.as_str(), |(_, carrier)| *carrier);
+    let path = crates_dir()
+        .join(carrier)
+        .join("locales")
+        .join(locale)
+        .join(format!("{krate}.ftl"));
+    let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let resource = FluentResource::try_new(text).unwrap_or_else(|(r, _)| r);
+    let mut bundle = FluentBundle::new(vec![locale.parse().expect("a locale tag")]);
+    bundle.set_use_isolating(false);
+    bundle
+        .add_resource(resource)
+        .unwrap_or_else(|e| panic!("{}: {e:?}", path.display()));
+    let mut fluent = FluentArgs::new();
+    for (name, arg) in args {
+        let value = match arg {
+            Arg::Int(n) => FluentValue::from(*n),
+            Arg::Uint(n) => FluentValue::from(*n),
+            Arg::Str(s) => FluentValue::from(s.clone()),
+            Arg::Nested(cause) => FluentValue::from(cause.code().to_string()),
+        };
+        fluent.set(*name, value);
+    }
+    let Some(pattern) = bundle.get_message(code).and_then(|m| m.value()) else {
+        return (
+            String::new(),
+            vec![format!("{code}: no message in {locale}")],
+        );
+    };
+    let mut errors = Vec::new();
+    let rendered = bundle.format_pattern(pattern, Some(&fluent), &mut errors);
+    (
+        rendered.into_owned(),
+        errors.iter().map(|e| format!("{code}: {e:?}")).collect(),
+    )
+}
+
+/// Every sample's message, in every shipped locale, renders with the
+/// sample's own args and no error: no message names a variable its error
+/// does not give, whichever args that error has.
+#[test]
+fn every_samples_message_renders_with_its_args() {
+    let mut problems = Vec::new();
+    let locales: BTreeSet<String> = catalogs(&mut problems)
+        .values()
+        .flat_map(|c| c.keys().cloned())
+        .collect();
+    fn each(d: &dyn Diagnostic, locales: &BTreeSet<String>, problems: &mut Vec<String>) {
+        for locale in locales {
+            let (_, errors) = render(d.code(), &d.args(), locale);
+            problems.extend(errors.into_iter().map(|e| format!("{e} ({locale})")));
+        }
+        for (_, arg) in d.args() {
+            if let Arg::Nested(inner) = arg {
+                each(inner.as_ref(), locales, problems);
+            }
+        }
+    }
+    for (_, diagnostics) in samples() {
+        for d in &diagnostics {
+            each(&**d, &locales, &mut problems);
+        }
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+/// SQLite's failure renders whether or not the driver gave SQLite's result
+/// code: with it, as the database's failure naming the code; without it
+/// (an I/O error, a pool timing out), under a key of its own that names
+/// none, so no `$errno` goes missing.
+#[test]
+fn sqlites_failure_renders_with_and_without_its_errno() {
+    use angzarr_store_sqlite::SqlError;
+    let detail = "database is locked".to_string();
+    let rendered = |error: SqlError| {
+        let ported = Ported {
+            code: error.code(),
+            display: error.to_string(),
+            args: error.cause().args,
+        };
+        render(ported.code, &ported.args(), "en-US")
+    };
+
+    let with = rendered(SqlError::Unavailable {
+        errno: Some(5),
+        detail: detail.clone(),
+    });
+    assert_eq!(
+        with,
+        (
+            "the database failed (SQLite code 5): database is locked".to_string(),
+            vec![]
+        )
+    );
+
+    let without = rendered(SqlError::Unavailable {
+        errno: None,
+        detail,
+    });
+    assert_eq!(
+        without,
+        (
+            "the database driver failed: database is locked".to_string(),
+            vec![]
+        )
+    );
+}

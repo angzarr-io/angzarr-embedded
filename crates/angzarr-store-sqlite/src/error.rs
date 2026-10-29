@@ -190,6 +190,10 @@ pub fn errors() -> Vec<SqlError> {
             errno: Some(1),
             detail: detail(),
         },
+        SqlError::Unavailable {
+            errno: None,
+            detail: detail(),
+        },
         SqlError::Undecodable { detail: detail() },
         SqlError::Unmigrated { pending: 1 },
         SqlError::DamagedFile {
