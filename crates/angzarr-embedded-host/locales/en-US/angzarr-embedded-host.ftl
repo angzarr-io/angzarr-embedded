@@ -13,5 +13,8 @@ angzarr-embedded-host-spawn = domain "{ $domain }": could not start "{ $program 
 angzarr-embedded-host-handshake = domain "{ $domain }": { $cause }
 angzarr-embedded-host-connect = domain "{ $domain }": could not connect to { $socket }
 angzarr-embedded-host-describe = domain "{ $domain }": Describe failed with gRPC code { $grpc_code }
-angzarr-embedded-host-name-mismatch = domain "{ $domain }": the child describes a component named "{ $described }"
 angzarr-embedded-host-runtime = the host's runtime could not be built ({ $kind })
+angzarr-embedded-host-socket-dir-too-long = socket_dir "{ $dir }" is too long for a Unix socket path: at most { $max_bytes ->
+        [one] { $max_bytes } byte
+       *[other] { $max_bytes } bytes
+    }

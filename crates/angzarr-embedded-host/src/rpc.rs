@@ -35,7 +35,6 @@ pub mod component {
 /// A channel to the server listening on the Unix socket at `socket`. The
 /// endpoint's URI is a placeholder tonic requires; every connection is the
 /// socket.
-#[allow(dead_code)] // red: used by the supervisor
 pub(crate) async fn connect_unix(socket: PathBuf) -> Result<Channel, tonic::transport::Error> {
     Endpoint::from_static("http://[::]:0")
         .connect_with_connector(tower::service_fn(move |_: Uri| {
@@ -43,4 +42,42 @@ pub(crate) async fn connect_unix(socket: PathBuf) -> Result<Channel, tonic::tran
             async move { Ok::<_, std::io::Error>(TokioIo::new(UnixStream::connect(socket).await?)) }
         }))
         .await
+}
+
+/// google.rpc's `Status` (google/rpc/status.proto) and `ErrorInfo`
+/// (google/rpc/error_details.proto): how a gRPC status's details travel.
+/// A non-OK status from a child carries a `Status` in its details, whose
+/// own details are an `ErrorInfo` (the coded error's reason and metadata)
+/// and, for a refusal, the typed refusal. Two messages of a schema that
+/// does not change, written out rather than taken from a crate.
+pub mod google_rpc {
+    use std::collections::HashMap;
+
+    /// `google.rpc.Status`.
+    #[derive(Clone, PartialEq, prost::Message)]
+    pub struct Status {
+        #[prost(int32, tag = "1")]
+        pub code: i32,
+        #[prost(string, tag = "2")]
+        pub message: String,
+        #[prost(message, repeated, tag = "3")]
+        pub details: Vec<prost_types::Any>,
+    }
+
+    /// `google.rpc.ErrorInfo`.
+    #[derive(Clone, PartialEq, prost::Message)]
+    pub struct ErrorInfo {
+        #[prost(string, tag = "1")]
+        pub reason: String,
+        #[prost(string, tag = "2")]
+        pub domain: String,
+        #[prost(map = "string, string", tag = "3")]
+        pub metadata: HashMap<String, String>,
+    }
+
+    /// `ErrorInfo`'s fully-qualified name, as a type URL ends.
+    pub const ERROR_INFO_NAME: &str = "google.rpc.ErrorInfo";
+
+    /// The type URL a status detail packs an `ErrorInfo` under.
+    pub const ERROR_INFO_TYPE_URL: &str = "type.googleapis.com/google.rpc.ErrorInfo";
 }

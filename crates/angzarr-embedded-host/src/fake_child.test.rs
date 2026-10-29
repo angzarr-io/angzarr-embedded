@@ -24,13 +24,13 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::PathBuf;
 
+use crate::rpc::google_rpc::{ErrorInfo, Status as RpcStatus, ERROR_INFO_TYPE_URL};
 use angzarr_router::pb;
 use prost::Message;
 use prost_types::Any;
 use tokio::net::UnixListener;
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::{Request, Response, Status};
-use tonic_types::pb::{ErrorInfo, Status as RpcStatus};
 
 use crate::config::{DomainConfig, HostConfig, Supervision};
 use crate::handshake::SOCKET_ENV;
@@ -57,6 +57,9 @@ pub(crate) mod mode {
     pub(crate) const MALFORMED: &str = "malformed";
     /// Serve, and ignore stdin's end: only a kill stops it.
     pub(crate) const STUBBORN: &str = "stubborn";
+    /// Handshake, close stdout, then serve: the host sees stdout's end
+    /// while the child lives on.
+    pub(crate) const CLOSES_STDOUT: &str = "closes-stdout";
 }
 
 /// The v2 line the malformed fake prints.
@@ -136,9 +139,10 @@ fn entry() {
         mode::NOISY => {
             say("Loading player...");
             say("");
-            serve(name)
+            serve(name, false)
         }
-        _ => serve(name),
+        mode::CLOSES_STDOUT => serve(name, true),
+        _ => serve(name, false),
     }
 }
 
@@ -154,13 +158,16 @@ fn park() -> ! {
     }
 }
 
-fn serve(name: String) -> ! {
+fn serve(name: String, close_stdout: bool) -> ! {
     let socket = PathBuf::from(std::env::var(SOCKET_ENV).expect("the host sets ANGZARR_SOCKET"));
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async move {
         let _ = std::fs::remove_file(&socket);
         let listener = UnixListener::bind(&socket).unwrap();
         say(&format!("angzarr-handshake v1 unix:{}", socket.display()));
+        if close_stdout {
+            close_stdout_for_good();
+        }
         tonic::transport::Server::builder()
             .add_service(CommandHandlerServiceServer::new(Fake {
                 name: name.clone(),
@@ -172,6 +179,21 @@ fn serve(name: String) -> ! {
     });
     // Reached only if the server stopped on its own.
     std::process::exit(3)
+}
+
+/// Closes the stdout pipe, so its reader sees end of file, and parks
+/// /dev/null on descriptor 1 (the lowest free one, just closed), so a later
+/// write to stdout goes nowhere rather than into a socket.
+fn close_stdout_for_good() {
+    use std::os::fd::{FromRawFd, OwnedFd};
+    // SAFETY: descriptor 1 is this process's stdout, which nothing else
+    // here owns; it is flushed, and closed exactly once.
+    drop(unsafe { OwnedFd::from_raw_fd(1) });
+    let null = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/null")
+        .unwrap();
+    std::mem::forget(null);
 }
 
 struct Fake {
@@ -237,7 +259,7 @@ fn refused() -> Status {
         message: "table is full".to_string(),
         details: vec![
             Any {
-                type_url: "type.googleapis.com/google.rpc.ErrorInfo".to_string(),
+                type_url: ERROR_INFO_TYPE_URL.to_string(),
                 value: info.encode_to_vec(),
             },
             refusal(),

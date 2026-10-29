@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 
+use crate::rpc::google_rpc::{ErrorInfo, Status as RpcStatus, ERROR_INFO_TYPE_URL};
 use angzarr_router::error::{codes as router_codes, extras, GrpcCode};
 use prost::Message;
 use prost_types::Any;
 use tonic::Code;
-use tonic_types::pb::{ErrorInfo, Status as RpcStatus};
 
 use super::*;
 
@@ -29,7 +29,7 @@ pub(crate) fn error_info(reason: &str, metadata: &[(&str, &str)]) -> Any {
             .collect(),
     };
     Any {
-        type_url: "type.googleapis.com/google.rpc.ErrorInfo".to_string(),
+        type_url: ERROR_INFO_TYPE_URL.to_string(),
         value: info.encode_to_vec(),
     }
 }
@@ -146,6 +146,44 @@ fn a_status_without_error_info_is_unhandled() {
     assert_eq!(coded.message, "boom");
     assert_eq!(coded.grpc, GrpcCode::Internal);
     assert!(!is_retryable(&coded));
+}
+
+/// Every gRPC code the router knows is kept; any other is INTERNAL.
+#[test]
+fn each_status_code_maps_to_the_routers() {
+    for (code, grpc) in [
+        (Code::InvalidArgument, GrpcCode::InvalidArgument),
+        (Code::NotFound, GrpcCode::NotFound),
+        (Code::FailedPrecondition, GrpcCode::FailedPrecondition),
+        (Code::Aborted, GrpcCode::Aborted),
+        (Code::Unimplemented, GrpcCode::Unimplemented),
+        (Code::DataLoss, GrpcCode::DataLoss),
+        (Code::Internal, GrpcCode::Internal),
+        (Code::PermissionDenied, GrpcCode::Internal),
+    ] {
+        let status = status_with_details(code, "m", vec![error_info("SOME_REASON", &[])]);
+        assert_eq!(status_to_coded("player", &status).grpc, grpc, "{code:?}");
+    }
+}
+
+/// UNKNOWN is the transport's only when the transport is its source; a
+/// child's own UNKNOWN is a failure no one classified.
+#[test]
+fn a_childs_own_unknown_is_unhandled() {
+    let coded = status_to_coded("player", &tonic::Status::unknown("what"));
+    assert_eq!(coded.code, router_codes::UNHANDLED_HANDLER_ERROR);
+    assert!(!is_retryable(&coded));
+}
+
+/// A typed detail on a status other than FAILED_PRECONDITION is no refusal.
+#[test]
+fn only_a_failed_precondition_carries_a_refusal() {
+    let status = status_with_details(
+        Code::InvalidArgument,
+        "bad",
+        vec![error_info("BAD", &[]), refusal()],
+    );
+    assert_eq!(status_to_coded("player", &status).refusal, None);
 }
 
 #[test]

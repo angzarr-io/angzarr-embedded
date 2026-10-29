@@ -42,8 +42,10 @@ pub const IN_PROCESS_LANGUAGE: &str = "rust";
 /// domain's `entry`. Python's runs the domain's project with exactly its
 /// lock file's dependencies.
 pub fn default_launch(language: &str) -> Option<&'static [&'static str]> {
-    let _ = language;
-    todo!("red: the default launch command by language")
+    match language {
+        "python" => Some(&["uv", "run", "--locked"]),
+        _ => None,
+    }
 }
 
 /// The host's whole config.
@@ -102,9 +104,11 @@ pub struct Supervision {
     /// How long a child has, once its stdin is closed at shutdown, to exit
     /// before it is killed.
     pub shutdown_grace_ms: u64,
-    /// The directory the host puts the children's sockets in; the system's
-    /// temporary directory when absent. A Unix socket's path is short (about
-    /// 100 bytes), so a deep directory will not do.
+    /// The directory the host puts the children's sockets in. When absent,
+    /// `$XDG_RUNTIME_DIR` if it is set, absolute and short enough, else
+    /// `/tmp`: never `$TMPDIR`, which may be deep. A Unix socket's path is
+    /// at most 107 bytes, so a directory too long to hold the host's socket
+    /// names is refused at start ([`HostError::SocketDirTooLong`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub socket_dir: Option<PathBuf>,
 }
@@ -148,7 +152,33 @@ impl DomainConfig {
     /// launch is empty, or when no launch is given for a language with no
     /// default.
     pub fn placement(&self) -> Result<Placement, HostError> {
-        todo!("red: a domain's placement and launch")
+        let words: Vec<String> = match (&self.launch, default_launch(&self.language)) {
+            (Some(launch), _) => launch.clone(),
+            (None, _) if self.language == IN_PROCESS_LANGUAGE => return Ok(Placement::InProcess),
+            (None, Some(default)) => default
+                .iter()
+                .map(|w| w.to_string())
+                .chain(self.entry.iter().cloned())
+                .collect(),
+            (None, None) => {
+                return Err(HostError::NoLaunch {
+                    domain: self.name.clone(),
+                    language: self.language.clone(),
+                })
+            }
+        };
+        let mut words = words.into_iter();
+        let Some(program) = words.next() else {
+            return Err(HostError::EmptyLaunch {
+                domain: self.name.clone(),
+            });
+        };
+        Ok(Placement::Remote(Launch {
+            program,
+            args: words.collect(),
+            dir: self.dir.clone(),
+            env: self.env.clone(),
+        }))
     }
 }
 

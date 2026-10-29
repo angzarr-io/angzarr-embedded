@@ -14,10 +14,10 @@
 //! harness's) are skipped; a line that does start so and is not a v1
 //! handshake naming an absolute Unix socket is refused, never skipped.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use tokio::io::AsyncBufRead;
+use tokio::io::{AsyncBufRead, AsyncBufReadExt};
 
 use crate::error::HandshakeError;
 
@@ -42,8 +42,29 @@ pub struct Handshake {
 /// an error for a line that starts `angzarr-handshake` but is not a v1
 /// handshake naming an absolute Unix socket path.
 pub fn parse_line(line: &str) -> Result<Option<Handshake>, HandshakeError> {
-    let _ = line;
-    todo!("red: parse one stdout line")
+    let line = line.strip_suffix('\n').unwrap_or(line);
+    let line = line.strip_suffix('\r').unwrap_or(line);
+    let Some(rest) = line.strip_prefix(HANDSHAKE_PREFIX) else {
+        return Ok(None);
+    };
+    if !rest.is_empty() && !rest.starts_with(' ') {
+        // A longer first word (`angzarr-handshaker`): not a handshake.
+        return Ok(None);
+    }
+    let malformed = || HandshakeError::Malformed {
+        line: line.to_string(),
+    };
+    let (version, address) = rest
+        .strip_prefix(' ')
+        .and_then(|rest| rest.split_once(' '))
+        .ok_or_else(malformed)?;
+    let path = address.strip_prefix("unix:").ok_or_else(malformed)?;
+    if version != PROTOCOL_VERSION || !Path::new(path).is_absolute() {
+        return Err(malformed());
+    }
+    Ok(Some(Handshake {
+        socket: PathBuf::from(path),
+    }))
 }
 
 /// Reads `stdout` line by line to its handshake, skipping the lines before
@@ -52,8 +73,29 @@ pub async fn read_handshake<R: AsyncBufRead + Unpin>(
     stdout: &mut R,
     timeout: Duration,
 ) -> Result<Handshake, HandshakeError> {
-    let _ = (stdout, timeout);
-    todo!("red: read the handshake within the timeout")
+    let reading = async {
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            stdout
+                .read_until(b'\n', &mut line)
+                .await
+                .map_err(|e| HandshakeError::Unreadable {
+                    kind: format!("{:?}", e.kind()),
+                })?;
+            if line.last() != Some(&b'\n') {
+                return Err(HandshakeError::Closed);
+            }
+            if let Some(handshake) = parse_line(&String::from_utf8_lossy(&line))? {
+                return Ok(handshake);
+            }
+        }
+    };
+    tokio::time::timeout(timeout, reading)
+        .await
+        .unwrap_or(Err(HandshakeError::Timeout {
+            timeout_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+        }))
 }
 
 #[cfg(test)]

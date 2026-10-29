@@ -96,8 +96,9 @@ pub enum HostError {
     /// `ComponentService.Describe` failed; `grpc_code` is the status's wire
     /// code.
     Describe { domain: String, grpc_code: i32 },
-    /// The child describes a component of another name than its domain.
-    NameMismatch { domain: String, described: String },
+    /// The configured `socket_dir` is too long for a Unix socket path to
+    /// hold the host's socket names in it: at most `max_bytes` bytes.
+    SocketDirTooLong { dir: String, max_bytes: u64 },
     /// The host's own runtime could not be built. `kind` is the I/O error's
     /// `std::io::ErrorKind`, by name.
     Runtime { kind: String },
@@ -131,9 +132,9 @@ impl fmt::Display for HostError {
                 f,
                 "domain \"{domain}\": Describe failed with gRPC code {grpc_code}"
             ),
-            HostError::NameMismatch { domain, described } => write!(
+            HostError::SocketDirTooLong { dir, max_bytes } => write!(
                 f,
-                "domain \"{domain}\": the child describes a component named \"{described}\""
+                "socket_dir \"{dir}\" is too long for a Unix socket path: at most {max_bytes} bytes"
             ),
             HostError::Runtime { kind } => {
                 write!(f, "the host's runtime could not be built ({kind})")
@@ -152,7 +153,7 @@ impl Diagnostic for HostError {
             HostError::Handshake { .. } => "angzarr-embedded-host-handshake",
             HostError::Connect { .. } => "angzarr-embedded-host-connect",
             HostError::Describe { .. } => "angzarr-embedded-host-describe",
-            HostError::NameMismatch { .. } => "angzarr-embedded-host-name-mismatch",
+            HostError::SocketDirTooLong { .. } => "angzarr-embedded-host-socket-dir-too-long",
             HostError::Runtime { .. } => "angzarr-embedded-host-runtime",
         }
     }
@@ -186,10 +187,10 @@ impl Diagnostic for HostError {
                 domain: d,
                 grpc_code,
             } => vec![domain(d), ("grpc_code", (*grpc_code).into())],
-            HostError::NameMismatch {
-                domain: d,
-                described,
-            } => vec![domain(d), ("described", described.as_str().into())],
+            HostError::SocketDirTooLong { dir, max_bytes } => vec![
+                ("dir", dir.as_str().into()),
+                ("max_bytes", (*max_bytes).into()),
+            ],
             HostError::Runtime { kind } => vec![("kind", kind.as_str().into())],
         }
     }
@@ -233,9 +234,9 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn Diagnostic>> {
             domain: d(),
             grpc_code: 14,
         }),
-        Box::new(HostError::NameMismatch {
-            domain: d(),
-            described: "table".to_string(),
+        Box::new(HostError::SocketDirTooLong {
+            dir: "/very/deep/directory".to_string(),
+            max_bytes: 65,
         }),
         Box::new(HostError::Runtime {
             kind: "Other".to_string(),

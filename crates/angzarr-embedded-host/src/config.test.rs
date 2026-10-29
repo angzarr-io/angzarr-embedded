@@ -18,32 +18,28 @@ fn strings(words: &[&str]) -> Vec<String> {
     words.iter().map(|w| w.to_string()).collect()
 }
 
-/// The CLI writes `[[domain]]` tables; every key but `name` and `language`
-/// may be left out, and `[supervision]` keeps the defaults of the keys it
-/// leaves out.
+/// The CLI writes `[[domain]]` tables (the `domain` key holds the list);
+/// every key but `name` and `language` may be left out, and
+/// `[supervision]` keeps the defaults of the keys it leaves out. Read here
+/// through serde_json, the serde format in the graph: the shape is serde's,
+/// whatever the format.
 #[test]
-fn the_domain_tables_read_from_toml() {
-    let text = r#"
-        [[domain]]
-        name = "table"
-        language = "rust"
-
-        [[domain]]
-        name = "player"
-        language = "python"
-        entry = ["-m", "player.serve"]
-        dir = "domains/player"
-        env = { PLAYER_SEATS = "6" }
-
-        [[domain]]
-        name = "dealer"
-        language = "go"
-        launch = ["./bin/dealer", "--serve"]
-
-        [supervision]
-        handshake_timeout_ms = 10000
-    "#;
-    let config: HostConfig = toml::from_str(text).unwrap();
+fn the_domain_tables_deserialize() {
+    let text = r#"{
+        "domain": [
+            { "name": "table", "language": "rust" },
+            {
+                "name": "player",
+                "language": "python",
+                "entry": ["-m", "player.serve"],
+                "dir": "domains/player",
+                "env": { "PLAYER_SEATS": "6" }
+            },
+            { "name": "dealer", "language": "go", "launch": ["./bin/dealer", "--serve"] }
+        ],
+        "supervision": { "handshake_timeout_ms": 10000 }
+    }"#;
+    let config: HostConfig = serde_json::from_str(text).unwrap();
     let mut player = domain("player", "python");
     player.entry = strings(&["-m", "player.serve"]);
     player.dir = Some(PathBuf::from("domains/player"));
@@ -66,13 +62,13 @@ fn the_domain_tables_read_from_toml() {
 /// default launch silently.
 #[test]
 fn an_unknown_key_is_refused() {
-    let text = r#"
-        [[domain]]
-        name = "player"
-        language = "python"
-        lanuch = ["python3", "serve.py"]
-    "#;
-    assert!(toml::from_str::<HostConfig>(text).is_err());
+    let text = r#"{
+        "domain": [
+            { "name": "player", "language": "python", "lanuch": ["python3", "serve.py"] }
+        ]
+    }"#;
+    assert!(serde_json::from_str::<HostConfig>(text).is_err());
+    assert!(serde_json::from_str::<HostConfig>(r#"{ "domains": [] }"#).is_err());
 }
 
 #[test]

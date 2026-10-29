@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use angzarr_router::error::GrpcCode;
@@ -69,6 +70,10 @@ fn start_describes_each_remote_domain() {
     assert_eq!(descriptor.kind, pb::ComponentKind::Aggregate as i32);
     assert!(descriptor.rules_version.starts_with("pid-"));
     assert_eq!(handler.command_types(), Vec::<String>::new());
+    assert_eq!(
+        format!("{handler:?}"),
+        "RemoteCommandHandler { domain: \"player\", .. }"
+    );
     assert_eq!(host.handler("player").unwrap().name(), "player");
     assert!(host.handler("table").is_none());
     host.shutdown();
@@ -188,6 +193,121 @@ fn a_dead_child_is_retryable_then_restarted() {
     host.shutdown();
 }
 
+/// A restart that fails waits twice as long before the next, up to the
+/// configured most.
+#[test]
+fn the_backoff_doubles_up_to_its_most() {
+    let ms = Duration::from_millis;
+    assert_eq!(next_backoff(ms(100), ms(5_000)), ms(200));
+    assert_eq!(next_backoff(ms(3_000), ms(5_000)), ms(5_000));
+    assert_eq!(next_backoff(ms(5_000), ms(5_000)), ms(5_000));
+}
+
+/// Stdout ending after the handshake is not the child ending: it keeps
+/// serving, the same process. The fake closes stdout before it serves its
+/// first call, so the end is already there when the call is made.
+#[test]
+fn stdout_ending_after_the_handshake_is_not_the_child_ending() {
+    let host = started(vec![player(mode::CLOSES_STDOUT)]);
+    let handler = host.handler("player").unwrap();
+    for _ in 0..3 {
+        let response = handler
+            .dispatch(&command("player", "/examples.blackjack.SitDown"))
+            .expect("still serving");
+        assert_eq!(response.rules_version, pid_of(&handler));
+    }
+    assert_eq!(
+        host.shutdown(),
+        vec![("player".to_string(), ChildExit::Exited(Some(0)))]
+    );
+}
+
+/// The default socket directory is short: `$XDG_RUNTIME_DIR` when it is
+/// absolute and fits, else `/tmp`; never a deep `$TMPDIR`.
+#[test]
+fn the_default_socket_dir_is_short() {
+    let xdg = PathBuf::from("/run/user/1000");
+    assert_eq!(socket_dir(None, Some(xdg.clone())), Ok(xdg));
+    assert_eq!(socket_dir(None, None), Ok(PathBuf::from("/tmp")));
+    assert_eq!(
+        socket_dir(None, Some(PathBuf::from("run/user/1000"))),
+        Ok(PathBuf::from("/tmp"))
+    );
+    let deep = PathBuf::from(format!("/{}", "d".repeat(80)));
+    assert_eq!(socket_dir(None, Some(deep)), Ok(PathBuf::from("/tmp")));
+    let path = socket_path(Path::new("/tmp"));
+    assert!(path.as_os_str().len() <= MAX_SOCKET_PATH);
+}
+
+/// A configured directory is used as given, up to the longest that holds
+/// the host's socket names, and refused past it.
+#[test]
+fn a_configured_socket_dir_too_long_is_refused() {
+    let max = MAX_SOCKET_PATH - MAX_SOCKET_NAME;
+    let fits = PathBuf::from(format!("/{}", "d".repeat(max - 1)));
+    assert_eq!(socket_dir(Some(&fits), None), Ok(fits.clone()));
+    let worst = fits.join(format!("angzarr-{}-{}.sock", 4_194_304, u64::MAX));
+    assert!(worst.as_os_str().len() <= MAX_SOCKET_PATH);
+    let long = PathBuf::from(format!("/{}", "d".repeat(max)));
+    assert_eq!(
+        socket_dir(Some(&long), None),
+        Err(HostError::SocketDirTooLong {
+            dir: long.display().to_string(),
+            max_bytes: max as u64,
+        })
+    );
+}
+
+/// The refusal comes at start, before any child is launched.
+#[test]
+fn start_refuses_a_socket_dir_too_long() {
+    let mut config = config(vec![player(mode::SERVE)]);
+    let long = PathBuf::from(format!("/{}", "d".repeat(100)));
+    config.supervision.socket_dir = Some(long.clone());
+    assert_eq!(
+        Host::start(config).err(),
+        Some(HostError::SocketDirTooLong {
+            dir: long.display().to_string(),
+            max_bytes: (MAX_SOCKET_PATH - MAX_SOCKET_NAME) as u64,
+        })
+    );
+}
+
+/// The real Python player (client-python's harness, examples-python's
+/// player bot), launched by its default: `uv run --locked angzarr-player`.
+/// Ignored by default: it needs uv, the player's checkout, and its locked
+/// dependencies. `ANGZARR_PLAYER_DIR` names the checkout's `player`
+/// directory; `~/workspace/worktrees/examples-python--player-bot/player`
+/// otherwise.
+#[test]
+#[ignore = "needs uv and the Python player's checkout"]
+fn the_python_player_comes_up_by_its_default_launch() {
+    let dir = std::env::var_os("ANGZARR_PLAYER_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(std::env::var_os("HOME").unwrap())
+                .join("workspace/worktrees/examples-python--player-bot/player")
+        });
+    let player = DomainConfig {
+        name: "player".to_string(),
+        language: "python".to_string(),
+        launch: None,
+        entry: vec!["angzarr-player".to_string()],
+        dir: Some(dir),
+        env: Default::default(),
+    };
+    let mut config = config(vec![player]);
+    config.supervision.handshake_timeout_ms = 120_000;
+    let host = Host::start(config).expect("the player comes up");
+    let handler = host.handler("player").unwrap();
+    assert_eq!(handler.kind(), pb::ComponentKind::Aggregate);
+    assert!(!handler.name().is_empty());
+    assert_eq!(
+        host.shutdown(),
+        vec![("player".to_string(), ChildExit::Exited(Some(0)))]
+    );
+}
+
 /// Chatter on stdout before the handshake is skipped.
 #[test]
 fn stdout_before_the_handshake_is_skipped() {
@@ -244,15 +364,19 @@ fn the_configured_launch_is_what_runs() {
     );
 }
 
-/// A child must describe the domain it was launched for.
+/// A handler is named by the component its child describes, and found by
+/// the domain it is configured for: the two differ (`PlayerAggregate` in
+/// the domain `player`).
 #[test]
-fn a_child_describing_another_component_fails_start() {
+fn a_handler_is_named_by_its_component_and_found_by_its_domain() {
+    let host = started(vec![domain("player", "PlayerAggregate", mode::SERVE)]);
+    let handler = host.handler("player").expect("found by its domain");
+    assert_eq!(handler.name(), "PlayerAggregate");
+    assert_eq!(handler.domain(), "player");
+    assert!(host.handler("PlayerAggregate").is_none());
     assert_eq!(
-        Host::start(config(vec![domain("player", "table", mode::SERVE)])).err(),
-        Some(HostError::NameMismatch {
-            domain: "player".to_string(),
-            described: "table".to_string(),
-        })
+        host.shutdown(),
+        vec![("player".to_string(), ChildExit::Exited(Some(0)))]
     );
 }
 

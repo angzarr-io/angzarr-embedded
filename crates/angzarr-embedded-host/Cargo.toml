@@ -11,9 +11,10 @@ rust-version = "1.85"
 # A remote domain is a child process serving angzarr's CommandHandlerService
 # and ComponentService over gRPC on a Unix socket (the go-plugin model), so
 # this crate needs a gRPC client (tonic, with its prost codec), the async
-# runtime it runs on (tokio), the connector glue for a Unix socket (tower,
-# hyper-util), and google.rpc's Status and ErrorInfo for a status's details
-# (tonic-types). The handler it builds is angzarr-router's CommandHandler,
+# runtime it runs on (tokio), and the connector glue for a Unix socket
+# (tower, hyper-util), all of which tonic itself depends on; google.rpc's
+# Status and ErrorInfo are two hand-written prost messages (src/rpc.rs), not
+# a crate. serde derives the config. The handler it builds is angzarr-router's CommandHandler,
 # on the router's types, so angzarr-router and angzarr-proto are pinned at
 # the revs the router itself names: ONE angzarr-proto in the graph.
 [dependencies]
@@ -24,19 +25,19 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 prost = "0.14"
 prost-types = "0.14"
 serde = { version = "1", features = ["derive"] }
-tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 tonic = { version = "0.14", default-features = false, features = ["codegen", "transport"] }
 tonic-prost = "0.14"
-tonic-types = "0.14"
 tower = { version = "0.5", default-features = false, features = ["util"] }
 
 # The fake child the tests launch serves the generated server stubs over a
-# Unix socket (tonic's router, tokio-stream's UnixListenerStream); the
-# config's TOML shape is checked by parsing it.
+# Unix socket (tonic's router, tokio-stream's UnixListenerStream, both in
+# the graph through tonic); the config's serde shape is checked through
+# serde_json, in the graph already (through sqlx).
 [dev-dependencies]
+serde_json = "1"
 tonic = { version = "0.14", default-features = false, features = ["router"] }
 tokio-stream = { version = "0.1", features = ["net"] }
-toml = "0.9"
 
 # The gRPC stubs are written from Rust types with tonic-build's manual
 # builder, not from .proto files: angzarr-proto compiles no services and

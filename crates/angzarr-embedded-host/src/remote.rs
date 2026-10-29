@@ -16,12 +16,15 @@
 
 use std::sync::{Arc, RwLock};
 
-use angzarr_router::error::CodedError;
+use angzarr_router::error::{codes as router_codes, extras, CodedError, GrpcCode};
 use angzarr_router::pb;
 use angzarr_router::router::CommandHandler;
+use prost::Message;
 use tonic::transport::Channel;
+use tonic::Code;
 
 use crate::rpc::command_handler::command_handler_service_client::CommandHandlerServiceClient;
+use crate::rpc::google_rpc::{ErrorInfo, Status as RpcStatus, ERROR_INFO_NAME};
 
 /// The router-style codes a remote handler's dispatch adds to the router's
 /// own (`angzarr_router::error::codes`).
@@ -52,8 +55,7 @@ pub mod causes {
 /// Whether a remote handler's error is worth retrying: the child was
 /// unreachable, and will be back.
 pub fn is_retryable(error: &CodedError) -> bool {
-    let _ = error;
-    todo!("red: which errors are retryable")
+    error.code == codes::REMOTE_HANDLER_UNAVAILABLE
 }
 
 /// A remote domain's handler. Cloning it is cheap; every clone reaches the
@@ -73,13 +75,11 @@ struct Remote {
 /// The connection to a domain's current child, which its supervisor sets
 /// when a child comes up and clears when it exits.
 #[derive(Default)]
-#[allow(dead_code)] // red: read by dispatch, set by the supervisor
 pub(crate) struct Link {
     pub(crate) client: RwLock<Option<CommandHandlerServiceClient<Channel>>>,
 }
 
 impl RemoteCommandHandler {
-    #[allow(dead_code)] // red: built by Host::start
     pub(crate) fn new(
         domain: String,
         descriptor: pb::ComponentDescriptor,
@@ -97,6 +97,13 @@ impl RemoteCommandHandler {
     }
 }
 
+impl RemoteCommandHandler {
+    /// The domain this handler is configured for: its `[[domain]]` name.
+    pub fn domain(&self) -> &str {
+        &self.inner.domain
+    }
+}
+
 impl std::fmt::Debug for RemoteCommandHandler {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RemoteCommandHandler")
@@ -106,20 +113,22 @@ impl std::fmt::Debug for RemoteCommandHandler {
 }
 
 impl CommandHandler for RemoteCommandHandler {
-    /// The domain's name, which its descriptor names too.
+    /// The component's name, as its descriptor gives it (a domain's
+    /// component is named for itself, not for the domain:
+    /// `PlayerAggregate` for `player`).
     fn name(&self) -> &str {
-        &self.inner.domain
+        &self.inner.descriptor.name
     }
 
     /// The kind its descriptor gives.
     fn kind(&self) -> pb::ComponentKind {
-        todo!("red: the descriptor's kind")
+        self.inner.descriptor.kind()
     }
 
     /// None: the wire descriptor carries no command types, and the router
     /// hosts one component, which every command reaches.
     fn command_types(&self) -> Vec<String> {
-        todo!("red: a remote domain's command types")
+        Vec::new()
     }
 
     /// `CommandHandlerService.Handle` on the child, blocking until it
@@ -129,30 +138,102 @@ impl CommandHandler for RemoteCommandHandler {
         &self,
         req: &pb::ContextualCommand,
     ) -> Result<pb::CommandHandlerResponse, CodedError> {
-        let _ = (req, &self.inner.link, &self.inner.runtime);
-        todo!("red: dispatch over the child's socket")
+        let domain = &self.inner.domain;
+        let client = self
+            .inner
+            .link
+            .client
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let Some(mut client) = client else {
+            return Err(unavailable(domain, causes::NOT_RUNNING));
+        };
+        let req = req.clone();
+        let (answer, answered) = std::sync::mpsc::sync_channel(1);
+        self.inner.runtime.spawn(async move {
+            let _ = answer.send(client.handle(req).await);
+        });
+        match answered.recv() {
+            Ok(Ok(response)) => Ok(response.into_inner()),
+            Ok(Err(status)) => Err(status_to_coded(domain, &status)),
+            // The host's runtime stopped, dropping the call.
+            Err(_) => Err(unavailable(domain, causes::TRANSPORT)),
+        }
     }
 
     /// The descriptor `Describe` gave when the domain first came up.
     fn component_descriptor(&self) -> Result<pb::ComponentDescriptor, CodedError> {
-        let _ = &self.inner.descriptor;
-        todo!("red: the described descriptor")
+        Ok(self.inner.descriptor.clone())
     }
 }
 
 /// A non-OK status from the child's `Handle`, in the router's terms (see
 /// the module's docs).
-#[allow(dead_code)] // red: used by dispatch
 pub(crate) fn status_to_coded(domain: &str, status: &tonic::Status) -> CodedError {
-    let _ = (domain, status);
-    todo!("red: map a status to the router's error")
+    let details = RpcStatus::decode(status.details())
+        .map(|rpc| rpc.details)
+        .unwrap_or_default();
+    // A status the child never sent: the call failed on the way (the
+    // connection refused or reset, the child gone mid-call), which tonic
+    // reports with the transport's error as its source.
+    let transport = details.is_empty()
+        && (status.code() == Code::Unavailable
+            || (status.code() == Code::Unknown && std::error::Error::source(status).is_some()));
+    if transport {
+        return unavailable(domain, causes::TRANSPORT);
+    }
+    let is_info = |detail: &&prost_types::Any| {
+        angzarr_router::type_name_from_url(&detail.type_url) == ERROR_INFO_NAME
+    };
+    let info = details
+        .iter()
+        .find(is_info)
+        .and_then(|detail| ErrorInfo::decode(detail.value.as_slice()).ok());
+    let refusal = details
+        .iter()
+        .find(|detail| !is_info(detail))
+        .cloned()
+        .map(Box::new);
+    let grpc = match status.code() {
+        Code::InvalidArgument => GrpcCode::InvalidArgument,
+        Code::NotFound => GrpcCode::NotFound,
+        Code::FailedPrecondition => GrpcCode::FailedPrecondition,
+        Code::Aborted => GrpcCode::Aborted,
+        Code::Unimplemented => GrpcCode::Unimplemented,
+        Code::DataLoss => GrpcCode::DataLoss,
+        _ => GrpcCode::Internal,
+    };
+    let (code, extras) = match info {
+        Some(info) => (info.reason, info.metadata.into_iter().collect()),
+        None => (
+            router_codes::UNHANDLED_HANDLER_ERROR.to_string(),
+            Default::default(),
+        ),
+    };
+    CodedError {
+        code,
+        message: status.message().to_string(),
+        extras,
+        grpc,
+        // Only a refusal carries its typed object to a policy.
+        refusal: refusal.filter(|_| grpc == GrpcCode::FailedPrecondition),
+    }
 }
 
 /// [`codes::REMOTE_HANDLER_UNAVAILABLE`] for `domain`, for `cause`.
-#[allow(dead_code)] // red: used by dispatch
 pub(crate) fn unavailable(domain: &str, cause: &str) -> CodedError {
-    let _ = (domain, cause);
-    todo!("red: the retryable unavailable error")
+    CodedError {
+        code: codes::REMOTE_HANDLER_UNAVAILABLE.to_string(),
+        message: REMOTE_HANDLER_UNAVAILABLE_MESSAGE.to_string(),
+        extras: [
+            (extras::DOMAIN.to_string(), domain.to_string()),
+            (CAUSE.to_string(), cause.to_string()),
+        ]
+        .into(),
+        grpc: GrpcCode::Aborted,
+        refusal: None,
+    }
 }
 
 #[cfg(test)]
