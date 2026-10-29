@@ -140,14 +140,16 @@
 //! later event must be decided from the state after an earlier one, the
 //! handler returns `Emit::of(e).then(Self::step)`. A step is a pure
 //! `&self` method, `fn(&self, ctx: &Context) -> Result<R, E>`, with `R`
-//! any `Emits` shape and `E` anything that converts into the domain's
-//! rejection (its own, or a `Refuses` choice), so a step may chain
-//! `.then(..)` again.
+//! any `Emits` shape and `E` anything a handler may fail with
+//! (`markup::Fails`: the domain's own rejection or a `Refuses` choice, as
+//! is or as a `Failed`), so a step may chain `.then(..)` again, refuse
+//! under a business status, or fail with a bug.
 //!
 //! The router applies the events, calls the step on the updated instance,
 //! applies what it returns, and repeats until there is no continuation.
 //! All of it is **one decision**: a rejection from the handler or any step
-//! refuses it all, and every step's events are committed together, in
+//! refuses it all, a bug from any of them fails it all (dead-lettered as
+//! the handler's bug), and every step's events are committed together, in
 //! order, in one commit. A decision that runs more than
 //! `angzarr_embedded::next::markup::STEP_LIMIT` steps is a bug (a step that always
 //! continues): the kernel's `TooManySteps`, nothing committed. A step must
@@ -188,7 +190,11 @@
 //! whose message is the refusal's. The handler's `Err` is then
 //! `Refuses<Self, Hold>`, a choice the macro builds of exactly those
 //! types, each `From` its type: `Err(InsufficientFunds { .. }.into())`. An
-//! object not listed does not compile.
+//! object not listed does not compile. To refuse under a business status
+//! other than FAILED_PRECONDITION, or to fail with a bug, the `Err` is
+//! `Failed<Refuses<Self, Hold>>` instead:
+//! `Err(Failed::rejected(InsufficientFunds { .. }).with_status(..))`,
+//! `Err(Failed::bug(&broke))`, the list still checked.
 //!
 //! A command handler without `refuses` refuses with the domain's own
 //! rejection, a message only. Either way the domain's `Domain::Rejection`

@@ -1239,12 +1239,7 @@ where
     O: Emits<A>,
     E: Fails<A>,
 {
-    let fail = |failed: Failed<Rejection<R>>| match failed {
-        Failed::Rejected { rejection, .. } => {
-            super::route::rejection(&rejection, rejection.refusal().cloned())
-        }
-        Failed::Bug(report) => super::route::rejection(&report, None),
-    };
+    let fail = super::route::failed::<R>;
     let ctx = context_of(cctx);
     let command = input::<C>(any)?;
     let mut emit = handler(state, command, &ctx)

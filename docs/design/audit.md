@@ -448,7 +448,13 @@ angzarr-router's `GrpcCode` has no ALREADY_EXISTS, OUT_OF_RANGE,
 PERMISSION_DENIED or UNKNOWN: a remote child's ALREADY_EXISTS,
 OUT_OF_RANGE and PERMISSION_DENIED arrive FAILED_PRECONDITION, its
 UNKNOWN, DEADLINE_EXCEEDED and RESOURCE_EXHAUSTED (and an UNAVAILABLE it
-sent with its reason) INTERNAL. A handler fails deliberately as a bug with
+sent with its reason) INTERNAL. A marked-up command handler or
+continuation step fails with `markup::Failed`: `Failed::Rejected`, a
+refusal under its business status (FAILED_PRECONDITION by default; until
+angzarr-router carries them, ALREADY_EXISTS, OUT_OF_RANGE and
+PERMISSION_DENIED go out FAILED_PRECONDITION, and `Rejected::status`
+reads so), or `Failed::Bug`, which goes out as angzarr-router's
+`CodedError::bug`. A handler fails deliberately as a bug with
 angzarr-router's `CodedError::bug` (decision 14.37), which answers
 UNHANDLED_HANDLER_ERROR with the handler's own code and args as its cause
 (`cause=<code>`, `cause.<arg>=<value>`); an error without a code of its

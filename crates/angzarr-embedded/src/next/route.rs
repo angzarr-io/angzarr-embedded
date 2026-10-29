@@ -29,6 +29,7 @@ use prost_types::{Any, Timestamp};
 
 use super::domain::{Domain, State};
 use super::error::UpcastError;
+use super::markup::{BusinessStatus, Failed};
 use super::payload::{type_name, Payload};
 use super::upcast::Upcaster;
 use super::version::Rulebook;
@@ -209,6 +210,7 @@ pub(crate) const TOO_MANY_STEPS: &str = "ANGZARR_EMBEDDED_TOO_MANY_STEPS";
 pub struct Rejected {
     report: Report,
     refusal: Option<Any>,
+    status: BusinessStatus,
 }
 
 impl Rejected {
@@ -227,6 +229,11 @@ impl Rejected {
         Rejected {
             report,
             refusal: error.refusal.as_deref().cloned(),
+            status: match error.grpc {
+                GrpcCode::InvalidArgument => BusinessStatus::InvalidArgument,
+                GrpcCode::NotFound => BusinessStatus::NotFound,
+                _ => BusinessStatus::FailedPrecondition,
+            },
         }
     }
 
@@ -236,8 +243,8 @@ impl Rejected {
     }
 
     /// The business status the refusal went out under.
-    pub fn status(&self) -> super::markup::BusinessStatus {
-        super::markup::BusinessStatus::FailedPrecondition
+    pub fn status(&self) -> BusinessStatus {
+        self.status
     }
 
     /// The typed refusal object, packed, if the handler refused with one.
@@ -307,6 +314,55 @@ pub(crate) fn is_handler_fault(error: &CodedError) -> bool {
 /// router carries it: a business rejection (FAILED_PRECONDITION) under the
 /// refusal's own code, its args as metadata, the object packed beside.
 pub fn rejection(rejection: &dyn Diagnostic, refusal: Option<Any>) -> HandlerError {
+    refused(rejection, refusal, BusinessStatus::FailedPrecondition)
+}
+
+/// A marked-up handler's failure, as the router carries it: a refusal
+/// under its status ([`refused`]), or a bug ([`bug`]).
+pub(crate) fn failed<R: Diagnostic>(failed: Failed<super::markup::Rejection<R>>) -> HandlerError {
+    match failed {
+        Failed::Rejected { rejection, status } => {
+            refused(&rejection, rejection.refusal().cloned(), status)
+        }
+        Failed::Bug(report) => bug(&report),
+    }
+}
+
+/// A handler's bug, as the router carries it (decision 14.37): INTERNAL
+/// UNHANDLED_HANDLER_ERROR, the bug's code as its `cause` and its args,
+/// flattened, as `cause.<arg>`; never a refusal.
+pub(crate) fn bug(bug: &dyn Diagnostic) -> HandlerError {
+    HandlerError::Coded(CodedError::bug(
+        bug.code(),
+        &bug.to_string(),
+        flat_args(bug),
+    ))
+}
+
+/// The router's status for a refusal under `status`.
+fn grpc(status: BusinessStatus) -> GrpcCode {
+    match status {
+        BusinessStatus::FailedPrecondition => GrpcCode::FailedPrecondition,
+        BusinessStatus::InvalidArgument => GrpcCode::InvalidArgument,
+        BusinessStatus::NotFound => GrpcCode::NotFound,
+        // TODO(angzarr-router feat/errors-key-map): angzarr-router's
+        // GrpcCode has no ALREADY_EXISTS, OUT_OF_RANGE or PERMISSION_DENIED
+        // until that branch merges; until then each goes out a refusal
+        // still, as FAILED_PRECONDITION, as a remote child's does.
+        BusinessStatus::AlreadyExists
+        | BusinessStatus::OutOfRange
+        | BusinessStatus::PermissionDenied => GrpcCode::FailedPrecondition,
+    }
+}
+
+/// A handler's refusal `rejection` under `status`, with its typed refusal
+/// object: a business rejection under the refusal's own code, its args as
+/// metadata, the object packed beside.
+fn refused(
+    rejection: &dyn Diagnostic,
+    refusal: Option<Any>,
+    status: BusinessStatus,
+) -> HandlerError {
     let extras = rejection.args().into_iter().map(|(name, arg)| {
         let value = match arg {
             Arg::Int(n) => n.to_string(),
@@ -316,7 +372,10 @@ pub fn rejection(rejection: &dyn Diagnostic, refusal: Option<Any>) -> HandlerErr
         };
         (name.to_string(), value)
     });
-    let error = CodedError::rejection(rejection.code(), &rejection.to_string(), extras);
+    let error = CodedError {
+        grpc: grpc(status),
+        ..CodedError::rejection(rejection.code(), &rejection.to_string(), extras)
+    };
     HandlerError::Coded(match refusal {
         Some(object) => error.with_refusal(object),
         None => error,
