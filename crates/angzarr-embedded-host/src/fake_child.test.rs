@@ -113,6 +113,7 @@ pub(crate) fn domain(name: &str, described: &str, mode: &str) -> DomainConfig {
 /// A config of `domains`, with short waits so the tests are quick.
 pub(crate) fn config(domains: Vec<DomainConfig>) -> HostConfig {
     HostConfig {
+        store: Default::default(),
         domains,
         supervision: Supervision {
             handshake_timeout_ms: 20_000,

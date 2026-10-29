@@ -9,7 +9,7 @@
 
 use std::fmt;
 
-use angzarr_embedded_diagnostic::{Arg, Diagnostic};
+use angzarr_embedded_diagnostic::{Arg, Diagnostic, Report};
 
 /// What was wrong with a child's handshake: the one stdout line,
 /// `angzarr-handshake v1 unix:<absolute-socket-path>`, it prints once it is
@@ -99,6 +99,16 @@ pub enum HostError {
     /// The configured `socket_dir` is too long for a Unix socket path to
     /// hold the host's socket names in it: at most `max_bytes` bytes.
     SocketDirTooLong { dir: String, max_bytes: u64 },
+    /// The config file could not be read. `kind` is the I/O error's
+    /// `std::io::ErrorKind`, by name.
+    ConfigUnreadable { path: String, kind: String },
+    /// The config file is not a valid config: malformed TOML, an unknown
+    /// key, a missing one. `offset` is the byte where the problem starts.
+    ConfigInvalid { path: String, offset: u64 },
+    /// The registry refused a domain (the kernel's `Misconfigured`).
+    Register { cause: Report },
+    /// The store could not be opened (the kernel's store error).
+    Store { cause: Report },
     /// The host's own runtime could not be built. `kind` is the I/O error's
     /// `std::io::ErrorKind`, by name.
     Runtime { kind: String },
@@ -136,6 +146,14 @@ impl fmt::Display for HostError {
                 f,
                 "socket_dir \"{dir}\" is too long for a Unix socket path: at most {max_bytes} bytes"
             ),
+            HostError::ConfigUnreadable { path, kind } => {
+                write!(f, "the config {path} could not be read ({kind})")
+            }
+            HostError::ConfigInvalid { path, offset } => {
+                write!(f, "the config {path} is not valid, at byte {offset}")
+            }
+            HostError::Register { cause } => write!(f, "a domain could not be registered: {cause}"),
+            HostError::Store { cause } => write!(f, "the store could not be opened: {cause}"),
             HostError::Runtime { kind } => {
                 write!(f, "the host's runtime could not be built ({kind})")
             }
@@ -154,6 +172,10 @@ impl Diagnostic for HostError {
             HostError::Connect { .. } => "angzarr-embedded-host-connect",
             HostError::Describe { .. } => "angzarr-embedded-host-describe",
             HostError::SocketDirTooLong { .. } => "angzarr-embedded-host-socket-dir-too-long",
+            HostError::ConfigUnreadable { .. } => "angzarr-embedded-host-config-unreadable",
+            HostError::ConfigInvalid { .. } => "angzarr-embedded-host-config-invalid",
+            HostError::Register { .. } => "angzarr-embedded-host-register",
+            HostError::Store { .. } => "angzarr-embedded-host-store",
             HostError::Runtime { .. } => "angzarr-embedded-host-runtime",
         }
     }
@@ -191,6 +213,16 @@ impl Diagnostic for HostError {
                 ("dir", dir.as_str().into()),
                 ("max_bytes", (*max_bytes).into()),
             ],
+            HostError::ConfigUnreadable { path, kind } => vec![
+                ("path", path.as_str().into()),
+                ("kind", kind.as_str().into()),
+            ],
+            HostError::ConfigInvalid { path, offset } => {
+                vec![("path", path.as_str().into()), ("offset", (*offset).into())]
+            }
+            HostError::Register { cause } | HostError::Store { cause } => {
+                vec![("cause", Arg::nested(cause))]
+            }
             HostError::Runtime { kind } => vec![("kind", kind.as_str().into())],
         }
     }
@@ -237,6 +269,27 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn Diagnostic>> {
         Box::new(HostError::SocketDirTooLong {
             dir: "/very/deep/directory".to_string(),
             max_bytes: 65,
+        }),
+        Box::new(HostError::ConfigUnreadable {
+            path: "angzarr.toml".to_string(),
+            kind: "NotFound".to_string(),
+        }),
+        Box::new(HostError::ConfigInvalid {
+            path: "angzarr.toml".to_string(),
+            offset: 12,
+        }),
+        Box::new(HostError::Register {
+            cause: Report::new(
+                "angzarr-embedded-host-duplicate-domain",
+                "domain \"player\" is configured twice",
+            )
+            .arg("domain", "player"),
+        }),
+        Box::new(HostError::Store {
+            cause: Report::new(
+                "angzarr-embedded-host-handshake-closed",
+                "stdout closed before a handshake",
+            ),
         }),
         Box::new(HostError::Runtime {
             kind: "Other".to_string(),

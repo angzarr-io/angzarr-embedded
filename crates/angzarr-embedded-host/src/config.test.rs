@@ -54,8 +54,51 @@ fn the_domain_tables_deserialize() {
                 handshake_timeout_ms: 10_000,
                 ..Supervision::default()
             },
+            store: StoreConfig::default(),
         }
     );
+}
+
+/// The module docs' TOML, as the CLI writes it, reads as their comments
+/// say.
+#[test]
+fn the_documented_toml_reads() {
+    let text = r#"
+        [[domain]]
+        name = "table"
+        language = "rust"
+
+        [[domain]]
+        name = "player"
+        language = "python"
+        entry = ["-m", "player.serve"]
+        dir = "domains/player"
+
+        [[domain]]
+        name = "dealer"
+        language = "go"
+        launch = ["./bin/dealer"]
+
+        [supervision]
+        handshake_timeout_ms = 10000
+
+        [store]
+        path = "angzarr.db"
+    "#;
+    let config: HostConfig = toml::from_str(text).unwrap();
+    assert_eq!(config.domains.len(), 3);
+    assert_eq!(config.domains[1].placement(), {
+        let mut player = domain("player", "python");
+        player.entry = strings(&["-m", "player.serve"]);
+        player.dir = Some(PathBuf::from("domains/player"));
+        player.placement()
+    });
+    assert_eq!(config.supervision.handshake_timeout_ms, 10_000);
+    assert_eq!(config.supervision.call_timeout_ms, 30_000);
+    assert_eq!(config.store, StoreConfig::default());
+    let memory: HostConfig = toml::from_str("[store]\nin_memory = true\n").unwrap();
+    assert!(memory.store.in_memory);
+    assert!(memory.domains.is_empty());
 }
 
 /// A misspelt key is refused, not ignored: `lanuch` would otherwise run the

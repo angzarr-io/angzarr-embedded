@@ -18,3 +18,7 @@ angzarr-embedded-host-socket-dir-too-long = socket_dir "{ $dir }" is too long fo
         [one] { $max_bytes } byte
        *[other] { $max_bytes } bytes
     }
+angzarr-embedded-host-config-unreadable = the config { $path } could not be read ({ $kind })
+angzarr-embedded-host-config-invalid = the config { $path } is not valid, at byte { $offset }
+angzarr-embedded-host-register = a domain could not be registered: { $cause }
+angzarr-embedded-host-store = the store could not be opened: { $cause }

@@ -23,6 +23,7 @@
 //!
 //! [`CommandHandler`]: angzarr_router::router::CommandHandler
 
+pub mod app;
 pub mod config;
 pub mod error;
 pub mod handshake;
@@ -30,7 +31,8 @@ pub mod host;
 pub mod remote;
 pub mod rpc;
 
-pub use config::{DomainConfig, HostConfig, Launch, Placement, Supervision};
+pub use app::{run, App};
+pub use config::{DomainConfig, HostConfig, Launch, Placement, StoreConfig, Supervision};
 pub use error::{HandshakeError, HostError};
 pub use host::{ChildExit, Host};
 pub use remote::{is_retryable, RemoteCommandHandler};

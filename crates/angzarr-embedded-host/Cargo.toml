@@ -22,6 +22,8 @@ rust-version = "1.85"
 # domains.
 angzarr-embedded = { path = "../angzarr-embedded" }
 angzarr-embedded-diagnostic = { path = "../angzarr-embedded-diagnostic" }
+# The store `run` opens: SQLite, at the config's [store] path or in memory.
+angzarr-store-sqlite = { path = "../angzarr-store-sqlite" }
 angzarr-proto = { git = "https://github.com/angzarr-io/angzarr-project", rev = "55eab0f7225ecd5ed63aa74a766d2f16b2735be2" }
 angzarr-router = { git = "https://github.com/angzarr-io/angzarr-router", rev = "6be9159962b4d3beffa3936855a55b6469ca0cc7" }
 hyper-util = { version = "0.1", features = ["tokio"] }
@@ -35,6 +37,8 @@ tokio = { version = "1", features = ["io-std", "io-util", "macros", "net", "proc
 tonic = { version = "0.14", default-features = false, features = ["codegen", "transport"] }
 tonic-prost = "0.14"
 tower = { version = "0.5", default-features = false, features = ["util"] }
+# `run` reads the application's angzarr.toml, which the CLI writes.
+toml = "0.9"
 
 # The fake child the tests launch serves the generated server stubs over a
 # Unix socket (tonic's router, tokio-stream's UnixListenerStream, both in

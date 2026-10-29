@@ -71,8 +71,9 @@ which `Host::register` fills), `angzarr-router` and `angzarr-proto`
 `tonic` and `tonic-prost` (its gRPC client, and in its tests the fake
 child's server), `tokio`,
 `tower` and `hyper-util` (the runtime and the Unix-socket connector),
-`libc` (SIGTERM to a child at shutdown, which tokio cannot send), and
-`serde` (its config), because a remote domain is a child process speaking
+`libc` (SIGTERM to a child at shutdown, which tokio cannot send),
+`angzarr-store-sqlite` (the store `run` opens), and `serde` and `toml`
+(its config, the angzarr.toml the CLI writes), because a remote domain is a child process speaking
 gRPC on a Unix socket: hand-rolling HTTP/2 would be a second, unchecked
 implementation of gRPC. Its stubs are written by `tonic-build`'s manual
 builder from the router's Rust types, so no `io.angzarr.v1` message is

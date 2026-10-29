@@ -20,6 +20,9 @@
 //!
 //! [supervision]
 //! handshake_timeout_ms = 10000
+//!
+//! [store]
+//! path = "angzarr.db"          # SQLite; `in_memory = true` for none on disk
 //! ```
 //!
 //! A domain's language picks its default launch command and nothing else:
@@ -59,6 +62,30 @@ pub struct HostConfig {
     /// How the host waits for, restarts and stops its children.
     #[serde(default)]
     pub supervision: Supervision,
+    /// The store [`crate::run`] opens.
+    #[serde(default)]
+    pub store: StoreConfig,
+}
+
+/// The `[store]` table: the application's SQLite store.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct StoreConfig {
+    /// The SQLite file, created when absent; relative to the working
+    /// directory. `angzarr.db` by default.
+    pub path: PathBuf,
+    /// An in-memory SQLite store instead, gone when the application ends;
+    /// `path` is then unused.
+    pub in_memory: bool,
+}
+
+impl Default for StoreConfig {
+    fn default() -> Self {
+        StoreConfig {
+            path: PathBuf::from("angzarr.db"),
+            in_memory: false,
+        }
+    }
 }
 
 /// One `[[domain]]` table.
