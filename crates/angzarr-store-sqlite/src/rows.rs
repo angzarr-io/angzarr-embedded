@@ -4,7 +4,7 @@ use angzarr_ports::angzarr_proto::v1::{Cover, EventPage, Snapshot};
 use angzarr_ports::StoreError;
 use prost::Message;
 
-use crate::error::{unavailable, undecodable};
+use crate::error::{bad_root, undecodable};
 use crate::Dialect;
 
 /// A page's stored bytes, decoded; `sequence` names it if they do not.
@@ -40,8 +40,6 @@ pub(crate) fn cover<D: Dialect>(
 
 /// A stored root, as the ports key a stream by it.
 pub(crate) fn stream_root(root: &[u8]) -> Result<angzarr_ports::Uuid, StoreError> {
-    let root: [u8; 16] = root
-        .try_into()
-        .map_err(|_| unavailable(format!("a stored root of {} bytes, not 16", root.len())))?;
+    let root: [u8; 16] = root.try_into().map_err(|_| bad_root(root.len()))?;
     Ok(angzarr_ports::Uuid::from_bytes(root))
 }

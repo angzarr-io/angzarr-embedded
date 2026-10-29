@@ -13,8 +13,8 @@ use std::path::Path;
 
 use angzarr_embedded::next::v1::{CommandBook, Cover, EventPage};
 use angzarr_embedded::next::{
-    EventStore, Failure, Handled, Kernel, KernelError, MemoryDeadLetters, OnPolicyBug, Registry,
-    Rejected, Sampled, StoreError, StreamRef,
+    EventStore, Failure, Handled, Kernel, KernelError, MemoryDeadLetters, OnPolicyBug, OnRetryable,
+    Registry, Rejected, Sampled, StoreError, StreamRef,
 };
 use angzarr_embedded_diagnostic::Report;
 use angzarr_store_sqlite::SqliteStore;
@@ -43,6 +43,7 @@ pub fn run(
     })?;
     let store_config = config.store.clone();
     let policy_bug = config.policy.on_bug;
+    let retry = config.retry.on_retryable();
     let host = Host::start(config)?;
     let mut registry = Registry::new();
     host.register(&mut registry)
@@ -71,6 +72,7 @@ pub fn run(
         registry,
         dead_letters: MemoryDeadLetters::new(),
         policy_bug,
+        retry,
         store,
         runtime,
     })
@@ -87,15 +89,20 @@ pub struct App {
     dead_letters: MemoryDeadLetters,
     /// The config's `[policy] on_bug`.
     policy_bug: OnPolicyBug,
+    /// The config's `[retry]`.
+    retry: OnRetryable,
     store: SqliteStore,
     runtime: tokio::runtime::Runtime,
 }
 
 impl App {
     /// The kernel over this application's registry and dead letters,
-    /// doing with a policy's bug what the config's `[policy] on_bug` says.
+    /// doing with a policy's bug what the config's `[policy] on_bug` says,
+    /// and retrying a step's retryable failure as its `[retry]` does.
     pub fn kernel(&self) -> Kernel<'_> {
-        Kernel::new(&self.registry, &self.dead_letters).on_policy_bug(self.policy_bug)
+        Kernel::new(&self.registry, &self.dead_letters)
+            .on_policy_bug(self.policy_bug)
+            .on_retryable(self.retry)
     }
 
     /// The application's store.

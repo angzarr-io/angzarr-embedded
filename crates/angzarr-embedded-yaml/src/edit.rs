@@ -985,28 +985,6 @@ impl View {
 
 // ------------------------------------------------------------------ errors
 
-impl fmt::Display for EditProblem {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            EditProblem::NotFound => f.write_str("not found"),
-            EditProblem::NotAMapping => f.write_str("not a mapping"),
-            EditProblem::NotASequence => f.write_str("not a sequence"),
-            EditProblem::InsideFlow => {
-                f.write_str("inside a flow collection, which is edited only as a whole")
-            }
-            EditProblem::NoSuchItem { index, len } => {
-                write!(f, "no item {index}: the sequence has {len}")
-            }
-            EditProblem::ItemFirstKey => f.write_str(
-                "the key on a sequence item's dash line, which is edited only with the whole item",
-            ),
-            EditProblem::Unfaithful => {
-                f.write_str("the edit would not read back as written; nothing was changed")
-            }
-        }
-    }
-}
-
 fn path_text(path: &[String]) -> String {
     if path.is_empty() {
         "the root".to_string()
@@ -1017,7 +995,7 @@ fn path_text(path: &[String]) -> String {
 
 impl fmt::Display for EditError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: {}", path_text(&self.path), self.problem)
+        angzarr_embedded_diagnostic::display(self, f)
     }
 }
 

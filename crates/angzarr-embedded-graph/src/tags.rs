@@ -68,20 +68,9 @@ pub enum TagProblem {
     EmptyNamespace,
 }
 
-impl fmt::Display for TagProblem {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            TagProblem::BadNamespace => "a namespace is lowercase letters, digits, _ and -",
-            TagProblem::BadName => "a name is lowercase letters, digits, _ and -",
-            TagProblem::BadSymbol => "a symbol is lowercase letters, digits, _ and -",
-            TagProblem::EmptyNamespace => "an empty namespace: leave out the colon, or name it",
-        })
-    }
-}
-
 impl fmt::Display for BadTag {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "bad tag {:?}: {}", self.text, self.problem)
+        angzarr_embedded_diagnostic::display(self, f)
     }
 }
 

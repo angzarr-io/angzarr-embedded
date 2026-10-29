@@ -118,8 +118,8 @@ pub use error::{
 };
 pub use fixture::{assert_replay_fixtures, check_replay_fixtures, ReplayFixture};
 pub use handle::{
-    Handled, Kernel, OnPolicyBug, Project, ProjectionRoute, ProjectorFailure, Recorded,
-    DEFAULT_DEPTH_LIMIT,
+    Handled, Kernel, OnPolicyBug, OnRetryable, Project, ProjectionRoute, ProjectorFailure,
+    Recorded, Wait, DEFAULT_DEPTH_LIMIT,
 };
 pub use handler::{Committed, Handler};
 pub use payload::{decode_as, pack, type_name, Decoder, Payload};
@@ -127,7 +127,7 @@ pub use policy::{
     policy, projection, target_cover, Order, Policy, PolicyHandler, Projection, Projector,
 };
 pub use registry::{Aggregate, Misconfigured, Registry};
-pub use route::{recorded_at, rejection, Rejected};
+pub use route::{rejection, Rejected};
 pub use store::{
     Append, ChangeToken, EventStore, Head, ListStreams, Outbox, OutboxEntry, PositionKey,
     PositionStore, Purge, ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, Slice,
@@ -232,10 +232,6 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn angzarr_embedded_diagnostic::D
                 error: report(),
             },
         },
-        KernelError::IngestPanicked {
-            stream: stream(),
-            command_id: v1::Uuid::from_bytes([1; 16]),
-        },
         KernelError::WrongDomain {
             stream: stream(),
             expected: "ledger",
@@ -296,14 +292,23 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn angzarr_embedded_diagnostic::D
         StoreError::MalformedStream { stream: boxed() },
         StoreError::Unavailable(Cause::new(
             "angzarr-store-sqlite-unavailable",
-            "the database failed: disk I/O error",
+            [
+                ("errno", angzarr_ports::Arg::Uint(5)),
+                (
+                    "ext_err_txt",
+                    angzarr_ports::Arg::Str("database is locked".to_string()),
+                ),
+            ],
         )),
         StoreError::Unreadable {
             stream: boxed(),
             sequence: 0,
             reason: Cause::new(
                 "angzarr-store-sqlite-undecodable",
-                "a stored value does not decode: buffer underflow",
+                [(
+                    "ext_err_txt",
+                    angzarr_ports::Arg::Str("buffer underflow".to_string()),
+                )],
             ),
         },
         StoreError::EditionNotForked { stream: boxed() },
@@ -383,12 +388,8 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn angzarr_embedded_diagnostic::D
         committed: Vec::new(),
         failures: vec![("balances", report())],
     }));
-    for (reason, _) in route::REASONS {
-        samples.push(Box::new(KernelError::Router(route::internal(
-            reason,
-            reason,
-            [],
-        ))));
+    for reason in angzarr_router::error::codes::ALL {
+        samples.push(Box::new(KernelError::Router(route::internal(reason, []))));
     }
     samples.push(Box::new(missing));
     samples.push(Box::new(WireError::UnknownEnum {

@@ -91,17 +91,21 @@ Every crate has `license = "BSD-3-Clause"` and `publish = false`, both inherited
 from `[workspace.package]`. A new crate sets `license.workspace = true` and
 `publish.workspace = true`.
 
-## Errors are localizable: a code, args, and an en-US message
+## Errors are a key and args: a code, args, and an en-US message
 
-Every public error type implements `angzarr_embedded_diagnostic::Diagnostic` and keeps
-an English `Display` as the fallback. The game client renders the localized
-text from Fluent catalogs; angzarr-embedded renders nothing. The trait lives in its own
+Every public error type implements `angzarr_embedded_diagnostic::Diagnostic`, and
+its `Display` is its code then its args (` name=value` each, a wrapped
+cause flattened as `name=<code>` and `name.<arg>=value`), never English
+(angzarr decision 14.37): `angzarr_embedded_diagnostic::display` writes it.
+English is rendered only where an error is shown, from the Fluent catalogs
+keyed by the code: the game client renders it; angzarr-embedded renders nothing. The trait lives in its own
 crate, angzarr-embedded-diagnostic, not in angzarr-embedded, so angzarr-embedded-yaml and angzarr-embedded-graph get
 it without depending on the event-sourcing kernel.
 
 Two exceptions, angzarr's: angzarr-ports' `StoreError` and
-angzarr-store-sqlite's errors have `code()`, args and English in the same
-style without the trait (they depend on no angzarr-embedded crate). angzarr-embedded forwards a
+angzarr-store-sqlite's errors have `code()`, args and a code-and-args
+`Display` in the same style without the trait (they depend on no
+angzarr-embedded crate). angzarr-embedded forwards a
 `StoreError` under its own `angzarr-ports-*` code through
 `KernelError::Store`, and carries angzarr-ports' catalog
 (`crates/angzarr-embedded/locales/en-US/angzarr-ports.ftl`, exported as
@@ -115,6 +119,11 @@ style without the trait (they depend on no angzarr-embedded crate). angzarr-embe
   the text that was read are args; any phrase a player reads belongs in the
   catalog. A wrapped cause is `Arg::Nested`. An error does not hold a
   `String` of prose: a new failure is a new variant with data fields.
+- **A third party's error is carried as it said it.** Converting a
+  library's error (the SQLite driver's, prost's, tonic's transport), its
+  text goes verbatim into the arg `ext_err_txt`, beside its numeric code
+  (`errno`) where it has one. A user handler's text (an escaped error's, a
+  panic's) is never captured: it stays in the handler's own log.
 - **A new variant needs a code and an en-US message** in
   `crates/<crate>/locales/en-US/<crate>.ftl`, using exactly the variant's
   args, with a Fluent selector wherever a count is shown.
@@ -171,7 +180,7 @@ on a failure, a `FAIL` line, the extract worth reading, and the full log in
 `target/logs/<gate>.log`. `VERBOSE=1 just <gate>` shows the full output.
 `just test` runs cargo-nextest.
 
-## The pre-commit gates are in gates/; the justfile gives their parameters
+## The git-hook gates are in gates/; the justfile gives their parameters
 
 The gates and their recipes are `gates/gates.just` and
 `gates/lefthook.yml`: the justfile imports the one and lefthook.yml extends
@@ -184,7 +193,9 @@ them), and again after a change to the gates names a new hook
 (`gates/MIGRATING.md`). They came from the shared gates repository that
 taskloom and ctxloom-rs also copied; a change here does not reach them.
 
-lefthook runs the gates one at a time, stopping at the first failure. A
+lefthook runs the gates one at a time, stopping at the first failure.
+Gates 1 to 5 run at pre-commit; mutation (6) is too slow for every commit
+and runs at pre-push, after the push's tests (`just push-check`). A
 failing gate is a finding: fix the cause and commit again; never
 `--no-verify`, and never weaken a gate to get through.
 
@@ -204,11 +215,16 @@ failing gate is a finding: fix the cause and commit again; never
    tests (failing tests, not a failed build) are committed on a branch other
    than the default one, with a warning that it cannot merge until they
    pass, and refused on the default branch.
-6. **mutants**: `just mutants-staged` runs `cargo mutants --in-diff` over
-   the staged diff in that tree and holds every crate's new code to a 90%
-   kill rate (`mutation_thresholds`; a new crate gets a threshold there
-   before it gets code). The last run's mutants.out is kept in
-   `target/logs/mutants-staged/`. A mutant judged equivalent is excluded by
+6. **mutants** (pre-push): `just mutants-push` runs `cargo mutants
+   --in-diff` over what each pushed ref adds (the diff from the remote's
+   tip of that ref, or for a new branch from its merge base with the
+   default branch, to the commit pushed), in that commit's tree, and holds
+   every crate's new code to a 90% kill rate (`mutation_thresholds`; a new
+   crate gets a threshold there before it gets code). Red tests pushed to a
+   branch other than the default one are not judged and pass with a
+   warning. The last run's mutants.out is kept in
+   `target/logs/mutants-push/`. `just mutants-staged` makes the same
+   judgement over the staged diff, by hand. A mutant judged equivalent is excluded by
    an `exclude_re` in `.cargo/mutants.toml` matching that one mutant, with a
    comment saying why: not `#[mutants::skip]`, which needs the `mutants`
    crate as a dependency, and never a lowered threshold.
@@ -227,7 +243,7 @@ is a module of angzarr-embedded-yaml rather than its own crate because it works 
   version. Use the helpers (`rename_key`, `move_key`, `set_default`,
   `remove_key`, `map_seq`). A step that fails for the game's own reason
   returns the game's diagnostic: `MigrationError::game(&e)`, or
-  `Report::new(code, english).arg(..).into()`.
+  `Report::new(code).arg(..).into()`.
 - Loading is string in, tree out, and never rewrites a file.
   `Loader::upgrade` gives the upgraded text for a tool that rewrites on
   purpose (the written text has no comments).

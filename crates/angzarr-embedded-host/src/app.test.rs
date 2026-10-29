@@ -194,6 +194,39 @@ fn the_kernel_follows_the_configs_policy_setting() {
     drop(app);
 }
 
+/// The kernel the app hands out retries a step's retryable failure as the
+/// config's `[retry]` says, its defaults (the kernel's) when it is left
+/// out: retrying is on with no config.
+#[test]
+fn the_kernel_follows_the_configs_retry_setting() {
+    use angzarr_embedded::next::OnRetryable;
+    use std::time::Duration;
+    let dir = scratch("retry");
+    let path = dir.join("angzarr.toml");
+    std::fs::write(&path, "[store]\nin_memory = true\n").unwrap();
+    let app = run(&path, nothing).unwrap();
+    assert_eq!(app.kernel().retryable(), OnRetryable::default());
+    drop(app);
+    std::fs::write(
+        &path,
+        "[store]\nin_memory = true\n\n[retry]\nmax_retries = 5\ninitial_backoff_ms = 50\n\
+         multiplier = 3.0\nmax_backoff_ms = 1000\njitter = 0.5\n",
+    )
+    .unwrap();
+    let app = run(&path, nothing).unwrap();
+    assert_eq!(
+        app.kernel().retryable(),
+        OnRetryable {
+            max_retries: 5,
+            initial_backoff: Duration::from_millis(50),
+            multiplier: 3.0,
+            max_backoff: Duration::from_millis(1_000),
+            jitter: 0.5,
+        }
+    );
+    drop(app);
+}
+
 #[test]
 fn a_missing_config_is_unreadable() {
     let dir = scratch("missing");
@@ -237,7 +270,7 @@ fn a_store_that_cannot_open_fails_the_run() {
     config.store.path = dir.join("no/such/dir/app.db");
     let failed = run(written(&dir, &config), nothing).err();
     assert!(
-        matches!(&failed, Some(HostError::Store { cause }) if cause != &Report::new("", "")),
+        matches!(&failed, Some(HostError::Store { cause }) if cause != &Report::new("")),
         "{failed:?}"
     );
 }

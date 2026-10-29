@@ -44,7 +44,7 @@ use angzarr_router::policy::PolicyDispatch;
 use prost_types::Any;
 
 use super::check::{check_policy_command, Checked, Malformed};
-use super::dead_letter::{write_dead_letter, write_policy_failure, DeadLetterLog};
+use super::dead_letter::{write_dead_letter, write_letter, DeadLetterLog};
 use super::domain::Domain;
 use super::handler::{Committed, Handler};
 use super::markup::{self, CommandContext, Commands, PolicyContext, TypeName};
@@ -106,8 +106,8 @@ pub trait Policy: Send + Sync + 'static {
     /// that cannot happen, or one of a type it handles that does not
     /// decode): its step fails as
     /// [`StepError::PolicyFailed`](super::StepError::PolicyFailed), is
-    /// dead-lettered with the error's code as its reason and its args as
-    /// the letter's metadata, and its position moves past the event.
+    /// dead-lettered with the error's code and args as its reason, and its
+    /// position moves past the event.
     /// Policies should not fail for business reasons: they react to events
     /// the application's own domains created, so an `Err` is a bug.
     fn on_event(
@@ -212,12 +212,7 @@ impl Order {
         dead_letters: &dyn DeadLetterLog,
     ) -> Result<Checked, Malformed> {
         self.check(registry).inspect_err(|malformed| {
-            write_dead_letter(
-                dead_letters,
-                self.book(),
-                &self.policy,
-                &malformed.to_string(),
-            )
+            write_dead_letter(dead_letters, self.book(), &self.policy, malformed)
         })
     }
 
@@ -290,7 +285,7 @@ impl<P: Policy, F: FnMut(Order)> Handler<P::Source> for PolicyHandler<'_, P, F> 
                     }],
                     ..EventBook::default()
                 };
-                write_policy_failure(
+                write_letter(
                     self.dead_letters,
                     Letter::RejectedEvents(trigger),
                     P::NAME,

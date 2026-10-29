@@ -1,10 +1,11 @@
-# Pre-commit gates for angzarr-embedded's cargo workspace. Each gate prints one line
+# The git-hook gates for angzarr-embedded's cargo workspace. Each gate prints one line
 # on a pass and, on a failure, the extract worth reading plus its full log in
 # target/logs/<gate>.log.
 #
 # Red tests are allowed on a branch and kept out of the default branch: a
-# commit off it may carry failing tests (`test-commit`, `mutants-staged`),
-# and the pre-merge-commit, pre-push and post-merge hooks (`test-commit`,
+# commit off it may carry failing tests (`test-commit`), a push to a branch
+# other than it may carry them (`push-check`, `mutants-push`), and the
+# pre-merge-commit, pre-push and post-merge hooks (`test-commit`,
 # `push-check`, `merge-check`) keep them from reaching it. Every other gate
 # refuses on every branch.
 #
@@ -361,32 +362,125 @@ _require-nextest gate:
         exit 1
     fi
 
-# Mutation-test what the commit changes: lefthook's pre-commit step, last
-# because it is the slowest. `cargo mutants --in-diff` over the staged diff,
-# in the STAGED tree (`_staged-tree`), judged by `mutation_thresholds`; the
-# commit is refused with the per-tier verdict and the surviving mutants
-# listed. cargo-mutants' own output is the log, and its mutants.out is kept
-# in target/logs/mutants-staged/; its config (excludes, test_workspace) is
-# the repository's .cargo/mutants.toml. A missing cargo-mutants (`cargo install
-# cargo-mutants --locked`) fails rather than skipping: a mutation run that
-# passes by not running tested nothing.
+# Mutation-test what a push changes: lefthook's pre-push step, after the
+# tests. Mutation is too slow for every commit, so it is judged once per push,
+# over everything the push adds. For each ref pushed (git's pushed refs on
+# stdin, as `push-check` reads them), `cargo mutants --in-diff` over the diff
+# from the base `_push-base` names to the commit pushed, in that commit's tree
+# checked out alone (`_commit-tree`), judged by `mutation_thresholds` per
+# crate path; the push is refused with the per-tier verdict and the surviving
+# mutants listed. A deleted ref, and a ref whose diff touches no Rust source,
+# pass at once. cargo-mutants' own output is the log, and its mutants.out is
+# kept in target/logs/mutants-push/ (the last ref judged); its config
+# (excludes, test_workspace) is the repository's .cargo/mutants.toml. A
+# missing cargo-mutants fails rather than skipping: a mutation run that passes
+# by not running tested nothing. `lefthook` is what lefthook.yml passes to
+# stop lefthook skipping it, and is ignored.
 #
-# Off the default branch (`_red-allowed`), a red commit passes it: when the
-# staged tree's tests fail unmutated (cargo-mutants' baseline, exit 4), no
-# mutant can be judged, since every one would be "caught" by a test that
-# fails anyway. The commit that turns those tests green changes the code they
-# test (a red commit's stubs are what it replaces), so that code is mutated
-# then, against passing tests. Every other failure, and a red baseline on the
-# default branch, is refused.
+# Pushed to a branch other than the remote's default one, a red commit passes
+# it: when the pushed commit's tests fail unmutated (cargo-mutants' baseline,
+# exit 4), no mutant can be judged, since every one would be "caught" by a
+# test that fails anyway. The push that turns those tests green changes the
+# code they test, so that code is mutated then, against passing tests. Every
+# other failure, and a red baseline pushed to the default branch (or to any
+# branch when the remote's default one is unknown), is refused.
+#
+# A pushed commit is judged by its own tree's recipes, so a commit from before
+# this recipe existed cannot be: rebase it first.
+[positional-arguments]
+[no-exit-message]
+mutants-push remote *lefthook:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    root='{{gates_root}}'
+    remote=$1
+    just --justfile "$root/justfile" _require-mutants mutants-push
+    default=$(just --justfile "$root/justfile" _default-branch "$remote") || default=
+    work=$(mktemp -d)
+    trap 'rm -rf "$work"' EXIT
+    pushed=0
+    while read -r local_ref local_sha remote_ref remote_sha; do
+        [ -n "${local_sha:-}" ] || continue
+        [ "${local_sha//0/}" = "" ] && continue  # a deletion
+        pushed=1
+        target=${remote_ref#refs/heads/}
+        base=$(just --justfile "$root/justfile" _push-base "$remote" "$local_sha" "${remote_sha:-}") || {
+            echo "FAIL mutants-push: no base to diff $local_ref against: $base" >&2
+            exit 1
+        }
+        range="$(git -C "$root" rev-parse --short "$base")..$(git -C "$root" rev-parse --short "$local_sha") to $remote/$target"
+        if [ -z "$(git -C "$root" diff --name-only "$base" "$local_sha" -- '*.rs' ':(exclude)*.test.rs')" ]; then
+            echo "ok   mutants-push ($range: no mutants, the push touches no Rust source)"
+            continue
+        fi
+        git -C "$root" diff --no-color --no-ext-diff --no-renames --src-prefix=a/ --dst-prefix=b/ \
+            "$base" "$local_sha" -- '*.rs' > "$work/push.patch"
+        rc=0
+        just --justfile "$root/justfile" _commit-tree "$local_sha" _mutants-pushed "$range" "$work/push.patch" || rc=$?
+        [ "$rc" -eq 0 ] && continue
+        [ "$rc" -eq 4 ] || exit "$rc"
+        if [ -n "$default" ] && [ "$remote_ref" != "refs/heads/$default" ]; then
+            echo "RED  mutants-push: $range not judged, the tests are red; allowed off $default, which $target cannot merge into until they pass"
+            continue
+        fi
+        [ -n "$default" ] || echo "No default branch of $remote was found, so $target is held to it (git remote set-head $remote --auto)." >&2
+        echo "FAIL mutants-push: red tests cannot be pushed to $remote/$target" >&2
+        exit 1
+    done
+    [ "$pushed" = 1 ] || echo "ok   mutants-push (no commit pushed, only deletions or nothing: nothing to mutate)"
+
+# The commit a pushed ref's diff starts from, printed: the merge base of the
+# commit pushed and the remote's current tip of that ref, when the remote has
+# the ref and its tip is here (a fast-forward's base is that tip itself; a
+# forced push is judged on what it adds over their common history, not on
+# what it drops). A new ref, or a remote tip not fetched, starts from the
+# merge base with the remote's default branch (`_default-branch <remote>`),
+# its remote-tracking branch if there is one, else the local branch. Exits 1,
+# printing why, when there is no such base.
+[positional-arguments]
+[no-exit-message]
+_push-base remote local_sha remote_sha="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{gates_root}}'
+    remote=$1 local_sha=$2 remote_sha=${3:-}
+    if [ -n "$remote_sha" ] && [ -n "${remote_sha//0/}" ] && git cat-file -e "$remote_sha^{commit}" 2>/dev/null; then
+        git merge-base "$remote_sha" "$local_sha" && exit 0
+    fi
+    if ! default=$(just --justfile '{{gates_root}}/justfile' _default-branch "$remote"); then
+        echo "the remote's tip is unknown here and $remote has no default branch (git remote set-head $remote --auto)"
+        exit 1
+    fi
+    for ref in "refs/remotes/$remote/$default" "refs/heads/$default"; do
+        if git rev-parse --verify --quiet "$ref^{commit}" > /dev/null; then
+            git merge-base "$ref" "$local_sha" && exit 0
+        fi
+    done
+    echo "$local_sha shares no history with $default"
+    exit 1
+
+# Inside a pushed commit's tree (`_commit-tree`): `_mutants-judge` over the
+# push's diff, run as the gate.
+[positional-arguments]
+[no-exit-message]
+_mutants-pushed scope patch:
+    @just --justfile '{{gates_root}}/justfile' _run mutants-push "$1" mutants just --justfile '{{gates_root}}/justfile' _mutants-judge mutants-push "$2"
+
+# Mutation-test what the commit will contain, by hand: `cargo mutants
+# --in-diff` over the staged diff, in the STAGED tree (`_staged-tree`), judged
+# by `mutation_thresholds` as `mutants-push` is. No hook runs it (the pre-push
+# `mutants-push` is the gate); it is the quick check of a change's tests
+# before committing, its mutants.out kept in target/logs/mutants-staged/.
+#
+# Off the default branch (`_red-allowed`), a red commit passes it, as it does
+# `mutants-push`: when the staged tree's tests fail unmutated (cargo-mutants'
+# baseline, exit 4), no mutant can be judged. Every other failure, and a red
+# baseline on the default branch, is refused.
 [no-exit-message]
 mutants-staged:
     #!/usr/bin/env bash
     set -euo pipefail
-    if ! cargo mutants --version >/dev/null 2>&1; then
-        echo "FAIL mutants-staged: cargo-mutants is not installed; the mutation gate cannot pass by not running." >&2
-        echo "Install it: cargo install cargo-mutants --locked" >&2
-        exit 1
-    fi
+    just --justfile '{{gates_root}}/justfile' _require-mutants mutants-staged
     if [ -z "$(git -C '{{gates_root}}' diff --cached --name-only HEAD -- '*.rs' ':(exclude)*.test.rs')" ]; then
         echo "ok   mutants-staged (no mutants: the staged change touches no Rust source)"
         exit 0
@@ -402,19 +496,39 @@ mutants-staged:
     echo "FAIL mutants-staged: red tests cannot be committed here: $where" >&2
     exit 1
 
-# Inside the staged tree: `_mutants-judge`, run as the gate.
+# Fail, never skip, when cargo-mutants is missing (`cargo install
+# cargo-mutants --locked`).
+[no-exit-message]
+_require-mutants gate:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! cargo mutants --version >/dev/null 2>&1; then
+        echo "FAIL {{gate}}: cargo-mutants is not installed; the mutation gate cannot pass by not running." >&2
+        echo "Install it: cargo install cargo-mutants --locked" >&2
+        exit 1
+    fi
+
+# Inside the staged tree: `_mutants-judge` over the staged diff, run as the gate.
 [no-exit-message]
 _mutants-affected:
-    @just --justfile '{{gates_root}}/justfile' _run mutants-staged "staged diff" mutants just --justfile '{{gates_root}}/justfile' _mutants-judge
+    #!/usr/bin/env bash
+    set -euo pipefail
+    patch=$(mktemp)
+    trap 'rm -f "$patch"' EXIT
+    git diff --cached --no-color --no-ext-diff --no-renames --src-prefix=a/ --dst-prefix=b/ HEAD -- '*.rs' > "$patch"
+    just --justfile '{{gates_root}}/justfile' _run mutants-staged "staged diff" mutants just --justfile '{{gates_root}}/justfile' _mutants-judge mutants-staged "$patch"
 
-# Mutate the staged diff in place (the tree is throwaway) and judge each
-# tier's kill rate. `feature_rules` turns on the features of the packages
-# whose sources the diff touches, after `features_prepare`. Killed = caught
-# or timed out (a mutant the tests could not finish under changed behaviour);
-# unviable mutants (did not build) count neither way. A failing verdict goes
-# to verdict.txt beside mutants.out: its summary line, then the kill rate by
-# tier, for `_extract-mutants`. Mutants run under `cargo test`, not nextest:
-# a process per test only slows a run that rebuilds for each mutant.
+# Mutate the diff `patch` (a/ and b/ paths, the tree's own lines on the b
+# side) in place (the tree is throwaway) and judge each tier's kill rate, as
+# `gate`, whose log directory (<GATE_LOG_DIR>/<gate>/) holds mutants.out.
+# `feature_rules` turns on the features of the packages whose sources the diff
+# touches, after `features_prepare`. Killed = caught or timed out (a mutant
+# the tests could not finish under changed behaviour); unviable mutants (did
+# not build) count neither way. A failing verdict goes to verdict.txt beside
+# mutants.out: its summary line, then the kill rate by tier, for
+# `_extract-mutants`. Mutants run under `cargo test`, not nextest: a process
+# per test only slows a run that rebuilds for each mutant. Exits 4,
+# cargo-mutants' own code, when the tree's tests fail unmutated.
 #
 # cargo mutants runs in a session of its own (setsid), and whatever is left
 # in that session when it ends, or when the gate is interrupted, is killed
@@ -423,15 +537,17 @@ _mutants-affected:
 # process the test spawned outlives it when the mutant broke that process's
 # own way to stop (a server with its SIGTERM handler installed and its stop
 # condition mutated): re-parented, it would run until the machine
-# restarts. No such process can hold the staged tree's lock either: fd 9 is
+# restarts. No such process can hold the throwaway tree's lock either: fd 9 is
 # closed for the run. Only the session's processes are touched; nothing
 # started outside the run is in it.
+[positional-arguments]
 [no-exit-message]
-_mutants-judge:
+_mutants-judge gate patch:
     #!/usr/bin/env bash
     set -euo pipefail
+    gate=$1
     root='{{gates_root}}'
-    out=${GATE_LOG_DIR:-$root/target/logs}/mutants-staged
+    out=${GATE_LOG_DIR:-$root/target/logs}/$gate
     rm -rf "$out"
     mkdir -p "$out"
     verdict() { printf '%s\n' "$@" | tee -a "$out/verdict.txt"; }
@@ -444,14 +560,14 @@ _mutants-judge:
         [ -n "$sid" ] || return 0
         left=$(ps -o pid=,args= -s "$sid" 2>/dev/null) || true
         if [ -n "$left" ]; then
-            echo "mutants-staged: killed what the run left running:"
+            echo "$gate: killed what the run left running:"
             sed 's/^ */  /' <<< "$left"
             pkill -KILL -s "$sid" || true
         fi
     }
     trap 'reap; rm -rf "$work"' EXIT
     trap 'exit 130' INT TERM HUP
-    git diff --cached --no-color --no-ext-diff --no-renames --src-prefix=a/ --dst-prefix=b/ HEAD -- '*.rs' > "$work/staged.patch"
+    cp "$2" "$work/staged.patch"
     read -ra rules <<< "{{feature_rules}}"
     features=()
     if [ "${#rules[@]}" -gt 0 ]; then
@@ -480,10 +596,10 @@ _mutants-judge:
     case "$rc" in
         0|2|3) ;;
         4)
-            verdict "the staged tree's tests fail unmutated (cargo-mutants baseline); fix them first" \
-                "baseline log: target/logs/mutants-staged/mutants.out/log/baseline.log"
-            # cargo-mutants' own code for it: `mutants-staged` allows it off
-            # the default branch.
+            verdict "the tree's tests fail unmutated (cargo-mutants baseline); fix them first" \
+                "baseline log: target/logs/$gate/mutants.out/log/baseline.log"
+            # cargo-mutants' own code for it: `mutants-push` and
+            # `mutants-staged` allow it off the default branch.
             exit 4 ;;
         *)
             verdict "cargo mutants failed before a verdict (exit $rc)"
@@ -492,7 +608,7 @@ _mutants-judge:
     outcomes="$out/mutants.out/outcomes.json"
     judged='[.outcomes[] | select(.scenario | type == "object") | {name: .scenario.Mutant.name, file: .scenario.Mutant.file, summary}]'
     if [ ! -f "$outcomes" ] || [ "$(jq "$judged | length" "$outcomes")" -eq 0 ]; then
-        echo "mutants-staged: no mutants: the staged diff changes no mutable code."
+        echo "$gate: no mutants: the diff changes no mutable code."
         exit 0
     fi
     read -ra tiers <<< "{{mutation_thresholds}}"
@@ -510,7 +626,7 @@ _mutants-judge:
         | "\(if $killed * 100 >= $tier.min * $viable then "pass" else "FAIL" end)  \($tier.prefix): \($killed)/\($viable) killed (\($rate)%), threshold \($tier.min)%"
             + (map(select(.summary == "Unviable")) | length | if . > 0 then "; \(.) unviable, not counted" else "" end)
             + (map(select(.summary == "Timeout")) | length | if . > 0 then "; \(.) timed out, counted killed" else "" end)' <<< "$tiered")
-    echo "mutants-staged: kill rate by tier:"
+    echo "$gate: kill rate by tier:"
     sed 's/^/  /' <<< "$report"
     if grep -q '^FAIL' <<< "$report"; then
         verdict "below the kill-rate threshold: $(grep '^FAIL' <<< "$report" | sed 's/^FAIL  //; s/;.*//' | paste -sd ';' | sed 's/;/; /g')" \
@@ -593,8 +709,9 @@ _scratch-tree source +recipe:
 
 # The red-on-branches rule: red tests may be committed on any branch but the
 # default one, and never reach it. `test-commit` and `mutants-staged` allow
-# them off it; `push-check` (pre-push) refuses a push to it, and
-# `merge-check` (post-merge) reports a fast-forward of it, whose tests fail.
+# them off it, and `mutants-push` (pre-push) a push of them to another
+# branch; `push-check` (pre-push) refuses a push to it, and `merge-check`
+# (post-merge) reports a fast-forward of it, whose tests fail.
 # A merge commit into it is `test-commit`'s (pre-merge-commit).
 
 # The default branch: <remote>/HEAD when the remote has one (`git remote
@@ -855,5 +972,5 @@ _extract-mutants log rc:
         sed 's/^/  /' "$timeout"
     fi
     if [ -s "$missed" ]; then
-        echo "Add or sharpen the test that would kill each survivor, stage it, and commit again."
+        echo "Add or sharpen the test that would kill each survivor, commit it, and push (or commit) again."
     fi

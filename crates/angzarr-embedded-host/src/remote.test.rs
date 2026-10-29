@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::rpc::google_rpc::{ErrorInfo, Status as RpcStatus, ERROR_INFO_TYPE_URL};
-use angzarr_router::error::{codes as router_codes, extras, GrpcCode};
+use angzarr_router::error::{codes as router_codes, extras, ErrorClass, GrpcCode};
 use prost::Message;
 use prost_types::Any;
 use tonic::Code;
@@ -56,14 +56,16 @@ fn a_failed_precondition_is_the_routers_refusal() {
         coded,
         CodedError {
             code: "TABLE_FULL".to_string(),
-            message: "table is full".to_string(),
             extras: BTreeMap::from([("seats".to_string(), "6".to_string())]),
             grpc: GrpcCode::FailedPrecondition,
             refusal: Some(Box::new(refusal())),
         }
     );
     let response = coded.refusal_response().expect("a refusal");
-    assert_eq!(response.refusal, Some(refusal()));
+    assert_eq!(
+        response.reason,
+        Some(pb::refusal_response::Reason::Refusal(refusal()))
+    );
     assert!(!is_retryable(&coded));
 }
 
@@ -90,6 +92,8 @@ fn an_unavailable_status_is_retryable() {
         BTreeMap::from([
             (extras::DOMAIN.to_string(), "player".to_string()),
             (CAUSE.to_string(), causes::TRANSPORT.to_string()),
+            // The transport's own text, verbatim: a third party's.
+            (EXT_ERR_TXT.to_string(), "connection refused".to_string()),
         ])
     );
     assert!(is_retryable(&coded));
@@ -102,7 +106,6 @@ fn a_child_not_running_is_retryable() {
         coded,
         CodedError {
             code: codes::REMOTE_HANDLER_UNAVAILABLE.to_string(),
-            message: REMOTE_HANDLER_UNAVAILABLE_MESSAGE.to_string(),
             extras: BTreeMap::from([
                 (extras::DOMAIN.to_string(), "player".to_string()),
                 (CAUSE.to_string(), causes::NOT_RUNNING.to_string()),
@@ -115,25 +118,26 @@ fn a_child_not_running_is_retryable() {
 }
 
 /// Another coded failure keeps its code and its gRPC code, and is not
-/// retried: it would fail the same way again.
+/// retried: it would fail the same way again. The router's own error on
+/// malformed input arrives INTERNAL, a bug (the owner's ruling,
+/// 2026-10-29).
 #[test]
 fn another_status_keeps_its_code() {
     let status = status_with_details(
-        Code::InvalidArgument,
-        "Unknown command type",
+        Code::Internal,
+        "UNKNOWN_COMMAND_TYPE",
         vec![error_info(
-            router_codes::NO_HANDLER_REGISTERED,
+            router_codes::UNKNOWN_COMMAND_TYPE,
             &[("type_url", "/x.Y")],
         )],
     );
     let coded = status_to_coded("player", &status);
-    assert_eq!(coded.code, router_codes::NO_HANDLER_REGISTERED);
-    assert_eq!(coded.message, "Unknown command type");
+    assert_eq!(coded.code, router_codes::UNKNOWN_COMMAND_TYPE);
     assert_eq!(
         coded.extras,
         BTreeMap::from([("type_url".to_string(), "/x.Y".to_string())])
     );
-    assert_eq!(coded.grpc, GrpcCode::InvalidArgument);
+    assert_eq!(coded.grpc, GrpcCode::Internal);
     assert_eq!(coded.refusal, None);
     assert!(!is_retryable(&coded));
 }
@@ -143,34 +147,63 @@ fn another_status_keeps_its_code() {
 fn a_status_without_error_info_is_unhandled() {
     let coded = status_to_coded("player", &tonic::Status::internal("boom"));
     assert_eq!(coded.code, router_codes::UNHANDLED_HANDLER_ERROR);
-    assert_eq!(coded.message, "boom");
     assert_eq!(coded.grpc, GrpcCode::Internal);
     assert!(!is_retryable(&coded));
 }
 
-/// Every gRPC code the router knows is kept; a business refusal's status
-/// it has no variant for (ALREADY_EXISTS, OUT_OF_RANGE, PERMISSION_DENIED)
-/// is FAILED_PRECONDITION; any other is INTERNAL.
+/// Every gRPC code the router has a variant for survives exactly (its
+/// `GrpcCode` has each status of the business set, and UNKNOWN), so the
+/// status decides the class (decision 14.37). A status it has no variant
+/// for (CANCELLED, UNAUTHENTICATED) keeps its class: a retryable bug (the
+/// owner's ruling, 2026-10-29).
 #[test]
 fn each_status_code_maps_to_the_routers() {
     for (code, grpc) in [
         (Code::InvalidArgument, GrpcCode::InvalidArgument),
         (Code::NotFound, GrpcCode::NotFound),
         (Code::FailedPrecondition, GrpcCode::FailedPrecondition),
-        (Code::AlreadyExists, GrpcCode::FailedPrecondition),
-        (Code::OutOfRange, GrpcCode::FailedPrecondition),
-        (Code::PermissionDenied, GrpcCode::FailedPrecondition),
+        (Code::AlreadyExists, GrpcCode::AlreadyExists),
+        (Code::OutOfRange, GrpcCode::OutOfRange),
+        (Code::PermissionDenied, GrpcCode::PermissionDenied),
         (Code::Aborted, GrpcCode::Aborted),
         (Code::Unimplemented, GrpcCode::Unimplemented),
         (Code::DataLoss, GrpcCode::DataLoss),
         (Code::Internal, GrpcCode::Internal),
-        (Code::Unknown, GrpcCode::Internal),
-        (Code::Unavailable, GrpcCode::Internal),
-        (Code::DeadlineExceeded, GrpcCode::Internal),
-        (Code::ResourceExhausted, GrpcCode::Internal),
+        (Code::Unknown, GrpcCode::Unknown),
+        (Code::Unavailable, GrpcCode::Unavailable),
+        (Code::DeadlineExceeded, GrpcCode::DeadlineExceeded),
+        (Code::ResourceExhausted, GrpcCode::ResourceExhausted),
     ] {
         let status = status_with_details(code, "m", vec![error_info("SOME_REASON", &[])]);
         assert_eq!(status_to_coded("player", &status).grpc, grpc, "{code:?}");
+    }
+    for code in [Code::Cancelled, Code::Unauthenticated] {
+        let status = status_with_details(code, "m", vec![error_info("SOME_REASON", &[])]);
+        assert_eq!(
+            status_to_coded("player", &status).grpc.class(),
+            ErrorClass::BugRetryable,
+            "{code:?}"
+        );
+    }
+}
+
+/// No text crosses the boundary (decision 14.37): the child's status
+/// message is never forwarded, in a field or an arg; the reason key and
+/// its metadata are what the router gets.
+#[test]
+fn a_childs_status_message_is_not_forwarded() {
+    for code in [Code::FailedPrecondition, Code::Internal, Code::Aborted] {
+        let status = status_with_details(
+            code,
+            "the table is full, try another",
+            vec![error_info("TABLE_FULL", &[("seats", "6")])],
+        );
+        let coded = status_to_coded("player", &status);
+        assert!(
+            !format!("{coded:?}").contains("the table is full"),
+            "{coded:?}"
+        );
+        assert_eq!(coded.to_string(), "TABLE_FULL seats=6");
     }
 }
 
@@ -205,34 +238,31 @@ fn a_childs_not_found_is_a_refusal_with_its_object() {
     refused_under(Code::NotFound, GrpcCode::NotFound);
 }
 
-/// angzarr-router's `GrpcCode` has no ALREADY_EXISTS: the refusal arrives
-/// FAILED_PRECONDITION.
+/// ALREADY_EXISTS is a business status: the refusal arrives as itself.
 #[test]
 fn a_childs_already_exists_is_a_refusal_with_its_object() {
-    refused_under(Code::AlreadyExists, GrpcCode::FailedPrecondition);
+    refused_under(Code::AlreadyExists, GrpcCode::AlreadyExists);
 }
 
-/// angzarr-router's `GrpcCode` has no OUT_OF_RANGE: the refusal arrives
-/// FAILED_PRECONDITION.
+/// OUT_OF_RANGE is a business status: the refusal arrives as itself.
 #[test]
 fn a_childs_out_of_range_is_a_refusal_with_its_object() {
-    refused_under(Code::OutOfRange, GrpcCode::FailedPrecondition);
+    refused_under(Code::OutOfRange, GrpcCode::OutOfRange);
 }
 
-/// angzarr-router's `GrpcCode` has no PERMISSION_DENIED: the refusal
-/// arrives FAILED_PRECONDITION.
+/// PERMISSION_DENIED is a business status: the refusal arrives as itself.
 #[test]
 fn a_childs_permission_denied_is_a_refusal_with_its_object() {
-    refused_under(Code::PermissionDenied, GrpcCode::FailedPrecondition);
+    refused_under(Code::PermissionDenied, GrpcCode::PermissionDenied);
 }
 
-/// A child's bug (INTERNAL, UNKNOWN, DATA_LOSS) keeps its reason, carries
-/// no typed refusal, and is not retried; UNKNOWN arrives INTERNAL.
+/// A child's bug (INTERNAL, UNKNOWN, DATA_LOSS) keeps its reason and its
+/// status, carries no typed refusal, and is not retried.
 #[test]
 fn a_childs_bug_status_is_no_refusal() {
     for (code, grpc) in [
         (Code::Internal, GrpcCode::Internal),
-        (Code::Unknown, GrpcCode::Internal),
+        (Code::Unknown, GrpcCode::Unknown),
         (Code::DataLoss, GrpcCode::DataLoss),
     ] {
         let status = status_with_details(
@@ -248,30 +278,33 @@ fn a_childs_bug_status_is_no_refusal() {
     }
 }
 
-/// The retryable and other statuses keep their classification: a child's
-/// UNAVAILABLE with no details is unavailability, retried; one it sent
-/// with its reason, and a DEADLINE_EXCEEDED or RESOURCE_EXHAUSTED, keep
-/// the reason, INTERNAL; an ABORTED or UNIMPLEMENTED keeps its status.
-/// None carries a typed refusal.
+/// The retried statuses keep their class (decision 14.37): a child's
+/// UNAVAILABLE with no details is unavailability; one it sent with its
+/// reason, and a DEADLINE_EXCEEDED, RESOURCE_EXHAUSTED or UNIMPLEMENTED,
+/// keeps the reason, a retryable bug; an ABORTED keeps the reason, a
+/// business answer to return at once. None carries a typed refusal.
 #[test]
-fn a_childs_retryable_or_other_status_keeps_its_classification() {
+fn a_childs_retryable_status_keeps_its_class() {
     let bare = status_to_coded("player", &tonic::Status::unavailable("gone"));
     assert_eq!(bare.code, codes::REMOTE_HANDLER_UNAVAILABLE);
     assert!(is_retryable(&bare));
-    for (code, grpc) in [
-        (Code::Unavailable, GrpcCode::Internal),
-        (Code::DeadlineExceeded, GrpcCode::Internal),
-        (Code::ResourceExhausted, GrpcCode::Internal),
-        (Code::Aborted, GrpcCode::Aborted),
-        (Code::Unimplemented, GrpcCode::Unimplemented),
+    for code in [
+        Code::Unavailable,
+        Code::DeadlineExceeded,
+        Code::ResourceExhausted,
+        Code::Aborted,
+        Code::Unimplemented,
     ] {
         let status =
             status_with_details(code, "m", vec![error_info("PLAYER_BUSY", &[]), refusal()]);
         let coded = status_to_coded("player", &status);
         assert_eq!(coded.code, "PLAYER_BUSY", "{code:?}");
-        assert_eq!(coded.grpc, grpc, "{code:?}");
+        let class = match code {
+            Code::Aborted => ErrorClass::BusinessImmediate,
+            _ => ErrorClass::BugRetryable,
+        };
+        assert_eq!(coded.grpc.class(), class, "{code:?}");
         assert_eq!(coded.refusal, None, "{code:?}");
-        assert!(!is_retryable(&coded), "{code:?}");
     }
 }
 
@@ -297,8 +330,12 @@ fn only_a_business_status_carries_a_refusal() {
 
 #[test]
 fn only_unavailability_is_retryable() {
-    let other = CodedError::invalid_argument("REMOTE_HANDLER_UNAVAILABLE_NOT", "m", []);
+    let other = CodedError::rejection(
+        angzarr_router::error::BusinessStatus::InvalidArgument,
+        "REMOTE_HANDLER_UNAVAILABLE_NOT",
+        [],
+    );
     assert!(!is_retryable(&other));
-    let stale = CodedError::stale(router_codes::CONFLICT_OVERLAP, "m", []);
+    let stale = CodedError::stale(router_codes::CONFLICT_OVERLAP, []);
     assert!(!is_retryable(&stale));
 }

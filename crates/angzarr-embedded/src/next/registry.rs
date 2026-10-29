@@ -177,40 +177,7 @@ pub enum Misconfigured {
 
 impl fmt::Display for Misconfigured {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Misconfigured::AlreadyRegistered { domain } => {
-                write!(f, "domain \"{domain}\" is registered already")
-            }
-            Misconfigured::UpcasterForAnotherDomain { domain, upcaster } => write!(
-                f,
-                "the upcaster registered for domain \"{domain}\" is for \"{upcaster}\""
-            ),
-            Misconfigured::EmptyRulesVersion { domain } => {
-                write!(f, "domain \"{domain}\"'s current rules version is empty")
-            }
-            Misconfigured::BadStateDescriptor { domain } => write!(
-                f,
-                "domain \"{domain}\"'s state descriptor lists a value that is not a resolution, or lacks STRICT or AGGREGATE_HANDLES"
-            ),
-            Misconfigured::UnsupportedResolution {
-                domain,
-                command_type: None,
-                resolution,
-            } => write!(
-                f,
-                "domain \"{domain}\" is configured {}, which its state does not support",
-                resolution.as_str_name()
-            ),
-            Misconfigured::UnsupportedResolution {
-                domain,
-                command_type: Some(command_type),
-                resolution,
-            } => write!(
-                f,
-                "domain \"{domain}\" configures {command_type} {}, which its state does not support",
-                resolution.as_str_name()
-            ),
-        }
+        angzarr_embedded_diagnostic::display(self, f)
     }
 }
 

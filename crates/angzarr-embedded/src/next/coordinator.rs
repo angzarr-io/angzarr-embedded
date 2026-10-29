@@ -38,9 +38,7 @@
 //!    events, upcast; the book with its ids and its handling resolved; the
 //!    nonce) through the router, whose handler decides or records; the
 //!    kernel stamps every event it answers with the input's
-//!    [`Identified::meta`]. A panicking fact handler is caught.
-
-use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
+//!    [`Identified::meta`]. The router catches a panicking handler, a bug.
 
 use angzarr_proto::v1::{ConflictResolution, EventBook, EventPage, Handling, Snapshot};
 use angzarr_router::domain::{Admission, Arrival, StreamStatus};
@@ -48,8 +46,8 @@ use angzarr_router::error::{codes, CodedError};
 use angzarr_router::pb::ContextualCommand;
 use prost_types::Timestamp;
 
-use super::check::{Body, Identified, Malformed, Sampled};
-use super::dead_letter::{write_dead_letter, write_handler_fault, DeadLetterLog};
+use super::check::{Identified, Malformed, Sampled};
+use super::dead_letter::{write_dead_letter, DeadLetterLog};
 use super::error::{Failure, KernelError};
 use super::markup::STEP_LIMIT;
 use super::registry::Registry;
@@ -303,14 +301,13 @@ pub(crate) fn load(novel: Novel, nonces: &mut u64) -> Result<Contextual, KernelE
 }
 
 /// Step 5: `command` through its domain's router, against its stream's
-/// history: the events it answers, stamped at `recorded_at = max(sampled
-/// now, the stream's last)` with the domain's rules version, from the
-/// head on. A panicking fact handler fails the chain
-/// ([`KernelError::IngestPanicked`]) and `dead_letters` gets a line; a
-/// panicking command handler panics on. A handler's fault under a code of
-/// its own outside the business set ([`route::is_handler_fault`]) fails it as
-/// [`KernelError::Router`], a bug, and `dead_letters` gets a line of its
-/// code and args.
+/// history: the events it answers, stamped at the instant the input was
+/// accepted, `recorded_at = max(sampled now, the stream's last)` (the
+/// `ContextualCommand.recorded_at` its handler read), with the domain's
+/// rules version, from the head on. The router catches a handler's panic,
+/// a bug (UNHANDLED_HANDLER_ERROR, cause HANDLER_PANICKED). A bug
+/// ([`route::is_handler_fault`]) fails it as [`KernelError::Router`], and
+/// `dead_letters` gets a line of its code and args.
 pub(crate) fn dispatch(
     command: &Contextual,
     sampled: &Sampled,
@@ -323,38 +320,9 @@ pub(crate) fn dispatch(
     let handler = registry
         .handler(domain)
         .ok_or_else(|| kernel(unknown_domain(domain)))?;
-    let recorded_at = crate::next::not_before(command.last_recorded_at.as_ref(), sampled.now);
-    let contextual = contextual_command(command, registry).map_err(kernel)?;
-    let answered = catch_unwind(AssertUnwindSafe(|| {
-        let delivery = route::Delivery { recorded_at };
-        route::recording(delivery, || handler.dispatch(&contextual))
-    }));
-    let answered = match answered {
-        Ok(answered) => answered,
-        Err(panic) if matches!(identified.body(), Body::Fact { .. }) => {
-            drop(panic);
-            write_dead_letter(
-                dead_letters,
-                identified.to_book(),
-                domain,
-                "ingest panicked",
-            );
-            return Err(kernel(KernelError::IngestPanicked {
-                stream: identified.cover().clone(),
-                command_id: identified.command_id().clone(),
-            }));
-        }
-        Err(panic) => resume_unwind(panic),
-    };
-    let response = answered.map_err(|error| {
-        if error.code == codes::CONFLICT_UNRESOLVED {
-            write_dead_letter(
-                dead_letters,
-                identified.to_book(),
-                domain,
-                "decide never acknowledged its conflict window",
-            );
-        }
+    let contextual = contextual_command(command, registry, sampled.now).map_err(kernel)?;
+    let recorded_at = contextual.recorded_at.unwrap_or_default();
+    let response = handler.dispatch(&contextual).map_err(|error| {
         let (stream, expected, actual) =
             (identified.cover().clone(), command.expected, command.head);
         match error.code.as_str() {
@@ -363,16 +331,20 @@ pub(crate) fn dispatch(
                 expected,
                 actual,
             }),
-            codes::CONFLICT_UNRESOLVED => Failure::Kernel(KernelError::Unresolved {
-                stream,
-                expected,
-                actual,
-            }),
+            codes::CONFLICT_UNRESOLVED => {
+                let unresolved = KernelError::Unresolved {
+                    stream,
+                    expected,
+                    actual,
+                };
+                write_dead_letter(dead_letters, identified.to_book(), domain, &unresolved);
+                Failure::Kernel(unresolved)
+            }
             _ => {
                 let failure = refused(identified, error);
-                if let Failure::Kernel(KernelError::Router(error)) = &failure {
-                    if route::is_handler_fault(error) {
-                        write_handler_fault(dead_letters, identified.to_book(), domain, error);
+                if let Failure::Kernel(error @ KernelError::Router(coded)) = &failure {
+                    if route::is_handler_fault(coded) {
+                        write_dead_letter(dead_letters, identified.to_book(), domain, error);
                     }
                 }
                 failure
@@ -403,10 +375,13 @@ pub(crate) fn dispatch(
 
 /// The `ContextualCommand` step 5 hands `command`'s domain: its stream's
 /// history upcast, its handling resolved (COMMUTATIVE at the head is handed
-/// over as STRICT, with no nonce), and the delivery's nonce.
+/// over as STRICT, with no nonce), the delivery's nonce, and the instant
+/// the input is accepted at, `max(now, the stream's last)`: what its events
+/// are recorded at (decision 14.37, `ContextualCommand.recorded_at`).
 pub(crate) fn contextual_command(
     command: &Contextual,
     registry: &Registry,
+    now: Timestamp,
 ) -> Result<ContextualCommand, KernelError> {
     let identified = &command.command;
     let upcaster = registry.upcaster(identified.domain());
@@ -444,6 +419,10 @@ pub(crate) fn contextual_command(
         }),
         command: Some(book),
         conflict_nonce: nonce.unwrap_or_default().into(),
+        recorded_at: Some(crate::next::not_before(
+            command.last_recorded_at.as_ref(),
+            now,
+        )),
     })
 }
 

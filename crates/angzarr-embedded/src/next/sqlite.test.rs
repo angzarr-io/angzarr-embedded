@@ -446,26 +446,28 @@ async fn resume_after_reopening_runs_what_a_crash_left_owed() {
 
 // ------------------------------------------------------ one handle
 
-/// A decide that panics unwinds before its step's write: nothing is
-/// written, and the handle serves the next command (no transaction left
-/// open, no lock held).
+/// A decide that panics is a bug the router answers (decision 14.37:
+/// UNHANDLED_HANDLER_ERROR, its cause HANDLER_PANICKED), never an unwind
+/// through the kernel: nothing is written, and the handle serves the next
+/// command (no transaction left open, no lock held).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_panicking_decide_writes_nothing_and_frees_the_handle() {
     let store = Arc::new(SqliteStore::open_in_memory().await.unwrap());
     let stream = cover("tally", 1);
-    let panicking = {
-        let store = Arc::clone(&store);
-        let stream = stream.clone();
-        tokio::spawn(async move {
-            let registry = registry();
-            handle::<Tally>(&store, &registry, add(stream, 1, -1))
-                .await
-                .map(drop)
-                .map_err(drop)
-        })
-    };
-    assert!(panicking.await.unwrap_err().is_panic());
     let registry = registry();
+    let refused = handle::<Tally>(&store, &registry, add(stream.clone(), 1, -1))
+        .await
+        .err()
+        .expect("a bug, answered");
+    assert_eq!(refused.recovery(), Recovery::Bug);
+    assert!(
+        matches!(
+            &refused,
+            Failure::Kernel(KernelError::Router(e))
+                if e.extras.get("cause").map(String::as_str) == Some("HANDLER_PANICKED")
+        ),
+        "{refused:?}"
+    );
     handle::<Tally>(&store, &registry, add(stream.clone(), 2, 5))
         .await
         .unwrap();

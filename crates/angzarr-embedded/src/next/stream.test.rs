@@ -10,7 +10,7 @@ use crate::next::{
 };
 use angzarr_embedded_diagnostic::Report;
 use angzarr_ports::Cause;
-use angzarr_router::error::{codes, CodedError, GrpcCode};
+use angzarr_router::error::{codes, BusinessStatus, CodedError, GrpcCode};
 
 use crate::next::toys::{
     account, at, command, command_id, cover, instant, registry, registry_with_upcasters, root,
@@ -407,7 +407,7 @@ fn every_failure_says_how_to_recover() {
         ),
         (
             Recovery::Retry,
-            KernelError::Store(StoreError::Unavailable(Cause::new("x-down", "down"))),
+            KernelError::Store(StoreError::Unavailable(Cause::new("x-down", []))),
         ),
         (
             Recovery::Invalid,
@@ -428,7 +428,7 @@ fn every_failure_says_how_to_recover() {
             KernelError::Store(StoreError::Unreadable {
                 stream: Box::new(stream.clone()),
                 sequence: 0,
-                reason: Cause::new("x-bad", "bad"),
+                reason: Cause::new("x-bad", []),
             }),
         ),
         (
@@ -436,7 +436,7 @@ fn every_failure_says_how_to_recover() {
             KernelError::Unreadable {
                 stream: stream.clone(),
                 sequence: 0,
-                reason: Report::new("x-bad", "bad"),
+                reason: Report::new("x-bad"),
             },
         ),
         (
@@ -445,15 +445,8 @@ fn every_failure_says_how_to_recover() {
                 stream: stream.clone(),
                 error: crate::next::UpcastError::Rule {
                     source: String::new(),
-                    error: Report::new("x-bad", "bad"),
+                    error: Report::new("x-bad"),
                 },
-            },
-        ),
-        (
-            Recovery::Bug,
-            KernelError::IngestPanicked {
-                stream: stream.clone(),
-                command_id: command_id(1),
             },
         ),
         (
@@ -477,43 +470,79 @@ fn every_failure_says_how_to_recover() {
         ),
         (
             Recovery::Business,
-            KernelError::Router(CodedError::rejection("PLAYER_BROKE", "", [])),
+            KernelError::Router(CodedError::rejection(
+                BusinessStatus::FailedPrecondition,
+                "PLAYER_BROKE",
+                [],
+            )),
         ),
         (
             Recovery::Bug,
-            KernelError::Router(CodedError::bug("PLAYER_BROKE", "", [])),
+            KernelError::Router(CodedError::bug("PLAYER_BROKE", [])),
         ),
         (
-            Recovery::Bug,
-            KernelError::Router(CodedError::stale("PLAYER_BROKE", "", [])),
+            Recovery::Retry,
+            KernelError::Router(CodedError::stale("PLAYER_BROKE", [])),
         ),
         // A handler's own code: under a business status a refusal, under a
-        // bug's status a bug (the owner's ruling, 2026-10-29).
+        // bug's status a bug (the owner's ruling, 2026-10-29). Every status
+        // of the business set arrives as itself (angzarr-router's GrpcCode
+        // has each), so each is a refusal.
         (
             Recovery::Business,
-            KernelError::Router(CodedError::invalid_argument("PLAYER_BROKE", "", [])),
+            KernelError::Router(CodedError::rejection(
+                BusinessStatus::InvalidArgument,
+                "PLAYER_BROKE",
+                [],
+            )),
         ),
         (
             Recovery::Business,
             KernelError::Router(own(GrpcCode::NotFound)),
         ),
-        (Recovery::Bug, KernelError::Router(own(GrpcCode::Internal))),
-        (Recovery::Bug, KernelError::Router(own(GrpcCode::DataLoss))),
         (
-            Recovery::Bug,
+            Recovery::Business,
+            KernelError::Router(own(GrpcCode::AlreadyExists)),
+        ),
+        (
+            Recovery::Business,
+            KernelError::Router(own(GrpcCode::OutOfRange)),
+        ),
+        (
+            Recovery::Business,
+            KernelError::Router(own(GrpcCode::PermissionDenied)),
+        ),
+        (Recovery::Bug, KernelError::Router(own(GrpcCode::Internal))),
+        (Recovery::Bug, KernelError::Router(own(GrpcCode::Unknown))),
+        (Recovery::Bug, KernelError::Router(own(GrpcCode::DataLoss))),
+        // Under a retryable status, neither a refusal nor a bug: retried
+        // (the owner's ruling, 2026-10-29).
+        (
+            Recovery::Retry,
             KernelError::Router(own(GrpcCode::Unimplemented)),
         ),
         (
             Recovery::Retry,
-            KernelError::Router(CodedError::stale(codes::CONFLICT_OVERLAP, "", [])),
+            KernelError::Router(own(GrpcCode::Unavailable)),
+        ),
+        (Recovery::Retry, KernelError::Router(own(GrpcCode::Aborted))),
+        (
+            Recovery::Retry,
+            KernelError::Router(CodedError::stale(codes::CONFLICT_OVERLAP, [])),
+        ),
+        // The router's own errors on malformed input are bugs, INTERNAL,
+        // never the sender's to fix (the owner's ruling, 2026-10-29).
+        (
+            Recovery::Bug,
+            KernelError::Router(router_own(codes::MISSING_COMMAND_BOOK)),
         ),
         (
-            Recovery::Invalid,
-            KernelError::Router(CodedError::invalid_argument(
-                codes::MISSING_COMMAND_BOOK,
-                "",
-                [],
-            )),
+            Recovery::Bug,
+            KernelError::Router(router_own(codes::UNKNOWN_COMMAND_TYPE)),
+        ),
+        (
+            Recovery::Bug,
+            KernelError::Router(router_own(codes::ANY_DECODE_FAILED)),
         ),
     ];
     for (recovery, error) in cases {
@@ -530,7 +559,7 @@ fn every_failure_says_how_to_recover() {
         error,
     };
     assert_eq!(
-        downstream(StepError::Rejected(Report::new("x-no", "no"))).recovery(),
+        downstream(StepError::Rejected(Report::new("x-no"))).recovery(),
         Recovery::Business
     );
     assert_eq!(
@@ -547,8 +576,13 @@ fn every_failure_says_how_to_recover() {
     );
 }
 
+/// An error's `Display` is its code, then its args, ` name=value` each,
+/// a wrapped cause flattened as on the wire (`name=code`, then
+/// `name.arg=value`): never English (decision 14.37, the owner's
+/// clarification of 2026-10-29). English comes only from a catalog keyed
+/// by the code, where the error is shown.
 #[test]
-fn errors_render_their_english_and_wrappers_their_cause() {
+fn errors_display_their_code_and_args_and_wrappers_their_cause_flattened() {
     use angzarr_embedded_diagnostic::Diagnostic;
     let stale = KernelError::Stale {
         stream: crate::next::v1::Cover {
@@ -558,10 +592,11 @@ fn errors_render_their_english_and_wrappers_their_cause() {
         expected: 1,
         actual: 2,
     };
+    let at = "account/0a000000-0000-0000-0000-000000000001@what-if";
     let text = stale.to_string();
-    assert!(
-        text.starts_with("stream account/0a000000-0000-0000-0000-000000000001@what-if is at 2"),
-        "{text}"
+    assert_eq!(
+        text,
+        format!("angzarr-embedded-next-stale stream={at} expected=1 actual=2")
     );
     let failure = Failure::<crate::next::toys::Refused>::Kernel(stale.clone());
     assert_eq!(failure.to_string(), text);
@@ -569,59 +604,87 @@ fn errors_render_their_english_and_wrappers_their_cause() {
     assert_eq!(failure.args().len(), 3);
     let rejected = Failure::Rejected(crate::next::toys::Refused::Overdrawn { short: 3 });
     assert_eq!(rejected.code(), "toy-account-overdrawn");
-    assert_eq!(rejected.to_string(), "3 cents short");
-    assert_eq!(rejected.args().len(), 1);
+    assert_eq!(rejected.to_string(), "toy-account-overdrawn short=3");
     let step = StepError::Rejected(Report::of(&crate::next::toys::Refused::NotOpen));
-    assert_eq!(step.code(), "toy-account-not-open");
-    assert_eq!(step.to_string(), "the account is not open");
-    assert!(step.args().is_empty());
+    assert_eq!(step.to_string(), "toy-account-not-open");
     let step = StepError::Kernel(stale.clone());
-    assert_eq!(
-        (step.code(), step.to_string()),
-        (stale.code(), text.clone())
-    );
-    assert_eq!(step.args().len(), 3);
+    assert_eq!(step.to_string(), text);
     let downstream = Failure::<crate::next::toys::Refused>::Downstream {
         path: vec![],
         error: step,
     };
-    assert!(downstream.to_string().ends_with(&text));
+    assert_eq!(
+        downstream.to_string(),
+        format!(
+            "angzarr-embedded-next-downstream depth=0 error=angzarr-embedded-next-stale \
+             error.stream={at} error.expected=1 error.actual=2"
+        )
+    );
     let upcast = crate::next::UpcastError::Payload(crate::next::PayloadError::UnknownType {
         type_url: "/a.B".to_string(),
     });
-    assert_eq!(upcast.code(), "angzarr-embedded-next-payload-unknown-type");
-    assert_eq!(upcast.to_string(), "no decoder for the type /a.B");
-    assert_eq!(upcast.args().len(), 1);
+    assert_eq!(
+        upcast.to_string(),
+        "angzarr-embedded-next-payload-unknown-type type_url=/a.B"
+    );
     let malformed = KernelError::Malformed(Malformed::NoCover);
     assert_eq!(
-        (
-            malformed.code(),
-            malformed.to_string(),
-            malformed.args().len()
-        ),
-        (
-            "angzarr-embedded-next-malformed-no-cover",
-            "the book has no cover".to_string(),
-            0
-        )
+        malformed.to_string(),
+        "angzarr-embedded-next-malformed-no-cover"
     );
     let replay = KernelError::Replay(ReplayError::RecordedBackwards { sequence: 3 });
     assert_eq!(
-        replay.code(),
-        "angzarr-embedded-next-replay-recorded-backwards"
+        replay.to_string(),
+        "angzarr-embedded-next-replay-recorded-backwards sequence=3"
     );
-    assert!(replay.to_string().starts_with("event 3"));
-    assert_eq!(replay.args().len(), 1);
-    let store = KernelError::Store(StoreError::Unavailable(Cause::new("x-down", "down")));
+    let store = KernelError::Store(StoreError::Unavailable(Cause::new("x-down", [])));
     assert_eq!(store.code(), "angzarr-ports-store-unavailable");
-    assert_eq!(store.to_string(), "the store is unavailable: down");
-    assert_eq!(store.args().len(), 1);
+    assert_eq!(
+        store.to_string(),
+        "angzarr-ports-store-unavailable cause=x-down"
+    );
+    let router = KernelError::Router(CodedError::bug(
+        "PLAYER_BROKE",
+        [("seat".to_string(), "2".to_string())],
+    ));
+    assert_eq!(
+        router.to_string(),
+        "angzarr-embedded-next-unhandled-handler-error cause=PLAYER_BROKE cause.seat=2",
+        "the kernel's code, never the router's English or its SCREAMING reason"
+    );
+}
+
+/// A handler that could not be reached carries why as a key, `cause` (the
+/// host's: `not-running`, `transport`, `timeout`), and says so as its code
+/// and args, never in a sentence.
+#[test]
+fn an_unreachable_handler_carries_its_cause_as_a_key() {
+    use angzarr_embedded_diagnostic::{Arg, Diagnostic};
+    let unreachable = KernelError::HandlerUnavailable {
+        stream: cover("account", 1),
+        cause: "not-running".to_string(),
+    };
+    assert_eq!(
+        unreachable.code(),
+        "angzarr-embedded-next-handler-unavailable"
+    );
+    assert!(unreachable
+        .args()
+        .iter()
+        .any(|arg| matches!(arg, ("cause", Arg::Str(key)) if key == "not-running")));
+    assert_eq!(
+        unreachable.to_string(),
+        format!(
+            "angzarr-embedded-next-handler-unavailable stream=account/{} cause=not-running",
+            root(1)
+        )
+    );
 }
 
 /// The store's errors are angzarr-ports': the kernel forwards each one's
 /// code and args unchanged (the codes ruled `angzarr-ports-*`), an arg a
 /// `Uint` or `Str` as itself, and a wrapped `Cause` as a report nested
-/// under the adapter's own code, with its English and no args.
+/// under the adapter's own code, with its args.
 #[test]
 fn a_store_error_keeps_its_angzarr_ports_code_and_args() {
     use angzarr_embedded_diagnostic::{Arg, Diagnostic};
@@ -645,9 +708,11 @@ fn a_store_error_keeps_its_angzarr_ports_code_and_args() {
     assert_eq!(not_forked.code(), "angzarr-ports-store-edition-not-forked");
     assert_eq!(not_forked.args().len(), 1);
 
+    // The adapter's cause carries its own args (the driver's numeric code,
+    // never its text: decision 14.37), nested under the cause's code.
     let down = KernelError::Store(StoreError::Unavailable(Cause::new(
         "angzarr-store-sqlite-unavailable",
-        "the database failed: disk I/O error",
+        [("errno", angzarr_ports::Arg::Uint(10))],
     )));
     let args = down.args();
     assert_eq!(args.len(), 1);
@@ -655,8 +720,15 @@ fn a_store_error_keeps_its_angzarr_ports_code_and_args() {
         panic!("a nested cause: {args:?}");
     };
     assert_eq!(cause.code(), "angzarr-store-sqlite-unavailable");
-    assert_eq!(cause.to_string(), "the database failed: disk I/O error");
-    assert!(cause.args().is_empty());
+    assert!(
+        matches!(cause.args()[..], [("errno", Arg::Uint(10))]),
+        "{:?}",
+        cause.args()
+    );
+    assert_eq!(
+        down.to_string(),
+        "angzarr-ports-store-unavailable cause=angzarr-store-sqlite-unavailable cause.errno=10"
+    );
 }
 
 /// A stored event the kernel cannot replay is the kernel's own error, not
@@ -668,7 +740,7 @@ fn an_event_the_kernel_cannot_replay_is_its_own_error() {
     let unreadable = KernelError::Unreadable {
         stream: cover("account", 1),
         sequence: 4,
-        reason: Report::new("x-bad", "bad"),
+        reason: Report::new("x-bad"),
     };
     assert_eq!(unreadable.code(), "angzarr-embedded-next-unreadable");
     assert_eq!(
@@ -681,7 +753,7 @@ fn an_event_the_kernel_cannot_replay_is_its_own_error() {
     );
     assert!(unreadable
         .to_string()
-        .starts_with("event 4 of stream account/"));
+        .starts_with("angzarr-embedded-next-unreadable stream=account/"));
 }
 
 #[test]
@@ -828,9 +900,19 @@ fn a_resumed_stream_decides_against_its_snapshot_and_the_events_after_it() {
 fn own(grpc: GrpcCode) -> CodedError {
     CodedError {
         code: "PLAYER_BROKE".to_string(),
-        message: String::new(),
         extras: Default::default(),
         grpc,
+        refusal: None,
+    }
+}
+
+/// One of the router's own errors on malformed input, as it answers them:
+/// INTERNAL.
+fn router_own(code: &str) -> CodedError {
+    CodedError {
+        code: code.to_string(),
+        extras: Default::default(),
+        grpc: GrpcCode::Internal,
         refusal: None,
     }
 }

@@ -372,21 +372,23 @@ fn a_command_handler_registers_by_its_hello() {
             .err()
     };
     assert_eq!(
-        refused(Err(CodedError::invalid_argument(
-            codes::MISSING_RULES_VERSION,
-            "",
-            []
-        ))),
+        refused(Err(CodedError {
+            code: codes::MISSING_RULES_VERSION.to_string(),
+            extras: Default::default(),
+            grpc: angzarr_router::error::GrpcCode::Internal,
+            refusal: None,
+        })),
         Some(Misconfigured::EmptyRulesVersion {
             domain: "hello".to_string()
         })
     );
     assert_eq!(
-        refused(Err(CodedError::invalid_argument(
-            codes::MISSING_STATE_TYPE,
-            "",
-            []
-        ))),
+        refused(Err(CodedError {
+            code: codes::MISSING_STATE_TYPE.to_string(),
+            extras: Default::default(),
+            grpc: angzarr_router::error::GrpcCode::Internal,
+            refusal: None,
+        })),
         Some(Misconfigured::BadStateDescriptor {
             domain: "hello".to_string()
         })

@@ -27,6 +27,14 @@
 //! [policy]
 //! on_bug = "move_past"         # a policy step's bug, dead-lettered, moves its
 //!                              # position past the trigger; "stay" keeps it
+//!
+//! [retry]
+//! max_retries = 3              # a retryable failure is retried this often
+//!                              # (0: never), then dead-lettered; waiting
+//! initial_backoff_ms = 100     # this long first,
+//! multiplier = 2.0             # this many times longer each retry,
+//! max_backoff_ms = 5000        # at most this long,
+//! jitter = 0.2                 # less up to this fraction of it at random
 //! ```
 //!
 //! A domain's language picks its default launch command and nothing else:
@@ -36,7 +44,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use angzarr_embedded::next::OnPolicyBug;
+use angzarr_embedded::next::{OnPolicyBug, OnRetryable};
 use serde::{Deserialize, Serialize};
 
 use crate::error::HostError;
@@ -57,7 +65,7 @@ pub fn default_launch(language: &str) -> Option<&'static [&'static str]> {
 }
 
 /// The host's whole config.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostConfig {
     /// Every domain of the application, in-process and remote: the
@@ -73,6 +81,65 @@ pub struct HostConfig {
     /// What the kernel does when a policy's step hits a bug.
     #[serde(default)]
     pub policy: PolicyConfig,
+    /// How the kernel retries a step's retryable failure.
+    #[serde(default)]
+    pub retry: RetryConfig,
+}
+
+/// The `[retry]` table: how the kernel retries a step whose failure is
+/// retryable (UNAVAILABLE, ABORTED, UNIMPLEMENTED, DEADLINE_EXCEEDED,
+/// RESOURCE_EXHAUSTED and the like), with exponential backoff and jitter,
+/// before it dead-letters it. The kernel's
+/// [`OnRetryable`](angzarr_embedded::next::OnRetryable), whose defaults
+/// these are. Retrying is on with no config; `max_retries = 0` turns it
+/// off. Every key has a default, so the table may be left out.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct RetryConfig {
+    /// Retries after the first attempt, then the step is dead-lettered; 0
+    /// turns retrying off.
+    pub max_retries: u32,
+    /// The wait before the first retry.
+    pub initial_backoff_ms: u64,
+    /// What each retry's wait is the last one's times.
+    pub multiplier: f64,
+    /// The longest wait between retries.
+    pub max_backoff_ms: u64,
+    /// The most of each wait taken off at random, as a fraction of it (0
+    /// to 1).
+    pub jitter: f64,
+}
+
+impl Default for RetryConfig {
+    /// The kernel's own defaults.
+    fn default() -> Self {
+        let kernel = OnRetryable::default();
+        RetryConfig {
+            max_retries: kernel.max_retries,
+            initial_backoff_ms: millis(kernel.initial_backoff),
+            multiplier: kernel.multiplier,
+            max_backoff_ms: millis(kernel.max_backoff),
+            jitter: kernel.jitter,
+        }
+    }
+}
+
+/// `duration` in whole milliseconds.
+fn millis(duration: std::time::Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+impl RetryConfig {
+    /// As the kernel's [`OnRetryable`].
+    pub fn on_retryable(&self) -> OnRetryable {
+        OnRetryable {
+            max_retries: self.max_retries,
+            initial_backoff: std::time::Duration::from_millis(self.initial_backoff_ms),
+            multiplier: self.multiplier,
+            max_backoff: std::time::Duration::from_millis(self.max_backoff_ms),
+            jitter: self.jitter,
+        }
+    }
 }
 
 /// The `[policy]` table: how the kernel treats a policy whose step hits a

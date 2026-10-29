@@ -58,7 +58,7 @@ use angzarr_router::policy::address_refusal_fact;
 
 use super::check::{check, check_refusal, Checked, Identified, Sampled};
 use super::coordinator::{contextual_command, deduplicate, dispatch, load, Deduplicated};
-use super::dead_letter::{write_dead_letter, write_policy_failure, DeadLetterLog};
+use super::dead_letter::{write_dead_letter, write_letter, write_retries_exhausted, DeadLetterLog};
 use super::domain::Domain;
 use super::error::{Failure, KernelError, Step, StepError};
 use super::handler::Handler;
@@ -70,6 +70,7 @@ use super::route::Rejected;
 use super::store::{Port, Store, StorePort};
 use super::stream::{Envelope, Stream};
 use angzarr_embedded_diagnostic::Report;
+use angzarr_router::error::ErrorClass;
 
 /// How deep a chain may go before it is a [`KernelError::ChainTooDeep`],
 /// unless the kernel says otherwise ([`Kernel::limit`]).
@@ -83,6 +84,163 @@ pub struct Kernel<'k> {
     dead_letters: &'k dyn DeadLetterLog,
     limit: usize,
     policy_bug: OnPolicyBug,
+    retry: OnRetryable,
+    wait: &'k dyn Wait,
+}
+
+/// What the kernel does with a step's retryable failure (decision 14.37:
+/// a failure that is neither a business refusal nor a bug, the kernel's
+/// [`Recovery::Retry`](super::Recovery::Retry): UNAVAILABLE, ABORTED,
+/// UNIMPLEMENTED, DEADLINE_EXCEEDED, RESOURCE_EXHAUSTED and the like): run
+/// the step again after a backoff, up to `max_retries` times, then
+/// dead-letter it, visibly, under its key. The `n`th retry (from 0) waits
+/// `initial_backoff` times `multiplier` to the `n`, at most `max_backoff`,
+/// less a random part of it up to `jitter` (0 to 1): `base * (1 - jitter *
+/// draw)`, `draw` uniform in `[0, 1)` ([`Wait::draw`]). On by default;
+/// `max_retries = 0` turns it off: a retryable failure goes back to the
+/// caller at once and is not dead-lettered.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OnRetryable {
+    /// Retries after the first attempt; 0 turns retrying off.
+    pub max_retries: u32,
+    /// The wait before the first retry.
+    pub initial_backoff: std::time::Duration,
+    /// What each retry's wait is the last one's times (at least 1).
+    pub multiplier: f64,
+    /// The longest wait between retries.
+    pub max_backoff: std::time::Duration,
+    /// The most of a wait taken off at random, as a fraction of it (0 to
+    /// 1), so retries of many failures do not land together.
+    pub jitter: f64,
+}
+
+impl Default for OnRetryable {
+    /// Three retries, from 100 ms, doubling, at most 5 s apart, a fifth
+    /// of each wait at random.
+    fn default() -> Self {
+        OnRetryable {
+            max_retries: 3,
+            initial_backoff: std::time::Duration::from_millis(100),
+            multiplier: 2.0,
+            max_backoff: std::time::Duration::from_secs(5),
+            jitter: 0.2,
+        }
+    }
+}
+
+/// How the kernel waits out a backoff, and draws its jitter: the
+/// application's timer and randomness. The kernel's own
+/// ([`Kernel::new`]'s) sleeps on a thread of its own and draws from the
+/// standard library's hasher seeds; a test injects its own, so its waits
+/// are exact.
+pub trait Wait: Send + Sync {
+    /// A future that completes once `backoff` has passed.
+    fn wait(
+        &self,
+        backoff: std::time::Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>>;
+
+    /// A draw uniform in `[0, 1)`: the jitter's randomness.
+    fn draw(&self) -> f64;
+}
+
+impl OnRetryable {
+    /// The wait before retry `retry` (from 0), its jitter `draw` (in
+    /// `[0, 1)`) taken off: `initial_backoff * multiplier^retry`, at most
+    /// `max_backoff`, times `1 - jitter * draw`. A multiplier below 1 is 1,
+    /// a jitter outside `[0, 1]` the nearer end.
+    pub fn backoff(&self, retry: u32, draw: f64) -> std::time::Duration {
+        let grown = self.initial_backoff.as_secs_f64()
+            * self
+                .multiplier
+                .max(1.0)
+                .powi(i32::try_from(retry).unwrap_or(i32::MAX));
+        let base = grown.min(self.max_backoff.as_secs_f64());
+        std::time::Duration::from_secs_f64(base * (1.0 - self.jitter.clamp(0.0, 1.0) * draw))
+    }
+}
+
+/// The kernel's own [`Wait`]: each wait on a thread of its own, which
+/// wakes the waiting task when the backoff has passed (no runtime of the
+/// kernel's own; not on `wasm32-unknown-unknown`, which has no threads), and
+/// draws from the standard library's randomly keyed hasher.
+struct ThreadWait;
+
+impl Wait for ThreadWait {
+    fn wait(
+        &self,
+        backoff: std::time::Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(Sleep {
+            backoff,
+            shared: None,
+        })
+    }
+
+    fn draw(&self) -> f64 {
+        use std::hash::{BuildHasher, Hasher};
+        let bits = std::collections::hash_map::RandomState::new()
+            .build_hasher()
+            .finish();
+        // The top 53 bits, as a fraction: uniform in [0, 1).
+        (bits >> 11) as f64 / (1u64 << 53) as f64
+    }
+}
+
+/// A wait of `backoff` on a thread of its own.
+struct Sleep {
+    backoff: std::time::Duration,
+    /// Whether the thread has woken, and the waker to wake: set at the
+    /// first poll, which starts the thread.
+    shared: Option<std::sync::Arc<std::sync::Mutex<(bool, std::task::Waker)>>>,
+}
+
+impl std::future::Future for Sleep {
+    type Output = ();
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
+        let lock = |shared: &std::sync::Mutex<(bool, std::task::Waker)>| {
+            shared
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0
+        };
+        match &self.shared {
+            Some(shared) => {
+                let mut held = shared
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if held.0 {
+                    return std::task::Poll::Ready(());
+                }
+                held.1 = cx.waker().clone();
+                std::task::Poll::Pending
+            }
+            None => {
+                let shared =
+                    std::sync::Arc::new(std::sync::Mutex::new((false, cx.waker().clone())));
+                let woken = std::sync::Arc::clone(&shared);
+                let backoff = self.backoff;
+                std::thread::spawn(move || {
+                    std::thread::sleep(backoff);
+                    let mut held = woken
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    held.0 = true;
+                    held.1.wake_by_ref();
+                });
+                let done = lock(&shared);
+                self.shared = Some(shared);
+                match done {
+                    true => std::task::Poll::Ready(()),
+                    false => std::task::Poll::Pending,
+                }
+            }
+        }
+    }
 }
 
 /// What a policy step that hits a bug does with the policy's position on
@@ -128,7 +286,7 @@ impl Handled {
                     .map(|f| v1::ProjectorFailure {
                         projector: f.projector.to_string(),
                         code: INTERNAL,
-                        message: f.error.to_string(),
+                        diagnostic: None,
                     })
                     .collect(),
             },
@@ -157,7 +315,28 @@ impl<'k> Kernel<'k> {
             dead_letters,
             limit: DEFAULT_DEPTH_LIMIT,
             policy_bug: OnPolicyBug::default(),
+            retry: OnRetryable::default(),
+            wait: &ThreadWait,
         }
+    }
+
+    /// Retries a step's retryable failure as `retry` says, then
+    /// dead-letters it ([`OnRetryable::default`] unless told otherwise;
+    /// `max_retries = 0` turns it off).
+    pub fn on_retryable(mut self, retry: OnRetryable) -> Kernel<'k> {
+        self.retry = retry;
+        self
+    }
+
+    /// Waits out each backoff, and draws its jitter, with `wait`.
+    pub fn wait_with(mut self, wait: &'k dyn Wait) -> Kernel<'k> {
+        self.wait = wait;
+        self
+    }
+
+    /// How this kernel retries a step's retryable failure.
+    pub fn retryable(&self) -> OnRetryable {
+        self.retry
     }
 
     /// Does `policy_bug` with a policy's position when one of its steps
@@ -245,8 +424,15 @@ impl<'k> Kernel<'k> {
         let mut run = Run::new(self, sampled);
         let identified = checked.identify(sampled);
         let cover = identified.cover().clone();
-        let novel = match deduplicate(&mut port, self.registry, identified).await? {
-            Deduplicated::Duplicate { events } => {
+        let mut retries = 0;
+        let origin = loop {
+            match run.origin(&mut port, identified.clone()).await {
+                Err(failure) if run.again(&failure, false, &mut retries, &identified).await => {}
+                answer => break answer?,
+            }
+        };
+        match origin {
+            Origin::Duplicate(events) => {
                 // A retry settles what its own events still owe, as the
                 // original would have: never the stream's older history.
                 if let Some(first) = events.pages.first() {
@@ -261,30 +447,20 @@ impl<'k> Kernel<'k> {
                         failures,
                     });
                 }
-                return Ok(Handled::Duplicate(events));
+                Ok(Handled::Duplicate(events))
             }
-            Deduplicated::Skipped => {
-                return self
-                    .finish(Handled::Applied(Recorded::default()), projections)
+            Origin::Skipped => {
+                self.finish(Handled::Applied(Recorded::default()), projections)
                     .await
             }
-            Deduplicated::Novel(novel) => novel,
-        };
-        let contextual = load(*novel, &mut run.nonces).map_err(Failure::Kernel)?;
-        let head = contextual.head();
-        let pages = dispatch(&contextual, sampled, self.registry, self.dead_letters)?;
-        let stream = typed(&contextual, &pages, self.registry).map_err(Failure::Kernel)?;
-        if !pages.is_empty() {
-            port.write(&cover, head, &pages, &[])
-                .await
-                .map_err(|e| Failure::Kernel(KernelError::Store(e)))?;
+            Origin::Wrote(head) => {
+                run.queue.push_back((cover, Vec::new(), Some(head)));
+                let settled = run.settle(&mut port).await.map_err(downstream);
+                let recorded = run.recorded;
+                settled?;
+                self.finish(Handled::Applied(recorded), projections).await
+            }
         }
-        run.record(cover.clone(), head, stream, pages);
-        run.queue.push_back((cover, Vec::new(), Some(head)));
-        let settled = run.settle(&mut port).await.map_err(downstream);
-        let recorded = run.recorded;
-        settled?;
-        self.finish(Handled::Applied(recorded), projections).await
     }
 
     /// Run every policy step still owed, by position: for each stream of
@@ -502,6 +678,44 @@ struct Run<'k> {
     /// The context the last step's refused command was handed, whole: what
     /// its policy's translating callback reads.
     refused: Option<markup::CommandContext>,
+    /// How a step's retryable failure is retried, and the timer.
+    retry: OnRetryable,
+    wait: &'k dyn Wait,
+}
+
+/// What the originating command's step came to.
+enum Origin {
+    /// Step 3 found its events already: these.
+    Duplicate(EventBook),
+    /// A process manager's fact for a stream with no instance, skipped.
+    Skipped,
+    /// It was decided, and wrote its events (perhaps none) from this
+    /// sequence on.
+    Wrote(u64),
+}
+
+/// The class of a step's `failure` (angzarr-router's `ErrorClass`), if it
+/// is one the kernel may run again: a stale command or a lost race
+/// (ABORTED) is the caller's to reload; an unreachable handler or store,
+/// and a router error under a retryable status, are retryable bugs; a
+/// router error's own class otherwise. `None` for a failure never run
+/// again: a refusal, a decide that never acknowledged its window (already
+/// dead-lettered), any other.
+fn failure_class(failure: &Failure<Rejected>) -> Option<ErrorClass> {
+    match failure {
+        Failure::Kernel(KernelError::Stale { .. })
+        | Failure::Kernel(KernelError::Store(super::StoreError::Conflict { .. })) => {
+            Some(ErrorClass::BusinessImmediate)
+        }
+        Failure::Kernel(KernelError::HandlerUnavailable { .. }) => Some(ErrorClass::BugRetryable),
+        Failure::Kernel(KernelError::Store(error))
+            if super::error::store_recovery(error) == super::Recovery::Retry =>
+        {
+            Some(ErrorClass::BugRetryable)
+        }
+        Failure::Kernel(KernelError::Router(error)) => Some(error.grpc.class()),
+        _ => None,
+    }
 }
 
 /// What a step came to.
@@ -524,7 +738,77 @@ impl<'k> Run<'k> {
             queue: VecDeque::new(),
             recorded: Recorded::default(),
             refused: None,
+            retry: kernel.retry,
+            wait: kernel.wait,
         }
+    }
+
+    /// Whether a step's `failure` is run again: retrying is on, and it is a
+    /// retryable bug, or, as a `policy_step` (whose caller is the kernel),
+    /// ABORTED.
+    fn retried(&self, failure: &Failure<Rejected>, policy_step: bool) -> bool {
+        self.retry.max_retries > 0
+            && match failure_class(failure) {
+                Some(ErrorClass::BugRetryable) => true,
+                Some(ErrorClass::BusinessImmediate) => policy_step,
+                _ => false,
+            }
+    }
+
+    /// Whether `command`'s step, failed with `failure` after `retries`
+    /// retries, runs again: once its backoff is waited out, `retries` one
+    /// more. A failure that is retried but has had all its retries is
+    /// dead-lettered, with their count, and is not.
+    async fn again(
+        &mut self,
+        failure: &Failure<Rejected>,
+        policy_step: bool,
+        retries: &mut u32,
+        command: &Identified,
+    ) -> bool {
+        if !self.retried(failure, policy_step) {
+            return false;
+        }
+        if *retries >= self.retry.max_retries {
+            write_retries_exhausted(
+                self.dead_letters,
+                command.to_book(),
+                command.domain(),
+                failure,
+                *retries,
+            );
+            return false;
+        }
+        let backoff = self.retry.backoff(*retries, self.wait.draw());
+        self.wait.wait(backoff).await;
+        *retries += 1;
+        true
+    }
+
+    /// The originating command's step: load then deduplicate, then
+    /// dispatch through the router and write its events, alone.
+    async fn origin<P: Port>(
+        &mut self,
+        port: &mut P,
+        identified: Identified,
+    ) -> Result<Origin, Failure<Rejected>> {
+        let cover = identified.cover().clone();
+        let novel = match deduplicate(port, self.registry, identified).await? {
+            Deduplicated::Duplicate { events } => return Ok(Origin::Duplicate(events)),
+            Deduplicated::Skipped => return Ok(Origin::Skipped),
+            Deduplicated::Novel(novel) => novel,
+        };
+        let contextual = load(*novel, &mut self.nonces).map_err(Failure::Kernel)?;
+        let head = contextual.head();
+        let pages = dispatch(&contextual, self.sampled, self.registry, self.dead_letters)?;
+        let stream = typed(&contextual, &pages, self.registry).map_err(Failure::Kernel)?;
+        if !pages.is_empty() {
+            port.write(&cover, head, &pages, &[])
+                .await
+                .map_err(|e| Failure::Kernel(KernelError::Store(e)))?;
+        }
+        self.record(cover, head, stream, pages);
+        Ok(Origin::Wrote(head))
     }
 
     /// Settle every queued stream, in order: each runs its policies on
@@ -617,7 +901,7 @@ impl<'k> Run<'k> {
             Ok(response) => response.commands,
             Err(error) => {
                 if let Some(failure) = super::route::policy_failure(&error) {
-                    write_policy_failure(
+                    write_letter(
                         self.dead_letters,
                         Payload::RejectedEvents(event),
                         policy.name(),
@@ -628,13 +912,14 @@ impl<'k> Run<'k> {
                         .map_err(|e| (path.to_vec(), StepError::Kernel(KernelError::Store(e))))?;
                     return Err((path.to_vec(), StepError::PolicyFailed(failure)));
                 }
-                write_dead_letter(
+                let error = KernelError::Router(error);
+                write_letter(
                     self.dead_letters,
-                    CommandBook::default(),
+                    Payload::RejectedEvents(event),
                     policy.name(),
-                    &error.message,
+                    &error,
                 );
-                return Err((path.to_vec(), StepError::Kernel(KernelError::Router(error))));
+                return Err((path.to_vec(), StepError::Kernel(error)));
             }
         };
         let correlation = page
@@ -679,7 +964,7 @@ impl<'k> Run<'k> {
                             self.dead_letters,
                             order.book(),
                             policy.name(),
-                            &rejected.to_string(),
+                            &rejected,
                         );
                         port.write_positions(&position)
                             .await
@@ -689,10 +974,7 @@ impl<'k> Run<'k> {
                     let refusal = markup::v1::Refusal {
                         event: Some(event.clone()),
                         command: Some(delivered.to_book()),
-                        response: Some(markup::v1::RefusalResponse {
-                            refusal: rejected.refusal_object().cloned(),
-                            message: rejected.to_string(),
-                        }),
+                        response: Some(rejected.response()),
                     };
                     let ctx = self.refused.take().unwrap_or_default();
                     match self
@@ -714,7 +996,16 @@ impl<'k> Run<'k> {
                         .map_err(|e| store(path.clone(), e))?;
                     return Err((path, StepError::Kernel(KernelError::Router(error))));
                 }
-                Err(failure) => return Err((path, step_error(failure))),
+                Err(failure) => {
+                    // Retried to its cap and dead-lettered: the position
+                    // does what a bug's does.
+                    if self.retried(&failure, true) {
+                        past_bug(self.policy_bug, port, &position)
+                            .await
+                            .map_err(|e| store(path.clone(), e))?;
+                    }
+                    return Err((path, step_error(failure)));
+                }
             }
         }
         Ok(())
@@ -746,7 +1037,7 @@ impl<'k> Run<'k> {
                 let Some(failure) = super::route::policy_failure(&error) else {
                     return Err(kernel(error));
                 };
-                write_policy_failure(
+                write_letter(
                     self.dead_letters,
                     Payload::RejectedCommand(delivered.to_book()),
                     policy.name(),
@@ -785,17 +1076,31 @@ impl<'k> Run<'k> {
             delivered.command_id().clone(),
         )
         .map_err(|m| {
-            write_dead_letter(self.dead_letters, book, policy.name(), &m.to_string());
+            write_dead_letter(self.dead_letters, book, policy.name(), &m);
             StepError::Kernel(KernelError::Malformed(m))
         })?;
         let fact = checked.identify(self.sampled);
         let error = match self.step(port, fact.clone(), positions).await {
             Ok(stepped) => return Ok(stepped),
-            Err(Failure::Kernel(KernelError::Router(error))) => error,
-            Err(failure) => return Err(step_error(failure)),
+            Err(Failure::Kernel(KernelError::Router(error)))
+                if !matches!(
+                    error.grpc.class(),
+                    ErrorClass::BusinessImmediate | ErrorClass::BugRetryable
+                ) =>
+            {
+                error
+            }
+            Err(failure) => {
+                if self.retried(&failure, true) {
+                    past_bug(self.policy_bug, port, positions)
+                        .await
+                        .map_err(|e| StepError::Kernel(KernelError::Store(e)))?;
+                }
+                return Err(step_error(failure));
+            }
         };
         if let Some(failure) = super::route::policy_failure(&error) {
-            write_policy_failure(
+            write_letter(
                 self.dead_letters,
                 Payload::RejectedCommand(fact.to_book()),
                 fact.domain(),
@@ -806,7 +1111,7 @@ impl<'k> Run<'k> {
                 .map_err(|e| StepError::Kernel(KernelError::Store(e)))?;
             return Err(StepError::PolicyFailed(failure));
         }
-        if error.code != codes::NO_FACT_HANDLER {
+        if error.code != codes::NO_FACT_HANDLER && error.code != codes::NO_REFUSAL_HANDLER {
             if super::route::is_handler_fault(&error) {
                 past_bug(self.policy_bug, port, positions)
                     .await
@@ -814,22 +1119,39 @@ impl<'k> Run<'k> {
             }
             return Err(StepError::Kernel(KernelError::Router(error)));
         }
-        write_dead_letter(
-            self.dead_letters,
-            fact.to_book(),
-            fact.domain(),
-            &error.message,
-        );
+        // The router answers a refusal with no path INTERNAL, a bug: the
+        // dispatch dead-lettered it already.
         port.write_positions(positions)
             .await
             .map_err(|e| StepError::Kernel(KernelError::Store(e)))?;
         Ok(Stepped::Nothing)
     }
 
+    /// `command` as a step of its own, as [`Run::attempt`] runs it, run
+    /// again while its failure is retried ([`Run::again`]): a policy's
+    /// step, whose caller is the kernel.
+    async fn step<P: Port>(
+        &mut self,
+        port: &mut P,
+        command: Identified,
+        positions: &[(&str, &Cover, u64)],
+    ) -> Result<Stepped, Failure<Rejected>> {
+        let mut retries = 0;
+        loop {
+            let failure = match self.attempt(port, command.clone(), positions).await {
+                Err(failure) => failure,
+                stepped => return stepped,
+            };
+            if !self.again(&failure, true, &mut retries, &command).await {
+                return Err(failure);
+            }
+        }
+    }
+
     /// `command` as a step of its own in the stream it names: load,
     /// deduplicate, dispatch through the router, and write its events with
     /// `positions` (or `positions` alone, when it writes no event).
-    async fn step<P: Port>(
+    async fn attempt<P: Port>(
         &mut self,
         port: &mut P,
         command: Identified,
@@ -853,7 +1175,7 @@ impl<'k> Run<'k> {
             Ok(pages) => pages,
             Err(failure) => {
                 if let Failure::Rejected(_) = failure {
-                    self.refused = contextual_command(&contextual, self.registry)
+                    self.refused = contextual_command(&contextual, self.registry, self.sampled.now)
                         .ok()
                         .map(|delivered| angzarr_router::context::command_context(&delivered));
                 }

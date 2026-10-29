@@ -37,7 +37,7 @@ use sqlx::migrate::{MigrateError, Migration, Migrator};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection, SqliteRow};
 use sqlx::{ConnectOptions, Connection, Database, Row, Sqlite, TransactionManager};
 
-use crate::error::{damaged, unavailable, undecodable, unmigrated, Damage};
+use crate::error::{damaged, no_data_version, unavailable, undecodable, unmigrated, Damage};
 use crate::{rows, statements, Dialect, Integrity};
 
 /// SQLite keeps NULLs distinct in a key, so the main timeline is `''`.
@@ -522,7 +522,8 @@ fn primary_code(error: &sqlx::Error) -> Option<i32> {
 /// say. Any other failure is `angzarr-store-sqlite-unavailable`.
 fn opening(error: sqlx::Error) -> StoreError {
     match primary_code(&error) {
-        Some(SQLITE_CORRUPT | SQLITE_NOTADB) => damaged(
+        Some(code @ (SQLITE_CORRUPT | SQLITE_NOTADB)) => damaged(
+            code as u64,
             error
                 .as_database_error()
                 .map_or_else(String::new, |e| e.message().to_string()),
@@ -1112,7 +1113,7 @@ impl Watch for SqliteStore {
             .await
             .rows(statements::CHANGE_TOKEN, [])
             .await?;
-        let row = rows.first().ok_or_else(|| unavailable("no data version"))?;
+        let row = rows.first().ok_or_else(no_data_version)?;
         let version: i64 = row.try_get(0).map_err(unavailable)?;
         let changes: i64 = row.try_get(1).map_err(unavailable)?;
         // Their bits as they are: a token is only compared for equality.

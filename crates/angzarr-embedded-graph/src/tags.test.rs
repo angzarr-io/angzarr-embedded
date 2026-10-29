@@ -54,7 +54,7 @@ fn malformed_tags_are_refused_with_the_text() {
     }
     assert_eq!(
         r.parse("Terrain:roof").unwrap_err().to_string(),
-        "bad tag \"Terrain:roof\": a namespace is lowercase letters, digits, _ and -"
+        "angzarr-embedded-graph-bad-namespace text=Terrain:roof"
     );
 }
 

@@ -403,13 +403,15 @@ mod pipeline {
             matches!(
                 &refused,
                 Failure::Kernel(KernelError::Router(e))
-                    if e.code == "NO_HANDLER_REGISTERED"
+                    if e.code == "UNKNOWN_COMMAND_TYPE"
                         && e.extras.get("type_url").map(String::as_str)
                             == Some("/toy.account.v9.Bonus")
             ),
-            "the router's NO_HANDLER_REGISTERED, named by its type URL: {refused:?}"
+            "the router's UNKNOWN_COMMAND_TYPE, named by its type URL: {refused:?}"
         );
-        assert_eq!(refused.recovery(), Recovery::Invalid);
+        // The router's own error on malformed input is a bug, INTERNAL (the
+        // owner's ruling, 2026-10-29), never the sender's to fix.
+        assert_eq!(refused.recovery(), Recovery::Bug);
 
         // Stale and undecodable: STRICT's check comes first.
         let stale = handle::<Account>(

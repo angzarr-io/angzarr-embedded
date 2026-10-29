@@ -36,7 +36,7 @@ just lint-deps      # cargo-deny: licences, sources, bans, advisories (deny.toml
 just fmt            # cargo fmt over the workspace's crates (just fmt-check changes nothing)
 just mutants        # cargo-mutants over the workspace; `just mutants angzarr-embedded` for one crate
 just wasm           # build angzarr-embedded for wasm32-unknown-unknown
-just hooks-install  # install the pre-commit hooks (gates/)
+just hooks-install  # install the git hooks (gates/)
 ```
 
 angzarr-embedded depends on angzarr-proto, a git dependency whose build runs

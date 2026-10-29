@@ -1,8 +1,8 @@
 # Build, test and lint the workspace. Needs protoc on PATH (angzarr-proto,
 # under angzarr-embedded, runs it in its build script).
 #
-# The pre-commit gates and their recipes (fmt, fmt-check, test, test-staged,
-# test-commit, mutants-staged, lint-deps, secrets-scan-staged and the `_run`
+# The git-hook gates and their recipes (fmt, fmt-check, test, test-staged,
+# test-commit, mutants-push, mutants-staged, lint-deps, secrets-scan-staged and the `_run`
 # machinery) are gates/gates.just, imported below; this file gives them angzarr-embedded's
 # parameters.
 
@@ -105,8 +105,9 @@ mutants *crates:
 
 # Mutation-test only the lines changed since `base` (default main): the
 # working tree, uncommitted and untracked files included, against the merge
-# base, so it matches the source cargo-mutants mutates. `mutants-staged` is
-# the commit's gate; this is the branch's.
+# base, so it matches the source cargo-mutants mutates, unjudged. `mutants-push`
+# (pre-push) is the gate, judging what a push adds; `mutants-staged` judges
+# the staged diff by hand; this is the working tree's, by hand.
 mutants-diff base="main":
     #!/usr/bin/env bash
     set -euo pipefail

@@ -153,12 +153,13 @@ fn a_refusal_comes_back_as_the_routers_refusal() {
         .expect_err("refused");
     assert_eq!(refused.grpc, GrpcCode::FailedPrecondition);
     assert_eq!(refused.code, "TABLE_FULL");
-    assert_eq!(refused.message, "table is full");
     assert_eq!(refused.extras.get("seats").map(String::as_str), Some("6"));
     assert_eq!(refused.refusal.as_deref(), Some(&fake_child::refusal()));
     assert_eq!(
-        refused.refusal_response().unwrap().refusal,
-        Some(fake_child::refusal())
+        refused.refusal_response().unwrap().reason,
+        Some(angzarr_router::pb::refusal_response::Reason::Refusal(
+            fake_child::refusal()
+        ))
     );
     assert!(!is_retryable(&refused));
     host.shutdown();
