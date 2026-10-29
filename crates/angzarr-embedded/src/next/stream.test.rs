@@ -643,6 +643,18 @@ fn errors_display_their_code_and_args_and_wrappers_their_cause_flattened() {
         store.to_string(),
         "angzarr-ports-store-unavailable cause=x-down"
     );
+    // A value that would not parse back is quoted, a cause's too.
+    let locked = KernelError::Store(StoreError::Unavailable(Cause::new(
+        "x-down",
+        [(
+            "ext_err_txt",
+            angzarr_ports::Arg::Str("database is locked".to_string()),
+        )],
+    )));
+    assert_eq!(
+        locked.to_string(),
+        "angzarr-ports-store-unavailable cause=x-down cause.ext_err_txt=\"database is locked\""
+    );
     let router = KernelError::Router(CodedError::bug(
         "PLAYER_BROKE",
         [("seat".to_string(), "2".to_string())],

@@ -5,7 +5,9 @@ use super::{causes, damaged, unavailable, Damage, SqlError};
 /// An error's `Display` is its code, then its args (` name=value` each),
 /// never English of angzarr's (decision 14.37): text is rendered only
 /// where it is shown, from the catalog. A third party's text (the
-/// driver's) is carried verbatim as `ext_err_txt`.
+/// driver's) is carried verbatim as `ext_err_txt`, quoted where it would
+/// not parse back (holding whitespace, `=`, `"` or `\`, or empty), its
+/// `"` and `\` escaped.
 #[test]
 fn an_error_displays_its_code_and_args_never_english() {
     assert_eq!(
@@ -19,11 +21,39 @@ fn an_error_displays_its_code_and_args_never_english() {
     .to_string();
     assert_eq!(
         unavailable,
-        "angzarr-store-sqlite-unavailable ext_err_txt=disk I/O error"
+        "angzarr-store-sqlite-unavailable ext_err_txt=\"disk I/O error\""
     );
     assert!(
         !unavailable.contains("the database failed"),
         "{unavailable}"
+    );
+    assert_eq!(
+        SqlError::Undecodable {
+            detail: "bad \"utf8\" at C:\\db".to_string()
+        }
+        .to_string(),
+        "angzarr-store-sqlite-undecodable ext_err_txt=\"bad \\\"utf8\\\" at C:\\\\db\""
+    );
+    assert_eq!(
+        SqlError::Undecodable {
+            detail: String::new()
+        }
+        .to_string(),
+        "angzarr-store-sqlite-undecodable ext_err_txt=\"\""
+    );
+    assert_eq!(
+        SqlError::Undecodable {
+            detail: "k=v".to_string()
+        }
+        .to_string(),
+        "angzarr-store-sqlite-undecodable ext_err_txt=\"k=v\""
+    );
+    assert_eq!(
+        SqlError::Undecodable {
+            detail: "plain".to_string()
+        }
+        .to_string(),
+        "angzarr-store-sqlite-undecodable ext_err_txt=plain"
     );
 }
 
@@ -35,7 +65,7 @@ fn damage_shows_the_first_problem_and_counts_the_rest() {
     let one = damage(&["row 1 missing from index i"]);
     assert_eq!(
         one.to_string(),
-        "angzarr-store-sqlite-damaged first=row 1 missing from index i more=0"
+        "angzarr-store-sqlite-damaged first=\"row 1 missing from index i\" more=0"
     );
     assert_eq!(one.code(), "angzarr-store-sqlite-damaged");
     let args = one.args();
@@ -83,7 +113,7 @@ fn a_failure_reaches_the_ports_with_the_drivers_code_and_text() {
     );
     assert_eq!(
         locked.to_string(),
-        "angzarr-store-sqlite-unavailable errno=5 ext_err_txt=database is locked"
+        "angzarr-store-sqlite-unavailable errno=5 ext_err_txt=\"database is locked\""
     );
     let StoreError::Unavailable(cause) = unavailable("pool timed out") else {
         panic!("unavailable");

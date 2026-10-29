@@ -88,3 +88,27 @@ fn a_reports_display_is_its_code_and_args_flattened() {
     );
     assert_eq!(Report::of(&Inner).to_string(), "test-inner n=3");
 }
+
+/// A value that would not parse back is quoted (decision 14.37's display
+/// rule): one empty, or holding whitespace, `=`, `"` or `\`, is written
+/// double-quoted, its `"` and `\` escaped with a backslash, a nested
+/// cause's too; any other value stays bare.
+#[test]
+fn a_value_that_would_not_parse_back_is_quoted() {
+    let cause = Report::new("test-io").arg("ext_err_txt", "database is locked");
+    let r = Report::new("test-outer")
+        .arg("empty", "")
+        .arg("pair", "k=v")
+        .arg("said", "say \"hi\"")
+        .arg("path", "C:\\dir")
+        .arg("tab", "a\tb")
+        .arg("bare", "account/7-x_y.z")
+        .arg("n", -1i32)
+        .arg("cause", Arg::nested(&cause));
+    assert_eq!(
+        r.to_string(),
+        "test-outer empty=\"\" pair=\"k=v\" said=\"say \\\"hi\\\"\" path=\"C:\\\\dir\" \
+         tab=\"a\tb\" bare=account/7-x_y.z n=-1 cause=test-io \
+         cause.ext_err_txt=\"database is locked\""
+    );
+}
