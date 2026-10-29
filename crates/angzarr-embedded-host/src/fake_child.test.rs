@@ -59,8 +59,11 @@ pub(crate) mod mode {
     pub(crate) const SILENT: &str = "silent";
     /// A v2 handshake; then wait for stdin's end.
     pub(crate) const MALFORMED: &str = "malformed";
-    /// Serve, and ignore stdin's end: only a kill stops it.
+    /// Serve, and ignore stdin's end: SIGTERM (its default action) stops
+    /// it.
     pub(crate) const STUBBORN: &str = "stubborn";
+    /// Serve, and ignore stdin's end and SIGTERM: only SIGKILL stops it.
+    pub(crate) const DEAF: &str = "deaf";
     /// Handshake, close stdout, then serve: the host sees stdout's end
     /// while the child lives on.
     pub(crate) const CLOSES_STDOUT: &str = "closes-stdout";
@@ -130,7 +133,14 @@ fn entry() {
         return;
     };
     let name = std::env::var(NAME_ENV).unwrap_or_default();
-    if mode != mode::STUBBORN {
+    if mode == mode::DEAF {
+        // SAFETY: setting a signal's disposition to SIG_IGN installs no
+        // handler code; nothing else here touches SIGTERM.
+        unsafe {
+            libc::signal(libc::SIGTERM, libc::SIG_IGN);
+        }
+    }
+    if mode != mode::STUBBORN && mode != mode::DEAF {
         std::thread::spawn(|| {
             let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
             if let Some(mark) = std::env::var_os(EOF_MARK_ENV) {

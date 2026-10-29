@@ -458,17 +458,35 @@ fn shutdown_closes_stdin_and_the_child_exits() {
     assert!(!alive(&pid));
 }
 
-/// A child that ignores its stdin's end is killed once the grace runs out.
+/// A child that ignores its stdin's end is sent SIGTERM once the grace
+/// runs out, and exits on it.
 #[test]
-fn a_child_ignoring_stdin_eof_is_killed_after_the_grace() {
+fn a_child_ignoring_stdin_eof_is_terminated_after_the_grace() {
     let mut config = config(vec![player(mode::STUBBORN)]);
     config.supervision.shutdown_grace_ms = 300;
     let host = Host::start(config).unwrap();
     let pid = pid_of(&host.handler("player").unwrap());
     assert_eq!(
         host.shutdown(),
+        vec![("player".to_string(), ChildExit::Terminated)]
+    );
+    assert!(!alive(&pid));
+}
+
+/// A child that ignores SIGTERM too is killed once its grace runs out.
+#[test]
+fn a_child_ignoring_sigterm_is_killed_after_its_grace() {
+    let mut config = config(vec![player(mode::DEAF)]);
+    config.supervision.shutdown_grace_ms = 200;
+    config.supervision.terminate_grace_ms = 300;
+    let host = Host::start(config).unwrap();
+    let pid = pid_of(&host.handler("player").unwrap());
+    let started = Instant::now();
+    assert_eq!(
+        host.shutdown(),
         vec![("player".to_string(), ChildExit::Killed)]
     );
+    assert!(started.elapsed() >= Duration::from_millis(500));
     assert!(!alive(&pid));
 }
 

@@ -69,7 +69,8 @@ angzarr-embedded-host depends on `angzarr-router` and `angzarr-proto`
 (pinned at the revs the router names, so its graph holds one angzarr-proto),
 `tonic` and `tonic-prost` (its gRPC client, and in its tests the fake
 child's server), `tonic-types` (google.rpc's Status and ErrorInfo), `tokio`,
-`tower` and `hyper-util` (the runtime and the Unix-socket connector), and
+`tower` and `hyper-util` (the runtime and the Unix-socket connector),
+`libc` (SIGTERM to a child at shutdown, which tokio cannot send), and
 `serde` (its config), because a remote domain is a child process speaking
 gRPC on a Unix socket: hand-rolling HTTP/2 would be a second, unchecked
 implementation of gRPC. Its stubs are written by `tonic-build`'s manual

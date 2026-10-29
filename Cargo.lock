@@ -66,6 +66,7 @@ dependencies = [
  "angzarr-proto",
  "angzarr-router",
  "hyper-util",
+ "libc",
  "prost",
  "prost-types",
  "serde",

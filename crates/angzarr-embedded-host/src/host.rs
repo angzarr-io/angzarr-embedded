@@ -47,7 +47,9 @@ pub enum ChildExit {
     /// It exited by itself once its stdin was closed: its exit code, `None`
     /// when a signal ended it.
     Exited(Option<i32>),
-    /// It was still running when the grace ran out, and was killed.
+    /// It outlived its stdin's grace, and exited once sent SIGTERM.
+    Terminated,
+    /// It outlived SIGTERM's grace too, and was killed (SIGKILL).
     Killed,
     /// No child was running (it had exited and was waiting to be
     /// restarted).
@@ -200,6 +202,19 @@ impl Drop for Host {
     }
 }
 
+/// Sends SIGTERM to the child `pid`.
+fn terminate(pid: u32) {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return;
+    };
+    // SAFETY: kill(2) takes no pointers. The pid is a child this host has
+    // not yet reaped (tokio's Child gives its id only until then), so it
+    // names that child and no other process.
+    unsafe {
+        libc::kill(pid, libc::SIGTERM);
+    }
+}
+
 /// The wait after `backoff` when a restart fails again: twice as long, up
 /// to `max`.
 fn next_backoff(backoff: Duration, max: Duration) -> Duration {
@@ -331,18 +346,23 @@ impl Supervisor {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = client;
     }
 
-    /// Closes the child's stdin, gives it the grace to exit, and kills it
-    /// if it has not.
+    /// Closes the child's stdin and gives it the grace to exit; then sends
+    /// it SIGTERM and gives it the terminate grace; then kills it.
     async fn stop_child(&self, up: &mut Up) -> ChildExit {
         drop(up.stdin.take());
         let grace = Duration::from_millis(self.supervision.shutdown_grace_ms);
-        match tokio::time::timeout(grace, up.child.wait()).await {
-            Ok(Ok(status)) => ChildExit::Exited(status.code()),
-            _ => {
-                let _ = up.child.kill().await;
-                ChildExit::Killed
-            }
+        if let Ok(Ok(status)) = tokio::time::timeout(grace, up.child.wait()).await {
+            return ChildExit::Exited(status.code());
         }
+        if let Some(pid) = up.child.id() {
+            terminate(pid);
+        }
+        let grace = Duration::from_millis(self.supervision.terminate_grace_ms);
+        if let Ok(Ok(_)) = tokio::time::timeout(grace, up.child.wait()).await {
+            return ChildExit::Terminated;
+        }
+        let _ = up.child.kill().await;
+        ChildExit::Killed
     }
 
     /// Launches the child and brings it up. On a failure the child, if one
