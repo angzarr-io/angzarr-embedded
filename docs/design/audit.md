@@ -39,7 +39,7 @@ places:
 | A1 | `Envelope` holds only seq, cause and event: no when, no why. Consumers put metadata in the payload (hatpick's `Stamp`). | Every event carries angzarr's `EventMeta`, stamped by the kernel. Business code emits payloads only. [Metadata](#metadata) |
 | A2 | `cause` is only within a stream; there is no correlation id. | Every event names its direct cause, its command; a policy command names its trigger as its own `causation_id`; correlation is always set and kept through every policy step. [Identification](#step-2-identification), [Metadata](#metadata) |
 | A3 | `Header.rules` is a free string replay never checks. | The rules version is registered, stamped per event, resolved by a `Rulebook` at replay, and invalidates snapshots. [Rules versions](#rules-versions) |
-| A5 | `Header.schema` is unused; there is no upcasting. | A payload's type URL is its version. Old types are upcast by type URL, strictly, events at read and (discouraged) commands before decode. [Decode](#step-5-decode-then-decide-or-ingest) |
+| A5 | `Header.schema` is unused; there is no upcasting. | A payload's type URL is its version. Old types are upcast by type URL, strictly, events at read and (discouraged) commands before decode. [Dispatch](#step-5-dispatch-through-angzarr-router) |
 | A6 | Events emitted before a rejection stay in the `Stream`. | Decide is pure and stages its events; a rejection leaves nothing. |
 | B1 | The old kernel's policy was a stateless saga with an undocumented target-contiguity invariant, its backlog replaying the source once per target. | One `Policy` trait and one registration list; every step committed on its own, with the policy's position on its source, and resumed by position. [Policies](#policies-and-the-chain) |
 | B2 | `Projection::on` gets no stream identity or position. | Every handler gets a `Committed`: the cover, the sequence, the metadata, the event, the state just after. |
@@ -126,23 +126,26 @@ One command, end to end, in angzarr's normative order (`types.proto`, the
 so the order cannot be skipped or reordered:
 
 ```text
-CommandBook ─check──▶ Checked ─identify──▶ Identified ─deduplicate──▶ Deduplicated
+CommandBook ─check──▶ Checked ─identify──▶ Identified ─deduplicate (router: admit)──▶ Deduplicated
                                                          ├─ Duplicate { events }            (answer: DUPLICATE)
+                                                         ├─ Skipped                         (a PM's non-starting fact)
                                                          └─ Novel ─load──▶ Contextual
-                                                                     ─decode::<D>──▶ Prepared<D> ─decide──▶ Decision<D>
+                                                                     ─dispatch (router)──▶ stamped pages
 ```
 
 1. **Validate** (`check`): domain-blind, everything at once.
 2. **Identify** (`Checked::identify`): command id, correlation, causation.
-3. **Load, then deduplicate** (`deduplicate`): the conflict
-   resolution, the snapshot and events are loaded **first**; then, does the
-   stream already hold events with this command id? They are the answer.
+3. **Load, then admit** (`deduplicate`): the conflict
+   resolution, the snapshot and events are loaded **first**; then the
+   command id is looked up (`find_command`) and angzarr-router admits the
+   input: a refusal fact's address, deduplication by the events found (they
+   are the answer), a process manager's start rule.
 4. **Resolve** (`load`): the expected sequence stamped or
    checked against the head step 3 loaded (STRICT's stale refusal is
    here), the window and nonce.
-5. **Decode, then decide or ingest** (`prepare`, `Prepared::decide`):
-   typed, upcast, strict; the body arm picks decide or
-   ingest; the kernel stamps the events.
+5. **Dispatch** (`dispatch`): the `ContextualCommand` through the domain's
+   router (its `CommandHandler`), whose handler decides a command or
+   records a fact; the kernel stamps the events it answers.
 
 Steps 3 to 5 are the kernel's own (`pub(crate)`): the chain runs them, and
 `Kernel::handle` is the one entry.
@@ -292,7 +295,7 @@ pub(crate) struct Contextual {          // angzarr's ContextualCommand, in proce
     head: u64,
     snapshot: Option<Snapshot>,
     pages: Vec<EventPage>,              // the window is expected .. head
-    nonce: Option<Nonce>,
+    nonce: Option<Vec<u8>>,             // ContextualCommand.conflict_nonce
     /* the command, the last recorded_at */
 }
 ```
@@ -326,20 +329,24 @@ can never be stale. Present:
 - **STRICT**: it must equal the head, else `KernelError::Stale` (angzarr's
   ABORTED), before anything is decoded.
 - **AGGREGATE_HANDLES**: the events from it to the head are the window;
-  decide receives them with a `Nonce` and must give the nonce back
-  (`Tx::resolve_conflicts`), or the command fails as stale
-  (`KernelError::Unresolved`).
-- **COMMUTATIVE**: the same window and nonce; the kernel itself resolves
-  (below).
+  the handler receives them with the nonce (the router's
+  `CommandContext.conflict`) and must give the nonce back
+  (`Conflict::resolve_conflicts`), or the router fails the command
+  (CONFLICT_UNRESOLVED, the kernel's `KernelError::Unresolved`).
+- **COMMUTATIVE**: the same window and nonce; the router resolves (below).
+  At the head there is no window, and the command is handed over as
+  STRICT.
 - Past the head: stale under every resolution.
 
-**COMMUTATIVE.** decide runs on the head, so every invariant it checks
-holds against the window's effects. Then `window = changed(state at
-expected, head)` and `mine = changed(head, head with the command's
-events)`, both by the state's generated `State::changed`; the events are
-kept iff the two do not overlap (`Units::overlaps`: equal units or a prefix
-at a `.`/`[` boundary; a wildcard overlaps any non-empty set; an empty set
-nothing), else the command is stale. Unmarked fields conflict with
+**COMMUTATIVE**, angzarr-router's (`DomainDispatch::with_commutative`,
+which the registry configures for a state that lists it). The handler runs
+on the head, so every invariant it checks holds against the window's
+effects. Then `window = changed(state at expected, head)` and `mine =
+changed(head, head with the command's events)`, both by the state's
+generated `State::changed`; the events are kept iff the two do not overlap
+(the router's rule: equal units or a prefix at a `.`/`[` boundary; a
+wildcard overlaps any non-empty set; an empty set nothing), else the
+command is stale (CONFLICT_OVERLAP, the kernel's `KernelError::Stale`). Unmarked fields conflict with
 everything (the fail-safe wildcard), so an unmarked change only makes
 COMMUTATIVE stricter.
 
@@ -375,7 +382,7 @@ decide or a projection rather than storing it, or configure that command
 type STRICT. angzarr's `docs/guide/state-and-conflicts.md` shows the
 failures and their fixes; it applies to angzarr-embedded unchanged.
 
-## Step 5: decode, then decide or ingest
+## Step 5: dispatch through angzarr-router
 
 ```rust
 pub trait Domain: Sized + 'static {
@@ -383,59 +390,69 @@ pub trait Domain: Sized + 'static {
     type Command: Payload + Send + 'static;
     type Fact: Payload + Send + 'static;           // Infallible: none
     type Event: Payload + Clone + Send + Sync + 'static;
-    type Rejection: Diagnostic + Send + 'static;
+    type Rejection: Diagnostic + Send + 'static;   // what its handlers refuse with
     type Rules: Send + Sync + 'static;
     const NAME: &'static str;                      // the Cover.domain; the registry key
     const CONFLICT_RESOLUTION: Option<ConflictResolution> = None;
     const CONFLICT_RESOLUTION_BY_COMMAND: &'static [(&'static str, ConflictResolution)] = &[];
-    fn decide(cmd: &Self::Command, tx: &mut Tx<'_, Self>) -> Result<(), Self::Rejection>;
-    fn ingest(state: &Self::State, fact: &Self::Fact, ctx: &IngestCtx<'_, Self>) -> Vec<Self::Event>;
     fn apply(state: &mut Self::State, event: &Self::Event, rules: &Self::Rules);
 }
-```
 
-**Decode.** The snapshot's state, every event and the command's payload go
-through the domain's `Upcaster` by type URL, then through `Payload::from_any`.
-Strict: an event type nothing upcasts or decodes is
-`StoreError::Unreadable` naming its type URL (never skipped); a command or
-fact type is `KernelError::UnknownType` naming its type URL (angzarr's
-INVALID_ARGUMENT). Golden replay fixtures (`ReplayFixture`,
-`assert_replay_fixtures`) and `Registry::check` catch a missing upcaster in
-CI first.
-
-**Commands may be upcast**, through the same chain (`Upcaster::upcast_command`).
-**Discouraged**: it hides stale clients (they keep working, so nobody
-upgrades them) and is machinery for data that is never stored. Prefer an
-additive change, or decoding both versions in the domain for a transition;
-upcast a command only as a migration aid with a planned removal. Event
-upcasters are permanent.
-
-**Decide** is pure, in a staging `Tx`: it reads `state()`, `rules()`,
-`rules_version()`, `stream()`, `recorded_at()`, `command_id()`,
-`correlation_id()`, `causation_id()`, `conflicts()` (AGGREGATE_HANDLES
-only), emits through `emit`, and its events are kept only if it returns
-`Ok`. It may reject at any point; nothing staged is kept. No `Ctx`: random
-values are sampled by the caller into the command.
-
-**Ingest** is infallible by type: a fact already happened, so an awkward
-one is recorded (a payment for an unknown order becomes an event that says
-so), never refused. It reads a **read-only context**:
-
-```rust
-impl IngestCtx<'_, D> {
-    pub fn stream(&self) -> &Cover;            pub fn recorded_at(&self) -> Timestamp;
-    pub fn command_id(&self) -> &Uuid;         pub fn correlation_id(&self) -> &Uuid;
-    pub fn source(&self) -> &FactOrigin;       // external_id, description
-    pub fn rules(&self) -> &D::Rules;          pub fn rules_version(&self) -> &str;
+impl Registry {
+    pub fn register<D: Domain>(&mut self, rules: Rulebook<D::Rules>, upcaster: Upcaster,
+        handlers: impl FnOnce(DomainDispatch<D::State>) -> DomainDispatch<D::State>)
+        -> Result<(), Misconfigured>;
+    pub fn command_handler(&mut self, domain: &str, handler: impl CommandHandler + 'static)
+        -> Result<(), Misconfigured>;
 }
 ```
 
-A fact is never checked against a sequence nor conflict-resolved: it is
-always stamped at the head. A panicking ingest is a bug: the kernel catches
-it, fails the chain (`KernelError::IngestPanicked`, `Recovery::Bug`),
-writes nothing and logs a [dead letter](#dead-letters-a-logger). On a
-`panic = "abort"` target the process aborts instead; nothing is written
-either way.
+**Business dispatch is angzarr-router's**, implemented once for every
+runtime: handlers, typed refusals and the refusal path, the deduplication
+decision, a process manager's start rule, and a policy's commands kept in
+its trigger's edition, with a root and the trigger's correlation. The
+kernel keeps the check, identification, the store reads and writes,
+positions, resume and the edition-not-forked refusal.
+
+**A domain is a router table.** `Registry::register` builds angzarr-router's
+`DomainDispatch` over `D::State`: it folds each event through the domain's
+upcaster and `D::apply` under the rules the event's `rules_version` names
+(an event just emitted, under the current ones), restores a snapshot onto a
+fresh state, images the state as a snapshot when it has a snapshot form,
+resolves COMMUTATIVE by `State::changed`, and runs the upcaster on every
+incoming command and fact payload. The domain's handlers are registered on
+it: `#[aggregate]` and `#[process_manager]` generate them
+(`markup::Routed`); a hand-written domain registers its own (`on_command`,
+`on_fact`, `on_refused`). `Registry::command_handler` registers any
+`CommandHandler` (a `DomainDispatch` built by hand, or a handler in another
+process behind one), known by its registration hello: its state descriptor
+and rules version. `Kernel::handle_any` handles books for such a domain.
+
+**Dispatch.** The kernel hands the router the `ContextualCommand`: the
+usable snapshot and the events after it (upcast), the command with its ids
+and its handling resolved, and the nonce. An unknown command type is the
+router's NO_HANDLER_REGISTERED, an unknown fact type NO_FACT_HANDLER. A
+handler's refusal comes back as a business rejection carrying the refusal's
+code, args and typed refusal object: the caller's `Failure::Rejected(Rejected)`.
+Every other reason the router refuses with is `KernelError::Router`,
+forwarded under an angzarr-embedded code of its own
+(`angzarr-embedded-next-<reason>`), each with its own message. A remote
+handler that cannot be reached (`REMOTE_HANDLER_UNAVAILABLE`) is
+`KernelError::HandlerUnavailable`, retried: a policy's step keeps its
+position, and `resume` runs it again.
+
+**What a handler reads.** The router's `CommandContext`: the stream, the
+input's command id, correlation and fact origin, the conflict under
+AGGREGATE_HANDLES. The instant its events are recorded at
+(`max(Sampled::now, the stream's last)`) is the kernel's, read through
+`recorded_at()` (and a marked-up handler's `Context`) until the router's
+`ContextualCommand` carries it.
+
+**Facts** are recorded, never refused: a fact handler returns its events
+(the router's `FactRecord`: the first as the record, the rest as its flags).
+A panicking fact handler is a bug: the kernel catches it, fails the chain
+(`KernelError::IngestPanicked`, `Recovery::Bug`), writes nothing and logs a
+[dead letter](#dead-letters-a-logger).
 
 **Business output is payloads only.** The kernel builds the pages: their
 sequences and their `EventMeta` (`Identified::meta`).
@@ -462,8 +479,8 @@ security log, written by the application with the command id, so erasing
 or rotating personal data never touches an event. **No base sequence**: the
 events of one command are grouped by `command_id`, and the version decided
 against is the first one's sequence. Business time (a deadline, a draw's
-instant) belongs in the payload, where `apply` sees it; decide copies
-`tx.recorded_at()` there when the domain needs it.
+instant) belongs in the payload, where `apply` sees it; a handler copies
+its context's `recorded_at` there when the domain needs it.
 
 A decoded event is an `Envelope<E>`: a checked `EventPage`, its metadata's
 required fields outside their `Option`s (`causation()`, the generated
@@ -479,7 +496,12 @@ commands, which policies send it, and facts (timeouts, webhooks); it never
 subscribes to another domain's events. So angzarr-embedded needs nothing of its own
 for one: its commands and facts take the five steps like any domain's, its
 events name the command or the fact's derived id as their cause, and its
-deduplication is `find_command`'s, by command id and fact id.
+deduplication is `find_command`'s, by command id and fact id. It is
+registered on angzarr-router's process-manager table, whose start rule
+admits only a starting input for a stream with no instance. Its root is
+the one its input names, whatever the input's correlation (decision 14.36):
+one instance may take inputs of several correlations, its events carrying
+each input's; a correlation left unset is given the root.
 
 ## Rules versions
 
@@ -753,8 +775,8 @@ type itself:
 
 angzarr-embedded's own types are the ones angzarr has no message for, because they
 are execution, not wire: `Checked`, `Identified`, `Contextual`, `Prepared`,
-`Envelope` (a checked, decoded page), `Stream`, `Tx`, `IngestCtx`, `Nonce`,
-`Rulebook`, `Registry`, `Order`, `Kernel`.
+`Envelope` (a checked, decoded page), `Stream`, `Rejected`, `Rulebook`,
+`Registry`, `Order`, `Kernel`.
 
 ## Key signatures
 
@@ -763,14 +785,15 @@ are execution, not wire: `Checked`, `Identified`, `Contextual`, `Prepared`,
 pub fn check(book: CommandBook, registry: &Registry) -> Result<Checked, Malformed>;
 impl Checked { pub fn identify(self, sampled: &Sampled) -> Identified; }
 // step 3-5: the chain's own, pub(crate)
-async fn deduplicate<P: Port>(port: &mut P, registry, command: Identified) -> Result<Deduplicated, KernelError>;
+async fn deduplicate<P: Port>(port: &mut P, registry, command: Identified) -> Result<Deduplicated, Failure<Rejected>>;
 fn load(novel: Novel, nonces: &mut u64) -> Result<Contextual, KernelError>;
-fn prepare<D: Domain>(command: Contextual, staged, registry) -> Result<Prepared<D>, KernelError>;
-impl<D: Domain> Prepared<D> { fn decide(..) -> Result<Decision<D>, Failure<D::Rejection>>; }
+fn dispatch(command: &Contextual, sampled, registry, dead_letters) -> Result<Vec<EventPage>, Failure<Rejected>>;
 // the whole loop: one write per step, the chain settled before it returns
 impl Kernel<'_> {
     pub async fn handle<D: Domain, S: Store, Ps: Project>(&self, store: &S, book: CommandBook,
-        sampled: &Sampled, projections: &mut Ps) -> Result<Handled, Failure<D::Rejection>>;
+        sampled: &Sampled, projections: &mut Ps) -> Result<Handled, Failure<Rejected>>;
+    pub async fn handle_any<S: Store, Ps: Project>(&self, store: &S, book: CommandBook,
+        sampled: &Sampled, projections: &mut Ps) -> Result<Handled, Failure<Rejected>>;
     pub async fn resume<S: Store, Ps: Project>(&self, store: &S, sampled: &Sampled,
         projections: &mut Ps) -> Result<Recorded, Failure<Infallible>>;
 }
@@ -778,13 +801,16 @@ impl Kernel<'_> {
 impl<D: Domain> Stream<D> {
     pub fn execute(&mut self, book: CommandBook, registry: &Registry, sampled: &Sampled,
         dead_letters: &dyn DeadLetterLog, handlers: &mut [&mut dyn Handler<D>])
-        -> Result<Executed<'_, D::Event>, Failure<D::Rejection>>;
+        -> Result<Executed<'_, D::Event>, Failure<Rejected>>;
     pub fn replay(cover: Cover, pages: &[EventPage], registry: &Registry) -> Result<Stream<D>, KernelError>;
 }
 // registration
 impl Registry {
-    pub fn register<D: Domain>(&mut self, rules: Rulebook<D::Rules>, upcaster: Upcaster) -> Result<(), Misconfigured>;
+    pub fn register<D: Domain>(&mut self, rules: Rulebook<D::Rules>, upcaster: Upcaster,
+        handlers: impl FnOnce(DomainDispatch<D::State>) -> DomainDispatch<D::State>) -> Result<(), Misconfigured>;
+    pub fn command_handler(&mut self, domain: &str, handler: impl CommandHandler + 'static) -> Result<(), Misconfigured>;
     pub fn policy<P: Policy>(&mut self, policy: P) -> &mut Self;   // one list, run in registration order
+    pub fn policy_dispatch(&mut self, dispatch: PolicyDispatch) -> &mut Self;
     pub fn resolve(&self, domain: &str, command_type_url: &str, requested: Option<ConflictResolution>)
         -> Option<ConflictResolution>;
     pub fn snapshot_usable(&self, domain: &str, snapshot: &Snapshot) -> bool;
