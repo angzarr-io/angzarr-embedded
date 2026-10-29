@@ -337,13 +337,15 @@ impl Supervisor {
             };
             match started {
                 Ok(mut child) => {
+                    backoff = initial;
+                    // Published before `start` hears the child is up, so
+                    // the handler it hands back reaches the child at once.
+                    self.set_client(Some(child.client.clone()));
+                    self.link.generation.send_modify(|n| *n += 1);
                     if let Some(up) = up.take() {
                         let _ = up.send(Ok(child.descriptor.clone()));
                         self.hooks.reported_up().await;
                     }
-                    backoff = initial;
-                    self.set_client(Some(child.client.clone()));
-                    self.link.generation.send_modify(|n| *n += 1);
                     // The child's stdout after its handshake is its own
                     // output: passed on to the host's stderr, and drained so
                     // the child never blocks on a full pipe.
