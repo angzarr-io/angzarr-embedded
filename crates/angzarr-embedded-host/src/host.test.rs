@@ -194,6 +194,13 @@ fn a_dead_child_is_retryable_then_restarted() {
         .dispatch(&command("player", "/examples.blackjack.Die"))
         .expect_err("the child died mid-call");
     assert!(is_retryable(&died), "{died:?}");
+    // The call reached the child and the child went away under it: not a
+    // call that found no child, which would leave this one alive.
+    assert_eq!(
+        died.extras.get(crate::remote::CAUSE).map(String::as_str),
+        Some(crate::remote::causes::TRANSPORT),
+        "{died:?}"
+    );
 
     // The second child coming up is awaited, not polled for: the
     // supervisor counts each child once its client is set. The timeout is
