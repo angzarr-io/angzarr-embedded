@@ -123,8 +123,13 @@ pub trait Policy: Send + Sync + 'static {
     /// instead. The chain addresses it to the trigger's stream and stamps
     /// its identity.
     ///
-    /// `ctx` is the refused command's context as the kernel delivered it:
-    /// its target's cover, its command id and its correlation. An error is a bug, as `on_event`'s is: the step fails as
+    /// `ctx` is the refused command's context, whole, as its target's
+    /// handler was handed it (angzarr-router's `command_context` of the
+    /// delivery): the target's cover, its next sequence and whether it had
+    /// history, the sequence and resolution the command was decided under,
+    /// the conflict under AGGREGATE_HANDLES, and the command's identity. A
+    /// refused command of a type a marked-up policy translates that does
+    /// not decode is its error too. An error is a bug, as `on_event`'s is: the step fails as
     /// [`StepError::PolicyFailed`](super::StepError::PolicyFailed), is
     /// dead-lettered by the error's code and args, and the policy's
     /// position moves past the trigger.

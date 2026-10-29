@@ -318,44 +318,7 @@ pub(crate) fn dispatch(
         .handler(domain)
         .ok_or_else(|| kernel(unknown_domain(domain)))?;
     let recorded_at = crate::next::not_before(command.last_recorded_at.as_ref(), sampled.now);
-    let upcaster = registry.upcaster(domain);
-    let pages = command
-        .pages
-        .iter()
-        .map(|page| match upcaster {
-            Some(upcaster) => upcaster.upcast_page(page),
-            None => Ok(page.clone()),
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| {
-            kernel(KernelError::Upcast {
-                stream: identified.cover().clone(),
-                error,
-            })
-        })?;
-    // At the head there is no window: nothing for COMMUTATIVE to compare,
-    // so the command is handed over as STRICT, with no nonce.
-    let (resolution, nonce) = match command.resolution {
-        ConflictResolution::Commutative if command.expected == command.head => {
-            (ConflictResolution::Strict, None)
-        }
-        resolution => (resolution, command.nonce.clone()),
-    };
-    let mut book = identified.to_book();
-    book.handling = Some(Handling {
-        expected_sequence: Some(command.expected),
-        conflict_resolution: resolution as i32,
-    });
-    let contextual = ContextualCommand {
-        events: Some(EventBook {
-            cover: Some(identified.cover().clone()),
-            snapshot: command.snapshot.clone(),
-            pages,
-            next_sequence: command.head,
-        }),
-        command: Some(book),
-        conflict_nonce: nonce.unwrap_or_default().into(),
-    };
+    let contextual = contextual_command(command, registry).map_err(kernel)?;
     let answered = catch_unwind(AssertUnwindSafe(|| {
         let delivery = route::Delivery { recorded_at };
         route::recording(delivery, || handler.dispatch(&contextual))
@@ -422,6 +385,52 @@ pub(crate) fn dispatch(
             ..page
         })
         .collect())
+}
+
+/// The `ContextualCommand` step 5 hands `command`'s domain: its stream's
+/// history upcast, its handling resolved (COMMUTATIVE at the head is handed
+/// over as STRICT, with no nonce), and the delivery's nonce.
+pub(crate) fn contextual_command(
+    command: &Contextual,
+    registry: &Registry,
+) -> Result<ContextualCommand, KernelError> {
+    let identified = &command.command;
+    let upcaster = registry.upcaster(identified.domain());
+    let pages = command
+        .pages
+        .iter()
+        .map(|page| match upcaster {
+            Some(upcaster) => upcaster.upcast_page(page),
+            None => Ok(page.clone()),
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| KernelError::Upcast {
+            stream: identified.cover().clone(),
+            error,
+        })?;
+    // At the head there is no window: nothing for COMMUTATIVE to compare,
+    // so the command is handed over as STRICT, with no nonce.
+    let (resolution, nonce) = match command.resolution {
+        ConflictResolution::Commutative if command.expected == command.head => {
+            (ConflictResolution::Strict, None)
+        }
+        resolution => (resolution, command.nonce.clone()),
+    };
+    let mut book = identified.to_book();
+    book.handling = Some(Handling {
+        expected_sequence: Some(command.expected),
+        conflict_resolution: resolution as i32,
+    });
+    Ok(ContextualCommand {
+        events: Some(EventBook {
+            cover: Some(identified.cover().clone()),
+            snapshot: command.snapshot.clone(),
+            pages,
+            next_sequence: command.head,
+        }),
+        command: Some(book),
+        conflict_nonce: nonce.unwrap_or_default().into(),
+    })
 }
 
 #[cfg(test)]

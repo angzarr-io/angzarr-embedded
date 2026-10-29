@@ -54,7 +54,7 @@ use angzarr_router::error::codes;
 use angzarr_router::policy::address_refusal_fact;
 
 use super::check::{check, check_refusal, Checked, Identified, Sampled};
-use super::coordinator::{deduplicate, dispatch, load, Deduplicated};
+use super::coordinator::{contextual_command, deduplicate, dispatch, load, Deduplicated};
 use super::dead_letter::{write_dead_letter, write_policy_failure, DeadLetterLog};
 use super::domain::Domain;
 use super::error::{Failure, KernelError, Step, StepError};
@@ -452,6 +452,9 @@ struct Run<'k> {
     /// every one its policies still owe by their positions (`None`).
     queue: VecDeque<(Cover, Vec<Step>, Option<u64>)>,
     recorded: Recorded,
+    /// The context the last step's refused command was handed, whole: what
+    /// its policy's translating callback reads.
+    refused: Option<markup::CommandContext>,
 }
 
 /// What a step came to.
@@ -472,6 +475,7 @@ impl<'k> Run<'k> {
             nonces: 0,
             queue: VecDeque::new(),
             recorded: Recorded::default(),
+            refused: None,
         }
     }
 
@@ -641,8 +645,9 @@ impl<'k> Run<'k> {
                             message: rejected.to_string(),
                         }),
                     };
+                    let ctx = self.refused.take().unwrap_or_default();
                     match self
-                        .refusal_step(port, policy, &refusal, &delivered, positions)
+                        .refusal_step(port, policy, &refusal, &ctx, &delivered, positions)
                         .await
                     {
                         Ok(Stepped::Wrote(cover, head)) => {
@@ -659,9 +664,10 @@ impl<'k> Run<'k> {
     }
 
     /// `delivered`'s refusal fact, the policy's OnRefused answer to
-    /// `refusal` addressed by the router, as a step of its own in the
-    /// stream of the triggering event, with the refused command's id and
-    /// correlation. A refusal its source has no handler for is
+    /// `refusal`, its translating callback handed `ctx`, the context
+    /// `delivered` was handed at its target, addressed by the router, as a
+    /// step of its own in the stream of the triggering event, with the
+    /// refused command's id and correlation. A refusal its source has no handler for is
     /// dead-lettered, and writes only `positions`; one whose handler fails
     /// is the policy's failure ([`StepError::PolicyFailed`]), dead-lettered
     /// by its code and args, and writes only `positions`.
@@ -670,14 +676,12 @@ impl<'k> Run<'k> {
         port: &mut P,
         policy: &PolicyEntry,
         refusal: &markup::v1::Refusal,
+        ctx: &markup::CommandContext,
         delivered: &Identified,
         positions: &[(&str, &Cover, u64)],
     ) -> Result<Stepped, StepError> {
         let kernel = |error| StepError::Kernel(KernelError::Router(error));
-        let answer = match policy
-            .dispatch
-            .dispatch_refusal(refusal, &markup::CommandContext::default())
-        {
+        let answer = match policy.dispatch.dispatch_refusal(refusal, ctx) {
             Ok(answer) => answer,
             Err(error) => {
                 let Some(failure) = super::route::policy_failure(&error) else {
@@ -781,7 +785,17 @@ impl<'k> Run<'k> {
         };
         let contextual = load(*novel, &mut self.nonces).map_err(kernel)?;
         let head = contextual.head();
-        let pages = dispatch(&contextual, self.sampled, self.registry, self.dead_letters)?;
+        let pages = match dispatch(&contextual, self.sampled, self.registry, self.dead_letters) {
+            Ok(pages) => pages,
+            Err(failure) => {
+                if let Failure::Rejected(_) = failure {
+                    self.refused = contextual_command(&contextual, self.registry)
+                        .ok()
+                        .map(|delivered| angzarr_router::context::command_context(&delivered));
+                }
+                return Err(failure);
+            }
+        };
         if pages.is_empty() {
             if !positions.is_empty() {
                 port.write_positions(positions).await.map_err(store)?;

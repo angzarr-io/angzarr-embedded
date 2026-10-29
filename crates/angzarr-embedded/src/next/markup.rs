@@ -1227,16 +1227,25 @@ pub fn __pass_through(refusal: &v1::Refusal) -> Any {
     })
 }
 
-/// `refusal` as a translating callback for command `C` reads it, if the
-/// refused command is a `C`.
+/// `refusal` as a translating callback for command `C` reads it: `None` if
+/// the refused command is not a `C`; one of `C`'s type that does not decode
+/// is the error, a bug (the policy's failure), as an `#[on_event]`'s
+/// undecodable event is.
 #[doc(hidden)]
-pub fn __translating<C: DomainMessage>(refusal: &v1::Refusal) -> Option<Refusal<C>> {
-    let command = __decode::<C>(command_payload(refusal.command.as_ref()?)?).ok()??;
-    Some(Refusal {
+pub fn __translating<C: DomainMessage>(
+    refusal: &v1::Refusal,
+) -> Result<Option<Refusal<C>>, Report> {
+    let Some(payload) = refusal.command.as_ref().and_then(command_payload) else {
+        return Ok(None);
+    };
+    let Some(command) = __decode::<C>(payload).map_err(|error| Report::of(&error))? else {
+        return Ok(None);
+    };
+    Ok(Some(Refusal {
         event: refusal.event.clone().unwrap_or_default(),
         command,
         response: refusal.response.clone().unwrap_or_default(),
-    })
+    }))
 }
 
 /// A translating callback's answer, as `Policy::on_refused` gives it: its

@@ -291,11 +291,13 @@
 //! - **Translate**, for each command the policy has a callback for:
 //!   `#[on_refused(Hold)] fn(&self, refusal: &Refusal<Hold>, ctx:
 //!   &CommandContext) -> Result<F, E>` on the policy's impl reads the typed
-//!   object, and the refused command's context (its target's cover, its id,
-//!   its correlation), and returns `F`, a fact its source
+//!   object, and the refused command's context, whole, as its target's
+//!   handler was handed it (its cover, sequences, history, resolution,
+//!   conflict and identity), and returns `F`, a fact its source
 //!   ingests, so the source never refers to the target's types. A callback
 //!   returning anything else does not compile. Its `Err`, any `Diagnostic`,
-//!   is a bug, as an `#[on_event]` handler's is: the step fails as
+//!   is a bug, as an `#[on_event]` handler's is, and so is a refused
+//!   command of the callback's type that does not decode: the step fails as
 //!   `StepError::PolicyFailed`, is dead-lettered by its code and args, and
 //!   the policy's position moves past the trigger. One marker,
 //!   `#[on_refused(Cmd)]`, names both the source's handler and the policy's
@@ -3029,7 +3031,7 @@ fn flow(attr: Tokens, item: Tokens, flow: Flow) -> syn::Result<Tokens> {
                     ) -> ::core::result::Result<::angzarr_embedded::next::Any, #m::Report> {
                         #(
                             if let ::core::option::Option::Some(refusal) =
-                                #m::__translating::<#commands>(refusal)
+                                #m::__translating::<#commands>(refusal)?
                             {
                                 return #m::__domestic::<<Self as #m::Policy>::Source, _, _>(
                                     <#self_ty>::#callback_methods(self, &refusal, ctx),
