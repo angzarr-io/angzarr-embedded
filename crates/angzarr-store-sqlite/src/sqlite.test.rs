@@ -15,7 +15,7 @@
 //! present and ignored, and `MemoryStore` covers them meanwhile.
 
 use std::borrow::Cow;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
@@ -35,14 +35,66 @@ use sqlx::{ConnectOptions, Connection};
 use super::{into_wal, migrate, pause, read_only, SqliteStore, BUSY_TIMEOUT, MIGRATOR};
 use crate::{Damage, Integrity};
 
-/// A path for a database file of this test run's own.
-fn database() -> std::path::PathBuf {
+/// A path for a database file of this test run's own, removed (the file and
+/// its WAL files, or a directory made there and what is in it) when the
+/// guard drops, the test passing or not. Declared before the stores on it,
+/// it drops after them.
+fn database() -> Database {
     static RUN: AtomicUsize = AtomicUsize::new(0);
-    std::env::temp_dir().join(format!(
+    Database(std::env::temp_dir().join(format!(
         "angzarr-store-sqlite-test-{}-{}.db",
         std::process::id(),
         RUN.fetch_add(1, Ordering::Relaxed)
-    ))
+    )))
+}
+
+/// A database file's path, removed on drop.
+struct Database(PathBuf);
+
+impl std::ops::Deref for Database {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl AsRef<Path> for Database {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+/// The database file at `path` and its WAL files.
+fn with_wal(path: &Path) -> [PathBuf; 3] {
+    ["", "-wal", "-shm"].map(|suffix| {
+        let mut file = path.as_os_str().to_owned();
+        file.push(suffix);
+        PathBuf::from(file)
+    })
+}
+
+#[test]
+fn a_database_and_its_wal_files_are_gone_once_dropped() {
+    let path = database();
+    let files = with_wal(&path);
+    for file in &files {
+        std::fs::write(file, "").unwrap();
+    }
+    drop(path);
+    for file in &files {
+        assert!(!file.exists(), "{} was left behind", file.display());
+    }
+}
+
+#[test]
+fn a_directory_made_at_a_database_path_is_gone_once_dropped() {
+    let dir = database();
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::write(dir.join("state.db"), "").unwrap();
+    let path = dir.to_path_buf();
+    drop(dir);
+    assert!(!path.exists(), "{} was left behind", path.display());
 }
 
 /// Remove the database at `path`, and its WAL files if a connection is yet
@@ -1241,7 +1293,7 @@ async fn a_check_that_cannot_run_is_a_failure_not_damage() {
 /// A copy of a healthy database (one stream of one event), checkpointed so
 /// the file holds everything, then changed by `tamper`: the original is
 /// removed, and the copy is what each open is given.
-async fn damaged_copy(tamper: impl FnOnce(&mut Vec<u8>)) -> std::path::PathBuf {
+async fn damaged_copy(tamper: impl FnOnce(&mut Vec<u8>)) -> Database {
     let original = database();
     {
         let store = SqliteStore::open(&original).await.unwrap();
