@@ -14,7 +14,13 @@
 //! - a policy that failed on its trigger
 //!   ([`StepError::PolicyFailed`](super::StepError::PolicyFailed)): its
 //!   error's code is the reason and its args the letter's metadata, never
-//!   its English (angzarr decision 14.37).
+//!   its English (angzarr decision 14.37);
+//! - a handler's bug ([`KernelError::Router`](super::KernelError::Router)):
+//!   a code of its own under a status outside the business set
+//!   (FAILED_PRECONDITION, INVALID_ARGUMENT, NOT_FOUND, ALREADY_EXISTS,
+//!   OUT_OF_RANGE, PERMISSION_DENIED, whose refusal is never
+//!   dead-lettered), or the router's UNHANDLED_HANDLER_ERROR: its code and
+//!   args, never its English.
 //!
 //! Every line starts with [`DEAD_LETTER_PREFIX`]: **anything arriving there
 //! almost certainly indicates a problem**, never business as usual, so an
@@ -120,8 +126,8 @@ pub(crate) fn write_policy_failure(
     }));
 }
 
-/// Write the dead letter for `component`'s handler's own fault `error` on
-/// `book`: its code as the reason and its metadata as the letter's, never
+/// Write the dead letter for `component`'s handler's own fault `error` (a
+/// bug, never a business refusal) on `book`: its code as the reason and its metadata as the letter's, never
 /// its English.
 pub(crate) fn write_handler_fault(
     log: &dyn DeadLetterLog,

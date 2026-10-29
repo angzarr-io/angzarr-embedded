@@ -201,7 +201,7 @@ fn intern(text: &str) -> &'static str {
 pub(crate) const TOO_MANY_STEPS: &str = "ANGZARR_EMBEDDED_TOO_MANY_STEPS";
 
 /// A domain's refusal of a command, as its caller receives it (angzarr's
-/// business rejection, FAILED_PRECONDITION): the code and args of the
+/// business rejection, [`is_rejection`]): the code and args of the
 /// refusal the handler made (or the router's, a process manager's
 /// `PM_NO_INSTANCE`), and the typed refusal object it carries, if any.
 /// The refusing domain recorded nothing.
@@ -265,22 +265,34 @@ impl Diagnostic for Rejected {
     }
 }
 
-/// Whether the router's `error` is a business refusal: FAILED_PRECONDITION,
-/// under a domain's own code or the router's (a process manager with no
-/// instance). Under any other status it is a fault, a domain's own code
-/// included: errors are defects unless deliberately refused.
+/// Whether the router's `error` is a business refusal (the owner's ruling,
+/// 2026-10-29): FAILED_PRECONDITION, under a domain's own code or the
+/// router's (a process manager with no instance); or a domain's own code
+/// under INVALID_ARGUMENT or NOT_FOUND, the rest of the business set
+/// angzarr-router's `GrpcCode` carries (a remote child's ALREADY_EXISTS,
+/// OUT_OF_RANGE and PERMISSION_DENIED arrive FAILED_PRECONDITION). Under a
+/// bug's status (INTERNAL, DATA_LOSS; a child's UNKNOWN arrives INTERNAL),
+/// or any other, a domain's own code is a fault; the router's own codes
+/// under INVALID_ARGUMENT or NOT_FOUND are the sender's to fix, never a
+/// refusal.
 pub(crate) fn is_rejection(error: &CodedError) -> bool {
-    error.grpc == GrpcCode::FailedPrecondition
+    match error.grpc {
+        GrpcCode::FailedPrecondition => true,
+        GrpcCode::InvalidArgument | GrpcCode::NotFound => reason_code(&error.code).is_none(),
+        _ => false,
+    }
 }
 
 /// Whether the router's `error`, which the kernel keeps as
-/// [`KernelError::Router`](super::KernelError::Router) (never a refusal:
-/// that is [`Rejected`]), is a handler's bug: a code of its own (never a
-/// policy's failure, [`POLICY_FAILED`]), or one of the router's failed
-/// INTERNAL (UNHANDLED_HANDLER_ERROR: a handler's bug, its own code and
-/// args as its `cause`, or an error without a code of its own). The kernel
-/// dead-letters it by its code and args, the cause among them, and a policy's step moves the policy's position past it unless
-/// the kernel says to stay ([`OnPolicyBug`](super::OnPolicyBug)).
+/// [`KernelError::Router`](super::KernelError::Router) (never a refusal,
+/// [`is_rejection`]: that is [`Rejected`]), is a handler's bug: a code of
+/// its own outside the business set (never a policy's failure,
+/// [`POLICY_FAILED`]), or one of the router's failed INTERNAL
+/// (UNHANDLED_HANDLER_ERROR: a handler's bug, its own code and args as its
+/// `cause`, or an error without a code of its own). The kernel
+/// dead-letters it by its code and args, the cause among them, and a
+/// policy's step moves the policy's position past it unless the kernel
+/// says to stay ([`OnPolicyBug`](super::OnPolicyBug)).
 pub(crate) fn is_handler_fault(error: &CodedError) -> bool {
     error.code != POLICY_FAILED
         && (reason_code(&error.code).is_none() || error.grpc == GrpcCode::Internal)

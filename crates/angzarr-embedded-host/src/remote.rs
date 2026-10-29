@@ -4,17 +4,25 @@
 //!
 //! What comes back is in the router's terms:
 //!
-//! - a FAILED_PRECONDITION status is the router's refusal: its
+//! - a business status (the owner's ruling, 2026-10-29:
+//!   FAILED_PRECONDITION, INVALID_ARGUMENT, NOT_FOUND, ALREADY_EXISTS,
+//!   OUT_OF_RANGE, PERMISSION_DENIED) is a refusal: its
 //!   `google.rpc.ErrorInfo` detail's reason and metadata are the code and
 //!   extras, its message the message, and its other detail, an `Any`, the
-//!   typed refusal ([`CodedError::refusal`]);
+//!   typed refusal ([`CodedError::refusal`]). ALREADY_EXISTS, OUT_OF_RANGE
+//!   and PERMISSION_DENIED, which angzarr-router's `GrpcCode` has no
+//!   variant for, arrive FAILED_PRECONDITION; the kernel takes a reason of
+//!   the child's own under any of them as its refusal;
 //! - a child that is not running, a connection that fails, and an
 //!   UNAVAILABLE (or other transient) status are [`codes::REMOTE_HANDLER_UNAVAILABLE`],
 //!   which [`is_retryable`] says to retry: the child is being restarted, and
 //!   resuming by position retries the input once it is back;
-//! - any other status keeps its gRPC code and its ErrorInfo's reason: the
-//!   kernel takes a reason of the child's own under it as the child's bug,
-//!   never a refusal.
+//! - any other status keeps its gRPC code, INTERNAL where angzarr-router's
+//!   `GrpcCode` has no variant for it (UNKNOWN, DEADLINE_EXCEEDED,
+//!   RESOURCE_EXHAUSTED, an UNAVAILABLE the child sent), and its
+//!   ErrorInfo's reason, and carries no typed refusal: the kernel takes a
+//!   reason of the child's own under it as the child's bug, never a
+//!   refusal.
 
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -227,7 +235,12 @@ pub(crate) fn status_to_coded(domain: &str, status: &tonic::Status) -> CodedErro
     let grpc = match status.code() {
         Code::InvalidArgument => GrpcCode::InvalidArgument,
         Code::NotFound => GrpcCode::NotFound,
-        Code::FailedPrecondition => GrpcCode::FailedPrecondition,
+        // The business set's statuses angzarr-router's GrpcCode has no
+        // variant for: a refusal all the same.
+        Code::FailedPrecondition
+        | Code::AlreadyExists
+        | Code::OutOfRange
+        | Code::PermissionDenied => GrpcCode::FailedPrecondition,
         Code::Aborted => GrpcCode::Aborted,
         Code::Unimplemented => GrpcCode::Unimplemented,
         Code::DataLoss => GrpcCode::DataLoss,
@@ -245,8 +258,13 @@ pub(crate) fn status_to_coded(domain: &str, status: &tonic::Status) -> CodedErro
         message: status.message().to_string(),
         extras,
         grpc,
-        // Only a refusal carries its typed object to a policy.
-        refusal: refusal.filter(|_| grpc == GrpcCode::FailedPrecondition),
+        // Only a business status carries its typed object to a policy.
+        refusal: refusal.filter(|_| {
+            matches!(
+                grpc,
+                GrpcCode::FailedPrecondition | GrpcCode::InvalidArgument | GrpcCode::NotFound
+            )
+        }),
     }
 }
 

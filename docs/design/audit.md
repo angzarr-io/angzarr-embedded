@@ -434,10 +434,21 @@ and its handling resolved, and the nonce. An unknown command type is the
 router's NO_HANDLER_REGISTERED, an unknown fact type NO_FACT_HANDLER. A
 handler's refusal comes back as a business rejection carrying the refusal's
 code, args and typed refusal object: the caller's `Failure::Rejected(Rejected)`.
-A rejection is a FAILED_PRECONDITION, whatever its code: errors are
-defects unless deliberately refused. A handler's own code under any other
-status (INTERNAL, or any other) is its bug, and so is a code of the
-router's failed INTERNAL. A handler fails deliberately as a bug with
+Which it is goes by its gRPC status (the owner's ruling, 2026-10-29).
+Under a code of the handler's own, the **business set** (FAILED_PRECONDITION,
+INVALID_ARGUMENT, NOT_FOUND, ALREADY_EXISTS, OUT_OF_RANGE,
+PERMISSION_DENIED) is a rejection, `Recovery::Business`, never
+dead-lettered; the **bug set** (INTERNAL, UNKNOWN, DATA_LOSS) is its bug;
+any other status (UNAVAILABLE, ABORTED, DEADLINE_EXCEEDED,
+RESOURCE_EXHAUSTED, UNIMPLEMENTED, ...) keeps its classification, a bug
+too. Under a code of the router's, only a FAILED_PRECONDITION is a
+rejection (a process manager with no instance); its INVALID_ARGUMENT and
+NOT_FOUND are the sender's to fix, and its failed INTERNAL is a bug.
+angzarr-router's `GrpcCode` has no ALREADY_EXISTS, OUT_OF_RANGE,
+PERMISSION_DENIED or UNKNOWN: a remote child's ALREADY_EXISTS,
+OUT_OF_RANGE and PERMISSION_DENIED arrive FAILED_PRECONDITION, its
+UNKNOWN, DEADLINE_EXCEEDED and RESOURCE_EXHAUSTED (and an UNAVAILABLE it
+sent with its reason) INTERNAL. A handler fails deliberately as a bug with
 angzarr-router's `CodedError::bug` (decision 14.37), which answers
 UNHANDLED_HANDLER_ERROR with the handler's own code and args as its cause
 (`cause=<code>`, `cause.<arg>=<value>`); an error without a code of its
@@ -765,8 +776,8 @@ Cases: a panicking ingest; a policy's book the kernel built malformed; a
 decide under AGGREGATE_HANDLES that never acknowledged its window; a
 policy that failed on its trigger, whose line is its error's code and args
 (`name=value`), never its English, and the trigger's place; a handler
-that failed under a code of its own, not as a FAILED_PRECONDITION, or
-under a code of the router's failed INTERNAL, whose line is that code and
+that failed under a code of its own outside the business set, or under
+a code of the router's failed INTERNAL, whose line is that code and
 its args (a handler's bug: UNHANDLED_HANDLER_ERROR, its own code and args
 as `cause` and `cause.<arg>`), never its English, and the command. **Every
 line starts with the prefix**: anything arriving there almost certainly
@@ -790,7 +801,7 @@ names the trigger; angzarr-embedded has no tracing dependency and reports it now
 | `KernelError::UnknownType` | a command or fact type the domain does not decode, after upcasting | `Invalid` |
 | `KernelError::InvalidPayload` | a command or fact that decodes but is not a valid domain value (`WireError`: a required field absent, an undefined enum value) | `Invalid` |
 | `KernelError::Stale`, `Unresolved` | re-read and re-issue | `Retry` |
-| `KernelError::Router` | the router refused, or a handler failed under a code of its own (never FAILED_PRECONDITION: that is `Rejected`) | a handler's own code `Bug`; of the router's codes, by gRPC status: INTERNAL (dead-lettered, a handler's bug), DATA_LOSS and UNIMPLEMENTED `Bug`, ABORTED `Retry`, INVALID_ARGUMENT and NOT_FOUND `Invalid` |
+| `KernelError::Router` | the router refused, or a handler failed under a code of its own (never under a business status: that is `Rejected`) | a handler's own code `Bug` (`Business` under a business status, though the kernel makes that `Rejected`); of the router's codes, by gRPC status: INTERNAL (dead-lettered, a handler's bug), DATA_LOSS and UNIMPLEMENTED `Bug`, ABORTED `Retry`, INVALID_ARGUMENT and NOT_FOUND `Invalid` |
 | `StoreError::Conflict`, `Unavailable` | run again with the same command id (step 3 makes it safe) | `Retry` |
 | `IngestPanicked`, `Upcast`, `WrongDomain`, `ChainTooDeep`, `BeforeSnapshot`, `UnregisteredDomain` (a stored stream of a domain the application did not register; an incoming book for one is `Malformed`), `Replay(..)`, `StoreError::Discontinuous`, `Unreadable` | a bug or a misconfiguration | `Bug` |
 
@@ -1094,8 +1105,11 @@ runs it in full); angzarr-embedded tests the kernel over it, not the store.
   events applied in order, step limits, typed refusals, the refusal flow
   (pass-through `CommandRefused` or a translated fact to the source, a
   refusal no handler takes dead-lettered), a failing step keeping the
-  commits before it, and **a handler's own code is a rejection only as a
-  FAILED_PRECONDITION; under any other status it is a dead-lettered bug,
+  commits before it, and **a handler's own code is a rejection under each
+  status of the business set (FAILED_PRECONDITION, INVALID_ARGUMENT,
+  NOT_FOUND here; ALREADY_EXISTS, OUT_OF_RANGE, PERMISSION_DENIED in the
+  host's remote tests, which arrive FAILED_PRECONDITION); under any other
+  status it is a dead-lettered bug,
   as is a code of the router's failed INTERNAL, and as a policy's step
   its position moves past the trigger, or under `OnPolicyBug::Stay` stays
   at it**.
