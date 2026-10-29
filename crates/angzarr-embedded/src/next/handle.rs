@@ -471,20 +471,7 @@ impl<'k> Run<'k> {
                 let ran = self
                     .run_policy(port, *policy, source, page, &event, &ctx, path)
                     .await;
-                if let Err(failed) = ran {
-                    // A command owes steps for its own events only: a step
-                    // that fails leaves its policy owing from its trigger,
-                    // as a success would have moved past the history
-                    // before it. Best effort: the step's error is the
-                    // answer, and a position left behind only owes more. A
-                    // refused step has already moved its position past.
-                    if !matches!(failed.1, StepError::Rejected(_)) {
-                        let _ = port
-                            .write_positions(&[(policy.name(), source, page.sequence)])
-                            .await;
-                    }
-                    return Err(failed);
-                }
+                ran?;
             }
         }
         Ok(())

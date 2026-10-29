@@ -533,9 +533,8 @@ kernel.resume(&store, &sampled, &mut projections).await?;                       
   error }`, the path a list of `Step { stream, cause }`). A refused command
   of a policy that does not answer refusals is dead-lettered and its
   position moves past it; a bug (a malformed policy book, the depth limit)
-  or a store failure leaves the position at the step's trigger (best
-  effort, in a write of its own), so the step runs again and nothing before
-  it the command did not owe.
+  or a store failure writes nothing more: the position stays where the
+  last committed step put it, and `resume` runs the step again.
 - **A refusal is a fact.** A policy that answers refusals (every marked-up
   one) is not failed by its target's refusal: its `on_refused` answer goes
   to the stream of the triggering event as a fact, a step of its own,
