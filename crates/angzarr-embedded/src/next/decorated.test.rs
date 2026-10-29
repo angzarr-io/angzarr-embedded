@@ -39,9 +39,9 @@ use std::fmt;
 
 use ::angzarr_embedded::next::markup::v1::RefusalResponse;
 use ::angzarr_embedded::next::markup::{
-    self, assert_step_idempotent, CommandContext, CommandRefused, Commands, Context, DomainMessage,
-    Emit, Policy, PolicyContext, ProcessManager, ProjectionContext, Record, Refusal, Refuses,
-    Refusing, Rejection, TypeName, MARKUP_RULES_VERSION, STEP_LIMIT,
+    self, assert_step_idempotent, BusinessStatus, CommandContext, CommandRefused, Commands,
+    Context, DomainMessage, Emit, Failed, Policy, PolicyContext, ProcessManager, ProjectionContext,
+    Record, Refusal, Refuses, Refusing, Rejection, TypeName, MARKUP_RULES_VERSION, STEP_LIMIT,
 };
 use ::angzarr_embedded::next::v1::event_meta::Causation;
 use ::angzarr_embedded::next::v1::{
@@ -206,6 +206,23 @@ mod wire {
             short: i64,
         }
     );
+
+    message!(
+        "toy.meter.cmd.v1",
+        Gauge {
+            #[prost(int64, tag = "1")]
+            reading: i64,
+        }
+    );
+    message!(
+        "toy.meter.v1",
+        Gauged {
+            #[prost(int64, tag = "1")]
+            reading: i64,
+        }
+    );
+    message!("toy.meter.cmd.v1", Calibrate {});
+    message!("toy.meter.v1", Calibrated {});
 
     message!("toy.lamp.cmd.v1", SwitchOn {});
     message!("toy.lamp.v1", SwitchedOn {});
@@ -923,6 +940,98 @@ impl Lamp {
     }
 }
 
+// ---------------------------------------------------------------- the meter
+
+domain_type!(Gauge { reading: i64 });
+domain_type!(Gauged { reading: i64 });
+domain_type!(Calibrate {});
+domain_type!(Calibrated {});
+
+/// The meter's bug: a defect, never a business answer, keyed and with its
+/// args like any diagnostic.
+#[derive(Clone, PartialEq, Debug)]
+pub struct MeterBroke {
+    seat: i64,
+}
+
+impl fmt::Display for MeterBroke {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "the meter at seat {} broke", self.seat)
+    }
+}
+
+impl Diagnostic for MeterBroke {
+    fn code(&self) -> &'static str {
+        "toy-meter-broke"
+    }
+
+    fn args(&self) -> Vec<(&'static str, Arg)> {
+        vec![("seat", self.seat.into())]
+    }
+}
+
+/// The most a meter reads.
+const METER_LIMIT: i64 = 1000;
+
+/// A handler that fails both ways, [`Failed`]: a refusal under a status of
+/// the business set, a refusal by `?` from its own rejection, and a bug;
+/// beside a handler that still returns its rejection as is. The rejection,
+/// `Refused`, is inferred through `Failed`, and the two agree.
+#[derive(Clone, Default, PartialEq, Debug)]
+pub struct Meter {
+    reading: i64,
+}
+
+#[aggregate(domain = "meter")]
+impl Meter {
+    /// A negative reading is the caller's mistake (INVALID_ARGUMENT); one
+    /// over the limit refuses by `?` (FAILED_PRECONDITION); a zero reading
+    /// is the meter's bug.
+    #[handles_cmd(Gauge)]
+    fn gauge(&self, cmd: Gauge, _ctx: &Context) -> Result<Gauged, Failed<Refused>> {
+        if cmd.reading == 0 {
+            return Err(Failed::bug(&MeterBroke { seat: 3 }));
+        }
+        if cmd.reading < 0 {
+            return Err(Failed::from(Refused::NotPositive { cents: cmd.reading })
+                .with_status(BusinessStatus::InvalidArgument));
+        }
+        within(cmd.reading)?;
+        Ok(Gauged {
+            reading: cmd.reading,
+        })
+    }
+
+    /// The handler as it was before `Failed`: its own rejection, as is.
+    #[handles_cmd(Calibrate)]
+    fn calibrate(&self, _cmd: Calibrate, _ctx: &Context) -> Result<Calibrated, Refused> {
+        match self.reading {
+            0 => Ok(Calibrated {}),
+            cents => Err(Refused::NotEmpty { cents }),
+        }
+    }
+
+    #[applies(Gauged)]
+    fn gauged(&mut self, event: Gauged) {
+        self.reading = event.reading;
+    }
+
+    #[applies(Calibrated)]
+    fn calibrated(&mut self, _event: Calibrated) {
+        self.reading = 0;
+    }
+}
+
+fn within(reading: i64) -> Result<(), Refused> {
+    match reading > METER_LIMIT {
+        true => Err(Refused::OverLimit {
+            cents: reading,
+            limit: METER_LIMIT,
+        }),
+        false => Ok(()),
+    }
+}
+
 // ---------------------------------------------------------------- the ladder
 
 domain_type!(Climb { to: u32 });
@@ -1155,6 +1264,7 @@ fn configured(config: WalletConfig) -> Registry {
     registry
         .aggregate::<Wallet>(move || Wallet::with(config.clone()))
         .aggregate::<Lamp>(Lamp::default)
+        .aggregate::<Meter>(Meter::default)
         .aggregate::<Ladder>(Ladder::default)
         .aggregate::<Pot>(Pot::default);
     registry
@@ -2034,6 +2144,121 @@ mod rejection {
         );
         assert_eq!(wallet.len(), 2, "nothing was committed");
         assert_eq!(wallet.state(), &before, "nothing was applied");
+    }
+}
+
+mod failed {
+    use super::*;
+
+    fn meter_cover() -> Cover {
+        Cover {
+            domain: "meter".to_string(),
+            root: Some(root()),
+            edition: None,
+        }
+    }
+
+    /// A handler's `Failed::Bug` is a bug, never a refusal: INTERNAL
+    /// UNHANDLED_HANDLER_ERROR, `Recovery::Bug`, dead-lettered with the
+    /// bug's code as its `cause` and its args as `cause.<arg>`, no English,
+    /// and nothing written.
+    #[test]
+    fn a_handlers_bug_is_dead_lettered_and_writes_nothing() {
+        let registry = registry();
+        let store = Mem::new();
+        let log = MemoryDeadLetters::new();
+
+        let failure = handle_in::<Meter>(
+            &store,
+            &registry,
+            &log,
+            1,
+            send("meter", 1, any(Gauge { reading: 0 }), None),
+        )
+        .err()
+        .expect("the meter broke");
+
+        assert!(
+            matches!(
+                &failure,
+                Failure::Kernel(KernelError::Router(e)) if e.code == "UNHANDLED_HANDLER_ERROR"
+            ),
+            "a bug, not a refusal: {failure:?}"
+        );
+        assert_eq!(failure.recovery(), Recovery::Bug);
+        let lines = log.lines();
+        assert_eq!(lines.len(), 1, "dead-lettered once: {lines:?}");
+        assert!(
+            lines[0].contains("meter: UNHANDLED_HANDLER_ERROR cause=toy-meter-broke cause.seat=3"),
+            "its cause, the bug's code and args: {}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains("the meter at"),
+            "no English: {}",
+            lines[0]
+        );
+        assert_eq!(pages(&store, &meter_cover()), None, "nothing written");
+    }
+
+    /// A handler's refusal under a status of the business set other than
+    /// FAILED_PRECONDITION is still a business refusal, under that status:
+    /// `Recovery::Business`, its own code and args, nothing dead-lettered
+    /// and nothing written.
+    #[test]
+    fn a_refusal_goes_out_under_its_business_status() {
+        let registry = registry();
+        let store = Mem::new();
+        let log = MemoryDeadLetters::new();
+
+        let failure = handle_in::<Meter>(
+            &store,
+            &registry,
+            &log,
+            1,
+            send("meter", 1, any(Gauge { reading: -4 }), None),
+        )
+        .err()
+        .expect("refused");
+
+        let Failure::Rejected(rejected) = &failure else {
+            panic!("a business refusal, not {failure:?}");
+        };
+        assert_eq!(rejected.status(), BusinessStatus::InvalidArgument);
+        assert_eq!(said(rejected), said(&Refused::NotPositive { cents: -4 }));
+        assert_eq!(failure.recovery(), Recovery::Business);
+        assert!(log.lines().is_empty(), "a refusal is not dead-lettered");
+        assert_eq!(pages(&store, &meter_cover()), None, "nothing written");
+    }
+
+    /// `?` on the domain's own rejection inside a handler returning
+    /// `Failed` refuses with it, FAILED_PRECONDITION; and a handler still
+    /// returning its rejection as is refuses as before.
+    #[test]
+    fn the_domains_own_rejection_refuses_under_failed_precondition() {
+        let registry = registry();
+        let mut meter = Stream::<Meter>::new(root(), None).unwrap();
+
+        let over = run(&mut meter, &registry, 1, any(Gauge { reading: 2000 }));
+        let Err(Failure::Rejected(over)) = over else {
+            panic!("refused by `?`, not {over:?}");
+        };
+        assert_eq!(over.status(), BusinessStatus::FailedPrecondition);
+        assert_eq!(
+            said(&over),
+            said(&Refused::OverLimit {
+                cents: 2000,
+                limit: METER_LIMIT
+            })
+        );
+
+        run(&mut meter, &registry, 2, any(Gauge { reading: 7 })).unwrap();
+        let busy = run(&mut meter, &registry, 3, any(Calibrate {}));
+        let Err(Failure::Rejected(busy)) = busy else {
+            panic!("refused as before, not {busy:?}");
+        };
+        assert_eq!(busy.status(), BusinessStatus::FailedPrecondition);
+        assert_eq!(said(&busy), said(&Refused::NotEmpty { cents: 7 }));
     }
 }
 

@@ -3253,6 +3253,26 @@ fn returned(sig: &Signature) -> Option<(String, Vec<Type>)> {
     Some((last.ident.to_string(), args))
 }
 
+/// The domain's own rejection a handler's `Err` names: `R` of a
+/// `Failed<R>`, else the type itself.
+fn own_rejection(error: Type) -> Type {
+    let Type::Path(path) = &error else {
+        return error;
+    };
+    let Some(last) = path.path.segments.last() else {
+        return error;
+    };
+    match (&last.arguments, last.ident == "Failed") {
+        (PathArguments::AngleBracketed(args), true) if args.args.len() == 1 => {
+            match args.args.first() {
+                Some(GenericArgument::Type(own)) => own.clone(),
+                _ => error,
+            }
+        }
+        _ => error,
+    }
+}
+
 /// The receiver a method takes: `Some(true)` for `&mut self`, `Some(false)`
 /// for `&self`, `None` for anything else.
 fn receiver(sig: &Signature) -> Option<bool> {
@@ -3488,8 +3508,9 @@ fn domain(attr: Tokens, item: Tokens, kind: Kind) -> syn::Result<Tokens> {
         None => {
             let mut found: Option<Type> = None;
             for x in of("handles_cmd").filter(|x| x.args.refuses.is_empty()) {
-                let Some(error) =
-                    returned(&x.method.sig).and_then(|(_, args)| args.get(1).cloned())
+                let Some(error) = returned(&x.method.sig)
+                    .and_then(|(_, args)| args.get(1).cloned())
+                    .map(own_rejection)
                 else {
                     continue;
                 };
@@ -3658,6 +3679,15 @@ fn domain(attr: Tokens, item: Tokens, kind: Kind) -> syn::Result<Tokens> {
             impl ::core::convert::From<#choice> for #rejection_ty {
                 fn from(choice: #choice) -> Self {
                     #m::Rejection::Typed(::core::convert::Into::into(choice))
+                }
+            }
+
+            impl ::core::convert::From<#choice> for #m::Failed<#rejection> {
+                fn from(choice: #choice) -> Self {
+                    #m::Failed::Rejected {
+                        rejection: ::core::convert::Into::into(choice),
+                        status: #m::BusinessStatus::FailedPrecondition,
+                    }
                 }
             }
 

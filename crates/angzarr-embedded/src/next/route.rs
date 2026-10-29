@@ -235,6 +235,11 @@ impl Rejected {
         &self.report
     }
 
+    /// The business status the refusal went out under.
+    pub fn status(&self) -> super::markup::BusinessStatus {
+        super::markup::BusinessStatus::FailedPrecondition
+    }
+
     /// The typed refusal object, packed, if the handler refused with one.
     pub fn refusal_object(&self) -> Option<&Any> {
         self.refusal.as_ref()

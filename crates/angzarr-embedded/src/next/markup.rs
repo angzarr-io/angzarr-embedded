@@ -20,6 +20,9 @@
 //! - [`Rejection`], [`Refusing`], [`Refuses`] and [`TypedRefusal`]: a
 //!   command's refusal, a message only or one of its declared typed
 //!   refusal objects.
+//! - [`Failed`] and [`BusinessStatus`]: what a command handler fails
+//!   with, a business refusal (under a status of the business set) or a
+//!   bug.
 //! - [`CommandRefused`] and [`Refusal`]: a refusal fact as its source's
 //!   `#[on_refused]` handler reads it, and a refusal as a translating
 //!   policy's callback reads it.
@@ -575,6 +578,68 @@ impl<R: angzarr_embedded_diagnostic::Diagnostic> angzarr_embedded_diagnostic::Di
     }
 }
 
+/// What a command handler fails with: one of the two classes, a business
+/// refusal or a bug (decision 14.37), `R` the domain's own rejection.
+///
+/// - [`Failed::Rejected`]: the domain said no. It goes out as a business
+///   refusal under `status` (FAILED_PRECONDITION unless the handler says
+///   otherwise, [`Failed::with_status`]), the refusal's code and args
+///   beside, and reaches the issuing policy's refusal path.
+/// - [`Failed::Bug`]: a defect, never a business answer. It goes out as
+///   INTERNAL UNHANDLED_HANDLER_ERROR, the report's code as its `cause` and
+///   each arg as `cause.<arg>`, and the input is dead-lettered.
+///
+/// A handler that only refuses keeps returning `R` (or a `Refuses`
+/// choice): each converts into a `Failed` by `From`, so `?` on a
+/// `Result<_, R>` works inside a handler returning `Failed<R>`.
+#[derive(Clone, PartialEq, Debug)]
+pub enum Failed<R> {
+    Rejected {
+        rejection: Rejection<R>,
+        status: BusinessStatus,
+    },
+    Bug(Report),
+}
+
+/// The statuses a business refusal may go out under: the business set.
+/// Any other status is a fault.
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+pub enum BusinessStatus {
+    #[default]
+    FailedPrecondition,
+    InvalidArgument,
+    NotFound,
+    AlreadyExists,
+    OutOfRange,
+    PermissionDenied,
+}
+
+impl<R> Failed<R> {
+    /// A bug, keyed by `diagnostic`'s code, with its args.
+    pub fn bug(diagnostic: &dyn angzarr_embedded_diagnostic::Diagnostic) -> Failed<R> {
+        Failed::Bug(Report::of(diagnostic))
+    }
+
+    /// This refusal under `status`; a bug is unchanged.
+    pub fn with_status(self, status: BusinessStatus) -> Failed<R> {
+        match self {
+            Failed::Rejected { rejection, .. } => Failed::Rejected { rejection, status },
+            bug @ Failed::Bug(_) => bug,
+        }
+    }
+}
+
+/// A message-only refusal, FAILED_PRECONDITION: a handler's `Err` (or
+/// `?`) of the domain's own rejection.
+impl<R> From<R> for Failed<R> {
+    fn from(rejection: R) -> Self {
+        Failed::Rejected {
+            rejection: Rejection::Message(rejection),
+            status: BusinessStatus::default(),
+        }
+    }
+}
+
 /// The pass-through refusal fact, as the policy's SOURCE domain's handler
 /// for it reads it: `#[on_refused(C)]`, a fact handler,
 /// `fn(&self, refused: CommandRefused<C>, ctx: &Context) ->
@@ -1092,14 +1157,17 @@ where
     R: angzarr_embedded_diagnostic::Diagnostic,
     C: DomainMessage,
     O: Emits<A>,
-    E: Into<A::Rejection>,
+    E: Into<Failed<R>>,
 {
     let refuse =
         |rejection: Rejection<R>| super::route::rejection(&rejection, rejection.refusal().cloned());
     let ctx = context_of(cctx);
     let command = input::<C>(any)?;
     let mut emit = handler(state, command, &ctx)
-        .map_err(|e| refuse(e.into()))?
+        .map_err(|e| match e.into() {
+            Failed::Rejected { rejection, .. } => refuse(rejection),
+            Failed::Bug(report) => super::route::rejection(&report, None),
+        })?
         .into_emit();
     let mut working = state.clone();
     let mut events = Vec::new();
