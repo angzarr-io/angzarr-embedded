@@ -10,7 +10,7 @@ use crate::next::{
 };
 use angzarr_embedded_diagnostic::Report;
 use angzarr_ports::Cause;
-use angzarr_router::error::{codes, CodedError};
+use angzarr_router::error::{codes, CodedError, GrpcCode};
 
 use crate::next::toys::{
     account, at, command, command_id, cover, instant, registry, registry_with_upcasters, root,
@@ -487,9 +487,21 @@ fn every_failure_says_how_to_recover() {
             Recovery::Bug,
             KernelError::Router(CodedError::stale("PLAYER_BROKE", "", [])),
         ),
+        // A handler's own code: under a business status a refusal, under a
+        // bug's status a bug (the owner's ruling, 2026-10-29).
+        (
+            Recovery::Business,
+            KernelError::Router(CodedError::invalid_argument("PLAYER_BROKE", "", [])),
+        ),
+        (
+            Recovery::Business,
+            KernelError::Router(own(GrpcCode::NotFound)),
+        ),
+        (Recovery::Bug, KernelError::Router(own(GrpcCode::Internal))),
+        (Recovery::Bug, KernelError::Router(own(GrpcCode::DataLoss))),
         (
             Recovery::Bug,
-            KernelError::Router(CodedError::invalid_argument("PLAYER_BROKE", "", [])),
+            KernelError::Router(own(GrpcCode::Unimplemented)),
         ),
         (
             Recovery::Retry,
@@ -809,4 +821,16 @@ fn a_resumed_stream_decides_against_its_snapshot_and_the_events_after_it() {
     let executed = stream.execute(withdraw, &registry, &at(9), &log, &mut []);
     assert!(executed.is_ok(), "{:?}", executed.err());
     assert_eq!(stream.state().cents, 0, "150, less 149 and the fee");
+}
+
+/// A failure under a code of the handler's own (`PLAYER_BROKE`, one the
+/// router does not know), with status `grpc`.
+fn own(grpc: GrpcCode) -> CodedError {
+    CodedError {
+        code: "PLAYER_BROKE".to_string(),
+        message: String::new(),
+        extras: Default::default(),
+        grpc,
+        refusal: None,
+    }
 }

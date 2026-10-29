@@ -271,6 +271,40 @@ fn a_remote_refusal_is_a_business_rejection() {
     host.shutdown();
 }
 
+/// A child's ALREADY_EXISTS under a code of its own is a business refusal
+/// through the kernel (the owner's ruling, 2026-10-29), though
+/// angzarr-router's `GrpcCode` has no variant for it: a rejection under
+/// its code and args, with its typed refusal, nothing dead-lettered.
+#[test]
+fn a_remote_already_exists_is_a_business_rejection() {
+    let host = host();
+    let mut registry = Registry::new();
+    host.register(&mut registry).unwrap();
+    let store = MemoryStore::new();
+    let log = MemoryDeadLetters::new();
+    let kernel = Kernel::new(&registry, &log);
+    let refused = block_on(kernel.handle_any(
+        &store,
+        send("player", 1, any("/test.player.v1.Taken")),
+        &sampled(1),
+        &mut (),
+    ))
+    .err()
+    .expect("refused");
+    let Failure::Rejected(rejected) = &refused else {
+        panic!("a business rejection: {refused:?}");
+    };
+    assert_eq!(rejected.code(), "SEAT_TAKEN");
+    assert!(
+        matches!(rejected.args().as_slice(), [("seat", Arg::Str(v))] if v == "3"),
+        "its args: {rejected:?}"
+    );
+    assert!(rejected.refusal_object().is_some(), "its typed refusal");
+    assert_eq!(refused.recovery(), Recovery::Business);
+    assert!(log.lines().is_empty(), "{:?}", log.lines());
+    host.shutdown();
+}
+
 /// A child's INTERNAL under a code of its own, one the router does not
 /// know, is a bug through the kernel, never a rejection: the router's
 /// error, `Recovery::Bug`, dead-lettered by its code and args.

@@ -4701,7 +4701,29 @@ mod router {
     #[test]
     fn an_unknown_code_refused_as_failed_precondition_is_a_rejection() {
         use ::angzarr_embedded::next::angzarr_router::error::GrpcCode;
-        let registry = faulty(GrpcCode::FailedPrecondition);
+        refused_as_a_rejection(GrpcCode::FailedPrecondition);
+    }
+
+    /// A code the router does not know, refused INVALID_ARGUMENT, is a
+    /// business refusal too (the owner's ruling, 2026-10-29).
+    #[test]
+    fn an_unknown_code_refused_as_invalid_argument_is_a_rejection() {
+        use ::angzarr_embedded::next::angzarr_router::error::GrpcCode;
+        refused_as_a_rejection(GrpcCode::InvalidArgument);
+    }
+
+    /// A code the router does not know, refused NOT_FOUND, is a business
+    /// refusal too (the owner's ruling, 2026-10-29).
+    #[test]
+    fn an_unknown_code_refused_as_not_found_is_a_rejection() {
+        use ::angzarr_embedded::next::angzarr_router::error::GrpcCode;
+        refused_as_a_rejection(GrpcCode::NotFound);
+    }
+
+    /// A remote handler refusing under a code of its own with `grpc` is a
+    /// business rejection under that code and args, nothing dead-lettered.
+    fn refused_as_a_rejection(grpc: ::angzarr_embedded::next::angzarr_router::error::GrpcCode) {
+        let registry = faulty(grpc);
         let store = Mem::new();
         let log = MemoryDeadLetters::new();
         let kernel = ::angzarr_embedded::next::Kernel::new(&registry, &log);
@@ -4718,7 +4740,7 @@ mod router {
         .err()
         .expect("refused");
         let Failure::Rejected(rejected) = &refused else {
-            panic!("a business rejection: {refused:?}");
+            panic!("{grpc:?}, a business rejection: {refused:?}");
         };
         assert_eq!(rejected.code(), "PLAYER_BROKE");
         assert!(
@@ -4729,14 +4751,17 @@ mod router {
         assert!(log.lines().is_empty(), "{:?}", log.lines());
     }
 
-    /// A code the router does not know, failed with any status but
-    /// FAILED_PRECONDITION, is a bug, never a rejection: the router's
-    /// error, `Recovery::Bug`, dead-lettered by its code and args (no
-    /// English), at the origin and as a policy's step, whose position
-    /// moves past the trigger, as for a policy's own error: the dead
-    /// letter is the record to replay, so a resume does not run it again.
+    /// A code the router does not know, failed with a bug's status
+    /// (INTERNAL, DATA_LOSS; a remote child's UNKNOWN arrives INTERNAL),
+    /// or with a status in neither the business nor the bug set
+    /// (UNIMPLEMENTED, ABORTED: their classification unchanged), is a bug,
+    /// never a rejection: the router's error, `Recovery::Bug`,
+    /// dead-lettered by its code and args (no English), at the origin and
+    /// as a policy's step, whose position moves past the trigger, as for a
+    /// policy's own error: the dead letter is the record to replay, so a
+    /// resume does not run it again.
     #[test]
-    fn an_unknown_code_failed_with_another_status_is_a_dead_lettered_bug() {
+    fn an_unknown_code_failed_outside_the_business_set_is_a_dead_lettered_bug() {
         use ::angzarr_embedded::next::angzarr_router::error::GrpcCode;
         use ::angzarr_embedded::next::StepError;
         for grpc in [
@@ -4744,8 +4769,6 @@ mod router {
             GrpcCode::DataLoss,
             GrpcCode::Unimplemented,
             GrpcCode::Aborted,
-            GrpcCode::InvalidArgument,
-            GrpcCode::NotFound,
         ] {
             let registry = faulty(grpc);
             let store = Mem::new();

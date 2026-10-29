@@ -125,8 +125,9 @@ pub(crate) fn unknown_domain(domain: &str) -> KernelError {
 }
 
 /// The router's refusal `error` of an input to `command`'s stream, in the
-/// kernel's terms: a business refusal (FAILED_PRECONDITION, whatever its
-/// code) is [`Failure::Rejected`]; a decision past its step limit
+/// kernel's terms: a business refusal ([`route::is_rejection`]: a
+/// FAILED_PRECONDITION, or a handler's own code under another business
+/// status) is [`Failure::Rejected`]; a decision past its step limit
 /// [`KernelError::TooManySteps`]; anything else, a handler's own code under
 /// any other status and a policy's failure in its source's `#[on_refused]`
 /// handler included (the chain makes it
@@ -307,7 +308,7 @@ pub(crate) fn load(novel: Novel, nonces: &mut u64) -> Result<Contextual, KernelE
 /// head on. A panicking fact handler fails the chain
 /// ([`KernelError::IngestPanicked`]) and `dead_letters` gets a line; a
 /// panicking command handler panics on. A handler's fault under a code of
-/// its own ([`route::is_handler_fault`]) fails it as
+/// its own outside the business set ([`route::is_handler_fault`]) fails it as
 /// [`KernelError::Router`], a bug, and `dead_letters` gets a line of its
 /// code and args.
 pub(crate) fn dispatch(
