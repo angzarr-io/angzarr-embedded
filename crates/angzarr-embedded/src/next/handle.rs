@@ -674,7 +674,24 @@ impl<'k> Run<'k> {
         positions: &[(&str, &Cover, u64)],
     ) -> Result<Stepped, StepError> {
         let kernel = |error| StepError::Kernel(KernelError::Router(error));
-        let answer = policy.dispatch.dispatch_refusal(refusal).map_err(kernel)?;
+        let answer = match policy.dispatch.dispatch_refusal(refusal) {
+            Ok(answer) => answer,
+            Err(error) => {
+                let Some(failure) = super::route::policy_failure(&error) else {
+                    return Err(kernel(error));
+                };
+                write_policy_failure(
+                    self.dead_letters,
+                    Payload::RejectedCommand(delivered.to_book()),
+                    policy.name(),
+                    &failure,
+                );
+                port.write_positions(positions)
+                    .await
+                    .map_err(|e| StepError::Kernel(KernelError::Store(e)))?;
+                return Err(StepError::PolicyFailed(failure));
+            }
+        };
         let addressed = address_refusal_fact(refusal, &answer).map_err(kernel)?;
         let trigger = delivered.causation_id().cloned().unwrap_or_default();
         let page = addressed.page.unwrap_or_default();

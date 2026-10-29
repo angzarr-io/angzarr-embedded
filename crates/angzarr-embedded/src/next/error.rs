@@ -67,9 +67,9 @@ pub enum StepError {
     /// A kernel fault at that step. A malformed policy book is a bug here,
     /// not the caller's: it is also written to the dead-letter log.
     Kernel(KernelError),
-    /// The policy itself failed: its `on_event` (or its source's
-    /// `#[on_refused]` handler) answered an error, or a marked event did
-    /// not decode. A defect, never a business refusal: policies react to
+    /// The policy itself failed: its `on_event`, its `on_refused` (a
+    /// translating callback) or its source's `#[on_refused]` handler
+    /// answered an error, or a marked event did not decode. A defect, never a business refusal: policies react to
     /// events the application's own domains recorded, so an error is a
     /// bug. Its report (code and args) is the dead letter's reason, and the
     /// policy's position moved past the trigger.

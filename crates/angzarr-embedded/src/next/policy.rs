@@ -124,8 +124,7 @@ pub trait Policy: Send + Sync + 'static {
     /// its identity.
     ///
     /// `ctx` is the refused command's context as the kernel delivered it:
-    /// its target's cover, its command id, its correlation and its
-    /// handling. An error is a bug, as `on_event`'s is: the step fails as
+    /// its target's cover, its command id and its correlation. An error is a bug, as `on_event`'s is: the step fails as
     /// [`StepError::PolicyFailed`](super::StepError::PolicyFailed), is
     /// dead-lettered by the error's code and args, and the policy's
     /// position moves past the trigger.
@@ -378,13 +377,31 @@ pub(crate) fn answered(
         .collect()
 }
 
+/// The refused command's context, from the command `refusal` carries as
+/// the kernel delivered it: its target's cover and its identity (its
+/// derived command id and the trigger's correlation). A policy's command
+/// carries no handling and is never a fact, and what only the target's
+/// dispatch knew (its next sequence, whether it had history, a conflict) is
+/// not carried: those stay default.
+fn refused_context(refusal: &markup::v1::Refusal) -> CommandContext {
+    let book = refusal.command.clone().unwrap_or_default();
+    let page = book.page.unwrap_or_default();
+    CommandContext {
+        cover: book.cover,
+        command_id: page.command_id,
+        correlation_id: page.correlation_id,
+        ..CommandContext::default()
+    }
+}
+
 /// `policy` as angzarr-router's table: each event type it handles (its
 /// `EVENTS`, or every event of its source for a hand-written one) runs
 /// [`Policy::on_event`] with the trigger's place and metadata, each command
 /// for the target's stream at the root it names; and, for a policy that
 /// answers refusals, each command type it translates (its `TRANSLATES`, or
 /// every command of its target for a hand-written one) is answered by
-/// [`Policy::on_refused`]. The router holds the answer to the policy's one
+/// [`Policy::on_refused`], with the refused command's context; either's
+/// error is carried as the policy's failure. The router holds the answer to the policy's one
 /// destination, the trigger's edition, a named root and the trigger's
 /// correlation.
 pub(crate) fn dispatch<P: Policy>(policy: P) -> PolicyDispatch {
@@ -445,7 +462,7 @@ pub(crate) fn dispatch<P: Policy>(policy: P) -> PolicyDispatch {
             let policy = Arc::clone(&policy);
             table = table.on_refused(&command_type, move |refusal| {
                 policy
-                    .on_refused(refusal, &CommandContext::default())
+                    .on_refused(refusal, &refused_context(refusal))
                     .map_err(|failure| super::route::policy_failed(&failure))
             });
         }

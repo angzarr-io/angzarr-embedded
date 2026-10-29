@@ -523,7 +523,8 @@ pub trait Policy: Send + Sync + 'static {
     const ANSWERS_REFUSALS: bool = false; // every marked-up policy answers them
     fn on_event(&self, event: &Any, ctx: &PolicyContext)
         -> Result<Option<Commands<Self::Target>>, Report>;
-    fn on_refused(&self, refusal: &Refusal) -> Any { /* CommandRefused, passed through */ }
+    fn on_refused(&self, refusal: &Refusal, ctx: &CommandContext)    // the refused command's
+        -> Result<Any, Report> { /* CommandRefused, passed through */ }
 }
 pub trait Projection<D: Domain> { fn project(&mut self, c: &Committed<'_, D>); }
 
@@ -583,8 +584,9 @@ kernel.resume(&store, &sampled, &mut projections).await?;                       
 - **A policy's error is a bug.** Policies should not fail for business
   reasons: they react to events the application's own domains created, so
   an `Err` is a bug. `on_event`'s error (a marked-up policy's handler's,
-  or a marked event that does not decode) and an error of the source's
-  `#[on_refused]` handler fail the step as `StepError::PolicyFailed`, a
+  or a marked event that does not decode), `on_refused`'s (a translating
+  callback's, which reads the refused command's context) and an error of
+  the source's `#[on_refused]` handler fail the step as `StepError::PolicyFailed`, a
   defect (`Recovery::Bug`), never a business `Rejected`: the step is
   dead-lettered with the error's code as its reason and its args as the
   letter's metadata, never its English, and the policy's position moves

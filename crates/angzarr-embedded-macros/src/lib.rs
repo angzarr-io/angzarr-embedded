@@ -289,10 +289,15 @@
 //!   moves past the trigger. A `CommandRefused` from outside a policy is
 //!   accepted when its trigger names the receiving stream.
 //! - **Translate**, for each command the policy has a callback for:
-//!   `#[on_refused(Hold)] fn(&self, refusal: &Refusal<Hold>) -> F` on the
-//!   policy's impl reads the typed object and returns `F`, a fact its source
+//!   `#[on_refused(Hold)] fn(&self, refusal: &Refusal<Hold>, ctx:
+//!   &CommandContext) -> Result<F, E>` on the policy's impl reads the typed
+//!   object, and the refused command's context (its target's cover, its id,
+//!   its correlation), and returns `F`, a fact its source
 //!   ingests, so the source never refers to the target's types. A callback
-//!   returning anything else does not compile. One marker,
+//!   returning anything else does not compile. Its `Err`, any `Diagnostic`,
+//!   is a bug, as an `#[on_event]` handler's is: the step fails as
+//!   `StepError::PolicyFailed`, is dead-lettered by its code and args, and
+//!   the policy's position moves past the trigger. One marker,
 //!   `#[on_refused(Cmd)]`, names both the source's handler and the policy's
 //!   callback.
 //!
@@ -1329,7 +1334,8 @@
 //! ```no_run
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::next::markup::{
-//! #     CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record, Refusal, Refuses,
+//! #     CommandContext, CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record,
+//! #     Refusal, Refuses,
 //! # };
 //! # use angzarr_embedded::next::WireError;
 //! # use angzarr_embedded_macros::{
@@ -1461,7 +1467,8 @@
 //! ```compile_fail
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::next::markup::{
-//! #     CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record, Refusal, Refuses,
+//! #     CommandContext, CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record,
+//! #     Refusal, Refuses,
 //! # };
 //! # use angzarr_embedded::next::WireError;
 //! # use angzarr_embedded_macros::{
@@ -1547,7 +1554,8 @@
 //! ```compile_fail
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::next::markup::{
-//! #     CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record, Refusal, Refuses,
+//! #     CommandContext, CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record,
+//! #     Refusal, Refuses,
 //! # };
 //! # use angzarr_embedded::next::WireError;
 //! # use angzarr_embedded_macros::{
@@ -1633,7 +1641,8 @@
 //! ```compile_fail
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::next::markup::{
-//! #     CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record, Refusal, Refuses,
+//! #     CommandContext, CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record,
+//! #     Refusal, Refuses,
 //! # };
 //! # use angzarr_embedded::next::WireError;
 //! # use angzarr_embedded_macros::{
@@ -1719,7 +1728,8 @@
 //! ```compile_fail
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::next::markup::{
-//! #     CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record, Refusal, Refuses,
+//! #     CommandContext, CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record,
+//! #     Refusal, Refuses,
 //! # };
 //! # use angzarr_embedded::next::WireError;
 //! # use angzarr_embedded_macros::{
@@ -1805,7 +1815,8 @@
 //! ```compile_fail
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::next::markup::{
-//! #     CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record, Refusal, Refuses,
+//! #     CommandContext, CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record,
+//! #     Refusal, Refuses,
 //! # };
 //! # use angzarr_embedded::next::WireError;
 //! # use angzarr_embedded_macros::{
@@ -1903,7 +1914,8 @@
 //! ```compile_fail
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::next::markup::{
-//! #     CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record, Refusal, Refuses,
+//! #     CommandContext, CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record,
+//! #     Refusal, Refuses,
 //! # };
 //! # use angzarr_embedded::next::WireError;
 //! # use angzarr_embedded_macros::{
@@ -2003,7 +2015,8 @@
 //! ```compile_fail
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::next::markup::{
-//! #     CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record, Refusal, Refuses,
+//! #     CommandContext, CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record,
+//! #     Refusal, Refuses,
 //! # };
 //! # use angzarr_embedded::next::WireError;
 //! # use angzarr_embedded_macros::{
@@ -2066,7 +2079,8 @@
 //! ```compile_fail
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::next::markup::{
-//! #     CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record, Refusal, Refuses,
+//! #     CommandContext, CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record,
+//! #     Refusal, Refuses,
 //! # };
 //! # use angzarr_embedded::next::WireError;
 //! # use angzarr_embedded_macros::{
@@ -2161,7 +2175,8 @@
 //! ```no_run
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::next::markup::{
-//! #     CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record, Refusal, Refuses,
+//! #     CommandContext, CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record,
+//! #     Refusal, Refuses,
 //! # };
 //! # use angzarr_embedded::next::WireError;
 //! # use angzarr_embedded_macros::{
@@ -2286,8 +2301,12 @@
 //!     }
 //!
 //!     #[on_refused(SwitchOn)]
-//!     fn switch_on_refused(&self, _refusal: &Refusal<SwitchOn>) -> LampLost {
-//!         LampLost
+//!     fn switch_on_refused(
+//!         &self,
+//!         _refusal: &Refusal<SwitchOn>,
+//!         _ctx: &CommandContext,
+//!     ) -> Result<LampLost, Infallible> {
+//!         Ok(LampLost)
 //!     }
 //! }
 //! ```
@@ -2298,7 +2317,8 @@
 //! ```compile_fail
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::next::markup::{
-//! #     CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record, Refusal, Refuses,
+//! #     CommandContext, CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record,
+//! #     Refusal, Refuses,
 //! # };
 //! # use angzarr_embedded::next::WireError;
 //! # use angzarr_embedded_macros::{
@@ -2423,8 +2443,12 @@
 //!     }
 //!
 //!     #[on_refused(SwitchOn)]
-//!     fn switch_on_refused(&self, _refusal: &Refusal<SwitchOn>) -> Lost {
-//!         Lost
+//!     fn switch_on_refused(
+//!         &self,
+//!         _refusal: &Refusal<SwitchOn>,
+//!         _ctx: &CommandContext,
+//!     ) -> Result<Lost, Infallible> {
+//!         Ok(Lost)
 //!     }
 //! }
 //! ```
@@ -2435,7 +2459,8 @@
 //! ```compile_fail
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::next::markup::{
-//! #     CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record, Refusal, Refuses,
+//! #     CommandContext, CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record,
+//! #     Refusal, Refuses,
 //! # };
 //! # use angzarr_embedded::next::WireError;
 //! # use angzarr_embedded_macros::{
@@ -2560,8 +2585,12 @@
 //!     }
 //!
 //!     #[on_refused(SwitchOn)]
-//!     fn switch_on_refused(&self, _refusal: &Refusal<SwitchOn>) -> LampLost {
-//!         LampLost
+//!     fn switch_on_refused(
+//!         &self,
+//!         _refusal: &Refusal<SwitchOn>,
+//!         _ctx: &CommandContext,
+//!     ) -> Result<LampLost, Infallible> {
+//!         Ok(LampLost)
 //!     }
 //! }
 //! ```
@@ -2572,7 +2601,8 @@
 //! ```compile_fail
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::next::markup::{
-//! #     CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record, Refusal, Refuses,
+//! #     CommandContext, CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record,
+//! #     Refusal, Refuses,
 //! # };
 //! # use angzarr_embedded::next::WireError;
 //! # use angzarr_embedded_macros::{

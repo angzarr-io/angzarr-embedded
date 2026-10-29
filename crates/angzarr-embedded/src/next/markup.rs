@@ -630,9 +630,11 @@ impl<C> CommandRefused<C> {
 
 /// What a policy's translating callback reads (`#[on_refused(C)]` on the
 /// policy's impl): angzarr's `Refusal { event, command,
-/// response }`, the command decoded. The callback returns a fact of the
+/// response }`, the command decoded, beside the refused command's
+/// [`CommandContext`]. The callback returns `Result` of a fact of the
 /// policy's source domain, so the source never refers to the target's
-/// types.
+/// types; its `Err` is a bug, dead-lettered as
+/// [`StepError::PolicyFailed`](super::StepError::PolicyFailed).
 #[derive(Clone, PartialEq, Debug)]
 pub struct Refusal<C> {
     event: EventBook,
