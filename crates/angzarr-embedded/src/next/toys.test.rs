@@ -1238,16 +1238,21 @@ impl Policy for Bookkeeping {
     type Source = Account;
     type Target = Ledger;
 
-    fn on_event(&self, event: &Any, ctx: &PolicyContext) -> Option<Commands<Ledger>> {
-        let cents = match AccountEvent::from_any(event).ok()? {
-            AccountEvent::Deposited(cents) => cents,
-            _ => 0,
+    fn on_event(
+        &self,
+        event: &Any,
+        ctx: &PolicyContext,
+    ) -> Result<Option<Commands<Ledger>>, crate::next::markup::Report> {
+        let cents = match AccountEvent::from_any(event) {
+            Ok(AccountEvent::Deposited(cents)) => cents,
+            Ok(_) => 0,
+            Err(_) => return Ok(None),
         };
         let record = ledger::Record {
             source_sequence: ctx.trigger().sequence,
             cents,
         };
-        Some(Commands::none().send(ledger_root(), &record))
+        Ok(Some(Commands::none().send(ledger_root(), &record)))
     }
 }
 

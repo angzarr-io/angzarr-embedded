@@ -313,8 +313,11 @@ mod tx {
             &self,
             _: &crate::next::Any,
             _: &crate::next::markup::PolicyContext,
-        ) -> Option<crate::next::markup::Commands<ProbeDomain>> {
-            Some(crate::next::markup::Commands::none().send(probe_root(), &Probe { stash: 0 }))
+        ) -> Result<Option<crate::next::markup::Commands<ProbeDomain>>, crate::next::markup::Report>
+        {
+            Ok(Some(
+                crate::next::markup::Commands::none().send(probe_root(), &Probe { stash: 0 }),
+            ))
         }
     }
 
@@ -425,15 +428,18 @@ mod tx {
             &self,
             _: &crate::next::Any,
             ctx: &crate::next::markup::PolicyContext,
-        ) -> Option<crate::next::markup::Commands<crate::next::toys::Ledger>> {
+        ) -> Result<
+            Option<crate::next::markup::Commands<crate::next::toys::Ledger>>,
+            crate::next::markup::Report,
+        > {
             let record = crate::next::toys::ledger::Record {
                 source_sequence: ctx.trigger().sequence,
                 cents: 1,
             };
-            Some(
+            Ok(Some(
                 crate::next::markup::Commands::none()
                     .send(crate::next::toys::ledger_root(), &record),
-            )
+            ))
         }
     }
 

@@ -70,6 +70,15 @@ pub use angzarr_embedded_diagnostic::Report;
 /// a policy's derived one, or, for a fact, the one derived from its origin;
 /// a refusal fact's is the refused command's), its correlation, and, for a
 /// fact, its origin.
+///
+/// It is also angzarr-router's whole
+/// [`CommandContext`](angzarr_router::domain::CommandContext), through
+/// `Deref`: `ctx.cover` (the stream's domain and root), `ctx.next_sequence`,
+/// `ctx.had_prior_events`, `ctx.expected_sequence`,
+/// `ctx.conflict_resolution`, `ctx.conflict` (under AGGREGATE_HANDLES, the
+/// window the command did not see and the nonce the handler hands back
+/// through `resolve_conflicts`), `ctx.command_id`, `ctx.correlation_id` and
+/// `ctx.fact_origin`. Nothing the router knows of the input is withheld.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Context {
     recorded_at: Timestamp,
@@ -129,6 +138,15 @@ impl Context {
     /// A fact's origin; `None` for a command.
     pub fn fact_origin(&self) -> Option<&FactOrigin> {
         self.fact_origin.as_ref()
+    }
+}
+
+/// The router's context of the input this handler decides.
+impl std::ops::Deref for Context {
+    type Target = angzarr_router::domain::CommandContext;
+
+    fn deref(&self) -> &Self::Target {
+        todo!("handler-context: the router's CommandContext in the markup's Context")
     }
 }
 
@@ -696,7 +714,9 @@ impl<C> Refusal<C> {
 /// implements as it is.
 pub use super::policy::Policy;
 
-/// What a policy's `#[on_event(E)]` handler returns: commands for its target
+/// What a policy's `#[on_event(E)]` handler returns as its `Ok` (its `Err`
+/// is any [`Diagnostic`](angzarr_embedded_diagnostic::Diagnostic): a bug,
+/// dead-lettered): commands for its target
 /// `T`, each with the root of the stream it is for. For a process manager
 /// that is the trigger's correlation ([`PolicyContext::correlation_id`]);
 /// any other root is a policy bug. Each command's type must be one
@@ -1268,6 +1288,16 @@ pub fn __translating<C: DomainMessage>(refusal: &v1::Refusal) -> Option<Refusal<
 #[doc(hidden)]
 pub fn __domestic<S: Ingests<F>, F: DomainMessage>(fact: &F) -> Any {
     __pack(fact)
+}
+
+/// A policy's `#[on_event]` handler's answer, as `Policy::on_event` gives
+/// it: its commands, or its error as a report (its code the dead letter's
+/// reason).
+#[doc(hidden)]
+pub fn __answered<T: Domain, E: angzarr_embedded_diagnostic::Diagnostic>(
+    answer: Result<Commands<T>, E>,
+) -> Result<Option<Commands<T>>, Report> {
+    answer.map(Some).map_err(|error| Report::of(&error))
 }
 
 /// A projector handler's result, as the kernel awaits it.

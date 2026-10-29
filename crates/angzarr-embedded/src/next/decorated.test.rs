@@ -305,6 +305,51 @@ mod wire {
             short: i64,
         }
     );
+
+    message!(
+        "toy.pot.cmd.v1",
+        Stake {
+            #[prost(int64, tag = "1")]
+            cents: i64,
+            #[prost(bool, tag = "2")]
+            acknowledge: bool,
+        }
+    );
+    message!("toy.pot.cmd.v1", Mark {});
+    message!("toy.pot.cmd.v1", Peek {});
+    message!(
+        "toy.pot.v1",
+        Staked {
+            #[prost(int64, tag = "1")]
+            cents: i64,
+            #[prost(uint32, tag = "2")]
+            window: u32,
+        }
+    );
+    message!(
+        "toy.pot.v1",
+        Marked {
+            #[prost(bytes = "vec", tag = "1")]
+            root: Vec<u8>,
+            #[prost(string, tag = "2")]
+            domain: String,
+        }
+    );
+    message!(
+        "toy.pot.v1",
+        Peeked {
+            #[prost(uint64, tag = "1")]
+            next_sequence: u64,
+            #[prost(bool, tag = "2")]
+            had_prior_events: bool,
+            #[prost(uint64, tag = "3")]
+            expected_sequence: u64,
+            #[prost(int32, tag = "4")]
+            resolution: i32,
+            #[prost(bool, tag = "5")]
+            conflict: bool,
+        }
+    );
 }
 
 // ---------------------------------------------------------------- the domain types
@@ -380,6 +425,27 @@ domain_type!(Expired {
 });
 domain_type!(BuyInFailed { short: i64 });
 domain_type!(HoldWasLost { short: i64 });
+domain_type!(Stake {
+    cents: i64,
+    acknowledge: bool
+});
+domain_type!(Mark {});
+domain_type!(Peek {});
+domain_type!(Staked {
+    cents: i64,
+    window: u32
+});
+domain_type!(Marked {
+    root: Vec<u8>,
+    domain: String
+});
+domain_type!(Peeked {
+    next_sequence: u64,
+    had_prior_events: bool,
+    expected_sequence: u64,
+    resolution: i32,
+    conflict: bool,
+});
 
 /// A typed refusal object is a domain type and a diagnostic: its message
 /// is the refusal's.
@@ -879,6 +945,78 @@ impl Ladder {
     }
 }
 
+// ---------------------------------------------------------------- the pot
+
+/// An aggregate whose handlers read angzarr-router's whole
+/// `CommandContext` through their [`Context`]: a stake decided under
+/// AGGREGATE_HANDLES reads the window it did not see and, when told to,
+/// acknowledges it; a mark records the stream's root; a peek records what
+/// the router knows of the input.
+#[derive(Clone, Default, PartialEq, Debug)]
+pub struct Pot {
+    cents: i64,
+}
+
+#[aggregate(domain = "pot")]
+impl Pot {
+    /// A stake that does not acknowledge never reads the context, so the
+    /// router finds the window unacknowledged.
+    #[handles_cmd(Stake)]
+    fn stake(&self, cmd: Stake, ctx: &Context) -> Result<Staked, Infallible> {
+        if !cmd.acknowledge {
+            return Ok(Staked {
+                cents: cmd.cents,
+                window: 0,
+            });
+        }
+        let window = match &ctx.conflict {
+            Some(conflict) => {
+                conflict.resolve_conflicts(conflict.window(), conflict.nonce());
+                conflict.window().len() as u32
+            }
+            None => 0,
+        };
+        Ok(Staked {
+            cents: cmd.cents,
+            window,
+        })
+    }
+
+    /// The stream's root and domain, from the router's cover.
+    #[handles_cmd(Mark)]
+    fn mark(&self, _cmd: Mark, ctx: &Context) -> Result<Marked, Infallible> {
+        let cover = ctx.cover.clone().unwrap_or_default();
+        Ok(Marked {
+            root: cover.root.unwrap_or_default().value.to_vec(),
+            domain: cover.domain,
+        })
+    }
+
+    /// What the router knows of the input, under whatever resolution it
+    /// was decided.
+    #[handles_cmd(Peek)]
+    fn peek(&self, _cmd: Peek, ctx: &Context) -> Result<Peeked, Infallible> {
+        Ok(Peeked {
+            next_sequence: ctx.next_sequence,
+            had_prior_events: ctx.had_prior_events,
+            expected_sequence: ctx.expected_sequence,
+            resolution: ctx.conflict_resolution as i32,
+            conflict: ctx.conflict.is_some(),
+        })
+    }
+
+    #[applies(Staked)]
+    fn staked(&mut self, event: Staked) {
+        self.cents += event.cents;
+    }
+
+    #[applies(Marked)]
+    fn marked(&mut self, _event: Marked) {}
+
+    #[applies(Peeked)]
+    fn peeked(&mut self, _event: Peeked) {}
+}
+
 // ---------------------------------------------------------------- the tally, by hand
 
 wire::message!(
@@ -992,7 +1130,8 @@ fn configured(config: WalletConfig) -> Registry {
     registry
         .aggregate::<Wallet>(move || Wallet::with(config.clone()))
         .aggregate::<Lamp>(Lamp::default)
-        .aggregate::<Ladder>(Ladder::default);
+        .aggregate::<Ladder>(Ladder::default)
+        .aggregate::<Pot>(Pot::default);
     registry
         .register::<Tally>(
             Rulebook::new("v1", ()),
@@ -2146,8 +2285,12 @@ pub struct BuyInWallet;
 #[policy(name = "buyin-wallet", source = BuyIn, target = Wallet)]
 impl BuyInWallet {
     #[on_event(BuyInStarted)]
-    fn started(&self, event: &BuyInStarted, _ctx: &PolicyContext) -> Commands<Wallet> {
-        Commands::none().to(uuid(&event.wallet), Hold { cents: event.cents })
+    fn started(
+        &self,
+        event: &BuyInStarted,
+        _ctx: &PolicyContext,
+    ) -> Result<Commands<Wallet>, Infallible> {
+        Ok(Commands::none().to(uuid(&event.wallet), Hold { cents: event.cents }))
     }
 }
 
@@ -2159,8 +2302,12 @@ pub struct TranslatingBuyInWallet;
 #[policy(name = "buyin-wallet", source = BuyIn, target = Wallet)]
 impl TranslatingBuyInWallet {
     #[on_event(BuyInStarted)]
-    fn started(&self, event: &BuyInStarted, _ctx: &PolicyContext) -> Commands<Wallet> {
-        Commands::none().to(uuid(&event.wallet), Hold { cents: event.cents })
+    fn started(
+        &self,
+        event: &BuyInStarted,
+        _ctx: &PolicyContext,
+    ) -> Result<Commands<Wallet>, Infallible> {
+        Ok(Commands::none().to(uuid(&event.wallet), Hold { cents: event.cents }))
     }
 
     #[on_refused(Hold)]
@@ -2181,11 +2328,11 @@ pub struct WalletBuyIn;
 #[policy(name = "wallet-buyin", source = Wallet, target = BuyIn)]
 impl WalletBuyIn {
     #[on_event(Held)]
-    fn held(&self, event: &Held, ctx: &PolicyContext) -> Commands<BuyIn> {
-        Commands::none().to(
+    fn held(&self, event: &Held, ctx: &PolicyContext) -> Result<Commands<BuyIn>, Infallible> {
+        Ok(Commands::none().to(
             ctx.correlation_id().clone(),
             RecordHeld { cents: event.cents },
-        )
+        ))
     }
 }
 
@@ -2622,6 +2769,7 @@ mod policy_events {
         });
         let commands = BuyInWallet
             .on_event(&started, &ctx(&correlation(1)))
+            .unwrap()
             .expect("the policy handles BuyInStarted");
         assert_eq!(commands.orders(), [(root(), any(Hold { cents: 30 }))]);
     }
@@ -2632,6 +2780,7 @@ mod policy_events {
     fn a_policy_names_a_process_managers_root_with_the_correlation() {
         let commands = WalletBuyIn
             .on_event(&any(Held { cents: 5 }), &ctx(&correlation(7)))
+            .unwrap()
             .expect("the policy handles Held");
         assert_eq!(
             commands.orders(),
@@ -2644,7 +2793,211 @@ mod policy_events {
     fn an_event_it_does_not_handle_answers_nothing() {
         assert!(BuyInWallet
             .on_event(&any(BuyInHeld { cents: 5 }), &ctx(&correlation(1)))
+            .unwrap()
             .is_none());
+    }
+}
+
+/// A policy whose `#[on_event]` handler fails: a buy-in started with no
+/// stake cannot happen, so it is a bug, not a command to send.
+pub struct FussyBuyInWallet;
+
+#[policy(name = "fussy-buyin-wallet", source = BuyIn, target = Wallet)]
+impl FussyBuyInWallet {
+    #[on_event(BuyInStarted)]
+    fn started(
+        &self,
+        event: &BuyInStarted,
+        _ctx: &PolicyContext,
+    ) -> Result<Commands<Wallet>, Report> {
+        match event.cents > 0 {
+            true => Ok(Commands::none().to(uuid(&event.wallet), Hold { cents: event.cents })),
+            false => Err(
+                Report::new("toy-buyin-no-stake", "a buy-in started with no stake")
+                    .arg("cents", event.cents),
+            ),
+        }
+    }
+}
+
+mod policy_errors {
+    use super::*;
+
+    /// A marked-up policy's handler that fails answers its error: its
+    /// code, its args and its English, for the kernel to dead-letter.
+    #[test]
+    fn a_policy_handlers_error_is_its_answer() {
+        let started = any(BuyInStarted {
+            wallet: root().value.to_vec(),
+            cents: 0,
+        });
+        let ctx = PolicyContext::new(trigger(&correlation(1)), correlation(1), at(1));
+        let error = FussyBuyInWallet
+            .on_event(&started, &ctx)
+            .err()
+            .expect("the handler failed");
+        assert_eq!(
+            said(&error),
+            (
+                "toy-buyin-no-stake",
+                "a buy-in started with no stake".to_string()
+            )
+        );
+        assert_eq!(error.args().len(), 1, "its args kept");
+    }
+
+    /// The same handler, on an event it can answer, answers its commands.
+    #[test]
+    fn a_fallible_policy_handlers_commands_are_its_answer() {
+        let started = any(BuyInStarted {
+            wallet: root().value.to_vec(),
+            cents: 30,
+        });
+        let ctx = PolicyContext::new(trigger(&correlation(1)), correlation(1), at(1));
+        let commands = FussyBuyInWallet
+            .on_event(&started, &ctx)
+            .unwrap()
+            .expect("the policy handles BuyInStarted");
+        assert_eq!(commands.orders(), [(root(), any(Hold { cents: 30 }))]);
+    }
+}
+
+/// Every handler reads angzarr-router's whole `CommandContext` through its
+/// `Context`: under AGGREGATE_HANDLES the conflict window and nonce it must
+/// acknowledge, and under any resolution the stream's cover, the next
+/// sequence, whether the stream has history, the expected sequence and the
+/// resolution.
+mod handler_context {
+    use super::*;
+    use ::angzarr_embedded::next::v1::Handling;
+
+    fn pot() -> Stream<Pot> {
+        Stream::new(root(), None).unwrap()
+    }
+
+    fn pot_cover() -> Cover {
+        Cover {
+            domain: "pot".to_string(),
+            root: Some(root()),
+            edition: None,
+        }
+    }
+
+    /// Stake `n` of `cents`, issued against `expected`, asking for
+    /// AGGREGATE_HANDLES; acknowledging its window or not.
+    fn staking(n: u8, cents: i64, acknowledge: bool, expected: u64) -> CommandBook {
+        let mut book = send("pot", n, any(Stake { cents, acknowledge }), None);
+        book.handling = Some(Handling {
+            expected_sequence: Some(expected),
+            conflict_resolution: ConflictResolution::AggregateHandles as i32,
+        });
+        book
+    }
+
+    /// A stake at the head under AGGREGATE_HANDLES (the window empty, the
+    /// nonce still delivered) and one behind it (a window of one) are each
+    /// accepted once the handler acknowledges its window through
+    /// `ctx.conflict`.
+    #[test]
+    fn an_aggregate_handles_handler_acknowledges_its_window_and_is_accepted() {
+        let registry = registry();
+        let mut pot = pot();
+        assert_eq!(
+            execute(&mut pot, &registry, 1, staking(1, 5, true, 0)),
+            Ok(vec![any(Staked {
+                cents: 5,
+                window: 0
+            })]),
+            "the first stake, at the head: acknowledged, accepted"
+        );
+        assert_eq!(
+            execute(&mut pot, &registry, 2, staking(2, 7, true, 0)),
+            Ok(vec![any(Staked {
+                cents: 7,
+                window: 1
+            })]),
+            "issued before the first: it saw the one event it missed"
+        );
+    }
+
+    /// A handler that never acknowledges its window has its output
+    /// discarded: the router's CONFLICT_UNRESOLVED, the kernel's
+    /// `Unresolved`, dead-lettered, and nothing recorded.
+    #[test]
+    fn an_aggregate_handles_handler_that_never_acknowledges_is_unresolved() {
+        let registry = registry();
+        let mut pot = pot();
+        let log = MemoryDeadLetters::new();
+        let sampled = Sampled {
+            now: at(1),
+            command_id: Uuid::from_bytes([0x07; 16]),
+        };
+        let Err(failure) = pot.execute(staking(1, 5, false, 0), &registry, &sampled, &log, &mut [])
+        else {
+            panic!("unresolved");
+        };
+        assert_eq!(
+            failure,
+            Failure::Kernel(KernelError::Unresolved {
+                stream: pot_cover(),
+                expected: 0,
+                actual: 0,
+            })
+        );
+        let lines = log.lines();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains("decide never acknowledged its conflict window"),
+            "{}",
+            lines[0]
+        );
+        assert!(pot.is_empty(), "nothing recorded");
+    }
+
+    /// A handler reads its stream's domain and root from the router's
+    /// cover.
+    #[test]
+    fn a_handler_reads_its_stream_root_from_the_context() {
+        let registry = registry();
+        let mut pot = pot();
+        assert_eq!(
+            run(&mut pot, &registry, 1, any(Mark {})),
+            Ok(vec![any(Marked {
+                root: root().value.to_vec(),
+                domain: "pot".to_string(),
+            })])
+        );
+    }
+
+    /// A STRICT handler reads the router's context too: the next sequence,
+    /// whether the stream has history, the sequence the command was issued
+    /// against, the resolution, and no conflict.
+    #[test]
+    fn a_strict_handler_receives_the_context_too() {
+        let registry = registry();
+        let mut pot = pot();
+        assert_eq!(
+            run(&mut pot, &registry, 1, any(Peek {})),
+            Ok(vec![any(Peeked {
+                next_sequence: 0,
+                had_prior_events: false,
+                expected_sequence: 0,
+                resolution: ConflictResolution::Strict as i32,
+                conflict: false,
+            })]),
+            "a new stream"
+        );
+        assert_eq!(
+            run(&mut pot, &registry, 2, any(Peek {})),
+            Ok(vec![any(Peeked {
+                next_sequence: 1,
+                had_prior_events: true,
+                expected_sequence: 1,
+                resolution: ConflictResolution::Strict as i32,
+                conflict: false,
+            })]),
+            "a stream with one event"
+        );
     }
 }
 
@@ -3156,8 +3509,12 @@ pub struct RootlessHold;
 #[policy(name = "rootless-hold", source = BuyIn, target = Wallet)]
 impl RootlessHold {
     #[on_event(BuyInStarted)]
-    fn started(&self, event: &BuyInStarted, _ctx: &PolicyContext) -> Commands<Wallet> {
-        Commands::none().to(Uuid::default(), Hold { cents: event.cents })
+    fn started(
+        &self,
+        event: &BuyInStarted,
+        _ctx: &PolicyContext,
+    ) -> Result<Commands<Wallet>, Infallible> {
+        Ok(Commands::none().to(Uuid::default(), Hold { cents: event.cents }))
     }
 }
 
@@ -3168,8 +3525,8 @@ pub struct RootlessRecord;
 #[policy(name = "rootless-record", source = Wallet, target = BuyIn)]
 impl RootlessRecord {
     #[on_event(Held)]
-    fn held(&self, event: &Held, _ctx: &PolicyContext) -> Commands<BuyIn> {
-        Commands::none().to(Uuid::default(), RecordHeld { cents: event.cents })
+    fn held(&self, event: &Held, _ctx: &PolicyContext) -> Result<Commands<BuyIn>, Infallible> {
+        Ok(Commands::none().to(Uuid::default(), RecordHeld { cents: event.cents }))
     }
 }
 
@@ -3185,8 +3542,8 @@ pub struct SharedBuyIn;
 #[policy(name = "shared-buyin", source = Wallet, target = BuyIn)]
 impl SharedBuyIn {
     #[on_event(Held)]
-    fn held(&self, event: &Held, _ctx: &PolicyContext) -> Commands<BuyIn> {
-        Commands::none().to(shared_buy_in(), RecordHeld { cents: event.cents })
+    fn held(&self, event: &Held, _ctx: &PolicyContext) -> Result<Commands<BuyIn>, Infallible> {
+        Ok(Commands::none().to(shared_buy_in(), RecordHeld { cents: event.cents }))
     }
 }
 

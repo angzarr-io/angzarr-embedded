@@ -35,6 +35,7 @@
 
 use std::sync::Arc;
 
+use angzarr_embedded_diagnostic::Report;
 use angzarr_proto::v1::{command_page, Command, CommandBook, CommandPage, Cover, EventRef, Uuid};
 use angzarr_router::error::HandlerError;
 use angzarr_router::policy::PolicyDispatch;
@@ -91,8 +92,16 @@ pub trait Policy: Send + Sync + 'static {
 
     /// The commands this policy sends for `event` (an event of its source,
     /// packed), each with its target stream's root; `None` for an event it
-    /// does not handle.
-    fn on_event(&self, event: &Any, ctx: &PolicyContext) -> Option<Commands<Self::Target>>;
+    /// does not handle; or why it cannot answer the event, a bug (an event
+    /// that cannot happen): its step is dead-lettered with the error's code
+    /// as its reason, and its position moves past the event, as for a
+    /// refused command's step. angzarr-router's `PolicyDispatch::on_event`
+    /// is fallible the same way.
+    fn on_event(
+        &self,
+        event: &Any,
+        ctx: &PolicyContext,
+    ) -> Result<Option<Commands<Self::Target>>, Report>;
 
     /// angzarr's `PolicyService.OnRefused`: the refusal fact's payload for
     /// the policy's source, packed. Pass-through by default: angzarr's
@@ -227,8 +236,10 @@ impl<P: Policy, F: FnMut(Order)> Handler<P::Source> for PolicyHandler<'_, P, F> 
             committed.envelope.recorded_at(),
         );
         let event = committed.event().to_any();
-        let Some(commands) = self.policy.on_event(&event, &ctx) else {
-            return;
+        let commands = match self.policy.on_event(&event, &ctx) {
+            Ok(Some(commands)) => commands,
+            Ok(None) => return,
+            Err(_) => todo!("handler-context: a policy's error on the Handler path"),
         };
         let target = <P::Target as Domain>::NAME;
         for order in orders(
@@ -346,9 +357,13 @@ pub(crate) fn dispatch<P: Policy>(policy: P) -> PolicyDispatch {
                 meta.correlation_id.unwrap_or_default(),
                 meta.recorded_at.unwrap_or_default(),
             );
-            let commands = policy
-                .on_event(event, &ctx)
-                .map_or_else(Vec::new, Commands::into_orders);
+            let commands = match policy.on_event(event, &ctx) {
+                Ok(commands) => commands.map_or_else(Vec::new, Commands::into_orders),
+                Err(_) => todo!(
+                    "handler-context: a policy's error dead-letters its step with its \
+                     reason and moves its position past the event"
+                ),
+            };
             Ok(commands
                 .into_iter()
                 .map(|(root, command)| CommandBook {

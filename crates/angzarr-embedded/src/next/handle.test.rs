@@ -428,18 +428,127 @@ impl crate::next::Policy for DepositsOnly {
         &self,
         event: &crate::next::Any,
         ctx: &crate::next::markup::PolicyContext,
-    ) -> Option<crate::next::markup::Commands<Ledger>> {
-        let crate::next::toys::AccountEvent::Deposited(cents) =
-            crate::next::toys::AccountEvent::from_any(event).ok()?
+    ) -> Result<Option<crate::next::markup::Commands<Ledger>>, crate::next::markup::Report> {
+        let Ok(crate::next::toys::AccountEvent::Deposited(cents)) =
+            crate::next::toys::AccountEvent::from_any(event)
         else {
-            return None;
+            return Ok(None);
         };
         let record = ledger::Record {
             source_sequence: ctx.trigger().sequence,
             cents,
         };
-        Some(crate::next::markup::Commands::none().send(ledger_root(), &record))
+        Ok(Some(
+            crate::next::markup::Commands::none().send(ledger_root(), &record),
+        ))
     }
+}
+
+/// Account deposits → the ledger, but a deposit of 13 cents cannot happen:
+/// the policy answers it with its error, a bug, not a command.
+struct Unlucky;
+
+impl crate::next::Policy for Unlucky {
+    const NAME: &'static str = "unlucky";
+    type Source = Account;
+    type Target = Ledger;
+
+    fn on_event(
+        &self,
+        event: &crate::next::Any,
+        ctx: &crate::next::markup::PolicyContext,
+    ) -> Result<Option<crate::next::markup::Commands<Ledger>>, crate::next::markup::Report> {
+        let Ok(crate::next::toys::AccountEvent::Deposited(cents)) =
+            crate::next::toys::AccountEvent::from_any(event)
+        else {
+            return Ok(None);
+        };
+        if cents == 13 {
+            return Err(crate::next::markup::Report::new(
+                "toy-unlucky-deposit",
+                "a deposit of 13 cents cannot happen",
+            )
+            .arg("cents", cents));
+        }
+        let record = ledger::Record {
+            source_sequence: ctx.trigger().sequence,
+            cents,
+        };
+        Ok(Some(
+            crate::next::markup::Commands::none().send(ledger_root(), &record),
+        ))
+    }
+}
+
+/// A policy's error is a bug its step cannot run past: the step is
+/// dead-lettered with the error's code as its reason, the call fails
+/// downstream with it, and the policy's position moves past the trigger,
+/// as for a refused command's step, so nothing runs it again. The
+/// command's commit stands, and the next event is handled as usual.
+#[test]
+fn a_policys_error_dead_letters_its_step_and_moves_its_position_past_it() {
+    let plain = registry();
+    let mut registry = registry();
+    registry.policy(Unlucky);
+    let log = MemoryDeadLetters::new();
+    let kernel = Kernel::new(&registry, &log);
+    let store = MemoryStore::new();
+    opened(&store, &plain, 1, 0);
+    let before = slice(&store, &cover("account", 1)).next_sequence;
+
+    let failure = kernel
+        .handle::<Account, _, _>(&store, deposit(3, 13), &at(30), &mut ())
+        .ready()
+        .err()
+        .expect("the policy's error fails the call");
+    let Failure::Downstream { error, .. } = &failure else {
+        panic!("a downstream failure: {failure:?}");
+    };
+    assert!(
+        matches!(error, StepError::Rejected(r) if angzarr_embedded_diagnostic::Diagnostic::code(r) == "toy-unlucky-deposit"),
+        "{error:?}"
+    );
+    assert_eq!(
+        slice(&store, &cover("account", 1)).next_sequence,
+        before + 1,
+        "the command's deposit committed, and stays"
+    );
+    assert_eq!(pages(&store, &ledger_cover()), [], "the step sent nothing");
+    let lines = log.lines();
+    assert_eq!(lines.len(), 1, "the failed step, dead-lettered: {lines:?}");
+    assert!(lines[0].starts_with(crate::next::DEAD_LETTER_PREFIX));
+    assert!(
+        lines[0].contains("unlucky: toy-unlucky-deposit"),
+        "the policy, and its error's code as the reason: {}",
+        lines[0]
+    );
+    assert_eq!(
+        position(&store, "unlucky", &cover("account", 1)),
+        before + 1,
+        "past the trigger it failed on"
+    );
+
+    kernel
+        .handle::<Account, _, _>(&store, deposit(4, 5), &at(31), &mut ())
+        .ready()
+        .expect("the next event is handled as usual");
+    let book = crate::next::v1::EventBook {
+        pages: pages(&store, &ledger_cover()),
+        ..Default::default()
+    };
+    assert_eq!(
+        payloads::<ledger::Recorded>(&[book])
+            .iter()
+            .map(|r| (r.source_sequence, r.cents))
+            .collect::<Vec<_>>(),
+        [(before + 1, 5)],
+        "the next deposit, and only it"
+    );
+    assert_eq!(
+        position(&store, "unlucky", &cover("account", 1)),
+        before + 2
+    );
+    assert_eq!(log.lines().len(), 1, "nothing more dead-lettered");
 }
 
 #[test]
@@ -677,7 +786,7 @@ impl crate::next::Policy for TwoLedgers {
         &self,
         _: &crate::next::Any,
         ctx: &crate::next::markup::PolicyContext,
-    ) -> Option<crate::next::markup::Commands<Ledger>> {
+    ) -> Result<Option<crate::next::markup::Commands<Ledger>>, crate::next::markup::Report> {
         let record = ledger::Record {
             source_sequence: ctx.trigger().sequence,
             cents: 0,
@@ -685,7 +794,7 @@ impl crate::next::Policy for TwoLedgers {
         let commands = crate::next::markup::Commands::none()
             .send(two_ledgers_root(0), &record)
             .send(two_ledgers_root(1), &record);
-        Some(commands)
+        Ok(Some(commands))
     }
 }
 
@@ -911,9 +1020,11 @@ impl crate::next::Policy for SweepNine {
         &self,
         _: &crate::next::Any,
         _: &crate::next::markup::PolicyContext,
-    ) -> Option<crate::next::markup::Commands<Account>> {
+    ) -> Result<Option<crate::next::markup::Commands<Account>>, crate::next::markup::Report> {
         let root = cover("account", 9).root.unwrap();
-        Some(crate::next::markup::Commands::none().send(root, &AccountCmd::Sweep))
+        Ok(Some(
+            crate::next::markup::Commands::none().send(root, &AccountCmd::Sweep),
+        ))
     }
 }
 
@@ -976,7 +1087,7 @@ impl crate::next::Policy for AnsweringBookkeeping {
         &self,
         event: &crate::next::Any,
         ctx: &crate::next::markup::PolicyContext,
-    ) -> Option<crate::next::markup::Commands<Ledger>> {
+    ) -> Result<Option<crate::next::markup::Commands<Ledger>>, crate::next::markup::Report> {
         crate::next::Policy::on_event(&Bookkeeping, event, ctx)
     }
 

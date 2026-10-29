@@ -239,7 +239,8 @@
 //! #[policy(name = "buyin-wallet", source = BuyIn, target = Wallet)]
 //! impl BuyInWallet {
 //!     #[on_event(BuyInStarted)]
-//!     fn started(&self, event: &BuyInStarted, ctx: &PolicyContext) -> Commands<Wallet> { .. }
+//!     fn started(&self, event: &BuyInStarted, ctx: &PolicyContext)
+//!         -> Result<Commands<Wallet>, PolicyBug> { .. }
 //! }
 //! ```
 //!
@@ -247,9 +248,13 @@
 //!   ids are derived from), `source` and `target` (each a domain:
 //!   one source, one target).
 //! - [`on_event`]`(Event)`, one per event of the source it handles:
-//!   `fn(&self, event: &Event, ctx: &PolicyContext) -> Commands<Target>`,
-//!   pure and infallible, each command one the target decides, with the
-//!   root of its stream (for a process manager, `ctx.correlation_id()`).
+//!   `fn(&self, event: &Event, ctx: &PolicyContext) -> Result<Commands<Target>, E>`,
+//!   pure, each command one the target decides, with the root of its
+//!   stream (for a process manager, `ctx.correlation_id()`). `E` is any
+//!   `Diagnostic` (`Infallible` for a handler that cannot fail): an `Err`
+//!   is a bug, an event the policy cannot answer, and its step is
+//!   dead-lettered with the error's code as its reason and its position
+//!   moved past the event, as for a refused command's step.
 //!
 //! ## Refusals
 //!
@@ -1422,8 +1427,8 @@
 //! #[policy(name = "timer-lamp", source = Timer, target = Lamp)]
 //! impl TimerLamp {
 //!     #[on_event(Rang)]
-//!     fn rang(&self, _event: &Rang, ctx: &PolicyContext) -> Commands<Lamp> {
-//!         Commands::none().to(ctx.correlation_id().clone(), SwitchOn)
+//!     fn rang(&self, _event: &Rang, ctx: &PolicyContext) -> Result<Commands<Lamp>, Infallible> {
+//!         Ok(Commands::none().to(ctx.correlation_id().clone(), SwitchOn))
 //!     }
 //! }
 //! ```
@@ -2241,8 +2246,8 @@
 //! #[policy(name = "timer-lamp", source = Timer, target = Lamp)]
 //! impl TimerLamp {
 //!     #[on_event(Rang)]
-//!     fn rang(&self, _event: &Rang, ctx: &PolicyContext) -> Commands<Lamp> {
-//!         Commands::none().to(ctx.correlation_id().clone(), SwitchOn)
+//!     fn rang(&self, _event: &Rang, ctx: &PolicyContext) -> Result<Commands<Lamp>, Infallible> {
+//!         Ok(Commands::none().to(ctx.correlation_id().clone(), SwitchOn))
 //!     }
 //!
 //!     #[on_refused(SwitchOn)]
@@ -2374,8 +2379,8 @@
 //! #[policy(name = "timer-lamp", source = Timer, target = Lamp)]
 //! impl TimerLamp {
 //!     #[on_event(Rang)]
-//!     fn rang(&self, _event: &Rang, ctx: &PolicyContext) -> Commands<Lamp> {
-//!         Commands::none().to(ctx.correlation_id().clone(), SwitchOn)
+//!     fn rang(&self, _event: &Rang, ctx: &PolicyContext) -> Result<Commands<Lamp>, Infallible> {
+//!         Ok(Commands::none().to(ctx.correlation_id().clone(), SwitchOn))
 //!     }
 //!
 //!     #[on_refused(SwitchOn)]
@@ -2507,8 +2512,8 @@
 //! #[policy(name = "timer-lamp", source = Timer, target = Lamp, translate(SwitchOn))]
 //! impl TimerLamp {
 //!     #[on_event(Rang)]
-//!     fn rang(&self, _event: &Rang, ctx: &PolicyContext) -> Commands<Lamp> {
-//!         Commands::none().to(ctx.correlation_id().clone(), SwitchOn)
+//!     fn rang(&self, _event: &Rang, ctx: &PolicyContext) -> Result<Commands<Lamp>, Infallible> {
+//!         Ok(Commands::none().to(ctx.correlation_id().clone(), SwitchOn))
 //!     }
 //!
 //!     #[on_refused(SwitchOn)]
@@ -2640,8 +2645,8 @@
 //! #[policy(name = "timer-lamp", source = Timer, target = Lamp)]
 //! impl TimerLamp {
 //!     #[on_event(Rang)]
-//!     fn rang(&self, _event: &Rang, ctx: &PolicyContext) -> Commands<Timer> {
-//!         Commands::none().to(ctx.correlation_id().clone(), StartTimer)
+//!     fn rang(&self, _event: &Rang, ctx: &PolicyContext) -> Result<Commands<Timer>, Infallible> {
+//!         Ok(Commands::none().to(ctx.correlation_id().clone(), StartTimer))
 //!     }
 //! }
 //! ```
@@ -2949,18 +2954,21 @@ fn flow(attr: Tokens, item: Tokens, flow: Flow) -> syn::Result<Tokens> {
                         &self,
                         event: &::angzarr_embedded::next::Any,
                         ctx: &#m::PolicyContext,
-                    ) -> ::core::option::Option<#m::Commands<<Self as #m::Policy>::Target>> {
+                    ) -> ::core::result::Result<
+                        ::core::option::Option<#m::Commands<<Self as #m::Policy>::Target>>,
+                        #m::Report,
+                    > {
                         #(
                             if let ::core::result::Result::Ok(::core::option::Option::Some(event)) =
                                 #m::__decode::<#event_types>(event)
                             {
-                                return ::core::option::Option::Some(
+                                return #m::__answered::<<Self as #m::Policy>::Target, _>(
                                     <#self_ty>::#event_methods(self, &event, ctx),
                                 );
                             }
                         )*
                         let _ = (event, ctx);
-                        ::core::option::Option::None
+                        ::core::result::Result::Ok(::core::option::Option::None)
                     }
                 }
             }
