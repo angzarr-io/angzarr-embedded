@@ -828,6 +828,32 @@ impl Registry {
     pub fn domains(&self) -> impl Iterator<Item = &str> {
         self.domains.keys().map(String::as_str)
     }
+
+    /// Route `domain` to `coordinator`, a coordinator elsewhere that owns
+    /// its streams ([`super::target`]): every command naming it, the
+    /// application's and every policy step's, is handed to the port, and
+    /// nothing of it is loaded or written here. Refused for a domain
+    /// registered already, here or remote.
+    ///
+    /// RED: proposed for review; not implemented.
+    pub fn remote(
+        &mut self,
+        domain: &str,
+        coordinator: impl super::CoordinatorPort + 'static,
+    ) -> Result<(), Misconfigured> {
+        let _ = (domain, coordinator);
+        todo!("red: Registry::remote, the routing seam (design-by-test, 2026-10-30)")
+    }
+
+    /// Where a command naming `domain` is handled: here, through its
+    /// handler; remote, through its coordinator; `None` when it is
+    /// neither (the caller's [`Malformed::UnknownDomain`](super::Malformed::UnknownDomain)).
+    ///
+    /// RED: proposed for review; not implemented.
+    pub fn target(&self, domain: &str) -> Option<super::Target<'_>> {
+        let _ = domain;
+        todo!("red: Registry::target, the routing seam (design-by-test, 2026-10-30)")
+    }
 }
 
 #[cfg(test)]

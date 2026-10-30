@@ -81,6 +81,7 @@ mod registry;
 mod route;
 mod store;
 mod stream;
+mod target;
 mod upcast;
 mod version;
 mod wire;
@@ -138,6 +139,7 @@ pub use store::{
     SnapshotStore, Store, StoreError, StreamRef, Watch, Write, Written,
 };
 pub use stream::{Envelope, Executed, Stream};
+pub use target::{Coordinated, CoordinatorPort, Target};
 pub use upcast::{UpcastFn, UpcastPort, Upcaster};
 pub use version::Rulebook;
 pub use wire::WireError;
