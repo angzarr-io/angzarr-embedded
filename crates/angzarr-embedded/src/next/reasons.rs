@@ -61,6 +61,10 @@ pub mod args {
     pub const ACTUAL: &str = "actual";
     /// The stream's head, its next sequence, where the command is ahead.
     pub const HEAD: &str = "head";
+    /// How many times business code ran before a cap.
+    pub const ATTEMPTS: &str = "attempts";
+    /// The cap reached: a count of runs or deliveries.
+    pub const CAP: &str = "cap";
     /// The domain a refusal fact or a policy's command was addressed to.
     pub const DOMAIN: &str = "domain";
     /// The window's conflict units, comma-separated.

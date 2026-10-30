@@ -220,7 +220,9 @@ fn aggregate_handles_demands_the_nonce_back() {
 /// Outside STRICT, a command with an expected sequence whose write is lost
 /// to another write to its stream is never answered the stale expected
 /// sequence: that key is STRICT's alone (decision 14.45, amended). Under
-/// AGGREGATE_HANDLES it is the store's conflict, as the store answered it.
+/// AGGREGATE_HANDLES its window is re-delivered under the retry cap; with
+/// retrying off that cap is its one delivery, so it is given up at once,
+/// `COORDINATOR_REASON_RETRY_CAP_EXHAUSTED` (decision 14.46).
 #[test]
 fn outside_strict_a_lost_write_is_never_the_stale_key() {
     let registry = registry();
@@ -252,12 +254,13 @@ fn outside_strict_a_lost_write_is_never_the_stale_key() {
     )
     .err()
     .unwrap();
-    assert!(
-        matches!(
-            failure,
-            Failure::Kernel(KernelError::Store(crate::next::StoreError::Conflict { .. }))
-        ),
-        "{failure:?}"
+    assert_eq!(
+        failure,
+        Failure::Kernel(KernelError::RetryCapExhausted {
+            stream: cover("shelf", 3),
+            attempts: 1,
+            cap: 1,
+        })
     );
 }
 

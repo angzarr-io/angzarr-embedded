@@ -102,6 +102,7 @@ fn the_documented_toml_reads() {
 
         [retry]
         max_retries = 3
+        max_race_runs = 10
         initial_backoff_ms = 100
         multiplier = 2.0
         max_backoff_ms = 5000
@@ -181,20 +182,22 @@ fn a_bad_policy_setting_is_refused() {
 }
 
 /// `[retry]` is how the kernel retries a step's retryable failure before
-/// it dead-letters it: `max_retries` (0 turns it off),
-/// `initial_backoff_ms`, `multiplier`, `max_backoff_ms` and `jitter`, each
-/// with a default (3, 100, 2.0, 5000 and 0.2) when left out, as the whole
-/// table may be; an unknown key is refused.
+/// it dead-letters it: `max_retries` (0 turns it off), `max_race_runs`
+/// (the race re-run cap, decision 14.46), `initial_backoff_ms`,
+/// `multiplier`, `max_backoff_ms` and `jitter`, each with a default (3, 10,
+/// 100, 2.0, 5000 and 0.2) when left out, as the whole table may be; an
+/// unknown key is refused.
 #[test]
 fn the_retry_table_sets_the_cap_the_backoff_and_the_jitter() {
     let retry = |text: &str| toml::from_str::<HostConfig>(text).map(|c| c.retry);
     assert_eq!(
         retry(
-            "[retry]\nmax_retries = 5\ninitial_backoff_ms = 50\nmultiplier = 3.0\n\
-             max_backoff_ms = 1000\njitter = 0.5\n"
+            "[retry]\nmax_retries = 5\nmax_race_runs = 4\ninitial_backoff_ms = 50\n\
+             multiplier = 3.0\nmax_backoff_ms = 1000\njitter = 0.5\n"
         ),
         Ok(RetryConfig {
             max_retries: 5,
+            max_race_runs: 4,
             initial_backoff_ms: 50,
             multiplier: 3.0,
             max_backoff_ms: 1_000,
@@ -210,6 +213,7 @@ fn the_retry_table_sets_the_cap_the_backoff_and_the_jitter() {
     );
     let defaults = RetryConfig {
         max_retries: 3,
+        max_race_runs: 10,
         initial_backoff_ms: 100,
         multiplier: 2.0,
         max_backoff_ms: 5_000,

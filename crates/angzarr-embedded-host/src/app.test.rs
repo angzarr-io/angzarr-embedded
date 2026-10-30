@@ -214,8 +214,8 @@ async fn the_kernel_follows_the_configs_retry_setting() {
     drop(app);
     std::fs::write(
         &path,
-        "[store]\nin_memory = true\n\n[retry]\nmax_retries = 5\ninitial_backoff_ms = 50\n\
-         multiplier = 3.0\nmax_backoff_ms = 1000\njitter = 0.5\n",
+        "[store]\nin_memory = true\n\n[retry]\nmax_retries = 5\nmax_race_runs = 4\n\
+         initial_backoff_ms = 50\nmultiplier = 3.0\nmax_backoff_ms = 1000\njitter = 0.5\n",
     )
     .unwrap();
     let app = run(&path, nothing).await.unwrap();
@@ -223,6 +223,7 @@ async fn the_kernel_follows_the_configs_retry_setting() {
         app.kernel().retryable(),
         OnRetryable {
             max_retries: 5,
+            max_race_runs: 4,
             initial_backoff: Duration::from_millis(50),
             multiplier: 3.0,
             max_backoff: Duration::from_millis(1_000),

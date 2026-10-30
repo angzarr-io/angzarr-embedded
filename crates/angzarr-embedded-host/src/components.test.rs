@@ -585,6 +585,7 @@ fn projected(log_path: &Path) -> (Host, Registry) {
 fn quick() -> OnRetryable {
     OnRetryable {
         max_retries: 3,
+        max_race_runs: angzarr_embedded::next::DEFAULT_RACE_RUNS,
         initial_backoff: Duration::from_millis(5),
         multiplier: 1.0,
         max_backoff: Duration::from_millis(5),

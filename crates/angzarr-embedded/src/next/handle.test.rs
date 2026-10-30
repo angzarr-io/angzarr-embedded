@@ -1800,46 +1800,6 @@ fn an_outside_callers_lost_race_without_an_expected_sequence_is_run_again() {
     assert!(log.lines().is_empty(), "{:?}", log.lines());
 }
 
-/// With retrying off, a lost race of a command with no expected sequence
-/// goes back to its caller as the store's conflict, not run again.
-#[test]
-fn with_retrying_off_a_lost_race_goes_back_as_the_stores_conflict() {
-    let registry = registry();
-    let log = MemoryDeadLetters::new();
-    let waits = Waits::default();
-    let kernel =
-        Kernel::new(&registry, &log)
-            .wait_with(&waits)
-            .on_retryable(crate::next::OnRetryable {
-                max_retries: 0,
-                ..crate::next::OnRetryable::default()
-            });
-    let store = Recording::new();
-    opened(&store, &registry, 1, 0);
-    store.fail_write_with(
-        0,
-        crate::next::StoreError::Conflict {
-            stream: Box::new(cover("account", 1)),
-            expected: 2,
-            actual: 3,
-        },
-    );
-    let failure = kernel
-        .handle::<Account, _, _>(&store, deposit(3, 25), &at(30), &mut ())
-        .ready()
-        .err()
-        .expect("the race was lost");
-    assert!(
-        matches!(
-            failure,
-            Failure::Kernel(KernelError::Store(crate::next::StoreError::Conflict { .. }))
-        ),
-        "{failure:?}"
-    );
-    assert!(waits.0.lock().unwrap().is_empty(), "not retried");
-    assert!(log.lines().is_empty(), "{:?}", log.lines());
-}
-
 /// A command under STRICT whose sender set its expected sequence, and
 /// whose write lost a race, decided against a head that is gone: the
 /// stale expected sequence, against the head the store found, back to its

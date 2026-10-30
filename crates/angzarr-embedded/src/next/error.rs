@@ -126,6 +126,23 @@ pub enum KernelError {
         expected: u64,
         actual: u64,
     },
+    /// The kernel gave up on a command or fact that lost a race at its
+    /// write to another write to the same stream, every time, until a cap
+    /// (decision 14.46): one stamped with the head it loaded (no expected
+    /// sequence, or a fact), re-run on the new head, at the race re-run cap
+    /// ([`OnRetryable::max_race_runs`](super::OnRetryable::max_race_runs));
+    /// or an AGGREGATE_HANDLES or COMMUTATIVE one re-delivered its widened
+    /// window, at the retry cap (`max_retries + 1` deliveries). `attempts`
+    /// is how many times business code ran, `cap` the limit reached.
+    /// Dead-lettered under this error, nothing persisted. angzarr's
+    /// INTERNAL, `COORDINATOR_REASON_RETRY_CAP_EXHAUSTED`: the dead letter
+    /// holds the command, so no caller retries it; a fact is answered
+    /// PARKED instead ([`Handled::Parked`](super::Handled::Parked)).
+    RetryCapExhausted {
+        stream: Cover,
+        attempts: u32,
+        cap: u32,
+    },
     /// A command's or fact's payload type that the domain does not decode,
     /// after the upcaster: refused naming its type URL (angzarr's
     /// INVALID_ARGUMENT). Found at step 5, after deduplication.
@@ -353,7 +370,11 @@ impl KernelError {
     /// - a COMMUTATIVE overlap is `COORDINATOR_REASON_CONFLICT_OVERLAP`,
     ///   args `window_units` and `command_units`;
     /// - an unacknowledged AGGREGATE_HANDLES window is
-    ///   `COORDINATOR_REASON_CONFLICT_UNRESOLVED`, no args.
+    ///   `COORDINATOR_REASON_CONFLICT_UNRESOLVED`, no args;
+    ///
+    /// and a command given up at a cap, every write lost to a racing one,
+    /// is `COORDINATOR_REASON_RETRY_CAP_EXHAUSTED`, INTERNAL (a fatal bug's
+    /// status; decision 14.46), args `attempts` and `cap`.
     pub fn as_coded(&self) -> Option<angzarr_router::error::CodedError> {
         use super::reasons::{args, CoordinatorReason};
         use angzarr_router::error::{BusinessStatus, CodedError};
@@ -389,6 +410,15 @@ impl KernelError {
                 ],
             ),
             KernelError::Unresolved { .. } => (CoordinatorReason::ConflictUnresolved, Vec::new()),
+            KernelError::RetryCapExhausted { attempts, cap, .. } => {
+                return Some(super::route::internal(
+                    CoordinatorReason::RetryCapExhausted.as_str_name(),
+                    [
+                        (args::ATTEMPTS.to_string(), attempts.to_string()),
+                        (args::CAP.to_string(), cap.to_string()),
+                    ],
+                ));
+            }
             _ => return None,
         };
         Some(angzarr_router::error::CodedError::immediate(
@@ -414,6 +444,7 @@ impl KernelError {
                 ..
             } => Recovery::Retry,
             KernelError::Upcast { .. }
+            | KernelError::RetryCapExhausted { .. }
             | KernelError::WrongDomain { .. }
             | KernelError::ChainTooDeep { .. }
             | KernelError::TooManySteps { .. }
@@ -515,6 +546,7 @@ impl Diagnostic for KernelError {
                 "angzarr-embedded-next-expected-sequence-ahead"
             }
             KernelError::Unresolved { .. } => "angzarr-embedded-next-unresolved",
+            KernelError::RetryCapExhausted { .. } => "angzarr-embedded-next-retry-cap-exhausted",
             KernelError::Overlap { .. } => "angzarr-embedded-next-overlap",
             KernelError::UnknownType { .. } => "angzarr-embedded-next-unknown-type",
             KernelError::InvalidPayload { .. } => "angzarr-embedded-next-invalid-payload",
@@ -570,6 +602,15 @@ impl Diagnostic for KernelError {
                 ("actual", (*actual).into()),
                 ("window_units", window_units.as_str().into()),
                 ("command_units", command_units.as_str().into()),
+            ],
+            KernelError::RetryCapExhausted {
+                stream: s,
+                attempts,
+                cap,
+            } => vec![
+                ("stream", stream(s)),
+                ("attempts", (*attempts).into()),
+                ("cap", (*cap).into()),
             ],
             KernelError::UnknownType {
                 stream: s,

@@ -129,7 +129,7 @@ pub use error::{
 pub use fixture::{assert_replay_fixtures, check_replay_fixtures, ReplayFixture};
 pub use handle::{
     Handled, Kernel, OnPolicyBug, OnRetryable, Project, ProjectionRoute, ProjectorFailure,
-    Recorded, Wait, DEFAULT_DEPTH_LIMIT,
+    Recorded, Wait, DEFAULT_DEPTH_LIMIT, DEFAULT_RACE_RUNS,
 };
 pub use handler::{Committed, Handler};
 pub use payload::{decode_as, pack, type_name, Decoder, Payload};
@@ -227,6 +227,11 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn angzarr_embedded_diagnostic::D
             stream: stream(),
             expected: 7,
             head: 3,
+        },
+        KernelError::RetryCapExhausted {
+            stream: stream(),
+            attempts: 3,
+            cap: 3,
         },
         KernelError::Unresolved {
             stream: stream(),

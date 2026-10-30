@@ -85,6 +85,12 @@ use angzarr_router::router::DynProjectorHandler;
 /// unless the kernel says otherwise ([`Kernel::limit`]).
 pub const DEFAULT_DEPTH_LIMIT: usize = 8;
 
+/// The race re-run cap by default (decision 14.46): ten runs, the client
+/// library's default retry attempts. A re-run happens only when another
+/// write lands between a load and its append, so ten losses in a row mean
+/// a stream too hot for more runs to win.
+pub const DEFAULT_RACE_RUNS: u32 = 10;
+
 /// What the application builds once and handles every command through: the
 /// registry, where dead letters go, where trigger edges go, and the chain's
 /// depth limit.
@@ -108,10 +114,23 @@ pub struct Kernel<'k> {
 /// draw)`, `draw` uniform in `[0, 1)` ([`Wait::draw`]). On by default;
 /// `max_retries = 0` turns it off: a retryable failure goes back to the
 /// caller at once and is not dead-lettered.
+///
+/// The same cap bounds an AGGREGATE_HANDLES or COMMUTATIVE command's
+/// re-deliveries of its widened window after a race lost at its write
+/// (decision 14.45): at most `max_retries + 1` deliveries, the first
+/// included. A command stamped with the head it loaded (no expected
+/// sequence, or a fact) that loses such a race is re-run on the new head
+/// under a cap of its own, `max_race_runs` (decision 14.46), with the same
+/// backoff and jitter between runs. At either cap the command is
+/// dead-lettered, [`KernelError::RetryCapExhausted`] (a fact,
+/// [`Handled::Parked`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct OnRetryable {
     /// Retries after the first attempt; 0 turns retrying off.
     pub max_retries: u32,
+    /// Runs of a stamped command's business code, the first included,
+    /// while it loses the race at its write: the race re-run cap. 0 is 1.
+    pub max_race_runs: u32,
     /// The wait before the first retry.
     pub initial_backoff: std::time::Duration,
     /// What each retry's wait is the last one's times (at least 1).
@@ -125,10 +144,12 @@ pub struct OnRetryable {
 
 impl Default for OnRetryable {
     /// Three retries, from 100 ms, doubling, at most 5 s apart, a fifth
-    /// of each wait at random.
+    /// of each wait at random; [`DEFAULT_RACE_RUNS`] runs of a stamped
+    /// command that keeps losing its race.
     fn default() -> Self {
         OnRetryable {
             max_retries: 3,
+            max_race_runs: DEFAULT_RACE_RUNS,
             initial_backoff: std::time::Duration::from_millis(100),
             multiplier: 2.0,
             max_backoff: std::time::Duration::from_secs(5),
@@ -313,12 +334,18 @@ pub enum Handled {
     /// Step 3 found the command's events already on its stream: these, in
     /// sequence order. Nothing ran and nothing was written.
     Duplicate(EventBook),
+    /// A fact the kernel gave up on, its write lost to another write to its
+    /// stream until the race re-run cap: dead-lettered, nothing written
+    /// (decision 14.46). A fact is never refused, so its sender is answered
+    /// accepted and parked, with no events.
+    Parked,
 }
 
 impl Handled {
     /// As angzarr's `Outcome`: APPLIED, with each projector failure as a
-    /// `ProjectorFailure` (code INTERNAL), or DUPLICATE. angzarr-embedded never
-    /// answers PARKED: in process, a panicking ingest fails the call.
+    /// `ProjectorFailure` (code INTERNAL), DUPLICATE, or PARKED for a fact
+    /// given up at the race re-run cap. In process, a panicking ingest
+    /// fails the call: it is never parked.
     pub fn outcome(&self) -> Outcome {
         match self {
             Handled::Applied(recorded) => Outcome {
@@ -338,15 +365,20 @@ impl Handled {
                 delivery: DeliveryOutcome::Duplicate as i32,
                 ..Outcome::default()
             },
+            Handled::Parked => Outcome {
+                delivery: DeliveryOutcome::Parked as i32,
+                ..Outcome::default()
+            },
         }
     }
 
     /// The events to answer with: every stream the chain appended to, or
-    /// the duplicate's.
+    /// the duplicate's; none for a parked fact.
     pub fn books(&self) -> Vec<EventBook> {
         match self {
             Handled::Applied(recorded) => recorded.books.clone(),
             Handled::Duplicate(book) => vec![book.clone()],
+            Handled::Parked => Vec::new(),
         }
     }
 }
@@ -558,7 +590,9 @@ impl<'k> Kernel<'k> {
         settled?;
         match self.finish(Handled::Applied(recorded), projections).await? {
             Handled::Applied(recorded) => Ok(recorded),
-            Handled::Duplicate(_) => unreachable!("a resume answers what it recorded"),
+            Handled::Duplicate(_) | Handled::Parked => {
+                unreachable!("a resume answers what it recorded")
+            }
         }
     }
 
@@ -572,7 +606,7 @@ impl<'k> Kernel<'k> {
         let handled = self.project(handled, projections);
         let (steps, books) = match &handled {
             Handled::Applied(recorded) => (recorded.steps.clone(), recorded.books.clone()),
-            Handled::Duplicate(_) => return Ok(handled),
+            Handled::Duplicate(_) | Handled::Parked => return Ok(handled),
         };
         let failures = self.run_projectors(&steps).await;
         if !failures.is_empty() {
@@ -726,7 +760,7 @@ impl<'k> Kernel<'k> {
                 recorded.projector_failures = projections.project(&recorded, self.registry);
                 Handled::Applied(recorded)
             }
-            duplicate => duplicate,
+            unapplied => unapplied,
         }
     }
 }

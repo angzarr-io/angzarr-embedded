@@ -52,6 +52,10 @@ angzarr-embedded-next-downstream = a policy command down the chain failed, at de
 angzarr-embedded-next-stale = stream { $stream } is at { $actual }, not the { $expected } expected: re-read and re-issue
 angzarr-embedded-next-expected-sequence-ahead = stream { $stream } is at { $head }, behind the { $expected } expected: the command names a sequence the stream never reached
 angzarr-embedded-next-overlap = the window of stream { $stream } from { $expected } to { $actual } changed { $window_units }, which the command's change to { $command_units } overlaps: re-read and re-issue
+angzarr-embedded-next-retry-cap-exhausted = gave up on stream { $stream } after { $attempts ->
+        [one] one run
+       *[other] { $attempts } runs
+    }, each losing its write to another write to the stream, at the cap of { $cap }: dead-lettered, nothing persisted
 angzarr-embedded-next-unresolved = decide never acknowledged the window of stream { $stream } from { $expected } to { $actual }
 angzarr-embedded-next-unknown-type = stream { $stream }'s domain does not decode the type { $type_url }
 angzarr-embedded-next-invalid-payload = a { $type_url } for stream { $stream } is not a valid value: { $reason }

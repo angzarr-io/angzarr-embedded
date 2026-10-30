@@ -4164,7 +4164,9 @@ fn settle_in<D: Domain>(
     )?;
     match handled {
         Handled::Applied(recorded) => Ok(recorded),
-        Handled::Duplicate(_) => Ok(::angzarr_embedded::next::Recorded::default()),
+        Handled::Duplicate(_) | Handled::Parked => {
+            Ok(::angzarr_embedded::next::Recorded::default())
+        }
     }
 }
 
@@ -5285,6 +5287,7 @@ mod router {
     fn capped() -> ::angzarr_embedded::next::OnRetryable {
         ::angzarr_embedded::next::OnRetryable {
             max_retries: 3,
+            max_race_runs: 10,
             initial_backoff: std::time::Duration::from_millis(10),
             multiplier: 3.0,
             max_backoff: std::time::Duration::from_millis(50),
@@ -5357,6 +5360,7 @@ mod router {
             kernel.retryable(),
             OnRetryable {
                 max_retries: 3,
+                max_race_runs: 10,
                 initial_backoff: Duration::from_millis(100),
                 multiplier: 2.0,
                 max_backoff: Duration::from_secs(5),

@@ -40,6 +40,9 @@
 //! [retry]
 //! max_retries = 3              # a retryable failure is retried this often
 //!                              # (0: never), then dead-lettered; waiting
+//! max_race_runs = 10           # a command that keeps losing its write to
+//!                              # another write to its stream runs this
+//!                              # often, then is dead-lettered; waiting
 //! initial_backoff_ms = 100     # this long first,
 //! multiplier = 2.0             # this many times longer each retry,
 //! max_backoff_ms = 5000        # at most this long,
@@ -126,6 +129,10 @@ pub struct RetryConfig {
     /// Retries after the first attempt, then the step is dead-lettered; 0
     /// turns retrying off.
     pub max_retries: u32,
+    /// Runs of a command stamped with the head it loaded while it loses its
+    /// write to another write to its stream, the first included: the race
+    /// re-run cap (decision 14.46), then it is dead-lettered.
+    pub max_race_runs: u32,
     /// The wait before the first retry.
     pub initial_backoff_ms: u64,
     /// What each retry's wait is the last one's times.
@@ -143,6 +150,7 @@ impl Default for RetryConfig {
         let kernel = OnRetryable::default();
         RetryConfig {
             max_retries: kernel.max_retries,
+            max_race_runs: kernel.max_race_runs,
             initial_backoff_ms: millis(kernel.initial_backoff),
             multiplier: kernel.multiplier,
             max_backoff_ms: millis(kernel.max_backoff),
@@ -161,6 +169,7 @@ impl RetryConfig {
     pub fn on_retryable(&self) -> OnRetryable {
         OnRetryable {
             max_retries: self.max_retries,
+            max_race_runs: self.max_race_runs,
             initial_backoff: std::time::Duration::from_millis(self.initial_backoff_ms),
             multiplier: self.multiplier,
             max_backoff: std::time::Duration::from_millis(self.max_backoff_ms),
