@@ -24,8 +24,10 @@
 //!
 //! The host supervises its children on a tokio runtime of its own, on its
 //! own threads, so starting and stopping it works the same under any
-//! caller. A remote component's calls are not the host's: each is awaited
-//! on the caller's runtime, which must be tokio's, with its timer.
+//! caller; an async caller does both off its workers
+//! (`tokio::task::spawn_blocking`), as [`crate::run`] does. A remote
+//! component's calls are not the host's: each is awaited on the caller's
+//! runtime, which must be tokio's, with its timer.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -40,7 +42,7 @@ use tokio::io::BufReader;
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::oneshot;
 
-use crate::config::{ComponentKindConfig, HostConfig, Launch, Placement, Supervision};
+use crate::config::{ComponentKindConfig, Expose, HostConfig, Launch, Placement, Supervision};
 use crate::error::HostError;
 use crate::handshake::{read_handshake, SOCKET_ENV};
 use crate::remote::{
@@ -104,11 +106,14 @@ impl Host {
     /// not described: once connected, the host watches its gRPC health
     /// (refused, [`HostError::Health`], when it serves none), and it is up
     /// while that reports SERVING; until then it is handed back down, its
-    /// upcasts retryable. One naming no domain to
-    /// upcast is refused before any child starts
-    /// ([`HostError::UpcasterNoDomain`]). In-process domains are left to the caller. Refused, with every
-    /// child already started stopped again, when any domain's config is
-    /// refused or any child fails to come up the first time.
+    /// upcasts retryable. One naming no domain to upcast is refused before
+    /// any child starts ([`HostError::UpcasterNoDomain`]), as is a
+    /// component other than a domain given an `expose`
+    /// ([`HostError::NotExposable`]). In-process domains are left to the
+    /// caller. Refused, with every child already started stopped again,
+    /// when any domain's config is refused or any child fails to come up
+    /// the first time. It blocks until then: an async caller calls it off
+    /// its workers.
     pub fn start(config: HostConfig) -> Result<Host, HostError> {
         Host::start_with(config, Hooks::default())
     }
@@ -121,6 +126,12 @@ impl Host {
             if !names.insert(component.name.as_str()) {
                 return Err(HostError::DuplicateDomain {
                     domain: component.name.clone(),
+                });
+            }
+            if component.expose != Expose::None && component.kind != ComponentKindConfig::Domain {
+                return Err(HostError::NotExposable {
+                    domain: component.name.clone(),
+                    kind: component.kind.as_str().to_string(),
                 });
             }
             if let Placement::Remote(launch) = component.placement()? {
@@ -341,9 +352,17 @@ impl Host {
 }
 
 impl Drop for Host {
-    /// Stops the children, as [`Host::shutdown`] does.
+    /// Stops the children, as [`Host::shutdown`] does, waiting for them.
+    /// Dropped on a worker of a multi-threaded tokio runtime, it hands the
+    /// worker's other tasks on while it waits
+    /// (`tokio::task::block_in_place`).
     fn drop(&mut self) {
-        self.stop_all();
+        let worker = tokio::runtime::Handle::try_current()
+            .is_ok_and(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread);
+        match worker {
+            true => tokio::task::block_in_place(|| self.stop_all()),
+            false => self.stop_all(),
+        };
     }
 }
 

@@ -1059,8 +1059,10 @@ is not. This list matches angzarr's `docs/design/audit-meta/annals-divergence.md
 2. **No transient outbox.** angzarr-embedded delivers each step in process, so it
    writes no outbox entries; its positions say what is still owed. Its
    command ids are the derived ones, so the audit record is identical.
-3. **Causation is never accepted from outside**, because nothing outside
-   the process can call angzarr-embedded; angzarr needs mTLS-identified framework
+3. **Causation is never accepted from outside**: a book from the
+   application, or through the host's listener (`App::serve`), is a
+   client's, and angzarr-embedded has no framework component outside its
+   process to take one from; angzarr needs mTLS-identified framework
    components for the same guarantee. (This is the command's
    `causation_id`; it is never persisted on events, in either runtime.)
 4. **The dead-letter queue is a logger**, every line prefixed with its

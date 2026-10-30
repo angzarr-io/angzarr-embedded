@@ -20,22 +20,26 @@
 //! sequence, which makes the loss its business failure. Its store is ONE
 //! SQLite connection, which serializes the I/O and nothing else.
 //!
-//! RED (design-by-test, 2026-10-30): [`run`], [`App::handle`],
-//! [`App::events`], [`App::serve`] and [`App::shutdown`] are proposed
-//! async signatures, `todo!()`.
+//! The host's children are started and stopped off the caller's workers
+//! (`tokio::task::spawn_blocking`): the App has no runtime of its own, and
+//! the caller's runtime is tokio's, with its timer.
 
+use std::collections::BTreeMap;
+use std::future::Future;
 use std::path::Path;
 
-use angzarr_embedded::next::v1::{CommandBook, Cover, EventPage};
+use angzarr_embedded::next::v1::{CommandBook, Cover, EventBook, EventPage};
 use angzarr_embedded::next::{
-    Failure, Handled, Kernel, MemoryDeadLetters, OnPolicyBug, OnRetryable, Registry, Rejected,
-    Sampled, StoreError,
+    EventStore, Failure, Handled, Kernel, KernelError, Malformed, MemoryDeadLetters, OnPolicyBug,
+    OnRetryable, Registry, Rejected, Sampled, StoreError, StreamRef, Target,
 };
-use angzarr_router::pb::CommandResponse;
+use angzarr_embedded_diagnostic::Report;
+use angzarr_router::pb::{CommandResponse, ComponentKind};
 use angzarr_store_sqlite::SqliteStore;
 
+use crate::config::{Expose, HostConfig};
 use crate::error::HostError;
-use crate::exposure::Arrival;
+use crate::exposure::{Arrival, NotExposed};
 use crate::host::{ChildExit, Host};
 
 /// Runs the application the config at `config` describes: reads it
@@ -43,13 +47,125 @@ use crate::host::{ChildExit, Host};
 /// kind and calls `register` to register the in-process ones, and opens
 /// its store (SQLite, `[store]`) on the caller's runtime. The [`App`] is
 /// how the application sends commands and reads its streams; dropping it
-/// stops the children.
+/// stops the children. A component exposed (`expose`) that is registered
+/// as a process manager is refused ([`HostError::NotExposable`]): only an
+/// aggregate is served through the host's listener. On any refusal the
+/// children started are stopped again.
 pub async fn run(
     config: impl AsRef<Path>,
     register: impl FnOnce(&mut Registry),
 ) -> Result<App, HostError> {
-    let _ = (config.as_ref(), register);
-    todo!("red: async run (design-by-test, 2026-10-30)")
+    let path = config.as_ref().to_path_buf();
+    let (config, host) = blocking(move || {
+        let config = read(&path)?;
+        let host = Host::start(config.clone())?;
+        Ok((config, host))
+    })
+    .await?;
+    let mut registry = Registry::new();
+    let registered = host
+        .register(&mut registry)
+        .map_err(|e| HostError::Register {
+            cause: Report::of(&e),
+        });
+    if let Err(error) = registered {
+        return Err(stopped(host, error).await);
+    }
+    register(&mut registry);
+    let exposed: BTreeMap<String, Expose> = config
+        .components
+        .iter()
+        .filter(|c| c.expose != Expose::None)
+        .map(|c| (c.name.clone(), c.expose))
+        .collect();
+    if let Some(domain) = exposed.keys().find(|d| process_manager(&registry, d)) {
+        let error = HostError::NotExposable {
+            domain: domain.clone(),
+            kind: PROCESS_MANAGER.to_string(),
+        };
+        return Err(stopped(host, error).await);
+    }
+    let opened = match config.store.in_memory {
+        true => SqliteStore::open_in_memory().await,
+        false => SqliteStore::open(&config.store.path).await,
+    };
+    let store = match opened {
+        Ok(store) => store,
+        Err(e) => {
+            let error = HostError::Store {
+                cause: Report::of(&KernelError::Store(e)),
+            };
+            return Err(stopped(host, error).await);
+        }
+    };
+    Ok(App {
+        host,
+        registry,
+        dead_letters: MemoryDeadLetters::new(),
+        policy_bug: config.policy.on_bug,
+        retry: config.retry.on_retryable(),
+        store,
+        exposed,
+    })
+}
+
+/// The `kind` a process manager is refused exposure under: not a
+/// `[[component]]` kind (a domain is an aggregate or a process manager),
+/// its descriptor's kind.
+const PROCESS_MANAGER: &str = "process_manager";
+
+/// Whether `domain` is registered here as a process manager.
+fn process_manager(registry: &Registry, domain: &str) -> bool {
+    matches!(
+        registry.target(domain),
+        Some(Target::Local(handler)) if handler.kind() == ComponentKind::ProcessManager
+    )
+}
+
+/// The config at `path`, read as TOML.
+fn read(path: &Path) -> Result<HostConfig, HostError> {
+    let text = std::fs::read_to_string(path).map_err(|e| HostError::ConfigUnreadable {
+        path: path.display().to_string(),
+        kind: format!("{:?}", e.kind()),
+    })?;
+    toml::from_str(&text).map_err(|e| HostError::ConfigInvalid {
+        path: path.display().to_string(),
+        offset: e.span().map_or(0, |span| span.start as u64),
+    })
+}
+
+/// `work`, which blocks (starting or stopping the host's children), run
+/// off the caller's async workers. A panic in it is the caller's.
+async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+    match tokio::task::spawn_blocking(work).await {
+        Ok(done) => done,
+        Err(error) => std::panic::resume_unwind(error.into_panic()),
+    }
+}
+
+/// `work` awaited, each poll of it on a multi-threaded runtime's worker
+/// made with the worker's other tasks handed on
+/// (`tokio::task::block_in_place`). The kernel runs business code (a
+/// domain's decide, a policy) synchronously as it is polled, and business
+/// code may block; a task the worker held next (in its slot that no other
+/// worker takes) would wait out the block, so commands for other streams,
+/// which share nothing, would not run at once. On a current-thread
+/// runtime, which has no other worker to hand on to, it is polled as is.
+async fn off_worker<F: Future>(work: F) -> F::Output {
+    let threaded = tokio::runtime::Handle::try_current()
+        .is_ok_and(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread);
+    let mut work = std::pin::pin!(work);
+    std::future::poll_fn(|cx| match threaded {
+        true => tokio::task::block_in_place(|| work.as_mut().poll(cx)),
+        false => work.as_mut().poll(cx),
+    })
+    .await
+}
+
+/// `error`, once `host`'s children are stopped.
+async fn stopped(host: Host, error: HostError) -> HostError {
+    blocking(move || host.shutdown()).await;
+    error
 }
 
 /// A running application: its registry, store, kernel and remote
@@ -65,6 +181,9 @@ pub struct App {
     /// The config's `[retry]`.
     retry: OnRetryable,
     store: SqliteStore,
+    /// Each `[[component]]` exposed to the host's listener, by name: one
+    /// not here is exposed `"none"`.
+    exposed: BTreeMap<String, Expose>,
 }
 
 impl App {
@@ -102,14 +221,15 @@ impl App {
         book: CommandBook,
         sampled: &Sampled,
     ) -> Result<Handled, Failure<Rejected>> {
-        let _ = (book, sampled);
-        todo!("red: async App::handle (design-by-test, 2026-10-30)")
+        let kernel = self.kernel();
+        let mut projections = ();
+        off_worker(kernel.handle_any(&self.store, book, sampled, &mut projections)).await
     }
 
     /// Every event of the stream `cover` names, in sequence order.
     pub async fn events(&self, cover: &Cover) -> Result<Vec<EventPage>, StoreError> {
-        let _ = cover;
-        todo!("red: async App::events (design-by-test, 2026-10-30)")
+        let stream = StreamRef::try_from(cover)?;
+        Ok(self.store.read(stream, 0, None).await?.pages)
     }
 
     /// The exposure seam ([`crate::exposure`]): one request to the host's
@@ -128,14 +248,45 @@ impl App {
         arrived: Arrival,
         sampled: &Sampled,
     ) -> Result<CommandResponse, Failure<Rejected>> {
-        let _ = (book, arrived, sampled);
-        todo!("red: App::serve, the exposure seam (design-by-test, 2026-10-30)")
+        let cover = book.cover.clone();
+        if let Some(cover) = &cover {
+            let expose = self.exposed.get(&cover.domain).copied().unwrap_or_default();
+            if !arrived.admitted_by(expose) {
+                let hidden = NotExposed {
+                    domain: cover.domain.clone(),
+                    arrival: arrived,
+                    expose,
+                };
+                eprintln!("{hidden}");
+                return Err(Failure::Kernel(KernelError::Malformed(
+                    Malformed::UnknownDomain {
+                        domain: cover.domain.clone(),
+                    },
+                )));
+            }
+        }
+        let handled = self.handle(book, sampled).await?;
+        let events = handled
+            .books()
+            .into_iter()
+            .find(|book| book.cover == cover)
+            .unwrap_or(EventBook {
+                cover,
+                ..EventBook::default()
+            });
+        Ok(CommandResponse {
+            events: Some(events),
+            outcome: Some(handled.outcome()),
+        })
     }
 
-    /// Stops the remote components' children ([`Host::shutdown`]) and closes
-    /// the store.
+    /// Stops the remote components' children ([`Host::shutdown`], off the
+    /// caller's workers) and closes the store.
     pub async fn shutdown(self) -> Vec<(String, ChildExit)> {
-        todo!("red: async App::shutdown (design-by-test, 2026-10-30)")
+        let App { host, store, .. } = self;
+        let exits = blocking(move || host.shutdown()).await;
+        drop(store);
+        exits
     }
 }
 
