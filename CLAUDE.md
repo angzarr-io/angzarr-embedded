@@ -206,8 +206,10 @@ them), and again after a change to the gates names a new hook
 taskloom and ctxloom-rs also copied; a change here does not reach them.
 
 lefthook runs the gates one at a time, stopping at the first failure.
-Gates 1 to 5 run at pre-commit; mutation (6) is too slow for every commit
-and runs at pre-push, after the push's tests (`just push-check`). A
+Gates 1 to 5 run at pre-commit, and pre-push runs the push's tests (`just
+push-check`). Mutation (6) runs in no git hook: it runs while tests are
+written and judged, at the end of an unattended run, and in the scheduled CI
+full pass. A
 failing gate is a finding: fix the cause and commit again; never
 `--no-verify`, and never weaken a gate to get through.
 
@@ -227,12 +229,13 @@ failing gate is a finding: fix the cause and commit again; never
    tests (failing tests, not a failed build) are committed on a branch other
    than the default one, with a warning that it cannot merge until they
    pass, and refused on the default branch.
-6. **mutants** (pre-push): `just mutants-push` runs `cargo mutants
-   --in-diff` over what each pushed ref adds (the diff from the remote's
+6. **mutants** (no hook; by hand and in scheduled CI): `just mutants-push`
+   runs `cargo mutants --in-diff` over what each ref given on stdin, as
+   git's pre-push refs, adds (the diff from the remote's
    tip of that ref, or for a new branch from its merge base with the
    default branch, to the commit pushed), in that commit's tree, and holds
    every crate's new code to a 90% kill rate (`mutation_thresholds`; a new
-   crate gets a threshold there before it gets code). Red tests pushed to a
+   crate gets a threshold there before it gets code). Red tests bound for a
    branch other than the default one are not judged and pass with a
    warning. The last run's mutants.out is kept in
    `target/logs/mutants-push/`. `just mutants-staged` makes the same

@@ -1,6 +1,6 @@
 # cargo-mutants (https://mutants.rs): `just mutants` runs it, and so do the
-# gates: `just mutants-push` (pre-push), `just mutants-staged` (by hand) and
-# `just mutants-all` (the full pass, weekly in CI).
+# gates: `just mutants-push` and `just mutants-staged` (by hand; no git hook
+# runs mutation) and `just mutants-all` (the full pass, weekly in CI).
 #
 # Test code is not mutated: a test is what judges a mutant, so a mutant in
 # one measures the measure. The glob names every test file, whatever cfg

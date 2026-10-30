@@ -4,7 +4,7 @@
 #
 # Red tests are allowed on a branch and kept out of the default branch: a
 # commit off it may carry failing tests (`test-commit`), a push to a branch
-# other than it may carry them (`push-check`, `mutants-push`), and the
+# other than it may carry them (`push-check`), and the
 # pre-merge-commit, pre-push and post-merge hooks (`test-commit`,
 # `push-check`, `merge-check`) keep them from reaching it. Every other gate
 # refuses on every branch.
@@ -362,10 +362,14 @@ _require-nextest gate:
         exit 1
     fi
 
-# Mutation-test what a push changes: lefthook's pre-push step, after the
-# tests. Mutation is too slow for every commit, so it is judged once per push,
-# over everything the push adds. For each ref pushed (git's pushed refs on
-# stdin, as `push-check` reads them), `cargo mutants --in-diff` over the diff
+# Mutation-test what a push would add, by hand: no git hook runs mutation (it
+# runs while tests are written and judged, at the end of an unattended run,
+# and in the scheduled full pass, `mutants-all`). It reads git's pre-push refs
+# on stdin, as `push-check` does; for the current branch against origin:
+#
+#     echo "refs/heads/B $(git rev-parse HEAD) refs/heads/B 0" | just mutants-push origin
+#
+# For each ref given, `cargo mutants --in-diff` over the diff
 # from the base `_push-base` names to the commit pushed, in that commit's tree
 # checked out alone (`_commit-tree`), judged by `mutation_thresholds` per
 # crate path; the push is refused with the per-tier verdict and the surviving
@@ -374,10 +378,9 @@ _require-nextest gate:
 # kept in target/logs/mutants-push/ (the last ref judged); its config
 # (excludes, test_workspace) is the repository's .cargo/mutants.toml. A
 # missing cargo-mutants fails rather than skipping: a mutation run that passes
-# by not running tested nothing. `lefthook` is what lefthook.yml passes to
-# stop lefthook skipping it, and is ignored.
+# by not running tested nothing. `lefthook` is ignored.
 #
-# Pushed to a branch other than the remote's default one, a red commit passes
+# For a branch other than the remote's default one, a red commit passes
 # it: when the pushed commit's tests fail unmutated (cargo-mutants' baseline,
 # exit 4), no mutant can be judged, since every one would be "caught" by a
 # test that fails anyway. The push that turns those tests green changes the
@@ -468,9 +471,9 @@ _mutants-pushed scope patch:
 
 # Mutation-test what the commit will contain, by hand: `cargo mutants
 # --in-diff` over the staged diff, in the STAGED tree (`_staged-tree`), judged
-# by `mutation_thresholds` as `mutants-push` is. No hook runs it (the pre-push
-# `mutants-push` is the gate); it is the quick check of a change's tests
-# before committing, its mutants.out kept in target/logs/mutants-staged/.
+# by `mutation_thresholds` as `mutants-push` is. No hook runs it; it is the
+# quick check of a change's tests before committing, its mutants.out kept in
+# target/logs/mutants-staged/.
 #
 # Off the default branch (`_red-allowed`), a red commit passes it, as it does
 # `mutants-push`: when the staged tree's tests fail unmutated (cargo-mutants'
@@ -743,8 +746,8 @@ _scratch-tree source +recipe:
 
 # The red-on-branches rule: red tests may be committed on any branch but the
 # default one, and never reach it. `test-commit` and `mutants-staged` allow
-# them off it, and `mutants-push` (pre-push) a push of them to another
-# branch; `push-check` (pre-push) refuses a push to it, and `merge-check`
+# them off it, and `mutants-push` a diff of them bound for another branch;
+# `push-check` (pre-push) refuses a push to it, and `merge-check`
 # (post-merge) reports a fast-forward of it, whose tests fail.
 # A merge commit into it is `test-commit`'s (pre-merge-commit).
 

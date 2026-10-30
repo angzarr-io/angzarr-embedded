@@ -105,9 +105,9 @@ mutants *crates:
 
 # Mutation-test only the lines changed since `base` (default main): the
 # working tree, uncommitted and untracked files included, against the merge
-# base, so it matches the source cargo-mutants mutates, unjudged. `mutants-push`
-# (pre-push) is the gate, judging what a push adds; `mutants-staged` judges
-# the staged diff by hand; this is the working tree's, by hand.
+# base, so it matches the source cargo-mutants mutates, unjudged. No git hook
+# runs mutation: `mutants-push` judges what a push would add and
+# `mutants-staged` the staged diff, both by hand; this is the working tree's.
 mutants-diff base="main":
     #!/usr/bin/env bash
     set -euo pipefail
