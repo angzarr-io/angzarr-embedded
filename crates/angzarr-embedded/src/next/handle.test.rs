@@ -1817,8 +1817,14 @@ impl crate::next::PolicyPort for Unchecked {
     fn dispatch(
         &self,
         source: &crate::next::v1::EventBook,
-    ) -> Result<Vec<CommandBook>, crate::next::angzarr_router::error::CodedError> {
-        Ok((self.answer)(source))
+    ) -> Result<
+        Vec<crate::next::angzarr_router::pb::PolicyReaction>,
+        crate::next::angzarr_router::error::CodedError,
+    > {
+        Ok(vec![crate::next::angzarr_router::pb::PolicyReaction {
+            trigger_sequence: source.pages[0].sequence,
+            commands: (self.answer)(source),
+        }])
     }
     fn dispatch_refusal(
         &self,

@@ -420,16 +420,15 @@ refusal.
 **A policy's answer is the kernel's to check** (decision 14.42). The
 kernel runs a policy through its `PolicyPort` (angzarr-router's
 `PolicyDispatch`, or one behind another router: `Registry::policy_port`),
-one triggering event at a time, and holds every command it answers to four
-rules (`check_reaction`): the policy's one destination
+one triggering event at a time, and holds every command of each reaction
+(`PolicyResponse.reactions`, by triggering page) to four rules
+(`check_reactions`): the policy's one destination
 (`POLICY_COMMAND_OUTSIDE_DESTINATION`), the trigger's edition, an unset one
 stamped with it (`POLICY_COMMAND_OUTSIDE_EDITION`), a named root
 (`POLICY_COMMAND_NO_ROOT`) and the trigger's correlation, if any
 (`POLICY_COMMAND_OTHER_CORRELATION`). One failure refuses the whole answer
 as the policy's bug: nothing is delivered, the trigger is dead-lettered
-and the position stays. Until angzarr-router answers
-`PolicyResponse.reactions`, grouping by trigger is the kernel's one page
-per call.
+and the position stays.
 
 **A domain is a router table.** `Registry::register` builds angzarr-router's
 `DomainDispatch` over `D::State`: it folds each event through the domain's

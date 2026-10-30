@@ -65,7 +65,7 @@ use super::error::{Failure, KernelError, Step, StepError};
 use super::handler::Handler;
 use super::markup::{self, ProjectionContext};
 use super::payload::type_name;
-use super::policy::{answered, check_reaction, projection, Projection};
+use super::policy::{answered, check_reactions, projection, Projection};
 use super::registry::{PolicyEntry, Registry};
 use super::route::Rejected;
 use super::store::{Port, Store, StorePort};
@@ -909,7 +909,7 @@ impl<'k> Run<'k> {
     /// One policy on one event of `source` (`page`, upcast), through its
     /// [`PolicyPort`](super::PolicyPort): each command it answers a step of
     /// its own, its position written with the last (or alone, when no step
-    /// writes it). The kernel's refusal of the answer ([`check_reaction`]:
+    /// writes it). The kernel's refusal of the answer ([`check_reactions`]:
     /// a command outside the policy's destination or its trigger's edition,
     /// with no root or another correlation) is the policy's bug, as is the
     /// router's own error: dead-lettered, and the position stays. The policy's own error ([`StepError::PolicyFailed`]) and a
@@ -935,14 +935,8 @@ impl<'k> Run<'k> {
             pages: vec![page.clone()],
             ..EventBook::default()
         };
-        let correlation = page.meta.as_ref().and_then(|m| m.correlation_id.as_ref());
-        let checked = policy.dispatch.dispatch(&event).and_then(|commands| {
-            check_reaction(
-                policy.dispatch.output_domain(),
-                source,
-                correlation,
-                commands,
-            )
+        let checked = policy.dispatch.dispatch(&event).and_then(|reactions| {
+            check_reactions(policy.dispatch.output_domain(), &event, reactions)
         });
         let commands = match checked {
             Ok(commands) => commands,

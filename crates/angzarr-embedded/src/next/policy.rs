@@ -41,6 +41,7 @@ use angzarr_proto::v1::{
     command_page, Command, CommandBook, CommandPage, Cover, EventBook, EventPage, EventRef, Uuid,
 };
 use angzarr_router::error::CodedError;
+use angzarr_router::pb::PolicyReaction;
 use angzarr_router::policy::PolicyDispatch;
 use prost_types::Any;
 
@@ -56,9 +57,7 @@ use super::registry::Registry;
 
 /// angzarr-router's table as the kernel runs it. It still checks its own
 /// answer (its destination, edition, root and correlation), which the
-/// kernel's [`check_reaction`] makes redundant; until it answers
-/// `PolicyResponse.reactions` the kernel hands it one triggering page at a
-/// time, so its commands are that page's.
+/// kernel's [`check_reactions`] makes redundant.
 impl PolicyPort for PolicyDispatch {
     fn name(&self) -> &str {
         PolicyDispatch::name(self)
@@ -72,14 +71,8 @@ impl PolicyPort for PolicyDispatch {
         PolicyDispatch::output_domain(self)
     }
 
-    fn dispatch(&self, source: &EventBook) -> Result<Vec<CommandBook>, CodedError> {
-        PolicyDispatch::dispatch(self, source).map(|response| {
-            response
-                .reactions
-                .into_iter()
-                .flat_map(|reaction| reaction.commands)
-                .collect()
-        })
+    fn dispatch(&self, source: &EventBook) -> Result<Vec<PolicyReaction>, CodedError> {
+        PolicyDispatch::dispatch(self, source).map(|response| response.reactions)
     }
 
     fn dispatch_refusal(
@@ -130,6 +123,35 @@ pub(crate) fn translated(
         return Err(refused(codes::REFUSAL_FACT_IDENTIFIED));
     }
     Ok(body.payload.clone())
+}
+
+/// A policy's `reactions` to `source`, checked and stamped by the kernel
+/// per triggering page ([`check_reaction`], the page the reaction's
+/// `trigger_sequence` names giving the correlation), its commands in
+/// reaction order then command order. A reaction naming no page of
+/// `source` is checked against no correlation.
+pub(crate) fn check_reactions(
+    output_domain: &str,
+    source: &EventBook,
+    reactions: Vec<PolicyReaction>,
+) -> Result<Vec<CommandBook>, CodedError> {
+    let trigger = source.cover.clone().unwrap_or_default();
+    let mut commands = Vec::new();
+    for reaction in reactions {
+        let correlation = source
+            .pages
+            .iter()
+            .find(|page| page.sequence == reaction.trigger_sequence)
+            .and_then(|page| page.meta.as_ref())
+            .and_then(|meta| meta.correlation_id.as_ref());
+        commands.extend(check_reaction(
+            output_domain,
+            &trigger,
+            correlation,
+            reaction.commands,
+        )?);
+    }
+    Ok(commands)
 }
 
 /// One triggering event's commands, as a policy answered them, checked and
@@ -244,9 +266,10 @@ pub trait PolicyPort: Send + Sync {
     fn input_domain(&self) -> &str;
     /// The one domain its commands may go to.
     fn output_domain(&self) -> &str;
-    /// `PolicyService.Handle` for `source`, a book holding ONE triggering
-    /// page: the commands business code returned for it, unchecked.
-    fn dispatch(&self, source: &EventBook) -> Result<Vec<CommandBook>, CodedError>;
+    /// `PolicyService.Handle` for `source`: its reactions
+    /// (`PolicyResponse.reactions`), one per page it handled, each the
+    /// commands business code returned for that triggering page, unchecked.
+    fn dispatch(&self, source: &EventBook) -> Result<Vec<PolicyReaction>, CodedError>;
     /// `PolicyService.OnRefused` for `refusal`, its translating callback
     /// handed `ctx`, the refused command's context: the translated fact's
     /// payload, or `None` for no translation (the kernel then passes the

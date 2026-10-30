@@ -149,3 +149,73 @@ fn a_translated_fact_that_is_more_than_a_payload_is_the_policys_bug() {
         code("REFUSAL_FACT_IDENTIFIED")
     );
 }
+
+#[test]
+fn each_reaction_is_held_to_the_page_it_names() {
+    use super::check_reactions;
+    use crate::next::angzarr_router::pb::PolicyReaction;
+    use crate::next::toys::correlation;
+    use crate::next::v1::{EventBook, EventMeta, EventPage};
+    let page = |sequence, n| EventPage {
+        sequence,
+        meta: Some(EventMeta {
+            correlation_id: Some(correlation(n)),
+            ..EventMeta::default()
+        }),
+        ..EventPage::default()
+    };
+    let source = EventBook {
+        cover: Some(cover_in("account", 1, "what-if")),
+        pages: vec![page(4, 1), page(5, 2)],
+        ..EventBook::default()
+    };
+    let carrying = |n, cents| {
+        let mut book = record(None);
+        book.page.as_mut().unwrap().correlation_id = Some(correlation(n));
+        book.page.as_mut().unwrap().body = Some(crate::next::v1::command_page::Body::Command(
+            crate::next::v1::Command {
+                payload: Some(crate::next::pack(&ledger::Record {
+                    source_sequence: 0,
+                    cents,
+                })),
+            },
+        ));
+        book
+    };
+    let reaction = |trigger_sequence, commands| PolicyReaction {
+        trigger_sequence,
+        commands,
+    };
+    let checked = check_reactions(
+        "ledger",
+        &source,
+        vec![
+            reaction(5, vec![carrying(2, 1)]),
+            reaction(4, vec![carrying(1, 2), carrying(1, 3)]),
+            reaction(9, vec![carrying(7, 4)]),
+        ],
+    )
+    .unwrap();
+    let cents: Vec<i64> = checked
+        .iter()
+        .map(|book| {
+            let Some(crate::next::v1::command_page::Body::Command(c)) =
+                &book.page.as_ref().unwrap().body
+            else {
+                unreachable!()
+            };
+            <ledger::Record as prost::Message>::decode(&c.payload.as_ref().unwrap().value[..])
+                .unwrap()
+                .cents
+        })
+        .collect();
+    assert_eq!(cents, [1, 2, 3, 4], "reaction order, then command order");
+    assert!(checked
+        .iter()
+        .all(|b| b.cover.as_ref().unwrap().edition.as_deref() == Some("what-if")));
+
+    let crossed = check_reactions("ledger", &source, vec![reaction(4, vec![carrying(2, 1)])])
+        .err()
+        .unwrap();
+    assert_eq!(crossed.code, "POLICY_COMMAND_OTHER_CORRELATION");
+}
