@@ -1051,3 +1051,126 @@ mod upcasting {
         assert_eq!(extra("upcast_type_url"), Some("/toy.account.v9.Bonus"));
     }
 }
+
+mod admission {
+    //! Admission is the kernel's own (decision 14.42): deduplication, the
+    //! refusal fact's stream check and a process manager's start rule, by
+    //! the input's type name after upcasting against the descriptor's
+    //! `starting_types`. The router's `admit` is never called.
+    use std::sync::Arc;
+
+    use angzarr_embedded_diagnostic::Diagnostic;
+
+    use crate::next::angzarr_router::domain::{Admission, Arrival};
+    use crate::next::angzarr_router::error::CodedError;
+    use crate::next::angzarr_router::pb;
+    use crate::next::angzarr_router::router::CommandHandler;
+    use crate::next::toys::prelude::*;
+    use crate::next::toys::{
+        at, command, cover, fact, fees, handlers, payloads, Account, AccountCmd, AccountEvent,
+        AccountFact, Edit,
+    };
+    use crate::next::v1::DeliveryOutcome;
+    use crate::next::{Failure, Handled, Payload, Registry, Upcaster};
+
+    /// The account as a process manager started only by `Open`, behind a
+    /// handler whose `admit` must never be called.
+    struct NoAdmit(Box<dyn CommandHandler>);
+
+    impl CommandHandler for NoAdmit {
+        fn name(&self) -> &str {
+            self.0.name()
+        }
+        fn kind(&self) -> pb::ComponentKind {
+            pb::ComponentKind::ProcessManager
+        }
+        fn admit(&self, _: &Arrival<'_>) -> Result<Admission, CodedError> {
+            panic!("the kernel admits; the router's admit is never called")
+        }
+        fn command_types(&self) -> Vec<String> {
+            self.0.command_types()
+        }
+        fn dispatch(
+            &self,
+            req: &pb::ContextualCommand,
+        ) -> Result<pb::CommandHandlerResponse, CodedError> {
+            self.0.dispatch(req)
+        }
+        fn component_descriptor(&self) -> Result<pb::ComponentDescriptor, CodedError> {
+            self.0.component_descriptor()
+        }
+    }
+
+    fn registry() -> Registry {
+        let rules = fees();
+        let (version, current) = rules.current();
+        let table = crate::next::route::table::<Account>(
+            Arc::new(fees()),
+            Arc::new(Upcaster::new("account-upcaster", "account")),
+            Arc::new(crate::next::toys::account::AccountState::default),
+            true,
+        )
+        .starts("toy.account.cmd.v1.Open");
+        let inner = handlers::<Account>(*current, version)(table);
+        let mut registry = Registry::new();
+        registry
+            .command_handler("account", NoAdmit(Box::new(inner)))
+            .unwrap();
+        registry
+    }
+
+    fn any(
+        store: &MemoryStore,
+        registry: &Registry,
+        book: crate::next::v1::CommandBook,
+        seconds: i64,
+    ) -> Result<Handled, Failure<crate::next::Rejected>> {
+        let log = crate::next::MemoryDeadLetters::new();
+        crate::next::Kernel::new(registry, &log)
+            .on_retryable(crate::next::toys::no_retries())
+            .handle_any(store, book, &at(seconds), &mut ())
+            .ready()
+    }
+
+    #[test]
+    fn a_non_starting_command_for_a_pm_with_no_instance_is_refused_by_the_kernel() {
+        let registry = registry();
+        let store = MemoryStore::new();
+        let stream = cover("account", 1);
+
+        let deposit = command(stream.clone(), AccountCmd::Deposit(5).to_any()).id(2);
+        let refused = any(&store, &registry, deposit, 10).err().unwrap();
+        let Failure::Rejected(rejected) = &refused else {
+            panic!("a business refusal: {refused:?}");
+        };
+        assert_eq!(
+            rejected.report().code(),
+            "angzarr-embedded-next-pm-no-instance"
+        );
+        assert!(pages(&store, &stream).is_empty(), "nothing written");
+
+        // A non-starting fact is skipped: applied, with no events.
+        let paid = fact(
+            stream.clone(),
+            AccountFact::PaymentReceived(5).to_any(),
+            "pi_1",
+        );
+        let skipped = any(&store, &registry, paid, 11).unwrap();
+        assert_eq!(skipped.outcome().delivery, DeliveryOutcome::Applied as i32);
+        assert!(skipped.books().is_empty());
+
+        // A starting type starts it; then any input is dispatched.
+        let open = || command(stream.clone(), AccountCmd::Open.to_any()).id(1);
+        any(&store, &registry, open(), 12).unwrap();
+        let deposit = command(stream.clone(), AccountCmd::Deposit(5).to_any()).id(3);
+        let handled = any(&store, &registry, deposit, 13).unwrap();
+        assert_eq!(
+            payloads::<AccountEvent>(&handled.books()),
+            [AccountEvent::Deposited(5)]
+        );
+
+        // The kernel deduplicates.
+        let retry = any(&store, &registry, open(), 14).unwrap();
+        assert_eq!(retry.outcome().delivery, DeliveryOutcome::Duplicate as i32);
+    }
+}
