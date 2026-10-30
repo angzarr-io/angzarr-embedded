@@ -172,7 +172,7 @@ fn a_dead_letters_ambiguous_value_is_quoted() {
 #[test]
 fn a_retried_steps_dead_letter_holds_its_command_failure_and_retry_count() {
     use crate::next::v1::angzarr_dead_letter::RejectionDetails;
-    use crate::next::v1::EventProcessingFailedDetails;
+    use crate::next::v1::ProcessingFailedDetails;
     use angzarr_embedded_diagnostic::Report;
     let book = check(
         command(
@@ -203,12 +203,12 @@ fn a_retried_steps_dead_letter_holds_its_command_failure_and_retry_count() {
     assert_eq!(letter.reason, Some(reason.clone()));
     assert_eq!(
         letter.rejection_details,
-        Some(RejectionDetails::EventProcessingFailed(
-            EventProcessingFailedDetails {
+        Some(RejectionDetails::ProcessingFailed(
+            ProcessingFailedDetails {
                 failure: Some(reason),
                 retry_count: 3,
                 is_transient: true,
-                ..EventProcessingFailedDetails::default()
+                ..ProcessingFailedDetails::default()
             }
         ))
     );

@@ -33,7 +33,7 @@ use std::sync::Mutex;
 
 use angzarr_embedded_diagnostic::Diagnostic;
 use angzarr_proto::v1::angzarr_dead_letter::{Payload, RejectionDetails};
-use angzarr_proto::v1::{AngzarrDeadLetter, CommandBook, EventProcessingFailedDetails};
+use angzarr_proto::v1::{AngzarrDeadLetter, CommandBook, ProcessingFailedDetails};
 
 use super::error::cover_text;
 use super::route::diagnostic;
@@ -52,7 +52,8 @@ pub trait DeadLetterLog: Send + Sync {
 /// `name=value` in name order (a value quoted where it would not parse
 /// back, `angzarr_embedded_diagnostic::quote`), then any metadata, a retried step's
 /// `retry_count`, and the command's `command_id` and `stream`, or the
-/// event's `sequence` and `stream`, as the letter holds. Built from
+/// event's `sequence` and `stream` (the failed events', or an edition
+/// removal's `EditionDeleted`), as the letter holds. Built from
 /// angzarr's own `AngzarrDeadLetter`, so a line and an angzarr DLQ entry
 /// say the same things.
 pub fn dead_letter_line(letter: &AngzarrDeadLetter) -> String {
@@ -69,11 +70,11 @@ pub fn dead_letter_line(letter: &AngzarrDeadLetter) -> String {
         fields.extend(pairs(&reason.args));
     }
     fields.extend(pairs(&letter.metadata));
-    if let Some(RejectionDetails::EventProcessingFailed(details)) = &letter.rejection_details {
+    if let Some(RejectionDetails::ProcessingFailed(details)) = &letter.rejection_details {
         fields.push(("retry_count".to_string(), details.retry_count.to_string()));
     }
     match &letter.payload {
-        Some(Payload::RejectedEvents(book)) => {
+        Some(Payload::RejectedEvents(book) | Payload::FailedEditionRemoval(book)) => {
             if let (Some(page), Some(cover)) = (book.pages.first(), &book.cover) {
                 fields.push(("sequence".to_string(), page.sequence.to_string()));
                 fields.push(("stream".to_string(), cover_text(cover)));
@@ -157,12 +158,12 @@ pub(crate) fn retries_exhausted(
     AngzarrDeadLetter {
         payload: Some(payload),
         reason: Some(diagnostic(failure)),
-        rejection_details: Some(RejectionDetails::EventProcessingFailed(
-            EventProcessingFailedDetails {
+        rejection_details: Some(RejectionDetails::ProcessingFailed(
+            ProcessingFailedDetails {
                 failure: Some(diagnostic(failure)),
                 retry_count: retries,
                 is_transient: true,
-                ..EventProcessingFailedDetails::default()
+                ..ProcessingFailedDetails::default()
             },
         )),
         source_component: component.to_string(),

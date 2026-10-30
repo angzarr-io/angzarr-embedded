@@ -950,7 +950,7 @@ included), and the router's own error on malformed input; a policy's
 book the kernel built malformed; a decide under AGGREGATE_HANDLES that
 never acknowledged its window; a policy that failed on its trigger; a
 step whose retryable failure outlasted its retries, with their count
-(`EventProcessingFailedDetails.retry_count`). **Every line starts with the
+(`ProcessingFailedDetails.retry_count`). **Every line starts with the
 prefix**: anything arriving there almost certainly indicates a problem, so
 an operator alerts on it. The line is built from angzarr's own
 `AngzarrDeadLetter`, so it says what an angzarr DLQ entry would.
