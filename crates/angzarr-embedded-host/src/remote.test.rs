@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 
 use crate::rpc::google_rpc::{ErrorInfo, Status as RpcStatus, ERROR_INFO_TYPE_URL};
-use angzarr_router::error::{codes as router_codes, extras, ErrorClass, GrpcCode};
+use angzarr_embedded::next::{class, Class};
+use angzarr_router::error::{codes as router_codes, extras, GrpcCode};
 use prost::Message;
 use prost_types::Any;
 use tonic::Code;
@@ -180,8 +181,8 @@ fn each_status_code_maps_to_the_routers() {
     for code in [Code::Cancelled, Code::Unauthenticated] {
         let status = status_with_details(code, "m", vec![error_info("SOME_REASON", &[])]);
         assert_eq!(
-            status_to_coded("player", &status).grpc.class(),
-            ErrorClass::BugRetryable,
+            class(status_to_coded("player", &status).grpc as i32),
+            Class::BugRetryable,
             "{code:?}"
         );
     }
@@ -299,11 +300,11 @@ fn a_childs_retryable_status_keeps_its_class() {
             status_with_details(code, "m", vec![error_info("PLAYER_BUSY", &[]), refusal()]);
         let coded = status_to_coded("player", &status);
         assert_eq!(coded.code, "PLAYER_BUSY", "{code:?}");
-        let class = match code {
-            Code::Aborted => ErrorClass::BusinessImmediate,
-            _ => ErrorClass::BugRetryable,
+        let expected = match code {
+            Code::Aborted => Class::BusinessImmediate,
+            _ => Class::BugRetryable,
         };
-        assert_eq!(coded.grpc.class(), class, "{code:?}");
+        assert_eq!(class(coded.grpc as i32), expected, "{code:?}");
         assert_eq!(coded.refusal, None, "{code:?}");
     }
 }

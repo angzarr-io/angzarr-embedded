@@ -454,7 +454,10 @@ pub(crate) fn status_to_coded(domain: &str, status: &tonic::Status) -> CodedErro
         extras,
         grpc,
         // Only a business status carries its typed object to a policy.
-        refusal: refusal.filter(|_| grpc.is_business_refusal()),
+        refusal: refusal.filter(|_| {
+            angzarr_embedded::next::class(grpc as i32)
+                == angzarr_embedded::next::Class::BusinessFatal
+        }),
     }
 }
 
