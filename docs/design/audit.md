@@ -422,8 +422,7 @@ positions, resume and the edition-not-forked refusal.
 upcaster and `D::apply` under the rules the event's `rules_version` names
 (an event just emitted, under the current ones), restores a snapshot onto a
 fresh state, images the state as a snapshot when it has a snapshot form,
-resolves COMMUTATIVE by `State::changed`, and runs the upcaster on every
-incoming command and fact payload. The domain's handlers are registered on
+and resolves COMMUTATIVE by `State::changed`. The domain's handlers are registered on
 it: `#[aggregate]` and `#[process_manager]` generate them
 (`markup::Routed`); a hand-written domain registers its own (`on_command`,
 `on_fact`, `on_refused`). `Registry::command_handler` registers any
@@ -431,13 +430,25 @@ it: `#[aggregate]` and `#[process_manager]` generate them
 process behind one), known by its registration hello: its state descriptor
 and rules version. `Kernel::handle_any` handles books for such a domain.
 
+**The kernel upcasts every incoming payload** (decision 14.39) before it
+decides anything by its type (the resolution per command type, a process
+manager's start rule) and before dispatch, through the domain's
+`UpcastPort`: a typed domain's `Upcaster`, or the port
+`Registry::upcast_with` gives a domain registered as a bare
+`CommandHandler` (its upcaster sidecar). The payload goes as a one-page
+`UpcastRequest`; the router is handed the current type only. A payload
+whose upcast fails is `KernelError::Upcast`, reported after the sequence
+check.
+
 **Dispatch.** The kernel hands the router the `ContextualCommand`: the
 usable snapshot and the events after it (upcast), the command with its ids
 and its handling resolved, the nonce, and the instant the input is
 accepted at (`ContextualCommand.recorded_at`). An unknown command type is
 the router's UNKNOWN_COMMAND_TYPE, an unknown fact type NO_FACT_HANDLER, a
 refusal its source has no handler for NO_REFUSAL_HANDLER: the router's own
-errors on malformed input, INTERNAL, bugs.
+errors on malformed input, INTERNAL, bugs. The kernel answers the first two
+with `type_url` the type as sent and `upcast_type_url` the type the router
+was handed (the same when no rule applied).
 
 **Four classes of error, by gRPC status** (decision 14.37 and the owner's
 rulings of 2026-10-29), read in one place (`route::class`):

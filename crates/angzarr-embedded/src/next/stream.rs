@@ -8,7 +8,9 @@ use prost::{Message, Name};
 use prost_types::Timestamp;
 
 use super::check::{check, Malformed, Sampled};
-use super::coordinator::{dispatch, expect, refused, resolution, unknown_domain, Contextual};
+use super::coordinator::{
+    dispatch, expect, refused, resolution, unknown_domain, upcast, with_payload, Contextual,
+};
 use super::dead_letter::DeadLetterLog;
 use super::domain::{Domain, State};
 use super::error::{unreadable, Failure, KernelError, PayloadError, ReplayError};
@@ -351,7 +353,11 @@ impl<D: Domain> Stream<D> {
             .iter()
             .map(Envelope::page)
             .collect();
-        let delivered = command.to_book();
+        let current = upcast(registry, &command);
+        let delivered = match &current {
+            Ok(current) => with_payload(command.to_book(), current),
+            Err(_) => command.to_book(),
+        };
         let arrival = Arrival {
             command: &delivered,
             recorded: &recorded,
@@ -363,7 +369,7 @@ impl<D: Domain> Stream<D> {
             Ok(Admission::Dispatch) => {}
             Err(error) => return Err(refused(&command, error)),
         }
-        let resolution = resolution(registry, &command).map_err(kernel)?;
+        let resolution = resolution(registry, &command, &current).map_err(kernel)?;
         let mut nonces = head;
         let (expected, nonce) = expect(&command, resolution, head, &mut nonces).map_err(kernel)?;
         if nonce.is_some() && expected < self.first {
@@ -381,8 +387,15 @@ impl<D: Domain> Stream<D> {
                 .unwrap_or_default()
                 .to_string(),
         });
+        let current = current.map_err(|error| {
+            kernel(KernelError::Upcast {
+                stream: command.cover().clone(),
+                error,
+            })
+        })?;
         let contextual = Contextual {
             command,
+            current,
             resolution,
             expected,
             snapshot,

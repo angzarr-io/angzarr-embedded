@@ -54,6 +54,10 @@ struct Entry {
     typed: Option<Typed>,
     /// Whether it is a process manager: an absent correlation is its root.
     process_manager: bool,
+    /// What its incoming payloads are upcast through (decision 14.39): a
+    /// typed domain's [`Upcaster`], or the port [`Registry::upcast_with`]
+    /// gave. `None`: nothing is upcast.
+    upcast: Option<Arc<dyn UpcastPort>>,
 }
 
 /// A typed [`Domain`]'s parts, erased.
@@ -348,6 +352,7 @@ impl Registry {
         }
         let rules = Arc::new(rules);
         let upcaster = Arc::new(upcaster);
+        let port: Arc<dyn UpcastPort> = upcaster.clone();
         let table = route::table::<D>(
             Arc::clone(&rules),
             Arc::clone(&upcaster),
@@ -374,6 +379,7 @@ impl Registry {
                 replay: replay::<D>,
             }),
             process_manager,
+            upcast: Some(port),
         };
         self.domains.insert(domain, entry);
         Ok(())
@@ -424,6 +430,7 @@ impl Registry {
                 handler: Box::new(handler),
                 typed: None,
                 process_manager,
+                upcast: None,
             },
         );
         Ok(())
@@ -435,7 +442,10 @@ impl Registry {
     /// it was registered with. A domain not registered PANICS: a bug in the
     /// composition root.
     pub fn upcast_with(&mut self, domain: &str, port: impl UpcastPort + 'static) -> &mut Self {
-        let _ = (domain, port);
+        let Some(entry) = self.domains.get_mut(domain) else {
+            panic!("an upcaster is given for \"{domain}\", which is not registered");
+        };
+        entry.upcast = Some(Arc::new(port));
         self
     }
 
@@ -664,6 +674,11 @@ impl Registry {
             .typed
             .as_ref()
             .map(|t| &*t.upcaster)
+    }
+
+    /// What `domain`'s incoming payloads are upcast through, if anything.
+    pub(crate) fn upcast_port(&self, domain: &str) -> Option<&dyn UpcastPort> {
+        self.domains.get(domain)?.upcast.as_deref()
     }
 
     /// Whether a load may start from `snapshot` of a `domain` stream: its

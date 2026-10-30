@@ -35,24 +35,28 @@
 //!    nonce. An expected sequence past the head is stale under every
 //!    resolution.
 //! 5. [`dispatch`]: the `ContextualCommand` (the stream's snapshot and
-//!    events, upcast; the book with its ids and its handling resolved; the
-//!    nonce) through the router, whose handler decides or records; the
+//!    events, upcast; the book with its ids and its handling resolved, its
+//!    payload upcast through the domain's port before step 3 decided
+//!    anything by its type, decision 14.39; the nonce) through the router, whose handler decides or records; the
 //!    kernel stamps every event it answers with the input's
 //!    [`Identified::meta`]. The router catches a panicking handler, a bug.
 
-use angzarr_proto::v1::{ConflictResolution, EventBook, EventPage, Handling, Snapshot};
+use angzarr_proto::v1::{
+    command_page, CommandBook, ConflictResolution, EventBook, EventPage, Handling, Snapshot,
+};
 use angzarr_router::domain::{Admission, Arrival, StreamStatus};
-use angzarr_router::error::{codes, CodedError};
+use angzarr_router::error::{codes, extras, CodedError};
 use angzarr_router::pb::ContextualCommand;
-use prost_types::Timestamp;
+use prost_types::{Any, Timestamp};
 
 use super::check::{Identified, Malformed, Sampled};
 use super::dead_letter::{write_dead_letter, DeadLetterLog};
-use super::error::{Failure, KernelError};
+use super::error::{Failure, KernelError, UpcastError};
 use super::markup::STEP_LIMIT;
 use super::registry::Registry;
 use super::route::{self, Rejected};
 use super::store::Port;
+use super::upcast::upcast_input;
 
 /// What step 3 found.
 pub(crate) enum Deduplicated {
@@ -79,6 +83,8 @@ pub(crate) struct Novel {
 /// What step 3 read, before its lookup: the resolution, the snapshot, the
 /// events after it, the head and the last instant.
 pub(crate) struct Loaded {
+    /// The input's payload upcast (decision 14.39), or why it could not be.
+    current: Result<Any, UpcastError>,
     resolution: ConflictResolution,
     snapshot: Option<Snapshot>,
     pages: Vec<EventPage>,
@@ -90,6 +96,9 @@ pub(crate) struct Loaded {
 /// `ContextualCommand`, in process. Domain-blind: the history is pages.
 pub(crate) struct Contextual {
     pub(crate) command: Identified,
+    /// The command's payload upcast (decision 14.39): what the router is
+    /// handed in its place.
+    pub(crate) current: Any,
     /// Never UNSPECIFIED.
     pub(crate) resolution: ConflictResolution,
     /// The book's, or the head, stamped.
@@ -173,7 +182,10 @@ pub(crate) async fn deduplicate<P: Port>(
     let handler = registry
         .handler(command.domain())
         .ok_or_else(|| Failure::Kernel(unknown_domain(command.domain())))?;
-    let book = command.to_book();
+    let book = match &loaded.current {
+        Ok(current) => with_payload(command.to_book(), current),
+        Err(_) => command.to_book(),
+    };
     let arrival = Arrival {
         command: &book,
         recorded: &recorded,
@@ -196,23 +208,41 @@ pub(crate) async fn deduplicate<P: Port>(
     }
 }
 
+/// `command`'s payload upcast through its domain's port (decision 14.39),
+/// before the kernel decides anything by its type: as sent when the domain
+/// has no port.
+pub(crate) fn upcast(registry: &Registry, command: &Identified) -> Result<Any, UpcastError> {
+    match registry.upcast_port(command.domain()) {
+        Some(port) => upcast_input(port, command.domain(), command.payload()),
+        None => Ok(command.payload().clone()),
+    }
+}
+
+/// `book` carrying `payload` in its body's place, the arm kept.
+pub(crate) fn with_payload(mut book: CommandBook, payload: &Any) -> CommandBook {
+    if let Some(body) = book.page.as_mut().and_then(|page| page.body.as_mut()) {
+        match body {
+            command_page::Body::Command(c) => c.payload = Some(payload.clone()),
+            command_page::Body::Fact(f) => f.payload = Some(payload.clone()),
+        }
+    }
+    book
+}
+
 /// The command's resolution ([`Registry::resolve`]): never UNSPECIFIED.
 /// The configuration per command type is looked up by the command's
-/// current type, after the domain's upcaster, so an old type has the
-/// setting of the type it upcasts to. A payload whose upcast fails is
-/// looked up as sent; the router then reports the failure.
+/// `current` type, after upcasting, so an old type has the setting of the
+/// type it upcasts to. A payload whose upcast failed is looked up as sent;
+/// the failure is reported at [`load`].
 pub(crate) fn resolution(
     registry: &Registry,
     command: &Identified,
+    current: &Result<Any, UpcastError>,
 ) -> Result<ConflictResolution, KernelError> {
     let domain = command.domain();
-    let sent = command.payload();
-    let current = registry
-        .upcaster(domain)
-        .and_then(|u| u.upcast_command(sent).ok())
-        .map_or_else(|| sent.type_url.clone(), |any| any.type_url);
+    let current = current.as_ref().unwrap_or(command.payload());
     registry
-        .resolve(domain, &current, command.conflict_resolution())
+        .resolve(domain, &current.type_url, command.conflict_resolution())
         .ok_or_else(|| unknown_domain(domain))
 }
 
@@ -247,7 +277,8 @@ pub(crate) async fn read<P: Port>(
     registry: &Registry,
     command: &Identified,
 ) -> Result<Loaded, KernelError> {
-    let resolution = resolution(registry, command)?;
+    let current = upcast(registry, command);
+    let resolution = resolution(registry, command, &current)?;
     let cover = command.cover();
     let windowed = resolution != ConflictResolution::Strict;
     let snapshot = port
@@ -275,6 +306,7 @@ pub(crate) async fn read<P: Port>(
         (snapshot, _) => snapshot,
     };
     Ok(Loaded {
+        current,
         resolution,
         snapshot,
         pages: slice.pages,
@@ -288,8 +320,13 @@ pub(crate) async fn read<P: Port>(
 pub(crate) fn load(novel: Novel, nonces: &mut u64) -> Result<Contextual, KernelError> {
     let Novel { command, loaded } = novel;
     let (expected, nonce) = expect(&command, loaded.resolution, loaded.head, nonces)?;
+    let current = loaded.current.map_err(|error| KernelError::Upcast {
+        stream: command.cover().clone(),
+        error,
+    })?;
     Ok(Contextual {
         command,
+        current,
         resolution: loaded.resolution,
         expected,
         snapshot: loaded.snapshot,
@@ -323,6 +360,12 @@ pub(crate) fn dispatch(
     let contextual = contextual_command(command, registry, sampled.now).map_err(kernel)?;
     let recorded_at = contextual.recorded_at.unwrap_or_default();
     let response = handler.dispatch(&contextual).map_err(|error| {
+        let error = match error.code.as_str() {
+            codes::UNKNOWN_COMMAND_TYPE | codes::NO_FACT_HANDLER => {
+                as_sent(error, identified.payload(), &command.current)
+            }
+            _ => error,
+        };
         let (stream, expected, actual) =
             (identified.cover().clone(), command.expected, command.head);
         match error.code.as_str() {
@@ -373,6 +416,20 @@ pub(crate) fn dispatch(
         .collect())
 }
 
+/// The router's unknown-type refusal `error`, as the caller is answered
+/// (decision 14.39): `type_url` the type `sent`, `upcast_type_url` the type
+/// the router was handed, `current`. The same with no rule applied.
+fn as_sent(mut error: CodedError, sent: &Any, current: &Any) -> CodedError {
+    error
+        .extras
+        .insert(extras::TYPE_URL.to_string(), sent.type_url.clone());
+    error.extras.insert(
+        extras::UPCAST_TYPE_URL.to_string(),
+        current.type_url.clone(),
+    );
+    error
+}
+
 /// The `ContextualCommand` step 5 hands `command`'s domain: its stream's
 /// history upcast, its handling resolved (COMMUTATIVE at the head is handed
 /// over as STRICT, with no nonce), the delivery's nonce, and the instant
@@ -405,7 +462,7 @@ pub(crate) fn contextual_command(
         }
         resolution => (resolution, command.nonce.clone()),
     };
-    let mut book = identified.to_book();
+    let mut book = with_payload(identified.to_book(), &command.current);
     book.handling = Some(Handling {
         expected_sequence: Some(command.expected),
         conflict_resolution: resolution as i32,

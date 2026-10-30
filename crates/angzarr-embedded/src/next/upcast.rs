@@ -63,6 +63,31 @@ impl UpcastPort for Upcaster {
     }
 }
 
+/// `payload`, an incoming command's or fact's, upcast through `port` for
+/// `domain` (decision 14.39): sent as a one-page request whose page carries
+/// only the payload, the payload of the page returned taken. A port that
+/// answers no page leaves it as sent.
+pub(crate) fn upcast_input(
+    port: &dyn UpcastPort,
+    domain: &str,
+    payload: &Any,
+) -> Result<Any, UpcastError> {
+    let request = UpcastRequest {
+        domain: domain.to_string(),
+        events: vec![EventPage {
+            payload: Some(payload.clone()),
+            ..EventPage::default()
+        }],
+    };
+    Ok(port
+        .upcast(&request)?
+        .events
+        .into_iter()
+        .next()
+        .and_then(|page| page.payload)
+        .unwrap_or_else(|| payload.clone()))
+}
+
 /// One rule: its source type's full name, its target's when known (typed
 /// rules), and the transform.
 struct Rule {
