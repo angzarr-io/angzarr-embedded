@@ -447,7 +447,7 @@ rulings of 2026-10-29), read in one place (`route::class`):
 | business, fatal | FAILED_PRECONDITION, INVALID_ARGUMENT, NOT_FOUND, ALREADY_EXISTS, OUT_OF_RANGE, PERMISSION_DENIED | a rejection, `Failure::Rejected(Rejected)`, `Recovery::Business`: to the caller, or the issuing policy's refusal path; never retried, never dead-lettered |
 | business, immediate | ABORTED (a stale or overlapping command, a lost race, or a handler's own choice) | back to an outside caller at once, to reload (`Recovery::Retry`), never dead-lettered; a policy's step, whose caller is the kernel, is reloaded and run again under the capped backoff, then dead-lettered |
 | bug, fatal | INTERNAL, UNKNOWN, DATA_LOSS | `KernelError::Router`, `Recovery::Bug`, dead-lettered at once |
-| bug, retryable | every other status (UNAVAILABLE, UNIMPLEMENTED, an in-process handler's DEADLINE_EXCEEDED and RESOURCE_EXHAUSTED as it picked them; a remote child's DEADLINE_EXCEEDED, RESOURCE_EXHAUSTED and the rest arrive UNAVAILABLE) | retried under the capped backoff, then dead-lettered; `Recovery::Retry` |
+| bug, retryable | every other status (UNAVAILABLE, DEADLINE_EXCEEDED and RESOURCE_EXHAUSTED, a handler's in process or a remote child's as it picked them; UNIMPLEMENTED; a remote child's CANCELLED or UNAUTHENTICATED, and a call that failed on the way, arrive UNAVAILABLE) | retried under the capped backoff, then dead-lettered; `Recovery::Retry` |
 
 A handler's refusal carries its code and args (a typed refusal is keyed
 COMMAND_REFUSED, its object's type as `refusal_type`, the object beside).
