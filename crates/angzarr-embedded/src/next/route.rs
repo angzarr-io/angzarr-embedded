@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 use angzarr_embedded_diagnostic::{Arg, Diagnostic, Report};
 use angzarr_proto::v1::ConflictResolution;
 use angzarr_router::domain::DomainDispatch;
-use angzarr_router::error::{BusinessStatus, CodedError, ErrorClass, GrpcCode, HandlerError};
+use angzarr_router::error::{BusinessStatus, CodedError, GrpcCode, HandlerError};
 use angzarr_router::rebuild::{FoldFailure, Rebuilder};
 use prost::Message;
 use prost_types::Any;
@@ -172,12 +172,12 @@ impl Diagnostic for Rejected {
 /// behalf (a typed refusal's COMMAND_REFUSED, a process manager's
 /// PM_NO_INSTANCE).
 pub(crate) fn is_rejection(error: &CodedError) -> bool {
-    error.grpc.class() == ErrorClass::BusinessFatal
+    super::error::class(error.grpc as i32) == super::error::Class::BusinessFatal
 }
 
 /// Whether the router's `error`, which the kernel keeps as
 /// [`KernelError::Router`](super::KernelError::Router) (never a refusal,
-/// [`is_rejection`]: that is [`Rejected`]), is a fatal bug (`ErrorClass`:
+/// [`is_rejection`]: that is [`Rejected`]), is a fatal bug ([`class`](super::class):
 /// INTERNAL, UNKNOWN, DATA_LOSS), never a policy's failure
 /// ([`POLICY_FAILED`]). A handler's bug is UNHANDLED_HANDLER_ERROR, its
 /// own code and args its `cause`; the router's own errors on malformed
@@ -186,7 +186,8 @@ pub(crate) fn is_rejection(error: &CodedError) -> bool {
 /// the kernel says to stay ([`OnPolicyBug`](super::OnPolicyBug)). A
 /// retryable bug is retried first, then dead-lettered.
 pub(crate) fn is_handler_fault(error: &CodedError) -> bool {
-    error.code != POLICY_FAILED && error.grpc.class() == ErrorClass::BugFatal
+    error.code != POLICY_FAILED
+        && super::error::class(error.grpc as i32) == super::error::Class::BugFatal
 }
 
 /// A handler's refusal `rejection`, with its typed refusal object, as the

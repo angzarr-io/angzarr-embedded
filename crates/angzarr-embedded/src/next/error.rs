@@ -525,20 +525,23 @@ pub enum Class {
 
 /// The class of the gRPC status `code`, by its wire number.
 pub fn class(code: i32) -> Class {
-    let _ = code;
-    Class::BugRetryable
+    match code {
+        3 | 5 | 6 | 7 | 9 | 11 => Class::BusinessFatal,
+        10 => Class::BusinessImmediate,
+        2 | 13 | 15 => Class::BugFatal,
+        _ => Class::BugRetryable,
+    }
 }
 
 /// What to do about the router's error: its status decides its class
-/// (angzarr-router's `ErrorClass`, decision 14.37). A business refusal is
+/// ([`class`], decision 14.37). A business refusal is
 /// the caller's to hear, a fatal bug an operator's; ABORTED (reload) and a
 /// retryable bug are run again.
 fn router_recovery(error: &angzarr_router::error::CodedError) -> Recovery {
-    use angzarr_router::error::ErrorClass;
-    match error.grpc.class() {
-        ErrorClass::BusinessFatal => Recovery::Business,
-        ErrorClass::BugFatal => Recovery::Bug,
-        ErrorClass::BusinessImmediate | ErrorClass::BugRetryable => Recovery::Retry,
+    match class(error.grpc as i32) {
+        Class::BusinessFatal => Recovery::Business,
+        Class::BugFatal => Recovery::Bug,
+        Class::BusinessImmediate | Class::BugRetryable => Recovery::Retry,
     }
 }
 

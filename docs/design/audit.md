@@ -472,7 +472,9 @@ with `type_url` the type as sent and `upcast_type_url` the type the router
 was handed (the same when no rule applied).
 
 **Four classes of error, by gRPC status** (decision 14.37 and the owner's
-rulings of 2026-10-29), read in one place (`route::class`):
+rulings of 2026-10-29), decided by the kernel itself in one place
+(`next::class`, decision 14.42; the router answers a status and a key and
+never classifies):
 
 | Class | Statuses | What the kernel does |
 |---|---|---|

@@ -61,6 +61,7 @@ use super::coordinator::{
 };
 use super::dead_letter::{write_dead_letter, write_letter, write_retries_exhausted, DeadLetterLog};
 use super::domain::Domain;
+use super::error::{class, Class};
 use super::error::{Failure, KernelError, Step, StepError};
 use super::handler::Handler;
 use super::markup::{self, ProjectionContext};
@@ -71,7 +72,6 @@ use super::route::Rejected;
 use super::store::{Port, Store, StorePort};
 use super::stream::{Envelope, Stream};
 use angzarr_embedded_diagnostic::Report;
-use angzarr_router::error::ErrorClass;
 
 /// How deep a chain may go before it is a [`KernelError::ChainTooDeep`],
 /// unless the kernel says otherwise ([`Kernel::limit`]).
@@ -730,26 +730,26 @@ enum Origin {
     Wrote(u64),
 }
 
-/// The class of a step's `failure` (angzarr-router's `ErrorClass`), if it
+/// The class of a step's `failure` ([`class`]), if it
 /// is one the kernel may run again: a stale command or a lost race
 /// (ABORTED) is the caller's to reload; an unreachable handler or store,
 /// and a router error under a retryable status, are retryable bugs; a
 /// router error's own class otherwise. `None` for a failure never run
 /// again: a refusal, a decide that never acknowledged its window (already
 /// dead-lettered), any other.
-fn failure_class(failure: &Failure<Rejected>) -> Option<ErrorClass> {
+fn failure_class(failure: &Failure<Rejected>) -> Option<Class> {
     match failure {
         Failure::Kernel(KernelError::Stale { .. })
         | Failure::Kernel(KernelError::Store(super::StoreError::Conflict { .. })) => {
-            Some(ErrorClass::BusinessImmediate)
+            Some(Class::BusinessImmediate)
         }
-        Failure::Kernel(KernelError::HandlerUnavailable { .. }) => Some(ErrorClass::BugRetryable),
+        Failure::Kernel(KernelError::HandlerUnavailable { .. }) => Some(Class::BugRetryable),
         Failure::Kernel(KernelError::Store(error))
             if super::error::store_recovery(error) == super::Recovery::Retry =>
         {
-            Some(ErrorClass::BugRetryable)
+            Some(Class::BugRetryable)
         }
-        Failure::Kernel(KernelError::Router(error)) => Some(error.grpc.class()),
+        Failure::Kernel(KernelError::Router(error)) => Some(class(error.grpc as i32)),
         _ => None,
     }
 }
@@ -785,8 +785,8 @@ impl<'k> Run<'k> {
     fn retried(&self, failure: &Failure<Rejected>, policy_step: bool) -> bool {
         self.retry.max_retries > 0
             && match failure_class(failure) {
-                Some(ErrorClass::BugRetryable) => true,
-                Some(ErrorClass::BusinessImmediate) => policy_step,
+                Some(Class::BugRetryable) => true,
+                Some(Class::BusinessImmediate) => policy_step,
                 _ => false,
             }
     }
@@ -1131,8 +1131,8 @@ impl<'k> Run<'k> {
             Ok(stepped) => return Ok(stepped),
             Err(Failure::Kernel(KernelError::Router(error)))
                 if !matches!(
-                    error.grpc.class(),
-                    ErrorClass::BusinessImmediate | ErrorClass::BugRetryable
+                    class(error.grpc as i32),
+                    Class::BusinessImmediate | Class::BugRetryable
                 ) =>
             {
                 error
