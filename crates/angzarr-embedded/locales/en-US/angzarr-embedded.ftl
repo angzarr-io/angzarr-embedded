@@ -92,6 +92,7 @@ angzarr-embedded-next-misconfigured-empty-rules-version = domain "{ $domain }"'s
 angzarr-embedded-next-misconfigured-bad-state-descriptor = domain "{ $domain }"'s state descriptor lists a value that is not a resolution, or lacks STRICT or AGGREGATE_HANDLES
 angzarr-embedded-next-misconfigured-unsupported-resolution = domain "{ $domain }" is configured { $resolution }, which its state does not support
 angzarr-embedded-next-misconfigured-unsupported-command-resolution = domain "{ $domain }" configures { $command_type } { $resolution }, which its state does not support
+angzarr-embedded-next-misconfigured-remote-source = "{ $component }" handles the events of domain "{ $domain }", which is remote: its events are its coordinator's, never this process's
 
 # angzarr-router's refusals, one code per reason.
 angzarr-embedded-next-any-decode-failed = a payload did not decode as the type it names: send a payload of its type

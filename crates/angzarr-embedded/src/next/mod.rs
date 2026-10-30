@@ -395,6 +395,10 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn angzarr_embedded_diagnostic::D
             command_type: Some("toy.cmd.v1.Note".to_string()),
             resolution: ConflictResolution::Commutative,
         },
+        Misconfigured::RemoteSource {
+            domain: domain(),
+            component: "bookkeeping".to_string(),
+        },
     ];
 
     let mut samples: Vec<Box<dyn angzarr_embedded_diagnostic::Diagnostic>> = Vec::new();

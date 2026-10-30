@@ -15,7 +15,7 @@ use angzarr_router::router::CommandHandler;
 
 use super::*;
 use crate::next::toys::prelude::*;
-use crate::next::toys::{at, command, command_id, cover};
+use crate::next::toys::{at, command, command_id, cover, Edit};
 use crate::next::v1::{
     command_page, Command, CommandBook, CommandPage, ComponentDescriptor, ComponentKind,
     ConflictResolution, ContextualCommand, Cover, DeliveryOutcome, EventBook, EventPage, Outcome,
@@ -392,4 +392,151 @@ fn a_policy_step_into_a_remote_domain_goes_to_its_coordinator() {
     assert_eq!(covers, [Some(cover("till", 1)), Some(cover("bank", 1))]);
     assert_eq!(position(&store, "till-bank", &cover("till", 1)), 1);
     assert!(pages(&store, &cover("bank", 1)).is_empty());
+}
+
+/// A policy of the till's events, into nothing it ever reaches.
+fn till_policy(name: &str, source: &str) -> PolicyDispatch {
+    PolicyDispatch::new(name, source, "till").on_event(RUNG, |_, _| Ok(vec![]))
+}
+
+/// A projector, as the router's `ProjectorHandler`, that projects nothing.
+struct Quiet;
+
+impl angzarr_router::router::ProjectorHandler for Quiet {
+    fn name(&self) -> &str {
+        "quiet"
+    }
+
+    async fn dispatch(&self, _: &EventBook) -> Result<crate::next::v1::Projection, CodedError> {
+        Ok(crate::next::v1::Projection::default())
+    }
+}
+
+/// Remote stays remote (owner ruling): a remote domain's events are its
+/// coordinator's, never written here, so a policy here of them would
+/// never run. Registering one after the domain is routed remote is
+/// refused at startup, naming both.
+#[test]
+#[should_panic(
+    expected = "angzarr-embedded-next-misconfigured-remote-source domain=bank component=bank-till"
+)]
+fn a_policy_of_a_remote_domains_events_is_refused() {
+    let coordinator = FakeCoordinator::answering(Answer::Events(DeliveryOutcome::Applied, vec![]));
+    let mut registry = registry_with(&coordinator);
+    registry.policy_dispatch(till_policy("bank-till", "bank"));
+}
+
+/// The same, a projector of a remote domain's events.
+#[test]
+#[should_panic(
+    expected = "angzarr-embedded-next-misconfigured-remote-source domain=bank component=quiet"
+)]
+fn a_projector_of_a_remote_domains_events_is_refused() {
+    let coordinator = FakeCoordinator::answering(Answer::Events(DeliveryOutcome::Applied, vec![]));
+    let mut registry = registry_with(&coordinator);
+    registry.projector_handler("bank", Quiet);
+}
+
+/// In either order: routing a domain remote once a policy or projector
+/// here handles its events is refused, naming the domain and the
+/// component; a policy of a local domain is not.
+#[test]
+fn routing_remote_a_domain_whose_events_a_component_here_handles_is_refused() {
+    let coordinator = FakeCoordinator::answering(Answer::Events(DeliveryOutcome::Applied, vec![]));
+    let mut registry = Registry::new();
+    registry.policy_dispatch(till_policy("bank-till", "bank"));
+    registry.projector_handler("ledger", Quiet);
+    registry.policy_dispatch(till_policy("till-till", "till"));
+    assert_eq!(
+        registry.remote("bank", coordinator.clone()),
+        Err(Misconfigured::RemoteSource {
+            domain: "bank".to_string(),
+            component: "bank-till".to_string(),
+        })
+    );
+    assert_eq!(
+        registry.remote("ledger", coordinator.clone()),
+        Err(Misconfigured::RemoteSource {
+            domain: "ledger".to_string(),
+            component: "quiet".to_string(),
+        })
+    );
+    assert_eq!(registry.remote("vault", coordinator.clone()), Ok(()));
+    assert!(registry.target("bank").is_none(), "not routed remote");
+}
+
+/// Remote defaults are the remote coordinator's (owner ruling): a command
+/// the caller sent with no correlation is handed to the coordinator with
+/// none, so it applies its own default (a process manager's root,
+/// decision 14.31), never the command id filled in here. Its command id is
+/// still fixed here.
+#[test]
+fn a_remote_command_without_a_correlation_is_sent_without_one() {
+    let coordinator =
+        FakeCoordinator::answering(Answer::Events(DeliveryOutcome::Applied, deposited()));
+    let registry = registry_with(&coordinator);
+    let log = MemoryDeadLetters::new();
+    Kernel::new(&registry, &log)
+        .handle_any(&MemoryStore::new(), deposit(1), &at(1), &mut ())
+        .ready()
+        .expect("handled remotely");
+    let page = coordinator.handed()[0].page.clone().unwrap();
+    assert_eq!(page.correlation_id, None, "{page:?}");
+    assert_eq!(page.command_id, Some(command_id(1)));
+}
+
+/// A correlation the caller set is handed on as set.
+#[test]
+fn a_remote_command_keeps_the_correlation_its_caller_set() {
+    let coordinator =
+        FakeCoordinator::answering(Answer::Events(DeliveryOutcome::Applied, deposited()));
+    let registry = registry_with(&coordinator);
+    let log = MemoryDeadLetters::new();
+    Kernel::new(&registry, &log)
+        .handle_any(
+            &MemoryStore::new(),
+            deposit(1).correlated(5),
+            &at(1),
+            &mut (),
+        )
+        .ready()
+        .expect("handled remotely");
+    let page = coordinator.handed()[0].page.clone().unwrap();
+    assert_eq!(page.correlation_id, Some(crate::next::toys::correlation(5)));
+}
+
+/// A policy's step into a remote domain carries its trigger's
+/// correlation, as every reaction does: the kernel's, set.
+#[test]
+fn a_remote_policy_step_carries_its_triggers_correlation() {
+    let coordinator =
+        FakeCoordinator::answering(Answer::Events(DeliveryOutcome::Applied, deposited()));
+    let mut registry = registry_with(&coordinator);
+    registry.policy_dispatch(PolicyDispatch::new("till-bank", "till", "bank").on_event(
+        RUNG,
+        |_, source| {
+            Ok(vec![CommandBook {
+                cover: Some(Cover {
+                    domain: "bank".to_string(),
+                    root: source.and_then(|c| c.root.clone()),
+                    edition: None,
+                }),
+                page: Some(CommandPage {
+                    body: Some(command_page::Body::Command(Command {
+                        payload: Some(any("/toy.bank.v1.Deposit")),
+                    })),
+                    ..CommandPage::default()
+                }),
+                handling: None,
+            }])
+        },
+    ));
+    let log = MemoryDeadLetters::new();
+    let ring = command(cover("till", 1), any("/toy.till.v1.Ring")).correlated(6);
+    Kernel::new(&registry, &log)
+        .handle_any(&MemoryStore::new(), ring, &at(1), &mut ())
+        .ready()
+        .expect("handled");
+    let page = coordinator.handed()[0].page.clone().unwrap();
+    assert_eq!(page.correlation_id, Some(crate::next::toys::correlation(6)));
 }

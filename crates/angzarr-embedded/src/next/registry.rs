@@ -212,6 +212,11 @@ pub enum Misconfigured {
         command_type: Option<String>,
         resolution: ConflictResolution,
     },
+    /// A policy or projector here, `component`, handles the events of
+    /// `domain`, a remote domain ([`Registry::remote`]): a remote domain's
+    /// events are its coordinator's, never written or read here, so a
+    /// local component of them would never run. Remote stays remote.
+    RemoteSource { domain: String, component: String },
 }
 
 impl fmt::Display for Misconfigured {
@@ -242,6 +247,9 @@ impl Diagnostic for Misconfigured {
                 command_type: Some(_),
                 ..
             } => "angzarr-embedded-next-misconfigured-unsupported-command-resolution",
+            Misconfigured::RemoteSource { .. } => {
+                "angzarr-embedded-next-misconfigured-remote-source"
+            }
         }
     }
 
@@ -252,6 +260,10 @@ impl Diagnostic for Misconfigured {
             | Misconfigured::BadStateDescriptor { domain } => {
                 vec![("domain", domain.as_str().into())]
             }
+            Misconfigured::RemoteSource { domain, component } => vec![
+                ("domain", domain.as_str().into()),
+                ("component", component.as_str().into()),
+            ],
             Misconfigured::UpcasterForAnotherDomain { domain, upcaster } => vec![
                 ("domain", domain.as_str().into()),
                 ("upcaster", upcaster.as_str().into()),
