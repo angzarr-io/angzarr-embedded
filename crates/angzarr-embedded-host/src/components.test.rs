@@ -167,6 +167,7 @@ fn one_event(payload: Any, rules_version: &str) -> CommandHandlerResponse {
             ..Default::default()
         }),
         rules_version: rules_version.to_string(),
+        conflict: None,
     }
 }
 

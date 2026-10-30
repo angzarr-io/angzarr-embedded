@@ -136,3 +136,50 @@ fn a_refusal_goes_out_and_reads_back_under_each_business_status() {
         assert_eq!(read.refusal_object(), Some(&object));
     }
 }
+
+/// A marked-up handler's retryable bug goes out under exactly the status
+/// it picked, UNHANDLED_HANDLER_ERROR, its report as the cause; its
+/// immediate return as ABORTED under the report's own code and args.
+#[test]
+fn a_retryable_bug_and_an_immediate_return_go_out_under_their_status() {
+    use angzarr_embedded_diagnostic::Report;
+    use angzarr_router::error::{GrpcCode, HandlerError, RetryableStatus};
+
+    use super::failed;
+    use crate::next::markup::{Failed, Rejection};
+
+    let coded = |error: HandlerError| match error {
+        HandlerError::Coded(coded) => coded,
+        other => panic!("coded, not {other:?}"),
+    };
+    let report = || Report::new("toy-meter-offline").arg("seat", 3i64);
+    for status in [
+        RetryableStatus::Unavailable,
+        RetryableStatus::DeadlineExceeded,
+        RetryableStatus::ResourceExhausted,
+    ] {
+        let out = coded(failed::<Report>(
+            Failed::<Rejection<Report>>::retryable_bug(status, &report()),
+        ));
+        assert_eq!(out.grpc, GrpcCode::from(status), "{status:?}");
+        assert_eq!(out.code, "UNHANDLED_HANDLER_ERROR", "{status:?}");
+        assert_eq!(
+            out.extras.get("cause").map(String::as_str),
+            Some("toy-meter-offline"),
+            "{status:?}"
+        );
+        assert_eq!(
+            out.extras.get("cause.seat").map(String::as_str),
+            Some("3"),
+            "{status:?}"
+        );
+    }
+
+    let out = coded(failed::<Report>(Failed::<Rejection<Report>>::immediate(
+        &report(),
+    )));
+    assert_eq!(out.grpc, GrpcCode::Aborted);
+    assert_eq!(out.code, "toy-meter-offline");
+    assert_eq!(out.extras.get("seat").map(String::as_str), Some("3"));
+    assert_eq!(out.extras.get("cause"), None);
+}

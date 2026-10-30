@@ -368,6 +368,7 @@ impl CommandHandlerService for Fake {
             std::process::exit(7);
         }
         Ok(Response::new(pb::CommandHandlerResponse {
+            conflict: None,
             events: Some(pb::EventBook {
                 cover: command.cover,
                 pages: vec![pb::EventPage {
@@ -417,7 +418,7 @@ impl PolicyService for Fake {
         let book = request.into_inner();
         let target = std::env::var(TARGET_ENV).unwrap_or_default();
         let root = book.cover.as_ref().and_then(|c| c.root.clone());
-        let mut commands = Vec::new();
+        let mut reactions = Vec::new();
         for page in &book.pages {
             let type_url = page.payload.as_ref().map_or("", |a| a.type_url.as_str());
             log(&format!("handle {type_url}"));
@@ -428,7 +429,7 @@ impl PolicyService for Fake {
             } else {
                 continue;
             };
-            commands.push(pb::CommandBook {
+            let commands = vec![pb::CommandBook {
                 cover: Some(pb::Cover {
                     domain: target.clone(),
                     root: root.clone(),
@@ -441,9 +442,13 @@ impl PolicyService for Fake {
                     ..Default::default()
                 }),
                 handling: None,
+            }];
+            reactions.push(pb::PolicyReaction {
+                trigger_sequence: page.sequence,
+                commands,
             });
         }
-        Ok(Response::new(pb::PolicyResponse { commands }))
+        Ok(Response::new(pb::PolicyResponse { reactions }))
     }
 
     async fn on_refused(

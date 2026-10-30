@@ -1024,7 +1024,12 @@ impl<'k> Run<'k> {
             ..EventBook::default()
         };
         let commands = match policy.dispatch.dispatch(&event) {
-            Ok(response) => response.commands,
+            // One reaction per page of the book, and the book holds one.
+            Ok(response) => response
+                .reactions
+                .into_iter()
+                .flat_map(|reaction| reaction.commands)
+                .collect::<Vec<_>>(),
             Err(error) => {
                 if let Some(failure) = super::route::policy_failure(&error) {
                     write_letter(

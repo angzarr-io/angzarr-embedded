@@ -17,7 +17,7 @@
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use angzarr_ports::angzarr_proto::v1::{Cover, EventBook, EventPage};
 use angzarr_ports::contract::{
@@ -35,45 +35,68 @@ use sqlx::{ConnectOptions, Connection};
 use super::{into_wal, migrate, pause, read_only, SqliteStore, BUSY_TIMEOUT, MIGRATOR};
 use crate::{Damage, Integrity};
 
-/// A path for a database file of this test run's own, removed (the file and
-/// its WAL files, or a directory made there and what is in it) when the
-/// guard drops, the test passing or not. Declared before the stores on it,
-/// it drops after them.
+/// A path for a database file of this test run's own, `state.db` in a
+/// directory made for it alone, removed with what is in it (the file and
+/// its WAL files, or a directory made at the path) when the guard drops,
+/// the test passing or not. Declared before the stores on it, it drops
+/// after them.
 fn database() -> Database {
     static RUN: AtomicUsize = AtomicUsize::new(0);
-    Database(std::env::temp_dir().join(format!(
-        "angzarr-store-sqlite-test-{}-{}.db",
-        std::process::id(),
-        RUN.fetch_add(1, Ordering::Relaxed)
-    )))
+    database_in(&std::env::temp_dir(), || {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |since| since.as_nanos());
+        format!(
+            "angzarr-store-sqlite-test-{}-{nanos}-{}",
+            std::process::id(),
+            RUN.fetch_add(1, Ordering::Relaxed)
+        )
+    })
 }
 
-/// A database file's path, removed on drop.
-struct Database(PathBuf);
+/// `state.db` in a directory made in `root` under the first name from
+/// `name` that nothing in `root` holds. The directory is made only if none
+/// is there (`create_dir`), so no leftover is ever reused: a pid comes
+/// round and a counter restarts in every process, and a run killed before
+/// its guard dropped, or one from before the guards removed their files,
+/// leaves its database under a name that is given again.
+fn database_in(root: &Path, mut name: impl FnMut() -> String) -> Database {
+    loop {
+        let dir = root.join(name());
+        match std::fs::create_dir(&dir) {
+            Ok(()) => {
+                let file = dir.join("state.db");
+                return Database { dir, file };
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => panic!("cannot make {}: {e}", dir.display()),
+        }
+    }
+}
+
+/// A database file's path, and the directory made for it, removed on drop.
+struct Database {
+    dir: PathBuf,
+    file: PathBuf,
+}
 
 impl std::ops::Deref for Database {
     type Target = Path;
 
     fn deref(&self) -> &Path {
-        &self.0
+        &self.file
     }
 }
 
 impl AsRef<Path> for Database {
     fn as_ref(&self) -> &Path {
-        &self.0
+        &self.file
     }
 }
 
 impl Drop for Database {
     fn drop(&mut self) {
-        if self.0.is_dir() {
-            let _ = std::fs::remove_dir_all(&self.0);
-            return;
-        }
-        for file in with_wal(&self.0) {
-            let _ = std::fs::remove_file(file);
-        }
+        let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
 
@@ -89,6 +112,7 @@ fn with_wal(path: &Path) -> [PathBuf; 3] {
 #[test]
 fn a_database_and_its_wal_files_are_gone_once_dropped() {
     let path = database();
+    let dir = path.parent().unwrap().to_path_buf();
     let files = with_wal(&path);
     for file in &files {
         std::fs::write(file, "").unwrap();
@@ -97,6 +121,7 @@ fn a_database_and_its_wal_files_are_gone_once_dropped() {
     for file in &files {
         assert!(!file.exists(), "{} was left behind", file.display());
     }
+    assert!(!dir.exists(), "{} was left behind", dir.display());
 }
 
 #[test]
@@ -107,6 +132,25 @@ fn a_directory_made_at_a_database_path_is_gone_once_dropped() {
     let path = dir.to_path_buf();
     drop(dir);
     assert!(!path.exists(), "{} was left behind", path.display());
+}
+
+/// A database left where this test's would be, by a run before the
+/// guards removed theirs, or one killed before its guard dropped, and in
+/// WAL mode: the name it was made under comes round again (a pid reused,
+/// a counter restarted in every process), and the helper still gives a
+/// path at which nothing is, so a file opened there starts in its rollback
+/// journal.
+#[tokio::test]
+async fn a_database_path_never_lands_on_a_leftover() {
+    let root = database();
+    std::fs::create_dir(&root).unwrap();
+    let leftover = database_in(&root, || "taken".to_string());
+    drop(SqliteStore::open(&leftover).await.unwrap());
+    assert_eq!(journal_mode(&leftover).await, "wal");
+    std::mem::forget(leftover);
+    let mut names = ["taken", "free"].into_iter().map(str::to_string);
+    let path = database_in(&root, || names.next().unwrap());
+    migrated_in_rollback_mode(&path).await;
 }
 
 /// The `tasks` stream `n`, on the main timeline.
@@ -1411,7 +1455,7 @@ async fn a_purge_that_fails_part_way_deletes_nothing() {
     let path = database();
     let s = stream(1);
     let store = refusing_to_delete_snapshots(&path, s).await;
-    let purged = store.purge(s).await;
+    let purged = store.purge(s, 2).await;
     assert_eq!(
         purged.as_ref().map_err(code),
         Err(Some("angzarr-store-sqlite-unavailable")),
@@ -1435,40 +1479,41 @@ async fn impatient(path: &Path) -> SqliteStore {
 }
 
 #[tokio::test]
-async fn a_purge_racing_an_append_lands_after_it_and_purges_it() {
-    // A write in flight holds the write lock: a purge cannot land inside
-    // it. Issued while it is in flight, the purge waits, and deletes what
-    // the write appended with the rest.
+async fn a_purge_racing_an_append_waits_for_it_then_is_refused() {
+    // 14.43. A write in flight holds the write lock: a purge cannot land
+    // inside it. Issued while it is in flight, at the head its caller read
+    // before the write, the purge waits, then finds the stream grown and
+    // is refused, deleting nothing: the head is checked inside the purge's
+    // transaction, not before it.
     let path = database();
     let s = stream(1);
     let writer = SqliteStore::open(&path).await.unwrap();
     append(&writer, s, 0, &[page(0, 1)]).await.unwrap();
     let purger = SqliteStore::open(&path).await.unwrap();
+    let read = purger.head(s).await.unwrap().next_sequence;
     let writing = inserting(&path, &page(1, 2)).await;
 
     let hasty = impatient(&path).await;
-    let refused = hasty.purge(s).await;
+    let refused = hasty.purge(s, read).await;
     assert_eq!(
         refused.as_ref().map_err(code),
         Err(Some("angzarr-store-sqlite-unavailable")),
         "{refused:?}"
     );
 
-    let (purged, ()) = tokio::join!(purger.purge(s), async {
+    let (purged, ()) = tokio::join!(purger.purge(s, read), async {
         pause(Duration::from_millis(20)).await;
         end(writing, true).await
     });
-    assert_eq!(purged, Ok(2), "appended, then purged");
-    assert_eq!(writer.read(s, 0, None).await, Ok(Slice::default()));
-    assert_eq!(writer.covers("tasks").await, Ok(vec![]));
     assert_eq!(
-        append(&writer, s, 2, &[page(2, 3)]).await,
-        Err(StoreError::Conflict {
-            stream: Box::new(s.to_cover()),
-            expected: 2,
-            actual: 0
-        })
+        purged,
+        Err(StoreError::conflict(s, 1, 2)),
+        "appended, so the purge's read is stale"
     );
+    assert_eq!(pages(&writer, s).await, [page(0, 1), page(1, 2)]);
+    assert_eq!(writer.covers("tasks").await, Ok(covers(&[s])));
+    assert_eq!(purger.purge(s, 2).await, Ok(2), "re-read, purged");
+    assert_eq!(writer.covers("tasks").await, Ok(vec![]));
     drop((writer, purger, hasty));
 }
 
@@ -1560,7 +1605,7 @@ async fn a_read_outside_a_unit_is_one_moment_across_a_purge() {
             append(&writer, stream(1), 0, &[page(0, 1), page(1, 2)])
                 .await
                 .unwrap();
-            writer.purge(stream(1)).await.unwrap();
+            writer.purge(stream(1), 2).await.unwrap();
         }
     })
     .await;
@@ -1689,7 +1734,7 @@ async fn a_writer_waits_on_no_open_read_unit() {
         let mut first = writable_reader.begin_read().await.unwrap();
         let mut second = read_only_reader.begin_read().await.unwrap();
         assert_eq!(append(&hasty, s, 0, &[page(0, 1)]).await, Ok(1));
-        assert_eq!(hasty.purge(s).await, Ok(1));
+        assert_eq!(hasty.purge(s, 1).await, Ok(1));
         assert_eq!(first.covers("tasks").await, Ok(vec![]));
         assert_eq!(second.read(s, 0, None).await, Ok(Slice::default()));
     }
@@ -1818,7 +1863,7 @@ fn every_open_is_a_send_future() {
 fn every_purge_is_a_send_future() {
     drop(send(async {
         let store = SqliteStore::open_in_memory().await?;
-        store.purge(stream(1)).await
+        store.purge(stream(1), 0).await
     }));
 }
 

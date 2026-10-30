@@ -143,7 +143,9 @@
 //! any `Emits` shape and `E` anything a handler may fail with
 //! (`markup::Fails`: the domain's own rejection or a `Refuses` choice, as
 //! is or as a `Failed`), so a step may chain `.then(..)` again, refuse
-//! under a business status, or fail with a bug.
+//! under a business status, return at once (`Failed::immediate`), or fail
+//! with a bug, fatal or retryable (`Failed::bug`,
+//! `Failed::retryable_bug`).
 //!
 //! The router applies the events, calls the step on the updated instance,
 //! applies what it returns, and repeats until there is no continuation.
@@ -195,6 +197,34 @@
 //! `Failed<Refuses<Self, Hold>>` instead:
 //! `Err(Failed::rejected(InsufficientFunds { .. }).with_status(..))`,
 //! `Err(Failed::bug(&broke))`, the list still checked.
+//!
+//! ## Four ways to fail
+//!
+//! A command handler's or a step's `Failed` is one of decision 14.37's
+//! four classes, and its status says which:
+//!
+//! - `Failed::rejected(..)` (business, fatal): a refusal under a business
+//!   status (FAILED_PRECONDITION, or another of the six with
+//!   `.with_status(..)`), to the caller or the issuing policy's refusal
+//!   path; never retried.
+//! - `Failed::immediate(&why)` (business, immediate): ABORTED under
+//!   `why`'s own code, "re-read and re-decide": back to an outside caller
+//!   at once; a policy's step, whose caller is the kernel, is reloaded and
+//!   run again under the capped backoff, then dead-lettered.
+//! - `Failed::bug(&broke)` (bug, fatal): INTERNAL UNHANDLED_HANDLER_ERROR,
+//!   `broke`'s code as its `cause`; dead-lettered at once.
+//! - `Failed::retryable_bug(status, &down)` (bug, retryable): the
+//!   `markup::RetryableStatus` the handler picks, UNHANDLED_HANDLER_ERROR,
+//!   `down`'s code as its `cause`; retried with capped backoff, then
+//!   dead-lettered with its `retry_count`. The statuses are not
+//!   interchangeable: `Unavailable` means resend (the dependency is down
+//!   for now); `DeadlineExceeded` means resend only if the call is
+//!   idempotent, since the work may have happened (a command is, by its
+//!   `command_id`); `ResourceExhausted` means wait longer before resending
+//!   (a quota or a capacity limit was hit).
+//!
+//! Neither an immediate return nor a bug ever reaches a policy's refusal
+//! path.
 //!
 //! A command handler without `refuses` refuses with the domain's own
 //! rejection, a message only. Either way the domain's `Domain::Rejection`

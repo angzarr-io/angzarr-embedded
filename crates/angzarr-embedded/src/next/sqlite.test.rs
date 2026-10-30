@@ -8,6 +8,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use angzarr_embedded_diagnostic::{Arg, Diagnostic, Report};
 use angzarr_store_sqlite::SqliteStore;
@@ -220,34 +221,62 @@ async fn count(store: &SqliteStore, registry: &Registry, stream: &Cover) -> i64 
         .n
 }
 
-/// A database file of this test run's own, removed with its WAL files when
-/// the guard drops, the test passing or not. Declared before the stores on
-/// it, it drops after them.
+/// A path for a database file of this test run's own, `state.db` in a
+/// directory made for it alone, removed with what is in it (the file and
+/// its WAL files, or a directory made at the path) when the guard drops,
+/// the test passing or not. Declared before the stores on it, it drops
+/// after them.
 fn database() -> Database {
     static RUN: AtomicUsize = AtomicUsize::new(0);
-    Database(std::env::temp_dir().join(format!(
-        "angzarr-embedded-kernel-on-sqlite-{}-{}.db",
-        std::process::id(),
-        RUN.fetch_add(1, Ordering::Relaxed)
-    )))
+    database_in(&std::env::temp_dir(), || {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |since| since.as_nanos());
+        format!(
+            "angzarr-embedded-kernel-on-sqlite-{}-{nanos}-{}",
+            std::process::id(),
+            RUN.fetch_add(1, Ordering::Relaxed)
+        )
+    })
 }
 
-/// A database file's path, the file and its WAL files removed on drop.
-struct Database(PathBuf);
+/// `state.db` in a directory made in `root` under the first name from
+/// `name` that nothing in `root` holds. The directory is made only if none
+/// is there (`create_dir`), so no leftover is ever reused: a pid comes
+/// round and a counter restarts in every process, and a run killed before
+/// its guard dropped, or one from before the guards removed their files,
+/// leaves its database under a name that is given again.
+fn database_in(root: &Path, mut name: impl FnMut() -> String) -> Database {
+    loop {
+        let dir = root.join(name());
+        match std::fs::create_dir(&dir) {
+            Ok(()) => {
+                let file = dir.join("state.db");
+                return Database { dir, file };
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => panic!("cannot make {}: {e}", dir.display()),
+        }
+    }
+}
+
+/// A database file's path, and the directory made for it, removed on drop.
+struct Database {
+    dir: PathBuf,
+    file: PathBuf,
+}
 
 impl std::ops::Deref for Database {
     type Target = Path;
 
     fn deref(&self) -> &Path {
-        &self.0
+        &self.file
     }
 }
 
 impl Drop for Database {
     fn drop(&mut self) {
-        for file in with_wal(&self.0) {
-            let _ = std::fs::remove_file(file);
-        }
+        let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
 
@@ -263,6 +292,7 @@ fn with_wal(path: &Path) -> [PathBuf; 3] {
 #[test]
 fn a_database_and_its_wal_files_are_gone_once_dropped() {
     let path = database();
+    let dir = path.parent().unwrap().to_path_buf();
     let files = with_wal(&path);
     for file in &files {
         std::fs::write(file, "").unwrap();
@@ -271,6 +301,31 @@ fn a_database_and_its_wal_files_are_gone_once_dropped() {
     for file in &files {
         assert!(!file.exists(), "{} was left behind", file.display());
     }
+    assert!(!dir.exists(), "{} was left behind", dir.display());
+}
+
+/// A database left where this test's would be, by a run before the
+/// guards removed theirs, or one killed before its guard dropped, holding
+/// an account: the name it was made under comes round again (a pid
+/// reused, a counter restarted in every process), and the helper still
+/// gives a path at which nothing is, so a store opened there holds
+/// nothing.
+#[tokio::test]
+async fn a_database_path_never_lands_on_a_leftover() {
+    let root = database();
+    std::fs::create_dir(&*root).unwrap();
+    let leftover = database_in(&root, || "taken".to_string());
+    {
+        let store = SqliteStore::open(&leftover).await.unwrap();
+        handle::<toys::Account>(&store, &toys::registry(), open_account())
+            .await
+            .unwrap();
+    }
+    std::mem::forget(leftover);
+    let mut names = ["taken", "free"].into_iter().map(str::to_string);
+    let path = database_in(&root, || names.next().unwrap());
+    let store = SqliteStore::open(&path).await.unwrap();
+    assert_eq!(pages(&store, &cover("account", 1)).await.len(), 0);
 }
 
 fn ledger_cover() -> Cover {
