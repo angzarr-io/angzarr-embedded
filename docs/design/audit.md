@@ -763,9 +763,14 @@ administration (the `Editions` port) is not implemented.
 ## Snapshots
 
 A snapshot is angzarr's `Snapshot { sequence, state: Any, rules_version }`,
-a framework optimisation, never business data. `Stream::snapshot` makes one
-under the current rules version; the application writes it
-(`write_snapshot`, its own call, never in a step's write) when it likes. On
+a framework optimisation, never business data. The kernel writes one after
+every step that writes events (decision 14.40): the state the router
+returned with them, stamped with the last event's sequence and the rules
+version the events carry, under the default policy, the newest only (each
+replaces the last). It is its own call (`write_snapshot`), never in a
+step's write, and a cache: its failure fails nothing. A state with no
+snapshot form returns none, and none is written. `Stream::snapshot` makes
+one from a stream run in memory, for the application to write. On
 load the coordinator uses it only if `Registry::snapshot_usable` (the
 state's type URL and the rules version match the registration), its
 sequence is below the head (one at or past it claims events the stream
@@ -1063,7 +1068,7 @@ is the policy command's own causation, for tracing.
 |---|---|---|
 | Hash chaining | Not asked for. Kept possible: immutable pages, upcast on read, deterministic meta, no personal data. | A tamper-evidence requirement. |
 | Generated `State` impls, and angzarr's golden conflict-unit parity suite run here | The generator is angzarr's backlog CR-1; until then a hand-written fixture stands in. | CR-1 landing: angzarr-embedded generates from the same markers and runs every fixture pair through `Units::overlaps`. |
-| Snapshot frequency and retention configuration | `write_snapshot` is the application's; the load and discard rules are specified. | Replay latency that matters. |
+| Snapshot frequency and retention configuration | The newest only, written after every step with events; the load and discard rules are specified. | Replay latency or write cost that matters. |
 | Persisted projections | Replay on read. | Read latency: a projector's position goes to angzarr-ports' `PositionStore`. |
 | Edition lifecycle, branching, read-through (EA-1 to EA-3) | angzarr's system layer owns the edition lifecycle; angzarr-embedded only meets an edition through the store's refusal. | That layer landing. |
 | Configuration that forbids a `Handling` override | No hatpick command needs it. | A command type whose resolution a client must not choose. |

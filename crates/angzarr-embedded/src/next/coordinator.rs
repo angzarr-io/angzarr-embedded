@@ -42,7 +42,7 @@
 //!    [`Identified::meta`]. The router catches a panicking handler, a bug.
 
 use angzarr_proto::v1::{
-    command_page, CommandBook, ConflictResolution, EventBook, EventPage, Handling, Snapshot,
+    command_page, CommandBook, ConflictResolution, Cover, EventBook, EventPage, Handling, Snapshot,
 };
 use angzarr_router::domain::{Admission, Arrival, StreamStatus};
 use angzarr_router::error::{codes, extras, CodedError};
@@ -345,12 +345,12 @@ pub(crate) fn load(novel: Novel, nonces: &mut u64) -> Result<Contextual, KernelE
 /// a bug (UNHANDLED_HANDLER_ERROR, cause HANDLER_PANICKED). A bug
 /// ([`route::is_handler_fault`]) fails it as [`KernelError::Router`], and
 /// `dead_letters` gets a line of its code and args.
-pub(crate) fn dispatch(
+pub(crate) fn decide(
     command: &Contextual,
     sampled: &Sampled,
     registry: &Registry,
     dead_letters: &dyn DeadLetterLog,
-) -> Result<Vec<EventPage>, Failure<Rejected>> {
+) -> Result<Decided, Failure<Rejected>> {
     let identified = &command.command;
     let domain = identified.domain();
     let kernel = Failure::Kernel;
@@ -399,11 +399,10 @@ pub(crate) fn dispatch(
         .map(str::to_string)
         .unwrap_or(response.rules_version);
     let meta = identified.meta(recorded_at, &rules_version);
-    Ok((command.head..)
+    let events = response.events.unwrap_or_default();
+    let pages: Vec<EventPage> = (command.head..)
         .zip(
-            response
-                .events
-                .unwrap_or_default()
+            events
                 .pages
                 .into_iter()
                 .filter(|page| !route::is_nothing(page)),
@@ -413,7 +412,51 @@ pub(crate) fn dispatch(
             meta: Some(meta.clone()),
             ..page
         })
-        .collect())
+        .collect();
+    let snapshot = match (pages.last(), events.snapshot.and_then(|s| s.state)) {
+        (Some(last), Some(state)) => Some(Snapshot {
+            sequence: last.sequence,
+            state: Some(state),
+            rules_version,
+        }),
+        _ => None,
+    };
+    Ok(Decided { pages, snapshot })
+}
+
+/// What step 5 decided: the events, stamped, and the snapshot to write
+/// with them.
+pub(crate) struct Decided {
+    /// The events, from the head on.
+    pub(crate) pages: Vec<EventPage>,
+    /// The state the router returned with them, as the snapshot at the last
+    /// event under the rules they were stamped with (decision 14.40);
+    /// `None` with no events, or for a state with no snapshot form.
+    pub(crate) snapshot: Option<Snapshot>,
+}
+
+/// Step 5's events alone ([`decide`]): what a stream run in memory keeps.
+pub(crate) fn dispatch(
+    command: &Contextual,
+    sampled: &Sampled,
+    registry: &Registry,
+    dead_letters: &dyn DeadLetterLog,
+) -> Result<Vec<EventPage>, Failure<Rejected>> {
+    decide(command, sampled, registry, dead_letters).map(|decided| decided.pages)
+}
+
+/// Write `snapshot` of `stream` over the one it has (the default policy,
+/// the newest only; decision 14.40). A snapshot is a cache: the events are
+/// committed already, so a failed write fails nothing, and the next load
+/// replays from the snapshot it finds.
+pub(crate) async fn write_snapshot<P: Port>(
+    port: &mut P,
+    stream: &Cover,
+    snapshot: Option<Snapshot>,
+) {
+    if let Some(snapshot) = snapshot {
+        let _ = port.write_snapshot(stream, &snapshot).await;
+    }
 }
 
 /// The router's unknown-type refusal `error`, as the caller is answered

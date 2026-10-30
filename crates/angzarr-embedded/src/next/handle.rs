@@ -57,7 +57,9 @@ use angzarr_router::error::codes;
 use angzarr_router::policy::address_refusal_fact;
 
 use super::check::{check, check_refusal, Checked, Identified, Sampled};
-use super::coordinator::{contextual_command, deduplicate, dispatch, load, Deduplicated};
+use super::coordinator::{
+    contextual_command, decide, deduplicate, load, write_snapshot, Deduplicated,
+};
 use super::dead_letter::{write_dead_letter, write_letter, write_retries_exhausted, DeadLetterLog};
 use super::domain::Domain;
 use super::error::{Failure, KernelError, Step, StepError};
@@ -835,12 +837,14 @@ impl<'k> Run<'k> {
         };
         let contextual = load(*novel, &mut self.nonces).map_err(Failure::Kernel)?;
         let head = contextual.head();
-        let pages = dispatch(&contextual, self.sampled, self.registry, self.dead_letters)?;
+        let decided = decide(&contextual, self.sampled, self.registry, self.dead_letters)?;
+        let pages = decided.pages;
         let stream = typed(&contextual, &pages, self.registry).map_err(Failure::Kernel)?;
         if !pages.is_empty() {
             port.write(&cover, head, &pages, &[])
                 .await
                 .map_err(|e| Failure::Kernel(KernelError::Store(e)))?;
+            write_snapshot(port, &cover, decided.snapshot).await;
         }
         self.record(cover, head, stream, pages);
         Ok(Origin::Wrote(head))
@@ -1206,17 +1210,21 @@ impl<'k> Run<'k> {
         };
         let contextual = load(*novel, &mut self.nonces).map_err(kernel)?;
         let head = contextual.head();
-        let pages = match dispatch(&contextual, self.sampled, self.registry, self.dead_letters) {
-            Ok(pages) => pages,
-            Err(failure) => {
-                if let Failure::Rejected(_) = failure {
-                    self.refused = contextual_command(&contextual, self.registry, self.sampled.now)
-                        .ok()
-                        .map(|delivered| angzarr_router::context::command_context(&delivered));
+        let (pages, snapshot) =
+            match decide(&contextual, self.sampled, self.registry, self.dead_letters) {
+                Ok(decided) => (decided.pages, decided.snapshot),
+                Err(failure) => {
+                    if let Failure::Rejected(_) = failure {
+                        self.refused =
+                            contextual_command(&contextual, self.registry, self.sampled.now)
+                                .ok()
+                                .map(|delivered| {
+                                    angzarr_router::context::command_context(&delivered)
+                                });
+                    }
+                    return Err(failure);
                 }
-                return Err(failure);
-            }
-        };
+            };
         if pages.is_empty() {
             if !positions.is_empty() {
                 port.write_positions(positions).await.map_err(store)?;
@@ -1227,6 +1235,7 @@ impl<'k> Run<'k> {
         port.write(&cover, head, &pages, positions)
             .await
             .map_err(store)?;
+        write_snapshot(port, &cover, snapshot).await;
         self.record(cover.clone(), head, stream, pages);
         Ok(Stepped::Wrote(cover, head))
     }

@@ -71,6 +71,13 @@ pub(crate) trait Port {
         stream: &Cover,
     ) -> impl Future<Output = Result<Option<Snapshot>, StoreError>>;
 
+    /// `snapshot` of `stream`, replacing the one it has.
+    fn write_snapshot(
+        &mut self,
+        stream: &Cover,
+        snapshot: &Snapshot,
+    ) -> impl Future<Output = Result<(), StoreError>>;
+
     /// `handler`'s next sequence on `stream`.
     fn position(
         &mut self,
@@ -149,6 +156,16 @@ impl<S: Store> Port for StorePort<'_, S> {
 
     async fn read_snapshot(&mut self, stream: &Cover) -> Result<Option<Snapshot>, StoreError> {
         self.0.read_snapshot(StreamRef::try_from(stream)?).await
+    }
+
+    async fn write_snapshot(
+        &mut self,
+        stream: &Cover,
+        snapshot: &Snapshot,
+    ) -> Result<(), StoreError> {
+        self.0
+            .write_snapshot(StreamRef::try_from(stream)?, snapshot)
+            .await
     }
 
     async fn position(&mut self, handler: &str, stream: &Cover) -> Result<u64, StoreError> {
