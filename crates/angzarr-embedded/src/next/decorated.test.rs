@@ -2423,25 +2423,7 @@ mod failed {
             "a bug, not a refusal: {failure:?}"
         );
         assert_eq!(failure.recovery(), Recovery::Bug);
-        let lines = log.lines();
-        assert_eq!(lines.len(), 1, "dead-lettered once: {lines:?}");
-        assert!(
-            lines[0].contains(
-                "meter: angzarr-embedded-next-unhandled-handler-error cause=toy-meter-broke cause.seat=3"
-            ),
-            "its cause, the bug's code and args: {}",
-            lines[0]
-        );
-        assert!(
-            !lines[0].contains("the meter at"),
-            "no English: {}",
-            lines[0]
-        );
-        assert!(
-            !lines[0].contains("ROUTER_REASON_UNHANDLED_HANDLER_ERROR"),
-            "no retired code: {}",
-            lines[0]
-        );
+        broke_at(&log, 3);
         assert_eq!(pages(&store, &meter_cover()), None, "nothing written");
     }
 
@@ -2475,12 +2457,16 @@ mod failed {
         assert_eq!(pages(&store, &meter_cover()), None, "nothing written");
     }
 
-    /// The meter's one dead letter, a bug of `seat`.
+    /// The meter's one dead letter, a fatal bug of `seat`: its reason the
+    /// router's key as the spec spells it, the bug's code its `cause` and
+    /// its args `cause.<arg>`, and its one detail `processing_failed`,
+    /// never retried, not transient (decision 14.48); no English.
     fn broke_at(log: &MemoryDeadLetters, seat: i64) {
+        use crate::next::toys::{assert_letter, one_letter, processing_failed, wire};
         let lines = log.lines();
         assert_eq!(lines.len(), 1, "dead-lettered once: {lines:?}");
         let cause = format!(
-            "meter: angzarr-embedded-next-unhandled-handler-error cause=toy-meter-broke cause.seat={seat}"
+            "meter: ROUTER_REASON_UNHANDLED_HANDLER_ERROR cause=toy-meter-broke cause.seat={seat}"
         );
         assert!(lines[0].contains(&cause), "{cause}: {}", lines[0]);
         assert!(
@@ -2488,10 +2474,17 @@ mod failed {
             "no English: {}",
             lines[0]
         );
-        assert!(
-            !lines[0].contains("ROUTER_REASON_UNHANDLED_HANDLER_ERROR"),
-            "no retired code: {}",
-            lines[0]
+        let reason = wire(
+            "ROUTER_REASON_UNHANDLED_HANDLER_ERROR",
+            &[
+                ("cause", "toy-meter-broke"),
+                ("cause.seat", &seat.to_string()),
+            ],
+        );
+        assert_letter(
+            &one_letter(log.letters()),
+            &reason,
+            processing_failed(&reason, 0, false),
         );
     }
 
@@ -3621,18 +3614,22 @@ mod handler_context {
 
     /// A handler that never acknowledges its window has its output
     /// discarded: the router's COORDINATOR_REASON_CONFLICT_UNRESOLVED, the kernel's
-    /// `Unresolved`, dead-lettered, and nothing recorded.
+    /// `Unresolved`, dead-lettered under that key with the command's
+    /// expected sequence and the head as its `sequence_mismatch` (decision
+    /// 14.48), and nothing recorded.
     #[test]
     fn an_aggregate_handles_handler_that_never_acknowledges_is_unresolved() {
+        use crate::next::toys::{assert_letter, one_letter, sequence_mismatch, wire};
         let registry = registry();
         let mut pot = pot();
+        execute(&mut pot, &registry, 1, staking(1, 5, true, 0)).unwrap();
         let log = MemoryDeadLetters::new();
         let sampled = Sampled {
-            now: at(1),
-            command_id: Uuid::from_bytes([0x07; 16]),
+            now: at(2),
+            command_id: Uuid::from_bytes([0x08; 16]),
         };
         let Err(failure) = pot
-            .execute(staking(1, 5, false, 0), &registry, &sampled, &log, &mut [])
+            .execute(staking(2, 5, false, 0), &registry, &sampled, &log, &mut [])
             .ready()
         else {
             panic!("unresolved");
@@ -3642,17 +3639,16 @@ mod handler_context {
             Failure::Kernel(KernelError::Unresolved {
                 stream: pot_cover(),
                 expected: 0,
-                actual: 0,
+                actual: 1,
             })
         );
-        let lines = log.lines();
-        assert_eq!(lines.len(), 1, "{lines:?}");
-        assert!(
-            lines[0].contains("angzarr-embedded-next-unresolved"),
-            "{}",
-            lines[0]
+        let letter = one_letter(log.letters());
+        assert_letter(
+            &letter,
+            &wire("COORDINATOR_REASON_CONFLICT_UNRESOLVED", &[]),
+            sequence_mismatch(0, 1),
         );
-        assert!(pot.is_empty(), "nothing recorded");
+        assert_eq!(pot.len(), 1, "nothing recorded past the first stake");
     }
 
     /// A handler reads its stream's domain and root from the router's
@@ -3705,6 +3701,70 @@ mod handler_context {
 mod typed_refusals {
     use super::*;
     use ::angzarr_embedded::next::v1::Diagnostic as WireDiagnostic;
+
+    /// As [`BuyInWallet`], hand-written, and answering no refusal: its
+    /// refused hold fails its step and is dead-lettered.
+    struct QuietBuyInWallet;
+
+    impl Policy for QuietBuyInWallet {
+        const NAME: &'static str = "quiet-buyin-wallet";
+        type Source = BuyIn;
+        type Target = Wallet;
+
+        fn on_event(
+            &self,
+            event: &Any,
+            _ctx: &PolicyContext,
+        ) -> Result<Option<Commands<Wallet>>, Report> {
+            let Ok(Some(started)) = markup::__decode::<BuyInStarted>(event) else {
+                return Ok(None);
+            };
+            Ok(Some(Commands::none().to(
+                uuid(&started.wallet),
+                Hold {
+                    cents: started.cents,
+                },
+            )))
+        }
+    }
+
+    /// A typed refusal of a policy's command that no OnRefused answers is
+    /// dead-lettered under ROUTER_REASON_COMMAND_REFUSED with its
+    /// `refusal_type`, and its one detail is `command_refused`: the type and
+    /// the refusal object itself, kept whole (decision 14.48, C-0733).
+    #[test]
+    fn a_typed_refusal_dead_letters_its_object_as_command_refused() {
+        use crate::next::toys::{one_letter, wire};
+        use ::angzarr_embedded::next::v1::angzarr_dead_letter::RejectionDetails;
+        use ::angzarr_embedded::next::v1::CommandRefusedDetails;
+        let mut registry = buy_ins();
+        registry.policy(QuietBuyInWallet);
+        let store = Mem::new();
+        let log = MemoryDeadLetters::new();
+        handle_in::<Wallet>(
+            &store,
+            &registry,
+            &log,
+            1,
+            send("wallet", 1, any(Open { bonus: 0 }), Some(correlation(15))),
+        )
+        .unwrap();
+        let _ = handle_in::<BuyIn>(&store, &registry, &log, 2, start(&correlation(3), 2, 50));
+        let letter = one_letter(log.letters());
+        let reason = wire(
+            "ROUTER_REASON_COMMAND_REFUSED",
+            &[("refusal_type", "toy.wallet.v1.InsufficientFunds")],
+        );
+        crate::next::toys::assert_letter(
+            &letter,
+            &reason,
+            RejectionDetails::CommandRefused(CommandRefusedDetails {
+                refusal_type: "toy.wallet.v1.InsufficientFunds".to_string(),
+                refusal: Some(any(InsufficientFunds { short: 50 })),
+            }),
+        );
+        assert_eq!(letter.source_component, "quiet-buyin-wallet");
+    }
 
     /// A typed refusal is keyed, as on the wire, ROUTER_REASON_COMMAND_REFUSED with its
     /// object's full type name as `refusal_type`; a message-only refusal by
@@ -5404,15 +5464,19 @@ mod router {
         assert_eq!(waits.micros(), [7_500, 22_500, 37_500]);
         let lines = log.lines();
         assert_eq!(lines.len(), 1, "dead-lettered once, visibly: {lines:?}");
-        assert!(
-            lines[0].contains("angzarr-embedded-next-handler-unavailable"),
-            "its key: {lines:?}"
-        );
-        assert!(
-            lines[0].contains("cause=not-running"),
-            "its args: {lines:?}"
-        );
         assert!(lines[0].contains("retry_count=3"), "{lines:?}");
+        // A retryable bug at its cap records its own key and args as last
+        // answered, never the retry cap's; processing_failed, its retries,
+        // transient (decision 14.48).
+        let reason = crate::next::toys::wire(
+            "REMOTE_HANDLER_UNAVAILABLE",
+            &[("cause", "not-running"), ("domain", "remote")],
+        );
+        crate::next::toys::assert_letter(
+            &crate::next::toys::one_letter(log.letters()),
+            &reason,
+            crate::next::toys::processing_failed(&reason, 3, true),
+        );
     }
 
     /// `max_retries = 0` turns retrying off: a retryable failure goes back
@@ -5639,8 +5703,16 @@ mod router {
         assert_eq!(waits.micros(), [10_000, 30_000, 50_000]);
         let lines = log.lines();
         assert_eq!(lines.len(), 1, "{lines:?}");
-        assert!(lines[0].contains("cause=SEAT_MOVED"), "{lines:?}");
         assert!(lines[0].contains("retry_count=3"), "{lines:?}");
+        // A policy step's ABORTED re-run at its cap records the handler's
+        // own key as last answered: processing_failed, its retries,
+        // transient (decision 14.48).
+        let reason = crate::next::toys::wire("SEAT_MOVED", &[]);
+        crate::next::toys::assert_letter(
+            &crate::next::toys::one_letter(log.letters()),
+            &reason,
+            crate::next::toys::processing_failed(&reason, 3, true),
+        );
     }
 
     /// A bug of the fatal kind (INTERNAL, UNKNOWN, DATA_LOSS) is
@@ -5762,13 +5834,16 @@ mod router {
             assert_eq!(waits.micros(), [7_500, 22_500, 37_500]);
             let lines = log.lines();
             assert_eq!(lines.len(), 1, "dead-lettered once: {lines:?}");
-            assert!(
-                lines[0].contains(
-                    "meter: angzarr-embedded-next-unhandled-handler-error cause=toy-meter-broke cause.seat=5"
-                ),
-                "its cause: {lines:?}"
-            );
             assert!(lines[0].contains("retry_count=3"), "{lines:?}");
+            let reason = crate::next::toys::wire(
+                "ROUTER_REASON_UNHANDLED_HANDLER_ERROR",
+                &[("cause", "toy-meter-broke"), ("cause.seat", "5")],
+            );
+            crate::next::toys::assert_letter(
+                &crate::next::toys::one_letter(log.letters()),
+                &reason,
+                crate::next::toys::processing_failed(&reason, 3, true),
+            );
             assert_eq!(pages(&store, &meter_cover()), None, "nothing written");
         }
 

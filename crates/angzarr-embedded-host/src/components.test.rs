@@ -680,6 +680,7 @@ fn a_remote_projectors_bug_is_fatal_not_retried_and_dead_lettered() {
     let lines = log.lines();
     assert_eq!(lines.len(), 1, "dead-lettered: {lines:?}");
     assert!(lines[0].contains("PROJECTOR_BROKE"), "{}", lines[0]);
+    processing_failed(&log, "PROJECTOR_BROKE", 0, false);
     host.shutdown();
 }
 
@@ -717,6 +718,7 @@ fn a_remote_projectors_business_status_is_its_bug() {
     let lines = log.lines();
     assert_eq!(lines.len(), 1, "dead-lettered: {lines:?}");
     assert!(lines[0].contains("VIEW_REFUSED"), "{}", lines[0]);
+    processing_failed(&log, "VIEW_REFUSED", 0, false);
     host.shutdown();
 }
 
@@ -751,7 +753,31 @@ fn a_remote_projectors_retryable_failure_is_dead_lettered_at_the_cap() {
     assert_eq!(lines.len(), 1, "dead-lettered: {lines:?}");
     assert!(lines[0].contains("VIEW_DB_DOWN"), "{}", lines[0]);
     assert!(lines[0].contains("retry_count=3"), "{}", lines[0]);
+    processing_failed(&log, "VIEW_DB_DOWN", 3, true);
     host.shutdown();
+}
+
+/// `log`'s one letter is the projector's failure under the child's own
+/// key as answered, its events the payload, and its one detail
+/// `processing_failed` with `retry_count` and `is_transient` (decision
+/// 14.48).
+fn processing_failed(log: &MemoryDeadLetters, key: &str, retry_count: u32, is_transient: bool) {
+    use angzarr_embedded::next::v1::angzarr_dead_letter::{Payload, RejectionDetails};
+    let letters = log.letters();
+    assert_eq!(letters.len(), 1, "{letters:?}");
+    let letter = &letters[0];
+    let reason = letter.reason.clone().expect("a reason");
+    assert_eq!(reason.code, key, "{letter:?}");
+    let Some(RejectionDetails::ProcessingFailed(details)) = &letter.rejection_details else {
+        panic!("processing_failed: {letter:?}");
+    };
+    assert_eq!(details.failure.as_ref(), Some(&reason));
+    assert_eq!(details.retry_count, retry_count);
+    assert_eq!(details.is_transient, is_transient);
+    assert!(
+        matches!(letter.payload, Some(Payload::RejectedEvents(_))),
+        "{letter:?}"
+    );
 }
 
 /// With retrying off, a retryable failure is returned at once and not

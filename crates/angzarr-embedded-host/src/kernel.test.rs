@@ -337,11 +337,24 @@ fn a_remote_internal_failure_under_its_own_code_is_a_dead_lettered_bug() {
     assert_eq!(lines.len(), 1, "{lines:?}");
     assert!(lines[0].starts_with(DEAD_LETTER_PREFIX), "{}", lines[0]);
     assert!(
-        lines[0].contains(
-            "player: angzarr-embedded-next-unhandled-handler-error cause=PLAYER_BROKE cause.seat=3"
-        ),
-        "{}",
+        lines[0].contains("player: PLAYER_BROKE seat=3"),
+        "the child's own key and args, as answered (decision 14.48): {}",
         lines[0]
+    );
+    let letters = log.letters();
+    let reason = letters[0].reason.clone().expect("a reason");
+    assert_eq!(reason.code, "PLAYER_BROKE");
+    assert_eq!(
+        letters[0].rejection_details,
+        Some(
+            angzarr_embedded::next::v1::angzarr_dead_letter::RejectionDetails::ProcessingFailed(
+                angzarr_embedded::next::v1::ProcessingFailedDetails {
+                    failure: Some(reason),
+                    ..Default::default()
+                }
+            )
+        ),
+        "a fatal bug: never retried, not transient"
     );
     assert!(
         pages(&store, &cover("player")).is_empty(),

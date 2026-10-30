@@ -1377,6 +1377,75 @@ pub trait Ready: Future + Sized {
 
 impl<F: Future> Ready for F {}
 
+// ---------------------------------------------------------------- dead letters
+
+/// angzarr's wire `Diagnostic`: a key, as the spec spells it, and its args.
+pub fn wire(code: &str, args: &[(&str, &str)]) -> crate::next::v1::Diagnostic {
+    crate::next::v1::Diagnostic {
+        code: code.to_string(),
+        args: args
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect(),
+    }
+}
+
+/// The `processing_failed` details of a letter whose reason is `reason`
+/// (decision 14.48): the same Diagnostic as its failure.
+pub fn processing_failed(
+    reason: &crate::next::v1::Diagnostic,
+    retry_count: u32,
+    is_transient: bool,
+) -> crate::next::v1::angzarr_dead_letter::RejectionDetails {
+    crate::next::v1::angzarr_dead_letter::RejectionDetails::ProcessingFailed(
+        crate::next::v1::ProcessingFailedDetails {
+            failure: Some(reason.clone()),
+            retry_count,
+            is_transient,
+            ..crate::next::v1::ProcessingFailedDetails::default()
+        },
+    )
+}
+
+/// The `sequence_mismatch` details: the command's expected sequence and
+/// the stream's head.
+pub fn sequence_mismatch(
+    expected: u64,
+    actual: u64,
+) -> crate::next::v1::angzarr_dead_letter::RejectionDetails {
+    crate::next::v1::angzarr_dead_letter::RejectionDetails::SequenceMismatch(
+        crate::next::v1::SequenceMismatchDetails {
+            expected_sequence: expected,
+            actual_sequence: actual,
+        },
+    )
+}
+
+/// The one letter of `letters`.
+pub fn one_letter(
+    letters: Vec<crate::next::v1::AngzarrDeadLetter>,
+) -> crate::next::v1::AngzarrDeadLetter {
+    assert_eq!(letters.len(), 1, "one dead letter: {letters:?}");
+    letters.into_iter().next().unwrap()
+}
+
+/// `letter`'s reason is `reason` and its one rejection detail `details`
+/// (decision 14.48), and its line leads with the reason's key.
+pub fn assert_letter(
+    letter: &crate::next::v1::AngzarrDeadLetter,
+    reason: &crate::next::v1::Diagnostic,
+    details: crate::next::v1::angzarr_dead_letter::RejectionDetails,
+) {
+    assert_eq!(letter.reason.as_ref(), Some(reason), "{letter:?}");
+    assert_eq!(letter.rejection_details, Some(details), "{letter:?}");
+    let line = crate::next::dead_letter_line(letter);
+    assert!(
+        line.contains(&format!(": {} ", reason.code))
+            || line.ends_with(&format!(": {}", reason.code)),
+        "the line leads with the key: {line}"
+    );
+}
+
 /// What every kernel test over a store uses: the store, the helpers that
 /// read it, and the ports' traits, so their methods are in scope.
 pub mod prelude {

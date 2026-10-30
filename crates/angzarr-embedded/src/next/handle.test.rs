@@ -132,6 +132,27 @@ fn a_rejected_policy_step_keeps_the_commands_commit_and_is_dead_lettered() {
     let lines = log.lines();
     assert_eq!(lines.len(), 1, "the rejected step, dead-lettered");
     assert!(lines[0].starts_with(crate::next::DEAD_LETTER_PREFIX));
+    // An untyped business refusal: the handler's own key, and
+    // processing_failed, never retried, not transient (decision 14.48).
+    let letter = crate::next::toys::one_letter(log.letters());
+    let reason = crate::next::toys::wire("toy-ledger-too-large", &[]);
+    crate::next::toys::assert_letter(
+        &letter,
+        &reason,
+        crate::next::toys::processing_failed(&reason, 0, false),
+    );
+    // The command as delivered, its ids assigned.
+    let Some(crate::next::v1::angzarr_dead_letter::Payload::RejectedCommand(book)) =
+        &letter.payload
+    else {
+        panic!("the refused command: {letter:?}");
+    };
+    let page = book.page.as_ref().unwrap();
+    assert!(page.command_id.is_some(), "its id: {book:?}");
+    assert!(page.correlation_id.is_some(), "its correlation: {book:?}");
+    assert!(page.causation_id.is_some(), "its trigger: {book:?}");
+    assert_eq!(book.cover.as_ref(), Some(&ledger_cover()));
+    assert_eq!(letter.source_component, "bookkeeping");
     assert_eq!(
         position(&store, "bookkeeping", &cover("account", 1)),
         before + 1,
@@ -525,9 +546,30 @@ fn a_policys_error_dead_letters_its_step_and_moves_its_position_past_it() {
     assert_eq!(lines.len(), 1, "the failed step, dead-lettered: {lines:?}");
     assert!(lines[0].starts_with(crate::next::DEAD_LETTER_PREFIX));
     assert!(
-        lines[0].contains("unlucky: toy-unlucky-deposit cents=13"),
-        "the policy, its error's code as the reason, and its args: {}",
+        lines[0].contains("unlucky: ROUTER_REASON_UNHANDLED_HANDLER_ERROR cause=toy-unlucky-deposit cause.cents=13"),
+        "the policy, its bug's key, its error's code as the cause, and its args: {}",
         lines[0]
+    );
+    // A policy's error is a handler's bug, keyed as the router keys one;
+    // the trigger is the payload, processing_failed, never retried, not
+    // transient (decision 14.48).
+    let letter = crate::next::toys::one_letter(log.letters());
+    let reason = crate::next::toys::wire(
+        "ROUTER_REASON_UNHANDLED_HANDLER_ERROR",
+        &[("cause", "toy-unlucky-deposit"), ("cause.cents", "13")],
+    );
+    crate::next::toys::assert_letter(
+        &letter,
+        &reason,
+        crate::next::toys::processing_failed(&reason, 0, false),
+    );
+    assert!(
+        matches!(
+            &letter.payload,
+            Some(crate::next::v1::angzarr_dead_letter::Payload::RejectedEvents(book))
+                if book.cover == Some(cover("account", 1))
+        ),
+        "{letter:?}"
     );
     assert!(
         !lines[0].contains("cannot happen"),
@@ -923,11 +965,20 @@ fn a_policys_error_as_a_handler_of_its_source_is_dead_lettered() {
     assert!(lines[0].starts_with(crate::next::DEAD_LETTER_PREFIX));
     assert!(
         lines[0].contains(&format!(
-            "unlucky: toy-unlucky-deposit cents=13 sequence={deposited} stream=account/{}",
+            "unlucky: ROUTER_REASON_UNHANDLED_HANDLER_ERROR cause=toy-unlucky-deposit cause.cents=13 sequence={deposited} stream=account/{}",
             cover("account", 1).root.unwrap()
         )),
-        "the policy, its error's code and args, and the trigger: {}",
+        "the policy, its bug's key, its error's code and args, and the trigger: {}",
         lines[0]
+    );
+    let reason = crate::next::toys::wire(
+        "ROUTER_REASON_UNHANDLED_HANDLER_ERROR",
+        &[("cause", "toy-unlucky-deposit"), ("cause.cents", "13")],
+    );
+    crate::next::toys::assert_letter(
+        &crate::next::toys::one_letter(log.letters()),
+        &reason,
+        crate::next::toys::processing_failed(&reason, 0, false),
     );
     assert!(!lines[0].contains("cannot happen"), "{}", lines[0]);
 }
@@ -1402,10 +1453,22 @@ fn a_policys_refusal_answer_error_dead_letters_as_policy_failed() {
     assert_eq!(lines.len(), 1, "{lines:?}");
     assert!(
         lines[0].contains(&format!(
-            "unanswering-bookkeeping: toy-unanswerable-refusal trigger={before}"
+            "unanswering-bookkeeping: ROUTER_REASON_UNHANDLED_HANDLER_ERROR cause=toy-unanswerable-refusal cause.trigger={before}"
         )),
         "{}",
         lines[0]
+    );
+    let reason = crate::next::toys::wire(
+        "ROUTER_REASON_UNHANDLED_HANDLER_ERROR",
+        &[
+            ("cause", "toy-unanswerable-refusal"),
+            ("cause.trigger", &before.to_string()),
+        ],
+    );
+    crate::next::toys::assert_letter(
+        &crate::next::toys::one_letter(log.letters()),
+        &reason,
+        crate::next::toys::processing_failed(&reason, 0, false),
     );
     assert!(!lines[0].contains("cannot happen"), "{}", lines[0]);
     assert_eq!(
@@ -1946,6 +2009,24 @@ fn a_policy_command_outside_its_destination_is_refused_by_the_kernel() {
         "nothing delivered, not even the command inside the destination"
     );
     assert_eq!(log.lines().len(), 1, "{:?}", log.lines());
+    let reason = crate::next::toys::wire(
+        "COORDINATOR_REASON_POLICY_COMMAND_OUTSIDE_DESTINATION",
+        &[("actual_domain", "shelf"), ("expected_domain", "ledger")],
+    );
+    let letter = crate::next::toys::one_letter(log.letters());
+    crate::next::toys::assert_letter(
+        &letter,
+        &reason,
+        crate::next::toys::processing_failed(&reason, 0, false),
+    );
+    assert!(
+        matches!(
+            &letter.payload,
+            Some(crate::next::v1::angzarr_dead_letter::Payload::RejectedEvents(book))
+                if book.cover == Some(cover("account", 1))
+        ),
+        "the trigger: {letter:?}"
+    );
     assert_eq!(position(&store, "unchecked", &cover("account", 1)), 0);
 }
 
@@ -1969,13 +2050,92 @@ fn unchecked_refusal(
         .err()
         .expect("the policy's bug fails its step");
     assert_eq!(streams(&store), [cover("account", 1)], "nothing delivered");
-    match failure {
+    let error = match failure {
         Failure::Downstream {
             error: StepError::Kernel(KernelError::Router(error)),
             ..
         } => error,
         other => panic!("the policy's bug: {other:?}"),
+    };
+    // The trigger dead-lettered under the refusal's key and args, as
+    // answered: processing_failed, a fatal bug (decision 14.48).
+    let reason = crate::next::v1::Diagnostic {
+        code: error.code.clone(),
+        args: error.extras.clone().into_iter().collect(),
+    };
+    crate::next::toys::assert_letter(
+        &crate::next::toys::one_letter(log.letters()),
+        &reason,
+        crate::next::toys::processing_failed(&reason, 0, false),
+    );
+    error
+}
+
+/// A policy's command that carries Handling, which a reaction command
+/// never may, refuses the whole answer as the policy's bug,
+/// COORDINATOR_REASON_POLICY_COMMAND_WITH_HANDLING naming its domain and
+/// type (decision 14.48): never delivered with its handling dropped.
+#[test]
+fn a_policys_command_with_handling_is_refused_by_the_kernel() {
+    use crate::next::v1::{ConflictResolution, Handling};
+    let sequenced = unchecked_refusal(|_| {
+        let mut book = record_for(ledger_cover());
+        book.handling = Some(Handling {
+            expected_sequence: Some(0),
+            ..Handling::default()
+        });
+        vec![book]
+    });
+    let resolved = unchecked_refusal(|_| {
+        let mut book = record_for(ledger_cover());
+        book.handling = Some(Handling {
+            conflict_resolution: ConflictResolution::Strict as i32,
+            ..Handling::default()
+        });
+        vec![book]
+    });
+    for refused in [sequenced, resolved] {
+        assert_eq!(
+            refused.code,
+            "COORDINATOR_REASON_POLICY_COMMAND_WITH_HANDLING"
+        );
+        assert_eq!(
+            refused.extras.get("domain").map(String::as_str),
+            Some("ledger")
+        );
+        assert_eq!(
+            refused.extras.get("command_type").map(String::as_str),
+            Some("toy.ledger.cmd.v1.Record")
+        );
+        assert_eq!(
+            refused.grpc,
+            crate::next::angzarr_router::error::GrpcCode::Internal
+        );
     }
+    // An empty Handling is unset, and fine.
+    let mut registry = registry();
+    registry.policy_component(
+        Unchecked {
+            answer: |_| {
+                let mut book = record_for(ledger_cover());
+                book.handling = Some(crate::next::v1::Handling::default());
+                vec![book]
+            },
+        },
+        "ledger",
+    );
+    let log = MemoryDeadLetters::new();
+    let store = MemoryStore::new();
+    Kernel::new(&registry, &log)
+        .handle::<Account, _, _>(
+            &store,
+            command(cover("account", 1), AccountCmd::Open.to_any()),
+            &at(30),
+            &mut (),
+        )
+        .ready()
+        .expect("delivered");
+    assert!(log.lines().is_empty(), "{:?}", log.lines());
 }
 
 /// The kernel holds each command to its trigger's edition, a named root and

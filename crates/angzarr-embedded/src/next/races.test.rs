@@ -382,18 +382,32 @@ fn assert_cap_exhausted(failure: &Failure<Rejected>, attempts: u32, cap: u32) {
 }
 
 /// `log` holds one dead letter, the kernel giving up at a cap: its reason
-/// the retry cap's key (as the kernel's code), with `attempts` and `cap`.
+/// the retry cap's key as the spec spells it,
+/// `COORDINATOR_REASON_RETRY_CAP_EXHAUSTED`, with `attempts` and `cap`, and
+/// its one detail `processing_failed`, `retry_count` the attempts,
+/// transient (decision 14.48).
 fn assert_dead_lettered_at_cap(log: &MemoryDeadLetters, attempts: u32, cap: u32) {
+    use crate::next::toys::{assert_letter, one_letter, processing_failed, wire};
     let lines = log.lines();
     assert_eq!(lines.len(), 1, "{lines:?}");
     let line = &lines[0];
     assert!(line.starts_with(crate::next::DEAD_LETTER_PREFIX), "{line}");
-    assert!(
-        line.contains(" angzarr-embedded-next-retry-cap-exhausted "),
-        "{line}"
+    let reason = wire(
+        "COORDINATOR_REASON_RETRY_CAP_EXHAUSTED",
+        &[
+            ("attempts", &attempts.to_string()),
+            ("cap", &cap.to_string()),
+        ],
     );
-    assert!(line.contains(&format!(" attempts={attempts} ")), "{line}");
-    assert!(line.contains(&format!(" cap={cap} ")), "{line}");
+    let letter = one_letter(log.letters());
+    assert_letter(&letter, &reason, processing_failed(&reason, attempts, true));
+    assert!(
+        matches!(
+            letter.payload,
+            Some(crate::next::v1::angzarr_dead_letter::Payload::RejectedCommand(_))
+        ),
+        "{letter:?}"
+    );
 }
 
 /// C-0727: a command whose expected sequence is ahead of the head (4 or 7,

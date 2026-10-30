@@ -163,10 +163,19 @@ fn a_panicking_ingests_dead_letter_carries_its_code_not_english() {
     assert_eq!(lines.len(), 1);
     assert!(
         lines[0].contains(
-            "angzarr-embedded-next-unhandled-handler-error cause=ROUTER_REASON_HANDLER_PANICKED"
+            "account: ROUTER_REASON_UNHANDLED_HANDLER_ERROR cause=ROUTER_REASON_HANDLER_PANICKED"
         ),
-        "{}",
+        "the spec's key, never the kernel's code: {}",
         lines[0]
+    );
+    let reason = crate::next::toys::wire(
+        "ROUTER_REASON_UNHANDLED_HANDLER_ERROR",
+        &[("cause", "ROUTER_REASON_HANDLER_PANICKED")],
+    );
+    crate::next::toys::assert_letter(
+        &crate::next::toys::one_letter(log.letters()),
+        &reason,
+        crate::next::toys::processing_failed(&reason, 0, false),
     );
     assert!(!lines[0].contains("panicked:"), "{}", lines[0]);
     assert!(
