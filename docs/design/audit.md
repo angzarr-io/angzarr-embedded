@@ -1069,7 +1069,7 @@ no actor), and reactor re-runs deduplicate in both, with no switch.
   `Handled::Duplicate` is answered as the original response. A client
   sending several commands gives each its own command id and one shared
   correlation.
-- `Malformed` and `UnknownType` (`Recovery::Invalid`) are 400s; `Stale` and
+- `Malformed` and `UnknownType` (`Recovery::Invalid`) are 400s; `Stale`, `Overlap` and
   `Unresolved` 409/412; `Rejected` 422; `Retry` store failures are retried
   once with the same book; `Bug` is a 500 and is already in the
   dead-letter log, which the server routes to `tracing` at error level and
