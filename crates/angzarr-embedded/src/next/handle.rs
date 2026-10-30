@@ -443,10 +443,13 @@ impl<'k> Kernel<'k> {
     /// Each step is ONE atomic write to `store`: one stream's events, with
     /// the step's positions. The command's own failure writes nothing: a
     /// refused write is [`KernelError::Store`]. A race lost at the write
-    /// (another write to the stream landed first) is run again on the new
-    /// head when the kernel stamped the command's expected sequence, under
-    /// the retry policy; under STRICT, a sender's expected sequence it lost
-    /// is [`KernelError::Stale`] (decision 14.45). A cover of another
+    /// (another write to the stream landed first; decisions 14.45, 14.46)
+    /// is run again on the new head when the kernel stamped the command's
+    /// expected sequence, under the race re-run cap; under AGGREGATE_HANDLES
+    /// and COMMUTATIVE, a sender's expected sequence is re-delivered the
+    /// widened window, under the retry cap; under STRICT, it is
+    /// [`KernelError::Stale`]. At either cap the command is dead-lettered,
+    /// [`KernelError::RetryCapExhausted`], and a fact [`Handled::Parked`]. A cover of another
     /// domain than `D` is [`KernelError::WrongDomain`]; a remote domain's
     /// command goes to its coordinator ([`Registry::remote`]). Business
     /// code stays synchronous and pure, each dispatch awaited; the future
@@ -505,12 +508,26 @@ impl<'k> Kernel<'k> {
         let mut run = Run::new(self, sampled);
         let identified = checked.identify(sampled);
         let cover = identified.cover().clone();
-        let mut retries = 0;
+        let mut tries = Tries::default();
         let origin = loop {
-            match run.origin(&mut port, identified.clone()).await {
-                Err(failure) if run.again(&failure, false, &mut retries, &identified).await => {}
-                answer => break answer?,
+            let failure = match run.origin(&mut port, identified.clone()).await {
+                Err(failure) => failure,
+                answer => break answer,
+            };
+            match run.again(&failure, false, &mut tries, &identified).await {
+                Ok(true) => {}
+                Ok(false) => break Err(failure),
+                Err(given_up) => break Err(given_up),
             }
+        };
+        let origin = match origin {
+            // A fact is never refused: given up at the cap, it is parked.
+            Err(Failure::Kernel(KernelError::RetryCapExhausted { .. }))
+                if identified.body().is_fact() =>
+            {
+                return Ok(Handled::Parked)
+            }
+            origin => origin?,
         };
         match origin {
             Origin::Duplicate(events) => {
@@ -874,9 +891,9 @@ enum Origin {
 
 /// The class of a step's `failure` ([`class`]), if it
 /// is one the kernel may run again: a stale command or a lost race
-/// (ABORTED) is the caller's to reload (but a race the kernel's own
-/// stamped command lost, [`lost_its_own_race`], is run again for any
-/// caller); an unreachable handler or store,
+/// (ABORTED) is the caller's to reload (but a race lost at the write is
+/// the kernel's to run again, for any caller, [`raced`]); an unreachable
+/// handler or store,
 /// and a router error under a retryable status, are retryable bugs; a
 /// router error's own class otherwise. `None` for a failure never run
 /// again: a refusal, a decide that never acknowledged its window (already
@@ -908,8 +925,8 @@ fn failure_class(failure: &Failure<Rejected>) -> Option<Class> {
 /// (the store's conflict: it landed between this command's load and its
 /// write) under STRICT, by a command whose sender set its expected
 /// sequence, is that sequence gone stale: [`KernelError::Stale`], against
-/// the head the store found (decision 14.45). Any other error, a stamped
-/// command's lost race included ([`lost_its_own_race`]), is the store's.
+/// the head the store found (decision 14.45). Any other error, any other
+/// lost race included ([`raced`]), is the store's.
 fn lost(contextual: &Contextual, error: StoreError) -> KernelError {
     match (&error, contextual.command.expected_sequence()) {
         (StoreError::Conflict { actual, .. }, Some(expected))
@@ -925,17 +942,49 @@ fn lost(contextual: &Contextual, error: StoreError) -> KernelError {
     }
 }
 
+/// How a race lost at the write is run again (decisions 14.45, 14.46).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Race {
+    /// The kernel stamped the head it loaded (no expected sequence, or a
+    /// fact): decided again on the new head, under the race re-run cap.
+    Rerun,
+    /// The sender's expected sequence, under AGGREGATE_HANDLES or
+    /// COMMUTATIVE: the widened window re-delivered with a fresh nonce,
+    /// the resolution's rule deciding again, under the retry cap.
+    Redeliver,
+}
+
 /// Whether `failure` is a write `command` lost to another write to its
-/// stream when its sender set no expected sequence: the kernel stamped the
-/// head it loaded, so the race is the kernel's own, and the command is
-/// decided again on the new head (optimistic concurrency, per stream
-/// only; decision 14.45), for any caller.
-fn lost_its_own_race(failure: &Failure<Rejected>, command: &Identified) -> bool {
-    command.expected_sequence().is_none()
-        && matches!(
-            failure,
-            Failure::Kernel(KernelError::Store(StoreError::Conflict { .. }))
-        )
+/// stream, and how it is run again, for any caller (optimistic
+/// concurrency, per stream only). STRICT's loss with an expected sequence
+/// is never one: [`lost`] made it [`KernelError::Stale`].
+fn raced(failure: &Failure<Rejected>, command: &Identified) -> Option<Race> {
+    match failure {
+        Failure::Kernel(KernelError::Store(StoreError::Conflict { .. })) => {
+            Some(match command.expected_sequence() {
+                None => Race::Rerun,
+                Some(_) => Race::Redeliver,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// How often one command's step has been run again: retries of a
+/// retryable failure, and runs that lost the race at the write.
+#[derive(Default)]
+struct Tries {
+    retries: u32,
+    races: u32,
+}
+
+/// Whether `failure` is a step given up at a cap, dead-lettered already:
+/// its policy's position does what a bug's does.
+fn given_up(failure: &Failure<Rejected>) -> bool {
+    matches!(
+        failure,
+        Failure::Kernel(KernelError::RetryCapExhausted { .. })
+    )
 }
 
 /// What a step came to.
@@ -975,35 +1024,62 @@ impl<'k> Run<'k> {
             }
     }
 
-    /// Whether `command`'s step, failed with `failure` after `retries`
-    /// retries, runs again: once its backoff is waited out, `retries` one
+    /// Whether `command`'s step, failed with `failure` after `tries`, runs
+    /// again (`Ok(true)`): once its backoff is waited out, `tries` one
     /// more. A failure that is retried but has had all its retries is
-    /// dead-lettered, with their count, and is not.
+    /// dead-lettered, with their count, and is not (`Ok(false)`). A race
+    /// lost at the write ([`raced`]) runs again up to its cap: the race
+    /// re-run cap for a stamped command, `max_retries + 1` deliveries for a
+    /// re-delivered window; at the cap it is dead-lettered and given up,
+    /// [`KernelError::RetryCapExhausted`] in its place (`Err`).
     async fn again(
         &mut self,
         failure: &Failure<Rejected>,
         policy_step: bool,
-        retries: &mut u32,
+        tries: &mut Tries,
         command: &Identified,
-    ) -> bool {
-        let raced = self.retry.max_retries > 0 && lost_its_own_race(failure, command);
-        if !raced && !self.retried(failure, policy_step) {
-            return false;
+    ) -> Result<bool, Failure<Rejected>> {
+        if let Some(race) = raced(failure, command) {
+            tries.races += 1;
+            let cap = match race {
+                Race::Rerun => self.retry.max_race_runs.max(1),
+                Race::Redeliver => self.retry.max_retries.saturating_add(1),
+            };
+            if tries.races >= cap {
+                let given_up = KernelError::RetryCapExhausted {
+                    stream: command.cover().clone(),
+                    attempts: tries.races,
+                    cap,
+                };
+                write_dead_letter(
+                    self.dead_letters,
+                    command.to_book(),
+                    command.domain(),
+                    &given_up,
+                );
+                return Err(Failure::Kernel(given_up));
+            }
+            let backoff = self.retry.backoff(tries.races - 1, self.wait.draw());
+            self.wait.wait(backoff).await;
+            return Ok(true);
         }
-        if *retries >= self.retry.max_retries {
+        if !self.retried(failure, policy_step) {
+            return Ok(false);
+        }
+        if tries.retries >= self.retry.max_retries {
             write_retries_exhausted(
                 self.dead_letters,
                 Payload::RejectedCommand(command.to_book()),
                 command.domain(),
                 failure,
-                *retries,
+                tries.retries,
             );
-            return false;
+            return Ok(false);
         }
-        let backoff = self.retry.backoff(*retries, self.wait.draw());
+        let backoff = self.retry.backoff(tries.retries, self.wait.draw());
         self.wait.wait(backoff).await;
-        *retries += 1;
-        true
+        tries.retries += 1;
+        Ok(true)
     }
 
     /// The originating command's step: load then deduplicate, then
@@ -1234,9 +1310,9 @@ impl<'k> Run<'k> {
                     return Err((path, StepError::Kernel(KernelError::Router(error))));
                 }
                 Err(failure) => {
-                    // Retried to its cap and dead-lettered: the position
-                    // does what a bug's does.
-                    if self.retried(&failure, true) {
+                    // Retried or re-run to its cap and dead-lettered: the
+                    // position does what a bug's does.
+                    if self.retried(&failure, true) || given_up(&failure) {
                         past_bug(self.policy_bug, port, &position)
                             .await
                             .map_err(|e| store(path.clone(), e))?;
@@ -1332,7 +1408,7 @@ impl<'k> Run<'k> {
                 error
             }
             Err(failure) => {
-                if self.retried(&failure, true) {
+                if self.retried(&failure, true) || given_up(&failure) {
                     past_bug(self.policy_bug, port, positions)
                         .await
                         .map_err(|e| StepError::Kernel(KernelError::Store(e)))?;
@@ -1379,14 +1455,16 @@ impl<'k> Run<'k> {
         command: Identified,
         positions: &[(&str, &Cover, u64)],
     ) -> Result<Stepped, Failure<Rejected>> {
-        let mut retries = 0;
+        let mut tries = Tries::default();
         loop {
             let failure = match self.attempt(port, command.clone(), positions).await {
                 Err(failure) => failure,
                 stepped => return stepped,
             };
-            if !self.again(&failure, true, &mut retries, &command).await {
-                return Err(failure);
+            match self.again(&failure, true, &mut tries, &command).await {
+                Ok(true) => {}
+                Ok(false) => return Err(failure),
+                Err(given_up) => return Err(given_up),
             }
         }
     }

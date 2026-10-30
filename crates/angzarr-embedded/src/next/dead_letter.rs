@@ -19,6 +19,9 @@
 //!   ([`StepError::PolicyFailed`](super::StepError::PolicyFailed));
 //! - a step whose retryable failure outlasted its retries
 //!   ([`OnRetryable`](super::OnRetryable)), with how many there were.
+//! - a command or fact given up at a cap, every write lost to another write
+//!   to its stream ([`KernelError::RetryCapExhausted`](super::KernelError::RetryCapExhausted),
+//!   decision 14.46), with its attempts and the cap.
 //!
 //! A letter's reason is its error's [`Diagnostic`]: its code and its args,
 //! never English (angzarr decision 14.37). Every line starts with

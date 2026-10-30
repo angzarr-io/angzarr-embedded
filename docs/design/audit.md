@@ -296,23 +296,40 @@ first write and refuses the second (`StoreError::Conflict`). Nothing
 orders or locks streams: ordering is per stream only, and a write to
 another stream is never a conflict. The loser:
 
-- **set no expected sequence**: the kernel stamped the head it loaded, so
-  the race is the kernel's own. It is loaded and decided again on the new
-  head under the retry policy (`OnRetryable`), for an outside caller as for
-  a policy's step, and lands; its handler runs twice.
+- **set no expected sequence** (or is a fact): the kernel stamped the
+  head it loaded, so the race is the kernel's own. It is loaded and
+  decided again on the new head, for an outside caller as for a policy's
+  step, under the race re-run cap (`OnRetryable::max_race_runs`, default
+  10 runs, the first included; decision 14.46), with the retry policy's
+  backoff and jitter between runs, whatever `max_retries` says; its
+  handler runs once per run.
 - **set one, under STRICT**: it decided against a head that is gone, the
   early check's condition found late: `KernelError::Stale`, `expected`
   its sequence and `actual` the head the store found, ABORTED under
   `COORDINATOR_REASON_EXPECTED_SEQUENCE_STALE` (`KernelError::as_coded`),
   back to an outside caller at once and never run again by the kernel.
 - **set one, under AGGREGATE_HANDLES or COMMUTATIVE**: never that key (it
-  is STRICT's alone); the store's conflict goes back to the caller. What
-  these resolutions do when the stream moves after the window is
-  delivered is not yet decided (14.45, amended).
+  is STRICT's alone). The widened window (its expected sequence to the
+  new head) is re-delivered with a fresh nonce, and the resolution's rule
+  decides again on it (the nonce, or unit overlap), under the retry cap:
+  at most `max_retries + 1` deliveries, the first included, the retry
+  policy's backoff between them.
+
+At either cap the kernel gives up: the command is dead-lettered under
+`KernelError::RetryCapExhausted` (args `attempts`, how many times business
+code ran, and `cap`), nothing is persisted, and its caller is answered
+INTERNAL, `COORDINATOR_REASON_RETRY_CAP_EXHAUSTED` (`KernelError::as_coded`):
+the dead letter holds it, so no caller retries it, and a policy's step
+moves its position as `on_policy_bug` says. A fact is never refused: at the
+race re-run cap it is dead-lettered the same way and answered
+`Handled::Parked` (OK, PARKED, no events).
 
 Pinned by `next/concurrency.test.rs`, which forces the race with a barrier
-only the two first dispatches pass, and by the injected conflicts of
-`an_outside_callers_lost_race_*` and `outside_strict_a_lost_write_is_never_the_stale_key`.
+only the two first dispatches pass; by `next/races.test.rs`, whose
+business code lands the other write through the store while it decides
+(conflict_resolution.feature's C-0718, C-0719 and C-0722 to C-0726); and by
+the injected conflicts of `an_outside_callers_lost_race_*` and
+`outside_strict_a_lost_write_is_never_the_stale_key`.
 
 ## Step 4: load and conflict resolution
 
@@ -371,7 +388,10 @@ can never be stale (a race lost at its write is run again on the new head;
   sets and the kernel judges them (below).
   At the head there is no window, and the command is handed over as
   STRICT.
-- Past the head: stale under every resolution.
+- **Past the head**, under every resolution: malformed, never stale
+  (decision 14.47): `KernelError::ExpectedSequenceAhead`, angzarr's
+  INVALID_ARGUMENT `COORDINATOR_REASON_EXPECTED_SEQUENCE_AHEAD`, args
+  `expected` and `head`, before business code (C-0727).
 
 **COMMUTATIVE**, angzarr-router's (`DomainDispatch::with_commutative`,
 which the registry configures for a state that lists it). The handler runs
@@ -549,7 +569,7 @@ never classifies):
 | Class | Statuses | What the kernel does |
 |---|---|---|
 | business, fatal | FAILED_PRECONDITION, INVALID_ARGUMENT, NOT_FOUND, ALREADY_EXISTS, OUT_OF_RANGE, PERMISSION_DENIED | a rejection, `Failure::Rejected(Rejected)`, `Recovery::Business`: to the caller, or the issuing policy's refusal path; never retried, never dead-lettered |
-| business, immediate | ABORTED (a stale or overlapping command, a lost race of a command whose sender set its expected sequence, or a handler's own choice) | back to an outside caller at once, to reload (`Recovery::Retry`), never dead-lettered; a policy's step, whose caller is the kernel, is reloaded and run again under the capped backoff, then dead-lettered. A lost race of a command the kernel stamped is run again on the new head for any caller (*Races*) |
+| business, immediate | ABORTED (a stale or overlapping command, a STRICT command's lost race with its sender's expected sequence, or a handler's own choice) | back to an outside caller at once, to reload (`Recovery::Retry`), never dead-lettered; a policy's step, whose caller is the kernel, is reloaded and run again under the capped backoff, then dead-lettered. Any other race lost at the write is run again for any caller, under its cap (*Same-stream concurrency*) |
 | bug, fatal | INTERNAL, UNKNOWN, DATA_LOSS | `KernelError::Router`, `Recovery::Bug`, dead-lettered at once |
 | bug, retryable | every other status (UNAVAILABLE, DEADLINE_EXCEEDED and RESOURCE_EXHAUSTED, a handler's in process or a remote child's as it picked them; UNIMPLEMENTED; a remote child's CANCELLED or UNAUTHENTICATED, and a call that failed on the way, arrive UNAVAILABLE) | retried under the capped backoff, then dead-lettered; `Recovery::Retry` |
 
@@ -825,9 +845,9 @@ pub trait Store: EventStore + SnapshotStore + PositionStore {}
 optionally one stream's pages at the length the step loaded, with the
 step's positions (and, in angzarr, its outbox entries), landing together or
 not at all. Nothing is held open between a step's reads and its write; a
-race is caught by the expected length (`StoreError::Conflict`: run the step
-again, and its dedup lookup finds the winner's events if it was the same
-command). Stores take `&self`, so one handle is shared.
+race is caught by the expected length (`StoreError::Conflict`: the step
+runs again under its cap, and its dedup lookup finds the winner's events
+if it was the same command). Stores take `&self`, so one handle is shared.
 
 **Absent is empty.** A stream with no events reads as an empty `Slice` at
 0, so a snapshot whose stream has no events is never used.
