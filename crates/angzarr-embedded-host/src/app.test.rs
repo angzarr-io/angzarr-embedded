@@ -705,3 +705,129 @@ mod exposure {
         }
     }
 }
+
+/// What the exposure seam answers beyond the owner's cases: an exposed
+/// process manager is refused at run, and a decision with no events is
+/// answered with the addressed stream, empty.
+mod exposure_edges {
+    use angzarr_embedded::next::angzarr_router::error::CodedError;
+    use angzarr_embedded::next::angzarr_router::router::CommandHandler;
+    use angzarr_embedded::next::v1::{
+        ComponentKind, ContextualCommand, DeliveryOutcome, EventBook,
+    };
+    use angzarr_router::pb::CommandHandlerResponse;
+
+    use super::fixtures::*;
+    use super::*;
+    use crate::config::{ComponentConfig, Expose};
+    use crate::exposure::Arrival;
+
+    /// An in-process component's `[[component]]`, exposed `expose`.
+    fn in_process(name: &str, expose: Expose) -> ComponentConfig {
+        ComponentConfig {
+            name: name.to_string(),
+            language: "rust".to_string(),
+            kind: Default::default(),
+            upcasts: None,
+            launch: None,
+            entry: Vec::new(),
+            dir: None,
+            env: Default::default(),
+            expose,
+        }
+    }
+
+    /// A domain answering every input with no events, of `kind`.
+    struct Quiet(ComponentKind);
+
+    impl CommandHandler for Quiet {
+        fn name(&self) -> &str {
+            "Quiet"
+        }
+
+        fn kind(&self) -> ComponentKind {
+            self.0
+        }
+
+        fn command_types(&self) -> Vec<String> {
+            vec!["test.meet.v1.Meet".to_string()]
+        }
+
+        async fn dispatch(
+            &self,
+            _: &ContextualCommand,
+        ) -> Result<CommandHandlerResponse, CodedError> {
+            Ok(CommandHandlerResponse {
+                rules_version: "quiet-1".to_string(),
+                ..CommandHandlerResponse::default()
+            })
+        }
+    }
+
+    /// `quiet`, registered as `kind`, its component exposed `expose`.
+    async fn quiet(dir: &Path, kind: ComponentKind, expose: Expose) -> Result<App, HostError> {
+        let mut config = HostConfig {
+            components: vec![in_process("quiet", expose)],
+            ..HostConfig::default()
+        };
+        config.store.in_memory = true;
+        run(written(dir, &config), move |registry: &mut Registry| {
+            let mut described = descriptor("quiet");
+            described.kind = kind as i32;
+            if kind == ComponentKind::ProcessManager {
+                described.starting_types = vec!["test.meet.v1.Meet".to_string()];
+            }
+            registry
+                .command_handler("quiet", Quiet(kind), described)
+                .unwrap();
+        })
+        .await
+    }
+
+    /// Only an aggregate is served through the listener: a domain exposed
+    /// but registered as a process manager is refused at run, by its
+    /// descriptor's kind; one not exposed runs.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_exposed_process_manager_is_refused_at_run() {
+        let dir = scratch("exposed-pm");
+        assert_eq!(
+            quiet(&dir, ComponentKind::ProcessManager, Expose::Loopback)
+                .await
+                .err(),
+            Some(HostError::NotExposable {
+                domain: "quiet".to_string(),
+                kind: "process_manager".to_string(),
+            })
+        );
+        let hidden = quiet(&dir, ComponentKind::ProcessManager, Expose::None).await;
+        assert!(hidden.is_ok(), "{:?}", hidden.err());
+        let aggregate = quiet(&dir, ComponentKind::Aggregate, Expose::Loopback).await;
+        assert!(aggregate.is_ok(), "{:?}", aggregate.err());
+    }
+
+    /// A decision with no events is answered APPLIED, with the addressed
+    /// stream's book, empty.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_decision_with_no_events_answers_the_addressed_stream_empty() {
+        let dir = scratch("quiet");
+        let app = quiet(&dir, ComponentKind::Aggregate, Expose::Ip)
+            .await
+            .expect("the app runs");
+        let book = book("quiet", 1, 1, "/test.meet.v1.Meet");
+        let response = app
+            .serve(book.clone(), Arrival::Ip, &sampled(1))
+            .await
+            .expect("served");
+        assert_eq!(
+            response.events,
+            Some(EventBook {
+                cover: book.cover,
+                ..EventBook::default()
+            })
+        );
+        assert_eq!(
+            response.outcome.map(|o| o.delivery),
+            Some(DeliveryOutcome::Applied as i32)
+        );
+    }
+}

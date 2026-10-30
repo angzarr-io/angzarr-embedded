@@ -29,3 +29,64 @@ fn the_kernel_classifies_every_status_itself() {
         assert_eq!(class(code), class_of, "status {code}");
     }
 }
+
+/// The coordinator's conflicts on the wire (decisions 14.42, 14.45):
+/// each ABORTED under its key, its args as metadata; an error that is
+/// none of them has no wire answer of the coordinator's.
+#[test]
+fn the_coordinators_conflicts_are_coded_under_their_keys() {
+    use std::collections::BTreeMap;
+
+    use angzarr_router::error::GrpcCode;
+
+    use super::super::reasons::CoordinatorReason;
+    use super::KernelError;
+    let stream = || angzarr_proto::v1::Cover {
+        domain: "shelf".to_string(),
+        ..Default::default()
+    };
+    let coded = |error: KernelError| {
+        error
+            .as_coded()
+            .map(|c| (c.code, c.extras, c.grpc))
+            .expect("one of the coordinator's answers")
+    };
+    let extras = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    };
+    assert_eq!(
+        coded(KernelError::Overlap {
+            stream: stream(),
+            expected: 1,
+            actual: 3,
+            window_units: "items[a]".to_string(),
+            command_units: "items[a].count".to_string(),
+        }),
+        (
+            CoordinatorReason::ConflictOverlap.as_str_name().to_string(),
+            extras(&[
+                ("window_units", "items[a]"),
+                ("command_units", "items[a].count")
+            ]),
+            GrpcCode::Aborted
+        )
+    );
+    assert_eq!(
+        coded(KernelError::Unresolved {
+            stream: stream(),
+            expected: 1,
+            actual: 3,
+        }),
+        (
+            CoordinatorReason::ConflictUnresolved
+                .as_str_name()
+                .to_string(),
+            BTreeMap::new(),
+            GrpcCode::Aborted
+        )
+    );
+    assert!(KernelError::ChainTooDeep { limit: 8 }.as_coded().is_none());
+}

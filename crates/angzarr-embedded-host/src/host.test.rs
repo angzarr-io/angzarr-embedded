@@ -729,3 +729,18 @@ fn a_descriptor_that_fails_its_validation_is_refused_for_its_reason() {
         })
     );
 }
+
+/// A host dropped inside a current-thread runtime stops its children
+/// there, as it does anywhere: that runtime has no worker to hand off, so
+/// nothing is asked of it.
+#[test]
+fn a_host_dropped_on_a_current_thread_runtime_stops_its_children() {
+    let host = started(vec![player(mode::SERVE)]);
+    let pid = pid_of(&host.handler("player").unwrap());
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async move { drop(host) });
+    assert!(!alive(&pid));
+}
