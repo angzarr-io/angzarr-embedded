@@ -106,7 +106,7 @@ impl CommandHandler for Table {
         vec!["test.table.v1.Seat".to_string()]
     }
 
-    fn dispatch(&self, _: &ContextualCommand) -> Result<CommandHandlerResponse, CodedError> {
+    async fn dispatch(&self, _: &ContextualCommand) -> Result<CommandHandlerResponse, CodedError> {
         Ok(CommandHandlerResponse {
             conflict: None,
             events: Some(EventBook {

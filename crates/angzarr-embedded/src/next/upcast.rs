@@ -31,6 +31,7 @@
 
 use angzarr_embedded_diagnostic::Report;
 use angzarr_proto::v1::{EventPage, UpcastRequest, UpcastResponse};
+use angzarr_router::send::BoxFuture;
 use prost::{Message, Name};
 use prost_types::Any;
 
@@ -43,15 +44,24 @@ pub type UpcastFn = Box<dyn Fn(&Any) -> Result<Any, UpcastError> + Send + Sync>;
 /// What the kernel upcasts an incoming payload through (decision 14.39):
 /// its component's upcaster sidecar, `UpcasterService.Upcast`'s body. An
 /// in-process [`Upcaster`] is one, called directly under the same
-/// contract; angzarr-embedded-host's `kind = "upcaster"` child is another.
+/// contract, answering at once; angzarr-embedded-host's
+/// `kind = "upcaster"` child is another, whose answer the kernel awaits.
+/// Object-safe: the future is boxed ([`BoxFuture`]), `Send` on every target
+/// but `wasm32`, as the router's dispatch twins' are.
 pub trait UpcastPort: Send + Sync {
     /// Every page of `request` through the chain, for `request.domain`.
-    fn upcast(&self, request: &UpcastRequest) -> Result<UpcastResponse, UpcastError>;
+    fn upcast<'a>(
+        &'a self,
+        request: &'a UpcastRequest,
+    ) -> BoxFuture<'a, Result<UpcastResponse, UpcastError>>;
 }
 
 impl UpcastPort for Upcaster {
-    fn upcast(&self, request: &UpcastRequest) -> Result<UpcastResponse, UpcastError> {
-        self.dispatch(request)
+    fn upcast<'a>(
+        &'a self,
+        request: &'a UpcastRequest,
+    ) -> BoxFuture<'a, Result<UpcastResponse, UpcastError>> {
+        Box::pin(std::future::ready(self.dispatch(request)))
     }
 }
 
@@ -59,7 +69,7 @@ impl UpcastPort for Upcaster {
 /// `domain` (decision 14.39): sent as a one-page request whose page carries
 /// only the payload, the payload of the page returned taken. A port that
 /// answers no page leaves it as sent.
-pub(crate) fn upcast_input(
+pub(crate) async fn upcast_input(
     port: &dyn UpcastPort,
     domain: &str,
     payload: &Any,
@@ -72,7 +82,8 @@ pub(crate) fn upcast_input(
         }],
     };
     Ok(port
-        .upcast(&request)?
+        .upcast(&request)
+        .await?
         .events
         .into_iter()
         .next()
@@ -83,7 +94,7 @@ pub(crate) fn upcast_input(
 /// `pages` of a `domain` stream, read from the store, upcast through
 /// `port` (decision 14.39): sent as one request, the pages it answers
 /// taken in their place. No pages, no request.
-pub(crate) fn upcast_pages(
+pub(crate) async fn upcast_pages(
     port: &dyn UpcastPort,
     domain: &str,
     pages: &[EventPage],
@@ -95,7 +106,7 @@ pub(crate) fn upcast_pages(
         domain: domain.to_string(),
         events: pages.to_vec(),
     };
-    Ok(port.upcast(&request)?.events)
+    Ok(port.upcast(&request).await?.events)
 }
 
 /// One rule: its source type's full name, its target's when known (typed

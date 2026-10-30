@@ -315,7 +315,7 @@ impl angzarr_router::router::CommandHandler for Hello {
         Vec::new()
     }
 
-    fn dispatch(
+    async fn dispatch(
         &self,
         _: &angzarr_router::pb::ContextualCommand,
     ) -> Result<angzarr_router::pb::CommandHandlerResponse, angzarr_router::error::CodedError> {

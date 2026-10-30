@@ -20,7 +20,9 @@ use std::sync::{Arc, Mutex};
 use angzarr_proto::v1::{ConflictResolution, EventPage, Snapshot, StateDescriptor};
 use angzarr_router::domain::DomainDispatch;
 use angzarr_router::policy::PolicyDispatch;
-use angzarr_router::router::{CommandHandler, PolicyComponent, ProjectorHandler};
+use angzarr_router::router::{
+    self as router, DynCommandHandler, DynPolicyComponent, DynProjectorHandler,
+};
 
 use angzarr_embedded_diagnostic::{Arg, Diagnostic};
 
@@ -48,7 +50,7 @@ struct Entry {
     /// The current rules version.
     rules_version: String,
     /// What dispatches the domain's inputs: angzarr-router's.
-    handler: Box<dyn CommandHandler>,
+    handler: Box<dyn DynCommandHandler>,
     /// What only a typed domain has: its rulebook, upcaster, payload types,
     /// factory and typed replay.
     typed: Option<Typed>,
@@ -112,13 +114,13 @@ pub(crate) enum ProjectorInstance {
     /// A projector written as angzarr-router's `ProjectorHandler` (one in
     /// another process, behind its `ProjectorService`), handed each
     /// committed book of its source whole.
-    Handler(Box<dyn ProjectorHandler>),
+    Handler(Box<dyn DynProjectorHandler>),
 }
 
 /// A registered policy, as angzarr-router dispatches it, held in the
 /// registry's one list in registration order.
 pub(crate) struct PolicyEntry {
-    pub(crate) dispatch: Box<dyn PolicyComponent>,
+    pub(crate) dispatch: Box<dyn DynPolicyComponent>,
     /// The one domain its commands may go to (`ComponentDescriptor.output_domain`):
     /// what the kernel holds them to (decision 14.42).
     pub(crate) output_domain: String,
@@ -389,7 +391,7 @@ impl Registry {
         let port: Arc<dyn UpcastPort> = upcaster.clone();
         let process_manager = starting.is_some();
         let table = route::table::<D>(Arc::clone(&rules), Arc::clone(&fresh), process_manager);
-        let handler: Box<dyn CommandHandler> = Box::new(handlers(table));
+        let handler: Box<dyn DynCommandHandler> = Box::new(handlers(table));
         let entry = Entry {
             state,
             supported,
@@ -432,7 +434,7 @@ impl Registry {
     pub fn command_handler(
         &mut self,
         domain: &str,
-        handler: impl CommandHandler + 'static,
+        handler: impl router::CommandHandler + 'static,
         descriptor: angzarr_router::pb::ComponentDescriptor,
     ) -> Result<(), Misconfigured> {
         let name = domain.to_string();
@@ -590,7 +592,7 @@ impl Registry {
     /// at startup.
     pub fn policy_component(
         &mut self,
-        policy: impl PolicyComponent + 'static,
+        policy: impl router::PolicyComponent + 'static,
         output_domain: &str,
     ) -> &mut Self {
         self.push_policy(Box::new(policy), output_domain.to_string(), true)
@@ -598,7 +600,7 @@ impl Registry {
 
     fn push_policy(
         &mut self,
-        dispatch: Box<dyn PolicyComponent>,
+        dispatch: Box<dyn DynPolicyComponent>,
         output_domain: String,
         answers_refusals: bool,
     ) -> &mut Self {
@@ -633,7 +635,7 @@ impl Registry {
     }
 
     /// `domain`'s handler: what the kernel dispatches its inputs through.
-    pub(crate) fn handler(&self, domain: &str) -> Option<&dyn CommandHandler> {
+    pub(crate) fn handler(&self, domain: &str) -> Option<&dyn DynCommandHandler> {
         self.domains.get(domain).map(|e| &*e.handler)
     }
 
@@ -669,7 +671,7 @@ impl Registry {
     pub fn projector_handler(
         &mut self,
         source: &str,
-        projector: impl ProjectorHandler + 'static,
+        projector: impl router::ProjectorHandler + 'static,
     ) -> &mut Self {
         let name = projector.name().to_string();
         self.push_projector(

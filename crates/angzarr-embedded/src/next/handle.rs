@@ -77,7 +77,7 @@ use super::store::{Port, Store, StorePort};
 use super::stream::{Envelope, Stream};
 use super::upcast::upcast_pages;
 use angzarr_embedded_diagnostic::Report;
-use angzarr_router::router::ProjectorHandler;
+use angzarr_router::router::DynProjectorHandler;
 
 /// How deep a chain may go before it is a [`KernelError::ChainTooDeep`],
 /// unless the kernel says otherwise ([`Kernel::limit`]).
@@ -651,12 +651,12 @@ impl<'k> Kernel<'k> {
     async fn project_book(
         &self,
         name: &str,
-        handler: &dyn ProjectorHandler,
+        handler: &dyn DynProjectorHandler,
         book: &EventBook,
     ) -> Result<(), Report> {
         let mut retries = 0;
         loop {
-            let error = match handler.dispatch(book) {
+            let error = match handler.dispatch(book).await {
                 Ok(_) => return Ok(()),
                 Err(error) => error,
             };
@@ -934,7 +934,7 @@ impl<'k> Run<'k> {
         };
         let contextual = load(*novel, &mut self.nonces).map_err(Failure::Kernel)?;
         let head = contextual.head();
-        let decided = decide(&contextual, self.sampled, self.registry, self.dead_letters)?;
+        let decided = decide(&contextual, self.sampled, self.registry, self.dead_letters).await?;
         let pages = decided.pages;
         let stream = typed(&contextual, &pages, self.registry).map_err(Failure::Kernel)?;
         if !pages.is_empty() {
@@ -986,6 +986,7 @@ impl<'k> Run<'k> {
         for page in &slice.pages {
             let event = match sidecar {
                 Some(sidecar) => upcast_pages(sidecar, &source.domain, std::slice::from_ref(page))
+                    .await
                     .map(|mut upcast| upcast.pop().unwrap_or_else(|| page.clone()))
                     .map_err(|error| {
                         let error = KernelError::Upcast {
@@ -1035,9 +1036,13 @@ impl<'k> Run<'k> {
             pages: vec![page.clone()],
             ..EventBook::default()
         };
-        let checked = policy.dispatch.dispatch(&event).and_then(|reactions| {
-            check_reactions(&policy.output_domain, &event, reactions.reactions)
-        });
+        let checked = policy
+            .dispatch
+            .dispatch(&event)
+            .await
+            .and_then(|reactions| {
+                check_reactions(&policy.output_domain, &event, reactions.reactions)
+            });
         let commands = match checked {
             Ok(commands) => commands,
             Err(error) => {
@@ -1174,7 +1179,7 @@ impl<'k> Run<'k> {
         positions: &[(&str, &Cover, u64)],
     ) -> Result<Stepped, StepError> {
         let kernel = |error| StepError::Kernel(KernelError::Router(error));
-        let answer = match policy.dispatch.dispatch_refusal(refusal, ctx) {
+        let answer = match policy.dispatch.dispatch_refusal(refusal, ctx).await {
             Ok(answer) => answer,
             Err(error) => {
                 let Some(failure) = super::route::policy_failure(&error) else {
@@ -1319,12 +1324,13 @@ impl<'k> Run<'k> {
         let contextual = load(*novel, &mut self.nonces).map_err(kernel)?;
         let head = contextual.head();
         let (pages, snapshot) =
-            match decide(&contextual, self.sampled, self.registry, self.dead_letters) {
+            match decide(&contextual, self.sampled, self.registry, self.dead_letters).await {
                 Ok(decided) => (decided.pages, decided.snapshot),
                 Err(failure) => {
                     if let Failure::Rejected(_) = failure {
                         self.refused =
                             contextual_command(&contextual, self.registry, self.sampled.now)
+                                .await
                                 .ok()
                                 .map(|delivered| {
                                     angzarr_router::context::command_context(&delivered)

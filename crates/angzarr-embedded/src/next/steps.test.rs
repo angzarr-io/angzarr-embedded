@@ -134,7 +134,7 @@ impl<D: Domain> Prepared<D> {
         registry: &Registry,
         dead_letters: &dyn DeadLetterLog,
     ) -> Result<Vec<angzarr_proto::v1::EventPage>, Failure<Rejected>> {
-        dispatch(&self.contextual, sampled, registry, dead_letters)
+        crate::next::toys::ready(dispatch(&self.contextual, sampled, registry, dead_letters))
     }
 
     pub fn into_stream(self) -> Stream<D> {

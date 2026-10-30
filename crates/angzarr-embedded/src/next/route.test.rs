@@ -24,7 +24,7 @@ fn a_record_of_nothing_is_known_by_its_type_url() {
 /// bytes that do not decode as the event's type.
 #[test]
 fn a_fold_that_fails_carries_its_cause_as_a_key_and_args() {
-    use crate::next::toys::{account, command, cover, registry};
+    use crate::next::toys::{account, command, cover, registry, Ready};
     use angzarr_router::error::RouterReason;
     use angzarr_router::pb::ContextualCommand;
 
@@ -54,6 +54,7 @@ fn a_fold_that_fails_carries_its_cause_as_a_key_and_args() {
         .handler("account")
         .expect("registered")
         .dispatch(&request)
+        .ready()
         .expect_err("the persisted event does not fold");
     assert_eq!(error.code, RouterReason::FoldFailed.as_str_name());
     let extra = |key: &str| error.extras.get(key).map(String::as_str);

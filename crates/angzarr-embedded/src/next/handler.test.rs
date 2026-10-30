@@ -2,7 +2,7 @@
 
 use crate::next::{Committed, Stream};
 
-use crate::next::toys::{at, command, cover, registry, root, set, Shelf, ShelfEvent};
+use crate::next::toys::{at, command, cover, registry, root, set, Ready, Shelf, ShelfEvent};
 
 #[test]
 fn handlers_receive_identity_position_metadata_and_state() {
@@ -26,6 +26,7 @@ fn handlers_receive_identity_position_metadata_and_state() {
             &log,
             &mut [&mut handler],
         )
+        .ready()
         .unwrap();
     assert_eq!(seen.len(), 1);
     let (event, seconds, items, was_set) = &seen[0];

@@ -20,7 +20,7 @@ use std::pin::Pin;
 use angzarr_proto::v1::CommandBook;
 use angzarr_router::error::CodedError;
 use angzarr_router::pb::CommandResponse;
-use angzarr_router::router::CommandHandler;
+use angzarr_router::router::DynCommandHandler;
 
 /// What a [`CoordinatorPort`]'s call is: a `Send` future, so the kernel's
 /// own future stays `Send` across it.
@@ -45,7 +45,7 @@ pub enum Target<'r> {
     /// Handled here: the kernel's pipeline over its own store, deciding
     /// through this handler (in this process, or a child's behind its
     /// socket).
-    Local(&'r dyn CommandHandler),
+    Local(&'r dyn DynCommandHandler),
     /// Handled by the coordinator that owns the domain's streams: nothing
     /// of it is loaded or written here.
     Remote(&'r dyn CoordinatorPort),

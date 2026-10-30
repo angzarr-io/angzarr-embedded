@@ -22,8 +22,10 @@
 //! // dropping `host` stops the children.
 //! ```
 //!
-//! The host runs its own tokio runtime, on its own threads, so it works the
-//! same under any caller, async or not.
+//! The host supervises its children on a tokio runtime of its own, on its
+//! own threads, so starting and stopping it works the same under any
+//! caller. A remote component's calls are not the host's: each is awaited
+//! on the caller's runtime, which must be tokio's, with its timer.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -170,23 +172,20 @@ impl Host {
                         domain.clone(),
                         descriptor,
                         link,
-                        runtime.handle().clone(),
                         Duration::from_millis(config.supervision.call_timeout_ms),
                     );
                     let hosted = match kind {
                         ComponentKindConfig::Policy => Hosted::Policy(RemotePolicyHandler::new(
-                            parts.0, parts.1, parts.2, parts.3, parts.4,
+                            parts.0, parts.1, parts.2, parts.3,
                         )),
-                        ComponentKindConfig::Projector => {
-                            Hosted::Projector(RemoteProjectorHandler::new(
-                                parts.0, parts.1, parts.2, parts.3, parts.4,
-                            ))
-                        }
+                        ComponentKindConfig::Projector => Hosted::Projector(
+                            RemoteProjectorHandler::new(parts.0, parts.1, parts.2, parts.3),
+                        ),
                         ComponentKindConfig::Upcaster => Hosted::Upcaster(RemoteUpcaster::new(
-                            parts.0, upcasts, parts.2, parts.3, parts.4,
+                            parts.0, upcasts, parts.2, parts.3,
                         )),
                         _ => Hosted::Domain(RemoteCommandHandler::new(
-                            parts.0, parts.1, parts.2, parts.3, parts.4,
+                            parts.0, parts.1, parts.2, parts.3,
                         )),
                     };
                     host.domains.push(Supervised {

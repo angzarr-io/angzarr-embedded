@@ -551,7 +551,7 @@ mod judged {
     use super::shelf_a_b;
 
     struct Rewritten {
-        inner: Box<dyn CommandHandler>,
+        inner: Box<dyn crate::next::angzarr_router::router::DynCommandHandler>,
         edit: fn(&mut pb::ConflictReport),
     }
 
@@ -562,11 +562,11 @@ mod judged {
         fn command_types(&self) -> Vec<String> {
             self.inner.command_types()
         }
-        fn dispatch(
+        async fn dispatch(
             &self,
             req: &pb::ContextualCommand,
         ) -> Result<pb::CommandHandlerResponse, CodedError> {
-            let mut response = self.inner.dispatch(req)?;
+            let mut response = self.inner.dispatch(req).await?;
             (self.edit)(response.conflict.get_or_insert_with(Default::default));
             Ok(response)
         }

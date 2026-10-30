@@ -34,6 +34,20 @@ fn command(domain: &str, type_url: &str) -> pb::ContextualCommand {
     }
 }
 
+/// A future run to its end on a runtime of its own (with its timer), as
+/// the kernel's caller runs it: `handler.dispatch(&c).awaited()`.
+trait Awaited: std::future::Future + Sized {
+    fn awaited(self) -> Self::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(self)
+    }
+}
+
+impl<F: std::future::Future> Awaited for F {}
+
 fn player(mode: &str) -> ComponentConfig {
     domain("player", "player", mode)
 }
@@ -121,6 +135,7 @@ fn a_command_round_trips_through_the_child() {
     let handler = host.handler("player").unwrap();
     let response = handler
         .dispatch(&command("player", "/examples.blackjack.SitDown"))
+        .awaited()
         .expect("dispatched");
     let events = response.events.expect("events");
     assert_eq!(events.cover.unwrap().domain, "player");
@@ -138,8 +153,11 @@ fn dispatch_works_inside_a_tokio_runtime() {
         .enable_all()
         .build()
         .unwrap();
-    let response = runtime
-        .block_on(async { handler.dispatch(&command("player", "/examples.blackjack.SitDown")) });
+    let response = runtime.block_on(async {
+        handler
+            .dispatch(&command("player", "/examples.blackjack.SitDown"))
+            .await
+    });
     assert!(response.is_ok(), "{response:?}");
     host.shutdown();
 }
@@ -153,6 +171,7 @@ fn a_refusal_comes_back_as_the_routers_refusal() {
         .handler("player")
         .unwrap()
         .dispatch(&command("player", "/examples.blackjack.Refuse"))
+        .awaited()
         .expect_err("refused");
     assert_eq!(refused.grpc, GrpcCode::FailedPrecondition);
     assert_eq!(refused.code, "TABLE_FULL");
@@ -176,7 +195,8 @@ fn a_handler_reaches_its_child_as_soon_as_start_returns() {
     let answered = host
         .handler("player")
         .unwrap()
-        .dispatch(&command("player", "/examples.blackjack.SitDown"));
+        .dispatch(&command("player", "/examples.blackjack.SitDown"))
+        .awaited();
     hold.notify_one();
     assert!(answered.is_ok(), "{answered:?}");
     host.shutdown();
@@ -191,6 +211,7 @@ fn a_dead_child_is_retryable_then_restarted() {
     let first = pid_of(&handler);
     let died = handler
         .dispatch(&command("player", "/examples.blackjack.Die"))
+        .awaited()
         .expect_err("the child died mid-call");
     assert!(is_retryable(&died), "{died:?}");
     // The call reached the child and the child went away under it: not a
@@ -217,6 +238,7 @@ fn a_dead_child_is_retryable_then_restarted() {
     assert_eq!(restarted, Ok(true), "the child was restarted");
     let answered = handler
         .dispatch(&command("player", "/examples.blackjack.SitDown"))
+        .awaited()
         .expect("the restarted child answers");
     assert!(answered.rules_version.starts_with("pid-"));
     assert_ne!(answered.rules_version, first, "a new child answered");
@@ -236,6 +258,7 @@ fn a_hung_child_times_out_retryably() {
     let started = Instant::now();
     let hung = handler
         .dispatch(&command("player", "/examples.blackjack.Hang"))
+        .awaited()
         .expect_err("timed out");
     assert!(started.elapsed() >= Duration::from_millis(300));
     assert!(is_retryable(&hung), "{hung:?}");
@@ -245,6 +268,7 @@ fn a_hung_child_times_out_retryably() {
     );
     assert!(handler
         .dispatch(&command("player", "/examples.blackjack.SitDown"))
+        .awaited()
         .is_ok());
     host.shutdown();
 }
@@ -269,6 +293,7 @@ fn stdout_ending_after_the_handshake_is_not_the_child_ending() {
     for _ in 0..3 {
         let response = handler
             .dispatch(&command("player", "/examples.blackjack.SitDown"))
+            .awaited()
             .expect("still serving");
         assert_eq!(response.rules_version, pid_of(&handler));
     }
@@ -375,6 +400,7 @@ fn stdout_before_the_handshake_is_skipped() {
         .handler("player")
         .unwrap()
         .dispatch(&command("player", "/examples.blackjack.SitDown"))
+        .awaited()
         .is_ok());
     host.shutdown();
 }

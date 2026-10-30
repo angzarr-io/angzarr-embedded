@@ -33,6 +33,7 @@ use angzarr_router::context::CommandContext;
 use angzarr_router::error::{CodedError, GrpcCode, RouterReason};
 use angzarr_router::pb;
 use angzarr_router::router::{CommandHandler, PolicyComponent, ProjectorHandler};
+use angzarr_router::send::BoxFuture;
 use prost::Message;
 use tonic::transport::Channel;
 use tonic::Code;
@@ -88,7 +89,6 @@ struct Remote {
     name: String,
     descriptor: pb::ComponentDescriptor,
     link: Arc<Link>,
-    runtime: tokio::runtime::Handle,
     call_timeout: Duration,
 }
 
@@ -113,14 +113,14 @@ impl Default for Link {
 }
 
 impl Remote {
-    /// `rpc` on the current child's channel, blocking until it answers or
-    /// the call timeout passes (retryable). Safe to call from inside a
-    /// tokio runtime: the call runs on the host's own.
-    fn call<T, F, Fut>(&self, rpc: F) -> Result<T, CodedError>
+    /// `rpc` on the current child's channel, awaited on the caller's
+    /// runtime until it answers or the call timeout passes (retryable). No
+    /// thread is blocked: the caller's task yields while the call is out.
+    /// The caller is on a tokio runtime with its timer enabled.
+    async fn call<T, F, Fut>(&self, rpc: F) -> Result<T, CodedError>
     where
-        T: Send + 'static,
-        F: FnOnce(Channel) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = Result<tonic::Response<T>, tonic::Status>> + Send,
+        F: FnOnce(Channel) -> Fut,
+        Fut: std::future::Future<Output = Result<tonic::Response<T>, tonic::Status>>,
     {
         let name = &self.name;
         let channel = self
@@ -132,17 +132,10 @@ impl Remote {
         let Some(channel) = channel else {
             return Err(unavailable(name, causes::NOT_RUNNING));
         };
-        let call_timeout = self.call_timeout;
-        let (answer, answered) = std::sync::mpsc::sync_channel(1);
-        self.runtime.spawn(async move {
-            let _ = answer.send(tokio::time::timeout(call_timeout, rpc(channel)).await);
-        });
-        match answered.recv() {
-            Ok(Ok(Ok(response))) => Ok(response.into_inner()),
-            Ok(Ok(Err(status))) => Err(status_to_coded(name, &status)),
-            Ok(Err(_elapsed)) => Err(unavailable(name, causes::TIMEOUT)),
-            // The host's runtime stopped, dropping the call.
-            Err(_) => Err(unavailable(name, causes::TRANSPORT)),
+        match tokio::time::timeout(self.call_timeout, rpc(channel)).await {
+            Ok(Ok(response)) => Ok(response.into_inner()),
+            Ok(Err(status)) => Err(status_to_coded(name, &status)),
+            Err(_elapsed) => Err(unavailable(name, causes::TIMEOUT)),
         }
     }
 
@@ -169,7 +162,6 @@ impl RemoteCommandHandler {
         name: String,
         descriptor: pb::ComponentDescriptor,
         link: Arc<Link>,
-        runtime: tokio::runtime::Handle,
         call_timeout: Duration,
     ) -> Self {
         RemoteCommandHandler {
@@ -177,7 +169,6 @@ impl RemoteCommandHandler {
                 name,
                 descriptor,
                 link,
-                runtime,
                 call_timeout,
             }),
         }
@@ -229,16 +220,18 @@ impl CommandHandler for RemoteCommandHandler {
         Vec::new()
     }
 
-    /// `CommandHandlerService.Handle` on the child, blocking until it
+    /// `CommandHandlerService.Handle` on the child, awaited until it
     /// answers or the call timeout passes (retryable).
-    fn dispatch(
+    async fn dispatch(
         &self,
         req: &pb::ContextualCommand,
     ) -> Result<pb::CommandHandlerResponse, CodedError> {
         let req = req.clone();
-        self.inner.call(move |channel| async move {
-            CommandHandlerServiceClient::new(channel).handle(req).await
-        })
+        self.inner
+            .call(move |channel| async move {
+                CommandHandlerServiceClient::new(channel).handle(req).await
+            })
+            .await
     }
 }
 
@@ -256,7 +249,6 @@ impl RemotePolicyHandler {
         name: String,
         descriptor: pb::ComponentDescriptor,
         link: Arc<Link>,
-        runtime: tokio::runtime::Handle,
         call_timeout: Duration,
     ) -> Self {
         RemotePolicyHandler {
@@ -264,7 +256,6 @@ impl RemotePolicyHandler {
                 name,
                 descriptor,
                 link,
-                runtime,
                 call_timeout,
             }),
         }
@@ -296,11 +287,13 @@ impl PolicyComponent for RemotePolicyHandler {
     }
 
     /// `PolicyService.Handle` on the child.
-    fn dispatch(&self, source: &pb::EventBook) -> Result<pb::PolicyResponse, CodedError> {
+    async fn dispatch(&self, source: &pb::EventBook) -> Result<pb::PolicyResponse, CodedError> {
         let source = source.clone();
-        self.inner.call(move |channel| async move {
-            PolicyServiceClient::new(channel).handle(source).await
-        })
+        self.inner
+            .call(move |channel| async move {
+                PolicyServiceClient::new(channel).handle(source).await
+            })
+            .await
     }
 
     /// `PolicyService.OnRefused` on the child, with the refusal (`ctx`
@@ -312,15 +305,18 @@ impl PolicyComponent for RemotePolicyHandler {
     /// page (`COORDINATOR_REASON_REFUSAL_FACT_NO_PAGE`) or a page that is not a fact
     /// (`COORDINATOR_REASON_REFUSAL_FACT_NOT_A_FACT`), or sets its own identity
     /// (`COORDINATOR_REASON_REFUSAL_FACT_IDENTIFIED`).
-    fn dispatch_refusal(
+    async fn dispatch_refusal(
         &self,
         refusal: &pb::Refusal,
         _ctx: &CommandContext,
     ) -> Result<Option<prost_types::Any>, CodedError> {
         let refusal = refusal.clone();
-        let answer = self.inner.call(move |channel| async move {
-            PolicyServiceClient::new(channel).on_refused(refusal).await
-        })?;
+        let answer = self
+            .inner
+            .call(move |channel| async move {
+                PolicyServiceClient::new(channel).on_refused(refusal).await
+            })
+            .await?;
         let Some(fact) = answer.fact else {
             return Ok(None);
         };
@@ -350,7 +346,6 @@ impl RemoteUpcaster {
         name: String,
         upcasts: String,
         link: Arc<Link>,
-        runtime: tokio::runtime::Handle,
         call_timeout: Duration,
     ) -> Self {
         RemoteUpcaster {
@@ -358,7 +353,6 @@ impl RemoteUpcaster {
                 name,
                 descriptor: pb::ComponentDescriptor::default(),
                 link,
-                runtime,
                 call_timeout,
             }),
             upcasts,
@@ -391,36 +385,48 @@ impl UpcastPort for RemoteUpcaster {
     /// retried. Any other status is the failure of the rule it ran on the
     /// request's first payload, a bug ([`UpcastError::Rule`]), carrying the
     /// child's reason.
-    fn upcast(&self, request: &pb::UpcastRequest) -> Result<pb::UpcastResponse, UpcastError> {
-        let sent = request.clone();
-        self.inner
-            .call(move |channel| async move {
-                UpcasterServiceClient::new(channel).upcast(sent).await
-            })
-            .map_err(|error| {
-                if is_retryable(&error) {
-                    let cause = error.extras.get("cause").cloned().unwrap_or_default();
-                    return UpcastError::Unavailable {
-                        cause: Report::of(&KernelError::HandlerUnavailable {
-                            stream: pb::Cover {
-                                domain: self.upcasts.clone(),
-                                ..Default::default()
-                            },
-                            cause,
-                        }),
-                    };
-                }
-                let source = request
-                    .events
-                    .first()
-                    .and_then(|page| page.payload.as_ref())
-                    .map(|payload| angzarr_embedded::next::type_name(&payload.type_url).to_string())
-                    .unwrap_or_default();
-                UpcastError::Rule {
-                    source,
-                    error: Report::of(&KernelError::Router(error)),
-                }
-            })
+    fn upcast<'a>(
+        &'a self,
+        request: &'a pb::UpcastRequest,
+    ) -> BoxFuture<'a, Result<pb::UpcastResponse, UpcastError>> {
+        Box::pin(async move {
+            let sent = request.clone();
+            self.inner
+                .call(move |channel| async move {
+                    UpcasterServiceClient::new(channel).upcast(sent).await
+                })
+                .await
+                .map_err(|error| self.refused(request, error))
+        })
+    }
+}
+
+impl RemoteUpcaster {
+    /// The sidecar's failed `Upcast` of `request`, in the kernel's terms
+    /// (see [`UpcastPort::upcast`]).
+    fn refused(&self, request: &pb::UpcastRequest, error: CodedError) -> UpcastError {
+        if is_retryable(&error) {
+            let cause = error.extras.get("cause").cloned().unwrap_or_default();
+            return UpcastError::Unavailable {
+                cause: Report::of(&KernelError::HandlerUnavailable {
+                    stream: pb::Cover {
+                        domain: self.upcasts.clone(),
+                        ..Default::default()
+                    },
+                    cause,
+                }),
+            };
+        }
+        let source = request
+            .events
+            .first()
+            .and_then(|page| page.payload.as_ref())
+            .map(|payload| angzarr_embedded::next::type_name(&payload.type_url).to_string())
+            .unwrap_or_default();
+        UpcastError::Rule {
+            source,
+            error: Report::of(&KernelError::Router(error)),
+        }
     }
 }
 
@@ -437,7 +443,6 @@ impl RemoteProjectorHandler {
         name: String,
         descriptor: pb::ComponentDescriptor,
         link: Arc<Link>,
-        runtime: tokio::runtime::Handle,
         call_timeout: Duration,
     ) -> Self {
         RemoteProjectorHandler {
@@ -445,7 +450,6 @@ impl RemoteProjectorHandler {
                 name,
                 descriptor,
                 link,
-                runtime,
                 call_timeout,
             }),
         }
@@ -477,11 +481,13 @@ impl ProjectorHandler for RemoteProjectorHandler {
     }
 
     /// `ProjectorService.Handle` on the child.
-    fn dispatch(&self, events: &pb::EventBook) -> Result<pb::Projection, CodedError> {
+    async fn dispatch(&self, events: &pb::EventBook) -> Result<pb::Projection, CodedError> {
         let events = events.clone();
-        self.inner.call(move |channel| async move {
-            ProjectorServiceClient::new(channel).handle(events).await
-        })
+        self.inner
+            .call(move |channel| async move {
+                ProjectorServiceClient::new(channel).handle(events).await
+            })
+            .await
     }
 }
 

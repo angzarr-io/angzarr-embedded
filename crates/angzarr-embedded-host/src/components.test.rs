@@ -184,7 +184,10 @@ impl CommandHandler for Table {
         vec!["test.table.v1.Seat".to_string()]
     }
 
-    fn dispatch(&self, req: &ContextualCommand) -> Result<CommandHandlerResponse, CodedError> {
+    async fn dispatch(
+        &self,
+        req: &ContextualCommand,
+    ) -> Result<CommandHandlerResponse, CodedError> {
         let sent = input(req);
         let is_fact = matches!(
             req.command
@@ -218,7 +221,10 @@ impl CommandHandler for Wallet {
         vec![HOLD[1..].to_string(), HOLD_TOO_MUCH[1..].to_string()]
     }
 
-    fn dispatch(&self, req: &ContextualCommand) -> Result<CommandHandlerResponse, CodedError> {
+    async fn dispatch(
+        &self,
+        req: &ContextualCommand,
+    ) -> Result<CommandHandlerResponse, CodedError> {
         if input(req).type_url == HOLD_TOO_MUCH {
             return Err(CodedError {
                 code: "INSUFFICIENT_FUNDS".to_string(),

@@ -1517,7 +1517,10 @@ fn execute<D: Domain>(
         command_id: Uuid::from_bytes([0x07; 16]),
     };
     let log = MemoryDeadLetters::new();
-    match stream.execute(book, registry, &sampled, &log, &mut [])? {
+    match stream
+        .execute(book, registry, &sampled, &log, &mut [])
+        .ready()?
+    {
         Executed::Applied(events) => Ok(events.iter().map(|e| e.event().to_any()).collect()),
         Executed::Duplicate(_) => panic!("command {n} is new"),
     }
@@ -3272,6 +3275,7 @@ mod process_manager {
         };
         let refused = buy_in
             .execute(held(2), &registry, &sampled, &log, &mut [])
+            .ready()
             .expect_err("no instance");
         assert_eq!(refused.code(), "angzarr-embedded-next-pm-no-instance");
         buy_in
@@ -3282,9 +3286,11 @@ mod process_manager {
                 &log,
                 &mut [],
             )
+            .ready()
             .unwrap();
         assert!(buy_in
             .execute(held(4), &registry, &sampled, &log, &mut [])
+            .ready()
             .is_ok());
         assert_eq!(buy_in.len(), 2);
     }
@@ -3625,7 +3631,9 @@ mod handler_context {
             now: at(1),
             command_id: Uuid::from_bytes([0x07; 16]),
         };
-        let Err(failure) = pot.execute(staking(1, 5, false, 0), &registry, &sampled, &log, &mut [])
+        let Err(failure) = pot
+            .execute(staking(1, 5, false, 0), &registry, &sampled, &log, &mut [])
+            .ready()
         else {
             panic!("unresolved");
         };
@@ -4875,7 +4883,7 @@ mod router {
             vec!["toy.wallet.cmd.v1.Note".to_string()]
         }
 
-        fn dispatch(
+        async fn dispatch(
             &self,
             req: &pb::ContextualCommand,
         ) -> Result<
@@ -4926,9 +4934,9 @@ mod router {
     /// writes what it answers, and deduplicates a retry.
     #[test]
     fn a_boxed_command_handler_registers_as_a_domain() {
-        use ::angzarr_embedded::next::angzarr_router::router::CommandHandler;
+        use ::angzarr_embedded::next::angzarr_router::router::DynCommandHandler;
         let mut registry = Registry::new();
-        let remote: Box<dyn CommandHandler> = Box::new(Remote);
+        let remote: Box<dyn DynCommandHandler> = Box::new(Remote);
         registry
             .command_handler("remote", remote, remote_descriptor())
             .unwrap();
@@ -4990,7 +4998,7 @@ mod router {
             Remote.command_types()
         }
 
-        fn dispatch(
+        async fn dispatch(
             &self,
             req: &pb::ContextualCommand,
         ) -> Result<
@@ -4998,7 +5006,7 @@ mod router {
             ::angzarr_embedded::next::angzarr_router::error::CodedError,
         > {
             self.0.lock().unwrap().push(req.recorded_at);
-            Remote.dispatch(req)
+            Remote.dispatch(req).await
         }
     }
 
@@ -5062,7 +5070,7 @@ mod router {
             Remote.command_types()
         }
 
-        fn dispatch(
+        async fn dispatch(
             &self,
             req: &pb::ContextualCommand,
         ) -> Result<
@@ -5071,7 +5079,7 @@ mod router {
         > {
             use ::angzarr_embedded::next::angzarr_router::error::{CodedError, GrpcCode};
             if self.up.load(std::sync::atomic::Ordering::SeqCst) {
-                return Remote.dispatch(req);
+                return Remote.dispatch(req).await;
             }
             Err(CodedError {
                 code: "REMOTE_HANDLER_UNAVAILABLE".to_string(),
@@ -5092,11 +5100,11 @@ mod router {
     /// resume runs the step again once the handler is reachable.
     #[test]
     fn an_unreachable_remote_handler_is_retried_by_position() {
-        use ::angzarr_embedded::next::angzarr_router::router::CommandHandler;
+        use ::angzarr_embedded::next::angzarr_router::router::DynCommandHandler;
         use ::angzarr_embedded::next::StepError;
         let up = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut registry = registry();
-        let flaky: Box<dyn CommandHandler> = Box::new(Flaky { up: up.clone() });
+        let flaky: Box<dyn DynCommandHandler> = Box::new(Flaky { up: up.clone() });
         registry
             .command_handler("remote", flaky, remote_descriptor())
             .unwrap();
@@ -5214,7 +5222,7 @@ mod router {
             Remote.command_types()
         }
 
-        fn dispatch(
+        async fn dispatch(
             &self,
             req: &pb::ContextualCommand,
         ) -> Result<
@@ -5228,7 +5236,7 @@ mod router {
                 .fetch_update(SeqCst, SeqCst, |n| n.checked_sub(1))
                 .is_ok();
             let up = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(!down));
-            Flaky { up }.dispatch(req)
+            Flaky { up }.dispatch(req).await
         }
     }
 
@@ -5287,7 +5295,7 @@ mod router {
     /// The wallets' registry, with `remote` as the remote domain, and a
     /// policy sending it a `Note` on each wallet's `Held`.
     fn remote_registry(
-        remote: Box<dyn ::angzarr_embedded::next::angzarr_router::router::CommandHandler>,
+        remote: Box<dyn ::angzarr_embedded::next::angzarr_router::router::DynCommandHandler>,
     ) -> Registry {
         let mut registry = registry();
         registry
@@ -5537,7 +5545,7 @@ mod router {
             Remote.command_types()
         }
 
-        fn dispatch(
+        async fn dispatch(
             &self,
             _: &pb::ContextualCommand,
         ) -> Result<
@@ -6002,7 +6010,7 @@ mod router {
             Remote.command_types()
         }
 
-        fn dispatch(
+        async fn dispatch(
             &self,
             _: &pb::ContextualCommand,
         ) -> Result<
@@ -6037,9 +6045,9 @@ mod router {
 
     /// [`faulty`], its handler failing with `error`.
     fn faulty_with(error: ::angzarr_embedded::next::angzarr_router::error::CodedError) -> Registry {
-        use ::angzarr_embedded::next::angzarr_router::router::CommandHandler;
+        use ::angzarr_embedded::next::angzarr_router::router::DynCommandHandler;
         let mut registry = registry();
-        let faulty: Box<dyn CommandHandler> = Box::new(Faulty { error });
+        let faulty: Box<dyn DynCommandHandler> = Box::new(Faulty { error });
         registry
             .command_handler("remote", faulty, remote_descriptor())
             .unwrap();
@@ -6391,7 +6399,7 @@ mod router {
             Remote.command_types()
         }
 
-        fn dispatch(
+        async fn dispatch(
             &self,
             req: &pb::ContextualCommand,
         ) -> Result<
@@ -6406,7 +6414,7 @@ mod router {
                 .is_some_and(|p| matches!(p.body, Some(pb::command_page::Body::Fact(_))));
             match fact {
                 true => Err(CodedError::bug("PICKY_FACT_BROKE", [])),
-                false => Remote.dispatch(req),
+                false => Remote.dispatch(req).await,
             }
         }
     }
@@ -6420,7 +6428,7 @@ mod router {
 
     /// [`picky`], with `picky` as the source.
     fn picky_with(
-        picky: Box<dyn ::angzarr_embedded::next::angzarr_router::router::CommandHandler>,
+        picky: Box<dyn ::angzarr_embedded::next::angzarr_router::router::DynCommandHandler>,
     ) -> (Registry, Mem) {
         let mut registry = registry();
         registry
@@ -6526,7 +6534,7 @@ mod router {
             Remote.command_types()
         }
 
-        fn dispatch(
+        async fn dispatch(
             &self,
             req: &pb::ContextualCommand,
         ) -> Result<
@@ -6546,7 +6554,7 @@ mod router {
                     grpc: GrpcCode::Unavailable,
                     refusal: None,
                 }),
-                false => Remote.dispatch(req),
+                false => Remote.dispatch(req).await,
             }
         }
     }
@@ -6789,6 +6797,15 @@ fn ready<F: std::future::Future>(f: F) -> F::Output {
         Poll::Pending => panic!("not ready at once"),
     }
 }
+
+/// [`ready`], as a method: `stream.execute(..).ready()`.
+trait Ready: std::future::Future + Sized {
+    fn ready(self) -> Self::Output {
+        ready(self)
+    }
+}
+
+impl<F: std::future::Future> Ready for F {}
 
 /// Handle `payload` as command `n` to the wallet at `root`, on the async
 /// path, awaited.

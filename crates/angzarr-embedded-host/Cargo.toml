@@ -28,8 +28,8 @@ angzarr-embedded = { path = "../angzarr-embedded" }
 angzarr-embedded-diagnostic = { path = "../angzarr-embedded-diagnostic" }
 # The store `run` opens: SQLite, at the config's [store] path or in memory.
 angzarr-store-sqlite = { path = "../angzarr-store-sqlite" }
-angzarr-proto = { git = "https://github.com/angzarr-io/angzarr-project", rev = "47c8e09b1d034391f3cf24beb47aa47994722a5a" }
-angzarr-router = { git = "https://github.com/angzarr-io/angzarr-router", rev = "84444b97287908ea293b0348c314cbf78701dceb" }
+angzarr-proto = { git = "https://github.com/angzarr-io/angzarr-project", rev = "ce0a4214d0d949579bc35c7985060202ce926022" }
+angzarr-router = { git = "https://github.com/angzarr-io/angzarr-router", rev = "d79272451903d1cbaa2826f9a52897023c03b684" }
 hyper-util = { version = "0.1", features = ["tokio"] }
 # SIGTERM for a child that outlives its stdin at shutdown: tokio's Child
 # sends only SIGKILL. In the graph already, through tokio.
@@ -53,7 +53,7 @@ toml = "0.9"
 # The kernel test runs on angzarr-ports' MemoryStore (the kernel's own
 # store contract, at its rev).
 [dev-dependencies]
-angzarr-ports = { git = "https://github.com/angzarr-io/angzarr-project", rev = "47c8e09b1d034391f3cf24beb47aa47994722a5a", features = ["memory"] }
+angzarr-ports = { git = "https://github.com/angzarr-io/angzarr-project", rev = "ce0a4214d0d949579bc35c7985060202ce926022", features = ["memory"] }
 serde_json = "1"
 tonic = { version = "0.14", default-features = false, features = ["router"] }
 tokio-stream = { version = "0.1", features = ["net"] }

@@ -41,17 +41,15 @@ use crate::next::{
 };
 
 /// The reason key a stale expected sequence is answered with: the full
-/// name of `CoordinatorReason::ExpectedSequenceStale`, which angzarr-project's
-/// spec is adding (spec/20261019-draft). Held as text until angzarr-proto
-/// is pinned at a rev that has the value; then
-/// `CoordinatorReason::ExpectedSequenceStale.as_str_name()`. Red for that
-/// reason too.
-const EXPECTED_SEQUENCE_STALE: &str = "COORDINATOR_REASON_EXPECTED_SEQUENCE_STALE";
+/// name of `CoordinatorReason::ExpectedSequenceStale` (decision 14.45).
+fn expected_sequence_stale() -> &'static str {
+    crate::next::reasons::CoordinatorReason::ExpectedSequenceStale.as_str_name()
+}
 
 /// `failure` is the coordinator's stale expected sequence for stream
 /// `cover("till", 1)`, `expected` against `actual`: the kernel's
 /// `Stale`, answered on the wire as ABORTED (BusinessImmediate) under
-/// [`EXPECTED_SEQUENCE_STALE`], its sequences as args; for a direct
+/// [`expected_sequence_stale`], its sequences as args; for a direct
 /// caller, a retry (re-read and re-issue).
 fn assert_stale(failure: &Failure<Rejected>, expected: u64, actual: u64) {
     assert_eq!(
@@ -66,7 +64,7 @@ fn assert_stale(failure: &Failure<Rejected>, expected: u64, actual: u64) {
         unreachable!()
     };
     let coded = error.as_coded().expect("one of the coordinator's answers");
-    assert_eq!(coded.code, EXPECTED_SEQUENCE_STALE);
+    assert_eq!(coded.code, expected_sequence_stale());
     assert_eq!(coded.grpc, GrpcCode::Aborted);
     assert_eq!(class(coded.grpc as i32), Class::BusinessImmediate);
     assert_eq!(
@@ -113,7 +111,10 @@ impl CommandHandler for &'static Racing {
         vec!["toy.till.v1.Ring".to_string()]
     }
 
-    fn dispatch(&self, command: &ContextualCommand) -> Result<CommandHandlerResponse, CodedError> {
+    async fn dispatch(
+        &self,
+        command: &ContextualCommand,
+    ) -> Result<CommandHandlerResponse, CodedError> {
         if self.dispatched.fetch_add(1, Ordering::SeqCst) < RACERS {
             self.barrier.wait();
         }

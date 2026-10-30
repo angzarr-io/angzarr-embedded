@@ -269,9 +269,9 @@ pub(crate) fn admit(
 /// `command`'s payload upcast through its domain's port (decision 14.39),
 /// before the kernel decides anything by its type: as sent when the domain
 /// has no port.
-pub(crate) fn upcast(registry: &Registry, command: &Identified) -> Result<Any, UpcastError> {
+pub(crate) async fn upcast(registry: &Registry, command: &Identified) -> Result<Any, UpcastError> {
     match registry.upcast_port(command.domain()) {
-        Some(port) => upcast_input(port, command.domain(), command.payload()),
+        Some(port) => upcast_input(port, command.domain(), command.payload()).await,
         None => Ok(command.payload().clone()),
     }
 }
@@ -335,7 +335,7 @@ pub(crate) async fn read<P: Port>(
     registry: &Registry,
     command: &Identified,
 ) -> Result<Loaded, KernelError> {
-    let current = upcast(registry, command);
+    let current = upcast(registry, command).await;
     let resolution = resolution(registry, command, &current)?;
     let cover = command.cover();
     let windowed = resolution != ConflictResolution::Strict;
@@ -403,7 +403,7 @@ pub(crate) fn load(novel: Novel, nonces: &mut u64) -> Result<Contextual, KernelE
 /// a bug (ROUTER_REASON_UNHANDLED_HANDLER_ERROR, cause ROUTER_REASON_HANDLER_PANICKED). A bug
 /// ([`route::is_handler_fault`]) fails it as [`KernelError::Router`], and
 /// `dead_letters` gets a line of its code and args.
-pub(crate) fn decide(
+pub(crate) async fn decide(
     command: &Contextual,
     sampled: &Sampled,
     registry: &Registry,
@@ -415,10 +415,13 @@ pub(crate) fn decide(
     let handler = registry
         .handler(domain)
         .ok_or_else(|| kernel(unknown_domain(domain)))?;
-    let contextual = contextual_command(command, registry, sampled.now).map_err(kernel)?;
+    let contextual = contextual_command(command, registry, sampled.now)
+        .await
+        .map_err(kernel)?;
     let recorded_at = contextual.recorded_at.unwrap_or_default();
     let response = handler
         .dispatch(&contextual)
+        .await
         .and_then(|response| judged(&contextual, response));
     let response = response.map_err(|error| {
         let error = match RouterReason::from_str_name(&error.code) {
@@ -537,13 +540,15 @@ pub(crate) struct Decided {
 }
 
 /// Step 5's events alone ([`decide`]): what a stream run in memory keeps.
-pub(crate) fn dispatch(
+pub(crate) async fn dispatch(
     command: &Contextual,
     sampled: &Sampled,
     registry: &Registry,
     dead_letters: &dyn DeadLetterLog,
 ) -> Result<Vec<EventPage>, Failure<Rejected>> {
-    decide(command, sampled, registry, dead_letters).map(|decided| decided.pages)
+    decide(command, sampled, registry, dead_letters)
+        .await
+        .map(|decided| decided.pages)
 }
 
 /// Write `snapshot` of `stream` over the one it has (the default policy,
@@ -579,14 +584,14 @@ fn as_sent(mut error: CodedError, sent: &Any, current: &Any) -> CodedError {
 /// over as STRICT, with no nonce), the delivery's nonce, and the instant
 /// the input is accepted at, `max(now, the stream's last)`: what its events
 /// are recorded at (decision 14.37, `ContextualCommand.recorded_at`).
-pub(crate) fn contextual_command(
+pub(crate) async fn contextual_command(
     command: &Contextual,
     registry: &Registry,
     now: Timestamp,
 ) -> Result<ContextualCommand, KernelError> {
     let identified = &command.command;
     let pages = match registry.upcast_port(identified.domain()) {
-        Some(port) => upcast_pages(port, identified.domain(), &command.pages),
+        Some(port) => upcast_pages(port, identified.domain(), &command.pages).await,
         None => Ok(command.pages.clone()),
     }
     .map_err(|error| KernelError::Upcast {

@@ -114,7 +114,7 @@ impl CommandHandler for Till {
         vec!["toy.till.v1.Ring".to_string()]
     }
 
-    fn dispatch(&self, _: &ContextualCommand) -> Result<CommandHandlerResponse, CodedError> {
+    async fn dispatch(&self, _: &ContextualCommand) -> Result<CommandHandlerResponse, CodedError> {
         Ok(CommandHandlerResponse {
             conflict: None,
             events: Some(EventBook {

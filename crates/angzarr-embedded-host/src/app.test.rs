@@ -292,7 +292,7 @@ impl angzarr_embedded::next::angzarr_router::router::CommandHandler for NoHandle
         Vec::new()
     }
 
-    fn dispatch(
+    async fn dispatch(
         &self,
         _: &angzarr_embedded::next::v1::ContextualCommand,
     ) -> Result<
@@ -443,7 +443,10 @@ mod fixtures {
             vec!["test.meet.v1.Meet".to_string()]
         }
 
-        fn dispatch(&self, _: &ContextualCommand) -> Result<CommandHandlerResponse, CodedError> {
+        async fn dispatch(
+            &self,
+            _: &ContextualCommand,
+        ) -> Result<CommandHandlerResponse, CodedError> {
             let met = self.0.meet();
             Ok(decided(if met { MET } else { ALONE }, "meeting-1"))
         }

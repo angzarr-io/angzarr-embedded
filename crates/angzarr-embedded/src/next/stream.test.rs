@@ -240,13 +240,14 @@ fn a_decision_commits_only_to_the_stream_and_head_it_was_made_against() {
     let mut b = Stream::<Account>::new(root(2), None).unwrap();
     let open = |n| command(cover("account", n), AccountCmd::Open.to_any());
     a.execute(open(1), &registry, &at(1), &log, &mut [])
+        .ready()
         .unwrap();
     assert!(matches!(
-        a.execute(open(2), &registry, &at(2), &log, &mut []),
+        a.execute(open(2), &registry, &at(2), &log, &mut []).ready(),
         Err(Failure::Kernel(KernelError::Stale { .. }))
     ));
     assert!(matches!(
-        b.execute(open(1), &registry, &at(2), &log, &mut []),
+        b.execute(open(1), &registry, &at(2), &log, &mut []).ready(),
         Err(Failure::Kernel(KernelError::Stale { .. }))
     ));
     assert_eq!(
@@ -257,6 +258,7 @@ fn a_decision_commits_only_to_the_stream_and_head_it_was_made_against() {
             &log,
             &mut []
         )
+        .ready()
         .err(),
         Some(Failure::Kernel(KernelError::WrongDomain {
             stream: cover("ledger", 1),
@@ -280,10 +282,12 @@ fn a_decision_commits_only_to_the_stream_and_head_it_was_made_against() {
     let deposit = || command(cover("account", 1), AccountCmd::Deposit(4).to_any()).id(9);
     let applied = a
         .execute(deposit(), &registry, &at(3), &log, &mut [])
+        .ready()
         .unwrap();
     assert!(matches!(applied, crate::next::Executed::Applied(e) if e.len() == 1));
     let duplicate = a
         .execute(deposit(), &registry, &at(4), &log, &mut [])
+        .ready()
         .unwrap();
     assert!(matches!(duplicate, crate::next::Executed::Duplicate(e)
         if e.len() == 1 && e[0].sequence() == 1));
@@ -864,6 +868,7 @@ fn commutative_cannot_compare_a_window_hidden_in_a_snapshot() {
     assert_eq!(
         stream
             .execute(behind(11, 1), &registry, &at(9), &log, &mut [])
+            .ready()
             .err(),
         Some(Failure::Kernel(KernelError::BeforeSnapshot {
             stream: cover("shelf", 3),
@@ -872,6 +877,7 @@ fn commutative_cannot_compare_a_window_hidden_in_a_snapshot() {
     );
     let applied = stream
         .execute(behind(12, 2), &registry, &at(9), &log, &mut [])
+        .ready()
         .unwrap();
     assert!(
         matches!(&applied, crate::next::Executed::Applied(e) if e.len() == 1),
@@ -905,7 +911,9 @@ fn a_resumed_stream_decides_against_its_snapshot_and_the_events_after_it() {
     )
     .unwrap();
     let withdraw = command(cover("account", 1), AccountCmd::Withdraw(149).to_any()).id(9);
-    let executed = stream.execute(withdraw, &registry, &at(9), &log, &mut []);
+    let executed = stream
+        .execute(withdraw, &registry, &at(9), &log, &mut [])
+        .ready();
     assert!(executed.is_ok(), "{:?}", executed.err());
     assert_eq!(stream.state().cents, 0, "150, less 149 and the fee");
 }

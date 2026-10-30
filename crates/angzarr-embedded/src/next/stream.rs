@@ -315,10 +315,10 @@ impl<D: Domain> Stream<D> {
     /// is the full loop, with a store and a chain). [`check`](super::check),
     /// identify, admit it against this stream's own events (deduplication,
     /// a process manager's start rule), resolve the
-    /// handling, dispatch it through the router, commit, then hand each new
-    /// event to `handlers`. A book for another stream is
+    /// handling, dispatch it through the router (awaited), commit, then
+    /// hand each new event to `handlers`. A book for another stream is
     /// [`KernelError::WrongDomain`] or [`KernelError::Stale`].
-    pub fn execute(
+    pub async fn execute(
         &mut self,
         book: CommandBook,
         registry: &Registry,
@@ -352,7 +352,7 @@ impl<D: Domain> Stream<D> {
             .iter()
             .map(Envelope::page)
             .collect();
-        let current = upcast(registry, &command);
+        let current = upcast(registry, &command).await;
         match admit(registry, &command, &current, recorded, head > 0)? {
             Admitted::Duplicate(_) => return Ok(Executed::Duplicate(&self.events[found])),
             Admitted::Skip => return Ok(Executed::Applied(&[])),
@@ -393,7 +393,7 @@ impl<D: Domain> Stream<D> {
             last_recorded_at: self.last_recorded_at,
             nonce,
         };
-        let pages = dispatch(&contextual, sampled, registry, dead_letters)?;
+        let pages = dispatch(&contextual, sampled, registry, dead_letters).await?;
         let from = self.events.len();
         self.commit(&pages, registry, handlers).map_err(kernel)?;
         Ok(Executed::Applied(&self.events[from..]))

@@ -798,6 +798,7 @@ mod snapshot {
                 &log,
                 &mut [],
             )
+            .ready()
             .unwrap();
         let snapshot = stream.snapshot(&registry).unwrap();
         assert_eq!(snapshot.sequence, 0);
@@ -834,6 +835,7 @@ mod snapshot {
                 &MemoryDeadLetters::default(),
                 &mut [],
             )
+            .ready()
             .unwrap();
         stream
     }
@@ -907,7 +909,7 @@ mod upcasting {
     /// The account's router table with no upcaster of its own, recording
     /// the type of every command it is handed.
     pub(crate) struct Seen {
-        inner: Box<dyn CommandHandler>,
+        inner: Box<dyn crate::next::angzarr_router::router::DynCommandHandler>,
         seen: Arc<Mutex<Vec<String>>>,
     }
 
@@ -918,7 +920,7 @@ mod upcasting {
         fn command_types(&self) -> Vec<String> {
             self.inner.command_types()
         }
-        fn dispatch(
+        async fn dispatch(
             &self,
             req: &pb::ContextualCommand,
         ) -> Result<pb::CommandHandlerResponse, CodedError> {
@@ -934,7 +936,7 @@ mod upcasting {
                 .map(|payload| payload.type_url)
                 .unwrap_or_default();
             self.seen.lock().unwrap().push(sent);
-            self.inner.dispatch(req)
+            self.inner.dispatch(req).await
         }
     }
 
@@ -1013,13 +1015,18 @@ mod upcasting {
     struct Down;
 
     impl crate::next::UpcastPort for Down {
-        fn upcast(
-            &self,
-            _: &crate::next::v1::UpcastRequest,
-        ) -> Result<crate::next::v1::UpcastResponse, crate::next::UpcastError> {
-            Err(crate::next::UpcastError::Unavailable {
-                cause: angzarr_embedded_diagnostic::Report::new("toy-sidecar-down"),
-            })
+        fn upcast<'a>(
+            &'a self,
+            _: &'a crate::next::v1::UpcastRequest,
+        ) -> crate::next::angzarr_router::send::BoxFuture<
+            'a,
+            Result<crate::next::v1::UpcastResponse, crate::next::UpcastError>,
+        > {
+            Box::pin(std::future::ready(Err(
+                crate::next::UpcastError::Unavailable {
+                    cause: angzarr_embedded_diagnostic::Report::new("toy-sidecar-down"),
+                },
+            )))
         }
     }
 
@@ -1093,7 +1100,7 @@ mod upcasting {
     /// The account's router table with no upcaster of its own, recording
     /// the type of every stored event it is handed.
     struct History {
-        inner: Box<dyn CommandHandler>,
+        inner: Box<dyn crate::next::angzarr_router::router::DynCommandHandler>,
         seen: Arc<Mutex<Vec<String>>>,
     }
 
@@ -1104,7 +1111,7 @@ mod upcasting {
         fn command_types(&self) -> Vec<String> {
             self.inner.command_types()
         }
-        fn dispatch(
+        async fn dispatch(
             &self,
             req: &pb::ContextualCommand,
         ) -> Result<pb::CommandHandlerResponse, CodedError> {
@@ -1113,7 +1120,7 @@ mod upcasting {
                 .filter_map(|page| page.payload.as_ref())
                 .map(|payload| payload.type_url.clone());
             self.seen.lock().unwrap().extend(types);
-            self.inner.dispatch(req)
+            self.inner.dispatch(req).await
         }
     }
 
@@ -1261,7 +1268,7 @@ mod admission {
 
     /// The account's table, as a process manager: its descriptor (in
     /// [`registry`]) has it started only by `Open`.
-    struct AsProcessManager(Box<dyn CommandHandler>);
+    struct AsProcessManager(Box<dyn crate::next::angzarr_router::router::DynCommandHandler>);
 
     impl CommandHandler for AsProcessManager {
         fn name(&self) -> &str {
@@ -1273,11 +1280,11 @@ mod admission {
         fn command_types(&self) -> Vec<String> {
             self.0.command_types()
         }
-        fn dispatch(
+        async fn dispatch(
             &self,
             req: &pb::ContextualCommand,
         ) -> Result<pb::CommandHandlerResponse, CodedError> {
-            self.0.dispatch(req)
+            self.0.dispatch(req).await
         }
     }
 

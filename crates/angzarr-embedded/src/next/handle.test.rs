@@ -1811,7 +1811,7 @@ impl crate::next::angzarr_router::router::PolicyComponent for Unchecked {
     fn input_domain(&self) -> &str {
         "account"
     }
-    fn dispatch(
+    async fn dispatch(
         &self,
         source: &crate::next::v1::EventBook,
     ) -> Result<
@@ -1825,7 +1825,7 @@ impl crate::next::angzarr_router::router::PolicyComponent for Unchecked {
             }],
         })
     }
-    fn dispatch_refusal(
+    async fn dispatch_refusal(
         &self,
         _: &crate::next::markup::v1::Refusal,
         _: &crate::next::markup::CommandContext,
@@ -2034,7 +2034,7 @@ fn a_policys_commands_in_their_triggers_edition_and_correlation_are_delivered() 
 /// The account's router table behind a handler recording every book it is
 /// handed.
 struct Recorded {
-    inner: Box<dyn crate::next::angzarr_router::router::CommandHandler>,
+    inner: Box<dyn crate::next::angzarr_router::router::DynCommandHandler>,
     books: std::sync::Arc<std::sync::Mutex<Vec<CommandBook>>>,
 }
 
@@ -2045,7 +2045,7 @@ impl crate::next::angzarr_router::router::CommandHandler for Recorded {
     fn command_types(&self) -> Vec<String> {
         self.inner.command_types()
     }
-    fn dispatch(
+    async fn dispatch(
         &self,
         req: &crate::next::angzarr_router::pb::ContextualCommand,
     ) -> Result<
@@ -2056,7 +2056,7 @@ impl crate::next::angzarr_router::router::CommandHandler for Recorded {
             .lock()
             .unwrap()
             .push(req.command.clone().unwrap_or_default());
-        self.inner.dispatch(req)
+        self.inner.dispatch(req).await
     }
 }
 
