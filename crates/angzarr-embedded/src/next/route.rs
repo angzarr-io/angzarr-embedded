@@ -201,13 +201,25 @@ pub fn rejection(rejection: &dyn Diagnostic, refusal: Option<Any>) -> HandlerErr
 }
 
 /// A marked-up handler's failure, as the router carries it: a refusal
-/// under its status ([`refused`]), or a bug ([`bug`]).
+/// under its status ([`refused`]), an immediate return (ABORTED under its
+/// own code, angzarr-router's `CodedError::immediate`), a fatal bug
+/// ([`bug`]), or a retryable bug under the status it picked
+/// (UNHANDLED_HANDLER_ERROR, its cause as a fatal bug's,
+/// `CodedError::retryable_bug`).
 pub(crate) fn failed<R: Diagnostic>(failed: Failed<super::markup::Rejection<R>>) -> HandlerError {
     match failed {
         Failed::Rejected { rejection, status } => {
             refused(&rejection, rejection.refusal().cloned(), status)
         }
+        Failed::Immediate(report) => {
+            HandlerError::Coded(CodedError::immediate(report.code(), flat_args(&report)))
+        }
         Failed::Bug(report) => bug(&report),
+        Failed::RetryableBug { status, report } => HandlerError::Coded(CodedError::retryable_bug(
+            status,
+            report.code(),
+            flat_args(&report),
+        )),
     }
 }
 

@@ -41,7 +41,8 @@ use ::angzarr_embedded::next::markup::v1::{refusal_response, RefusalResponse};
 use ::angzarr_embedded::next::markup::{
     self, assert_step_idempotent, BusinessStatus, CommandContext, CommandRefused, Commands,
     Context, DomainMessage, Emit, Failed, Policy, PolicyContext, ProcessManager, ProjectionContext,
-    Record, Refusal, Refuses, Refusing, Rejection, TypeName, MARKUP_RULES_VERSION, STEP_LIMIT,
+    Record, Refusal, Refuses, Refusing, Rejection, RetryableStatus, TypeName, MARKUP_RULES_VERSION,
+    STEP_LIMIT,
 };
 use ::angzarr_embedded::next::v1::event_meta::Causation;
 use ::angzarr_embedded::next::v1::{
@@ -239,6 +240,16 @@ mod wire {
     message!("toy.meter.v1", MeterSealed {});
     message!("toy.meter.cmd.v1", Calibrate {});
     message!("toy.meter.v1", Calibrated {});
+    message!(
+        "toy.meter.cmd.v1",
+        Probe {
+            #[prost(int64, tag = "1")]
+            status: i64,
+            #[prost(bool, tag = "2")]
+            step: bool,
+        }
+    );
+    message!("toy.meter.v1", Probed {});
 
     message!("toy.lamp.cmd.v1", SwitchOn {});
     message!("toy.lamp.v1", SwitchedOn {});
@@ -966,6 +977,11 @@ domain_type!(Tune { reading: i64 });
 domain_type!(Seal { code: i64 });
 domain_type!(Sealed {});
 domain_type!(MeterSealed {});
+domain_type!(Probe {
+    status: i64,
+    step: bool,
+});
+domain_type!(Probed {});
 
 /// The meter's typed refusal object.
 impl fmt::Display for MeterSealed {
@@ -1007,8 +1023,79 @@ impl Diagnostic for MeterBroke {
     }
 }
 
+/// The meter's immediate return: its seat moved under the command, so the
+/// caller re-reads and re-decides.
+#[derive(Clone, PartialEq, Debug)]
+pub struct MeterMoved {
+    seat: i64,
+}
+
+impl fmt::Display for MeterMoved {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "the meter at seat {} moved", self.seat)
+    }
+}
+
+impl Diagnostic for MeterMoved {
+    fn code(&self) -> &'static str {
+        "toy-meter-moved"
+    }
+
+    fn args(&self) -> Vec<(&'static str, Arg)> {
+        vec![("seat", self.seat.into())]
+    }
+}
+
 /// The most a meter reads.
 const METER_LIMIT: i64 = 1000;
+
+std::thread_local! {
+    /// The probe's outside dependency, as this test's thread sees it: how
+    /// many more attempts it is down for (all of them, unless a test says
+    /// otherwise), and how many attempts reached it. Outside the meter,
+    /// as a dependency is: no event records it.
+    static PROBE: std::cell::Cell<(u32, u32)> = const { std::cell::Cell::new((u32::MAX, 0)) };
+}
+
+/// Whether the probe's dependency is down for this attempt, counting it.
+fn probe_down() -> bool {
+    PROBE.with(|probe| {
+        let (down, attempts) = probe.get();
+        probe.set((down.saturating_sub(1), attempts + 1));
+        down > 0
+    })
+}
+
+/// The probe's dependency, down for the next `down` attempts.
+fn probe_down_for(down: u32) {
+    PROBE.with(|probe| probe.set((down, 0)));
+}
+
+/// How many attempts reached the probe's dependency.
+fn probe_attempts() -> u32 {
+    PROBE.with(|probe| probe.get().1)
+}
+
+/// The status a probe's `status` picks for its retryable bug: 1
+/// UNAVAILABLE, 2 DEADLINE_EXCEEDED, 3 RESOURCE_EXHAUSTED; any other is
+/// an immediate return.
+fn probe_status(status: i64) -> Option<RetryableStatus> {
+    match status {
+        1 => Some(RetryableStatus::Unavailable),
+        2 => Some(RetryableStatus::DeadlineExceeded),
+        3 => Some(RetryableStatus::ResourceExhausted),
+        _ => None,
+    }
+}
+
+/// A probe's failure at `seat` while its dependency is down: a retryable
+/// bug under the status `status` picks, else an immediate return.
+fn probe_failure<X>(status: i64, seat: i64) -> Failed<X> {
+    match probe_status(status) {
+        Some(retryable) => Failed::retryable_bug(retryable, &MeterBroke { seat }),
+        None => Failed::immediate(&MeterMoved { seat }),
+    }
+}
 
 /// A handler that fails both ways, [`Failed`]: a refusal under a status of
 /// the business set, a refusal by `?` from its own rejection, and a bug;
@@ -1051,10 +1138,15 @@ impl Meter {
 
     /// A typed-refusal handler's two ways to fail: a zero code is its bug,
     /// a negative one its typed refusal under NOT_FOUND.
+    /// A code over 100 is the probe's failure (a retryable bug or an
+    /// immediate return, [`probe_failure`]) of the code less 100.
     #[handles_cmd(Seal, refuses(MeterSealed))]
     fn seal(&self, cmd: Seal, _ctx: &Context) -> Result<Sealed, Failed<Refuses<Self, Seal>>> {
         if cmd.code == 0 {
             return Err(Failed::bug(&MeterBroke { seat: 9 }));
+        }
+        if cmd.code > 100 && probe_down() {
+            return Err(probe_failure(cmd.code - 100, 9));
         }
         if cmd.code < 0 {
             return Err(Failed::rejected(MeterSealed {}).with_status(BusinessStatus::NotFound));
@@ -1070,6 +1162,29 @@ impl Meter {
             cents => Err(Refused::NotEmpty { cents }),
         }
     }
+
+    /// A probe of an outside dependency: while it is down, the handler
+    /// (or, with `step`, its continuation step) fails as `status` picks
+    /// ([`probe_failure`]); once it is up, a `Probed`.
+    #[handles_cmd(Probe)]
+    fn probe(&self, cmd: Probe, _ctx: &Context) -> Result<Emit<Self>, Failed<Refused>> {
+        let status = cmd.status;
+        if !cmd.step {
+            return match probe_down() {
+                true => Err(probe_failure(status, 5)),
+                false => Ok(Emit::of(Probed {})),
+            };
+        }
+        Ok(
+            Emit::of(Probed {}).then(move |_: &Self, _: &Context| match probe_down() {
+                true => Err(probe_failure::<Refused>(status, 6)),
+                false => Ok(None::<Probed>),
+            }),
+        )
+    }
+
+    #[applies(Probed)]
+    fn probed(&mut self, _event: Probed) {}
 
     #[applies(Gauged)]
     fn gauged(&mut self, event: Gauged) {
@@ -2483,6 +2598,35 @@ mod failed {
         assert_eq!(refused.to_string(), "toy-wallet-overdrawn short=2");
         assert_eq!(invalid.to_string(), "toy-wallet-already-open");
         assert_eq!(broke.to_string(), "toy-meter-broke seat=4");
+    }
+
+    /// A retryable bug and an immediate return read as their report's code
+    /// and args, whatever the status; `with_status` leaves them, and
+    /// `widen` keeps them as they are, status and report.
+    #[test]
+    fn a_retryable_bug_and_an_immediate_return_read_as_their_report() {
+        let offline: Failed<Refused> =
+            Failed::retryable_bug(RetryableStatus::ResourceExhausted, &MeterBroke { seat: 4 });
+        let moved: Failed<Refused> = Failed::immediate(&MeterMoved { seat: 2 });
+
+        assert_eq!(offline.to_string(), "toy-meter-broke seat=4");
+        assert_eq!(moved.to_string(), "toy-meter-moved seat=2");
+        assert_eq!(
+            offline.clone().with_status(BusinessStatus::NotFound),
+            offline
+        );
+        assert_eq!(moved.clone().with_status(BusinessStatus::NotFound), moved);
+        assert_eq!(
+            offline.widen::<Refused>(),
+            Failed::RetryableBug {
+                status: RetryableStatus::ResourceExhausted,
+                report: Report::of(&MeterBroke { seat: 4 }),
+            }
+        );
+        assert_eq!(
+            moved.widen::<Refused>(),
+            Failed::Immediate(Report::of(&MeterMoved { seat: 2 }))
+        );
     }
 
     /// `?` on the domain's own rejection inside a handler returning
@@ -5546,6 +5690,294 @@ mod router {
             assert!(failed.is_err(), "{grpc:?}");
             assert_eq!(calls.load(SeqCst), attempts, "{grpc:?}");
             assert_eq!(log.lines().len(), 1, "dead-lettered once: {grpc:?}");
+        }
+    }
+
+    /// A marked-up handler's retryable bug and immediate return
+    /// (`Failed::retryable_bug`, `Failed::immediate`), through the kernel
+    /// as an application runs it: the meter's [`Meter::probe`] and
+    /// [`Meter::seal`], their dependency [`PROBE`].
+    mod marked_up {
+        use super::*;
+        use ::angzarr_embedded::next::angzarr_router::error::GrpcCode;
+
+        fn meter_cover() -> Cover {
+            Cover {
+                domain: "meter".to_string(),
+                root: Some(root()),
+                edition: None,
+            }
+        }
+
+        /// The router's error `failure` is, at the origin or down the
+        /// chain.
+        fn coded<R: fmt::Debug>(
+            failure: &Failure<R>,
+        ) -> &::angzarr_embedded::next::angzarr_router::error::CodedError {
+            match failure {
+                Failure::Kernel(KernelError::Router(error))
+                | Failure::Downstream {
+                    error: StepError::Kernel(KernelError::Router(error)),
+                    ..
+                } => error,
+                other => panic!("the router's error, not {other:?}"),
+            }
+        }
+
+        /// A probe of `status`, the handler's own (or, with `step`, its
+        /// step's).
+        fn probe(status: i64, step: bool) -> Any {
+            any(Probe { status, step })
+        }
+
+        /// The capped kernel over `registry`, waiting with `waits`, its
+        /// dead letters to `log`, handling command `n` to the meter.
+        fn handled(
+            registry: &Registry,
+            store: &Mem,
+            log: &MemoryDeadLetters,
+            waits: &Waits,
+            n: u8,
+            payload: Any,
+        ) -> Result<Handled, Failure<Rejected>> {
+            let kernel = ::angzarr_embedded::next::Kernel::new(registry, log)
+                .on_retryable(capped())
+                .wait_with(waits);
+            ready(kernel.handle_any(
+                store,
+                send("meter", n, payload, None),
+                &sampled_at(n),
+                &mut (),
+            ))
+        }
+
+        /// A handler's retryable bug is retried up to the cap, each wait
+        /// the backoff less its jitter, through the injected `Wait`; then
+        /// it is dead-lettered as UNHANDLED_HANDLER_ERROR with its cause
+        /// and its retry count, and the caller gets it under its status,
+        /// `Recovery::Retry`. Nothing is written.
+        #[test]
+        fn a_handlers_retryable_bug_is_retried_to_the_cap_then_dead_lettered() {
+            let registry = registry();
+            let store = Mem::new();
+            let log = MemoryDeadLetters::new();
+            let waits = Waits::drawing(0.5);
+
+            let failed = handled(&registry, &store, &log, &waits, 3, probe(1, false))
+                .err()
+                .expect("still down after the cap");
+
+            let error = coded(&failed);
+            assert_eq!(error.code, "UNHANDLED_HANDLER_ERROR", "{failed:?}");
+            assert_eq!(error.grpc, GrpcCode::Unavailable, "{failed:?}");
+            assert_eq!(failed.recovery(), Recovery::Retry);
+            assert_eq!(probe_attempts(), 4, "the first attempt and 3 retries");
+            assert_eq!(waits.micros(), [7_500, 22_500, 37_500]);
+            let lines = log.lines();
+            assert_eq!(lines.len(), 1, "dead-lettered once: {lines:?}");
+            assert!(
+                lines[0].contains(
+                    "meter: angzarr-embedded-next-unhandled-handler-error cause=toy-meter-broke cause.seat=5"
+                ),
+                "its cause: {lines:?}"
+            );
+            assert!(lines[0].contains("retry_count=3"), "{lines:?}");
+            assert_eq!(pages(&store, &meter_cover()), None, "nothing written");
+        }
+
+        /// A retryable bug that clears within the cap writes once and
+        /// nothing extra: the decision's event, no dead letter, only the
+        /// backoffs it needed. A step's, the same.
+        #[test]
+        fn a_success_within_the_cap_writes_once_and_nothing_extra() {
+            for step in [false, true] {
+                probe_down_for(2);
+                let registry = registry();
+                let store = Mem::new();
+                let log = MemoryDeadLetters::new();
+                let waits = Waits::drawing(0.0);
+
+                let handled = handled(&registry, &store, &log, &waits, 3, probe(2, step));
+
+                assert!(
+                    matches!(handled, Ok(Handled::Applied(_))),
+                    "step {step}: {:?}",
+                    handled.err()
+                );
+                assert_eq!(probe_attempts(), 3, "step {step}");
+                assert_eq!(waits.micros(), [10_000, 30_000], "step {step}");
+                assert!(log.lines().is_empty(), "step {step}: {:?}", log.lines());
+                assert_eq!(
+                    pages(&store, &meter_cover()).map(|p| p.len()),
+                    Some(1),
+                    "step {step}: written once"
+                );
+            }
+        }
+
+        /// An immediate return (a handler's, a step's, a typed-refusal
+        /// handler's) goes back to an outside caller at once as ABORTED
+        /// under its own key and args: never retried, nothing waited,
+        /// nothing dead-lettered, nothing written, `Recovery::Retry`.
+        #[test]
+        fn an_immediate_return_goes_back_to_a_caller_at_once_under_its_key() {
+            for (payload, seat) in [
+                (probe(4, false), "5"),
+                (probe(4, true), "6"),
+                (any(Seal { code: 104 }), "9"),
+            ] {
+                probe_down_for(u32::MAX);
+                let registry = registry();
+                let store = Mem::new();
+                let log = MemoryDeadLetters::new();
+                let waits = Waits::drawing(0.0);
+
+                let failed = handled(&registry, &store, &log, &waits, 3, payload)
+                    .err()
+                    .expect("moved");
+
+                let error = coded(&failed);
+                assert_eq!(error.grpc, GrpcCode::Aborted, "{failed:?}");
+                assert_eq!(error.code, "toy-meter-moved", "{failed:?}");
+                assert_eq!(
+                    error.extras.get("seat").map(String::as_str),
+                    Some(seat),
+                    "{failed:?}"
+                );
+                assert_eq!(failed.recovery(), Recovery::Retry);
+                assert_eq!(probe_attempts(), 1, "not retried: {failed:?}");
+                assert!(waits.micros().is_empty(), "{failed:?}");
+                assert!(log.lines().is_empty(), "{:?}", log.lines());
+                assert_eq!(pages(&store, &meter_cover()), None, "nothing written");
+            }
+        }
+
+        /// The wallets' registry with a policy probing the meter (`status`)
+        /// on each wallet's `Held`.
+        fn probing(status: i64) -> Registry {
+            let mut registry = registry();
+            registry.policy_dispatch(
+                PolicyDispatch::new("wallet-meter", "wallet", "meter").on_event(
+                    "toy.wallet.v1.Held",
+                    move |_, source| {
+                        Ok(vec![pb::CommandBook {
+                            cover: Some(pb::Cover {
+                                domain: "meter".to_string(),
+                                root: source.and_then(|c| c.root.clone()),
+                                edition: None,
+                            }),
+                            page: Some(pb::CommandPage {
+                                body: Some(pb::command_page::Body::Command(pb::Command {
+                                    payload: Some(any(Probe {
+                                        status,
+                                        step: false,
+                                    })),
+                                })),
+                                ..Default::default()
+                            }),
+                            handling: None,
+                        }])
+                    },
+                ),
+            );
+            registry
+        }
+
+        /// As a policy's step, a handler's retryable bug and its immediate
+        /// return alike have the kernel for their caller: the step is
+        /// reloaded and run again under the capped backoff, then
+        /// dead-lettered with its cause and retry count.
+        #[test]
+        fn a_policy_steps_retryable_bug_or_immediate_return_is_rerun_then_dead_lettered() {
+            for (status, cause) in [
+                (1, "cause=toy-meter-broke cause.seat=5"),
+                (4, "cause=toy-meter-moved"),
+            ] {
+                probe_down_for(u32::MAX);
+                let registry = probing(status);
+                let store = Mem::new();
+                let log = MemoryDeadLetters::new();
+                let waits = Waits::drawing(0.0);
+                let kernel = ::angzarr_embedded::next::Kernel::new(&registry, &log)
+                    .on_retryable(capped())
+                    .wait_with(&waits);
+                ready(kernel.handle_any(
+                    &store,
+                    send("wallet", 1, any(Open { bonus: 50 }), None),
+                    &sampled_at(1),
+                    &mut (),
+                ))
+                .unwrap();
+
+                let held = ready(kernel.handle_any(
+                    &store,
+                    send("wallet", 2, any(Hold { cents: 5 }), None),
+                    &sampled_at(2),
+                    &mut (),
+                ))
+                .err()
+                .expect("the policy's step failed");
+
+                assert!(
+                    matches!(held, Failure::Downstream { .. }),
+                    "status {status}: {held:?}"
+                );
+                assert_eq!(probe_attempts(), 4, "status {status}");
+                assert_eq!(waits.micros(), [10_000, 30_000, 50_000], "status {status}");
+                let lines = log.lines();
+                assert_eq!(lines.len(), 1, "status {status}: {lines:?}");
+                assert!(lines[0].contains(cause), "status {status}: {lines:?}");
+                assert!(
+                    lines[0].contains("retry_count=3"),
+                    "status {status}: {lines:?}"
+                );
+                assert_eq!(pages(&store, &meter_cover()), None, "status {status}");
+            }
+        }
+
+        /// Each `RetryableStatus` a handler picks goes out exactly as that
+        /// status, from a handler, a step and a typed-refusal handler
+        /// alike: UNHANDLED_HANDLER_ERROR, its cause beside.
+        #[test]
+        fn each_retryable_status_goes_out_exactly() {
+            for (n, status) in [
+                (1, RetryableStatus::Unavailable),
+                (2, RetryableStatus::DeadlineExceeded),
+                (3, RetryableStatus::ResourceExhausted),
+            ] {
+                for (payload, seat) in [
+                    (probe(n, false), "5"),
+                    (probe(n, true), "6"),
+                    (any(Seal { code: 100 + n }), "9"),
+                ] {
+                    let store = Mem::new();
+                    let log = MemoryDeadLetters::new();
+
+                    let failed = handle_in::<Meter>(
+                        &store,
+                        &registry(),
+                        &log,
+                        1,
+                        send("meter", 1, payload, None),
+                    )
+                    .err()
+                    .expect("down");
+
+                    let error = coded(&failed);
+                    assert_eq!(error.grpc, GrpcCode::from(status), "{status:?}: {failed:?}");
+                    assert_eq!(error.code, "UNHANDLED_HANDLER_ERROR", "{status:?}");
+                    assert_eq!(
+                        error.extras.get("cause").map(String::as_str),
+                        Some("toy-meter-broke"),
+                        "{status:?}"
+                    );
+                    assert_eq!(
+                        error.extras.get("cause.seat").map(String::as_str),
+                        Some(seat),
+                        "{status:?}"
+                    );
+                }
+            }
         }
     }
 
