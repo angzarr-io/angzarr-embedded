@@ -4,9 +4,10 @@
 //!
 //! - A remote process manager's start rule is the host's, from the child's
 //!   descriptor (`ComponentDescriptor.starting_types`), applied in
-//!   `RemoteCommandHandler::admit` with no call to the child: the
-//!   coordinator upcasts before admitting (the owner's ruling: upcasting
-//!   leaves the router), so the payload admit sees is already current.
+//!   `RemoteCommandHandler::admit` with no call to the child: admit is
+//!   coordinator work, and the coordinator upcasts inputs before it
+//!   (decision 14.39; the proposal is 14.41), so the payload admit sees is
+//!   already current. There is no admit RPC.
 //! - A `[[domain]]` of `kind = "policy"` is a `PolicyService` child, run by
 //!   the kernel as any policy of its source; one of `kind = "projector"` a
 //!   `ProjectorService` child, run after each commit of its source's
