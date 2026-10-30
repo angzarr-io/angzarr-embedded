@@ -8,8 +8,7 @@
 //! message is generated here, so none exists twice.
 //!
 //! The gRPC health service a sidecar serves (`grpc.health.v1.Health`,
-//! decision 14.39) is written the same way, on the two messages of
-//! `crate::rpc::grpc_health`.
+//! decision 14.39) is not written here: tonic-health has it.
 //!
 //! `DescribeRequest` is the one message neither crate generates; it is empty,
 //! so it is `crate::rpc::DescribeRequest`, an alias of `()`, which prost
@@ -94,39 +93,9 @@ fn main() {
                 .build(),
         )
         .build();
-    let health = Service::builder()
-        .name("Health")
-        .package("grpc.health.v1")
-        .method(
-            Method::builder()
-                .name("check")
-                .route_name("Check")
-                .input_type("crate::rpc::grpc_health::HealthCheckRequest")
-                .output_type("crate::rpc::grpc_health::HealthCheckResponse")
-                .codec_path(CODEC)
-                .build(),
-        )
-        .method(
-            Method::builder()
-                .name("watch")
-                .route_name("Watch")
-                .input_type("crate::rpc::grpc_health::HealthCheckRequest")
-                .output_type("crate::rpc::grpc_health::HealthCheckResponse")
-                .codec_path(CODEC)
-                .server_streaming()
-                .build(),
-        )
-        .build();
     Builder::new()
         .build_client(true)
         .build_server(true)
         .build_transport(true)
-        .compile(&[
-            command_handler,
-            component,
-            policy,
-            projector,
-            upcaster,
-            health,
-        ]);
+        .compile(&[command_handler, component, policy, projector, upcaster]);
 }

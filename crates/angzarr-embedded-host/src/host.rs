@@ -46,8 +46,9 @@ use crate::remote::{
 };
 use crate::rpc::component::component_service_client::ComponentServiceClient;
 use crate::rpc::connect_unix;
-use crate::rpc::grpc_health::health_client::HealthClient;
-use crate::rpc::grpc_health::{HealthCheckRequest, HealthCheckResponse, ServingStatus};
+use tonic_health::pb::health_check_response::ServingStatus;
+use tonic_health::pb::health_client::HealthClient;
+use tonic_health::pb::{HealthCheckRequest, HealthCheckResponse};
 
 /// How a child ended at shutdown.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

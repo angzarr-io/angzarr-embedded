@@ -73,12 +73,13 @@ use crate::rpc::command_handler::command_handler_service_server::{
     CommandHandlerService, CommandHandlerServiceServer,
 };
 use crate::rpc::component::component_service_server::{ComponentService, ComponentServiceServer};
-use crate::rpc::grpc_health::health_server::{Health, HealthServer};
-use crate::rpc::grpc_health::{HealthCheckRequest, HealthCheckResponse, ServingStatus};
 use crate::rpc::policy::policy_service_server::{PolicyService, PolicyServiceServer};
 use crate::rpc::projector::projector_service_server::{ProjectorService, ProjectorServiceServer};
 use crate::rpc::upcaster::upcaster_service_server::{UpcasterService, UpcasterServiceServer};
 use crate::rpc::DescribeRequest;
+use tonic_health::pb::health_check_response::ServingStatus;
+use tonic_health::pb::health_server::{Health, HealthServer};
+use tonic_health::pb::{HealthCheckRequest, HealthCheckResponse};
 
 /// The variable naming the fake's mode.
 pub(crate) const MODE_ENV: &str = "ANGZARR_FAKE_CHILD";
