@@ -1796,3 +1796,212 @@ fn an_outside_callers_lost_race_goes_back_at_once() {
     assert!(waits.0.lock().unwrap().is_empty(), "not retried");
     assert!(log.lines().is_empty(), "{:?}", log.lines());
 }
+
+/// A policy of the account's events, to the ledger, behind a router that
+/// checks nothing: it answers whatever `answer` builds for the triggering
+/// event, as a remote policy's business code might (decision 14.42).
+struct Unchecked {
+    answer: fn(&crate::next::v1::EventBook) -> Vec<CommandBook>,
+}
+
+impl crate::next::PolicyPort for Unchecked {
+    fn name(&self) -> &str {
+        "unchecked"
+    }
+    fn input_domain(&self) -> &str {
+        "account"
+    }
+    fn output_domain(&self) -> &str {
+        "ledger"
+    }
+    fn dispatch(
+        &self,
+        source: &crate::next::v1::EventBook,
+    ) -> Result<Vec<CommandBook>, crate::next::angzarr_router::error::CodedError> {
+        Ok((self.answer)(source))
+    }
+    fn dispatch_refusal(
+        &self,
+        _: &crate::next::markup::v1::Refusal,
+        _: &crate::next::markup::CommandContext,
+    ) -> Result<Option<crate::next::Any>, crate::next::angzarr_router::error::CodedError> {
+        Ok(None)
+    }
+}
+
+/// A ledger `Record` for `cover`'s stream, as a policy's business code
+/// returns it: no ids, no handling.
+fn record_for(cover: crate::next::v1::Cover) -> CommandBook {
+    command(
+        cover,
+        crate::next::pack(&ledger::Record {
+            source_sequence: 0,
+            cents: 1,
+        }),
+    )
+}
+
+/// The kernel, not the router, holds a policy's commands to its one
+/// destination (decision 14.42, C-0583): one outside it refuses the whole
+/// answer as the policy's bug, naming both domains; nothing is delivered,
+/// the trigger is dead-lettered, and the position stays.
+#[test]
+fn a_policy_command_outside_its_destination_is_refused_by_the_kernel() {
+    let mut registry = registry();
+    registry.policy_port(Unchecked {
+        answer: |_| {
+            vec![
+                record_for(ledger_cover()),
+                record_for(crate::next::v1::Cover {
+                    domain: "shelf".to_string(),
+                    ..ledger_cover()
+                }),
+            ]
+        },
+    });
+    let log = MemoryDeadLetters::new();
+    let store = MemoryStore::new();
+    let failure = Kernel::new(&registry, &log)
+        .handle::<Account, _, _>(
+            &store,
+            command(cover("account", 1), AccountCmd::Open.to_any()),
+            &at(30),
+            &mut (),
+        )
+        .ready()
+        .err()
+        .unwrap();
+    let Failure::Downstream {
+        error: StepError::Kernel(KernelError::Router(error)),
+        ..
+    } = &failure
+    else {
+        panic!("the policy's bug: {failure:?}");
+    };
+    assert_eq!(error.code, "POLICY_COMMAND_OUTSIDE_DESTINATION");
+    let extra = |key: &str| error.extras.get(key).map(String::as_str);
+    assert_eq!(extra("expected_domain"), Some("ledger"));
+    assert_eq!(extra("actual_domain"), Some("shelf"));
+    assert_eq!(failure.recovery(), Recovery::Bug);
+    assert_eq!(
+        streams(&store),
+        [cover("account", 1)],
+        "nothing delivered, not even the command inside the destination"
+    );
+    assert_eq!(log.lines().len(), 1, "{:?}", log.lines());
+    assert_eq!(position(&store, "unchecked", &cover("account", 1)), 0);
+}
+
+/// What the kernel refuses `answer`'s commands with, as a policy of the
+/// account's opening, nothing delivered.
+fn unchecked_refusal(
+    answer: fn(&crate::next::v1::EventBook) -> Vec<CommandBook>,
+) -> crate::next::angzarr_router::error::CodedError {
+    let mut registry = registry();
+    registry.policy_port(Unchecked { answer });
+    let log = MemoryDeadLetters::new();
+    let store = MemoryStore::new();
+    let failure = Kernel::new(&registry, &log)
+        .handle::<Account, _, _>(
+            &store,
+            command(cover("account", 1), AccountCmd::Open.to_any()),
+            &at(30),
+            &mut (),
+        )
+        .ready()
+        .err()
+        .expect("the policy's bug fails its step");
+    assert_eq!(streams(&store), [cover("account", 1)], "nothing delivered");
+    match failure {
+        Failure::Downstream {
+            error: StepError::Kernel(KernelError::Router(error)),
+            ..
+        } => error,
+        other => panic!("the policy's bug: {other:?}"),
+    }
+}
+
+/// The kernel holds each command to its trigger's edition, a named root and
+/// the trigger's correlation (decision 14.42), each a refusal of the whole
+/// answer as the policy's bug.
+#[test]
+fn a_policys_commands_are_held_to_their_trigger_by_the_kernel() {
+    let outside = unchecked_refusal(|_| {
+        vec![record_for(crate::next::v1::Cover {
+            edition: Some("what-if".to_string()),
+            ..ledger_cover()
+        })]
+    });
+    assert_eq!(outside.code, "POLICY_COMMAND_OUTSIDE_EDITION");
+    assert_eq!(
+        outside.extras.get("actual_edition").map(String::as_str),
+        Some("what-if")
+    );
+    assert_eq!(
+        outside.extras.get("expected_edition").map(String::as_str),
+        Some("")
+    );
+
+    let rootless = unchecked_refusal(|_| {
+        vec![record_for(crate::next::v1::Cover {
+            root: None,
+            ..ledger_cover()
+        })]
+    });
+    assert_eq!(rootless.code, "POLICY_COMMAND_NO_ROOT");
+    assert_eq!(
+        rootless.extras.get("domain").map(String::as_str),
+        Some("ledger")
+    );
+    assert_eq!(
+        rootless.extras.get("command_type").map(String::as_str),
+        Some("toy.ledger.cmd.v1.Record")
+    );
+    let empty_root = unchecked_refusal(|_| {
+        vec![record_for(crate::next::v1::Cover {
+            root: Some(crate::next::v1::Uuid {
+                value: Vec::new().into(),
+            }),
+            ..ledger_cover()
+        })]
+    });
+    assert_eq!(empty_root.code, "POLICY_COMMAND_NO_ROOT");
+
+    let other = unchecked_refusal(|_| {
+        let mut book = record_for(ledger_cover());
+        book.page.as_mut().unwrap().correlation_id = Some(crate::next::toys::correlation(99));
+        vec![book]
+    });
+    assert_eq!(other.code, "POLICY_COMMAND_OTHER_CORRELATION");
+}
+
+/// A command whose edition, root and correlation are its trigger's (or an
+/// unset edition and correlation, stamped with the trigger's) is delivered.
+#[test]
+fn a_policys_commands_in_their_triggers_edition_and_correlation_are_delivered() {
+    let mut registry = registry();
+    registry.policy_port(Unchecked {
+        answer: |source| {
+            let trigger = source.pages[0]
+                .meta
+                .as_ref()
+                .and_then(|m| m.correlation_id.clone());
+            let mut named = record_for(ledger_cover());
+            named.page.as_mut().unwrap().correlation_id = trigger;
+            vec![record_for(ledger_cover()), named]
+        },
+    });
+    let log = MemoryDeadLetters::new();
+    let store = MemoryStore::new();
+    Kernel::new(&registry, &log)
+        .handle::<Account, _, _>(
+            &store,
+            command(cover("account", 1), AccountCmd::Open.to_any()),
+            &at(30),
+            &mut (),
+        )
+        .ready()
+        .unwrap();
+    assert_eq!(pages(&store, &ledger_cover()).len(), 1, "{:?}", log.lines());
+    assert_eq!(position(&store, "unchecked", &cover("account", 1)), 1);
+}

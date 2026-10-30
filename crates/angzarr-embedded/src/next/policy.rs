@@ -40,6 +40,7 @@ use angzarr_proto::v1::angzarr_dead_letter::Payload as Letter;
 use angzarr_proto::v1::{
     command_page, Command, CommandBook, CommandPage, Cover, EventBook, EventPage, EventRef, Uuid,
 };
+use angzarr_router::error::CodedError;
 use angzarr_router::policy::PolicyDispatch;
 use prost_types::Any;
 
@@ -52,6 +53,35 @@ use super::payload::{type_name, Payload};
 use super::registry::Registry;
 
 // ---------------------------------------------------------------- policies
+
+/// A policy as the kernel runs it, whatever its router: decision 14.41's
+/// `PolicyComponent`, the kernel's own until angzarr-router's lands. The
+/// kernel hands it one triggering event at a time, and owns everything
+/// generic about its answer (decision 14.42): it checks every command
+/// against the policy's one destination, the trigger's edition (stamping an
+/// unset one), a named root and the trigger's correlation, and it builds
+/// and addresses every refusal fact. angzarr-router's [`PolicyDispatch`] is
+/// one; a remote policy is another.
+pub trait PolicyPort: Send + Sync {
+    /// Its name: its commands' component and its position's handler.
+    fn name(&self) -> &str;
+    /// The one domain whose events it handles.
+    fn input_domain(&self) -> &str;
+    /// The one domain its commands may go to.
+    fn output_domain(&self) -> &str;
+    /// `PolicyService.Handle` for `source`, a book holding ONE triggering
+    /// page: the commands business code returned for it, unchecked.
+    fn dispatch(&self, source: &EventBook) -> Result<Vec<CommandBook>, CodedError>;
+    /// `PolicyService.OnRefused` for `refusal`, its translating callback
+    /// handed `ctx`, the refused command's context: the translated fact's
+    /// payload, or `None` for no translation (the kernel then passes the
+    /// refusal through as a `CommandRefused`).
+    fn dispatch_refusal(
+        &self,
+        refusal: &markup::v1::Refusal,
+        ctx: &CommandContext,
+    ) -> Result<Option<Any>, CodedError>;
+}
 
 /// Event → commands: one source domain, one target domain, and the
 /// commands each source event is owed, each with the root of the target

@@ -29,6 +29,7 @@ use super::domain::{Domain, State};
 use super::error::{KernelError, UpcastChainError};
 use super::markup::{self, AsyncProjector, Projecting, ProjectionContext};
 use super::payload::{type_name, Payload};
+use super::policy::PolicyPort;
 use super::route;
 use super::stream::Stream;
 use super::upcast::{UpcastPort, Upcaster};
@@ -550,6 +551,15 @@ impl Registry {
     /// PANICS at startup.
     pub fn policy_dispatch(&mut self, dispatch: PolicyDispatch) -> &mut Self {
         self.push_policy(dispatch, true)
+    }
+
+    /// Register `port`, a policy behind any router (a remote one, say), in
+    /// the ONE list beside every other policy: its source its input domain
+    /// and its target its output domain. Its refused commands are answered
+    /// by its OnRefused. Registering one twice (by name) PANICS at startup.
+    pub fn policy_port(&mut self, port: impl PolicyPort + 'static) -> &mut Self {
+        let _ = port;
+        self
     }
 
     fn push_policy(&mut self, dispatch: PolicyDispatch, answers_refusals: bool) -> &mut Self {

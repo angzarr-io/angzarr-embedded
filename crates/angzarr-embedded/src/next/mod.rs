@@ -125,7 +125,8 @@ pub use handle::{
 pub use handler::{Committed, Handler};
 pub use payload::{decode_as, pack, type_name, Decoder, Payload};
 pub use policy::{
-    policy, projection, target_cover, Order, Policy, PolicyHandler, Projection, Projector,
+    policy, projection, target_cover, Order, Policy, PolicyHandler, PolicyPort, Projection,
+    Projector,
 };
 pub use registry::{Aggregate, Misconfigured, Registry};
 pub use route::{rejection, Rejected};
