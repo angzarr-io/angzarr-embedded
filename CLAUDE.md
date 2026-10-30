@@ -226,7 +226,9 @@ failing gate is a finding: fix the cause and commit again; never
    branch other than the default one are not judged and pass with a
    warning. The last run's mutants.out is kept in
    `target/logs/mutants-push/`. `just mutants-staged` makes the same
-   judgement over the staged diff, by hand. A mutant judged equivalent is excluded by
+   judgement over the staged diff, by hand, and `just mutants-all` over the
+   whole workspace at HEAD (the full pass; weekly in CI,
+   `.github/workflows/mutation.yml`). A mutant judged equivalent is excluded by
    an `exclude_re` in `.cargo/mutants.toml` matching that one mutant, with a
    comment saying why: not `#[mutants::skip]`, which needs the `mutants`
    crate as a dependency, and never a lowered threshold.

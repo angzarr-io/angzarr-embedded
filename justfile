@@ -2,7 +2,7 @@
 # under angzarr-embedded, runs it in its build script).
 #
 # The git-hook gates and their recipes (fmt, fmt-check, test, test-staged,
-# test-commit, mutants-push, mutants-staged, lint-deps, secrets-scan-staged and the `_run`
+# test-commit, mutants-push, mutants-staged, mutants-all, lint-deps, secrets-scan-staged and the `_run`
 # machinery) are gates/gates.just, imported below; this file gives them angzarr-embedded's
 # parameters.
 

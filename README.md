@@ -35,6 +35,7 @@ just lint           # clippy, and the licence lists
 just lint-deps      # cargo-deny: licences, sources, bans, advisories (deny.toml)
 just fmt            # cargo fmt over the workspace's crates (just fmt-check changes nothing)
 just mutants        # cargo-mutants over the workspace; `just mutants angzarr-embedded` for one crate
+just mutants-all    # the full pass: every mutant at HEAD, judged per crate (weekly in CI)
 just wasm           # build angzarr-embedded for wasm32-unknown-unknown
 just hooks-install  # install the git hooks (gates/)
 ```

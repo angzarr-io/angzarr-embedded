@@ -496,6 +496,33 @@ mutants-staged:
     echo "FAIL mutants-staged: red tests cannot be committed here: $where" >&2
     exit 1
 
+# The full pass, for the scheduled CI run (.github/workflows/mutation.yml) or
+# by hand; slow, minutes per crate. HEAD's tree checked out alone
+# (`_commit-tree`, so no uncommitted edit counts), every mutant cargo-mutants
+# finds, judged per tier by `mutation_thresholds` as `mutants-push` is. The
+# kill rate by tier is printed pass or fail; mutants.out is kept in
+# target/logs/mutants-all/. Red tests (cargo-mutants' baseline) fail it on
+# any branch: a full pass judges the tree as it stands.
+# Mutation-test the whole workspace (HEAD), judged per tier.
+[no-exit-message]
+mutants-all:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    root='{{gates_root}}'
+    just --justfile "$root/justfile" _require-mutants mutants-all
+    rc=0
+    just --justfile "$root/justfile" _commit-tree HEAD _mutants-whole || rc=$?
+    log=${GATE_LOG_DIR:-$root/target/logs}/mutants-all.log
+    [ "$rc" -eq 0 ] && sed -n '/kill rate by tier:/,$p' "$log" | grep -E '^(mutants-all: kill|  (pass|FAIL) )' || true
+    [ "$rc" -eq 4 ] && echo "FAIL mutants-all: the tests are red; a full pass needs them green" >&2
+    exit "$rc"
+
+# Inside HEAD's tree (`_commit-tree`): `_mutants-judge` over the whole
+# workspace, run as the gate.
+[no-exit-message]
+_mutants-whole:
+    @just --justfile '{{gates_root}}/justfile' _run mutants-all workspace mutants just --justfile '{{gates_root}}/justfile' _mutants-judge mutants-all ""
+
 # Fail, never skip, when cargo-mutants is missing (`cargo install
 # cargo-mutants --locked`).
 [no-exit-message]
@@ -519,7 +546,8 @@ _mutants-affected:
     just --justfile '{{gates_root}}/justfile' _run mutants-staged "staged diff" mutants just --justfile '{{gates_root}}/justfile' _mutants-judge mutants-staged "$patch"
 
 # Mutate the diff `patch` (a/ and b/ paths, the tree's own lines on the b
-# side) in place (the tree is throwaway) and judge each tier's kill rate, as
+# side), or the whole workspace when `patch` is "", in place (the tree is
+# throwaway) and judge each tier's kill rate, as
 # `gate`, whose log directory (<GATE_LOG_DIR>/<gate>/) holds mutants.out.
 # `feature_rules` turns on the features of the packages whose sources the diff
 # touches, after `features_prepare`. Killed = caught or timed out (a mutant
@@ -567,7 +595,13 @@ _mutants-judge gate patch:
     }
     trap 'reap; rm -rf "$work"' EXIT
     trap 'exit 130' INT TERM HUP
-    cp "$2" "$work/staged.patch"
+    # No patch: the whole workspace is mutated (`mutants-all`), every
+    # feature rule turned on.
+    diff=()
+    if [ -n "$2" ]; then
+        cp "$2" "$work/staged.patch"
+        diff=(--in-diff "$work/staged.patch")
+    fi
     read -ra rules <<< "{{feature_rules}}"
     features=()
     if [ "${#rules[@]}" -gt 0 ]; then
@@ -577,7 +611,7 @@ _mutants-judge gate patch:
             '.packages[] | "\(.name)\t\(.manifest_path | ltrimstr($root) | rtrimstr("/Cargo.toml"))"')
         for rule in "${rules[@]}"; do
             dir=${dir_of[${rule%%=*}]:-}
-            if [ -n "$dir" ] && grep -qF "+++ b/$dir/" "$work/staged.patch"; then
+            if [ -n "$dir" ] && { [ -z "$2" ] || grep -qF "+++ b/$dir/" "$work/staged.patch"; }; then
                 features+=(--features "${rule#*=}")
             fi
         done
@@ -589,7 +623,7 @@ _mutants-judge gate patch:
     # In the background, so an interrupt is handled at once rather than once
     # the run ends: the trap's exit reaps the session, cargo mutants too.
     setsid --wait bash -c 'echo $$ > "$1"; shift; exec "$@"' mutants-session "$session" \
-        cargo mutants --dir "$root" --in-place --workspace "${features[@]}" --in-diff "$work/staged.patch" \
+        cargo mutants --dir "$root" --in-place --workspace "${features[@]}" "${diff[@]}" \
         --output "$out" --colors never 9>&- &
     wait "$!" || rc=$?
     reap
