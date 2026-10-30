@@ -104,9 +104,6 @@ pub enum HostError {
         domain: String,
         cause: crate::DescriptorRefused,
     },
-    /// A `kind` the host cannot run yet (`upcaster`: the sidecar lands
-    /// with the kernel's upcasting, decision 14.39).
-    KindUnsupported { domain: String, kind: String },
     /// The configured `socket_dir` is too long for a Unix socket path to
     /// hold the host's socket names in it: at most `max_bytes` bytes.
     SocketDirTooLong { dir: String, max_bytes: u64 },
@@ -143,7 +140,6 @@ impl Diagnostic for HostError {
             HostError::Describe { .. } => "angzarr-embedded-host-describe",
             HostError::KindMismatch { .. } => "angzarr-embedded-host-kind-mismatch",
             HostError::NoInput { .. } => "angzarr-embedded-host-no-input",
-            HostError::KindUnsupported { .. } => "angzarr-embedded-host-kind-unsupported",
             HostError::Descriptor { .. } => "angzarr-embedded-host-descriptor",
             HostError::UpcasterNoDomain { .. } => "angzarr-embedded-host-upcaster-no-domain",
             HostError::SocketDirTooLong { .. } => "angzarr-embedded-host-socket-dir-too-long",
@@ -196,9 +192,6 @@ impl Diagnostic for HostError {
                 ("configured", configured.as_str().into()),
                 ("described", described.as_str().into()),
             ],
-            HostError::KindUnsupported { domain: d, kind } => {
-                vec![domain(d), ("kind", kind.as_str().into())]
-            }
             HostError::Descriptor { domain: d, cause } => {
                 vec![domain(d), ("cause", Arg::nested(cause))]
             }
@@ -271,10 +264,6 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn Diagnostic>> {
             cause: crate::DescriptorRefused::PolicyNoOutputDomain {
                 component: "TableWalletPolicy".to_string(),
             },
-        }),
-        Box::new(HostError::KindUnsupported {
-            domain: d(),
-            kind: "upcaster".to_string(),
         }),
         Box::new(HostError::SocketDirTooLong {
             dir: "/very/deep/directory".to_string(),

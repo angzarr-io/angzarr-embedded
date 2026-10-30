@@ -836,7 +836,11 @@ fn failure_class(failure: &Failure<Rejected>) -> Option<Class> {
         | Failure::Kernel(KernelError::Store(super::StoreError::Conflict { .. })) => {
             Some(Class::BusinessImmediate)
         }
-        Failure::Kernel(KernelError::HandlerUnavailable { .. }) => Some(Class::BugRetryable),
+        Failure::Kernel(KernelError::HandlerUnavailable { .. })
+        | Failure::Kernel(KernelError::Upcast {
+            error: super::UpcastError::Unavailable { .. },
+            ..
+        }) => Some(Class::BugRetryable),
         Failure::Kernel(KernelError::Store(error))
             if super::error::store_recovery(error) == super::Recovery::Retry =>
         {

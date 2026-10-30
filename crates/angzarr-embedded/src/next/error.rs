@@ -334,7 +334,11 @@ impl KernelError {
             | KernelError::Unresolved { .. } => Recovery::Retry,
             KernelError::Store(error) => store_recovery(error),
             KernelError::Router(error) => router_recovery(error),
-            KernelError::HandlerUnavailable { .. } => Recovery::Retry,
+            KernelError::HandlerUnavailable { .. }
+            | KernelError::Upcast {
+                error: UpcastError::Unavailable { .. },
+                ..
+            } => Recovery::Retry,
             KernelError::Upcast { .. }
             | KernelError::WrongDomain { .. }
             | KernelError::ChainTooDeep { .. }

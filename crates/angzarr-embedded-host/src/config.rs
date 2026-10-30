@@ -46,9 +46,18 @@
 //! A component's `kind` is the service its child serves: `"domain"` (the
 //! default: an aggregate or a process manager, `CommandHandlerService`),
 //! `"policy"` (`PolicyService`), `"projector"` (`ProjectorService`) or
-//! `"upcaster"` (an upcaster sidecar, decision 14.39, which the host does
-//! not launch yet: [`HostError::KindUnsupported`]). Its descriptor must
-//! agree ([`HostError::KindMismatch`]).
+//! `"upcaster"` (an upcaster sidecar, decision 14.39, `UpcasterService`,
+//! naming the domain it `upcasts`). A component's descriptor must agree
+//! with its kind ([`HostError::KindMismatch`]); a sidecar has none.
+//!
+//! ```toml
+//! [[component]]
+//! name = "table-upcaster"
+//! kind = "upcaster"            # the table's inputs are upcast through it
+//! upcasts = "table"
+//! language = "python"
+//! entry = ["-m", "table_upcaster.serve"]
+//! ```
 //!
 //! A component's language picks its default launch command and nothing
 //! else: the host speaks one protocol to every child (the handshake, then
@@ -212,7 +221,7 @@ pub struct ComponentConfig {
     /// The service its child serves: `"domain"` (the default: an
     /// aggregate or a process manager, `CommandHandlerService`),
     /// `"policy"` (`PolicyService`), `"projector"` (`ProjectorService`)
-    /// or `"upcaster"` (an upcaster sidecar, not launched yet).
+    /// or `"upcaster"` (an upcaster sidecar, `UpcasterService`).
     #[serde(default, skip_serializing_if = "ComponentKindConfig::is_domain")]
     pub kind: ComponentKindConfig,
     /// An upcaster's: the domain whose payloads it upcasts (decision
@@ -250,8 +259,9 @@ pub enum ComponentKindConfig {
     Policy,
     /// A projector (`ProjectorService`).
     Projector,
-    /// An upcaster sidecar (`UpcasterService`, decision 14.39): refused at
-    /// start for now ([`HostError::KindUnsupported`]).
+    /// An upcaster sidecar (`UpcasterService`, decision 14.39) for the
+    /// domain its component `upcasts`: no descriptor, no coordinator of its
+    /// own.
     Upcaster,
 }
 

@@ -17,7 +17,6 @@ angzarr-embedded-host-kind-mismatch = component "{ $domain }" is configured as a
 angzarr-embedded-host-no-input = component "{ $domain }" names no input domain in its descriptor
 angzarr-embedded-host-upcaster-no-domain = component "{ $domain }" is an upcaster that names no domain to upcast: give it `upcasts`
 angzarr-embedded-host-descriptor = component "{ $domain }": its descriptor is refused: { $cause }
-angzarr-embedded-host-kind-unsupported = component "{ $domain }": kind "{ $kind }" is not run by the host yet
 angzarr-embedded-host-runtime = the host's runtime could not be built ({ $kind })
 angzarr-embedded-host-socket-dir-too-long = socket_dir "{ $dir }" is too long for a Unix socket path: at most { $max_bytes ->
         [one] { $max_bytes } byte

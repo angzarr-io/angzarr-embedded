@@ -41,6 +41,9 @@ use crate::rpc::command_handler::command_handler_service_client::CommandHandlerS
 use crate::rpc::google_rpc::{ErrorInfo, Status as RpcStatus, ERROR_INFO_NAME};
 use crate::rpc::policy::policy_service_client::PolicyServiceClient;
 use crate::rpc::projector::projector_service_client::ProjectorServiceClient;
+use crate::rpc::upcaster::upcaster_service_client::UpcasterServiceClient;
+use angzarr_embedded::next::{KernelError, UpcastError, UpcastPort};
+use angzarr_embedded_diagnostic::Report;
 
 /// The router-style codes a remote handler's dispatch adds to the router's
 /// own (`angzarr_router::error::codes`).
@@ -324,6 +327,95 @@ impl RemotePolicyHandler {
     /// The descriptor `Describe` gave when the policy first came up.
     pub fn descriptor(&self) -> &pb::ComponentDescriptor {
         &self.inner.descriptor
+    }
+}
+
+/// A remote upcaster sidecar (decision 14.39): its child serves
+/// `UpcasterService` alone, for [`Self::upcasts`], and the kernel upcasts
+/// that domain's inputs through it, as its `UpcastPort`. Cloning it is
+/// cheap.
+#[derive(Clone)]
+pub struct RemoteUpcaster {
+    inner: Arc<Remote>,
+    upcasts: String,
+}
+
+impl RemoteUpcaster {
+    pub(crate) fn new(
+        name: String,
+        upcasts: String,
+        link: Arc<Link>,
+        runtime: tokio::runtime::Handle,
+        call_timeout: Duration,
+    ) -> Self {
+        RemoteUpcaster {
+            inner: Arc::new(Remote {
+                name,
+                descriptor: pb::ComponentDescriptor::default(),
+                link,
+                runtime,
+                call_timeout,
+            }),
+            upcasts,
+        }
+    }
+
+    /// The `[[component]]` name it is configured as.
+    pub fn configured(&self) -> &str {
+        &self.inner.name
+    }
+
+    /// The domain whose payloads it upcasts.
+    pub fn upcasts(&self) -> &str {
+        &self.upcasts
+    }
+}
+
+impl std::fmt::Debug for RemoteUpcaster {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteUpcaster")
+            .field("component", &self.inner.name)
+            .field("upcasts", &self.upcasts)
+            .finish_non_exhaustive()
+    }
+}
+
+impl UpcastPort for RemoteUpcaster {
+    /// `UpcasterService.Upcast` on the child. A child that cannot be
+    /// reached ([`is_retryable`]) is not serving: [`UpcastError::Unavailable`],
+    /// retried. Any other status is the failure of the rule it ran on the
+    /// request's first payload, a bug ([`UpcastError::Rule`]), carrying the
+    /// child's reason.
+    fn upcast(&self, request: &pb::UpcastRequest) -> Result<pb::UpcastResponse, UpcastError> {
+        let sent = request.clone();
+        self.inner
+            .call(move |channel| async move {
+                UpcasterServiceClient::new(channel).upcast(sent).await
+            })
+            .map_err(|error| {
+                if is_retryable(&error) {
+                    let cause = error.extras.get("cause").cloned().unwrap_or_default();
+                    return UpcastError::Unavailable {
+                        cause: Report::of(&KernelError::HandlerUnavailable {
+                            stream: pb::Cover {
+                                domain: self.upcasts.clone(),
+                                ..Default::default()
+                            },
+                            cause,
+                        }),
+                    };
+                }
+                let source = request
+                    .events
+                    .first()
+                    .and_then(|page| page.payload.as_ref())
+                    .map(|payload| angzarr_embedded::next::type_name(&payload.type_url).to_string())
+                    .unwrap_or_default();
+                UpcastError::Rule {
+                    source,
+                    error: Report::of(&KernelError::Router(error)),
+                }
+            })
     }
 }
 

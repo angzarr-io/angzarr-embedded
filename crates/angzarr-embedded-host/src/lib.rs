@@ -18,10 +18,12 @@
 //!    whose descriptor fails validation ([`descriptor::validate`]);
 //! 4. hands back, by its kind, a [`RemoteCommandHandler`] over
 //!    `CommandHandlerService`, a [`RemotePolicyHandler`] over
-//!    `PolicyService` or a [`RemoteProjectorHandler`] over
-//!    `ProjectorService`, which [`Host::register`] registers with the
-//!    kernel; a remote process manager's start rule is the kernel's, from
-//!    its descriptor's starting types;
+//!    `PolicyService`, a [`RemoteProjectorHandler`] over
+//!    `ProjectorService` or a [`RemoteUpcaster`] over `UpcasterService`
+//!    (an upcaster sidecar, which is not described), which
+//!    [`Host::register`] registers with the kernel; a remote process
+//!    manager's start rule is the kernel's, from its descriptor's starting
+//!    types;
 //! 5. supervises it: a child that exits is restarted with backoff, and
 //!    while it is down its dispatch fails retryably ([`is_retryable`]).
 //!
@@ -48,7 +50,9 @@ pub use config::{
 pub use descriptor::{validate, DescriptorRefused};
 pub use error::{HandshakeError, HostError};
 pub use host::{ChildExit, Host};
-pub use remote::{is_retryable, RemoteCommandHandler, RemotePolicyHandler, RemoteProjectorHandler};
+pub use remote::{
+    is_retryable, RemoteCommandHandler, RemotePolicyHandler, RemoteProjectorHandler, RemoteUpcaster,
+};
 
 /// This crate's en-US Fluent catalog, its name first: what a dependent
 /// embeds to render this crate's diagnostics. The text of

@@ -40,7 +40,9 @@ use tokio::sync::oneshot;
 use crate::config::{ComponentKindConfig, HostConfig, Launch, Placement, Supervision};
 use crate::error::HostError;
 use crate::handshake::{read_handshake, SOCKET_ENV};
-use crate::remote::{Link, RemoteCommandHandler, RemotePolicyHandler, RemoteProjectorHandler};
+use crate::remote::{
+    Link, RemoteCommandHandler, RemotePolicyHandler, RemoteProjectorHandler, RemoteUpcaster,
+};
 use crate::rpc::component::component_service_client::ComponentServiceClient;
 use crate::rpc::connect_unix;
 
@@ -72,6 +74,7 @@ enum Hosted {
     Domain(RemoteCommandHandler),
     Policy(RemotePolicyHandler),
     Projector(RemoteProjectorHandler),
+    Upcaster(RemoteUpcaster),
 }
 
 /// One remote component under supervision.
@@ -89,9 +92,11 @@ impl Host {
     /// Starts every remote component of `config` and waits for each to come
     /// up: launched, handshaken, connected, and described, its descriptor of
     /// the kind its `kind` says ([`HostError::KindMismatch`]; a policy's or
-    /// projector's naming its input, [`HostError::NoInput`]). A remote
-    /// `kind = "upcaster"` is refused before any child starts
-    /// ([`HostError::KindUnsupported`]). In-process domains are left to the caller. Refused, with every
+    /// projector's naming its input, [`HostError::NoInput`]; one that
+    /// fails validation, [`HostError::Descriptor`]). An upcaster sidecar is
+    /// not described, and is up once connected; one naming no domain to
+    /// upcast is refused before any child starts
+    /// ([`HostError::UpcasterNoDomain`]). In-process domains are left to the caller. Refused, with every
     /// child already started stopped again, when any domain's config is
     /// refused or any child fails to come up the first time.
     pub fn start(config: HostConfig) -> Result<Host, HostError> {
@@ -109,13 +114,13 @@ impl Host {
                 });
             }
             if let Placement::Remote(launch) = component.placement()? {
-                if component.kind == ComponentKindConfig::Upcaster {
-                    return Err(HostError::KindUnsupported {
+                let upcasts = component.upcasts.clone().unwrap_or_default();
+                if component.kind == ComponentKindConfig::Upcaster && upcasts.is_empty() {
+                    return Err(HostError::UpcasterNoDomain {
                         domain: component.name.clone(),
-                        kind: component.kind.as_str().to_string(),
                     });
                 }
-                remote.push((component.name.clone(), component.kind, launch));
+                remote.push((component.name.clone(), component.kind, launch, upcasts));
             }
         }
         let socket_dir = socket_dir(
@@ -134,7 +139,7 @@ impl Host {
             runtime: None,
             domains: Vec::new(),
         };
-        for (domain, kind, launch) in remote {
+        for (domain, kind, launch, upcasts) in remote {
             let link = Arc::new(Link::default());
             let (stop, stopped) = oneshot::channel();
             let (up, came_up) = mpsc::channel();
@@ -169,6 +174,9 @@ impl Host {
                                 parts.0, parts.1, parts.2, parts.3, parts.4,
                             ))
                         }
+                        ComponentKindConfig::Upcaster => Hosted::Upcaster(RemoteUpcaster::new(
+                            parts.0, upcasts, parts.2, parts.3, parts.4,
+                        )),
                         _ => Hosted::Domain(RemoteCommandHandler::new(
                             parts.0, parts.1, parts.2, parts.3, parts.4,
                         )),
@@ -248,7 +256,10 @@ impl Host {
     /// handler as the domain it is configured for (the kernel then
     /// dispatches that domain's commands, and its policies' steps into it,
     /// through the child: `Kernel::handle_any`); a policy beside every
-    /// other policy of its source; a projector of its source. In-process
+    /// other policy of its source; a projector of its source; and, last, an
+    /// upcaster sidecar as the port its domain's inputs are upcast through
+    /// (decision 14.39), which domain the caller registers first if it is
+    /// in-process (one not registered PANICS). In-process
     /// components are registered by the caller as ever. Refused as the
     /// registry refuses a domain (one registered already, a descriptor with
     /// no state or rules version); a policy or projector of a name
@@ -266,6 +277,14 @@ impl Host {
                 Hosted::Projector(handler) => {
                     registry.projector_handler(handler.source(), handler.clone());
                 }
+                Hosted::Upcaster(_) => {}
+            }
+        }
+        // Each sidecar upcasts a domain registered by now: a remote one,
+        // above, or an in-process one, by the caller before.
+        for component in &self.domains {
+            if let Hosted::Upcaster(upcaster) = &component.hosted {
+                registry.upcast_with(upcaster.upcasts(), upcaster.clone());
             }
         }
         Ok(())
@@ -580,6 +599,15 @@ impl Supervisor {
                         domain: domain(),
                         socket: handshake.socket.display().to_string(),
                     })?;
+            // An upcaster sidecar has no descriptor (decision 14.39): it
+            // serves UpcasterService alone, and is up once connected.
+            if self.kind == ComponentKindConfig::Upcaster {
+                let descriptor = pb::ComponentDescriptor {
+                    name: self.domain.clone(),
+                    ..Default::default()
+                };
+                return Ok((channel, descriptor, handshake.socket));
+            }
             let descriptor = ComponentServiceClient::new(channel.clone())
                 .describe(())
                 .await

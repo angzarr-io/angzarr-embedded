@@ -960,9 +960,11 @@ fn a_remote_upcasters_failing_rule_is_a_bug() {
     };
     assert_eq!(source, "test.table.v0.Bad");
     assert!(
-        error.code().contains("upcast-rule-broke"),
-        "{}",
-        error.code()
+        error
+            .args()
+            .iter()
+            .any(|(name, arg)| *name == "cause" && format!("{arg:?}").contains("UPCAST_RULE_BROKE")),
+        "the child's reason: {error:?}"
     );
     assert_eq!(failure.recovery(), angzarr_embedded::next::Recovery::Bug);
 }
