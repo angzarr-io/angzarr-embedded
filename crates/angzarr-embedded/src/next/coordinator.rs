@@ -32,8 +32,8 @@
 //!    under AGGREGATE_HANDLES and COMMUTATIVE the events from it to the head
 //!    are the window, delivered as events (the snapshot used is at or below
 //!    expected−1, so none of the window is hidden in snapshot state), with a
-//!    nonce. An expected sequence past the head is stale under every
-//!    resolution.
+//!    nonce. An expected sequence past the head is malformed under every
+//!    resolution ([`KernelError::ExpectedSequenceAhead`], decision 14.47).
 //! 5. [`dispatch`]: the `ContextualCommand` (the stream's snapshot and
 //!    events, upcast; the book with its ids and its handling resolved, its
 //!    payload upcast through the domain's port before step 3 decided
@@ -305,7 +305,10 @@ pub(crate) fn resolution(
 }
 
 /// The expected sequence, stamped with `head` or checked against it, and
-/// the nonce (from `nonces`) under AGGREGATE_HANDLES and COMMUTATIVE.
+/// the nonce (from `nonces`) under AGGREGATE_HANDLES and COMMUTATIVE. One
+/// ahead of the head is malformed under every resolution
+/// ([`KernelError::ExpectedSequenceAhead`], decision 14.47); one behind it
+/// is stale under STRICT ([`KernelError::Stale`]).
 pub(crate) fn expect(
     command: &Identified,
     resolution: ConflictResolution,
@@ -313,7 +316,14 @@ pub(crate) fn expect(
     nonces: &mut u64,
 ) -> Result<(u64, Option<Vec<u8>>), KernelError> {
     let expected = command.expected_sequence().unwrap_or(head);
-    if expected > head || (resolution == ConflictResolution::Strict && expected != head) {
+    if expected > head {
+        return Err(KernelError::ExpectedSequenceAhead {
+            stream: command.cover().clone(),
+            expected,
+            head,
+        });
+    }
+    if resolution == ConflictResolution::Strict && expected != head {
         return Err(KernelError::Stale {
             stream: command.cover().clone(),
             expected,

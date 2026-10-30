@@ -15,8 +15,11 @@ pub use angzarr_proto::v1::{CoordinatorReason, RouterReason};
 /// [`Rejected`](super::Rejected), each under an angzarr-embedded code of its
 /// own. The readiness keys (`COORDINATOR_REASON_MISSING_RULES_VERSION` and the rest) are a
 /// component's, refused before any input.
-/// `COORDINATOR_REASON_EXPECTED_SEQUENCE_STALE` is not among them: no
-/// handler answers it; it is the kernel's own [`KernelError::Stale`](super::KernelError::Stale)
+/// `COORDINATOR_REASON_EXPECTED_SEQUENCE_STALE` and
+/// `COORDINATOR_REASON_EXPECTED_SEQUENCE_AHEAD` are not among them: no
+/// handler answers them; they are the kernel's own
+/// [`KernelError::Stale`](super::KernelError::Stale) and
+/// [`KernelError::ExpectedSequenceAhead`](super::KernelError::ExpectedSequenceAhead)
 /// on the wire ([`KernelError::as_coded`](super::KernelError::as_coded)).
 pub const ANSWERED: &[CoordinatorReason] = &[
     CoordinatorReason::ConflictUnresolved,
