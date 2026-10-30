@@ -232,9 +232,8 @@ pub(crate) fn overlap(a: &[String], b: &[String]) -> bool {
         return true;
     }
     let encloses = |prefix: &str, unit: &str| {
-        unit.len() > prefix.len()
-            && unit.starts_with(prefix)
-            && matches!(unit.as_bytes()[prefix.len()], b'.' | b'[')
+        unit.strip_prefix(prefix)
+            .is_some_and(|rest| rest.starts_with(['.', '[']))
     };
     a.iter()
         .any(|x| b.iter().any(|y| x == y || encloses(x, y) || encloses(y, x)))
