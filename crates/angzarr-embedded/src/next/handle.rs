@@ -51,8 +51,9 @@ use std::collections::VecDeque;
 use std::convert::Infallible;
 
 use angzarr_proto::v1::{
-    self as v1, command_page, refusal_response, CommandBook, CommandPage, CommandRefused, Cover,
-    DeliveryOutcome, EventBook, EventPage, EventRef, Fact, FactOrigin, Outcome,
+    self as v1, command_page, refusal_response, CommandBook, CommandPage, CommandRefused,
+    ConflictResolution, Cover, DeliveryOutcome, EventBook, EventPage, EventRef, Fact, FactOrigin,
+    Outcome,
 };
 use prost_types::Any;
 
@@ -61,7 +62,7 @@ use angzarr_router::error::RouterReason;
 
 use super::check::{check, check_refusal, Checked, Identified, Sampled};
 use super::coordinator::{
-    contextual_command, decide, deduplicate, load, write_snapshot, Deduplicated,
+    contextual_command, decide, deduplicate, load, write_snapshot, Contextual, Deduplicated,
 };
 use super::dead_letter::{write_dead_letter, write_letter, write_retries_exhausted, DeadLetterLog};
 use super::domain::Domain;
@@ -73,8 +74,9 @@ use super::payload::type_name;
 use super::policy::{answered, check_reactions, projection, Projection};
 use super::registry::{PolicyEntry, ProjectorInstance, Registry};
 use super::route::Rejected;
-use super::store::{Port, Store, StorePort};
+use super::store::{Port, Store, StoreError, StorePort};
 use super::stream::{Envelope, Stream};
+use super::target::{forward, Forwarded, Target};
 use super::upcast::upcast_pages;
 use angzarr_embedded_diagnostic::Report;
 use angzarr_router::router::DynProjectorHandler;
@@ -408,10 +410,15 @@ impl<'k> Kernel<'k> {
     /// it sets off, and wait for the chain to settle (see the module docs).
     /// Each step is ONE atomic write to `store`: one stream's events, with
     /// the step's positions. The command's own failure writes nothing: a
-    /// refused write and a lost race are [`KernelError::Store`]. A cover of
-    /// another domain than `D` is [`KernelError::WrongDomain`]. Deciding
-    /// stays synchronous and pure; the future is `Send` whenever the
-    /// store's are.
+    /// refused write is [`KernelError::Store`]. A race lost at the write
+    /// (another write to the stream landed first) is run again on the new
+    /// head when the kernel stamped the command's expected sequence, under
+    /// the retry policy; under STRICT, a sender's expected sequence it lost
+    /// is [`KernelError::Stale`] (decision 14.45). A cover of another
+    /// domain than `D` is [`KernelError::WrongDomain`]; a remote domain's
+    /// command goes to its coordinator ([`Registry::remote`]). Business
+    /// code stays synchronous and pure, each dispatch awaited; the future
+    /// is `Send` whenever the store's are.
     pub async fn handle<D, S, Ps>(
         &self,
         store: &S,
@@ -493,6 +500,12 @@ impl<'k> Kernel<'k> {
             }
             Origin::Skipped => {
                 self.finish(Handled::Applied(Recorded::default()), projections)
+                    .await
+            }
+            Origin::Forwarded(Forwarded::Duplicate(events)) => Ok(Handled::Duplicate(events)),
+            Origin::Forwarded(Forwarded::Applied(events)) => {
+                run.answered(events);
+                self.finish(Handled::Applied(run.recorded), projections)
                     .await
             }
             Origin::Wrote(head) => {
@@ -821,11 +834,15 @@ enum Origin {
     /// It was decided, and wrote its events (perhaps none) from this
     /// sequence on.
     Wrote(u64),
+    /// Its domain is remote: its coordinator's answer.
+    Forwarded(Forwarded),
 }
 
 /// The class of a step's `failure` ([`class`]), if it
 /// is one the kernel may run again: a stale command or a lost race
-/// (ABORTED) is the caller's to reload; an unreachable handler or store,
+/// (ABORTED) is the caller's to reload (but a race the kernel's own
+/// stamped command lost, [`lost_its_own_race`], is run again for any
+/// caller); an unreachable handler or store,
 /// and a router error under a retryable status, are retryable bugs; a
 /// router error's own class otherwise. `None` for a failure never run
 /// again: a refusal, a decide that never acknowledged its window (already
@@ -850,6 +867,41 @@ fn failure_class(failure: &Failure<Rejected>) -> Option<Class> {
         Failure::Kernel(KernelError::Router(error)) => Some(class(error.grpc as i32)),
         _ => None,
     }
+}
+
+/// The store's refusal `error` of the write of `contextual`'s events, in
+/// the kernel's terms. A write lost to another write to the same stream
+/// (the store's conflict: it landed between this command's load and its
+/// write) under STRICT, by a command whose sender set its expected
+/// sequence, is that sequence gone stale: [`KernelError::Stale`], against
+/// the head the store found (decision 14.45). Any other error, a stamped
+/// command's lost race included ([`lost_its_own_race`]), is the store's.
+fn lost(contextual: &Contextual, error: StoreError) -> KernelError {
+    match (&error, contextual.command.expected_sequence()) {
+        (StoreError::Conflict { actual, .. }, Some(expected))
+            if contextual.resolution == ConflictResolution::Strict =>
+        {
+            KernelError::Stale {
+                stream: contextual.command.cover().clone(),
+                expected,
+                actual: *actual,
+            }
+        }
+        _ => KernelError::Store(error),
+    }
+}
+
+/// Whether `failure` is a write `command` lost to another write to its
+/// stream when its sender set no expected sequence: the kernel stamped the
+/// head it loaded, so the race is the kernel's own, and the command is
+/// decided again on the new head (optimistic concurrency, per stream
+/// only; decision 14.45), for any caller.
+fn lost_its_own_race(failure: &Failure<Rejected>, command: &Identified) -> bool {
+    command.expected_sequence().is_none()
+        && matches!(
+            failure,
+            Failure::Kernel(KernelError::Store(StoreError::Conflict { .. }))
+        )
 }
 
 /// What a step came to.
@@ -900,7 +952,8 @@ impl<'k> Run<'k> {
         retries: &mut u32,
         command: &Identified,
     ) -> bool {
-        if !self.retried(failure, policy_step) {
+        let raced = self.retry.max_retries > 0 && lost_its_own_race(failure, command);
+        if !raced && !self.retried(failure, policy_step) {
             return false;
         }
         if *retries >= self.retry.max_retries {
@@ -926,6 +979,10 @@ impl<'k> Run<'k> {
         port: &mut P,
         identified: Identified,
     ) -> Result<Origin, Failure<Rejected>> {
+        if let Some(Target::Remote(remote)) = self.registry.target(identified.domain()) {
+            let forwarded = forward(remote, &identified, self.dead_letters).await?;
+            return Ok(Origin::Forwarded(forwarded));
+        }
         let cover = identified.cover().clone();
         let novel = match deduplicate(port, self.registry, identified).await? {
             Deduplicated::Duplicate { events } => return Ok(Origin::Duplicate(events)),
@@ -940,7 +997,7 @@ impl<'k> Run<'k> {
         if !pages.is_empty() {
             port.write(&cover, head, &pages, &[])
                 .await
-                .map_err(|e| Failure::Kernel(KernelError::Store(e)))?;
+                .map_err(|e| Failure::Kernel(lost(&contextual, e)))?;
             write_snapshot(port, &cover, decided.snapshot).await;
         }
         self.record(cover, head, stream, pages);
@@ -1311,6 +1368,17 @@ impl<'k> Run<'k> {
     ) -> Result<Stepped, Failure<Rejected>> {
         let kernel = Failure::Kernel;
         let store = |e| kernel(KernelError::Store(e));
+        if let Some(Target::Remote(remote)) = self.registry.target(command.domain()) {
+            self.refused = None;
+            let forwarded = forward(remote, &command, self.dead_letters).await?;
+            if !positions.is_empty() {
+                port.write_positions(positions).await.map_err(store)?;
+            }
+            if let Forwarded::Applied(events) = forwarded {
+                self.answered(events);
+            }
+            return Ok(Stepped::Nothing);
+        }
         let cover = command.cover().clone();
         let novel = match deduplicate(port, self.registry, command).await? {
             Deduplicated::Duplicate { .. } | Deduplicated::Skipped => {
@@ -1348,10 +1416,19 @@ impl<'k> Run<'k> {
         let stream = typed(&contextual, &pages, self.registry).map_err(kernel)?;
         port.write(&cover, head, &pages, positions)
             .await
-            .map_err(store)?;
+            .map_err(|e| kernel(lost(&contextual, e)))?;
         write_snapshot(port, &cover, snapshot).await;
         self.record(cover.clone(), head, stream, pages);
         Ok(Stepped::Wrote(cover, head))
+    }
+
+    /// A remote coordinator's `events` for a step it handled, as the
+    /// chain's answer: in its books, beside the streams written here, and
+    /// not among the steps written here (nothing of it was).
+    fn answered(&mut self, events: EventBook) {
+        if !events.pages.is_empty() {
+            self.recorded.books.push(events);
+        }
     }
 
     /// A step's write: its events, as the chain's answer.

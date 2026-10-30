@@ -344,11 +344,13 @@ fn parse(
     } = book;
 
     let cover = cover.ok_or(Malformed::NoCover)?;
-    if registry.state(&cover.domain).is_none() {
+    let Some(target) = registry.target(&cover.domain) else {
         return Err(Malformed::UnknownDomain {
             domain: cover.domain,
         });
-    }
+    };
+    // A remote domain's capabilities are its coordinator's to judge.
+    let local = matches!(target, super::Target::Local(_));
     let root = cover.root.clone().ok_or(Malformed::NoRoot)?;
     if !root.is_well_formed() {
         return Err(Malformed::BadRoot {
@@ -437,7 +439,7 @@ fn parse(
         value => {
             let requested = ConflictResolution::try_from(value)
                 .map_err(|_| Malformed::UnknownConflictResolution { value })?;
-            if !registry.supports(&cover.domain, requested) {
+            if local && !registry.supports(&cover.domain, requested) {
                 return Err(Malformed::UnsupportedConflictResolution {
                     domain: cover.domain,
                     requested,

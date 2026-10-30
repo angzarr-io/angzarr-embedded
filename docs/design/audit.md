@@ -290,6 +290,30 @@ either seen by the lookup or makes this delivery's append fail its expected
 head. Pinned by `a_retry_racing_its_original_commit_is_never_applied_twice`
 (a store that lets a commit land after the first read).
 
+**Same-stream concurrency is optimistic** (decision 14.45). Two commands
+to one stream at once both load and both decide; the store takes the
+first write and refuses the second (`StoreError::Conflict`). Nothing
+orders or locks streams: ordering is per stream only, and a write to
+another stream is never a conflict. The loser:
+
+- **set no expected sequence**: the kernel stamped the head it loaded, so
+  the race is the kernel's own. It is loaded and decided again on the new
+  head under the retry policy (`OnRetryable`), for an outside caller as for
+  a policy's step, and lands; its handler runs twice.
+- **set one, under STRICT**: it decided against a head that is gone, the
+  early check's condition found late: `KernelError::Stale`, `expected`
+  its sequence and `actual` the head the store found, ABORTED under
+  `COORDINATOR_REASON_EXPECTED_SEQUENCE_STALE` (`KernelError::as_coded`),
+  back to an outside caller at once and never run again by the kernel.
+- **set one, under AGGREGATE_HANDLES or COMMUTATIVE**: never that key (it
+  is STRICT's alone); the store's conflict goes back to the caller. What
+  these resolutions do when the stream moves after the window is
+  delivered is not yet decided (14.45, amended).
+
+Pinned by `next/concurrency.test.rs`, which forces the race with a barrier
+only the two first dispatches pass, and by the injected conflicts of
+`an_outside_callers_lost_race_*` and `outside_strict_a_lost_write_is_never_the_stale_key`.
+
 ## Step 4: load and conflict resolution
 
 ```rust
@@ -328,10 +352,13 @@ used is **at or below expected−1**, so no part of the window is hidden in
 snapshot state; a newer one is not used.
 
 **The expected sequence.** Absent: stamped with the head, and the command
-can never be stale. Present:
+can never be stale (a race lost at its write is run again on the new head;
+*Races*, above). Present:
 
 - **STRICT**: it must equal the head, else `KernelError::Stale` (angzarr's
-  ABORTED), before anything is decoded.
+  ABORTED, `COORDINATOR_REASON_EXPECTED_SEQUENCE_STALE`, args `expected`
+  and `actual`), before anything is decoded; a race lost at its write is
+  the same `Stale`.
 - **AGGREGATE_HANDLES**: the events from it to the head are the window;
   the handler receives them with the nonce (the router's
   `CommandContext.conflict`) and must give the nonce back
@@ -413,10 +440,34 @@ impl Registry {
     pub fn register<D: Domain>(&mut self, rules: Rulebook<D::Rules>, upcaster: Upcaster,
         handlers: impl FnOnce(DomainDispatch<D::State>) -> DomainDispatch<D::State>)
         -> Result<(), Misconfigured>;
-    pub fn command_handler(&mut self, domain: &str, handler: impl CommandHandler + 'static)
+    pub fn command_handler(&mut self, domain: &str, handler: impl CommandHandler + 'static,
+        descriptor: ComponentDescriptor) -> Result<(), Misconfigured>;
+    pub fn remote(&mut self, domain: &str, coordinator: impl CoordinatorPort + 'static)
         -> Result<(), Misconfigured>;
+    pub fn target(&self, domain: &str) -> Option<Target<'_>>;  // Local(&dyn DynCommandHandler) | Remote(&dyn CoordinatorPort)
 }
 ```
+
+The kernel awaits each dispatch (angzarr-router's `CommandHandler`,
+`PolicyComponent` and `ProjectorHandler` return futures; it holds them as
+their boxed twins, `DynCommandHandler` and the rest). Business code stays
+synchronous: an in-process handler answers at once, a remote child's call
+is awaited.
+
+**The routing seam** (`next::target`). The registry resolves a domain name
+to a `Target`: `Local`, the pipeline above over the kernel's store,
+through its handler (in this process or a child's); or `Remote`, a
+`CoordinatorPort`, a coordinator elsewhere that owns the domain's streams
+(`CommandHandlerCoordinatorService.Handle`). A domain is one or the other,
+never both (`Misconfigured::AlreadyRegistered`). A command for a remote
+domain, the application's or a policy's step, is checked and identified
+here, its command id fixed before it leaves so a retry is deduplicated
+there, then handed to the port; nothing of its stream is loaded or written
+here. Its answer comes back as a local domain's: its events (in the
+chain's books, not among the steps written here), DUPLICATE, or a refusal
+by its status's class. A policy's position is written here as ever. Only
+the seam is the kernel's: a transport behind the port is the composition
+root's.
 
 **Business dispatch is angzarr-router's**, implemented once for every
 runtime: handlers and typed refusals. The kernel keeps the check,
@@ -498,7 +549,7 @@ never classifies):
 | Class | Statuses | What the kernel does |
 |---|---|---|
 | business, fatal | FAILED_PRECONDITION, INVALID_ARGUMENT, NOT_FOUND, ALREADY_EXISTS, OUT_OF_RANGE, PERMISSION_DENIED | a rejection, `Failure::Rejected(Rejected)`, `Recovery::Business`: to the caller, or the issuing policy's refusal path; never retried, never dead-lettered |
-| business, immediate | ABORTED (a stale or overlapping command, a lost race, or a handler's own choice) | back to an outside caller at once, to reload (`Recovery::Retry`), never dead-lettered; a policy's step, whose caller is the kernel, is reloaded and run again under the capped backoff, then dead-lettered |
+| business, immediate | ABORTED (a stale or overlapping command, a lost race of a command whose sender set its expected sequence, or a handler's own choice) | back to an outside caller at once, to reload (`Recovery::Retry`), never dead-lettered; a policy's step, whose caller is the kernel, is reloaded and run again under the capped backoff, then dead-lettered. A lost race of a command the kernel stamped is run again on the new head for any caller (*Races*) |
 | bug, fatal | INTERNAL, UNKNOWN, DATA_LOSS | `KernelError::Router`, `Recovery::Bug`, dead-lettered at once |
 | bug, retryable | every other status (UNAVAILABLE, DEADLINE_EXCEEDED and RESOURCE_EXHAUSTED, a handler's in process or a remote child's as it picked them; UNIMPLEMENTED; a remote child's CANCELLED or UNAUTHENTICATED, and a call that failed on the way, arrive UNAVAILABLE) | retried under the capped backoff, then dead-lettered; `Recovery::Retry` |
 

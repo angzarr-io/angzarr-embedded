@@ -327,15 +327,47 @@ impl KernelError {
     /// This error as the coordinator answers it on the wire, in the
     /// router's shape: its reason key (a `CoordinatorReason`'s full name,
     /// `as_str_name`), its args as metadata, and its status; `None` for an
-    /// error that is not one of the coordinator's answers. A stale expected
-    /// sequence (the early check, or a write lost to a racing command) is
-    /// `COORDINATOR_REASON_EXPECTED_SEQUENCE_STALE`, ABORTED, args
-    /// `expected` and `actual`.
+    /// error that is not one of the coordinator's answers. Each is ABORTED
+    /// (business, immediate return; decision 14.37):
     ///
-    /// RED (design-by-test, the owner's ruling of 2026-10-30): proposed;
-    /// not implemented.
+    /// - a stale expected sequence under STRICT (the early check, or a
+    ///   write lost to a racing command; decision 14.45) is
+    ///   `COORDINATOR_REASON_EXPECTED_SEQUENCE_STALE`, args `expected` and
+    ///   `actual`;
+    /// - a COMMUTATIVE overlap is `COORDINATOR_REASON_CONFLICT_OVERLAP`,
+    ///   args `window_units` and `command_units`;
+    /// - an unacknowledged AGGREGATE_HANDLES window is
+    ///   `COORDINATOR_REASON_CONFLICT_UNRESOLVED`, no args.
     pub fn as_coded(&self) -> Option<angzarr_router::error::CodedError> {
-        todo!("red: KernelError::as_coded (design-by-test, 2026-10-30)")
+        use super::reasons::{args, CoordinatorReason};
+        let (reason, extras) = match self {
+            KernelError::Stale {
+                expected, actual, ..
+            } => (
+                CoordinatorReason::ExpectedSequenceStale,
+                vec![
+                    ("expected".to_string(), expected.to_string()),
+                    ("actual".to_string(), actual.to_string()),
+                ],
+            ),
+            KernelError::Overlap {
+                window_units,
+                command_units,
+                ..
+            } => (
+                CoordinatorReason::ConflictOverlap,
+                vec![
+                    (args::WINDOW_UNITS.to_string(), window_units.clone()),
+                    (args::COMMAND_UNITS.to_string(), command_units.clone()),
+                ],
+            ),
+            KernelError::Unresolved { .. } => (CoordinatorReason::ConflictUnresolved, Vec::new()),
+            _ => return None,
+        };
+        Some(angzarr_router::error::CodedError::immediate(
+            reason.as_str_name(),
+            extras,
+        ))
     }
 
     pub fn recovery(&self) -> Recovery {

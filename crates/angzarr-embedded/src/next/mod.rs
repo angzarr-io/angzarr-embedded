@@ -41,9 +41,15 @@
 //! 5. **Dispatch**: angzarr-router's `CommandHandler` for the domain gets
 //!    the `ContextualCommand` (the snapshot, the events, upcast, and the
 //!    command, its handling resolved) and runs its handler: a command's,
-//!    which may refuse ([`Rejected`]), or a fact's, which may not. Business
+//!    which may refuse ([`Rejected`]), or a fact's, which may not. The
+//!    kernel awaits it; business code stays synchronous. Business
 //!    output is payloads only: the kernel stamps every event's
 //!    [`EventMeta`](v1::EventMeta).
+//!
+//! A domain whose streams another coordinator owns ([`Registry::remote`],
+//! [`Target::Remote`]) takes steps 1 and 2 only: its command, identified,
+//! is handed to that coordinator's [`CoordinatorPort`], and its answer is
+//! the step's.
 //!
 //! Each step's output type is the next step's only input, so the order
 //! cannot be skipped or reordered.

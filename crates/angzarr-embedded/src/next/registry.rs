@@ -276,6 +276,9 @@ impl Diagnostic for Misconfigured {
 #[derive(Default)]
 pub struct Registry {
     domains: BTreeMap<String, Entry>,
+    /// The domains whose streams a coordinator elsewhere owns, by name
+    /// ([`Registry::remote`]): never one of `domains`.
+    remotes: BTreeMap<String, Box<dyn super::CoordinatorPort>>,
     /// The registered policies, in registration order: the one list.
     policies: Vec<PolicyEntry>,
     projectors: Vec<ProjectorEntry>,
@@ -347,7 +350,7 @@ impl Registry {
         handlers: impl FnOnce(DomainDispatch<D::State>) -> DomainDispatch<D::State>,
     ) -> Result<(), Misconfigured> {
         let domain = D::NAME.to_string();
-        if self.domains.contains_key(&domain) {
+        if self.taken(&domain) {
             return Err(Misconfigured::AlreadyRegistered { domain });
         }
         if upcaster.domain() != domain {
@@ -438,7 +441,7 @@ impl Registry {
         descriptor: angzarr_router::pb::ComponentDescriptor,
     ) -> Result<(), Misconfigured> {
         let name = domain.to_string();
-        if self.domains.contains_key(&name) {
+        if self.taken(&name) {
             return Err(Misconfigured::AlreadyRegistered { domain: name });
         }
         if descriptor.rules_version.is_empty() {
@@ -836,25 +839,37 @@ impl Registry {
     /// application's and every policy step's, is handed to the port, and
     /// nothing of it is loaded or written here. Refused for a domain
     /// registered already, here or remote.
-    ///
-    /// RED: proposed for review; not implemented.
     pub fn remote(
         &mut self,
         domain: &str,
         coordinator: impl super::CoordinatorPort + 'static,
     ) -> Result<(), Misconfigured> {
-        let _ = (domain, coordinator);
-        todo!("red: Registry::remote, the routing seam (design-by-test, 2026-10-30)")
+        if self.taken(domain) {
+            return Err(Misconfigured::AlreadyRegistered {
+                domain: domain.to_string(),
+            });
+        }
+        self.remotes
+            .insert(domain.to_string(), Box::new(coordinator));
+        Ok(())
     }
 
     /// Where a command naming `domain` is handled: here, through its
     /// handler; remote, through its coordinator; `None` when it is
     /// neither (the caller's [`Malformed::UnknownDomain`](super::Malformed::UnknownDomain)).
-    ///
-    /// RED: proposed for review; not implemented.
     pub fn target(&self, domain: &str) -> Option<super::Target<'_>> {
-        let _ = domain;
-        todo!("red: Registry::target, the routing seam (design-by-test, 2026-10-30)")
+        match self.domains.get(domain) {
+            Some(entry) => Some(super::Target::Local(&*entry.handler)),
+            None => self
+                .remotes
+                .get(domain)
+                .map(|port| super::Target::Remote(&**port)),
+        }
+    }
+
+    /// Whether `domain` is handled somewhere already: here or remote.
+    fn taken(&self, domain: &str) -> bool {
+        self.domains.contains_key(domain) || self.remotes.contains_key(domain)
     }
 }
 

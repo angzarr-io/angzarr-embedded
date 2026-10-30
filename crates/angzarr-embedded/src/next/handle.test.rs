@@ -1762,15 +1762,58 @@ fn without_threads_the_kernels_own_wait_completes_at_once() {
     assert_eq!(threaded.as_mut().poll(&mut cx), Poll::Pending);
 }
 
-/// A command whose write lost a race (a store conflict, ABORTED) goes back
-/// to its outside caller at once, to reload: never retried, never
-/// dead-lettered.
+/// A command with no expected sequence whose write lost a race (the
+/// store's conflict: another write to its stream landed first) is the
+/// kernel's own race: it is reloaded and decided again on the new head,
+/// after one backoff under the retry policy, for an outside caller too
+/// (decision 14.45). It lands, and nothing is dead-lettered.
 #[test]
-fn an_outside_callers_lost_race_goes_back_at_once() {
+fn an_outside_callers_lost_race_without_an_expected_sequence_is_run_again() {
     let registry = registry();
     let log = MemoryDeadLetters::new();
     let waits = Waits::default();
     let kernel = Kernel::new(&registry, &log).wait_with(&waits);
+    let store = Recording::new();
+    opened(&store, &registry, 1, 0);
+    store.fail_write_with(
+        0,
+        crate::next::StoreError::Conflict {
+            stream: Box::new(cover("account", 1)),
+            expected: 2,
+            actual: 3,
+        },
+    );
+    let handled = kernel
+        .handle::<Account, _, _>(&store, deposit(3, 25), &at(30), &mut ())
+        .ready();
+    assert!(
+        matches!(handled, Ok(crate::next::Handled::Applied(_))),
+        "{:?}",
+        handled.err()
+    );
+    assert_eq!(
+        *waits.0.lock().unwrap(),
+        [crate::next::OnRetryable::default().initial_backoff],
+        "run again once, after the first backoff"
+    );
+    assert_eq!(pages(&store, &cover("account", 1)).len(), 3);
+    assert!(log.lines().is_empty(), "{:?}", log.lines());
+}
+
+/// With retrying off, a lost race of a command with no expected sequence
+/// goes back to its caller as the store's conflict, not run again.
+#[test]
+fn with_retrying_off_a_lost_race_goes_back_as_the_stores_conflict() {
+    let registry = registry();
+    let log = MemoryDeadLetters::new();
+    let waits = Waits::default();
+    let kernel =
+        Kernel::new(&registry, &log)
+            .wait_with(&waits)
+            .on_retryable(crate::next::OnRetryable {
+                max_retries: 0,
+                ..crate::next::OnRetryable::default()
+            });
     let store = Recording::new();
     opened(&store, &registry, 1, 0);
     store.fail_write_with(
@@ -1792,6 +1835,49 @@ fn an_outside_callers_lost_race_goes_back_at_once() {
             Failure::Kernel(KernelError::Store(crate::next::StoreError::Conflict { .. }))
         ),
         "{failure:?}"
+    );
+    assert!(waits.0.lock().unwrap().is_empty(), "not retried");
+    assert!(log.lines().is_empty(), "{:?}", log.lines());
+}
+
+/// A command under STRICT whose sender set its expected sequence, and
+/// whose write lost a race, decided against a head that is gone: the
+/// stale expected sequence, against the head the store found, back to its
+/// outside caller at once: never run again, never dead-lettered (decision
+/// 14.45).
+#[test]
+fn an_outside_callers_lost_race_with_an_expected_sequence_is_stale_at_once() {
+    let registry = registry();
+    let log = MemoryDeadLetters::new();
+    let waits = Waits::default();
+    let kernel = Kernel::new(&registry, &log).wait_with(&waits);
+    let store = Recording::new();
+    opened(&store, &registry, 1, 0);
+    store.fail_write_with(
+        0,
+        crate::next::StoreError::Conflict {
+            stream: Box::new(cover("account", 1)),
+            expected: 2,
+            actual: 3,
+        },
+    );
+    let failure = kernel
+        .handle::<Account, _, _>(
+            &store,
+            deposit(3, 25).expecting(2, crate::next::v1::ConflictResolution::Strict),
+            &at(30),
+            &mut (),
+        )
+        .ready()
+        .err()
+        .expect("the race was lost");
+    assert_eq!(
+        failure,
+        Failure::Kernel(KernelError::Stale {
+            stream: cover("account", 1),
+            expected: 2,
+            actual: 3,
+        })
     );
     assert!(waits.0.lock().unwrap().is_empty(), "not retried");
     assert!(log.lines().is_empty(), "{:?}", log.lines());

@@ -10,17 +10,27 @@
 //! kernel knows only the port: what sits behind it is the composition
 //! root's, so a transport is added without touching the kernel.
 //!
-//! RED (design-by-test, 2026-10-30): the signatures here are proposed for
-//! review; [`Registry::remote`](super::Registry::remote) and
-//! [`Registry::target`](super::Registry::target) are `todo!()`.
+//! A command for a remote domain is checked and identified here (its
+//! command id and correlation fixed before it leaves, so a retry is
+//! deduplicated there), then handed to the port ([`forward`]); nothing of
+//! its stream is loaded, admitted, decided or written here. Its answer
+//! comes back as a local domain's would: its events, a duplicate, or a
+//! refusal under the class its status gives. A policy's step into a remote
+//! domain goes the same way, the policy's position written here.
 
 use std::future::Future;
 use std::pin::Pin;
 
-use angzarr_proto::v1::CommandBook;
+use angzarr_proto::v1::{CommandBook, DeliveryOutcome, EventBook};
 use angzarr_router::error::CodedError;
 use angzarr_router::pb::CommandResponse;
 use angzarr_router::router::DynCommandHandler;
+
+use super::check::Identified;
+use super::coordinator::refused;
+use super::dead_letter::{write_dead_letter, DeadLetterLog};
+use super::error::{Failure, KernelError};
+use super::route::{self, Rejected};
 
 /// What a [`CoordinatorPort`]'s call is: a `Send` future, so the kernel's
 /// own future stays `Send` across it.
@@ -56,6 +66,50 @@ impl std::fmt::Debug for Target<'_> {
         match self {
             Target::Local(handler) => f.debug_tuple("Local").field(&handler.name()).finish(),
             Target::Remote(_) => f.write_str("Remote"),
+        }
+    }
+}
+
+/// What a remote coordinator's answer came to: the events it persisted for
+/// the command's stream (perhaps none), or the ones it had already, a
+/// duplicate.
+pub(crate) enum Forwarded {
+    Applied(EventBook),
+    Duplicate(EventBook),
+}
+
+/// `command`, identified here, handed to the coordinator `port` that owns
+/// its stream, and its answer in the kernel's terms: its events, under
+/// their delivery; or its refusal as [`refused`] reads a local handler's,
+/// a handler's bug dead-lettered by its code and args as a local one is.
+/// An answer naming no stream is for the command's.
+pub(crate) async fn forward(
+    port: &dyn CoordinatorPort,
+    command: &Identified,
+    dead_letters: &dyn DeadLetterLog,
+) -> Result<Forwarded, Failure<Rejected>> {
+    match port.handle(command.to_book()).await {
+        Ok(response) => {
+            let mut events = response.events.unwrap_or_default();
+            if events.cover.is_none() {
+                events.cover = Some(command.cover().clone());
+            }
+            let duplicate = response
+                .outcome
+                .is_some_and(|o| o.delivery == DeliveryOutcome::Duplicate as i32);
+            Ok(match duplicate {
+                true => Forwarded::Duplicate(events),
+                false => Forwarded::Applied(events),
+            })
+        }
+        Err(error) => {
+            let failure = refused(command, error);
+            if let Failure::Kernel(error @ KernelError::Router(coded)) = &failure {
+                if route::is_handler_fault(coded) {
+                    write_dead_letter(dead_letters, command.to_book(), command.domain(), error);
+                }
+            }
+            Err(failure)
         }
     }
 }

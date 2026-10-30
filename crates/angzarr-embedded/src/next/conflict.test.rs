@@ -217,6 +217,50 @@ fn aggregate_handles_demands_the_nonce_back() {
     assert_eq!(failure.recovery(), Recovery::Retry);
 }
 
+/// Outside STRICT, a command with an expected sequence whose write is lost
+/// to another write to its stream is never answered the stale expected
+/// sequence: that key is STRICT's alone (decision 14.45, amended). Under
+/// AGGREGATE_HANDLES it is the store's conflict, as the store answered it.
+#[test]
+fn outside_strict_a_lost_write_is_never_the_stale_key() {
+    let registry = registry();
+    let store = crate::next::recording::Recording::new();
+    for (n, item) in [(1u128, "a"), (2, "b")] {
+        handle::<Shelf>(
+            &store,
+            &registry,
+            command(cover("shelf", 3), set(item, n as i64)).id(n),
+            &at(n as i64),
+        )
+        .unwrap();
+    }
+    store.fail_write_with(
+        0,
+        crate::next::StoreError::Conflict {
+            stream: Box::new(cover("shelf", 3)),
+            expected: 2,
+            actual: 3,
+        },
+    );
+    let failure = handle::<Shelf>(
+        &store,
+        &registry,
+        command(cover("shelf", 3), set("b", 7))
+            .id(3)
+            .expecting(1, ConflictResolution::AggregateHandles),
+        &at(3),
+    )
+    .err()
+    .unwrap();
+    assert!(
+        matches!(
+            failure,
+            Failure::Kernel(KernelError::Store(crate::next::StoreError::Conflict { .. }))
+        ),
+        "{failure:?}"
+    );
+}
+
 #[test]
 fn an_expected_sequence_past_the_head_is_stale() {
     let registry = registry();
@@ -326,7 +370,7 @@ fn an_old_command_type_has_its_current_types_resolution() {
         )
         .unwrap();
     let store = MemoryStore::new();
-    for (n, item) in [(1, "a"), (2, "b")] {
+    for (n, item) in [(1u128, "a"), (2, "b")] {
         handle::<Shelf>(
             &store,
             &registry,
