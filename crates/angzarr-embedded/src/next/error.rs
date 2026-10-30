@@ -503,6 +503,32 @@ impl Diagnostic for KernelError {
     }
 }
 
+/// The four classes of error (decision 14.37), decided by gRPC status
+/// alone, and by the kernel itself (decision 14.42): the router answers a
+/// status and a key and never classifies.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Class {
+    /// FAILED_PRECONDITION, INVALID_ARGUMENT, NOT_FOUND, ALREADY_EXISTS,
+    /// OUT_OF_RANGE, PERMISSION_DENIED: a refusal, final; to the caller, or
+    /// the issuing policy's OnRefused; never retried.
+    BusinessFatal,
+    /// ABORTED: re-read and re-decide. Returned at once to an outside
+    /// caller; a policy step, whose caller is the kernel, is run again.
+    BusinessImmediate,
+    /// INTERNAL, UNKNOWN, DATA_LOSS: dead-lettered and alerted at once.
+    BugFatal,
+    /// Every other status (UNAVAILABLE, DEADLINE_EXCEEDED,
+    /// RESOURCE_EXHAUSTED, UNIMPLEMENTED, CANCELLED, ...): retried under the
+    /// capped backoff, then dead-lettered.
+    BugRetryable,
+}
+
+/// The class of the gRPC status `code`, by its wire number.
+pub fn class(code: i32) -> Class {
+    let _ = code;
+    Class::BugRetryable
+}
+
 /// What to do about the router's error: its status decides its class
 /// (angzarr-router's `ErrorClass`, decision 14.37). A business refusal is
 /// the caller's to hear, a fatal bug an operator's; ABORTED (reload) and a
@@ -729,3 +755,7 @@ impl Diagnostic for UpcastChainError {
         args
     }
 }
+
+#[cfg(test)]
+#[path = "error.test.rs"]
+mod tests;

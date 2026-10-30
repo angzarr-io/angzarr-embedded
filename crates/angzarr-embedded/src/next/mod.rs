@@ -114,8 +114,8 @@ pub use conflict::{Key, UnitPath, Units};
 pub use dead_letter::{dead_letter_line, DeadLetterLog, MemoryDeadLetters, DEAD_LETTER_PREFIX};
 pub use domain::{Domain, State};
 pub use error::{
-    ChainProblem, Failure, KernelError, PayloadError, Recovery, ReplayError, Step, StepError,
-    UpcastChainError, UpcastError,
+    class, ChainProblem, Class, Failure, KernelError, PayloadError, Recovery, ReplayError, Step,
+    StepError, UpcastChainError, UpcastError,
 };
 pub use fixture::{assert_replay_fixtures, check_replay_fixtures, ReplayFixture};
 pub use handle::{
