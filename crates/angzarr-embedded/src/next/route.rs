@@ -208,7 +208,9 @@ pub(crate) fn failed<R: Diagnostic>(failed: Failed<super::markup::Rejection<R>>)
         Failed::Rejected { rejection, status } => {
             refused(&rejection, rejection.refusal().cloned(), status)
         }
-        Failed::Bug(report) => bug(&report),
+        Failed::Immediate(report) | Failed::Bug(report) | Failed::RetryableBug { report, .. } => {
+            bug(&report)
+        }
     }
 }
 

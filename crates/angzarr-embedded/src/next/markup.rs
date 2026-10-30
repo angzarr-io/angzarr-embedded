@@ -20,9 +20,11 @@
 //! - [`Rejection`], [`Refusing`], [`Refuses`] and [`TypedRefusal`]: a
 //!   command's refusal, a message only or one of its declared typed
 //!   refusal objects.
-//! - [`Failed`], [`BusinessStatus`] and [`Fails`]: what a command handler
-//!   or a continuation step fails with, a business refusal (under a status
-//!   of the business set) or a bug.
+//! - [`Failed`], [`BusinessStatus`], [`RetryableStatus`] and [`Fails`]:
+//!   what a command handler or a continuation step fails with, a business
+//!   refusal (under a status of the business set), an immediate return
+//!   (ABORTED), a fatal bug, or a retryable bug (under the status it
+//!   picks).
 //! - [`CommandRefused`] and [`Refusal`]: a refusal fact as its source's
 //!   `#[on_refused]` handler reads it, and a refusal as a translating
 //!   policy's callback reads it.
@@ -72,6 +74,19 @@ pub use angzarr_router::domain::{CommandContext, Conflict};
 /// business set: a [`Failed::Rejected`]'s status. Any other status is a
 /// fault.
 pub use angzarr_router::error::BusinessStatus;
+
+/// The statuses a handler's retryable bug may go out under,
+/// angzarr-router's: a [`Failed::RetryableBug`]'s status. They are not
+/// interchangeable, and the kernel's capped retry and any caller of its
+/// own honour the difference:
+///
+/// - `Unavailable` (UNAVAILABLE): resend; the dependency is down for now.
+/// - `DeadlineExceeded` (DEADLINE_EXCEEDED): resend only if the call is
+///   idempotent, since the work may have happened. A command is, by its
+///   `command_id` (the kernel's deduplication).
+/// - `ResourceExhausted` (RESOURCE_EXHAUSTED): wait longer before
+///   resending; a quota or a capacity limit was hit.
+pub use angzarr_router::error::RetryableStatus;
 
 /// What a handler, or a continuation step, reads besides the instance and
 /// its input, all read-only: the ONE handler context of every domain, an
@@ -597,20 +612,33 @@ impl<R: angzarr_embedded_diagnostic::Diagnostic> angzarr_embedded_diagnostic::Di
     }
 }
 
-/// What a command handler, or a continuation step, fails with: of
-/// decision 14.37's four classes, a business refusal (business, fatal) or
-/// a fatal bug. `X` is what
-/// it refuses with: the domain's own rejection, or, for a handler with
-/// `refuses(..)`, its [`Refuses`] choice.
+/// What a command handler, or a continuation step, fails with: one of
+/// decision 14.37's four classes. `X` is what it refuses with: the
+/// domain's own rejection, or, for a handler with `refuses(..)`, its
+/// [`Refuses`] choice.
 ///
-/// - [`Failed::Rejected`]: the domain said no. It goes out as a business
-///   refusal under `status` (FAILED_PRECONDITION unless the handler says
-///   otherwise, [`Failed::with_status`]), the refusal's code and args
-///   beside, and reaches the issuing policy's refusal path.
-/// - [`Failed::Bug`]: a fatal bug, never a business answer: the report of the
-///   bug value (a policy's `Err` is the same), its code and args. It goes
-///   out as INTERNAL UNHANDLED_HANDLER_ERROR, the code as its `cause` and
-///   each arg as `cause.<arg>`, and the input is dead-lettered.
+/// - [`Failed::Rejected`] (business, fatal): the domain said no. It goes
+///   out as a business refusal under `status` (FAILED_PRECONDITION unless
+///   the handler says otherwise, [`Failed::with_status`]), the refusal's
+///   code and args beside, and reaches the issuing policy's refusal path.
+/// - [`Failed::Immediate`] (business, immediate): "re-read and
+///   re-decide". It goes out as ABORTED under the report's own code and
+///   args (angzarr-router's `CodedError::immediate`): back to an outside
+///   caller at once, never retried or dead-lettered; a policy's step,
+///   whose caller is the kernel, is reloaded and run again under the
+///   capped backoff, then dead-lettered. Never a policy's refusal path.
+/// - [`Failed::Bug`] (bug, fatal): a defect, never a business answer: the
+///   report of the bug value (a policy's `Err` is the same), its code and
+///   args. It goes out as INTERNAL UNHANDLED_HANDLER_ERROR, the code as its
+///   `cause` and each arg as `cause.<arg>`, and the input is dead-lettered
+///   at once.
+/// - [`Failed::RetryableBug`] (bug, retryable): a defect outside the
+///   handler that may clear (a dependency that is down), under the
+///   [`RetryableStatus`] the handler picks. It goes out under that status
+///   as UNHANDLED_HANDLER_ERROR, its cause as a fatal bug's
+///   (angzarr-router's `CodedError::retryable_bug`); the kernel retries
+///   it with capped backoff, then dead-letters it with its `retry_count`.
+///   Never a policy's refusal path.
 ///
 /// A handler or step that only refuses keeps returning `X` as is: it
 /// converts into a `Failed` by `From`, so `?` on a `Result<_, X>` works
@@ -619,6 +647,8 @@ impl<R: angzarr_embedded_diagnostic::Diagnostic> angzarr_embedded_diagnostic::Di
 /// ```text
 /// fn gauge(&self, cmd: Gauge, ctx: &Context) -> Result<Gauged, Failed<Refused>> {
 ///     if broken { return Err(Failed::bug(&MeterBroke { seat })); }
+///     if offline { return Err(Failed::retryable_bug(RetryableStatus::Unavailable, &MeterOffline { seat })); }
+///     if moved { return Err(Failed::immediate(&SeatMoved { seat })); }
 ///     if cmd.reading < 0 {
 ///         return Err(Failed::from(Refused::Negative).with_status(BusinessStatus::InvalidArgument));
 ///     }
@@ -637,7 +667,12 @@ pub enum Failed<X> {
         rejection: X,
         status: BusinessStatus,
     },
+    Immediate(Report),
     Bug(Report),
+    RetryableBug {
+        status: RetryableStatus,
+        report: Report,
+    },
 }
 
 impl<X> Failed<X> {
@@ -654,11 +689,28 @@ impl<X> Failed<X> {
         Failed::Bug(Report::of(bug))
     }
 
-    /// This refusal under `status`; a bug is unchanged.
+    /// A retryable bug under `status`, keyed by `bug`'s code, with its
+    /// args.
+    pub fn retryable_bug(
+        status: RetryableStatus,
+        bug: &dyn angzarr_embedded_diagnostic::Diagnostic,
+    ) -> Failed<X> {
+        Failed::RetryableBug {
+            status,
+            report: Report::of(bug),
+        }
+    }
+
+    /// An immediate return (ABORTED), keyed by `why`'s code, with its args.
+    pub fn immediate(why: &dyn angzarr_embedded_diagnostic::Diagnostic) -> Failed<X> {
+        Failed::Immediate(Report::of(why))
+    }
+
+    /// This refusal under `status`; any other failure is unchanged.
     pub fn with_status(self, status: BusinessStatus) -> Failed<X> {
         match self {
             Failed::Rejected { rejection, .. } => Failed::Rejected { rejection, status },
-            bug @ Failed::Bug(_) => bug,
+            other => other,
         }
     }
 
@@ -673,7 +725,9 @@ impl<X> Failed<X> {
                 rejection: rejection.into(),
                 status,
             },
+            Failed::Immediate(report) => Failed::Immediate(report),
             Failed::Bug(report) => Failed::Bug(report),
+            Failed::RetryableBug { status, report } => Failed::RetryableBug { status, report },
         }
     }
 }
@@ -686,7 +740,7 @@ impl<X> From<X> for Failed<X> {
     }
 }
 
-/// The refusal's code and args, or the bug's (decision 14.37): never
+/// The refusal's code and args, or the report's (decision 14.37): never
 /// English.
 impl<X: angzarr_embedded_diagnostic::Diagnostic> fmt::Display for Failed<X> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -694,7 +748,11 @@ impl<X: angzarr_embedded_diagnostic::Diagnostic> fmt::Display for Failed<X> {
             Failed::Rejected { rejection, .. } => {
                 angzarr_embedded_diagnostic::display(rejection, f)
             }
-            Failed::Bug(report) => angzarr_embedded_diagnostic::display(report, f),
+            Failed::Immediate(report)
+            | Failed::Bug(report)
+            | Failed::RetryableBug { report, .. } => {
+                angzarr_embedded_diagnostic::display(report, f)
+            }
         }
     }
 }
