@@ -108,6 +108,7 @@ impl CommandHandler for Table {
 
     fn dispatch(&self, _: &ContextualCommand) -> Result<CommandHandlerResponse, CodedError> {
         Ok(CommandHandlerResponse {
+            conflict: None,
             events: Some(EventBook {
                 pages: vec![EventPage {
                     payload: Some(any(&format!("/{SEATED}"))),

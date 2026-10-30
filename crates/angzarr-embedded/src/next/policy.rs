@@ -73,7 +73,13 @@ impl PolicyPort for PolicyDispatch {
     }
 
     fn dispatch(&self, source: &EventBook) -> Result<Vec<CommandBook>, CodedError> {
-        PolicyDispatch::dispatch(self, source).map(|response| response.commands)
+        PolicyDispatch::dispatch(self, source).map(|response| {
+            response
+                .reactions
+                .into_iter()
+                .flat_map(|reaction| reaction.commands)
+                .collect()
+        })
     }
 
     fn dispatch_refusal(

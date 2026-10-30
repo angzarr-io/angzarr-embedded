@@ -982,8 +982,11 @@ impl PositionStore for SqliteStore {
 
 impl Purge for SqliteStore {
     /// One `BEGIN IMMEDIATE` transaction, as a write's: a purge lands wholly
-    /// before or wholly after any write, or not at all.
-    async fn purge(&self, stream: StreamRef<'_>) -> Result<u64, StoreError> {
+    /// before or wholly after any write, or not at all. The stream's head
+    /// is checked against `expected` inside it, under the write lock
+    /// (14.43), so a write landing between the caller's read and the purge
+    /// is caught; a refusal rolls back, deleting nothing.
+    async fn purge(&self, stream: StreamRef<'_>, expected: u64) -> Result<u64, StoreError> {
         let Exec { mut conn, sent } = self.conn.exec().await;
         sent.fetch_add(1, Ordering::Relaxed);
         let tx = conn
@@ -991,6 +994,10 @@ impl Purge for SqliteStore {
             .await
             .map_err(unavailable)?;
         let mut ex = Exec { conn: tx, sent };
+        let actual = ex.head(stream).await?.next_sequence;
+        if actual != expected {
+            return Err(StoreError::conflict(stream, expected, actual));
+        }
         let cover = stream.to_cover();
         let deleted = ex
             .built_execute(statements::delete_events::<SqliteDialect>(&cover))

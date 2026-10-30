@@ -107,7 +107,7 @@ dependencies = [
 [[package]]
 name = "angzarr-ports"
 version = "0.1.0"
-source = "git+https://github.com/angzarr-io/angzarr-project?rev=a0be9386a8e535141dea3a5c27499e838ec6abc8#a0be9386a8e535141dea3a5c27499e838ec6abc8"
+source = "git+https://github.com/angzarr-io/angzarr-project?rev=b0a680fd1d8cdfaef9baace879b6b6adbeeca22a#b0a680fd1d8cdfaef9baace879b6b6adbeeca22a"
 dependencies = [
  "angzarr-proto",
  "prost",
@@ -117,7 +117,7 @@ dependencies = [
 [[package]]
 name = "angzarr-proto"
 version = "0.1.0"
-source = "git+https://github.com/angzarr-io/angzarr-project?rev=a0be9386a8e535141dea3a5c27499e838ec6abc8#a0be9386a8e535141dea3a5c27499e838ec6abc8"
+source = "git+https://github.com/angzarr-io/angzarr-project?rev=b0a680fd1d8cdfaef9baace879b6b6adbeeca22a#b0a680fd1d8cdfaef9baace879b6b6adbeeca22a"
 dependencies = [
  "bytes",
  "prost",
@@ -129,7 +129,7 @@ dependencies = [
 [[package]]
 name = "angzarr-router"
 version = "0.1.0"
-source = "git+https://github.com/angzarr-io/angzarr-router?rev=fc6d3a6d2c7944744f22362a0f83504dfe0e81ab#fc6d3a6d2c7944744f22362a0f83504dfe0e81ab"
+source = "git+https://github.com/angzarr-io/angzarr-router?rev=8fc078ff1a0c9e5493a47304a4b507562ba29d8c#8fc078ff1a0c9e5493a47304a4b507562ba29d8c"
 dependencies = [
  "angzarr-proto",
  "heck 0.5.0",
@@ -1333,7 +1333,7 @@ version = "0.14.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03da047801ff44bb6a4d407d4860c05fd70bb81714e6b2f3812603d5b145b042"
 dependencies = [
- "heck 0.5.0",
+ "heck 0.4.1",
  "itertools",
  "log",
  "multimap",

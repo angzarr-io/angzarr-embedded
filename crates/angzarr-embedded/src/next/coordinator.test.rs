@@ -93,7 +93,7 @@ mod dedup {
             handle::<crate::next::toys::Account>(&store, &registry, open(), &at(21)).unwrap();
         assert_eq!(retry.outcome().delivery, DeliveryOutcome::Duplicate as i32);
 
-        assert_eq!(store.purge(sref(&stream)).ready(), Ok(1));
+        assert_eq!(store.purge(sref(&stream), 1).ready(), Ok(1));
         let again =
             handle::<crate::next::toys::Account>(&store, &registry, open(), &at(22)).unwrap();
         assert_eq!(
