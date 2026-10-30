@@ -92,6 +92,7 @@ fn in_process_domains_are_left_to_the_caller() {
         entry: Vec::new(),
         dir: None,
         env: Default::default(),
+        expose: Default::default(),
     };
     let host = started(vec![
         table,
@@ -352,6 +353,7 @@ fn the_python_player_comes_up_by_its_default_launch() {
         entry: vec!["angzarr-player".to_string()],
         dir: Some(dir),
         env: Default::default(),
+        expose: Default::default(),
     };
     let mut config = config(vec![player]);
     config.supervision.handshake_timeout_ms = 120_000;

@@ -102,6 +102,10 @@ pub enum HostError {
     /// A `kind = "upcaster"` component that names no domain to upcast
     /// (`upcasts`).
     UpcasterNoDomain { domain: String },
+    /// A component given an `expose` other than `"none"` that is not an
+    /// aggregate: `kind` is its `kind`, by its TOML name. Only an aggregate
+    /// is served through the host's listener.
+    NotExposable { domain: String, kind: String },
     /// The child's descriptor fails the coordinator's validation
     /// (decision 14.42, C-0687; [`DescriptorRefused`](crate::DescriptorRefused)).
     Descriptor {
@@ -147,6 +151,7 @@ impl Diagnostic for HostError {
             HostError::NoInput { .. } => "angzarr-embedded-host-no-input",
             HostError::Descriptor { .. } => "angzarr-embedded-host-descriptor",
             HostError::UpcasterNoDomain { .. } => "angzarr-embedded-host-upcaster-no-domain",
+            HostError::NotExposable { .. } => "angzarr-embedded-host-not-exposable",
             HostError::SocketDirTooLong { .. } => "angzarr-embedded-host-socket-dir-too-long",
             HostError::ConfigUnreadable { .. } => "angzarr-embedded-host-config-unreadable",
             HostError::ConfigInvalid { .. } => "angzarr-embedded-host-config-invalid",
@@ -180,6 +185,9 @@ impl Diagnostic for HostError {
             ],
             HostError::Handshake { domain: d, cause } => {
                 vec![domain(d), ("cause", Arg::nested(cause))]
+            }
+            HostError::NotExposable { domain: d, kind } => {
+                vec![domain(d), ("kind", kind.as_str().into())]
             }
             HostError::Connect { domain: d, socket } => {
                 vec![domain(d), ("socket", socket.as_str().into())]
@@ -272,6 +280,10 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn Diagnostic>> {
         }),
         Box::new(HostError::NoInput { domain: d() }),
         Box::new(HostError::UpcasterNoDomain { domain: d() }),
+        Box::new(HostError::NotExposable {
+            domain: d(),
+            kind: "policy".to_string(),
+        }),
         Box::new(HostError::Descriptor {
             domain: d(),
             cause: crate::DescriptorRefused::PolicyNoOutputDomain {

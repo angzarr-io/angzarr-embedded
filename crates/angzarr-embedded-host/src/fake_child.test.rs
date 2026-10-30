@@ -191,6 +191,7 @@ pub(crate) fn domain(name: &str, described: &str, mode: &str) -> ComponentConfig
             (MODE_ENV.to_string(), mode.to_string()),
             (NAME_ENV.to_string(), described.to_string()),
         ]),
+        expose: Default::default(),
     }
 }
 

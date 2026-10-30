@@ -48,7 +48,8 @@ pub mod rpc;
 
 pub use app::{run, App};
 pub use config::{
-    ComponentConfig, ComponentKindConfig, HostConfig, Launch, Placement, StoreConfig, Supervision,
+    ComponentConfig, ComponentKindConfig, Expose, HostConfig, Launch, Placement, StoreConfig,
+    Supervision,
 };
 pub use descriptor::{validate, DescriptorRefused};
 pub use error::{HandshakeError, HostError};

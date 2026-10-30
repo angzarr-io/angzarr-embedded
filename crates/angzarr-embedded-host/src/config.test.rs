@@ -13,6 +13,7 @@ fn domain(name: &str, language: &str) -> ComponentConfig {
         entry: Vec::new(),
         dir: None,
         env: BTreeMap::new(),
+        expose: Default::default(),
     }
 }
 
@@ -372,4 +373,86 @@ fn a_components_kind_is_written_unless_it_is_the_default() {
     assert_eq!(text.matches("kind = ").count(), 1, "{text}");
     assert!(text.contains("kind = \"policy\""), "{text}");
     assert_eq!(toml::from_str::<HostConfig>(&text).unwrap(), config);
+}
+
+/// A `[[component]]`'s `expose` (red, design-by-test, 2026-10-30): who may
+/// send it commands through the host's listener. `"none"` when left out,
+/// `"loopback"` or `"ip"` when given; anything else is refused.
+#[test]
+fn a_components_expose_is_none_by_default_else_loopback_or_ip() {
+    let expose = |text: &str| {
+        toml::from_str::<HostConfig>(&format!(
+            "[[component]]\nname = \"x\"\nlanguage = \"rust\"\n{text}"
+        ))
+        .map(|c| c.components[0].expose)
+    };
+    assert_eq!(expose("").unwrap(), Expose::None);
+    assert_eq!(expose("expose = \"none\"").unwrap(), Expose::None);
+    assert_eq!(expose("expose = \"loopback\"").unwrap(), Expose::Loopback);
+    assert_eq!(expose("expose = \"ip\"").unwrap(), Expose::Ip);
+    assert!(expose("expose = \"Loopback\"").is_err());
+    assert!(expose("expose = \"public\"").is_err());
+    assert!(expose("expose = true").is_err());
+}
+
+/// A component's `expose` writes back as it reads: `"none"`, the default,
+/// is left out.
+#[test]
+fn a_components_expose_is_written_unless_it_is_none() {
+    let mut table = domain("table", "rust");
+    table.expose = Expose::Loopback;
+    let config = HostConfig {
+        components: vec![domain("player", "python"), table],
+        ..HostConfig::default()
+    };
+    let text = toml::to_string(&config).unwrap();
+    assert_eq!(text.matches("expose = ").count(), 1, "{text}");
+    assert!(text.contains("expose = \"loopback\""), "{text}");
+    assert_eq!(toml::from_str::<HostConfig>(&text).unwrap(), config);
+}
+
+/// An exposure admits every arrival a narrower one does: none, then
+/// loopback, then ip.
+#[test]
+fn exposures_widen_from_none_to_loopback_to_ip() {
+    assert!(Expose::None < Expose::Loopback);
+    assert!(Expose::Loopback < Expose::Ip);
+}
+
+/// Only an aggregate is served through the host's listener: a policy, a
+/// projector or an upcaster given an `expose` is refused at start, before
+/// any child starts, whatever its language. A domain's is accepted.
+#[test]
+fn exposing_anything_but_a_domain_is_refused_at_start() {
+    for kind in [
+        ComponentKindConfig::Policy,
+        ComponentKindConfig::Projector,
+        ComponentKindConfig::Upcaster,
+    ] {
+        for expose in [Expose::Loopback, Expose::Ip] {
+            let mut component = domain("table-player", "rust");
+            component.kind = kind;
+            component.upcasts = Some("table".to_string());
+            component.expose = expose;
+            let config = HostConfig {
+                components: vec![component],
+                ..HostConfig::default()
+            };
+            assert_eq!(
+                crate::Host::start(config).err(),
+                Some(HostError::NotExposable {
+                    domain: "table-player".to_string(),
+                    kind: kind.as_str().to_string(),
+                }),
+                "{kind:?} exposed {expose:?}"
+            );
+        }
+    }
+    let mut table = domain("table", "rust");
+    table.expose = Expose::Ip;
+    let host = crate::Host::start(HostConfig {
+        components: vec![table],
+        ..HostConfig::default()
+    });
+    assert!(host.is_ok(), "{:?}", host.err());
 }

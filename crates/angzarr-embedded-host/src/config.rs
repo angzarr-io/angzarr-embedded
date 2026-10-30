@@ -6,6 +6,9 @@
 //! [[component]]
 //! name = "table"
 //! language = "rust"            # in-process: registered by main.rs, not launched
+//! expose = "loopback"          # reachable through the host's listener from
+//!                              # this machine; "ip" from the network; "none"
+//!                              # (the default) from nowhere
 //!
 //! [[component]]
 //! name = "player"
@@ -246,6 +249,44 @@ pub struct ComponentConfig {
     /// `ANGZARR_SOCKET`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
+    /// Who may send it commands from outside the application, through the
+    /// host's one listener (`CommandHandlerCoordinatorService`, routed by
+    /// `cover.domain`, this component's `name`): nobody (`"none"`, the
+    /// default), this machine only (`"loopback"`) or the network
+    /// (`"ip"`). Only an aggregate may be exposed
+    /// ([`HostError::NotExposable`]).
+    #[serde(default, skip_serializing_if = "Expose::is_none")]
+    pub expose: Expose,
+}
+
+/// A `[[component]]` table's `expose`: from how far a command may reach
+/// the component through the host's listener. Ordered: an exposure admits
+/// every request a narrower one does.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Expose {
+    /// Not reachable from outside the application.
+    #[default]
+    None,
+    /// Reachable from this machine: a request arriving on loopback.
+    Loopback,
+    /// Reachable from the network: a request arriving on any address.
+    Ip,
+}
+
+impl Expose {
+    fn is_none(&self) -> bool {
+        *self == Expose::None
+    }
+
+    /// Its TOML form: `"none"`, `"loopback"` or `"ip"`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Expose::None => "none",
+            Expose::Loopback => "loopback",
+            Expose::Ip => "ip",
+        }
+    }
 }
 
 /// A `[[component]]` table's `kind`: which of angzarr's component
