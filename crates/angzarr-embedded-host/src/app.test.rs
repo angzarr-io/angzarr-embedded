@@ -133,7 +133,7 @@ fn run_calls_register_for_the_in_process_domains() {
     config.store.in_memory = true;
     let app = run(written(&dir, &config), |registry: &mut Registry| {
         assert_eq!(
-            registry.command_handler("player", NoHandler),
+            registry.command_handler("player", NoHandler, Default::default()),
             Err(Misconfigured::AlreadyRegistered {
                 domain: "player".to_string(),
             }),
@@ -292,15 +292,6 @@ impl angzarr_embedded::next::angzarr_router::router::CommandHandler for NoHandle
         _: &angzarr_embedded::next::v1::ContextualCommand,
     ) -> Result<
         angzarr_router::pb::CommandHandlerResponse,
-        angzarr_embedded::next::angzarr_router::error::CodedError,
-    > {
-        unreachable!("never registered")
-    }
-
-    fn component_descriptor(
-        &self,
-    ) -> Result<
-        angzarr_embedded::next::v1::ComponentDescriptor,
         angzarr_embedded::next::angzarr_router::error::CodedError,
     > {
         unreachable!("never registered")

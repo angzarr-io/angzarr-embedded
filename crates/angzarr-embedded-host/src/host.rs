@@ -284,7 +284,11 @@ impl Host {
         for component in &self.domains {
             match &component.hosted {
                 Hosted::Domain(handler) => {
-                    registry.command_handler(handler.domain(), handler.clone())?;
+                    registry.command_handler(
+                        handler.domain(),
+                        handler.clone(),
+                        handler.descriptor().clone(),
+                    )?;
                 }
                 Hosted::Policy(handler) => {
                     registry.policy_component(handler.clone(), &handler.descriptor().output_domain);

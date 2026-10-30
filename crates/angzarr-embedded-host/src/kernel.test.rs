@@ -119,15 +119,16 @@ impl CommandHandler for Table {
             rules_version: "table-1".to_string(),
         })
     }
+}
 
-    fn component_descriptor(&self) -> Result<ComponentDescriptor, CodedError> {
-        Ok(ComponentDescriptor {
-            name: "Table".to_string(),
-            kind: ComponentKind::Aggregate as i32,
-            rules_version: "table-1".to_string(),
-            state: state("/test.table.v1.State"),
-            ..Default::default()
-        })
+/// [`Table`]'s descriptor, as angzarr-build generates it.
+fn table_descriptor() -> ComponentDescriptor {
+    ComponentDescriptor {
+        name: "Table".to_string(),
+        kind: ComponentKind::Aggregate as i32,
+        rules_version: "table-1".to_string(),
+        state: state("/test.table.v1.State"),
+        ..Default::default()
     }
 }
 
@@ -154,9 +155,9 @@ fn a_remote_command_round_trips_through_the_kernel_into_the_store() {
     let rules_version = host
         .handler("player")
         .unwrap()
-        .component_descriptor()
-        .unwrap()
-        .rules_version;
+        .descriptor()
+        .rules_version
+        .clone();
 
     let handled = block_on(kernel.handle_any(
         &store,
@@ -191,7 +192,9 @@ fn a_remote_command_round_trips_through_the_kernel_into_the_store() {
 fn a_policy_step_from_an_in_process_domain_reaches_the_remote_one() {
     let host = host();
     let mut registry = Registry::new();
-    registry.command_handler("table", Table).unwrap();
+    registry
+        .command_handler("table", Table, table_descriptor())
+        .unwrap();
     host.register(&mut registry).unwrap();
     registry.policy_dispatch(
         PolicyDispatch::new("table-player", "table", "player").on_event(SEATED, |_, source| {
@@ -358,7 +361,9 @@ fn a_remote_internal_failure_under_its_own_code_is_a_dead_lettered_bug() {
 fn register_is_refused_for_a_domain_registered_already() {
     let host = host();
     let mut registry = Registry::new();
-    registry.command_handler("player", Table).unwrap();
+    registry
+        .command_handler("player", Table, table_descriptor())
+        .unwrap();
     assert_eq!(
         host.register(&mut registry),
         Err(Misconfigured::AlreadyRegistered {

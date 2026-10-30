@@ -1,40 +1,33 @@
-//! Upcasting by type URL: a mirror of angzarr-router's `UpcasterDispatch`
-//! (`crates/router/src/upcaster.rs`), over angzarr-proto's types.
+//! Upcasting by type URL (decision 14.39): the kernel's own, the router
+//! has none. Every payload the kernel hands on is upcast first, through
+//! the domain's [`UpcastPort`]: its upcaster sidecar, or an in-process
+//! [`Upcaster`], called directly under the same contract.
 //!
-//! **The router's semantics.** Rules are kept in registration order. Every
-//! rule whose source type matches the payload's *current* type applies, and
-//! its output is the next rule's input, so V1 → V2 → V3 composes; the
-//! chain stops when no later rule matches. Other types pass through
-//! unchanged. A rule's source is a fully-qualified type name
-//! (`pkg.v1.Foo`), compared with the type URL's name
-//! ([`type_name`](super::type_name)).
+//! **The chain.** Rules are kept in registration order. Every rule whose
+//! source type matches the payload's *current* type applies, and its output
+//! is the next rule's input, so V1 → V2 → V3 composes; the chain stops when
+//! no later rule matches. Other types pass through unchanged. A rule's
+//! source is a fully-qualified type name (`pkg.v1.Foo`), compared with the
+//! type URL's name ([`type_name`](super::type_name)).
 //!
 //! **Events and commands, one chain.** The same rules run on a stored
 //! event's payload at read time and on a command's (or fact's) payload
-//! before it is decoded ([`Upcaster::upcast_command`]). Upcasting commands
-//! is **discouraged**: it hides stale clients, which keep working so nobody
-//! upgrades them, and it is machinery for data that is never stored. Prefer
-//! evolving a command compatibly (add fields), or decoding both versions in
-//! the domain for a transition; upcast a command only as a migration aid
-//! with a planned removal. Event upcasters are permanent; stored events
-//! never go away.
+//! before it is decoded. Upcasting commands is **discouraged**: it hides
+//! stale clients, which keep working so nobody upgrades them, and it is
+//! machinery for data that is never stored. Prefer evolving a command
+//! compatibly (add fields), or decoding both versions in the domain for a
+//! transition; upcast a command only as a migration aid with a planned
+//! removal. Event upcasters are permanent; stored events never go away.
 //!
-//! **Strict.** The router passes an unknown type through and leaves the
-//! consequence to whoever decodes. angzarr-embedded keeps that, and makes the decode
-//! strict: after upcasting, a type the domain does not decode is refused
-//! naming its type URL ([`KernelError::UnknownType`](super::KernelError::UnknownType)
-//! for a command, [`KernelError::Unreadable`](super::KernelError::Unreadable)
-//! for an event), never skipped. Typed rules ([`Upcaster::rule`]) record
-//! their target type too, so [`Registry::check`](super::Registry::check)
-//! can refuse a chain that cannot finish (a duplicate source, rules out of
+//! **Strict.** The chain passes an unknown type through and leaves the
+//! consequence to whoever decodes, and the decode is strict: after
+//! upcasting, a type the domain does not decode is refused naming its type
+//! URL ([`KernelError::UnknownType`](super::KernelError::UnknownType) for a
+//! command, [`KernelError::Unreadable`](super::KernelError::Unreadable) for
+//! an event), never skipped. Typed rules ([`Upcaster::rule`]) record their
+//! target type too, so [`Registry::check`](super::Registry::check) can
+//! refuse a chain that cannot finish (a duplicate source, rules out of
 //! order, a dead end) before anything is read.
-//!
-//! **Why a mirror, not the router crate.** angzarr-router generates its own
-//! `pb` types; until angzarr remaps it onto angzarr-proto its `EventPage`
-//! is not angzarr-proto's, and depending on it would pull in its dispatch
-//! engine and its own protoc build. The mirror keeps the router's names
-//! (`on_event`, `upcast_event`, `upcast_page`, `dispatch`, `source_types`),
-//! so moving onto the router's own is a change of import.
 
 use angzarr_embedded_diagnostic::Report;
 use angzarr_proto::v1::{EventPage, UpcastRequest, UpcastResponse};
@@ -44,8 +37,7 @@ use prost_types::Any;
 use super::error::{ChainProblem, PayloadError, UpcastChainError, UpcastError};
 use super::payload::{pack, type_name};
 
-/// Transforms one payload to its next schema version, as the router's
-/// `UpcastFn` (with angzarr-embedded's error type).
+/// Transforms one payload to its next schema version.
 pub type UpcastFn = Box<dyn Fn(&Any) -> Result<Any, UpcastError> + Send + Sync>;
 
 /// What the kernel upcasts an incoming payload through (decision 14.39):
@@ -88,6 +80,24 @@ pub(crate) fn upcast_input(
         .unwrap_or_else(|| payload.clone()))
 }
 
+/// `pages` of a `domain` stream, read from the store, upcast through
+/// `port` (decision 14.39): sent as one request, the pages it answers
+/// taken in their place. No pages, no request.
+pub(crate) fn upcast_pages(
+    port: &dyn UpcastPort,
+    domain: &str,
+    pages: &[EventPage],
+) -> Result<Vec<EventPage>, UpcastError> {
+    if pages.is_empty() {
+        return Ok(Vec::new());
+    }
+    let request = UpcastRequest {
+        domain: domain.to_string(),
+        events: pages.to_vec(),
+    };
+    Ok(port.upcast(&request)?.events)
+}
+
 /// One rule: its source type's full name, its target's when known (typed
 /// rules), and the transform.
 struct Rule {
@@ -115,7 +125,7 @@ impl Upcaster {
     }
 
     /// Registers a rule transforming payloads of the fully-qualified
-    /// `source_type`, as the router's. Its target is not known, so
+    /// `source_type`. Its target is not known, so
     /// [`Registry::check`](super::Registry::check) cannot follow it.
     pub fn on_event(
         mut self,
@@ -179,7 +189,8 @@ impl Upcaster {
         self.rules.iter().map(|r| r.source.as_str()).collect()
     }
 
-    /// Runs one stored event's payload through the rule chain.
+    /// Runs one payload (a stored event's, or a command's or fact's) through
+    /// the rule chain.
     pub fn upcast_event(&self, event: &Any) -> Result<Any, UpcastError> {
         let mut current = event.clone();
         for rule in &self.rules {
@@ -188,12 +199,6 @@ impl Upcaster {
             }
         }
         Ok(current)
-    }
-
-    /// Runs one command's (or fact's) payload through the same rule chain,
-    /// before it is decoded. Discouraged; see the module docs.
-    pub fn upcast_command(&self, command: &Any) -> Result<Any, UpcastError> {
-        self.upcast_event(command)
     }
 
     /// One page with its payload (if any) run through the rule chain; its

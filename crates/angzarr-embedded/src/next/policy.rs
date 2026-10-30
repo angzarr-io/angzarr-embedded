@@ -65,26 +65,26 @@ use super::registry::Registry;
 /// kernel passes the refusal through. The kernel addresses and identifies
 /// every refusal fact itself.
 pub fn translated(fact: CommandBook) -> Result<Any, CodedError> {
-    use angzarr_router::error::codes;
+    use super::reasons;
     let refused = |code: &str| super::route::internal(code, []);
     if fact.cover.is_some() || fact.handling.is_some() {
-        return Err(refused(codes::REFUSAL_FACT_ADDRESSED));
+        return Err(refused(reasons::REFUSAL_FACT_ADDRESSED));
     }
     let page = fact
         .page
-        .ok_or_else(|| refused(codes::REFUSAL_FACT_NO_PAGE))?;
+        .ok_or_else(|| refused(reasons::REFUSAL_FACT_NO_PAGE))?;
     if page.command_id.is_some()
         || page.correlation_id.is_some()
         || page.causation_id.is_some()
         || page.fact_origin.is_some()
     {
-        return Err(refused(codes::REFUSAL_FACT_IDENTIFIED));
+        return Err(refused(reasons::REFUSAL_FACT_IDENTIFIED));
     }
     match page.body {
         Some(command_page::Body::Fact(angzarr_proto::v1::Fact {
             payload: Some(payload),
         })) => Ok(payload),
-        _ => Err(refused(codes::REFUSAL_FACT_NOT_A_FACT)),
+        _ => Err(refused(reasons::REFUSAL_FACT_NOT_A_FACT)),
     }
 }
 
@@ -134,7 +134,8 @@ pub(crate) fn check_reaction(
     correlation: Option<&Uuid>,
     mut commands: Vec<CommandBook>,
 ) -> Result<Vec<CommandBook>, CodedError> {
-    use angzarr_router::error::{codes, extras};
+    use super::reasons::{self, args};
+    use angzarr_router::error::extras;
     let domain = |c: &CommandBook| {
         c.cover
             .as_ref()
@@ -143,13 +144,10 @@ pub(crate) fn check_reaction(
     };
     if let Some(stray) = commands.iter().find(|c| domain(c) != output_domain) {
         return Err(super::route::internal(
-            codes::POLICY_COMMAND_OUTSIDE_DESTINATION,
+            reasons::POLICY_COMMAND_OUTSIDE_DESTINATION,
             [
-                (
-                    extras::EXPECTED_DOMAIN.to_string(),
-                    output_domain.to_string(),
-                ),
-                (extras::ACTUAL_DOMAIN.to_string(), domain(stray)),
+                (args::EXPECTED_DOMAIN.to_string(), output_domain.to_string()),
+                (args::ACTUAL_DOMAIN.to_string(), domain(stray)),
             ],
         ));
     }
@@ -166,7 +164,7 @@ pub(crate) fn check_reaction(
                 })
                 .map_or("", |p| type_name(&p.type_url));
             [
-                (extras::DOMAIN.to_string(), domain(command)),
+                (args::DOMAIN.to_string(), domain(command)),
                 (extras::COMMAND_TYPE.to_string(), command_type.to_string()),
             ]
         };
@@ -177,7 +175,7 @@ pub(crate) fn check_reaction(
             .is_some_and(|r| !r.value.is_empty());
         if !named {
             return Err(super::route::internal(
-                codes::POLICY_COMMAND_NO_ROOT,
+                reasons::POLICY_COMMAND_NO_ROOT,
                 naming(),
             ));
         }
@@ -188,7 +186,7 @@ pub(crate) fn check_reaction(
         if let (Some(carried), Some(trigger)) = (carried, correlation) {
             if carried != trigger {
                 return Err(super::route::internal(
-                    codes::POLICY_COMMAND_OTHER_CORRELATION,
+                    reasons::POLICY_COMMAND_OTHER_CORRELATION,
                     naming(),
                 ));
             }
@@ -198,13 +196,13 @@ pub(crate) fn check_reaction(
             None => cover.edition = edition.clone(),
             Some(named) if Some(named) != edition.as_deref() => {
                 return Err(super::route::internal(
-                    codes::POLICY_COMMAND_OUTSIDE_EDITION,
+                    reasons::POLICY_COMMAND_OUTSIDE_EDITION,
                     [
                         (
-                            extras::EXPECTED_EDITION.to_string(),
+                            args::EXPECTED_EDITION.to_string(),
                             edition.clone().unwrap_or_default(),
                         ),
-                        (extras::ACTUAL_EDITION.to_string(), named.to_string()),
+                        (args::ACTUAL_EDITION.to_string(), named.to_string()),
                     ],
                 ));
             }

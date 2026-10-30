@@ -39,13 +39,17 @@ trait set, its errors and codes, its conformance suite), which angzarr-embedded'
 kernel runs on and has no store traits of its own beside.
 angzarr-embedded also depends on `angzarr-router`, a git dependency pinned by
 rev: angzarr's shared client router, through which the kernel dispatches
-business (handlers, typed refusals and the refusal path, deduplication, a
-policy's commands' edition, root and correlation), so those rules are
-implemented once for every runtime. The kernel keeps the check,
-identification, a process manager's start rule (from its descriptor's
-starting types: admit is coordinator work, decisions 14.41 and 14.42), the
-pass-through refusal fact and its address, a projector's failure classes,
-the store writes, positions and resume. Policies reach it as the router's
+business (routing by type, folding the state it is given, the handlers,
+typed refusals and the conflict report), so those rules are implemented
+once for every runtime. Everything else is coordinator work, and the
+kernel's (decisions 14.39 to 14.42): the check, identification, upcasting
+through the domain's upcaster port, snapshots, admission (deduplication,
+the refusal fact's stream, a process manager's start rule from its
+descriptor's starting types), conflict judgement, a policy's output checks,
+the pass-through refusal fact and its address, a projector's failure
+classes, classification, the coordinator's reason keys (`next::reasons`,
+from angzarr-project's `catalog/reasons.toml`), the store writes,
+positions and resume. Policies reach it as the router's
 `PolicyComponent`, so a policy in another process runs as an in-process
 one does.
 

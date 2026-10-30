@@ -546,7 +546,7 @@ mod judged {
     use crate::next::toys::prelude::*;
     use crate::next::toys::{at, command, cover, handlers, set, Edit, Shelf, ShelfState};
     use crate::next::v1::ConflictResolution;
-    use crate::next::{Failure, Handled, KernelError, Registry, Rulebook, Upcaster};
+    use crate::next::{Failure, Handled, KernelError, Registry, Rulebook};
 
     use super::shelf_a_b;
 
@@ -570,15 +570,11 @@ mod judged {
             (self.edit)(response.conflict.get_or_insert_with(Default::default));
             Ok(response)
         }
-        fn component_descriptor(&self) -> Result<pb::ComponentDescriptor, CodedError> {
-            self.inner.component_descriptor()
-        }
     }
 
     fn rewritten(edit: fn(&mut pb::ConflictReport)) -> Registry {
         let table = crate::next::route::table::<Shelf>(
             Arc::new(Rulebook::new("v1", ())),
-            Arc::new(Upcaster::new("shelf-upcaster", "shelf")),
             Arc::new(ShelfState::default),
             false,
         );
@@ -591,6 +587,11 @@ mod judged {
                     inner: Box::new(inner),
                     edit,
                 },
+                crate::next::toys::descriptor_of::<Shelf>(
+                    crate::next::v1::ComponentKind::Aggregate,
+                    "v1",
+                    &[],
+                ),
             )
             .unwrap();
         registry

@@ -317,11 +317,16 @@ fn a_process_manager_with_only_refusal_handlers_still_skips_for_no_instance() {
     )
     .expect("expands")
     .to_string();
-    // The router's process-manager table skips a fact for a stream with no
-    // instance, of a type that starts none: the expansion routes the refusal
-    // and declares no starting input.
+    // The kernel skips a fact for a stream with no instance, of a type that
+    // starts none: the expansion routes the refusal and declares no starting
+    // input.
     assert!(expanded.contains(". on_refused ("), "{expanded}");
-    assert!(!expanded.contains(". starts ("), "{expanded}");
+    assert!(
+        expanded.contains(
+            "const STARTS : & 'static [:: angzarr_embedded :: next :: markup :: TypeName] = & [] ;"
+        ),
+        "{expanded}"
+    );
 }
 
 #[test]

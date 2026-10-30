@@ -26,7 +26,7 @@ angzarr-embedded-diagnostic = { path = "../angzarr-embedded-diagnostic" }
 # The store `run` opens: SQLite, at the config's [store] path or in memory.
 angzarr-store-sqlite = { path = "../angzarr-store-sqlite" }
 angzarr-proto = { git = "https://github.com/angzarr-io/angzarr-project", rev = "b0a680fd1d8cdfaef9baace879b6b6adbeeca22a" }
-angzarr-router = { git = "https://github.com/angzarr-io/angzarr-router", rev = "b71612ef5ada5fb16cc700159a07d697938cfb18" }
+angzarr-router = { git = "https://github.com/angzarr-io/angzarr-router", rev = "1dca8adfbc2bd2b744cc80f1b058188a717ece69" }
 hyper-util = { version = "0.1", features = ["tokio"] }
 # SIGTERM for a child that outlives its stdin at shutdown: tokio's Child
 # sends only SIGKILL. In the graph already, through tokio.

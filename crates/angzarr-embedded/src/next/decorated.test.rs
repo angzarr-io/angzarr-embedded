@@ -3250,7 +3250,7 @@ mod process_manager {
         assert!(log.lines().is_empty());
     }
 
-    /// In memory, the router's start rule reads whether the stream holds
+    /// In memory, the kernel's start rule reads whether the stream holds
     /// an instance: a non-starting command is refused on an empty stream,
     /// and decided once a starting one made the instance.
     #[test]
@@ -4861,8 +4861,8 @@ mod router {
     }
 
     /// A handler the kernel knows only as angzarr-router's `CommandHandler`
-    /// (a remote one, say), written by hand: its registration hello names
-    /// its state and its rules version; it answers every command with one
+    /// (a remote one, say), written by hand, registered by its descriptor
+    /// ([`remote_descriptor`]: its state and its rules version); it answers every command with one
     /// `Noted` event.
     struct Remote;
 
@@ -4899,28 +4899,25 @@ mod router {
                 rules_version: "remote-1".to_string(),
             })
         }
+    }
 
-        fn component_descriptor(
-            &self,
-        ) -> Result<
-            pb::ComponentDescriptor,
-            ::angzarr_embedded::next::angzarr_router::error::CodedError,
-        > {
-            Ok(pb::ComponentDescriptor {
-                name: "remote".to_string(),
-                kind: pb::ComponentKind::Aggregate as i32,
-                rules_version: "remote-1".to_string(),
-                state: Some(StateDescriptor {
-                    type_url: "/toy.remote.v1.State".to_string(),
-                    options: Some(StateOptions {
-                        conflict_resolutions: vec![
-                            ConflictResolution::Strict as i32,
-                            ConflictResolution::AggregateHandles as i32,
-                        ],
-                    }),
+    /// [`Remote`]'s descriptor, as angzarr-build generates it (decision
+    /// 14.42): what every remote handler here registers by.
+    fn remote_descriptor() -> pb::ComponentDescriptor {
+        pb::ComponentDescriptor {
+            name: "remote".to_string(),
+            kind: pb::ComponentKind::Aggregate as i32,
+            rules_version: "remote-1".to_string(),
+            state: Some(StateDescriptor {
+                type_url: "/toy.remote.v1.State".to_string(),
+                options: Some(StateOptions {
+                    conflict_resolutions: vec![
+                        ConflictResolution::Strict as i32,
+                        ConflictResolution::AggregateHandles as i32,
+                    ],
                 }),
-                ..Default::default()
-            })
+            }),
+            ..Default::default()
         }
     }
 
@@ -4932,7 +4929,9 @@ mod router {
         use ::angzarr_embedded::next::angzarr_router::router::CommandHandler;
         let mut registry = Registry::new();
         let remote: Box<dyn CommandHandler> = Box::new(Remote);
-        registry.command_handler("remote", remote).unwrap();
+        registry
+            .command_handler("remote", remote, remote_descriptor())
+            .unwrap();
         let store = Mem::new();
         let log = MemoryDeadLetters::new();
         let kernel = ::angzarr_embedded::next::Kernel::new(&registry, &log);
@@ -4971,7 +4970,7 @@ mod router {
             "a retry is a duplicate"
         );
         assert_eq!(
-            registry.command_handler("remote", Remote),
+            registry.command_handler("remote", Remote, remote_descriptor()),
             Err(::angzarr_embedded::next::Misconfigured::AlreadyRegistered {
                 domain: "remote".to_string()
             })
@@ -5001,15 +5000,6 @@ mod router {
             self.0.lock().unwrap().push(req.recorded_at);
             Remote.dispatch(req)
         }
-
-        fn component_descriptor(
-            &self,
-        ) -> Result<
-            pb::ComponentDescriptor,
-            ::angzarr_embedded::next::angzarr_router::error::CodedError,
-        > {
-            Remote.component_descriptor()
-        }
     }
 
     /// The kernel stamps the input's acceptance time on the
@@ -5022,7 +5012,11 @@ mod router {
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let mut registry = Registry::new();
         registry
-            .command_handler("remote", Clocked(std::sync::Arc::clone(&seen)))
+            .command_handler(
+                "remote",
+                Clocked(std::sync::Arc::clone(&seen)),
+                remote_descriptor(),
+            )
             .unwrap();
         let store = Mem::new();
         let log = MemoryDeadLetters::new();
@@ -5090,15 +5084,6 @@ mod router {
                 refusal: None,
             })
         }
-
-        fn component_descriptor(
-            &self,
-        ) -> Result<
-            pb::ComponentDescriptor,
-            ::angzarr_embedded::next::angzarr_router::error::CodedError,
-        > {
-            Remote.component_descriptor()
-        }
     }
 
     /// An unreachable remote handler is a retryable failure, never a
@@ -5112,7 +5097,9 @@ mod router {
         let up = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut registry = registry();
         let flaky: Box<dyn CommandHandler> = Box::new(Flaky { up: up.clone() });
-        registry.command_handler("remote", flaky).unwrap();
+        registry
+            .command_handler("remote", flaky, remote_descriptor())
+            .unwrap();
         registry.policy_dispatch(
             PolicyDispatch::new("wallet-remote", "wallet", "remote").on_event(
                 "toy.wallet.v1.Held",
@@ -5243,15 +5230,6 @@ mod router {
             let up = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(!down));
             Flaky { up }.dispatch(req)
         }
-
-        fn component_descriptor(
-            &self,
-        ) -> Result<
-            pb::ComponentDescriptor,
-            ::angzarr_embedded::next::angzarr_router::error::CodedError,
-        > {
-            Remote.component_descriptor()
-        }
     }
 
     /// The backoffs the kernel waited out, in order, each completing at
@@ -5312,7 +5290,9 @@ mod router {
         remote: Box<dyn ::angzarr_embedded::next::angzarr_router::router::CommandHandler>,
     ) -> Registry {
         let mut registry = registry();
-        registry.command_handler("remote", remote).unwrap();
+        registry
+            .command_handler("remote", remote, remote_descriptor())
+            .unwrap();
         registry.policy_dispatch(
             PolicyDispatch::new("wallet-remote", "wallet", "remote").on_event(
                 "toy.wallet.v1.Held",
@@ -5566,15 +5546,6 @@ mod router {
         > {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Err(self.error.clone())
-        }
-
-        fn component_descriptor(
-            &self,
-        ) -> Result<
-            pb::ComponentDescriptor,
-            ::angzarr_embedded::next::angzarr_router::error::CodedError,
-        > {
-            Remote.component_descriptor()
         }
     }
 
@@ -6034,15 +6005,6 @@ mod router {
         > {
             Err(self.error.clone())
         }
-
-        fn component_descriptor(
-            &self,
-        ) -> Result<
-            pb::ComponentDescriptor,
-            ::angzarr_embedded::next::angzarr_router::error::CodedError,
-        > {
-            Remote.component_descriptor()
-        }
     }
 
     /// A registry with [`Faulty`] answering `grpc` under a code of its own,
@@ -6072,7 +6034,9 @@ mod router {
         use ::angzarr_embedded::next::angzarr_router::router::CommandHandler;
         let mut registry = registry();
         let faulty: Box<dyn CommandHandler> = Box::new(Faulty { error });
-        registry.command_handler("remote", faulty).unwrap();
+        registry
+            .command_handler("remote", faulty, remote_descriptor())
+            .unwrap();
         registry.policy_dispatch(
             PolicyDispatch::new("wallet-remote", "wallet", "remote").on_event(
                 "toy.wallet.v1.Held",
@@ -6439,15 +6403,6 @@ mod router {
                 false => Remote.dispatch(req),
             }
         }
-
-        fn component_descriptor(
-            &self,
-        ) -> Result<
-            pb::ComponentDescriptor,
-            ::angzarr_embedded::next::angzarr_router::error::CodedError,
-        > {
-            Remote.component_descriptor()
-        }
     }
 
     /// A registry with [`Picky`] as the source of a policy that sends the
@@ -6462,7 +6417,9 @@ mod router {
         picky: Box<dyn ::angzarr_embedded::next::angzarr_router::router::CommandHandler>,
     ) -> (Registry, Mem) {
         let mut registry = registry();
-        registry.command_handler("picky", picky).unwrap();
+        registry
+            .command_handler("picky", picky, remote_descriptor())
+            .unwrap();
         registry.policy_dispatch(
             PolicyDispatch::new("picky-wallet", "picky", "wallet").on_event(
                 "toy.wallet.v1.Noted",
@@ -6585,15 +6542,6 @@ mod router {
                 }),
                 false => Remote.dispatch(req),
             }
-        }
-
-        fn component_descriptor(
-            &self,
-        ) -> Result<
-            pb::ComponentDescriptor,
-            ::angzarr_embedded::next::angzarr_router::error::CodedError,
-        > {
-            Remote.component_descriptor()
         }
     }
 

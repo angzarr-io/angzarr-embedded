@@ -2049,14 +2049,6 @@ impl crate::next::angzarr_router::router::CommandHandler for Recorded {
             .push(req.command.clone().unwrap_or_default());
         self.inner.dispatch(req)
     }
-    fn component_descriptor(
-        &self,
-    ) -> Result<
-        crate::next::angzarr_router::pb::ComponentDescriptor,
-        crate::next::angzarr_router::error::CodedError,
-    > {
-        self.inner.component_descriptor()
-    }
 }
 
 /// With no translation, the kernel builds the pass-through `CommandRefused`
@@ -2073,7 +2065,6 @@ fn no_translation_makes_the_kernel_build_the_pass_through_fact() {
     let (version, current) = fees.current();
     let table = crate::next::route::table::<Account>(
         std::sync::Arc::new(crate::next::toys::fees()),
-        std::sync::Arc::new(crate::next::Upcaster::new("u", "account")),
         std::sync::Arc::new(crate::next::toys::account::AccountState::default),
         false,
     );
@@ -2085,6 +2076,11 @@ fn no_translation_makes_the_kernel_build_the_pass_through_fact() {
                 inner: Box::new(inner),
                 books: std::sync::Arc::clone(&books),
             },
+            crate::next::toys::descriptor_of::<Account>(
+                crate::next::v1::ComponentKind::Aggregate,
+                version,
+                &[],
+            ),
         )
         .unwrap();
     crate::next::toys::register::<Ledger>(

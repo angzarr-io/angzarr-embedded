@@ -318,6 +318,25 @@ where
     registry.register::<D>(rules, upcaster, handlers)
 }
 
+/// The descriptor angzarr-build generates for typed domain `D` when a
+/// handler the kernel does not build serves it: of `kind`, under
+/// `rules_version`, a process manager's instance started by the `starting`
+/// types (full names).
+pub fn descriptor_of<D: Domain>(
+    kind: crate::next::v1::ComponentKind,
+    rules_version: &str,
+    starting: &[&str],
+) -> crate::next::v1::ComponentDescriptor {
+    crate::next::v1::ComponentDescriptor {
+        name: D::NAME.to_string(),
+        kind: kind as i32,
+        rules_version: rules_version.to_string(),
+        state: Some(<D::State as State>::descriptor()),
+        starting_types: starting.iter().map(|t| t.to_string()).collect(),
+        ..Default::default()
+    }
+}
+
 /// The registry every test runs: the three toys, each with an upcaster
 /// that has no rules (registering the account's v0 rules is
 /// [`registry_with_upcasters`]'s).

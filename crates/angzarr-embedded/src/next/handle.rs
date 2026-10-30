@@ -75,6 +75,7 @@ use super::registry::{PolicyEntry, ProjectorInstance, Registry};
 use super::route::Rejected;
 use super::store::{Port, Store, StorePort};
 use super::stream::{Envelope, Stream};
+use super::upcast::upcast_pages;
 use angzarr_embedded_diagnostic::Report;
 use angzarr_router::router::ProjectorHandler;
 
@@ -981,16 +982,18 @@ impl<'k> Run<'k> {
         let owed = positions.iter().copied().min().unwrap_or_default();
         let from = written.map_or(owed, |written| written.max(owed));
         let slice = port.read_from(source, from).await.map_err(store)?;
-        let upcaster = registry.upcaster(&source.domain);
+        let sidecar = registry.upcast_port(&source.domain);
         for page in &slice.pages {
-            let event = match upcaster {
-                Some(upcaster) => upcaster.upcast_page(page).map_err(|error| {
-                    let error = KernelError::Upcast {
-                        stream: source.clone(),
-                        error,
-                    };
-                    (path.to_vec(), StepError::Kernel(error))
-                })?,
+            let event = match sidecar {
+                Some(sidecar) => upcast_pages(sidecar, &source.domain, std::slice::from_ref(page))
+                    .map(|mut upcast| upcast.pop().unwrap_or_else(|| page.clone()))
+                    .map_err(|error| {
+                        let error = KernelError::Upcast {
+                            stream: source.clone(),
+                            error,
+                        };
+                        (path.to_vec(), StepError::Kernel(error))
+                    })?,
                 None => page.clone(),
             };
             for (k, policy) in policies.iter().enumerate() {

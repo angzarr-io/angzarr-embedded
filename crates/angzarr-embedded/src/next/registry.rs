@@ -330,17 +330,18 @@ impl Registry {
         handlers: impl FnOnce(DomainDispatch<D::State>) -> DomainDispatch<D::State>,
     ) -> Result<(), Misconfigured> {
         let fresh: Factory<D::State> = Arc::new(D::State::default);
-        self.typed::<D>(rules, upcaster, fresh, false, handlers)
+        self.typed::<D>(rules, upcaster, fresh, None, handlers)
     }
 
-    /// Register typed `D`, built fresh by `fresh`, a process manager if
-    /// `process_manager`, its handlers registered by `handlers`.
+    /// Register typed `D`, built fresh by `fresh`, a process manager if it
+    /// has `starting` types (its descriptor's), its handlers registered by
+    /// `handlers`.
     fn typed<D: Domain>(
         &mut self,
         rules: Rulebook<D::Rules>,
         upcaster: Upcaster,
         fresh: Factory<D::State>,
-        process_manager: bool,
+        starting: Option<BTreeSet<String>>,
         handlers: impl FnOnce(DomainDispatch<D::State>) -> DomainDispatch<D::State>,
     ) -> Result<(), Misconfigured> {
         let domain = D::NAME.to_string();
@@ -386,17 +387,9 @@ impl Registry {
         let rules = Arc::new(rules);
         let upcaster = Arc::new(upcaster);
         let port: Arc<dyn UpcastPort> = upcaster.clone();
-        let table = route::table::<D>(
-            Arc::clone(&rules),
-            Arc::clone(&upcaster),
-            Arc::clone(&fresh),
-            process_manager,
-        );
+        let process_manager = starting.is_some();
+        let table = route::table::<D>(Arc::clone(&rules), Arc::clone(&fresh), process_manager);
         let handler: Box<dyn CommandHandler> = Box::new(handlers(table));
-        let starting = handler
-            .component_descriptor()
-            .ok()
-            .and_then(|descriptor| starting_types(handler.kind(), &descriptor));
         let entry = Entry {
             state,
             supported,
@@ -426,34 +419,33 @@ impl Registry {
 
     /// Register `handler` as domain `domain`: any angzarr-router
     /// `CommandHandler` (a `DomainDispatch` built by hand, or a handler in
-    /// another process behind one). The kernel knows only what its
-    /// registration hello (`ComponentDescriptor`) says: its state's
-    /// descriptor and its rules version, which its events are stamped with.
-    /// Its streams are dispatched like any domain's; with no typed
-    /// [`Domain`] behind it, a chain holds no typed stream of it
-    /// ([`Recorded::events`](super::Recorded::events) is `None`).
+    /// another process behind one), described by `descriptor`, its
+    /// generated `ComponentDescriptor` (decision 14.42: angzarr-build's
+    /// `angzarr-descriptors.rs`, or the one a child answers `Describe`
+    /// with). The kernel knows only what the descriptor says: its state's
+    /// descriptor, its rules version, which its events are stamped with,
+    /// and a process manager's starting types. Refused without a rules
+    /// version or a state type. Its streams are dispatched like any
+    /// domain's; with no typed [`Domain`] behind it, a chain holds no typed
+    /// stream of it ([`Recorded::events`](super::Recorded::events) is
+    /// `None`).
     pub fn command_handler(
         &mut self,
         domain: &str,
         handler: impl CommandHandler + 'static,
+        descriptor: angzarr_router::pb::ComponentDescriptor,
     ) -> Result<(), Misconfigured> {
         let name = domain.to_string();
         if self.domains.contains_key(&name) {
             return Err(Misconfigured::AlreadyRegistered { domain: name });
         }
-        let descriptor = handler.component_descriptor().map_err(|error| {
-            match error.code == angzarr_router::error::codes::MISSING_RULES_VERSION {
-                true => Misconfigured::EmptyRulesVersion {
-                    domain: name.clone(),
-                },
-                false => Misconfigured::BadStateDescriptor {
-                    domain: name.clone(),
-                },
-            }
-        })?;
+        if descriptor.rules_version.is_empty() {
+            return Err(Misconfigured::EmptyRulesVersion { domain: name });
+        }
         let starting = starting_types(handler.kind(), &descriptor);
         let state = descriptor
             .state
+            .filter(|state| !state.type_url.is_empty())
             .ok_or_else(|| Misconfigured::BadStateDescriptor {
                 domain: name.clone(),
             })?;
@@ -519,7 +511,7 @@ impl Registry {
     where
         D: Domain<State = D, Rules = ()> + markup::Routed,
     {
-        self.marked_up::<D>(Arc::new(factory), Upcaster::new(D::NAME, D::NAME), false);
+        self.marked_up::<D>(Arc::new(factory), Upcaster::new(D::NAME, D::NAME), None);
         Aggregate {
             registry: self,
             domain: std::marker::PhantomData,
@@ -539,19 +531,30 @@ impl Registry {
     where
         P: super::markup::ProcessManager + markup::Routed,
     {
-        self.marked_up::<P>(Arc::new(factory), Upcaster::new(P::NAME, P::NAME), true);
+        // Its starting types are its markup's (the inputs marked `starts`),
+        // as its generated descriptor lists them.
+        let starting = P::STARTS.iter().map(|t| t.full_name()).collect();
+        self.marked_up::<P>(
+            Arc::new(factory),
+            Upcaster::new(P::NAME, P::NAME),
+            Some(starting),
+        );
         self
     }
 
     /// Register `D`, marked up, with `factory` and `upcaster`; a process
-    /// manager if `pm`. A registration [`Registry::register`] refuses
-    /// panics: a bug in the composition root.
-    fn marked_up<D>(&mut self, factory: Factory<D>, upcaster: Upcaster, pm: bool)
-    where
+    /// manager if it has `starting` types. A registration
+    /// [`Registry::register`] refuses panics: a bug in the composition root.
+    fn marked_up<D>(
+        &mut self,
+        factory: Factory<D>,
+        upcaster: Upcaster,
+        starting: Option<BTreeSet<String>>,
+    ) where
         D: Domain<State = D, Rules = ()> + markup::Routed,
     {
         let rules = Rulebook::new(markup::MARKUP_RULES_VERSION, ());
-        if let Err(problem) = self.typed::<D>(rules, upcaster, factory, pm, D::route) {
+        if let Err(problem) = self.typed::<D>(rules, upcaster, factory, starting, D::route) {
             panic!("{problem}");
         }
     }
@@ -851,17 +854,15 @@ impl<'r, D: Domain<State = D, Rules = ()> + markup::Routed> Aggregate<'r, D> {
                 upcaster.domain()
             );
         }
-        let process_manager = self.registry.is_process_manager(D::NAME);
-        let fresh = self
-            .registry
-            .domains
-            .remove(D::NAME)
-            .and_then(|entry| entry.typed)
+        let Some(entry) = self.registry.domains.remove(D::NAME) else {
+            return self;
+        };
+        let starting = entry.starting;
+        let fresh = (entry.typed)
             .and_then(|typed| typed.fresh.downcast::<Factory<D>>().ok())
             .map(|fresh| *fresh);
         if let Some(fresh) = fresh {
-            self.registry
-                .marked_up::<D>(fresh, upcaster, process_manager);
+            self.registry.marked_up::<D>(fresh, upcaster, starting);
         }
         self
     }

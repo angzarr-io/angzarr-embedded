@@ -1,10 +1,6 @@
-use std::sync::Arc;
-
-use angzarr_router::PayloadUpcaster;
 use prost_types::Any;
 
-use super::{is_nothing, CommandUpcaster, NOTHING};
-use crate::next::toys::account_upcaster;
+use super::{is_nothing, NOTHING};
 use crate::next::v1::EventPage;
 
 /// A fact's record of nothing is known by its type URL alone.
@@ -20,18 +16,6 @@ fn a_record_of_nothing_is_known_by_its_type_url() {
     assert!(is_nothing(&page(NOTHING)));
     assert!(!is_nothing(&page("/toy.account.v1.Opened")));
     assert!(!is_nothing(&EventPage::default()));
-}
-
-/// The router reads an upcaster's sources: the types it upcasts from.
-#[test]
-fn the_router_reads_an_upcasters_sources() {
-    let upcaster = CommandUpcaster(Arc::new(account_upcaster()));
-    let mut sources = upcaster.source_types();
-    sources.sort();
-    assert_eq!(
-        sources,
-        ["toy.account.cmd.v0.Credit", "toy.account.v0.Credited"]
-    );
 }
 
 /// A fold that fails on a persisted event says why as its cause, a key and

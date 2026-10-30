@@ -257,8 +257,8 @@
 //!   each input's. A correlation left unset is given the root. A policy
 //!   names the root of every command it sends; "the root is the
 //!   correlation" is a convention it may follow.
-//! - **The start rule**, angzarr-router's, on the router's process-manager
-//!   table. Only an input marked `starts`
+//! - **The start rule**, the kernel's, by the descriptor's starting types.
+//!   Only an input marked `starts`
 //!   (`#[handles_cmd(StartBuyIn, starts)]`, `#[handles_fact(F, starts)]`)
 //!   may start an instance; `STARTS` lists them. Any other input for a
 //!   correlation with no instance is not delivered: a fact is skipped
@@ -446,7 +446,8 @@
 //! // working copy with them applied, up to STEP_LIMIT steps; a refusal as
 //! // the router's business rejection, its typed object packed); each fact
 //! // handler by `markup::__fact`; each `#[on_refused(C)]` by the router's
-//! // `on_refused`; a process manager's `starts` inputs by `starts`.
+//! // `on_refused`. (A process manager's `starts` inputs are its
+//! // `markup::ProcessManager::STARTS`, not routes.)
 //! impl markup::Routed for Wallet {
 //!     fn route(table: DomainDispatch<Wallet>) -> DomainDispatch<Wallet> {
 //!         table
@@ -2804,7 +2805,7 @@ pub fn aggregate(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Marks an inherent impl as a PROCESS MANAGER: a domain, marked up as an
 /// aggregate is (the same arguments, markers and expansion), plus
 /// `markup::ProcessManager`: only an input marked `starts` may start an
-/// instance, by angzarr-router's start rule (see the crate docs).
+/// instance, by the kernel's start rule (see the crate docs).
 #[proc_macro_attribute]
 pub fn process_manager(attr: TokenStream, item: TokenStream) -> TokenStream {
     domain(attr.into(), item.into(), Kind::ProcessManager)
@@ -3638,32 +3639,22 @@ fn domain(attr: Tokens, item: Tokens, kind: Kind) -> syn::Result<Tokens> {
         quote!(match event { #(#apply_arms)* })
     };
 
-    // A process manager's starting inputs, which the router's start rule
-    // reads.
-    let (start_routes, process_manager) = match kind {
-        Kind::Aggregate => (Vec::new(), quote!()),
+    // A process manager's starting inputs: its descriptor's starting
+    // types, which the kernel's start rule reads.
+    let process_manager = match kind {
+        Kind::Aggregate => quote!(),
         Kind::ProcessManager => {
-            let starts: Vec<&Type> = methods
+            let starts = methods
                 .iter()
                 .filter(|x| x.args.starts.is_some())
-                .map(|x| &x.args.ty)
-                .collect();
-            (
-                starts
-                    .iter()
-                    .map(|ty| {
-                        let name = full_name(ty);
-                        quote!(.starts(#name))
-                    })
-                    .collect(),
-                quote! {
-                    impl #m::ProcessManager for #self_ty {
-                        const STARTS: &'static [#m::TypeName] = &[
-                            #(#m::TypeName::of::<<#starts as #m::DomainMessage>::Wire>(),)*
-                        ];
-                    }
-                },
-            )
+                .map(|x| &x.args.ty);
+            quote! {
+                impl #m::ProcessManager for #self_ty {
+                    const STARTS: &'static [#m::TypeName] = &[
+                        #(#m::TypeName::of::<<#starts as #m::DomainMessage>::Wire>(),)*
+                    ];
+                }
+            }
         }
     };
 
@@ -3862,7 +3853,6 @@ fn domain(attr: Tokens, item: Tokens, kind: Kind) -> syn::Result<Tokens> {
                     #(#command_routes)*
                     #(#fact_routes)*
                     #(#refusal_routes)*
-                    #(#start_routes)*
             }
         }
 

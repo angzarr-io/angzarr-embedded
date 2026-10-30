@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
 
 use crate::rpc::google_rpc::{ErrorInfo, Status as RpcStatus, ERROR_INFO_TYPE_URL};
+use angzarr_embedded::next::reasons::{self, args};
 use angzarr_embedded::next::{class, Class};
-use angzarr_router::error::{codes as router_codes, extras, GrpcCode};
+use angzarr_router::error::GrpcCode;
 use prost::Message;
 use prost_types::Any;
 use tonic::Code;
@@ -62,11 +63,6 @@ fn a_failed_precondition_is_the_routers_refusal() {
             refusal: Some(Box::new(refusal())),
         }
     );
-    let response = coded.refusal_response().expect("a refusal");
-    assert_eq!(
-        response.reason,
-        Some(pb::refusal_response::Reason::Refusal(refusal()))
-    );
     assert!(!is_retryable(&coded));
 }
 
@@ -91,7 +87,7 @@ fn an_unavailable_status_is_retryable() {
     assert_eq!(
         coded.extras,
         BTreeMap::from([
-            (extras::DOMAIN.to_string(), "player".to_string()),
+            (args::DOMAIN.to_string(), "player".to_string()),
             (CAUSE.to_string(), causes::TRANSPORT.to_string()),
             // The transport's own text, verbatim: a third party's.
             (EXT_ERR_TXT.to_string(), "connection refused".to_string()),
@@ -108,7 +104,7 @@ fn a_child_not_running_is_retryable() {
         CodedError {
             code: codes::REMOTE_HANDLER_UNAVAILABLE.to_string(),
             extras: BTreeMap::from([
-                (extras::DOMAIN.to_string(), "player".to_string()),
+                (args::DOMAIN.to_string(), "player".to_string()),
                 (CAUSE.to_string(), causes::NOT_RUNNING.to_string()),
             ]),
             grpc: GrpcCode::Aborted,
@@ -337,12 +333,12 @@ fn only_unavailability_is_retryable() {
         [],
     );
     assert!(!is_retryable(&other));
-    let stale = CodedError::stale(router_codes::CONFLICT_OVERLAP, []);
+    let stale = CodedError::immediate(reasons::CONFLICT_OVERLAP, []);
     assert!(!is_retryable(&stale));
 }
 
 /// A remote policy's translated refusal fact is a bare payload; anything
-/// more is the policy's bug, refused INTERNAL under the router's keys.
+/// more is the policy's bug, refused INTERNAL under the coordinator's keys.
 #[test]
 fn a_translated_fact_is_a_bare_payload() {
     use angzarr_embedded::next::translated;
@@ -375,29 +371,29 @@ fn a_translated_fact_is_a_bare_payload() {
     };
     assert_eq!(
         with(&|f| f.cover = Some(pb::Cover::default())),
-        router_codes::REFUSAL_FACT_ADDRESSED
+        reasons::REFUSAL_FACT_ADDRESSED
     );
     assert_eq!(
         with(&|f| f.handling = Some(pb::Handling::default())),
-        router_codes::REFUSAL_FACT_ADDRESSED
+        reasons::REFUSAL_FACT_ADDRESSED
     );
-    assert_eq!(with(&|f| f.page = None), router_codes::REFUSAL_FACT_NO_PAGE);
+    assert_eq!(with(&|f| f.page = None), reasons::REFUSAL_FACT_NO_PAGE);
     let id = || Some(angzarr_router::pb::Uuid::from_bytes([1; 16]));
     assert_eq!(
         page(&|p| p.command_id = id()),
-        router_codes::REFUSAL_FACT_IDENTIFIED
+        reasons::REFUSAL_FACT_IDENTIFIED
     );
     assert_eq!(
         page(&|p| p.correlation_id = id()),
-        router_codes::REFUSAL_FACT_IDENTIFIED
+        reasons::REFUSAL_FACT_IDENTIFIED
     );
     assert_eq!(
         page(&|p| p.causation_id = Some(pb::EventRef::default())),
-        router_codes::REFUSAL_FACT_IDENTIFIED
+        reasons::REFUSAL_FACT_IDENTIFIED
     );
     assert_eq!(
         page(&|p| p.fact_origin = Some(pb::FactOrigin::default())),
-        router_codes::REFUSAL_FACT_IDENTIFIED
+        reasons::REFUSAL_FACT_IDENTIFIED
     );
     assert_eq!(
         page(&|p| {
@@ -405,10 +401,10 @@ fn a_translated_fact_is_a_bare_payload() {
                 payload: Some(payload.clone()),
             }))
         }),
-        router_codes::REFUSAL_FACT_NOT_A_FACT
+        reasons::REFUSAL_FACT_NOT_A_FACT
     );
     assert_eq!(
         page(&|p| p.body = Some(pb::command_page::Body::Fact(pb::Fact { payload: None }))),
-        router_codes::REFUSAL_FACT_NOT_A_FACT
+        reasons::REFUSAL_FACT_NOT_A_FACT
     );
 }

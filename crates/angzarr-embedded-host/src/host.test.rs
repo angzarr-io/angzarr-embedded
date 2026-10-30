@@ -44,7 +44,7 @@ fn started(domains: Vec<ComponentConfig>) -> Host {
 
 /// The fake's `pid-<n>` rules version, from its descriptor.
 fn pid_of(handler: &RemoteCommandHandler) -> String {
-    handler.component_descriptor().unwrap().rules_version
+    handler.descriptor().rules_version.clone()
 }
 
 /// Whether the process `pid-<n>` names is running (a zombie is not).
@@ -65,7 +65,7 @@ fn start_describes_each_remote_domain() {
     let handler = &handlers[0];
     assert_eq!(handler.name(), "player");
     assert_eq!(handler.kind(), pb::ComponentKind::Aggregate);
-    let descriptor = handler.component_descriptor().unwrap();
+    let descriptor = handler.descriptor();
     assert_eq!(descriptor.name, "player");
     assert_eq!(descriptor.kind, pb::ComponentKind::Aggregate as i32);
     assert!(descriptor.rules_version.starts_with("pid-"));
@@ -157,12 +157,6 @@ fn a_refusal_comes_back_as_the_routers_refusal() {
     assert_eq!(refused.code, "TABLE_FULL");
     assert_eq!(refused.extras.get("seats").map(String::as_str), Some("6"));
     assert_eq!(refused.refusal.as_deref(), Some(&fake_child::refusal()));
-    assert_eq!(
-        refused.refusal_response().unwrap().reason,
-        Some(angzarr_router::pb::refusal_response::Reason::Refusal(
-            fake_child::refusal()
-        ))
-    );
     assert!(!is_retryable(&refused));
     host.shutdown();
 }

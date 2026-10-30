@@ -45,6 +45,8 @@ use angzarr_proto::v1::{
     command_page, CommandBook, ConflictResolution, Cover, EventBook, EventPage, Handling, Snapshot,
 };
 use angzarr_router::error::{codes, extras, BusinessStatus, CodedError};
+
+use super::reasons::{self, args};
 use angzarr_router::pb::ContextualCommand;
 use prost_types::{Any, Timestamp};
 
@@ -56,7 +58,7 @@ use super::payload::type_name;
 use super::registry::Registry;
 use super::route::{self, Rejected};
 use super::store::Port;
-use super::upcast::upcast_input;
+use super::upcast::{upcast_input, upcast_pages};
 
 /// What step 3 found.
 pub(crate) enum Deduplicated {
@@ -153,12 +155,6 @@ pub(crate) fn refused(command: &Identified, error: CodedError) -> Failure<Reject
             cause: error.extras.get("cause").cloned().unwrap_or_default(),
         });
     }
-    if let Some(error) = route::upcast_failure(&error) {
-        return Failure::Kernel(KernelError::Upcast {
-            stream: command.cover().clone(),
-            error,
-        });
-    }
     if route::is_rejection(&error) {
         return Failure::Rejected(Rejected::of(&error));
     }
@@ -211,8 +207,8 @@ pub(crate) enum Admitted {
     Dispatch,
 }
 
-/// Admission, the kernel's own (decision 14.42; the router's `admit` is
-/// never called): what an input meets before its handler runs, from what
+/// Admission, the kernel's own (decision 14.42; the router admits
+/// nothing): what an input meets before its handler runs, from what
 /// step 3 read (`recorded`, the events found under its id; whether its
 /// stream `exists`), in order:
 /// 1. a refusal fact (a fact with a causation) is admitted only by the
@@ -234,8 +230,8 @@ pub(crate) fn admit(
     if let (true, Some(cause)) = (is_fact, command.causation_id()) {
         if cause.stream.as_ref() != Some(command.cover()) {
             return Err(Failure::Kernel(KernelError::Router(route::internal(
-                codes::REFUSAL_FACT_WRONG_STREAM,
-                [(extras::DOMAIN.to_string(), command.domain().to_string())],
+                reasons::REFUSAL_FACT_WRONG_STREAM,
+                [(args::DOMAIN.to_string(), command.domain().to_string())],
             ))));
         }
     }
@@ -262,7 +258,7 @@ pub(crate) fn admit(
     }
     Err(Failure::Rejected(Rejected::of(&CodedError::rejection(
         BusinessStatus::FailedPrecondition,
-        codes::PM_NO_INSTANCE,
+        reasons::PM_NO_INSTANCE,
         [(
             extras::TYPE_URL.to_string(),
             command.payload().type_url.clone(),
@@ -434,17 +430,17 @@ pub(crate) fn decide(
         let (stream, expected, actual) =
             (identified.cover().clone(), command.expected, command.head);
         match error.code.as_str() {
-            codes::CONFLICT_OVERLAP => {
+            reasons::CONFLICT_OVERLAP => {
                 let units = |key: &str| error.extras.get(key).cloned().unwrap_or_default();
                 Failure::Kernel(KernelError::Overlap {
                     stream,
                     expected,
                     actual,
-                    window_units: units(extras::WINDOW_UNITS),
-                    command_units: units(extras::COMMAND_UNITS),
+                    window_units: units(args::WINDOW_UNITS),
+                    command_units: units(args::COMMAND_UNITS),
                 })
             }
-            codes::CONFLICT_UNRESOLVED => {
+            reasons::CONFLICT_UNRESOLVED => {
                 let unresolved = KernelError::Unresolved {
                     stream,
                     expected,
@@ -515,12 +511,12 @@ fn judged(
         response.conflict.as_ref(),
     ) {
         Judgement::Kept => Ok(response),
-        Judgement::Unresolved => Err(CodedError::stale(codes::CONFLICT_UNRESOLVED, [])),
-        Judgement::Overlap { window, command } => Err(CodedError::stale(
-            codes::CONFLICT_OVERLAP,
+        Judgement::Unresolved => Err(CodedError::immediate(reasons::CONFLICT_UNRESOLVED, [])),
+        Judgement::Overlap { window, command } => Err(CodedError::immediate(
+            reasons::CONFLICT_OVERLAP,
             [
-                (extras::WINDOW_UNITS.to_string(), window.join(",")),
-                (extras::COMMAND_UNITS.to_string(), command.join(",")),
+                (args::WINDOW_UNITS.to_string(), window.join(",")),
+                (args::COMMAND_UNITS.to_string(), command.join(",")),
             ],
         )),
     }
@@ -586,19 +582,14 @@ pub(crate) fn contextual_command(
     now: Timestamp,
 ) -> Result<ContextualCommand, KernelError> {
     let identified = &command.command;
-    let upcaster = registry.upcaster(identified.domain());
-    let pages = command
-        .pages
-        .iter()
-        .map(|page| match upcaster {
-            Some(upcaster) => upcaster.upcast_page(page),
-            None => Ok(page.clone()),
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| KernelError::Upcast {
-            stream: identified.cover().clone(),
-            error,
-        })?;
+    let pages = match registry.upcast_port(identified.domain()) {
+        Some(port) => upcast_pages(port, identified.domain(), &command.pages),
+        None => Ok(command.pages.clone()),
+    }
+    .map_err(|error| KernelError::Upcast {
+        stream: identified.cover().clone(),
+        error,
+    })?;
     // At the head there is no window: nothing for COMMUTATIVE to compare,
     // so the command is handed over as STRICT, with no nonce.
     let (resolution, nonce) = match command.resolution {

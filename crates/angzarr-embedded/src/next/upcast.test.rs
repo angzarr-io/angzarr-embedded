@@ -1,5 +1,5 @@
-//! Upcasting by type URL, for events and (discouraged) commands, with the
-//! router's semantics and strict decoding.
+//! Upcasting by type URL, for events and (discouraged) commands, in
+//! registration order, with strict decoding.
 use crate::next::toys::prelude::*;
 use crate::next::v1::{EventMeta, EventPage, UpcastRequest};
 use crate::next::{
@@ -29,7 +29,7 @@ fn page(sequence: u64, payload: crate::next::Any) -> EventPage {
 }
 
 #[test]
-fn upcasting_by_type_url_runs_the_chain_as_the_router_does() {
+fn upcasting_by_type_url_runs_the_chain_in_registration_order() {
     let upcaster = account_upcaster();
     assert_eq!(
         upcaster.source_types(),
@@ -45,7 +45,7 @@ fn upcasting_by_type_url_runs_the_chain_as_the_router_does() {
     assert_eq!(
         upcaster.upcast_event(&unknown),
         Ok(unknown.clone()),
-        "the router passes other types through; strictness is at decode"
+        "other types pass through; strictness is at decode"
     );
 
     let old = page(
@@ -273,7 +273,7 @@ fn an_upcast_rule_reports_its_own_failure_and_bytes_it_cannot_read() {
         value: vec![0x08],
     };
     assert!(matches!(
-        account_upcaster().upcast_command(&garbled),
+        account_upcaster().upcast_event(&garbled),
         Err(crate::next::UpcastError::Payload(
             crate::next::PayloadError::Decode { .. }
         ))

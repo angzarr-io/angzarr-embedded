@@ -30,7 +30,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use angzarr_router::context::CommandContext;
-use angzarr_router::error::{codes as router_codes, extras, CodedError, GrpcCode};
+use angzarr_router::error::{codes as router_codes, CodedError, GrpcCode};
 use angzarr_router::pb;
 use angzarr_router::router::{CommandHandler, PolicyComponent, ProjectorHandler};
 use prost::Message;
@@ -42,6 +42,7 @@ use crate::rpc::google_rpc::{ErrorInfo, Status as RpcStatus, ERROR_INFO_NAME};
 use crate::rpc::policy::policy_service_client::PolicyServiceClient;
 use crate::rpc::projector::projector_service_client::ProjectorServiceClient;
 use crate::rpc::upcaster::upcaster_service_client::UpcasterServiceClient;
+use angzarr_embedded::next::reasons::args;
 use angzarr_embedded::next::{KernelError, UpcastError, UpcastPort};
 use angzarr_embedded_diagnostic::Report;
 
@@ -55,7 +56,8 @@ pub mod codes {
 }
 
 /// The extras key naming why a remote handler was unreachable, one of the
-/// [`causes`]. The domain is under the router's `extras::DOMAIN`.
+/// [`causes`]. The domain is under the catalog's `domain`
+/// (`angzarr_embedded::next::reasons::args::DOMAIN`).
 pub const CAUSE: &str = "cause";
 
 /// The extras key a transport's failure carries its text under, verbatim:
@@ -192,6 +194,12 @@ impl RemoteCommandHandler {
     pub fn domain(&self) -> &str {
         &self.inner.name
     }
+
+    /// The descriptor `Describe` gave when the domain first came up: what
+    /// the kernel registers the domain by.
+    pub fn descriptor(&self) -> &pb::ComponentDescriptor {
+        &self.inner.descriptor
+    }
 }
 
 impl std::fmt::Debug for RemoteCommandHandler {
@@ -231,11 +239,6 @@ impl CommandHandler for RemoteCommandHandler {
         self.inner.call(move |channel| async move {
             CommandHandlerServiceClient::new(channel).handle(req).await
         })
-    }
-
-    /// The descriptor `Describe` gave when the domain first came up.
-    fn component_descriptor(&self) -> Result<pb::ComponentDescriptor, CodedError> {
-        Ok(self.inner.descriptor.clone())
     }
 }
 
@@ -480,11 +483,6 @@ impl ProjectorHandler for RemoteProjectorHandler {
             ProjectorServiceClient::new(channel).handle(events).await
         })
     }
-
-    /// The descriptor `Describe` gave when the projector first came up.
-    fn component_descriptor(&self) -> Result<pb::ComponentDescriptor, CodedError> {
-        Ok(self.inner.descriptor.clone())
-    }
 }
 
 /// A non-OK status from the child's `Handle`, in the router's terms (see
@@ -569,7 +567,7 @@ pub(crate) fn unavailable(domain: &str, cause: &str) -> CodedError {
     CodedError {
         code: codes::REMOTE_HANDLER_UNAVAILABLE.to_string(),
         extras: [
-            (extras::DOMAIN.to_string(), domain.to_string()),
+            (args::DOMAIN.to_string(), domain.to_string()),
             (CAUSE.to_string(), cause.to_string()),
         ]
         .into(),

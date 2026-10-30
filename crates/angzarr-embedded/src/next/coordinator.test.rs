@@ -936,9 +936,6 @@ mod upcasting {
             self.seen.lock().unwrap().push(sent);
             self.inner.dispatch(req)
         }
-        fn component_descriptor(&self) -> Result<pb::ComponentDescriptor, CodedError> {
-            self.inner.component_descriptor()
-        }
     }
 
     /// A registry whose account is [`Seen`], upcast through `upcaster`.
@@ -948,7 +945,6 @@ mod upcasting {
         let (version, current) = rules.current();
         let table = crate::next::route::table::<Account>(
             Arc::new(fees()),
-            Arc::new(Upcaster::new("account-upcaster", "account")),
             Arc::new(account::AccountState::default),
             false,
         );
@@ -961,6 +957,11 @@ mod upcasting {
                     inner: Box::new(inner),
                     seen: Arc::clone(&seen),
                 },
+                crate::next::toys::descriptor_of::<Account>(
+                    crate::next::v1::ComponentKind::Aggregate,
+                    version,
+                    &[],
+                ),
             )
             .unwrap();
         registry.upcast_with("account", upcaster);
@@ -1114,9 +1115,6 @@ mod upcasting {
             self.seen.lock().unwrap().extend(types);
             self.inner.dispatch(req)
         }
-        fn component_descriptor(&self) -> Result<pb::ComponentDescriptor, CodedError> {
-            self.inner.component_descriptor()
-        }
     }
 
     /// A registry whose account is [`History`], a handler the kernel did
@@ -1128,7 +1126,6 @@ mod upcasting {
         let (version, current) = rules.current();
         let table = crate::next::route::table::<Account>(
             Arc::new(fees()),
-            Arc::new(Upcaster::new("account-upcaster", "account")),
             Arc::new(account::AccountState::default),
             false,
         );
@@ -1141,6 +1138,11 @@ mod upcasting {
                     inner: Box::new(inner),
                     seen: Arc::clone(&seen),
                 },
+                crate::next::toys::descriptor_of::<Account>(
+                    crate::next::v1::ComponentKind::Aggregate,
+                    version,
+                    &[],
+                ),
             )
             .unwrap();
         registry.upcast_with("account", upcaster);
@@ -1241,12 +1243,11 @@ mod admission {
     //! Admission is the kernel's own (decision 14.42): deduplication, the
     //! refusal fact's stream check and a process manager's start rule, by
     //! the input's type name after upcasting against the descriptor's
-    //! `starting_types`. The router's `admit` is never called.
+    //! `starting_types`.
     use std::sync::Arc;
 
     use angzarr_embedded_diagnostic::Diagnostic;
 
-    use crate::next::angzarr_router::domain::{Admission, Arrival};
     use crate::next::angzarr_router::error::CodedError;
     use crate::next::angzarr_router::pb;
     use crate::next::angzarr_router::router::CommandHandler;
@@ -1256,21 +1257,18 @@ mod admission {
         AccountFact, Edit,
     };
     use crate::next::v1::DeliveryOutcome;
-    use crate::next::{Failure, Handled, Payload, Registry, Upcaster};
+    use crate::next::{Failure, Handled, Payload, Registry};
 
-    /// The account as a process manager started only by `Open`, behind a
-    /// handler whose `admit` must never be called.
-    struct NoAdmit(Box<dyn CommandHandler>);
+    /// The account's table, as a process manager: its descriptor (in
+    /// [`registry`]) has it started only by `Open`.
+    struct AsProcessManager(Box<dyn CommandHandler>);
 
-    impl CommandHandler for NoAdmit {
+    impl CommandHandler for AsProcessManager {
         fn name(&self) -> &str {
             self.0.name()
         }
         fn kind(&self) -> pb::ComponentKind {
             pb::ComponentKind::ProcessManager
-        }
-        fn admit(&self, _: &Arrival<'_>) -> Result<Admission, CodedError> {
-            panic!("the kernel admits; the router's admit is never called")
         }
         fn command_types(&self) -> Vec<String> {
             self.0.command_types()
@@ -1281,9 +1279,6 @@ mod admission {
         ) -> Result<pb::CommandHandlerResponse, CodedError> {
             self.0.dispatch(req)
         }
-        fn component_descriptor(&self) -> Result<pb::ComponentDescriptor, CodedError> {
-            self.0.component_descriptor()
-        }
     }
 
     fn registry() -> Registry {
@@ -1291,15 +1286,21 @@ mod admission {
         let (version, current) = rules.current();
         let table = crate::next::route::table::<Account>(
             Arc::new(fees()),
-            Arc::new(Upcaster::new("account-upcaster", "account")),
             Arc::new(crate::next::toys::account::AccountState::default),
             true,
-        )
-        .starts("toy.account.cmd.v1.Open");
+        );
         let inner = handlers::<Account>(*current, version)(table);
         let mut registry = Registry::new();
         registry
-            .command_handler("account", NoAdmit(Box::new(inner)))
+            .command_handler(
+                "account",
+                AsProcessManager(Box::new(inner)),
+                crate::next::toys::descriptor_of::<Account>(
+                    pb::ComponentKind::ProcessManager,
+                    version,
+                    &["toy.account.cmd.v1.Open"],
+                ),
+            )
             .unwrap();
         registry
     }

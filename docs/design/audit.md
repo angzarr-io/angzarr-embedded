@@ -80,8 +80,8 @@ flowchart TB
   second home is a place for the two to disagree.
 - **annals-angzarr is folded into the kernel.** What it held that was more
   than mapping lives on in `angzarr_embedded::next`: the `Payload` trait, `pack`,
-  `type_name` and `Decoder`; the `Upcaster` (a mirror of angzarr-router's
-  `UpcasterDispatch`), now also for commands; the `Registry`, now also the
+  `type_name` and `Decoder`; the `Upcaster` (the in-process `UpcastPort`),
+  for events and commands; the `Registry`, now also the
   mirror of `ComponentDescriptor.state`; and the golden replay fixtures. The
   opaque-row store adapter (`Opaque`, `Stored`) is gone: the store port
   itself is opaque now. The id helpers are angzarr-proto's own
@@ -141,7 +141,7 @@ CommandBook ─check──▶ Checked ─identify──▶ Identified ─dedupli
 3. **Load, then admit** (`deduplicate`): the conflict
    resolution, the snapshot and events are loaded **first**; then the
    command id is looked up (`find_command`) and the kernel admits the
-   input (decision 14.42; the router's `admit` is never called): a refusal
+   input (decision 14.42; the router admits nothing): a refusal
    fact's address, deduplication by the events found (they are the
    answer), a process manager's start rule (below).
 4. **Resolve** (`load`): the expected sequence stamped or
@@ -357,8 +357,7 @@ the events are kept iff the two do not overlap (options.proto's rule:
 equal units or a prefix at a `.`/`[` boundary; a wildcard overlaps any
 non-empty set; an empty set nothing), else the command is stale
 (CONFLICT_OVERLAP, the kernel's `KernelError::Overlap`, naming both unit
-sets as `window_units` and `command_units`) and nothing is persisted. The router still makes the same judgement itself, now
-redundant. Unmarked fields conflict with
+sets as `window_units` and `command_units`) and nothing is persisted. Unmarked fields conflict with
 everything (the fail-safe wildcard), so an unmarked change only makes
 COMMUTATIVE stricter.
 
@@ -440,17 +439,34 @@ as the policy's bug: nothing is delivered, the trigger is dead-lettered
 and the position stays.
 
 **A domain is a router table.** `Registry::register` builds angzarr-router's
-`DomainDispatch` over `D::State`: it folds each event through the domain's
-upcaster and `D::apply` under the rules the event's `rules_version` names
-(an event just emitted, under the current ones), restores a snapshot onto a
-fresh state, images the state as a snapshot when it has a snapshot form,
-and resolves COMMUTATIVE by `State::changed`. The domain's handlers are registered on
-it: `#[aggregate]` and `#[process_manager]` generate them
-(`markup::Routed`); a hand-written domain registers its own (`on_command`,
-`on_fact`, `on_refused`). `Registry::command_handler` registers any
-`CommandHandler` (a `DomainDispatch` built by hand, or a handler in another
-process behind one), known by its registration hello: its state descriptor
-and rules version. `Kernel::handle_any` handles books for such a domain.
+`DomainDispatch` over `D::State`: it folds each event, upcast by the kernel
+before it is handed over, through `D::apply` under the rules the event's
+`rules_version` names (an event just emitted, under the current ones); a
+state with a snapshot form has the state's codec (`with_state_codec`: a
+delivered starting state restored onto a fresh state, and the state every
+answer carries); and it resolves COMMUTATIVE by `State::changed`. The
+domain's handlers are registered on it: `#[aggregate]` and
+`#[process_manager]` generate them (`markup::Routed`); a hand-written
+domain registers its own (`on_command`, `on_fact`, `on_refused`).
+`Registry::command_handler` registers any `CommandHandler` (a
+`DomainDispatch` built by hand, or a handler in another process behind
+one) with its `ComponentDescriptor`: its state descriptor, rules version
+and a process manager's starting types. `Kernel::handle_any` handles books
+for such a domain.
+
+**Where a descriptor comes from** (decision 14.42: no component carries
+one; they are generated). A marked-up process manager's starting types are
+its markup's: the macro generates `markup::ProcessManager::STARTS` from the
+inputs marked `starts`, the same list angzarr-build writes into its
+descriptor, and `Registry::process_manager` reads it. A typed domain's
+state descriptor is its `State::descriptor()` and its rules version its
+`Rulebook`'s. A domain registered by `Registry::command_handler` is given
+its descriptor: an application's, decoded from the `angzarr-descriptors.rs`
+angzarr-build generates, or, for a child, the one it answers `Describe`
+with (angzarr-embedded-host). The kernel does not read
+`angzarr-descriptors.rs` itself: that would make angzarr-build (angzarr-cli's)
+a dependency of the kernel and of its tests, and the markup already holds
+every fact the descriptor has.
 
 **The kernel upcasts every incoming payload** (decision 14.39) before it
 decides anything by its type (the resolution per command type, a process
@@ -460,7 +476,9 @@ manager's start rule) and before dispatch, through the domain's
 `CommandHandler` (its upcaster sidecar). The payload goes as a one-page
 `UpcastRequest`; the router is handed the current type only. A payload
 whose upcast fails is `KernelError::Upcast`, reported after the sequence
-check.
+check. The stored events it hands on go through the same port (C-0584,
+C-0586): a load's for the router, as one request, and each event a policy
+reads, one page at a time; the router upcasts nothing.
 
 **Dispatch.** The kernel hands the router the `ContextualCommand`: the
 usable snapshot and the events after it (upcast), the command with its ids
@@ -1106,8 +1124,8 @@ no actor), and reactor re-runs deduplicate in both, with no switch.
    from `Bug` so the server can answer 400 without alerting.
 8. **`Stream::execute`** runs the whole pipeline in memory with no store.
    I recommend keeping it, for tests and in-browser use.
-9. **The upcaster: a mirror or the router's.** I recommend the mirror, and
-    switching when angzarr remaps the router onto angzarr-proto.
+9. **The upcaster is the kernel's.** The router has none (decision
+    14.39); the kernel's `Upcaster` is the in-process `UpcastPort`.
 10. **Old `annals.log.v1` logs.** I recommend leaving them: hatpick stores
     none.
 11. **The default depth limit of 8.** I recommend 8; hatpick's deepest
@@ -1173,7 +1191,7 @@ runs it in full); angzarr-embedded tests the kernel over it, not the store.
 - **domain.test.rs**: ingest reads a read-only context; a fact is never
   refused and is stamped at the head; decide reads the rules, stream,
   instant and ids; a nonce acknowledges only its own delivery.
-- **upcast.test.rs**: upcasting runs the chain as the router does; old
+- **upcast.test.rs**: upcasting runs the chain in registration order; old
   events replay through the upcaster and are never rewritten; an old
   command is upcast then decided; an upcaster is checked whole.
 - **stream.test.rs**: replay folds each event with the rules it names and

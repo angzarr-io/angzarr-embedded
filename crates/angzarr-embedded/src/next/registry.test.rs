@@ -297,9 +297,8 @@ fn a_state_descriptor_naming_another_type_than_its_snapshot_is_refused() {
     );
 }
 
-/// A hand-written handler whose registration hello is `hello`, of `kind`.
+/// A hand-written handler of `kind`, registered by its descriptor.
 struct Hello {
-    hello: Result<angzarr_router::pb::ComponentDescriptor, angzarr_router::error::CodedError>,
     kind: angzarr_router::pb::ComponentKind,
 }
 
@@ -321,12 +320,6 @@ impl angzarr_router::router::CommandHandler for Hello {
         _: &angzarr_router::pb::ContextualCommand,
     ) -> Result<angzarr_router::pb::CommandHandlerResponse, angzarr_router::error::CodedError> {
         Ok(Default::default())
-    }
-
-    fn component_descriptor(
-        &self,
-    ) -> Result<angzarr_router::pb::ComponentDescriptor, angzarr_router::error::CodedError> {
-        self.hello.clone()
     }
 }
 
@@ -354,47 +347,44 @@ fn base_state() -> crate::next::v1::StateDescriptor {
     }
 }
 
-/// A handler registers on what its hello says: refused without a rules
-/// version or a state, a process manager's kind kept.
+/// A handler registers on what its descriptor says: refused without a
+/// rules version or a state type, a process manager's kind kept.
 #[test]
-fn a_command_handler_registers_by_its_hello() {
-    use angzarr_router::error::{codes, CodedError};
+fn a_command_handler_registers_by_its_descriptor() {
     use angzarr_router::pb::ComponentKind;
-    let refused = |hello: Result<_, CodedError>| {
+    let refused = |descriptor| {
         crate::next::Registry::new()
             .command_handler(
                 "hello",
                 Hello {
-                    hello,
                     kind: ComponentKind::Aggregate,
                 },
+                descriptor,
             )
             .err()
     };
+    let unversioned = angzarr_router::pb::ComponentDescriptor {
+        rules_version: String::new(),
+        ..hello(Some(base_state()))
+    };
     assert_eq!(
-        refused(Err(CodedError {
-            code: codes::MISSING_RULES_VERSION.to_string(),
-            extras: Default::default(),
-            grpc: angzarr_router::error::GrpcCode::Internal,
-            refusal: None,
-        })),
+        refused(unversioned),
         Some(Misconfigured::EmptyRulesVersion {
             domain: "hello".to_string()
         })
     );
+    let untyped = crate::next::v1::StateDescriptor {
+        type_url: String::new(),
+        ..base_state()
+    };
     assert_eq!(
-        refused(Err(CodedError {
-            code: codes::MISSING_STATE_TYPE.to_string(),
-            extras: Default::default(),
-            grpc: angzarr_router::error::GrpcCode::Internal,
-            refusal: None,
-        })),
+        refused(hello(Some(untyped))),
         Some(Misconfigured::BadStateDescriptor {
             domain: "hello".to_string()
         })
     );
     assert_eq!(
-        refused(Ok(hello(None))),
+        refused(hello(None)),
         Some(Misconfigured::BadStateDescriptor {
             domain: "hello".to_string()
         })
@@ -405,9 +395,9 @@ fn a_command_handler_registers_by_its_hello() {
         .command_handler(
             "hello",
             Hello {
-                hello: Ok(hello(Some(base_state()))),
                 kind: ComponentKind::ProcessManager,
             },
+            hello(Some(base_state())),
         )
         .unwrap();
     assert!(registry.is_process_manager("hello"));
@@ -417,9 +407,9 @@ fn a_command_handler_registers_by_its_hello() {
         .command_handler(
             "hello",
             Hello {
-                hello: Ok(hello(Some(base_state()))),
                 kind: ComponentKind::Aggregate,
             },
+            hello(Some(base_state())),
         )
         .unwrap();
     assert!(!aggregate.is_process_manager("hello"));

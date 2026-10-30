@@ -482,7 +482,7 @@ fn every_failure_says_how_to_recover() {
         ),
         (
             Recovery::Retry,
-            KernelError::Router(CodedError::stale("PLAYER_BROKE", [])),
+            KernelError::Router(CodedError::immediate("PLAYER_BROKE", [])),
         ),
         // A handler's own code: under a business status a refusal, under a
         // bug's status a bug (the owner's ruling, 2026-10-29). Every status
@@ -528,13 +528,16 @@ fn every_failure_says_how_to_recover() {
         (Recovery::Retry, KernelError::Router(own(GrpcCode::Aborted))),
         (
             Recovery::Retry,
-            KernelError::Router(CodedError::stale(codes::CONFLICT_OVERLAP, [])),
+            KernelError::Router(CodedError::immediate(
+                crate::next::reasons::CONFLICT_OVERLAP,
+                [],
+            )),
         ),
         // The router's own errors on malformed input are bugs, INTERNAL,
         // never the sender's to fix (the owner's ruling, 2026-10-29).
         (
             Recovery::Bug,
-            KernelError::Router(router_own(codes::MISSING_COMMAND_BOOK)),
+            KernelError::Router(router_own(codes::NO_REFUSAL_HANDLER)),
         ),
         (
             Recovery::Bug,

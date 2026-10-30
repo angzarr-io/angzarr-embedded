@@ -199,10 +199,6 @@ impl CommandHandler for Table {
         };
         Ok(one_event(event, "Table-1"))
     }
-
-    fn component_descriptor(&self) -> Result<ComponentDescriptor, CodedError> {
-        Ok(descriptor("Table", "/test.table.v1.State"))
-    }
 }
 
 /// An in-process `wallet`: `Hold` records `Held`; `HoldTooMuch` is
@@ -232,10 +228,6 @@ impl CommandHandler for Wallet {
             });
         }
         Ok(one_event(any(HELD), "Wallet-1"))
-    }
-
-    fn component_descriptor(&self) -> Result<ComponentDescriptor, CodedError> {
-        Ok(descriptor("Wallet", "/test.wallet.v1.State"))
     }
 }
 
@@ -461,8 +453,16 @@ fn a_remote_policy_turns_its_sources_events_into_commands_through_the_kernel() {
     let log_path = log_file("policy-commands");
     let host = Host::start(config(vec![policy_domain(&log_path)])).expect("the host starts");
     let mut registry = Registry::new();
-    registry.command_handler("table", Table).unwrap();
-    registry.command_handler("wallet", Wallet).unwrap();
+    registry
+        .command_handler("table", Table, descriptor("Table", "/test.table.v1.State"))
+        .unwrap();
+    registry
+        .command_handler(
+            "wallet",
+            Wallet,
+            descriptor("Wallet", "/test.wallet.v1.State"),
+        )
+        .unwrap();
     host.register(&mut registry)
         .expect("a policy child registers as a policy");
     let store = MemoryStore::new();
@@ -496,8 +496,16 @@ fn a_refusal_of_a_remote_policys_command_is_answered_by_its_on_refused() {
     let log_path = log_file("policy-refused");
     let host = Host::start(config(vec![policy_domain(&log_path)])).expect("the host starts");
     let mut registry = Registry::new();
-    registry.command_handler("table", Table).unwrap();
-    registry.command_handler("wallet", Wallet).unwrap();
+    registry
+        .command_handler("table", Table, descriptor("Table", "/test.table.v1.State"))
+        .unwrap();
+    registry
+        .command_handler(
+            "wallet",
+            Wallet,
+            descriptor("Wallet", "/test.wallet.v1.State"),
+        )
+        .unwrap();
     host.register(&mut registry)
         .expect("a policy child registers as a policy");
     let store = MemoryStore::new();
@@ -556,7 +564,9 @@ fn projector_domain(log: &Path) -> ComponentConfig {
 fn projected(log_path: &Path) -> (Host, Registry) {
     let host = Host::start(config(vec![projector_domain(log_path)])).expect("the host starts");
     let mut registry = Registry::new();
-    registry.command_handler("table", Table).unwrap();
+    registry
+        .command_handler("table", Table, descriptor("Table", "/test.table.v1.State"))
+        .unwrap();
     host.register(&mut registry)
         .expect("a projector child registers as a projector");
     (host, registry)
@@ -586,10 +596,6 @@ fn a_projector_child_comes_up_as_a_projector_not_a_domain() {
     assert_eq!(projector.name(), "TableView");
     assert_eq!(projector.source(), "table");
     assert_eq!(projector.configured(), "table-view");
-    assert_eq!(
-        projector.component_descriptor().expect("described").name,
-        "TableView"
-    );
     assert!(
         format!("{projector:?}").contains("table-view"),
         "{projector:?}"
@@ -875,7 +881,9 @@ fn upcaster_domain() -> ComponentConfig {
 fn upcast() -> (Host, Registry) {
     let host = Host::start(config(vec![upcaster_domain()])).expect("the host starts");
     let mut registry = Registry::new();
-    registry.command_handler("table", Table).unwrap();
+    registry
+        .command_handler("table", Table, descriptor("Table", "/test.table.v1.State"))
+        .unwrap();
     host.register(&mut registry)
         .expect("an upcaster registers as its domain's sidecar");
     (host, registry)
@@ -1053,7 +1061,9 @@ fn a_sidecar_is_up_only_while_its_health_reports_serving() {
     };
     let host = Host::start_with(config(vec![sidecar]), hooks).expect("the host starts");
     let mut registry = Registry::new();
-    registry.command_handler("table", Table).unwrap();
+    registry
+        .command_handler("table", Table, descriptor("Table", "/test.table.v1.State"))
+        .unwrap();
     host.register(&mut registry).unwrap();
     let (mut fake, _) = control.accept().unwrap();
     let _ = std::fs::remove_file(&socket);

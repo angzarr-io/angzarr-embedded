@@ -452,7 +452,7 @@ pub const MARKUP_RULES_VERSION: &str = "markup-1";
 ///   to it names the instance in its cover, whatever its correlation (one
 ///   instance may take inputs of several correlations); a `correlation_id`
 ///   left unset is given the root.
-/// - **The start rule**, angzarr-router's. Only an input type it declares
+/// - **The start rule**, the kernel's. Only an input type it declares
 ///   as starting (`#[handles_cmd(C, starts)]`, `#[handles_fact(F, starts)]`)
 ///   may start an instance. Any other input for a stream with no instance is
 ///   not delivered, decided before the handler by the type after
@@ -466,8 +466,9 @@ pub const MARKUP_RULES_VERSION: &str = "markup-1";
 /// angzarr-embedded does not refuse one (no compile error, no check): the warning is
 /// angzarr-cli's.
 ///
-/// The kernel registers it on the router's process-manager table, which
-/// applies the start rule.
+/// The kernel registers it on the router's process-manager table, and
+/// applies the start rule by `STARTS`: the descriptor's starting types,
+/// which the markup generates (decision 14.42).
 pub trait ProcessManager: Domain<State = Self, Rules = ()> {
     /// The input types (commands and facts) that may start an instance,
     /// in marker order: angzarr's `ComponentDescriptor.starting_types`.
@@ -1218,8 +1219,7 @@ fn command_payload(book: &angzarr_proto::v1::CommandBook) -> Option<&Any> {
 /// A marked-up domain's handlers, as angzarr-router dispatches them: what
 /// `#[aggregate]` and `#[process_manager]` generate, each marked handler
 /// registered on the router's table for the domain (`on_command`,
-/// `on_fact_with_context`, `on_refused`; a process manager's starting
-/// inputs `starts`).
+/// `on_fact_with_context`, `on_refused`).
 pub trait Routed: Domain {
     /// `table`, with every marked handler registered on it.
     fn route(

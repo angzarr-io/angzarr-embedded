@@ -1,14 +1,15 @@
 //! Where the kernel meets angzarr-router: the router owns business
 //! dispatch (handlers, typed refusals and the refusal path); this module turns what the router answers into the kernel's terms.
 //!
-//! - [`reason_code`]: every reason the router answers with, each
+//! - [`reason_code`]: every reason the router answers with, and every
+//!   coordinator key the kernel answers in the router's shape, each
 //!   forwarded under an angzarr-embedded code of its own with its own
 //!   message ([`KernelError::Router`](super::KernelError::Router)).
 //! - [`Rejected`]: a domain's refusal, as the caller receives it: the
 //!   refusing handler's code and args, and its typed refusal object.
 //! - The table a typed [`Domain`] is dispatched by: the router's
 //!   `DomainDispatch` over the domain's state, folding with the domain's
-//!   own `apply` under the rules each event names, restoring snapshots and
+//!   own `apply` under the rules each event names, with the state's codec,
 //!   resolving COMMUTATIVE by the state's conflict units; the domain's
 //!   handlers are registered on it.
 
@@ -25,21 +26,30 @@ use prost::Message;
 use prost_types::Any;
 
 use super::domain::{Domain, State};
-use super::error::{PayloadError, UpcastError};
+use super::error::PayloadError;
 use super::markup::Failed;
 use super::payload::{type_name, Payload};
-use super::upcast::Upcaster;
 use super::version::Rulebook;
 
-/// The angzarr-embedded code a router reason is forwarded under, for
-/// every reason angzarr-router answers with (its `error::codes::ALL`):
+/// The angzarr-embedded code a reason in the router's shape is forwarded
+/// under, for every reason angzarr-router answers with (its
+/// `error::codes::ALL`) and every coordinator key the kernel answers in
+/// that shape ([`reasons::ANSWERED`](super::reasons::ANSWERED)):
 /// `angzarr-embedded-next-` and the reason in kebab-case; `None` for a
-/// reason that is not the router's (a domain's own). The catalog check
-/// holds the catalog to the router's list.
+/// reason that is neither (a domain's own). The catalog check holds the
+/// catalog to the router's list.
 pub(crate) fn reason_code(reason: &str) -> Option<&'static str> {
-    angzarr_router::error::codes::ALL
-        .contains(&reason)
+    forwarded()
+        .any(|known| known == reason)
         .then(|| intern(&kebab(reason)))
+}
+
+/// Every reason [`reason_code`] forwards: the router's, then the
+/// coordinator's the kernel answers.
+pub(crate) fn forwarded() -> impl Iterator<Item = &'static str> {
+    (angzarr_router::error::codes::ALL.iter())
+        .chain(super::reasons::ANSWERED)
+        .copied()
 }
 
 /// `REASON` as `angzarr-embedded-next-reason`.
@@ -349,90 +359,21 @@ pub(crate) fn is_nothing(page: &angzarr_proto::v1::EventPage) -> bool {
 /// [`KernelError::HandlerUnavailable`](super::KernelError::HandlerUnavailable).
 pub(crate) const HANDLER_UNAVAILABLE: &str = "REMOTE_HANDLER_UNAVAILABLE";
 
-/// The router's code for an incoming payload's upcast that failed: the
-/// kernel's [`KernelError::Upcast`](super::KernelError::Upcast).
-const UPCAST_FAILED: &str = "ANGZARR_EMBEDDED_UPCAST_FAILED";
-
-/// The failed upcast's source type, in its metadata.
-const UPCAST_SOURCE: &str = "source";
-
-/// The failed upcast rule's own code, in its metadata.
-const UPCAST_REASON: &str = "reason";
-
-/// The upcast failure the router carries, if `error` is one: the rule from
-/// its source and the rule's own reason, its code and args.
-pub(crate) fn upcast_failure(error: &CodedError) -> Option<UpcastError> {
-    if error.code != UPCAST_FAILED {
-        return None;
-    }
-    let extra = |key: &str| error.extras.get(key).cloned().unwrap_or_default();
-    let prefix = format!("{UPCAST_REASON}.");
-    let reason = error
-        .extras
-        .iter()
-        .filter_map(|(key, value)| Some((key.strip_prefix(&prefix)?, value)))
-        .fold(
-            Report::new(intern(&extra(UPCAST_REASON))),
-            |report, (name, value)| report.arg(intern(name), value.as_str()),
-        );
-    Some(UpcastError::Rule {
-        source: extra(UPCAST_SOURCE),
-        error: reason,
-    })
-}
-
-/// An upcaster as the router runs it on a command's or fact's payload.
-pub(crate) struct CommandUpcaster(pub(crate) Arc<Upcaster>);
-
-impl angzarr_router::PayloadUpcaster for CommandUpcaster {
-    fn upcast_payload(&self, payload: &Any) -> Result<Any, CodedError> {
-        self.0.upcast_command(payload).map_err(|error| {
-            let (source, reason) = match &error {
-                UpcastError::Payload(e) => (payload.type_url.clone(), Report::of(e)),
-                UpcastError::Rule { source, error } => (source.clone(), error.clone()),
-                UpcastError::Unavailable { cause } => (payload.type_url.clone(), cause.clone()),
-            };
-            let flattened = flat_args(&reason)
-                .into_iter()
-                .map(|(name, value)| (format!("{UPCAST_REASON}.{name}"), value));
-            internal(
-                UPCAST_FAILED,
-                [
-                    (UPCAST_SOURCE.to_string(), source),
-                    (UPCAST_REASON.to_string(), reason.code().to_string()),
-                ]
-                .into_iter()
-                .chain(flattened),
-            )
-        })
-    }
-
-    fn source_types(&self) -> Vec<String> {
-        self.0
-            .source_types()
-            .into_iter()
-            .map(str::to_string)
-            .collect()
-    }
-}
-
 /// The router's table for typed domain `D`, before its handlers: named
 /// `D::NAME` (a process manager's if `process_manager`), folding each
-/// event through `upcaster` and `D::apply` under the rules its
-/// `rules_version` names (an event just emitted, under the current ones),
-/// restoring a snapshot onto a fresh state from `fresh`, imaging its state
-/// as a snapshot when it has a snapshot form, resolving COMMUTATIVE by
-/// [`State::changed`] when the state supports it, and running `upcaster`
-/// on every incoming payload.
+/// event, upcast by the kernel before it is handed over, through `D::apply`
+/// under the rules its `rules_version` names (an event just emitted, under
+/// the current ones), with the state's codec when it has a snapshot form
+/// (a delivered starting state restored onto a fresh state from `fresh`,
+/// and the state every answer carries), resolving COMMUTATIVE by
+/// [`State::changed`] when the state supports it.
 pub(crate) fn table<D: Domain>(
     rules: Arc<Rulebook<D::Rules>>,
-    upcaster: Arc<Upcaster>,
     fresh: Arc<dyn Fn() -> D::State + Send + Sync>,
     process_manager: bool,
 ) -> DomainDispatch<D::State> {
     let snapshot_form = <<D::State as State>::Snapshot as prost::Name>::full_name();
     let fold_rules = Arc::clone(&rules);
-    let fold_upcaster = Arc::clone(&upcaster);
     let restore_fresh = Arc::clone(&fresh);
     let mut rebuilder = Rebuilder::new(move || fresh())
         .with_fold(move |state, pages, _cover| {
@@ -444,8 +385,7 @@ pub(crate) fn table<D: Domain>(
                     page_index: Some(index),
                     cause: Some(diagnostic(cause)),
                 };
-                let sent = page.payload.clone().unwrap_or_default();
-                let any = fold_upcaster.upcast_event(&sent).map_err(|e| failed(&e))?;
+                let any = page.payload.clone().unwrap_or_default();
                 let event = D::Event::from_any(&any).map_err(|e| failed(&e))?;
                 // A stored event names its rules; one just emitted has no
                 // metadata yet, and is under the current ones.
@@ -462,35 +402,34 @@ pub(crate) fn table<D: Domain>(
             }
             Ok(())
         })
-        .with_snapshot(move |state, any| {
-            if type_name(&any.type_url) != snapshot_form {
-                return Err(Box::new(PayloadError::UnknownType {
-                    type_url: any.type_url.clone(),
-                }));
-            }
-            let wire = <D::State as State>::Snapshot::decode(&any.value[..]).map_err(|error| {
-                PayloadError::Decode {
-                    type_url: any.type_url.clone(),
-                    error,
-                }
-            })?;
-            let mut restored = restore_fresh();
-            restored.restore(wire).map_err(Box::new)?;
-            *state = restored;
-            Ok(())
-        })
-        .with_state_type(&<<D::State as State>::Snapshot as prost::Name>::full_name());
+        .with_state_type(&snapshot_form);
     if <D::State as State>::SNAPSHOTS {
-        rebuilder = rebuilder
-            .with_state_image(|state: &D::State| super::payload::pack(&state.to_snapshot()));
+        rebuilder = rebuilder.with_state_codec(
+            move |any| {
+                if type_name(&any.type_url) != snapshot_form {
+                    return Err(Box::new(PayloadError::UnknownType {
+                        type_url: any.type_url.clone(),
+                    }));
+                }
+                let wire =
+                    <D::State as State>::Snapshot::decode(&any.value[..]).map_err(|error| {
+                        PayloadError::Decode {
+                            type_url: any.type_url.clone(),
+                            error,
+                        }
+                    })?;
+                let mut restored = restore_fresh();
+                restored.restore(wire).map_err(Box::new)?;
+                Ok(restored)
+            },
+            |state: &D::State| super::payload::pack(&state.to_snapshot()),
+        );
     }
     let base = match process_manager {
         true => DomainDispatch::process_manager(D::NAME, D::NAME, rebuilder),
         false => DomainDispatch::new(D::NAME, D::NAME, rebuilder),
     };
-    let base = base
-        .with_rules_version(rules.current().0)
-        .with_command_upcaster(CommandUpcaster(upcaster));
+    let base = base.with_rules_version(rules.current().0);
     let commutative = <D::State as State>::descriptor().options.is_some_and(|o| {
         o.conflict_resolutions
             .contains(&(ConflictResolution::Commutative as i32))

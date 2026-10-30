@@ -9,6 +9,7 @@
 
 use std::fmt;
 
+use angzarr_embedded::next::reasons;
 use angzarr_embedded_diagnostic::{Arg, Diagnostic};
 use angzarr_router::pb::{ComponentDescriptor, ComponentKind};
 
@@ -34,16 +35,19 @@ pub enum DescriptorRefused {
 }
 
 impl DescriptorRefused {
-    /// The reason key, as `catalog/reasons.toml` names it.
+    /// The reason key, as `catalog/reasons.toml` names it (the kernel's
+    /// constant for it).
     pub fn reason(&self) -> &'static str {
         match self {
-            DescriptorRefused::MissingRulesVersion { .. } => "MISSING_RULES_VERSION",
-            DescriptorRefused::StartingTypesOnNonPm { .. } => "STARTING_TYPES_ON_NON_PM",
-            DescriptorRefused::MissingStateType { .. } => "MISSING_STATE_TYPE",
-            DescriptorRefused::StateOnStatelessKind { .. } => "STATE_ON_STATELESS_KIND",
-            DescriptorRefused::PolicyInputCount { .. } => "POLICY_INPUT_COUNT",
-            DescriptorRefused::PolicyNoOutputDomain { .. } => "POLICY_NO_OUTPUT_DOMAIN",
-            DescriptorRefused::OutputDomainOnNonPolicy { .. } => "OUTPUT_DOMAIN_ON_NON_POLICY",
+            DescriptorRefused::MissingRulesVersion { .. } => reasons::MISSING_RULES_VERSION,
+            DescriptorRefused::StartingTypesOnNonPm { .. } => reasons::STARTING_TYPES_ON_NON_PM,
+            DescriptorRefused::MissingStateType { .. } => reasons::MISSING_STATE_TYPE,
+            DescriptorRefused::StateOnStatelessKind { .. } => reasons::STATE_ON_STATELESS_KIND,
+            DescriptorRefused::PolicyInputCount { .. } => reasons::POLICY_INPUT_COUNT,
+            DescriptorRefused::PolicyNoOutputDomain { .. } => reasons::POLICY_NO_OUTPUT_DOMAIN,
+            DescriptorRefused::OutputDomainOnNonPolicy { .. } => {
+                reasons::OUTPUT_DOMAIN_ON_NON_POLICY
+            }
         }
     }
 }

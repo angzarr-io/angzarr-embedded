@@ -129,7 +129,7 @@ dependencies = [
 [[package]]
 name = "angzarr-router"
 version = "0.1.0"
-source = "git+https://github.com/angzarr-io/angzarr-router?rev=b71612ef5ada5fb16cc700159a07d697938cfb18#b71612ef5ada5fb16cc700159a07d697938cfb18"
+source = "git+https://github.com/angzarr-io/angzarr-router?rev=1dca8adfbc2bd2b744cc80f1b058188a717ece69#1dca8adfbc2bd2b744cc80f1b058188a717ece69"
 dependencies = [
  "angzarr-proto",
  "heck 0.5.0",

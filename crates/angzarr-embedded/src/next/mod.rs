@@ -76,6 +76,7 @@ mod handler;
 pub mod markup;
 mod payload;
 mod policy;
+pub mod reasons;
 mod registry;
 mod route;
 mod store;
@@ -404,7 +405,7 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn angzarr_embedded_diagnostic::D
         committed: Vec::new(),
         failures: vec![("balances".to_string(), report())],
     }));
-    for reason in angzarr_router::error::codes::ALL {
+    for reason in route::forwarded() {
         samples.push(Box::new(KernelError::Router(route::internal(reason, []))));
     }
     samples.push(Box::new(missing));

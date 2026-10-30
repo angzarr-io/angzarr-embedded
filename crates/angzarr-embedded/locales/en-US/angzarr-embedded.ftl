@@ -90,28 +90,11 @@ angzarr-embedded-next-misconfigured-unsupported-command-resolution = domain "{ $
 
 # angzarr-router's refusals, one code per reason.
 angzarr-embedded-next-any-decode-failed = a payload did not decode as the type it names: send a payload of its type
-angzarr-embedded-next-missing-command-book = the request carries no command: send the command
-angzarr-embedded-next-missing-command-page = the command carries no page: send the command's page
-angzarr-embedded-next-missing-command-payload = the command's page carries no typed payload: send its payload
 angzarr-embedded-next-persisted-event-corrupt = a stored event or snapshot does not decode: restore it, or add the upcaster it needs
 angzarr-embedded-next-unhandled-handler-error = a handler failed with an error it does not classify: a bug in the handler
-angzarr-embedded-next-missing-event-book-cover = the events carry no cover: a bug in the runtime
-angzarr-embedded-next-empty-policy-source = a policy was given no event: a bug in the runtime
 angzarr-embedded-next-no-handlers-registered = no component is registered: register one
-angzarr-embedded-next-duplicate-command-handler = a type is handled twice, as a current type and an upcaster's source: drop one
 angzarr-embedded-next-no-fact-handler = no handler is registered for this fact's type: register one, or stop sending it
-angzarr-embedded-next-conflict-unresolved = the handler never acknowledged the events it did not see: a bug in the handler; re-read and re-issue
-angzarr-embedded-next-conflict-overlap = the command's changes overlap changes it did not see: re-read and re-issue
 angzarr-embedded-next-conflict-resolution-unsupported = the domain does not support the conflict resolution asked for: ask for another
-angzarr-embedded-next-missing-rules-version = a component registers with its rules version: give it one
-angzarr-embedded-next-missing-state-type = a component with state registers its state's type: give it one
-angzarr-embedded-next-policy-command-outside-destination = a policy sent a command to a domain other than its one destination: a bug in the policy
-angzarr-embedded-next-policy-command-outside-edition = a policy sent a command into an edition other than its trigger's: a bug in the policy
-angzarr-embedded-next-policy-command-no-root = a policy sent a command naming no root: a bug in the policy, which names the root of every command
-angzarr-embedded-next-policy-command-other-correlation = a policy sent a command in a correlation other than its trigger's: a bug in the policy
-angzarr-embedded-next-pm-no-instance = the process manager has no instance here, and only a starting input starts one: start it first
-angzarr-embedded-next-refusal-fact-wrong-stream = a refusal fact was addressed to a stream other than its trigger's: a bug in the runtime
-angzarr-embedded-next-starting-types-on-non-pm = only a process manager declares starting types: drop them, or make it a process manager
 
 # angzarr-router's reasons (decision 14.37), each under its own code.
 angzarr-embedded-next-handler-panicked = a handler panicked: a bug in the handler
@@ -120,19 +103,20 @@ angzarr-embedded-next-fold-failed = a stored event could not be folded into the 
 angzarr-embedded-next-fold-failed-emitted = an event the command emitted could not be folded into the state: a bug in the domain
 angzarr-embedded-next-unknown-command-type = no handler takes this command's type, after upcasting: a bug in the sender
 angzarr-embedded-next-no-refusal-handler = nothing handles the refusal of this command: give its source a refusal handler
-angzarr-embedded-next-refusal-without-command = a refusal carries no command: a bug
-angzarr-embedded-next-refusal-without-event = a refusal carries no triggering event: a bug
-angzarr-embedded-next-host-status-undecodable = a host's status could not be decoded: a bug in the host
-angzarr-embedded-next-null-abi-pointer = a null pointer crossed the C ABI: a bug in the host
 angzarr-embedded-next-no-component-of-kind = the business process hosts no component of the kind dispatched to
-angzarr-embedded-next-policy-source-outside-input-domain = a policy was given a book of a domain it does not consume
 angzarr-embedded-next-duplicate-component = a router hosts one component: register the other in its own
-angzarr-embedded-next-duplicate-upcaster-chain = a component has one upcaster chain
-angzarr-embedded-next-refusal-fact-missing = a policy answered a refusal with no fact: a bug in the policy
+
+# The coordinator's keys (catalog/reasons.toml) the kernel answers, each
+# under its own code.
+angzarr-embedded-next-conflict-unresolved = the handler never acknowledged the events it did not see: a bug in the handler; re-read and re-issue
+angzarr-embedded-next-conflict-overlap = the command's changes overlap changes it did not see: re-read and re-issue
+angzarr-embedded-next-policy-command-outside-destination = a policy sent a command to a domain other than its one destination: a bug in the policy
+angzarr-embedded-next-policy-command-outside-edition = a policy sent a command into an edition other than its trigger's: a bug in the policy
+angzarr-embedded-next-policy-command-no-root = a policy sent a command naming no root: a bug in the policy, which names the root of every command
+angzarr-embedded-next-policy-command-other-correlation = a policy sent a command in a correlation other than its trigger's: a bug in the policy
+angzarr-embedded-next-pm-no-instance = the process manager has no instance here, and only a starting input starts one: start it first
+angzarr-embedded-next-refusal-fact-wrong-stream = a refusal fact was addressed to a stream other than its trigger's: a bug in the runtime
 angzarr-embedded-next-refusal-fact-addressed = a policy set its refusal fact's cover or handling: a bug in the policy
 angzarr-embedded-next-refusal-fact-no-page = a policy's refusal fact has no page: a bug in the policy
 angzarr-embedded-next-refusal-fact-not-a-fact = a policy answered a refusal with a command, not a fact: a bug in the policy
 angzarr-embedded-next-refusal-fact-identified = a policy set its refusal fact's identity: a bug in the policy
-angzarr-embedded-next-refusal-without-refused-command = a refusal carries no refused command: a bug
-angzarr-embedded-next-refused-command-without-id = a refused command carries no command id: a bug
-angzarr-embedded-next-refusal-without-trigger-stream = a refusal carries no triggering stream: a bug
