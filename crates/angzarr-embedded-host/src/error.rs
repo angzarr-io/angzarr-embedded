@@ -95,6 +95,12 @@ pub enum HostError {
     /// A policy or projector whose descriptor names no input domain: it
     /// has no source.
     NoInput { domain: String },
+    /// The child's descriptor fails the coordinator's validation
+    /// (decision 14.42, C-0687; [`DescriptorRefused`](crate::DescriptorRefused)).
+    Descriptor {
+        domain: String,
+        cause: crate::DescriptorRefused,
+    },
     /// A `kind` the host cannot run yet (`upcaster`: the sidecar lands
     /// with the kernel's upcasting, decision 14.39).
     KindUnsupported { domain: String, kind: String },
@@ -135,6 +141,7 @@ impl Diagnostic for HostError {
             HostError::KindMismatch { .. } => "angzarr-embedded-host-kind-mismatch",
             HostError::NoInput { .. } => "angzarr-embedded-host-no-input",
             HostError::KindUnsupported { .. } => "angzarr-embedded-host-kind-unsupported",
+            HostError::Descriptor { .. } => "angzarr-embedded-host-descriptor",
             HostError::SocketDirTooLong { .. } => "angzarr-embedded-host-socket-dir-too-long",
             HostError::ConfigUnreadable { .. } => "angzarr-embedded-host-config-unreadable",
             HostError::ConfigInvalid { .. } => "angzarr-embedded-host-config-invalid",
@@ -186,6 +193,9 @@ impl Diagnostic for HostError {
             ],
             HostError::KindUnsupported { domain: d, kind } => {
                 vec![domain(d), ("kind", kind.as_str().into())]
+            }
+            HostError::Descriptor { domain: d, cause } => {
+                vec![domain(d), ("cause", Arg::nested(cause))]
             }
             HostError::SocketDirTooLong { dir, max_bytes } => vec![
                 ("dir", dir.as_str().into()),
@@ -250,6 +260,12 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn Diagnostic>> {
             described: "AGGREGATE".to_string(),
         }),
         Box::new(HostError::NoInput { domain: d() }),
+        Box::new(HostError::Descriptor {
+            domain: d(),
+            cause: crate::DescriptorRefused::PolicyNoOutputDomain {
+                component: "TableWalletPolicy".to_string(),
+            },
+        }),
         Box::new(HostError::KindUnsupported {
             domain: d(),
             kind: "upcaster".to_string(),

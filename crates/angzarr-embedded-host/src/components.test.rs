@@ -852,3 +852,24 @@ fn a_remote_projectors_retryable_and_aborted_statuses_are_retried() {
         host.shutdown();
     }
 }
+
+/// The host validates a child's descriptor at start (decision 14.42,
+/// C-0687): a policy child whose descriptor names no output domain is
+/// refused, naming the component and the reason, and no child is left
+/// running.
+#[test]
+fn a_policy_child_with_no_output_domain_is_refused_at_start() {
+    let log = log_file("policy-no-output");
+    let mut policy = policy_domain(&log);
+    policy.env.remove(TARGET_ENV);
+    let refused = Host::start(config(vec![policy])).err();
+    assert_eq!(
+        refused,
+        Some(HostError::Descriptor {
+            domain: "table-wallet".to_string(),
+            cause: crate::DescriptorRefused::PolicyNoOutputDomain {
+                component: "TableWalletPolicy".to_string(),
+            },
+        })
+    );
+}
