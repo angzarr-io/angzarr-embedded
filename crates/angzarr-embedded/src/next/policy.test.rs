@@ -71,3 +71,81 @@ fn a_command_carrying_its_triggers_correlation_passes() {
     // No trigger correlation to compare with: any is kept.
     assert!(check_reaction("ledger", &trigger, None, vec![carried]).is_ok());
 }
+
+#[test]
+fn a_translated_fact_that_is_more_than_a_payload_is_the_policys_bug() {
+    use super::translated;
+    use crate::next::angzarr_router::pb::OnRefusedResponse;
+    use crate::next::v1::{command_page::Body, CommandPage, Fact, FactOrigin, Handling};
+    let payload = crate::next::pack(&ledger::Record {
+        source_sequence: 0,
+        cents: 1,
+    });
+    let page = |body| CommandPage {
+        body: Some(body),
+        ..CommandPage::default()
+    };
+    let fact = || {
+        Body::Fact(Fact {
+            payload: Some(payload.clone()),
+        })
+    };
+    let answer = |book: CommandBook| OnRefusedResponse { fact: Some(book) };
+    let bare = || CommandBook {
+        page: Some(page(fact())),
+        ..CommandBook::default()
+    };
+
+    assert_eq!(
+        translated(&OnRefusedResponse { fact: None }),
+        Ok(None),
+        "no translation"
+    );
+    assert_eq!(translated(&answer(bare())), Ok(Some(payload.clone())));
+
+    let refused = |book: CommandBook| translated(&answer(book)).err().map(|e| e.code);
+    let code = |c: &str| Some(c.to_string());
+    let addressed = CommandBook {
+        cover: Some(cover_in("account", 1, "what-if")),
+        ..bare()
+    };
+    assert_eq!(refused(addressed), code("REFUSAL_FACT_ADDRESSED"));
+    let handled = CommandBook {
+        handling: Some(Handling::default()),
+        ..bare()
+    };
+    assert_eq!(refused(handled), code("REFUSAL_FACT_ADDRESSED"));
+    assert_eq!(
+        refused(CommandBook::default()),
+        code("REFUSAL_FACT_NO_PAGE")
+    );
+    let command = CommandBook {
+        page: Some(page(Body::Command(crate::next::v1::Command {
+            payload: Some(payload.clone()),
+        }))),
+        ..CommandBook::default()
+    };
+    assert_eq!(refused(command), code("REFUSAL_FACT_NOT_A_FACT"));
+    let identified = |edit: fn(&mut CommandPage)| {
+        let mut book = bare();
+        edit(book.page.as_mut().unwrap());
+        refused(book)
+    };
+
+    assert_eq!(
+        identified(|p| p.command_id = Some(crate::next::toys::command_id(1))),
+        code("REFUSAL_FACT_IDENTIFIED")
+    );
+    assert_eq!(
+        identified(|p| p.correlation_id = Some(crate::next::toys::command_id(1))),
+        code("REFUSAL_FACT_IDENTIFIED")
+    );
+    assert_eq!(
+        identified(|p| p.causation_id = Some(Default::default())),
+        code("REFUSAL_FACT_IDENTIFIED")
+    );
+    assert_eq!(
+        identified(|p| p.fact_origin = Some(FactOrigin::default())),
+        code("REFUSAL_FACT_IDENTIFIED")
+    );
+}

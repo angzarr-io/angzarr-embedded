@@ -81,15 +81,29 @@ impl PolicyPort for PolicyDispatch {
         refusal: &markup::v1::Refusal,
         ctx: &CommandContext,
     ) -> Result<Option<Any>, CodedError> {
-        let answer = PolicyDispatch::dispatch_refusal(self, refusal, ctx)?;
-        Ok(answer
-            .fact
-            .and_then(|fact| fact.page)
-            .and_then(|page| match page.body {
-                Some(command_page::Body::Fact(fact)) => fact.payload,
-                _ => None,
-            }))
+        translated(&PolicyDispatch::dispatch_refusal(self, refusal, ctx)?)
     }
+}
+
+/// A policy's `OnRefused` answer on the wire, as the kernel takes it
+/// (decision 14.42): no fact is no translation (`None`); a translated fact
+/// is its payload alone, and one that is more than a payload is the
+/// policy's bug, refused INTERNAL: one that sets its own cover or handling
+/// (`REFUSAL_FACT_ADDRESSED`), with no page (`REFUSAL_FACT_NO_PAGE`), whose
+/// page is not a fact (`REFUSAL_FACT_NOT_A_FACT`), or that sets its own
+/// identity (`REFUSAL_FACT_IDENTIFIED`). The kernel addresses and
+/// identifies every refusal fact itself.
+pub(crate) fn translated(
+    answer: &angzarr_router::pb::OnRefusedResponse,
+) -> Result<Option<Any>, CodedError> {
+    Ok(answer
+        .fact
+        .as_ref()
+        .and_then(|fact| fact.page.as_ref())
+        .and_then(|page| match &page.body {
+            Some(command_page::Body::Fact(fact)) => fact.payload.clone(),
+            _ => None,
+        }))
 }
 
 /// One triggering event's commands, as a policy answered them, checked and

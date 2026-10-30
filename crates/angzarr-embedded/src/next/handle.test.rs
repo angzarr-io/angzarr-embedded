@@ -2010,3 +2010,148 @@ fn a_policys_commands_in_their_triggers_edition_and_correlation_are_delivered() 
     );
     assert_eq!(position(&store, "unchecked", &cover("account", 1)), 1);
 }
+
+/// The account's router table behind a handler recording every book it is
+/// handed.
+struct Recorded {
+    inner: Box<dyn crate::next::angzarr_router::router::CommandHandler>,
+    books: std::sync::Arc<std::sync::Mutex<Vec<CommandBook>>>,
+}
+
+impl crate::next::angzarr_router::router::CommandHandler for Recorded {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+    fn command_types(&self) -> Vec<String> {
+        self.inner.command_types()
+    }
+    fn dispatch(
+        &self,
+        req: &crate::next::angzarr_router::pb::ContextualCommand,
+    ) -> Result<
+        crate::next::angzarr_router::pb::CommandHandlerResponse,
+        crate::next::angzarr_router::error::CodedError,
+    > {
+        self.books
+            .lock()
+            .unwrap()
+            .push(req.command.clone().unwrap_or_default());
+        self.inner.dispatch(req)
+    }
+    fn component_descriptor(
+        &self,
+    ) -> Result<
+        crate::next::angzarr_router::pb::ComponentDescriptor,
+        crate::next::angzarr_router::error::CodedError,
+    > {
+        self.inner.component_descriptor()
+    }
+}
+
+/// With no translation, the kernel builds the pass-through `CommandRefused`
+/// itself and addresses it (decision 14.42, C-0613): to the exact stream of
+/// the triggering event, under the refused command's id, correlation and
+/// causation, its fact origin the refused command's id.
+#[test]
+fn no_translation_makes_the_kernel_build_the_pass_through_fact() {
+    use crate::next::markup::v1::CommandRefused;
+    use crate::next::v1::command_page::Body;
+    let books = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut registry = crate::next::Registry::new();
+    let fees = crate::next::toys::fees();
+    let (version, current) = fees.current();
+    let table = crate::next::route::table::<Account>(
+        std::sync::Arc::new(crate::next::toys::fees()),
+        std::sync::Arc::new(crate::next::Upcaster::new("u", "account")),
+        std::sync::Arc::new(crate::next::toys::account::AccountState::default),
+        false,
+    );
+    let inner = crate::next::toys::handlers::<Account>(*current, version)(table);
+    registry
+        .command_handler(
+            "account",
+            Recorded {
+                inner: Box::new(inner),
+                books: std::sync::Arc::clone(&books),
+            },
+        )
+        .unwrap();
+    crate::next::toys::register::<Ledger>(
+        &mut registry,
+        crate::next::Rulebook::new("v1", ()),
+        crate::next::Upcaster::new("ledger-upcaster", "ledger"),
+    )
+    .unwrap();
+    registry.policy_port(Unchecked {
+        answer: |source| {
+            let deposited = source.pages[0]
+                .payload
+                .as_ref()
+                .is_some_and(|p| p.type_url.ends_with("Deposited"));
+            match deposited {
+                true => {
+                    let mut book = record_for(ledger_cover());
+                    book.page.as_mut().unwrap().body =
+                        Some(Body::Command(crate::next::v1::Command {
+                            payload: Some(crate::next::pack(&ledger::Record {
+                                source_sequence: 1,
+                                cents: LEDGER_LIMIT + 1,
+                            })),
+                        }));
+                    vec![book]
+                }
+                false => Vec::new(),
+            }
+        },
+    });
+    let log = MemoryDeadLetters::new();
+    let kernel = Kernel::new(&registry, &log).on_retryable(crate::next::toys::no_retries());
+    let store = MemoryStore::new();
+    let account = cover("account", 1);
+    for book in [
+        command(account.clone(), AccountCmd::Open.to_any()).id(1),
+        deposit(2, 5),
+    ] {
+        let _ = kernel.handle_any(&store, book, &at(30), &mut ()).ready();
+    }
+
+    let books = books.lock().unwrap();
+    let fact = books.last().expect("the refusal fact reached the account");
+    assert_eq!(fact.cover, Some(account.clone()), "the trigger's stream");
+    let page = fact.page.as_ref().unwrap();
+    let Some(Body::Fact(f)) = &page.body else {
+        panic!("a fact: {page:?}");
+    };
+    let payload = f.payload.as_ref().unwrap();
+    assert_eq!(
+        crate::next::type_name(&payload.type_url),
+        "io.angzarr.v1.CommandRefused"
+    );
+    let refused = <CommandRefused as prost::Message>::decode(&payload.value[..]).unwrap();
+    let trigger = EventRef {
+        stream: Some(account.clone()),
+        sequence: 1,
+    };
+    assert_eq!(refused.trigger, Some(trigger.clone()));
+    let command = refused.command.expect("the refused command");
+    assert_eq!(command.cover, Some(ledger_cover()));
+    let refused_id = ids::policy_command_id(&trigger, "unchecked", 0).unwrap();
+    assert_eq!(
+        command.page.as_ref().and_then(|p| p.command_id.clone()),
+        Some(refused_id.clone())
+    );
+    assert_eq!(
+        page.command_id,
+        Some(refused_id.clone()),
+        "the refused command's id"
+    );
+    assert_eq!(
+        page.causation_id,
+        Some(trigger),
+        "the refused command's causation"
+    );
+    assert_eq!(
+        page.fact_origin.as_ref().map(|o| o.external_id.clone()),
+        Some(refused_id.to_string())
+    );
+}
