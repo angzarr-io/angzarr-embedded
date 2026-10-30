@@ -10,7 +10,7 @@ use crate::next::{
 };
 use angzarr_embedded_diagnostic::Report;
 use angzarr_ports::Cause;
-use angzarr_router::error::{codes, BusinessStatus, CodedError, GrpcCode};
+use angzarr_router::error::{BusinessStatus, CodedError, GrpcCode, RouterReason};
 
 use crate::next::toys::{
     account, at, command, command_id, cover, instant, registry, registry_with_upcasters, root,
@@ -529,7 +529,7 @@ fn every_failure_says_how_to_recover() {
         (
             Recovery::Retry,
             KernelError::Router(CodedError::immediate(
-                crate::next::reasons::CONFLICT_OVERLAP,
+                crate::next::reasons::CoordinatorReason::ConflictOverlap.as_str_name(),
                 [],
             )),
         ),
@@ -537,15 +537,15 @@ fn every_failure_says_how_to_recover() {
         // never the sender's to fix (the owner's ruling, 2026-10-29).
         (
             Recovery::Bug,
-            KernelError::Router(router_own(codes::NO_REFUSAL_HANDLER)),
+            KernelError::Router(router_own(RouterReason::NoRefusalHandler.as_str_name())),
         ),
         (
             Recovery::Bug,
-            KernelError::Router(router_own(codes::UNKNOWN_COMMAND_TYPE)),
+            KernelError::Router(router_own(RouterReason::UnknownCommandType.as_str_name())),
         ),
         (
             Recovery::Bug,
-            KernelError::Router(router_own(codes::ANY_DECODE_FAILED)),
+            KernelError::Router(router_own(RouterReason::AnyDecodeFailed.as_str_name())),
         ),
     ];
     for (recovery, error) in cases {

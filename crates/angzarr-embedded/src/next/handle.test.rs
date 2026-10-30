@@ -1886,7 +1886,10 @@ fn a_policy_command_outside_its_destination_is_refused_by_the_kernel() {
     else {
         panic!("the policy's bug: {failure:?}");
     };
-    assert_eq!(error.code, "POLICY_COMMAND_OUTSIDE_DESTINATION");
+    assert_eq!(
+        error.code,
+        "COORDINATOR_REASON_POLICY_COMMAND_OUTSIDE_DESTINATION"
+    );
     let extra = |key: &str| error.extras.get(key).map(String::as_str);
     assert_eq!(extra("expected_domain"), Some("ledger"));
     assert_eq!(extra("actual_domain"), Some("shelf"));
@@ -1940,7 +1943,10 @@ fn a_policys_commands_are_held_to_their_trigger_by_the_kernel() {
             ..ledger_cover()
         })]
     });
-    assert_eq!(outside.code, "POLICY_COMMAND_OUTSIDE_EDITION");
+    assert_eq!(
+        outside.code,
+        "COORDINATOR_REASON_POLICY_COMMAND_OUTSIDE_EDITION"
+    );
     assert_eq!(
         outside.extras.get("actual_edition").map(String::as_str),
         Some("what-if")
@@ -1956,7 +1962,7 @@ fn a_policys_commands_are_held_to_their_trigger_by_the_kernel() {
             ..ledger_cover()
         })]
     });
-    assert_eq!(rootless.code, "POLICY_COMMAND_NO_ROOT");
+    assert_eq!(rootless.code, "COORDINATOR_REASON_POLICY_COMMAND_NO_ROOT");
     assert_eq!(
         rootless.extras.get("domain").map(String::as_str),
         Some("ledger")
@@ -1973,14 +1979,17 @@ fn a_policys_commands_are_held_to_their_trigger_by_the_kernel() {
             ..ledger_cover()
         })]
     });
-    assert_eq!(empty_root.code, "POLICY_COMMAND_NO_ROOT");
+    assert_eq!(empty_root.code, "COORDINATOR_REASON_POLICY_COMMAND_NO_ROOT");
 
     let other = unchecked_refusal(|_| {
         let mut book = record_for(ledger_cover());
         book.page.as_mut().unwrap().correlation_id = Some(crate::next::toys::correlation(99));
         vec![book]
     });
-    assert_eq!(other.code, "POLICY_COMMAND_OTHER_CORRELATION");
+    assert_eq!(
+        other.code,
+        "COORDINATOR_REASON_POLICY_COMMAND_OTHER_CORRELATION"
+    );
 }
 
 /// A command whose edition, root and correlation are its trigger's (or an

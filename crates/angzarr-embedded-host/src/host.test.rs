@@ -599,7 +599,7 @@ fn described(kind: pb::ComponentKind) -> pb::ComponentDescriptor {
 }
 
 /// C-0687: the host refuses a policy's descriptor with no output domain,
-/// naming the component, under POLICY_NO_OUTPUT_DOMAIN.
+/// naming the component, under COORDINATOR_REASON_POLICY_NO_OUTPUT_DOMAIN.
 #[test]
 fn a_policy_descriptor_without_an_output_domain_is_refused() {
     use angzarr_embedded_diagnostic::Diagnostic;
@@ -607,7 +607,10 @@ fn a_policy_descriptor_without_an_output_domain_is_refused() {
     assert_eq!(crate::validate(&descriptor), Ok(()));
     descriptor.output_domain = String::new();
     let refused = crate::validate(&descriptor).err().unwrap();
-    assert_eq!(refused.reason(), "POLICY_NO_OUTPUT_DOMAIN");
+    assert_eq!(
+        refused.reason(),
+        "COORDINATOR_REASON_POLICY_NO_OUTPUT_DOMAIN"
+    );
     assert_eq!(
         refused,
         crate::DescriptorRefused::PolicyNoOutputDomain {
@@ -638,25 +641,37 @@ fn a_descriptor_that_fails_its_validation_is_refused_for_its_reason() {
         (
             Aggregate,
             |d| d.rules_version.clear(),
-            "MISSING_RULES_VERSION",
+            "COORDINATOR_REASON_MISSING_RULES_VERSION",
         ),
-        (Policy, |d| d.rules_version.clear(), "MISSING_RULES_VERSION"),
-        (Aggregate, |d| d.state = None, "MISSING_STATE_TYPE"),
-        (ProcessManager, |d| d.state = None, "MISSING_STATE_TYPE"),
+        (
+            Policy,
+            |d| d.rules_version.clear(),
+            "COORDINATOR_REASON_MISSING_RULES_VERSION",
+        ),
+        (
+            Aggregate,
+            |d| d.state = None,
+            "COORDINATOR_REASON_MISSING_STATE_TYPE",
+        ),
+        (
+            ProcessManager,
+            |d| d.state = None,
+            "COORDINATOR_REASON_MISSING_STATE_TYPE",
+        ),
         (
             Projector,
             |d| d.state = Some(Default::default()),
-            "STATE_ON_STATELESS_KIND",
+            "COORDINATOR_REASON_STATE_ON_STATELESS_KIND",
         ),
         (
             Aggregate,
             |d| d.starting_types = vec!["orders.v1.Place".to_string()],
-            "STARTING_TYPES_ON_NON_PM",
+            "COORDINATOR_REASON_STARTING_TYPES_ON_NON_PM",
         ),
         (
             Policy,
             |d| d.output_domain.clear(),
-            "POLICY_NO_OUTPUT_DOMAIN",
+            "COORDINATOR_REASON_POLICY_NO_OUTPUT_DOMAIN",
         ),
         (
             Policy,
@@ -665,12 +680,12 @@ fn a_descriptor_that_fails_its_validation_is_refused_for_its_reason() {
                     domain: "payment".to_string(),
                 })
             },
-            "POLICY_INPUT_COUNT",
+            "COORDINATOR_REASON_POLICY_INPUT_COUNT",
         ),
         (
             ProcessManager,
             |d| d.output_domain = "inventory".to_string(),
-            "OUTPUT_DOMAIN_ON_NON_POLICY",
+            "COORDINATOR_REASON_OUTPUT_DOMAIN_ON_NON_POLICY",
         ),
     ];
     for (kind, fault, expected) in cases {

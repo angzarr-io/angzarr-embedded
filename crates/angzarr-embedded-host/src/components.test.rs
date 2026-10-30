@@ -40,7 +40,7 @@ use crate::fake_child::{
     INPUT_ENV, KIND_ENV, LOG_ENV, SEAT_RELEASED, STARTING_ENV, TARGET_ENV,
 };
 
-/// The kernel's key for angzarr's `PM_NO_INSTANCE` (a router code reaches
+/// The kernel's key for angzarr's `COORDINATOR_REASON_PM_NO_INSTANCE` (a router code reaches
 /// the caller under the kernel's own key, `angzarr-embedded-next-` and the
 /// code in kebab case).
 const PM_NO_INSTANCE: &str = "angzarr-embedded-next-pm-no-instance";
@@ -268,7 +268,7 @@ fn process_manager(starting: &str) -> Host {
 }
 
 /// A non-starting COMMAND for a root with no instance is refused before
-/// the child decides: FAILED_PRECONDITION, PM_NO_INSTANCE, a business
+/// the child decides: FAILED_PRECONDITION, COORDINATOR_REASON_PM_NO_INSTANCE, a business
 /// rejection, nothing recorded (process_manager.proto, Starting an
 /// instance). The child would have answered `Noted`.
 #[test]
@@ -293,7 +293,10 @@ fn a_remote_process_managers_non_starting_command_with_no_instance_is_refused() 
         "no instance is started by a non-starting command: {written:?}"
     );
     let Err(Failure::Rejected(rejected)) = &refused else {
-        panic!("refused PM_NO_INSTANCE: {:?}", refused.err());
+        panic!(
+            "refused COORDINATOR_REASON_PM_NO_INSTANCE: {:?}",
+            refused.err()
+        );
     };
     assert_eq!(rejected.code(), PM_NO_INSTANCE);
     assert!(log.lines().is_empty(), "{:?}", log.lines());

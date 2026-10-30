@@ -2,14 +2,14 @@
 //! angzarr-cli generates the `ComponentDescriptor` at build time and the
 //! child answers `Describe` with it unchanged; the host, as its
 //! coordinator, refuses one that fails a rule, as a readiness failure,
-//! naming the component and the reason key (`catalog/reasons.toml`):
+//! naming the component and the reason key (a `CoordinatorReason`):
 //! [`Host::start`](crate::Host::start) refuses such a child as
 //! [`HostError::Descriptor`](crate::HostError::Descriptor), after its kind
 //! is checked against its `kind`, and on every restart.
 
 use std::fmt;
 
-use angzarr_embedded::next::reasons;
+use angzarr_embedded::next::reasons::CoordinatorReason;
 use angzarr_embedded_diagnostic::{Arg, Diagnostic};
 use angzarr_router::pb::{ComponentDescriptor, ComponentKind};
 
@@ -17,36 +17,48 @@ use angzarr_router::pb::{ComponentDescriptor, ComponentKind};
 /// the component, in the order the rules are checked.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DescriptorRefused {
-    /// `MISSING_RULES_VERSION`: an empty rules version.
+    /// `COORDINATOR_REASON_MISSING_RULES_VERSION`: an empty rules version.
     MissingRulesVersion { component: String },
-    /// `STARTING_TYPES_ON_NON_PM`: starting types on a kind that is not a
+    /// `COORDINATOR_REASON_STARTING_TYPES_ON_NON_PM`: starting types on a kind that is not a
     /// process manager.
     StartingTypesOnNonPm { component: String, kind: String },
-    /// `MISSING_STATE_TYPE`: an aggregate or process manager with no state.
+    /// `COORDINATOR_REASON_MISSING_STATE_TYPE`: an aggregate or process manager with no state.
     MissingStateType { component: String, kind: String },
-    /// `STATE_ON_STATELESS_KIND`: a policy or projector with a state.
+    /// `COORDINATOR_REASON_STATE_ON_STATELESS_KIND`: a policy or projector with a state.
     StateOnStatelessKind { component: String, kind: String },
-    /// `POLICY_INPUT_COUNT`: a policy with other than exactly one input.
+    /// `COORDINATOR_REASON_POLICY_INPUT_COUNT`: a policy with other than exactly one input.
     PolicyInputCount { component: String, input_count: u64 },
-    /// `POLICY_NO_OUTPUT_DOMAIN`: a policy with no output domain.
+    /// `COORDINATOR_REASON_POLICY_NO_OUTPUT_DOMAIN`: a policy with no output domain.
     PolicyNoOutputDomain { component: String },
-    /// `OUTPUT_DOMAIN_ON_NON_POLICY`: an output domain on any other kind.
+    /// `COORDINATOR_REASON_OUTPUT_DOMAIN_ON_NON_POLICY`: an output domain on any other kind.
     OutputDomainOnNonPolicy { component: String, kind: String },
 }
 
 impl DescriptorRefused {
-    /// The reason key, as `catalog/reasons.toml` names it (the kernel's
-    /// constant for it).
+    /// The reason key: its `CoordinatorReason` value's full name, as it
+    /// travels.
     pub fn reason(&self) -> &'static str {
         match self {
-            DescriptorRefused::MissingRulesVersion { .. } => reasons::MISSING_RULES_VERSION,
-            DescriptorRefused::StartingTypesOnNonPm { .. } => reasons::STARTING_TYPES_ON_NON_PM,
-            DescriptorRefused::MissingStateType { .. } => reasons::MISSING_STATE_TYPE,
-            DescriptorRefused::StateOnStatelessKind { .. } => reasons::STATE_ON_STATELESS_KIND,
-            DescriptorRefused::PolicyInputCount { .. } => reasons::POLICY_INPUT_COUNT,
-            DescriptorRefused::PolicyNoOutputDomain { .. } => reasons::POLICY_NO_OUTPUT_DOMAIN,
+            DescriptorRefused::MissingRulesVersion { .. } => {
+                CoordinatorReason::MissingRulesVersion.as_str_name()
+            }
+            DescriptorRefused::StartingTypesOnNonPm { .. } => {
+                CoordinatorReason::StartingTypesOnNonPm.as_str_name()
+            }
+            DescriptorRefused::MissingStateType { .. } => {
+                CoordinatorReason::MissingStateType.as_str_name()
+            }
+            DescriptorRefused::StateOnStatelessKind { .. } => {
+                CoordinatorReason::StateOnStatelessKind.as_str_name()
+            }
+            DescriptorRefused::PolicyInputCount { .. } => {
+                CoordinatorReason::PolicyInputCount.as_str_name()
+            }
+            DescriptorRefused::PolicyNoOutputDomain { .. } => {
+                CoordinatorReason::PolicyNoOutputDomain.as_str_name()
+            }
             DescriptorRefused::OutputDomainOnNonPolicy { .. } => {
-                reasons::OUTPUT_DOMAIN_ON_NON_POLICY
+                CoordinatorReason::OutputDomainOnNonPolicy.as_str_name()
             }
         }
     }

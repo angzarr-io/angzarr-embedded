@@ -32,31 +32,37 @@ use super::payload::{type_name, Payload};
 use super::version::Rulebook;
 
 /// The angzarr-embedded code a reason in the router's shape is forwarded
-/// under, for every reason angzarr-router answers with (its
-/// `error::codes::ALL`) and every coordinator key the kernel answers in
-/// that shape ([`reasons::ANSWERED`](super::reasons::ANSWERED)):
-/// `angzarr-embedded-next-` and the reason in kebab-case; `None` for a
-/// reason that is neither (a domain's own). The catalog check holds the
-/// catalog to the router's list.
+/// under, for every reason angzarr-router answers with (each `RouterReason`
+/// but `UNSPECIFIED`) and every coordinator key the kernel answers in that
+/// shape ([`reasons::ANSWERED`](super::reasons::ANSWERED)):
+/// `angzarr-embedded-next-` and the reason, its enum's prefix dropped, in
+/// kebab-case (`COORDINATOR_REASON_PM_NO_INSTANCE` is
+/// `angzarr-embedded-next-pm-no-instance`); `None` for a reason that is
+/// neither (a domain's own). The catalog check holds the catalog to the
+/// router's list.
 pub(crate) fn reason_code(reason: &str) -> Option<&'static str> {
     forwarded()
         .any(|known| known == reason)
         .then(|| intern(&kebab(reason)))
 }
 
-/// Every reason [`reason_code`] forwards: the router's, then the
-/// coordinator's the kernel answers.
+/// Every reason [`reason_code`] forwards, by its full name: the router's,
+/// then the coordinator's the kernel answers.
 pub(crate) fn forwarded() -> impl Iterator<Item = &'static str> {
-    (angzarr_router::error::codes::ALL.iter())
-        .chain(super::reasons::ANSWERED)
-        .copied()
+    (super::reasons::router().map(|reason| reason.as_str_name())).chain(
+        super::reasons::ANSWERED
+            .iter()
+            .map(|reason| reason.as_str_name()),
+    )
 }
 
-/// `REASON` as `angzarr-embedded-next-reason`.
+/// `PREFIX_REASON` as `angzarr-embedded-next-reason`.
 fn kebab(reason: &str) -> String {
     format!(
         "angzarr-embedded-next-{}",
-        reason.to_ascii_lowercase().replace('_', "-")
+        super::reasons::unprefixed(reason)
+            .to_ascii_lowercase()
+            .replace('_', "-")
     )
 }
 
@@ -94,7 +100,7 @@ pub(crate) const TOO_MANY_STEPS: &str = "ANGZARR_EMBEDDED_TOO_MANY_STEPS";
 /// A domain's refusal of a command, as its caller receives it (angzarr's
 /// business rejection, [`is_rejection`]): the code and args of the
 /// refusal the handler made (or the router's, a process manager's
-/// `PM_NO_INSTANCE`), and the typed refusal object it carries, if any.
+/// `COORDINATOR_REASON_PM_NO_INSTANCE`), and the typed refusal object it carries, if any.
 /// The refusing domain recorded nothing.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Rejected {
@@ -106,7 +112,7 @@ pub struct Rejected {
 impl Rejected {
     /// The router's rejection, in the kernel's terms: under the router's
     /// reason as angzarr-embedded's code (a typed refusal's
-    /// COMMAND_REFUSED), or the handler's own, its metadata the args.
+    /// ROUTER_REASON_COMMAND_REFUSED), or the handler's own, its metadata the args.
     pub(crate) fn of(error: &CodedError) -> Rejected {
         let code = reason_code(&error.code).unwrap_or_else(|| intern(&error.code));
         let report = router_args(error)
@@ -179,8 +185,8 @@ impl Diagnostic for Rejected {
 /// ALREADY_EXISTS, OUT_OF_RANGE, PERMISSION_DENIED), which decides the
 /// class (decision 14.37). The router answers its own errors on malformed
 /// input INTERNAL, so a refusal is a handler's, or the router's on its
-/// behalf (a typed refusal's COMMAND_REFUSED, a process manager's
-/// PM_NO_INSTANCE).
+/// behalf (a typed refusal's ROUTER_REASON_COMMAND_REFUSED, a process manager's
+/// COORDINATOR_REASON_PM_NO_INSTANCE).
 pub(crate) fn is_rejection(error: &CodedError) -> bool {
     super::error::class(error.grpc as i32) == super::error::Class::BusinessFatal
 }
@@ -189,7 +195,7 @@ pub(crate) fn is_rejection(error: &CodedError) -> bool {
 /// [`KernelError::Router`](super::KernelError::Router) (never a refusal,
 /// [`is_rejection`]: that is [`Rejected`]), is a fatal bug ([`class`](super::class):
 /// INTERNAL, UNKNOWN, DATA_LOSS), never a policy's failure
-/// ([`POLICY_FAILED`]). A handler's bug is UNHANDLED_HANDLER_ERROR, its
+/// ([`POLICY_FAILED`]). A handler's bug is ROUTER_REASON_UNHANDLED_HANDLER_ERROR, its
 /// own code and args its `cause`; the router's own errors on malformed
 /// input are bugs too. The kernel dead-letters it by its code and args at
 /// once, and a policy's step moves the policy's position past it unless
@@ -202,7 +208,7 @@ pub(crate) fn is_handler_fault(error: &CodedError) -> bool {
 
 /// A handler's refusal `rejection`, with its typed refusal object, as the
 /// router carries it: a business rejection (FAILED_PRECONDITION). A typed
-/// refusal is keyed COMMAND_REFUSED, its object's type as `refusal_type`
+/// refusal is keyed ROUTER_REASON_COMMAND_REFUSED, its object's type as `refusal_type`
 /// and the object beside (decision 14.37); a refusal without one under its
 /// own code, its args flattened as metadata.
 pub fn rejection(rejection: &dyn Diagnostic, refusal: Option<Any>) -> HandlerError {
@@ -213,7 +219,7 @@ pub fn rejection(rejection: &dyn Diagnostic, refusal: Option<Any>) -> HandlerErr
 /// under its status ([`refused`]), an immediate return (ABORTED under its
 /// own code, angzarr-router's `CodedError::immediate`), a fatal bug
 /// ([`bug`]), or a retryable bug under the status it picked
-/// (UNHANDLED_HANDLER_ERROR, its cause as a fatal bug's,
+/// (ROUTER_REASON_UNHANDLED_HANDLER_ERROR, its cause as a fatal bug's,
 /// `CodedError::retryable_bug`).
 pub(crate) fn failed<R: Diagnostic>(failed: Failed<super::markup::Rejection<R>>) -> HandlerError {
     match failed {
@@ -233,14 +239,14 @@ pub(crate) fn failed<R: Diagnostic>(failed: Failed<super::markup::Rejection<R>>)
 }
 
 /// A handler's bug, as the router carries it (decision 14.37): INTERNAL
-/// UNHANDLED_HANDLER_ERROR, the bug's code as its `cause` and its args,
+/// ROUTER_REASON_UNHANDLED_HANDLER_ERROR, the bug's code as its `cause` and its args,
 /// flattened, as `cause.<arg>`; never a refusal.
 pub(crate) fn bug(bug: &dyn Diagnostic) -> HandlerError {
     HandlerError::Coded(CodedError::bug(bug.code(), flat_args(bug)))
 }
 
 /// A handler's refusal `rejection` under `status`, with its typed refusal
-/// object: a typed refusal keyed COMMAND_REFUSED, its object's type as
+/// object: a typed refusal keyed ROUTER_REASON_COMMAND_REFUSED, its object's type as
 /// `refusal_type` and the object beside; a refusal without one under its
 /// own code, its args flattened as metadata. Either goes out under
 /// `status`.
@@ -261,7 +267,7 @@ fn refused(
 /// One of angzarr-embedded's own failures, INTERNAL under its own `code`
 /// ([`POLICY_FAILED`], [`TOO_MANY_STEPS`], an upcast's failure): never a
 /// handler's bug, which angzarr-router's `CodedError::bug` answers as
-/// UNHANDLED_HANDLER_ERROR with the handler's code as its cause.
+/// ROUTER_REASON_UNHANDLED_HANDLER_ERROR with the handler's code as its cause.
 pub(crate) fn internal(
     code: &str,
     extras: impl IntoIterator<Item = (String, String)>,

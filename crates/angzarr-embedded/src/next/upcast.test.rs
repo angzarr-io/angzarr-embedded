@@ -135,11 +135,11 @@ fn an_old_command_is_upcast_then_decided() {
         matches!(
             &refused,
             Failure::Kernel(KernelError::Router(e))
-                if e.code == "UNKNOWN_COMMAND_TYPE"
+                if e.code == "ROUTER_REASON_UNKNOWN_COMMAND_TYPE"
                     && e.extras.get("type_url").map(String::as_str)
                         == Some("/toy.account.cmd.v0.Credit")
         ),
-        "no upcaster path: the router's UNKNOWN_COMMAND_TYPE, naming the type URL: {refused:?}"
+        "no upcaster path: the router's ROUTER_REASON_UNKNOWN_COMMAND_TYPE, naming the type URL: {refused:?}"
     );
 }
 

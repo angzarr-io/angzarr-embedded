@@ -457,7 +457,7 @@ pub const MARKUP_RULES_VERSION: &str = "markup-1";
 ///   may start an instance. Any other input for a stream with no instance is
 ///   not delivered, decided before the handler by the type after
 ///   upcasting: a FACT is skipped silently (applied, no events, nothing
-///   dead-lettered), and a COMMAND is refused (`PM_NO_INSTANCE`, forwarded
+///   dead-lettered), and a COMMAND is refused (`COORDINATOR_REASON_PM_NO_INSTANCE`, forwarded
 ///   as `angzarr-embedded-next-pm-no-instance`, a business refusal, so a
 ///   policy's refused command yields its refusal fact like any other),
 ///   recording nothing.
@@ -507,14 +507,14 @@ pub type Refuses<A, C> = <A as Refusing<C>>::Refuses;
 
 /// A typed refusal object, packed: one of a command's `refuses` types (a
 /// [`DomainMessage`] of the command's own domain). Keyed, as on the wire,
-/// COMMAND_REFUSED with the object's full type name as `refusal_type`
+/// ROUTER_REASON_COMMAND_REFUSED with the object's full type name as `refusal_type`
 /// (decision 14.37): the object is the refusal's data.
 #[derive(Clone, PartialEq, Debug)]
 pub struct TypedRefusal {
     object: Any,
 }
 
-/// The code a typed refusal is keyed under: angzarr's COMMAND_REFUSED.
+/// The code a typed refusal is keyed under: angzarr's ROUTER_REASON_COMMAND_REFUSED.
 const COMMAND_REFUSED: &str = "angzarr-embedded-next-command-refused";
 
 impl TypedRefusal {
@@ -630,13 +630,13 @@ impl<R: angzarr_embedded_diagnostic::Diagnostic> angzarr_embedded_diagnostic::Di
 ///   capped backoff, then dead-lettered. Never a policy's refusal path.
 /// - [`Failed::Bug`] (bug, fatal): a defect, never a business answer: the
 ///   report of the bug value (a policy's `Err` is the same), its code and
-///   args. It goes out as INTERNAL UNHANDLED_HANDLER_ERROR, the code as its
+///   args. It goes out as INTERNAL ROUTER_REASON_UNHANDLED_HANDLER_ERROR, the code as its
 ///   `cause` and each arg as `cause.<arg>`, and the input is dead-lettered
 ///   at once.
 /// - [`Failed::RetryableBug`] (bug, retryable): a defect outside the
 ///   handler that may clear (a dependency that is down), under the
 ///   [`RetryableStatus`] the handler picks. It goes out under that status
-///   as UNHANDLED_HANDLER_ERROR, its cause as a fatal bug's
+///   as ROUTER_REASON_UNHANDLED_HANDLER_ERROR, its cause as a fatal bug's
 ///   (angzarr-router's `CodedError::retryable_bug`); the kernel retries
 ///   it with capped backoff, then dead-letters it with its `retry_count`.
 ///   Never a policy's refusal path.
@@ -1232,13 +1232,13 @@ fn context_of(cctx: angzarr_router::domain::CommandContext) -> Context {
     Context { command: cctx }
 }
 
-/// The input `any` as a `T`, or the router's ANY_DECODE_FAILED for a
+/// The input `any` as a `T`, or the router's ROUTER_REASON_ANY_DECODE_FAILED for a
 /// payload that is not one: malformed input, a bug (INTERNAL), never a
 /// refusal (decision 14.37). Bytes that do not decode carry prost's text
 /// as `ext_err_txt`; a payload of another type, or not a valid `T`, its
 /// type alone.
 fn input<T: DomainMessage>(any: &Any) -> Result<T, angzarr_router::error::HandlerError> {
-    use angzarr_router::error::{codes, extras, CodedError, GrpcCode, HandlerError};
+    use angzarr_router::error::{extras, CodedError, GrpcCode, HandlerError, RouterReason};
     let message_type = || super::payload::type_name(&any.type_url).to_string();
     match __decode::<T>(any) {
         Ok(Some(value)) => Ok(value),
@@ -1246,7 +1246,7 @@ fn input<T: DomainMessage>(any: &Any) -> Result<T, angzarr_router::error::Handle
             CodedError::undecodable(&message_type(), &error),
         )),
         Ok(None) | Err(_) => Err(HandlerError::Coded(CodedError {
-            code: codes::ANY_DECODE_FAILED.to_string(),
+            code: RouterReason::AnyDecodeFailed.as_str_name().to_string(),
             extras: [(extras::MESSAGE_TYPE.to_string(), message_type())].into(),
             grpc: GrpcCode::Internal,
             refusal: None,

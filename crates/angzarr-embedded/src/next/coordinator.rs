@@ -44,9 +44,9 @@
 use angzarr_proto::v1::{
     command_page, CommandBook, ConflictResolution, Cover, EventBook, EventPage, Handling, Snapshot,
 };
-use angzarr_router::error::{codes, extras, BusinessStatus, CodedError};
+use angzarr_router::error::{extras, BusinessStatus, CodedError, RouterReason};
 
-use super::reasons::{self, args};
+use super::reasons::{args, CoordinatorReason};
 use angzarr_router::pb::ContextualCommand;
 use prost_types::{Any, Timestamp};
 
@@ -212,11 +212,11 @@ pub(crate) enum Admitted {
 /// step 3 read (`recorded`, the events found under its id; whether its
 /// stream `exists`), in order:
 /// 1. a refusal fact (a fact with a causation) is admitted only by the
-///    exact stream its causation names (`REFUSAL_FACT_WRONG_STREAM`, a bug);
+///    exact stream its causation names (`COORDINATOR_REASON_REFUSAL_FACT_WRONG_STREAM`, a bug);
 /// 2. events found under its id are [`Admitted::Duplicate`];
 /// 3. a process manager's start rule: with no instance, an input whose type
 ///    after upcasting (`current`) is not one of its starting types is
-///    refused `PM_NO_INSTANCE` (a business refusal) if a command, and
+///    refused `COORDINATOR_REASON_PM_NO_INSTANCE` (a business refusal) if a command, and
 ///    [`Admitted::Skip`]ped if a fact. Its upcast's failure is
 ///    [`KernelError::Upcast`].
 pub(crate) fn admit(
@@ -230,7 +230,7 @@ pub(crate) fn admit(
     if let (true, Some(cause)) = (is_fact, command.causation_id()) {
         if cause.stream.as_ref() != Some(command.cover()) {
             return Err(Failure::Kernel(KernelError::Router(route::internal(
-                reasons::REFUSAL_FACT_WRONG_STREAM,
+                CoordinatorReason::RefusalFactWrongStream.as_str_name(),
                 [(args::DOMAIN.to_string(), command.domain().to_string())],
             ))));
         }
@@ -258,7 +258,7 @@ pub(crate) fn admit(
     }
     Err(Failure::Rejected(Rejected::of(&CodedError::rejection(
         BusinessStatus::FailedPrecondition,
-        reasons::PM_NO_INSTANCE,
+        CoordinatorReason::PmNoInstance.as_str_name(),
         [(
             extras::TYPE_URL.to_string(),
             command.payload().type_url.clone(),
@@ -400,7 +400,7 @@ pub(crate) fn load(novel: Novel, nonces: &mut u64) -> Result<Contextual, KernelE
 /// accepted, `recorded_at = max(sampled now, the stream's last)` (the
 /// `ContextualCommand.recorded_at` its handler read), with the domain's
 /// rules version, from the head on. The router catches a handler's panic,
-/// a bug (UNHANDLED_HANDLER_ERROR, cause HANDLER_PANICKED). A bug
+/// a bug (ROUTER_REASON_UNHANDLED_HANDLER_ERROR, cause ROUTER_REASON_HANDLER_PANICKED). A bug
 /// ([`route::is_handler_fault`]) fails it as [`KernelError::Router`], and
 /// `dead_letters` gets a line of its code and args.
 pub(crate) fn decide(
@@ -421,16 +421,16 @@ pub(crate) fn decide(
         .dispatch(&contextual)
         .and_then(|response| judged(&contextual, response));
     let response = response.map_err(|error| {
-        let error = match error.code.as_str() {
-            codes::UNKNOWN_COMMAND_TYPE | codes::NO_FACT_HANDLER => {
+        let error = match RouterReason::from_str_name(&error.code) {
+            Some(RouterReason::UnknownCommandType | RouterReason::NoFactHandler) => {
                 as_sent(error, identified.payload(), &command.current)
             }
             _ => error,
         };
         let (stream, expected, actual) =
             (identified.cover().clone(), command.expected, command.head);
-        match error.code.as_str() {
-            reasons::CONFLICT_OVERLAP => {
+        match CoordinatorReason::from_str_name(&error.code) {
+            Some(CoordinatorReason::ConflictOverlap) => {
                 let units = |key: &str| error.extras.get(key).cloned().unwrap_or_default();
                 Failure::Kernel(KernelError::Overlap {
                     stream,
@@ -440,7 +440,7 @@ pub(crate) fn decide(
                     command_units: units(args::COMMAND_UNITS),
                 })
             }
-            reasons::CONFLICT_UNRESOLVED => {
+            Some(CoordinatorReason::ConflictUnresolved) => {
                 let unresolved = KernelError::Unresolved {
                     stream,
                     expected,
@@ -493,8 +493,8 @@ pub(crate) fn decide(
 /// `response` to `delivered`, judged by its conflict report (decision
 /// 14.42; [`conflict::judge`](super::conflict::judge)): the router's answer
 /// when its events may be kept; otherwise the refusal the kernel answers
-/// with, as the router would have, ABORTED: `CONFLICT_UNRESOLVED`, or
-/// `CONFLICT_OVERLAP` naming both unit sets.
+/// with, as the router would have, ABORTED: `COORDINATOR_REASON_CONFLICT_UNRESOLVED`, or
+/// `COORDINATOR_REASON_CONFLICT_OVERLAP` naming both unit sets.
 fn judged(
     delivered: &ContextualCommand,
     response: angzarr_router::pb::CommandHandlerResponse,
@@ -511,9 +511,12 @@ fn judged(
         response.conflict.as_ref(),
     ) {
         Judgement::Kept => Ok(response),
-        Judgement::Unresolved => Err(CodedError::immediate(reasons::CONFLICT_UNRESOLVED, [])),
+        Judgement::Unresolved => Err(CodedError::immediate(
+            CoordinatorReason::ConflictUnresolved.as_str_name(),
+            [],
+        )),
         Judgement::Overlap { window, command } => Err(CodedError::immediate(
-            reasons::CONFLICT_OVERLAP,
+            CoordinatorReason::ConflictOverlap.as_str_name(),
             [
                 (args::WINDOW_UNITS.to_string(), window.join(",")),
                 (args::COMMAND_UNITS.to_string(), command.join(",")),
