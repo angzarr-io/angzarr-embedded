@@ -1521,6 +1521,11 @@ impl<D: Domain, P: Projection<D>> Project for ProjectionRoute<'_, D, P> {
 #[path = "handle.test.rs"]
 mod tests;
 
+// Same-stream concurrency, optimistic: forced races on one stream.
+#[cfg(test)]
+#[path = "concurrency.test.rs"]
+mod concurrency_tests;
+
 /// A future that is pending once, waking itself: a turn for another task.
 struct Yield(bool);
 
