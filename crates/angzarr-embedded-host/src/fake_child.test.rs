@@ -108,6 +108,10 @@ pub(crate) const CONTROL_ENV: &str = "ANGZARR_FAKE_CONTROL";
 pub(crate) mod health {
     /// NOT_SERVING.
     pub(crate) const NOT_SERVING: &str = "not-serving";
+    /// UNKNOWN.
+    pub(crate) const UNKNOWN: &str = "unknown";
+    /// SERVICE_UNKNOWN (a Watch's answer for a service it does not know).
+    pub(crate) const SERVICE_UNKNOWN: &str = "service-unknown";
     /// No health service at all.
     pub(crate) const NONE: &str = "none";
 }
@@ -274,10 +278,11 @@ fn serve(name: String, close_stdout: bool) -> ! {
         let kind = std::env::var(KIND_ENV).unwrap_or_default();
         if kind == kind::UPCASTER {
             let started = std::env::var(HEALTH_ENV).unwrap_or_default();
-            let initial = if started == health::NOT_SERVING {
-                ServingStatus::NotServing
-            } else {
-                ServingStatus::Serving
+            let initial = match started.as_str() {
+                health::NOT_SERVING => ServingStatus::NotServing,
+                health::UNKNOWN => ServingStatus::Unknown,
+                health::SERVICE_UNKNOWN => ServingStatus::ServiceUnknown,
+                _ => ServingStatus::Serving,
             };
             let (set, status) = tokio::sync::watch::channel(initial as i32);
             if let Ok(control) = std::env::var(CONTROL_ENV) {

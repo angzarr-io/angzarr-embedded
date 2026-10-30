@@ -1111,6 +1111,51 @@ fn a_sidecar_is_up_only_while_its_health_reports_serving() {
     assert_eq!(payloads(&store, &cover("table")).len(), 1);
 }
 
+/// A sidecar is up only while its health reports SERVING, not merely while
+/// it does not report NOT_SERVING: one that reports UNKNOWN or
+/// SERVICE_UNKNOWN is handed back down, and nothing that needs it is
+/// delivered. The supervisor's acting on the status is awaited, never
+/// polled for.
+#[test]
+fn a_sidecar_whose_health_is_unknown_is_not_up() {
+    for status in [health::UNKNOWN, health::SERVICE_UNKNOWN] {
+        let sidecar = with_env(upcaster_domain(), &[(HEALTH_ENV, status)]);
+        let (applied, acted) = std::sync::mpsc::channel();
+        let hooks = Hooks {
+            applied: Some(applied),
+            ..Hooks::default()
+        };
+        let host = Host::start_with(config(vec![sidecar]), hooks).expect("the host starts");
+        let mut registry = Registry::new();
+        registry
+            .command_handler("table", Table, descriptor("Table", "/test.table.v1.State"))
+            .unwrap();
+        host.register(&mut registry).unwrap();
+        let log = MemoryDeadLetters::new();
+        let store = MemoryStore::new();
+        let kernel = Kernel::new(&registry, &log).on_retryable(OnRetryable {
+            max_retries: 0,
+            ..OnRetryable::default()
+        });
+
+        assert_eq!(
+            acted.recv_timeout(Duration::from_secs(20)),
+            Ok(false),
+            "came up {status}"
+        );
+        let refused = block_on(kernel.handle_any(
+            &store,
+            send("table", 1, any("/test.table.v0.Sit")),
+            &sampled(1),
+            &mut (),
+        ))
+        .err()
+        .expect("not delivered");
+        assert!(not_serving(&refused), "{status}: {refused:?}");
+        assert!(payloads(&store, &cover("table")).is_empty(), "{status}");
+    }
+}
+
 /// A sidecar that serves no gRPC health is refused at start, as a domain
 /// whose Describe fails is: naming the component and the status's code.
 #[test]
