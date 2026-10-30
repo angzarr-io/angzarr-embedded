@@ -1088,6 +1088,153 @@ mod upcasting {
         assert_eq!(extra("type_url"), Some("/toy.account.v9.Bonus"));
         assert_eq!(extra("upcast_type_url"), Some("/toy.account.v9.Bonus"));
     }
+
+    /// The account's router table with no upcaster of its own, recording
+    /// the type of every stored event it is handed.
+    struct History {
+        inner: Box<dyn CommandHandler>,
+        seen: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl CommandHandler for History {
+        fn name(&self) -> &str {
+            self.inner.name()
+        }
+        fn command_types(&self) -> Vec<String> {
+            self.inner.command_types()
+        }
+        fn dispatch(
+            &self,
+            req: &pb::ContextualCommand,
+        ) -> Result<pb::CommandHandlerResponse, CodedError> {
+            let types = (req.events.iter())
+                .flat_map(|book| &book.pages)
+                .filter_map(|page| page.payload.as_ref())
+                .map(|payload| payload.type_url.clone());
+            self.seen.lock().unwrap().extend(types);
+            self.inner.dispatch(req)
+        }
+        fn component_descriptor(&self) -> Result<pb::ComponentDescriptor, CodedError> {
+            self.inner.component_descriptor()
+        }
+    }
+
+    /// A registry whose account is [`History`], a handler the kernel did
+    /// not build (as one in another process is), upcast through
+    /// `upcaster` as its sidecar; beside it the ledger.
+    fn handled_account(upcaster: Upcaster) -> (Registry, Arc<Mutex<Vec<String>>>) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let rules = fees();
+        let (version, current) = rules.current();
+        let table = crate::next::route::table::<Account>(
+            Arc::new(fees()),
+            Arc::new(Upcaster::new("account-upcaster", "account")),
+            Arc::new(account::AccountState::default),
+            false,
+        );
+        let inner = handlers::<Account>(*current, version)(table);
+        let mut registry = Registry::new();
+        registry
+            .command_handler(
+                "account",
+                History {
+                    inner: Box::new(inner),
+                    seen: Arc::clone(&seen),
+                },
+            )
+            .unwrap();
+        registry.upcast_with("account", upcaster);
+        crate::next::toys::register::<crate::next::toys::Ledger>(
+            &mut registry,
+            crate::next::Rulebook::new("v1", ()),
+            Upcaster::new("ledger-upcaster", "ledger"),
+        )
+        .unwrap();
+        (registry, seen)
+    }
+
+    /// Account 1 as an older build wrote it: opened, then 2 euros credited
+    /// under the old event type.
+    fn old_history(store: &MemoryStore) {
+        use crate::next::v1::{event_meta::Causation, EventMeta, EventPage};
+        let page = |sequence: u64, payload| EventPage {
+            payload: Some(payload),
+            meta: Some(EventMeta {
+                causation: Some(Causation::CommandId(crate::next::toys::command_id(
+                    u128::from(sequence) + 1,
+                ))),
+                correlation_id: Some(crate::next::toys::command_id(u128::from(sequence) + 1)),
+                recorded_at: Some(crate::next::toys::instant(sequence as i64)),
+                rules_version: "v2".to_string(),
+                ..EventMeta::default()
+            }),
+            sequence,
+        };
+        let log = [
+            page(0, pack(&account::Opened {})),
+            page(1, pack(&account::v0::Credited { euros: 2 })),
+        ];
+        store
+            .write(Write::append(sref(&cover("account", 1)), 0, &log))
+            .ready()
+            .unwrap();
+    }
+
+    /// A stream loaded for a command reaches its handler in current shapes,
+    /// through the domain's sidecar, whoever built the handler (C-0584).
+    #[test]
+    fn a_handlers_stored_events_reach_it_as_the_current_types() {
+        let (registry, seen) = handled_account(account_upcaster());
+        let store = MemoryStore::new();
+        old_history(&store);
+        let deposit = command(cover("account", 1), AccountCmd::Deposit(1).to_any()).id(3);
+        let handled = any(&store, &registry, deposit, 20);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [
+                "/toy.account.v1.Opened".to_string(),
+                "/toy.account.v1.Deposited".to_string()
+            ],
+            "the handler is handed current types only"
+        );
+        assert_eq!(
+            payloads::<AccountEvent>(&handled.unwrap().books()),
+            [AccountEvent::Deposited(1)]
+        );
+    }
+
+    /// A policy reading a stream's stored events is handed them in current
+    /// shapes, through the source's sidecar, whoever built the source's
+    /// handler (C-0586).
+    #[test]
+    fn a_policy_reads_a_handlers_stored_events_as_the_current_types() {
+        use crate::next::toys::{ledger, ledger_root, no_retries, Bookkeeping};
+        let (mut registry, _) = handled_account(account_upcaster());
+        registry.policy(Bookkeeping);
+        let store = MemoryStore::new();
+        old_history(&store);
+        let log = crate::next::MemoryDeadLetters::new();
+        crate::next::Kernel::new(&registry, &log)
+            .on_retryable(no_retries())
+            .resume(&store, &at(30), &mut ())
+            .ready()
+            .unwrap();
+        let ledger = crate::next::v1::Cover {
+            domain: "ledger".to_string(),
+            root: Some(ledger_root()),
+            edition: None,
+        };
+        let recorded: Vec<(u64, i64)> = pages(&store, &ledger)
+            .iter()
+            .map(|page| {
+                let payload = page.payload.as_ref().unwrap();
+                let recorded =
+                    <ledger::Recorded as prost::Message>::decode(&payload.value[..]).unwrap();
+                (recorded.source_sequence, recorded.cents)
+            })
+            .collect();
+        assert_eq!(recorded, [(0, 0), (1, 200)], "the credit booked in cents");
+    }
 }
 
 mod admission {
