@@ -64,7 +64,8 @@ pub const EXT_ERR_TXT: &str = "ext_err_txt";
 
 /// The values of [`CAUSE`].
 pub mod causes {
-    /// No child is running: it exited and is being restarted.
+    /// No child is up: it exited and is being restarted, or, a sidecar,
+    /// its health does not report SERVING.
     pub const NOT_RUNNING: &str = "not-running";
     /// The call did not reach the child, or its answer did not come back.
     pub const TRANSPORT: &str = "transport";
@@ -90,12 +91,13 @@ struct Remote {
 }
 
 /// The connection to a component's current child, which its supervisor
-/// sets when a child comes up and clears when it exits.
+/// sets when a child comes up and clears when it exits (a sidecar's, when
+/// its health turns SERVING and when it turns otherwise).
 pub(crate) struct Link {
     pub(crate) channel: RwLock<Option<Channel>>,
-    /// How many children have come up: the supervisor counts each one
-    /// after setting its channel, so a watcher that sees `n` reaches the
-    /// `n`th child.
+    /// How many times a child has come up: the supervisor counts each one
+    /// after setting its channel (a sidecar's each time its health turns
+    /// SERVING), so a watcher that sees `n` reaches the `n`th.
     pub(crate) generation: tokio::sync::watch::Sender<u64>,
 }
 
@@ -331,9 +333,9 @@ impl RemotePolicyHandler {
 }
 
 /// A remote upcaster sidecar (decision 14.39): its child serves
-/// `UpcasterService` alone, for [`Self::upcasts`], and the kernel upcasts
-/// that domain's inputs through it, as its `UpcastPort`. Cloning it is
-/// cheap.
+/// `UpcasterService` and gRPC health, for [`Self::upcasts`], and the kernel
+/// upcasts that domain's inputs through it, as its `UpcastPort`, while its
+/// health reports SERVING. Cloning it is cheap.
 #[derive(Clone)]
 pub struct RemoteUpcaster {
     inner: Arc<Remote>,

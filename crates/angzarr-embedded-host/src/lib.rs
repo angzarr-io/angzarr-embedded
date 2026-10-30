@@ -15,17 +15,20 @@
 //!    within a timeout;
 //! 3. connects to that socket and calls `ComponentService.Describe`,
 //!    refusing a child of another kind than its `kind` says, and one
-//!    whose descriptor fails validation ([`descriptor::validate`]);
+//!    whose descriptor fails validation ([`descriptor::validate`]); an
+//!    upcaster sidecar, not described, has its gRPC health watched
+//!    instead, and is up while it reports SERVING;
 //! 4. hands back, by its kind, a [`RemoteCommandHandler`] over
 //!    `CommandHandlerService`, a [`RemotePolicyHandler`] over
 //!    `PolicyService`, a [`RemoteProjectorHandler`] over
 //!    `ProjectorService` or a [`RemoteUpcaster`] over `UpcasterService`
-//!    (an upcaster sidecar, which is not described), which
+//!    (an upcaster sidecar), which
 //!    [`Host::register`] registers with the kernel; a remote process
 //!    manager's start rule is the kernel's, from its descriptor's starting
 //!    types;
 //! 5. supervises it: a child that exits is restarted with backoff, and
-//!    while it is down its dispatch fails retryably ([`is_retryable`]).
+//!    while it is down (a sidecar, while it is not SERVING) its dispatch
+//!    fails retryably ([`is_retryable`]).
 //!
 //! A child exits when its stdin reaches end of file, or on SIGTERM; the
 //! host closes its stdin to stop it.

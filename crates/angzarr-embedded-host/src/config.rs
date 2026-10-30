@@ -46,9 +46,10 @@
 //! A component's `kind` is the service its child serves: `"domain"` (the
 //! default: an aggregate or a process manager, `CommandHandlerService`),
 //! `"policy"` (`PolicyService`), `"projector"` (`ProjectorService`) or
-//! `"upcaster"` (an upcaster sidecar, decision 14.39, `UpcasterService`,
-//! naming the domain it `upcasts`). A component's descriptor must agree
-//! with its kind ([`HostError::KindMismatch`]); a sidecar has none.
+//! `"upcaster"` (an upcaster sidecar, decision 14.39, `UpcasterService`
+//! and gRPC health, naming the domain it `upcasts`). A component's
+//! descriptor must agree with its kind ([`HostError::KindMismatch`]); a
+//! sidecar has none, and is up while its health reports SERVING.
 //!
 //! ```toml
 //! [[component]]
@@ -221,7 +222,8 @@ pub struct ComponentConfig {
     /// The service its child serves: `"domain"` (the default: an
     /// aggregate or a process manager, `CommandHandlerService`),
     /// `"policy"` (`PolicyService`), `"projector"` (`ProjectorService`)
-    /// or `"upcaster"` (an upcaster sidecar, `UpcasterService`).
+    /// or `"upcaster"` (an upcaster sidecar, `UpcasterService` and gRPC
+    /// health).
     #[serde(default, skip_serializing_if = "ComponentKindConfig::is_domain")]
     pub kind: ComponentKindConfig,
     /// An upcaster's: the domain whose payloads it upcasts (decision
@@ -259,9 +261,9 @@ pub enum ComponentKindConfig {
     Policy,
     /// A projector (`ProjectorService`).
     Projector,
-    /// An upcaster sidecar (`UpcasterService`, decision 14.39) for the
-    /// domain its component `upcasts`: no descriptor, no coordinator of its
-    /// own.
+    /// An upcaster sidecar (`UpcasterService` and gRPC health, decision
+    /// 14.39) for the domain its component `upcasts`: no descriptor, no
+    /// coordinator of its own.
     Upcaster,
 }
 

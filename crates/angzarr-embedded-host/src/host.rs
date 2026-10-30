@@ -6,7 +6,8 @@
 //! supervises: a child that
 //! exits is restarted, after a backoff that grows while restarts fail; while
 //! it is down its handler's dispatch is retryable
-//! ([`crate::is_retryable`]).
+//! ([`crate::is_retryable`]). An upcaster sidecar is not described: it is
+//! up while its gRPC health reports SERVING, and down while it does not.
 //!
 //! The generated `main.rs` is, in outline:
 //!
@@ -45,6 +46,8 @@ use crate::remote::{
 };
 use crate::rpc::component::component_service_client::ComponentServiceClient;
 use crate::rpc::connect_unix;
+use crate::rpc::grpc_health::health_client::HealthClient;
+use crate::rpc::grpc_health::{HealthCheckRequest, HealthCheckResponse, ServingStatus};
 
 /// How a child ended at shutdown.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -94,7 +97,10 @@ impl Host {
     /// the kind its `kind` says ([`HostError::KindMismatch`]; a policy's or
     /// projector's naming its input, [`HostError::NoInput`]; one that
     /// fails validation, [`HostError::Descriptor`]). An upcaster sidecar is
-    /// not described, and is up once connected; one naming no domain to
+    /// not described: once connected, the host watches its gRPC health
+    /// (refused, [`HostError::Health`], when it serves none), and it is up
+    /// while that reports SERVING; until then it is handed back down, its
+    /// upcasts retryable. One naming no domain to
     /// upcast is refused before any child starts
     /// ([`HostError::UpcasterNoDomain`]). In-process domains are left to the caller. Refused, with every
     /// child already started stopped again, when any domain's config is
@@ -436,7 +442,8 @@ fn socket_path(dir: &Path) -> PathBuf {
     dir.join(format!("angzarr-{}-{n}.sock", std::process::id()))
 }
 
-/// A child that came up: handshaken, connected and described.
+/// A child that came up: handshaken, connected and described, or, a
+/// sidecar, its health watched.
 struct Up {
     child: Child,
     stdin: Option<ChildStdin>,
@@ -444,6 +451,28 @@ struct Up {
     channel: tonic::transport::Channel,
     descriptor: pb::ComponentDescriptor,
     socket: PathBuf,
+    /// Whether it serves: a described child does; a sidecar as its health
+    /// first said.
+    serving: bool,
+    /// A sidecar's health, each status it changes to; `None` for a
+    /// described child, and once the watch has ended.
+    health: Option<tonic::Streaming<HealthCheckResponse>>,
+}
+
+/// The next status `health` reports, `true` for SERVING; never, when it is
+/// `None`. A watch that ends (or fails) is not serving, and is not watched
+/// again: the sidecar stays down until its child is restarted.
+async fn next_health(health: &mut Option<tonic::Streaming<HealthCheckResponse>>) -> bool {
+    let Some(watch) = health else {
+        return std::future::pending().await;
+    };
+    match watch.message().await {
+        Ok(Some(response)) => response.status == ServingStatus::Serving as i32,
+        _ => {
+            *health = None;
+            false
+        }
+    }
 }
 
 /// Where a test holds every supervisor, to force an interleaving rather
@@ -512,9 +541,7 @@ impl Supervisor {
                     backoff = initial;
                     // Published before `start` hears the child is up, so
                     // the handler it hands back reaches the child at once.
-                    self.set_channel(Some(child.channel.clone()));
-                    self.link.generation.send_modify(|n| *n += 1);
-                    self.hooks.applied(true);
+                    self.serve(child.serving.then_some(&child.channel));
                     if let Some(up) = up.take() {
                         let _ = up.send(Ok(child.descriptor.clone()));
                         self.hooks.reported_up().await;
@@ -527,16 +554,22 @@ impl Supervisor {
                             let _ = tokio::io::copy(&mut stdout, &mut tokio::io::stderr()).await;
                         });
                     }
-                    tokio::select! {
-                        _ = child.child.wait() => {
-                            self.set_channel(None);
-                            let _ = std::fs::remove_file(&child.socket);
-                        }
-                        _ = &mut stop => {
-                            self.set_channel(None);
-                            let exit = self.stop_child(&mut child).await;
-                            let _ = std::fs::remove_file(&child.socket);
-                            return exit;
+                    loop {
+                        tokio::select! {
+                            _ = child.child.wait() => {
+                                self.set_channel(None);
+                                let _ = std::fs::remove_file(&child.socket);
+                                break;
+                            }
+                            _ = &mut stop => {
+                                self.set_channel(None);
+                                let exit = self.stop_child(&mut child).await;
+                                let _ = std::fs::remove_file(&child.socket);
+                                return exit;
+                            }
+                            serving = next_health(&mut child.health) => {
+                                self.serve(serving.then_some(&child.channel));
+                            }
                         }
                     }
                 }
@@ -553,6 +586,16 @@ impl Supervisor {
                 _ = &mut stop => return ChildExit::NotRunning,
             }
         }
+    }
+
+    /// Publishes `channel`, the child up, counting it; or, `None`,
+    /// withdraws the child's connection, the child down.
+    fn serve(&self, channel: Option<&tonic::transport::Channel>) {
+        self.set_channel(channel.cloned());
+        if channel.is_some() {
+            self.link.generation.send_modify(|n| *n += 1);
+        }
+        self.hooks.applied(channel.is_some());
     }
 
     fn set_channel(&self, channel: Option<tonic::transport::Channel>) {
@@ -623,12 +666,25 @@ impl Supervisor {
                         socket: handshake.socket.display().to_string(),
                     })?;
             // An upcaster sidecar has no descriptor (decision 14.39): it
-            // serves UpcasterService alone, and is up once connected.
+            // serves UpcasterService and gRPC health, and is up while its
+            // health, the whole server's, reports SERVING.
             if self.kind == ComponentKindConfig::Upcaster {
+                let watch = HealthClient::new(channel.clone())
+                    .watch(HealthCheckRequest::default())
+                    .await
+                    .map_err(|status| HostError::Health {
+                        domain: domain(),
+                        grpc_code: status.code() as i32,
+                    })?
+                    .into_inner();
+                let mut health = Some(watch);
+                let serving = next_health(&mut health).await;
                 return Ok((
                     channel,
                     pb::ComponentDescriptor::default(),
                     handshake.socket,
+                    serving,
+                    health,
                 ));
             }
             let descriptor = ComponentServiceClient::new(channel.clone())
@@ -644,17 +700,19 @@ impl Supervisor {
                 domain: domain(),
                 cause,
             })?;
-            Ok((channel, descriptor, handshake.socket))
+            Ok((channel, descriptor, handshake.socket, true, None))
         }
         .await;
         match reached {
-            Ok((channel, descriptor, socket)) => Ok(Up {
+            Ok((channel, descriptor, socket, serving, health)) => Ok(Up {
                 child,
                 stdin,
                 stdout: Some(stdout),
                 channel,
                 descriptor,
                 socket,
+                serving,
+                health,
             }),
             Err(error) => {
                 let _ = child.kill().await;
