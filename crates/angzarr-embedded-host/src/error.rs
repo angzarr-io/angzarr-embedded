@@ -85,6 +85,10 @@ pub enum HostError {
     /// `ComponentService.Describe` failed; `grpc_code` is the status's wire
     /// code.
     Describe { domain: String, grpc_code: i32 },
+    /// An upcaster sidecar's `grpc.health.v1.Health.Watch` failed (decision
+    /// 14.39: a sidecar serves gRPC health); `grpc_code` is the status's
+    /// wire code.
+    Health { domain: String, grpc_code: i32 },
     /// The child described itself as another kind than its `kind` says:
     /// `described` is its descriptor's `ComponentKind`, by name.
     KindMismatch {
@@ -138,6 +142,7 @@ impl Diagnostic for HostError {
             HostError::Handshake { .. } => "angzarr-embedded-host-handshake",
             HostError::Connect { .. } => "angzarr-embedded-host-connect",
             HostError::Describe { .. } => "angzarr-embedded-host-describe",
+            HostError::Health { .. } => "angzarr-embedded-host-health",
             HostError::KindMismatch { .. } => "angzarr-embedded-host-kind-mismatch",
             HostError::NoInput { .. } => "angzarr-embedded-host-no-input",
             HostError::Descriptor { .. } => "angzarr-embedded-host-descriptor",
@@ -180,6 +185,10 @@ impl Diagnostic for HostError {
                 vec![domain(d), ("socket", socket.as_str().into())]
             }
             HostError::Describe {
+                domain: d,
+                grpc_code,
+            }
+            | HostError::Health {
                 domain: d,
                 grpc_code,
             } => vec![domain(d), ("grpc_code", (*grpc_code).into())],
@@ -251,6 +260,10 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn Diagnostic>> {
         Box::new(HostError::Describe {
             domain: d(),
             grpc_code: 14,
+        }),
+        Box::new(HostError::Health {
+            domain: d(),
+            grpc_code: 12,
         }),
         Box::new(HostError::KindMismatch {
             domain: d(),

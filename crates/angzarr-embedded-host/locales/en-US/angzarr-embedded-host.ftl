@@ -13,6 +13,7 @@ angzarr-embedded-host-spawn = component "{ $domain }": could not start "{ $progr
 angzarr-embedded-host-handshake = component "{ $domain }": { $cause }
 angzarr-embedded-host-connect = component "{ $domain }": could not connect to { $socket }
 angzarr-embedded-host-describe = component "{ $domain }": Describe failed with gRPC code { $grpc_code }
+angzarr-embedded-host-health = component "{ $domain }": its gRPC health watch failed with gRPC code { $grpc_code }
 angzarr-embedded-host-kind-mismatch = component "{ $domain }" is configured as a { $configured } but describes itself as { $described }
 angzarr-embedded-host-no-input = component "{ $domain }" names no input domain in its descriptor
 angzarr-embedded-host-upcaster-no-domain = component "{ $domain }" is an upcaster that names no domain to upcast: give it `upcasts`

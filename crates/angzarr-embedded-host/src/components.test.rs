@@ -32,12 +32,12 @@ use angzarr_embedded_diagnostic::Diagnostic;
 use angzarr_ports::memory::MemoryStore;
 use angzarr_router::pb::CommandHandlerResponse;
 
-use super::Host;
+use super::{Hooks, Host};
 use crate::config::{ComponentConfig, ComponentKindConfig};
 use crate::error::HostError;
 use crate::fake_child::{
-    config, domain, kind, mode, noted, HOLD, HOLD_TOO_MUCH, INPUT_ENV, KIND_ENV, LOG_ENV,
-    SEAT_RELEASED, STARTING_ENV, TARGET_ENV,
+    config, domain, health, kind, mode, noted, CONTROL_ENV, HEALTH_ENV, HOLD, HOLD_TOO_MUCH,
+    INPUT_ENV, KIND_ENV, LOG_ENV, SEAT_RELEASED, STARTING_ENV, TARGET_ENV,
 };
 
 /// The kernel's key for angzarr's `PM_NO_INSTANCE` (a router code reaches
@@ -1011,6 +1011,106 @@ fn an_upcaster_naming_no_domain_is_refused() {
         Host::start(config(vec![upcaster])).err(),
         Some(HostError::UpcasterNoDomain {
             domain: "table-upcaster".to_string(),
+        })
+    );
+}
+
+/// Whether `failure` is the upcast's `Unavailable`: the sidecar is not
+/// serving (C-0681).
+fn not_serving<R>(failure: &Failure<R>) -> bool {
+    matches!(
+        failure,
+        Failure::Kernel(angzarr_embedded::next::KernelError::Upcast {
+            error: angzarr_embedded::next::UpcastError::Unavailable { .. },
+            ..
+        })
+    )
+}
+
+/// A sidecar is up only while its gRPC health reports SERVING (decision
+/// 14.39), as a domain is up only once described: one that connects but
+/// reports NOT_SERVING is handed back, but nothing that needs it is
+/// delivered (C-0681); once it turns SERVING it is used; once it turns
+/// NOT_SERVING again it is not. Each turn is forced through the fake's
+/// control socket, and the supervisor's acting on it awaited, never
+/// polled for: the timeout is a safety net, never the way the test passes.
+#[test]
+fn a_sidecar_is_up_only_while_its_health_reports_serving() {
+    let socket = std::env::temp_dir().join(format!("angzarr-ctl-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&socket);
+    let control = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let sidecar = with_env(
+        upcaster_domain(),
+        &[
+            (HEALTH_ENV, health::NOT_SERVING),
+            (CONTROL_ENV, socket.to_str().unwrap()),
+        ],
+    );
+    let (applied, acted) = std::sync::mpsc::channel();
+    let hooks = Hooks {
+        applied: Some(applied),
+        ..Hooks::default()
+    };
+    let host = Host::start_with(config(vec![sidecar]), hooks).expect("the host starts");
+    let mut registry = Registry::new();
+    registry.command_handler("table", Table).unwrap();
+    host.register(&mut registry).unwrap();
+    let (mut fake, _) = control.accept().unwrap();
+    let _ = std::fs::remove_file(&socket);
+    let log = MemoryDeadLetters::new();
+    let store = MemoryStore::new();
+    let kernel = Kernel::new(&registry, &log).on_retryable(OnRetryable {
+        max_retries: 0,
+        ..OnRetryable::default()
+    });
+    // Command `n`, an old `Sit`, to the table: how it failed, if it did.
+    let sit = |n| {
+        block_on(kernel.handle_any(
+            &store,
+            send("table", n, any("/test.table.v0.Sit")),
+            &sampled(n),
+            &mut (),
+        ))
+        .err()
+    };
+    let mut turned = |status: &[u8]| {
+        use std::io::Write;
+        if !status.is_empty() {
+            fake.write_all(status).unwrap();
+        }
+        acted.recv_timeout(Duration::from_secs(20))
+    };
+
+    assert_eq!(turned(b""), Ok(false), "came up NOT_SERVING");
+    let refused = sit(1).expect("not delivered");
+    assert!(not_serving(&refused), "{refused:?}");
+    assert_eq!(refused.recovery(), angzarr_embedded::next::Recovery::Retry);
+    assert!(payloads(&store, &cover("table")).is_empty());
+
+    assert_eq!(turned(b"1"), Ok(true), "turned SERVING");
+    let delivered = sit(2);
+    assert!(delivered.is_none(), "delivered, upcast: {delivered:?}");
+    assert_eq!(
+        payloads(&store, &cover("table")),
+        [Some(any("/test.table.v1.Seated"))]
+    );
+
+    assert_eq!(turned(b"0"), Ok(false), "turned NOT_SERVING");
+    let refused = sit(3).expect("not delivered");
+    assert!(not_serving(&refused), "{refused:?}");
+    assert_eq!(payloads(&store, &cover("table")).len(), 1);
+}
+
+/// A sidecar that serves no gRPC health is refused at start, as a domain
+/// whose Describe fails is: naming the component and the status's code.
+#[test]
+fn a_sidecar_serving_no_health_is_refused_at_start() {
+    let sidecar = with_env(upcaster_domain(), &[(HEALTH_ENV, health::NONE)]);
+    assert_eq!(
+        Host::start(config(vec![sidecar])).err(),
+        Some(HostError::Health {
+            domain: "table-upcaster".to_string(),
+            grpc_code: tonic::Code::Unimplemented as i32,
         })
     );
 }

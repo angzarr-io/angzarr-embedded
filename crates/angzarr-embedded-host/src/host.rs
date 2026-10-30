@@ -454,6 +454,11 @@ struct Hooks {
     /// up, before it does anything else.
     #[cfg(test)]
     reported_up: Option<Arc<tokio::sync::Notify>>,
+    /// Told, by a supervisor, each health status it has acted on: `true`
+    /// once it has published its child's connection, `false` once it has
+    /// withdrawn it.
+    #[cfg(test)]
+    applied: Option<mpsc::Sender<bool>>,
 }
 
 impl Hooks {
@@ -461,6 +466,14 @@ impl Hooks {
         #[cfg(test)]
         if let Some(hold) = &self.reported_up {
             hold.notified().await;
+        }
+    }
+
+    #[cfg_attr(not(test), allow(unused_variables))]
+    fn applied(&self, serving: bool) {
+        #[cfg(test)]
+        if let Some(applied) = &self.applied {
+            let _ = applied.send(serving);
         }
     }
 }
@@ -501,6 +514,7 @@ impl Supervisor {
                     // the handler it hands back reaches the child at once.
                     self.set_channel(Some(child.channel.clone()));
                     self.link.generation.send_modify(|n| *n += 1);
+                    self.hooks.applied(true);
                     if let Some(up) = up.take() {
                         let _ = up.send(Ok(child.descriptor.clone()));
                         self.hooks.reported_up().await;

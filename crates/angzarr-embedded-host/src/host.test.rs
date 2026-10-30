@@ -175,6 +175,7 @@ fn a_handler_reaches_its_child_as_soon_as_start_returns() {
     let hold = Arc::new(tokio::sync::Notify::new());
     let hooks = Hooks {
         reported_up: Some(hold.clone()),
+        ..Hooks::default()
     };
     let host = Host::start_with(config(vec![player(mode::SERVE)]), hooks).expect("the host starts");
     let answered = host

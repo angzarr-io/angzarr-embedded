@@ -44,10 +44,14 @@
 //! call: `handle <type>` per event, `refused <typed refusal type URL>`.
 //!
 //! - `upcaster`: an upcaster sidecar (decision 14.39), serving
-//!   `UpcasterService` and nothing else (no descriptor): a page whose
+//!   `UpcasterService` and gRPC health (no descriptor): a page whose
 //!   payload is `/test.table.v0.Sit` comes back `/test.table.v1.Seat`;
 //!   `...v0.Die` exits with code 7 mid-call; `...v0.Bad` is INTERNAL
-//!   (`UPCAST_RULE_BROKE`); any other passes through.
+//!   (`UPCAST_RULE_BROKE`); any other passes through. Its health is
+//!   SERVING, or `ANGZARR_FAKE_HEALTH`'s ([`health`]); given
+//!   `ANGZARR_FAKE_CONTROL`, a Unix socket's path, it connects there as it
+//!   starts, and each byte read sets its status: `1` SERVING, any other
+//!   NOT_SERVING.
 //!
 //! It exits with code 0 when its stdin reaches end of file.
 
@@ -69,6 +73,8 @@ use crate::rpc::command_handler::command_handler_service_server::{
     CommandHandlerService, CommandHandlerServiceServer,
 };
 use crate::rpc::component::component_service_server::{ComponentService, ComponentServiceServer};
+use crate::rpc::grpc_health::health_server::{Health, HealthServer};
+use crate::rpc::grpc_health::{HealthCheckRequest, HealthCheckResponse, ServingStatus};
 use crate::rpc::policy::policy_service_server::{PolicyService, PolicyServiceServer};
 use crate::rpc::projector::projector_service_server::{ProjectorService, ProjectorServiceServer};
 use crate::rpc::upcaster::upcaster_service_server::{UpcasterService, UpcasterServiceServer};
@@ -92,6 +98,18 @@ pub(crate) const INPUT_ENV: &str = "ANGZARR_FAKE_INPUT";
 pub(crate) const TARGET_ENV: &str = "ANGZARR_FAKE_TARGET";
 /// The file a policy or projector logs its calls to.
 pub(crate) const LOG_ENV: &str = "ANGZARR_FAKE_LOG";
+/// An upcaster's health as it starts: [`health`]'s; SERVING when unset.
+pub(crate) const HEALTH_ENV: &str = "ANGZARR_FAKE_HEALTH";
+/// The Unix socket an upcaster reads its health from, byte by byte.
+pub(crate) const CONTROL_ENV: &str = "ANGZARR_FAKE_CONTROL";
+
+/// An upcaster's health as it starts, besides SERVING.
+pub(crate) mod health {
+    /// NOT_SERVING.
+    pub(crate) const NOT_SERVING: &str = "not-serving";
+    /// No health service at all.
+    pub(crate) const NONE: &str = "none";
+}
 
 /// The kinds besides an aggregate.
 pub(crate) mod kind {
@@ -254,8 +272,39 @@ fn serve(name: String, close_stdout: bool) -> ! {
         let fake = Fake { name };
         let kind = std::env::var(KIND_ENV).unwrap_or_default();
         if kind == kind::UPCASTER {
-            tonic::transport::Server::builder()
-                .add_service(UpcasterServiceServer::new(fake))
+            let started = std::env::var(HEALTH_ENV).unwrap_or_default();
+            let initial = if started == health::NOT_SERVING {
+                ServingStatus::NotServing
+            } else {
+                ServingStatus::Serving
+            };
+            let (set, status) = tokio::sync::watch::channel(initial as i32);
+            if let Ok(control) = std::env::var(CONTROL_ENV) {
+                let mut control = tokio::net::UnixStream::connect(control).await.unwrap();
+                tokio::spawn(async move {
+                    use tokio::io::AsyncReadExt;
+                    let mut byte = [0u8];
+                    while control.read_exact(&mut byte).await.is_ok() {
+                        let now = if byte[0] == b'1' {
+                            ServingStatus::Serving
+                        } else {
+                            ServingStatus::NotServing
+                        };
+                        let _ = set.send(now as i32);
+                    }
+                    std::future::pending::<()>().await;
+                });
+            } else {
+                std::mem::forget(set);
+            }
+            let server =
+                tonic::transport::Server::builder().add_service(UpcasterServiceServer::new(fake));
+            let server = if started == health::NONE {
+                server
+            } else {
+                server.add_service(HealthServer::new(FakeHealth { status }))
+            };
+            server
                 .serve_with_incoming(UnixListenerStream::new(listener))
                 .await
                 .unwrap();
@@ -295,6 +344,53 @@ fn close_stdout_for_good() {
 #[derive(Clone)]
 struct Fake {
     name: String,
+}
+
+/// An upcaster's gRPC health: the status it holds, for the server as a
+/// whole and for every service.
+struct FakeHealth {
+    status: tokio::sync::watch::Receiver<i32>,
+}
+
+#[tonic::async_trait]
+impl Health for FakeHealth {
+    type WatchStream = tokio_stream::wrappers::ReceiverStream<Result<HealthCheckResponse, Status>>;
+
+    async fn check(
+        &self,
+        _: Request<HealthCheckRequest>,
+    ) -> Result<Response<HealthCheckResponse>, Status> {
+        Ok(Response::new(HealthCheckResponse {
+            status: *self.status.borrow(),
+        }))
+    }
+
+    /// The status now, then each status it changes to.
+    async fn watch(
+        &self,
+        _: Request<HealthCheckRequest>,
+    ) -> Result<Response<Self::WatchStream>, Status> {
+        let mut status = self.status.clone();
+        let (send, sent) = tokio::sync::mpsc::channel(4);
+        tokio::spawn(async move {
+            loop {
+                let now = *status.borrow_and_update();
+                if send
+                    .send(Ok(HealthCheckResponse { status: now }))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                if status.changed().await.is_err() {
+                    return;
+                }
+            }
+        });
+        Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
+            sent,
+        )))
+    }
 }
 
 #[tonic::async_trait]

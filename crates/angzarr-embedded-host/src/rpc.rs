@@ -51,6 +51,40 @@ pub mod upcaster {
     ));
 }
 
+/// gRPC health checking, `grpc.health.v1` (grpc's health.proto): what an
+/// upcaster sidecar serves beside `UpcasterService` (decision 14.39), and
+/// the host watches for its readiness. Its two messages are written here,
+/// as the proto has them; no crate in the graph has them.
+#[allow(clippy::all, missing_docs)]
+pub mod grpc_health {
+    /// `grpc.health.v1.HealthCheckRequest`: the service asked about; empty
+    /// for the server as a whole.
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct HealthCheckRequest {
+        #[prost(string, tag = "1")]
+        pub service: ::prost::alloc::string::String,
+    }
+
+    /// `grpc.health.v1.HealthCheckResponse`: the service's status.
+    #[derive(Clone, Copy, PartialEq, ::prost::Message)]
+    pub struct HealthCheckResponse {
+        #[prost(enumeration = "ServingStatus", tag = "1")]
+        pub status: i32,
+    }
+
+    /// `grpc.health.v1.HealthCheckResponse.ServingStatus`.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+    #[repr(i32)]
+    pub enum ServingStatus {
+        Unknown = 0,
+        Serving = 1,
+        NotServing = 2,
+        ServiceUnknown = 3,
+    }
+
+    include!(concat!(env!("OUT_DIR"), "/grpc.health.v1.Health.rs"));
+}
+
 /// `io.angzarr.v1.ComponentService` (component.proto): `Describe`, the
 /// component's descriptor.
 #[allow(clippy::all, missing_docs)]
