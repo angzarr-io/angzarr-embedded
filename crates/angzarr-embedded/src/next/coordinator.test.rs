@@ -737,6 +737,54 @@ mod snapshot {
         }
     }
 
+    /// The kernel writes the snapshot from the state the router returns
+    /// with a command's events (decision 14.40), stamped with the last
+    /// event's sequence and the domain's rules version, under the default
+    /// policy: the newest only, each replacing the last. A decision with no
+    /// events writes none.
+    #[test]
+    fn the_state_a_command_returns_is_written_as_the_snapshot() {
+        use crate::next::toys::handle;
+        let registry = registry();
+        let store = MemoryStore::new();
+        let stream = cover("account", 1);
+        let stored = || store.read_snapshot(sref(&stream)).ready().unwrap();
+        let state = |snapshot: &Snapshot| {
+            let any = snapshot.state.as_ref().expect("a snapshot holds a state");
+            assert_eq!(any.type_url, "/toy.account.v1.AccountState");
+            <account::AccountState as prost::Message>::decode(&any.value[..]).unwrap()
+        };
+        opened(&store, &registry, 1, 100);
+
+        let snapshot = stored().expect("written with the deposit");
+        assert_eq!(snapshot.sequence, 1, "the last event's");
+        assert_eq!(snapshot.rules_version, "v2", "the domain's current rules");
+        assert_eq!(state(&snapshot).cents, 100);
+        assert!(registry.snapshot_usable("account", &snapshot));
+
+        let deposit = command(stream.clone(), AccountCmd::Deposit(5).to_any()).id(3);
+        handle::<Account>(&store, &registry, deposit, &at(12)).unwrap();
+        let snapshot = stored().unwrap();
+        assert_eq!(snapshot.sequence, 2, "the newest replaces the last");
+        assert_eq!(state(&snapshot).cents, 105);
+
+        let sweep_nothing = command(cover("account", 2), AccountCmd::Sweep.to_any()).id(4);
+        opened(&store, &registry, 2, 0);
+        let before = store
+            .read_snapshot(sref(&cover("account", 2)))
+            .ready()
+            .unwrap();
+        handle::<Account>(&store, &registry, sweep_nothing, &at(13)).unwrap();
+        assert_eq!(
+            store
+                .read_snapshot(sref(&cover("account", 2)))
+                .ready()
+                .unwrap(),
+            before,
+            "no events, no snapshot"
+        );
+    }
+
     #[test]
     fn a_stream_snapshots_under_the_current_rules_version() {
         let registry = registry();
