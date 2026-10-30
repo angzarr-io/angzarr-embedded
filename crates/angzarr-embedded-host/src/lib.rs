@@ -54,7 +54,7 @@ pub use config::{
 };
 pub use descriptor::{validate, DescriptorRefused};
 pub use error::{HandshakeError, HostError};
-pub use exposure::{Arrival, Refused};
+pub use exposure::Arrival;
 pub use host::{ChildExit, Host};
 pub use remote::{
     is_retryable, RemoteCommandHandler, RemotePolicyHandler, RemoteProjectorHandler, RemoteUpcaster,
@@ -73,7 +73,6 @@ pub const EN_US: (&str, &str) = (
 pub fn diagnostic_samples() -> Vec<Box<dyn angzarr_embedded_diagnostic::Diagnostic>> {
     let mut samples = error::diagnostic_samples();
     samples.extend(descriptor::diagnostic_samples());
-    samples.extend(exposure::diagnostic_samples());
     samples
 }
 

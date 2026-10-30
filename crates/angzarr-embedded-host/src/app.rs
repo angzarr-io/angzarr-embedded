@@ -13,10 +13,12 @@
 //! ```
 //!
 //! The [`App`] is `Send + Sync` and its methods are async, on the caller's
-//! runtime: commands for different streams run concurrently, each stream's
-//! in the order they arrive, and nothing orders streams against each other
-//! (ordering is per stream only). Its store is ONE SQLite connection, which
-//! serializes the I/O and nothing else.
+//! runtime: commands run concurrently, and nothing orders streams against
+//! each other (ordering is per stream only). Two commands to one stream
+//! race optimistically: both decide, the store takes one write, and the
+//! loser is decided again on the new head, unless it set an expected
+//! sequence, which makes the loss its business failure. Its store is ONE
+//! SQLite connection, which serializes the I/O and nothing else.
 //!
 //! RED (design-by-test, 2026-10-30): [`run`], [`App::handle`],
 //! [`App::events`], [`App::serve`] and [`App::shutdown`] are proposed
@@ -33,7 +35,7 @@ use angzarr_router::pb::CommandResponse;
 use angzarr_store_sqlite::SqliteStore;
 
 use crate::error::HostError;
-use crate::exposure::{Arrival, Refused};
+use crate::exposure::Arrival;
 use crate::host::{ChildExit, Host};
 
 /// Runs the application the config at `config` describes: reads it
@@ -90,9 +92,9 @@ impl App {
     }
 
     /// Handles one command book, for any domain, and every policy step it
-    /// sets off ([`Kernel::handle_any`]), once the chain settles. Calls for
-    /// different streams run concurrently; calls for one stream are
-    /// handled one at a time, in the order they arrive.
+    /// sets off ([`Kernel::handle_any`]), once the chain settles. Calls run
+    /// concurrently; two on one stream race optimistically, as the kernel's
+    /// do.
     // The kernel's own Failure, as Kernel::handle_any returns it.
     #[allow(clippy::result_large_err)]
     pub async fn handle(
@@ -115,14 +117,17 @@ impl App {
     /// handles a book when its domain's `[[component]]` is exposed to the
     /// arrival, and answered as `CommandHandlerCoordinatorService.Handle`
     /// answers: the addressed stream's events and the delivery outcome.
-    /// Refused, [`Refused::NotExposed`], when it is not; an unknown domain
-    /// is the kernel's own refusal ([`Refused::Failed`]).
+    /// A domain not exposed to the arrival is refused as an unknown domain
+    /// is (`Malformed::UnknownDomain`), the real reason logged locally
+    /// only.
+    // The kernel's own Failure, as Kernel::handle_any returns it.
+    #[allow(clippy::result_large_err)]
     pub async fn serve(
         &self,
         book: CommandBook,
         arrived: Arrival,
         sampled: &Sampled,
-    ) -> Result<CommandResponse, Refused> {
+    ) -> Result<CommandResponse, Failure<Rejected>> {
         let _ = (book, arrived, sampled);
         todo!("red: App::serve, the exposure seam (design-by-test, 2026-10-30)")
     }

@@ -380,21 +380,6 @@ mod fixtures {
         }
     }
 
-    /// The command's type URL.
-    fn command_type(command: &ContextualCommand) -> String {
-        match command
-            .command
-            .as_ref()
-            .and_then(|b| b.page.as_ref())
-            .and_then(|p| p.body.as_ref())
-        {
-            Some(command_page::Body::Command(Command {
-                payload: Some(payload),
-            })) => payload.type_url.clone(),
-            _ => String::new(),
-        }
-    }
-
     /// One event, `type_url`.
     fn decided(type_url: &str, rules_version: &str) -> CommandHandlerResponse {
         CommandHandlerResponse {
@@ -463,78 +448,14 @@ mod fixtures {
             Ok(decided(if met { MET } else { ALONE }, "meeting-1"))
         }
     }
-
-    pub const FIRST: &str = "/test.gate.v1.First";
-    pub const SECOND: &str = "/test.gate.v1.Second";
-
-    /// How long the first command holds its stream's handler open for a
-    /// second dispatch on it to show up: a second dispatch while the first
-    /// is open is the fault the test detects, so the hold bounds the
-    /// detection, and a correct host is never seen to overlap however long
-    /// it is.
-    pub const HOLD: Duration = Duration::from_millis(500);
-
-    /// What the gate saw.
-    #[derive(Default)]
-    pub struct Seen {
-        /// Dispatches inside the handler now.
-        inside: usize,
-        /// Whether two were ever inside at once.
-        pub overlapped: bool,
-        /// Each dispatch's command type, in the order they entered.
-        pub entered: Vec<String>,
-    }
-
-    /// An aggregate whose [`FIRST`] command tells the test it is inside
-    /// (`entered`), then holds the handler open for [`HOLD`], or until a
-    /// second dispatch enters beside it; each command decides its own
-    /// type's event (`.../First` decides `.../FirstDone`).
-    pub struct Gate {
-        pub seen: Mutex<Seen>,
-        pub changed: Condvar,
-        pub entered: Mutex<std::sync::mpsc::Sender<()>>,
-    }
-
-    impl CommandHandler for Gate {
-        fn name(&self) -> &str {
-            "Gate"
-        }
-
-        fn command_types(&self) -> Vec<String> {
-            vec![FIRST[1..].to_string(), SECOND[1..].to_string()]
-        }
-
-        fn dispatch(
-            &self,
-            command: &ContextualCommand,
-        ) -> Result<CommandHandlerResponse, CodedError> {
-            let kind = command_type(command);
-            let mut seen = self.seen.lock().unwrap();
-            seen.inside += 1;
-            seen.overlapped |= seen.inside > 1;
-            seen.entered.push(kind.clone());
-            self.changed.notify_all();
-            if kind == FIRST {
-                let _ = self.entered.lock().unwrap().send(());
-                seen = self
-                    .changed
-                    .wait_timeout_while(seen, HOLD, |s| !s.overlapped)
-                    .unwrap()
-                    .0;
-            }
-            seen.inside -= 1;
-            Ok(decided(&format!("{kind}Done"), "gate-1"))
-        }
-    }
 }
 
 /// The App's async API, shared (red, design-by-test, 2026-10-30): commands
-/// for different streams run at once; one stream's run one at a time, in
-/// the order they arrive. Each test forces what it claims: handlers that
-/// can only finish together, or a handler held open where a second
-/// dispatch would show.
+/// for different streams run at once, forced by handlers that can only
+/// finish together. One stream's commands race optimistically, as the
+/// kernel's tests show (`next/concurrency.test.rs` in angzarr-embedded).
 mod concurrency {
-    use std::sync::{Arc, Condvar, Mutex};
+    use std::sync::Arc;
 
     use super::fixtures::*;
     use super::*;
@@ -628,95 +549,6 @@ mod concurrency {
         assert_eq!(payloads(&app, &fixtures::cover("left", 1)).await, [MET]);
         assert_eq!(payloads(&app, &fixtures::cover("left", 2)).await, [MET]);
     }
-
-    /// Two commands to ONE stream: the second is sent once the first is
-    /// inside its handler, which holds it open for [`HOLD`] or until a
-    /// second dispatch enters beside it. The second waits its turn: it is
-    /// never dispatched beside the first, both are applied (neither loses
-    /// a race at the write), and the stream holds their events in the
-    /// order they arrived.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn commands_to_one_stream_are_handled_one_at_a_time_in_arrival_order() {
-        let dir = scratch("one-stream");
-        let (entered, inside) = std::sync::mpsc::channel();
-        let gate = Arc::new(Gate {
-            seen: Mutex::new(Seen::default()),
-            changed: Condvar::new(),
-            entered: Mutex::new(entered),
-        });
-        let handler = gate.clone();
-        let app = run(in_memory(&dir), move |registry: &mut Registry| {
-            registry
-                .command_handler("left", ArcHandler(handler), descriptor("left"))
-                .unwrap();
-        })
-        .await
-        .expect("the app runs");
-        let app = Arc::new(app);
-        let send = |n: u8, type_url: &'static str| {
-            let app = app.clone();
-            tokio::spawn(async move { app.handle(book("left", 1, n, type_url), &sampled(n)).await })
-        };
-        let first = send(1, FIRST);
-        tokio::task::spawn_blocking(move || inside.recv_timeout(WITHIN))
-            .await
-            .unwrap()
-            .expect("the first command reaches its handler");
-        let second = send(2, SECOND);
-        let (first, second) = (first.await.unwrap(), second.await.unwrap());
-
-        let (overlapped, entered) = {
-            let seen = gate.seen.lock().unwrap();
-            (seen.overlapped, seen.entered.clone())
-        };
-        assert!(
-            !overlapped,
-            "the second command was dispatched while the first was inside its handler"
-        );
-        assert_eq!(entered, [FIRST, SECOND]);
-        assert!(
-            matches!(first, Ok(Handled::Applied(_))),
-            "{:?}",
-            first.err()
-        );
-        assert!(
-            matches!(second, Ok(Handled::Applied(_))),
-            "{:?}",
-            second.err()
-        );
-        let events = app.events(&fixtures::cover("left", 1)).await.unwrap();
-        let order: Vec<_> = events
-            .iter()
-            .map(|p| (p.sequence, p.payload.clone().unwrap_or_default().type_url))
-            .collect();
-        assert_eq!(
-            order,
-            [(0, format!("{FIRST}Done")), (1, format!("{SECOND}Done"))]
-        );
-    }
-
-    /// A handler shared with the test, which reads what it saw.
-    struct ArcHandler(Arc<Gate>);
-
-    impl angzarr_embedded::next::angzarr_router::router::CommandHandler for ArcHandler {
-        fn name(&self) -> &str {
-            self.0.name()
-        }
-
-        fn command_types(&self) -> Vec<String> {
-            self.0.command_types()
-        }
-
-        fn dispatch(
-            &self,
-            command: &angzarr_embedded::next::v1::ContextualCommand,
-        ) -> Result<
-            angzarr_router::pb::CommandHandlerResponse,
-            angzarr_embedded::next::angzarr_router::error::CodedError,
-        > {
-            self.0.dispatch(command)
-        }
-    }
 }
 
 /// The exposure seam (red, design-by-test, 2026-10-30): what the host's
@@ -730,7 +562,7 @@ mod exposure {
     use super::fixtures::*;
     use super::*;
     use crate::config::{ComponentConfig, Expose};
-    use crate::exposure::{Arrival, Refused};
+    use crate::exposure::Arrival;
 
     /// An in-process (Rust) aggregate's `[[component]]`, exposed `expose`.
     fn aggregate(name: &str, expose: Expose) -> ComponentConfig {
@@ -779,12 +611,12 @@ mod exposure {
         book(domain, 1, 1, "/test.meet.v1.Meet")
     }
 
-    fn not_exposed(domain: &str, exposed: Expose, arrived: Arrival) -> Refused {
-        Refused::NotExposed {
+    /// The kernel's refusal of `domain` as unknown: what a caller gets for
+    /// a domain that is not registered, and for one not exposed to it.
+    fn unknown(domain: &str) -> Failure<Rejected> {
+        Failure::Kernel(KernelError::Malformed(Malformed::UnknownDomain {
             domain: domain.to_string(),
-            exposed,
-            arrived,
-        }
+        }))
     }
 
     /// A request is served when its domain is exposed to where it arrived
@@ -824,21 +656,24 @@ mod exposure {
     }
 
     /// A request for a domain not exposed to where it arrived from is
-    /// refused, and reaches no handler: nothing is written. A domain the
-    /// config does not name is exposed `"none"`.
+    /// refused exactly as an unknown domain is: the caller cannot tell a
+    /// hidden domain from a missing one (the owner's ruling, 2026-10-30;
+    /// the host logs the real reason locally). It reaches no handler:
+    /// nothing is written. A domain the config does not name is exposed
+    /// `"none"`.
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_domain_not_exposed_to_the_arrival_is_refused() {
+    async fn a_domain_not_exposed_to_the_arrival_is_refused_as_unknown() {
         let dir = scratch("not-exposed");
         let app = app(&dir).await;
-        for (domain, exposed, arrived) in [
-            ("hidden", Expose::None, Arrival::Loopback),
-            ("hidden", Expose::None, Arrival::Ip),
-            ("local", Expose::Loopback, Arrival::Ip),
-            ("unlisted", Expose::None, Arrival::Loopback),
+        for (domain, arrived) in [
+            ("hidden", Arrival::Loopback),
+            ("hidden", Arrival::Ip),
+            ("local", Arrival::Ip),
+            ("unlisted", Arrival::Loopback),
         ] {
             assert_eq!(
                 app.serve(meet(domain), arrived, &sampled(1)).await.err(),
-                Some(not_exposed(domain, exposed, arrived)),
+                Some(unknown(domain)),
                 "{domain} from {arrived:?}"
             );
             assert!(
@@ -861,23 +696,9 @@ mod exposure {
         for arrived in [Arrival::Loopback, Arrival::Ip] {
             assert_eq!(
                 app.serve(meet("nowhere"), arrived, &sampled(1)).await.err(),
-                Some(Refused::Failed(Failure::Kernel(KernelError::Malformed(
-                    Malformed::UnknownDomain {
-                        domain: "nowhere".to_string(),
-                    }
-                )))),
+                Some(unknown("nowhere")),
                 "from {arrived:?}"
             );
         }
-    }
-
-    /// A refusal is a code and args, as every error here is.
-    #[test]
-    fn not_exposed_is_a_code_and_args() {
-        let refused = not_exposed("hidden", Expose::None, Arrival::Ip);
-        assert_eq!(
-            refused.to_string(),
-            "angzarr-embedded-host-not-exposed domain=hidden exposed=none arrived=ip"
-        );
     }
 }
