@@ -1,4 +1,4 @@
-//! The gRPC stubs for the two services a remote domain serves, written by
+//! The gRPC stubs for the services a remote component serves, written by
 //! build.rs on angzarr-router's types, and the Unix-socket channel they run
 //! on.
 
@@ -19,6 +19,24 @@ pub mod command_handler {
     include!(concat!(
         env!("OUT_DIR"),
         "/io.angzarr.v1.CommandHandlerService.rs"
+    ));
+}
+
+/// `io.angzarr.v1.PolicyService` (policy.proto): `Handle`, a source
+/// event in, the commands it answers out; `OnRefused`, a refusal of one of
+/// them in, the refusal fact for its source out.
+#[allow(clippy::all, missing_docs)]
+pub mod policy {
+    include!(concat!(env!("OUT_DIR"), "/io.angzarr.v1.PolicyService.rs"));
+}
+
+/// `io.angzarr.v1.ProjectorService` (projector.proto): `Handle`, events
+/// in, a projection out.
+#[allow(clippy::all, missing_docs)]
+pub mod projector {
+    include!(concat!(
+        env!("OUT_DIR"),
+        "/io.angzarr.v1.ProjectorService.rs"
     ));
 }
 

@@ -38,7 +38,7 @@ use tokio::sync::oneshot;
 use crate::config::{HostConfig, Launch, Placement, Supervision};
 use crate::error::HostError;
 use crate::handshake::{read_handshake, SOCKET_ENV};
-use crate::remote::{Link, RemoteCommandHandler};
+use crate::remote::{Link, RemoteCommandHandler, RemotePolicyHandler, RemoteProjectorHandler};
 use crate::rpc::command_handler::command_handler_service_client::CommandHandlerServiceClient;
 use crate::rpc::component::component_service_client::ComponentServiceClient;
 use crate::rpc::connect_unix;
@@ -172,6 +172,24 @@ impl Host {
             .iter()
             .find(|d| d.handler.domain() == domain)
             .map(|d| d.handler.clone())
+    }
+
+    /// The handler of the remote policy configured as `name` (a
+    /// `[[domain]]` of `kind = "policy"`).
+    ///
+    /// RED STUB (feat/host-admit-policies): always `None`.
+    pub fn policy(&self, name: &str) -> Option<RemotePolicyHandler> {
+        let _ = name;
+        None
+    }
+
+    /// The handler of the remote projector configured as `name` (a
+    /// `[[domain]]` of `kind = "projector"`).
+    ///
+    /// RED STUB (feat/host-admit-policies): always `None`.
+    pub fn projector(&self, name: &str) -> Option<RemoteProjectorHandler> {
+        let _ = name;
+        None
     }
 
     /// Registers every remote domain's handler into `registry`, as the
@@ -485,3 +503,7 @@ mod tests;
 #[cfg(test)]
 #[path = "kernel.test.rs"]
 mod kernel_tests;
+
+#[cfg(test)]
+#[path = "components.test.rs"]
+mod component_tests;

@@ -32,10 +32,12 @@ pub mod remote;
 pub mod rpc;
 
 pub use app::{run, App};
-pub use config::{DomainConfig, HostConfig, Launch, Placement, StoreConfig, Supervision};
+pub use config::{
+    ComponentKindConfig, DomainConfig, HostConfig, Launch, Placement, StoreConfig, Supervision,
+};
 pub use error::{HandshakeError, HostError};
 pub use host::{ChildExit, Host};
-pub use remote::{is_retryable, RemoteCommandHandler};
+pub use remote::{is_retryable, RemoteCommandHandler, RemotePolicyHandler, RemoteProjectorHandler};
 
 /// This crate's en-US Fluent catalog, its name first: what a dependent
 /// embeds to render this crate's diagnostics. The text of

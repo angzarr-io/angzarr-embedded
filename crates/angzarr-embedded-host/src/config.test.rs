@@ -7,6 +7,7 @@ fn domain(name: &str, language: &str) -> DomainConfig {
     DomainConfig {
         name: name.to_string(),
         language: language.to_string(),
+        kind: Default::default(),
         launch: None,
         entry: Vec::new(),
         dir: None,
@@ -301,4 +302,32 @@ fn an_empty_launch_is_refused() {
             domain: "player".to_string(),
         })
     );
+}
+
+/// A `[[domain]]`'s `kind` names the service its child serves:
+/// `"domain"` by default, `"policy"` or `"projector"`; anything else is
+/// refused.
+#[test]
+fn a_domains_kind_is_domain_policy_or_projector() {
+    let kind = |text: &str| {
+        toml::from_str::<HostConfig>(&format!(
+            "[[domain]]\nname = \"x\"\nlanguage = \"python\"\n{text}"
+        ))
+        .map(|c| c.domains[0].kind)
+    };
+    assert_eq!(kind("").unwrap(), ComponentKindConfig::Domain);
+    assert_eq!(
+        kind("kind = \"domain\"").unwrap(),
+        ComponentKindConfig::Domain
+    );
+    assert_eq!(
+        kind("kind = \"policy\"").unwrap(),
+        ComponentKindConfig::Policy
+    );
+    assert_eq!(
+        kind("kind = \"projector\"").unwrap(),
+        ComponentKindConfig::Projector
+    );
+    assert!(kind("kind = \"saga\"").is_err());
+    assert!(kind("kind = \"Policy\"").is_err());
 }

@@ -201,6 +201,56 @@ impl CommandHandler for RemoteCommandHandler {
     }
 }
 
+/// A remote policy's handler: its child serves `PolicyService`, and the
+/// kernel runs it as any policy of its source ([`Self::input_domain`]).
+///
+/// RED STUB (feat/host-admit-policies): the host does not hand one back
+/// yet ([`crate::Host::policy`] is always `None`).
+#[derive(Clone, Debug)]
+pub struct RemotePolicyHandler {
+    descriptor: pb::ComponentDescriptor,
+}
+
+impl RemotePolicyHandler {
+    /// The component's name, as its descriptor gives it.
+    pub fn name(&self) -> &str {
+        &self.descriptor.name
+    }
+
+    /// The domain whose events it handles: its descriptor's one input.
+    pub fn input_domain(&self) -> &str {
+        self.descriptor
+            .inputs
+            .first()
+            .map_or("", |t| t.domain.as_str())
+    }
+}
+
+/// A remote projector's handler: its child serves `ProjectorService`, and
+/// the kernel runs it after each commit that records its source's events.
+///
+/// RED STUB (feat/host-admit-policies): the host does not hand one back
+/// yet ([`crate::Host::projector`] is always `None`).
+#[derive(Clone, Debug)]
+pub struct RemoteProjectorHandler {
+    descriptor: pb::ComponentDescriptor,
+}
+
+impl RemoteProjectorHandler {
+    /// The component's name, as its descriptor gives it.
+    pub fn name(&self) -> &str {
+        &self.descriptor.name
+    }
+
+    /// The domain whose events it projects: its descriptor's one input.
+    pub fn source(&self) -> &str {
+        self.descriptor
+            .inputs
+            .first()
+            .map_or("", |t| t.domain.as_str())
+    }
+}
+
 /// A non-OK status from the child's `Handle`, in the router's terms (see
 /// the module's docs).
 pub(crate) fn status_to_coded(domain: &str, status: &tonic::Status) -> CodedError {

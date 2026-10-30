@@ -195,6 +195,15 @@ pub struct DomainConfig {
     /// The language it is written in (`"rust"`, `"python"`, `"go"`, ...),
     /// lowercase.
     pub language: String,
+    /// The service its child serves: `"domain"` (the default: an
+    /// aggregate or a process manager, `CommandHandlerService`),
+    /// `"policy"` (`PolicyService`) or `"projector"`
+    /// (`ProjectorService`).
+    ///
+    /// RED STUB (feat/host-admit-policies): parsed, not yet acted on; the
+    /// host still dials every child as a domain.
+    #[serde(default, skip_serializing_if = "ComponentKindConfig::is_domain")]
+    pub kind: ComponentKindConfig,
     /// The command that starts its child, program first. Overrides the
     /// language's default (and its `entry`) entirely.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -211,6 +220,27 @@ pub struct DomainConfig {
     /// `ANGZARR_SOCKET`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
+}
+
+/// A `[[domain]]` table's `kind`: which of angzarr's component services
+/// its child serves. Its descriptor's kind must agree.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComponentKindConfig {
+    /// An aggregate or a process manager (`CommandHandlerService`); which,
+    /// its descriptor says.
+    #[default]
+    Domain,
+    /// A policy (`PolicyService`).
+    Policy,
+    /// A projector (`ProjectorService`).
+    Projector,
+}
+
+impl ComponentKindConfig {
+    fn is_domain(&self) -> bool {
+        *self == ComponentKindConfig::Domain
+    }
 }
 
 /// How the host supervises its children. Every field has a default, so the
