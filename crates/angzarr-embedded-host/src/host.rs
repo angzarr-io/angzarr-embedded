@@ -29,7 +29,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
 use angzarr_embedded::next::{Misconfigured, Registry};
@@ -88,8 +88,9 @@ struct Supervised {
     hosted: Hosted,
     /// Tells the supervisor to stop the child; taken when sent.
     stop: Option<oneshot::Sender<()>>,
-    /// How the child ended, once the supervisor has stopped it.
-    ended: mpsc::Receiver<ChildExit>,
+    /// How the child ended, once the supervisor has stopped it. In a
+    /// `Mutex` only so the host is `Sync`: it is read once, at shutdown.
+    ended: Mutex<mpsc::Receiver<ChildExit>>,
 }
 
 impl Host {
@@ -192,7 +193,7 @@ impl Host {
                         name: domain,
                         hosted,
                         stop: Some(stop),
-                        ended,
+                        ended: Mutex::new(ended),
                     });
                     continue;
                 }
@@ -328,7 +329,8 @@ impl Host {
             .domains
             .drain(..)
             .map(|d| {
-                let exit = d.ended.recv().unwrap_or(ChildExit::NotRunning);
+                let ended = d.ended.into_inner().unwrap_or_else(|e| e.into_inner());
+                let exit = ended.recv().unwrap_or(ChildExit::NotRunning);
                 (d.name, exit)
             })
             .collect();

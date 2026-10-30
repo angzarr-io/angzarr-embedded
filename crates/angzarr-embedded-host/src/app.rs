@@ -2,88 +2,59 @@
 //! generated `main.rs` calls.
 //!
 //! ```ignore
-//! fn main() -> Result<(), angzarr_embedded_host::HostError> {
-//!     let app = angzarr_embedded_host::run("angzarr.toml", register)?;
-//!     // app.handle(book, &sampled), app.events(&cover), app.kernel(), ...
+//! #[tokio::main]
+//! async fn main() -> Result<(), angzarr_embedded_host::HostError> {
+//!     let app = std::sync::Arc::new(angzarr_embedded_host::run("angzarr.toml", register).await?);
+//!     // app.handle(book, &sampled).await from any task, concurrently;
+//!     // app.events(&cover).await, app.kernel(), ...
+//!     app.shutdown().await; // or drop it: the children stop
 //!     Ok(())
-//! } // dropping `app` stops the children
+//! }
 //! ```
+//!
+//! The [`App`] is `Send + Sync` and its methods are async, on the caller's
+//! runtime: commands for different streams run concurrently, each stream's
+//! in the order they arrive, and nothing orders streams against each other
+//! (ordering is per stream only). Its store is ONE SQLite connection, which
+//! serializes the I/O and nothing else.
+//!
+//! RED (design-by-test, 2026-10-30): [`run`], [`App::handle`],
+//! [`App::events`], [`App::serve`] and [`App::shutdown`] are proposed
+//! async signatures, `todo!()`.
 
 use std::path::Path;
 
 use angzarr_embedded::next::v1::{CommandBook, Cover, EventPage};
 use angzarr_embedded::next::{
-    EventStore, Failure, Handled, Kernel, KernelError, MemoryDeadLetters, OnPolicyBug, OnRetryable,
-    Registry, Rejected, Sampled, StoreError, StreamRef,
+    Failure, Handled, Kernel, MemoryDeadLetters, OnPolicyBug, OnRetryable, Registry, Rejected,
+    Sampled, StoreError,
 };
-use angzarr_embedded_diagnostic::Report;
+use angzarr_router::pb::CommandResponse;
 use angzarr_store_sqlite::SqliteStore;
 
-use crate::config::HostConfig;
 use crate::error::HostError;
+use crate::exposure::{Arrival, Refused};
 use crate::host::{ChildExit, Host};
 
 /// Runs the application the config at `config` describes: reads it
 /// (TOML), starts its remote components ([`Host::start`]), registers them by
 /// kind and calls `register` to register the in-process ones, and opens
-/// its store (SQLite, `[store]`). The [`App`] is how the application sends
-/// commands and reads its streams; dropping it stops the children.
-pub fn run(
+/// its store (SQLite, `[store]`) on the caller's runtime. The [`App`] is
+/// how the application sends commands and reads its streams; dropping it
+/// stops the children.
+pub async fn run(
     config: impl AsRef<Path>,
     register: impl FnOnce(&mut Registry),
 ) -> Result<App, HostError> {
-    let path = config.as_ref();
-    let text = std::fs::read_to_string(path).map_err(|e| HostError::ConfigUnreadable {
-        path: path.display().to_string(),
-        kind: format!("{:?}", e.kind()),
-    })?;
-    let config: HostConfig = toml::from_str(&text).map_err(|e| HostError::ConfigInvalid {
-        path: path.display().to_string(),
-        offset: e.span().map_or(0, |span| span.start as u64),
-    })?;
-    let store_config = config.store.clone();
-    let policy_bug = config.policy.on_bug;
-    let retry = config.retry.on_retryable();
-    let host = Host::start(config)?;
-    let mut registry = Registry::new();
-    host.register(&mut registry)
-        .map_err(|e| HostError::Register {
-            cause: Report::of(&e),
-        })?;
-    register(&mut registry);
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| HostError::Runtime {
-            kind: format!("{:?}", e.kind()),
-        })?;
-    let store = runtime
-        .block_on(async {
-            match store_config.in_memory {
-                true => SqliteStore::open_in_memory().await,
-                false => SqliteStore::open(&store_config.path).await,
-            }
-        })
-        .map_err(|e| HostError::Store {
-            cause: Report::of(&KernelError::Store(e)),
-        })?;
-    Ok(App {
-        host,
-        registry,
-        dead_letters: MemoryDeadLetters::new(),
-        policy_bug,
-        retry,
-        store,
-        runtime,
-    })
+    let _ = (config.as_ref(), register);
+    todo!("red: async run (design-by-test, 2026-10-30)")
 }
 
-/// A running application: its registry, store, kernel and remote components.
-/// Its blocking methods ([`App::handle`], [`App::events`]) run on its own
-/// runtime, so they are called, and the App dropped, outside an async
-/// context; inside one, use [`App::kernel`] and [`App::store`] directly.
+/// A running application: its registry, store, kernel and remote
+/// components. `Send + Sync`: shared (an `Arc`) by every task that sends
+/// it commands, and by the host's listener.
 pub struct App {
-    // Dropped in this order: the children stopped first, the runtime last.
+    // Dropped in this order: the children stopped first.
     host: Host,
     registry: Registry,
     dead_letters: MemoryDeadLetters,
@@ -92,7 +63,6 @@ pub struct App {
     /// The config's `[retry]`.
     retry: OnRetryable,
     store: SqliteStore,
-    runtime: tokio::runtime::Runtime,
 }
 
 impl App {
@@ -120,34 +90,47 @@ impl App {
     }
 
     /// Handles one command book, for any domain, and every policy step it
-    /// sets off ([`Kernel::handle_any`]), blocking until the chain settles.
+    /// sets off ([`Kernel::handle_any`]), once the chain settles. Calls for
+    /// different streams run concurrently; calls for one stream are
+    /// handled one at a time, in the order they arrive.
     // The kernel's own Failure, as Kernel::handle_any returns it.
     #[allow(clippy::result_large_err)]
-    pub fn handle(
+    pub async fn handle(
         &self,
         book: CommandBook,
         sampled: &Sampled,
     ) -> Result<Handled, Failure<Rejected>> {
-        self.block_on(
-            self.kernel()
-                .handle_any(self.store(), book, sampled, &mut ()),
-        )
+        let _ = (book, sampled);
+        todo!("red: async App::handle (design-by-test, 2026-10-30)")
     }
 
     /// Every event of the stream `cover` names, in sequence order.
-    pub fn events(&self, cover: &Cover) -> Result<Vec<EventPage>, StoreError> {
-        let stream = StreamRef::try_from(cover)?;
-        Ok(self.block_on(self.store().read(stream, 0, None))?.pages)
+    pub async fn events(&self, cover: &Cover) -> Result<Vec<EventPage>, StoreError> {
+        let _ = cover;
+        todo!("red: async App::events (design-by-test, 2026-10-30)")
+    }
+
+    /// The exposure seam ([`crate::exposure`]): one request to the host's
+    /// listener, which arrived from `arrived`. Handled as [`App::handle`]
+    /// handles a book when its domain's `[[component]]` is exposed to the
+    /// arrival, and answered as `CommandHandlerCoordinatorService.Handle`
+    /// answers: the addressed stream's events and the delivery outcome.
+    /// Refused, [`Refused::NotExposed`], when it is not; an unknown domain
+    /// is the kernel's own refusal ([`Refused::Failed`]).
+    pub async fn serve(
+        &self,
+        book: CommandBook,
+        arrived: Arrival,
+        sampled: &Sampled,
+    ) -> Result<CommandResponse, Refused> {
+        let _ = (book, arrived, sampled);
+        todo!("red: App::serve, the exposure seam (design-by-test, 2026-10-30)")
     }
 
     /// Stops the remote components' children ([`Host::shutdown`]) and closes
     /// the store.
-    pub fn shutdown(self) -> Vec<(String, ChildExit)> {
-        self.host.shutdown()
-    }
-
-    fn block_on<F: std::future::Future>(&self, future: F) -> F::Output {
-        self.runtime.block_on(future)
+    pub async fn shutdown(self) -> Vec<(String, ChildExit)> {
+        todo!("red: async App::shutdown (design-by-test, 2026-10-30)")
     }
 }
 
