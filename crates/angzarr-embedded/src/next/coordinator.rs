@@ -434,11 +434,16 @@ pub(crate) fn decide(
         let (stream, expected, actual) =
             (identified.cover().clone(), command.expected, command.head);
         match error.code.as_str() {
-            codes::CONFLICT_OVERLAP => Failure::Kernel(KernelError::Stale {
-                stream,
-                expected,
-                actual,
-            }),
+            codes::CONFLICT_OVERLAP => {
+                let units = |key: &str| error.extras.get(key).cloned().unwrap_or_default();
+                Failure::Kernel(KernelError::Overlap {
+                    stream,
+                    expected,
+                    actual,
+                    window_units: units(extras::WINDOW_UNITS),
+                    command_units: units(extras::COMMAND_UNITS),
+                })
+            }
             codes::CONFLICT_UNRESOLVED => {
                 let unresolved = KernelError::Unresolved {
                     stream,

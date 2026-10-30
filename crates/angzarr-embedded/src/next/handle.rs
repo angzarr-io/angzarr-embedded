@@ -832,6 +832,7 @@ enum Origin {
 fn failure_class(failure: &Failure<Rejected>) -> Option<Class> {
     match failure {
         Failure::Kernel(KernelError::Stale { .. })
+        | Failure::Kernel(KernelError::Overlap { .. })
         | Failure::Kernel(KernelError::Store(super::StoreError::Conflict { .. })) => {
             Some(Class::BusinessImmediate)
         }

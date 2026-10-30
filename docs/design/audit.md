@@ -356,8 +356,8 @@ generated `State::changed`, reported to the kernel in the router's
 the events are kept iff the two do not overlap (options.proto's rule:
 equal units or a prefix at a `.`/`[` boundary; a wildcard overlaps any
 non-empty set; an empty set nothing), else the command is stale
-(CONFLICT_OVERLAP, the kernel's `KernelError::Stale`) and nothing is
-persisted. The router still makes the same judgement itself, now
+(CONFLICT_OVERLAP, the kernel's `KernelError::Overlap`, naming both unit
+sets as `window_units` and `command_units`) and nothing is persisted. The router still makes the same judgement itself, now
 redundant. Unmarked fields conflict with
 everything (the fail-safe wildcard), so an unmarked change only makes
 COMMUTATIVE stricter.
@@ -895,7 +895,7 @@ names the trigger; angzarr-embedded has no tracing dependency and reports it now
 | `KernelError::Malformed` | step 1 refused the book | `Invalid` |
 | `KernelError::UnknownType` | a command or fact type the domain does not decode, after upcasting | `Invalid` |
 | `KernelError::InvalidPayload` | a command or fact that decodes but is not a valid domain value (`WireError`: a required field absent, an undefined enum value) | `Invalid` |
-| `KernelError::Stale`, `Unresolved` | re-read and re-issue | `Retry` |
+| `KernelError::Stale`, `Overlap`, `Unresolved` | re-read and re-issue | `Retry` |
 | `KernelError::Router` | the router's error, or a handler's failure (never under a business status: that is `Rejected`) | by its status's class: a fatal bug `Bug` (dead-lettered), ABORTED and a retryable bug `Retry` |
 | `KernelError::HandlerUnavailable` | a remote handler that could not be reached | `Retry` |
 | `StoreError::Conflict`, `Unavailable` | run again with the same command id (step 3 makes it safe) | `Retry` |

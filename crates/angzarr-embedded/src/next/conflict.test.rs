@@ -92,8 +92,8 @@ fn commutative_is_the_default_for_a_state_with_conflict_units() {
         .unwrap();
     assert_eq!(
         overlap(&failure, 1, 3),
-        Some(("items[b]".to_string(), "items[b]".to_string())),
-        "the overlap names both unit sets: {failure:?}"
+        Some(("items[a],items[b]".to_string(), "items[b]".to_string())),
+        "the overlap names both unit sets, the window from 1 to 3: {failure:?}"
     );
     assert_eq!(failure.recovery(), Recovery::Retry);
 }
