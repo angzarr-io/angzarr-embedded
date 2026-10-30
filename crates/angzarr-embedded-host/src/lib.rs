@@ -25,6 +25,7 @@
 
 pub mod app;
 pub mod config;
+pub mod descriptor;
 pub mod error;
 pub mod handshake;
 pub mod host;
@@ -33,6 +34,7 @@ pub mod rpc;
 
 pub use app::{run, App};
 pub use config::{DomainConfig, HostConfig, Launch, Placement, StoreConfig, Supervision};
+pub use descriptor::{validate, DescriptorRefused};
 pub use error::{HandshakeError, HostError};
 pub use host::{ChildExit, Host};
 pub use remote::{is_retryable, RemoteCommandHandler};
@@ -48,7 +50,9 @@ pub const EN_US: (&str, &str) = (
 /// One value of every error this crate defines, each variant once, for the
 /// catalog parity test.
 pub fn diagnostic_samples() -> Vec<Box<dyn angzarr_embedded_diagnostic::Diagnostic>> {
-    error::diagnostic_samples()
+    let mut samples = error::diagnostic_samples();
+    samples.extend(descriptor::diagnostic_samples());
+    samples
 }
 
 #[cfg(test)]

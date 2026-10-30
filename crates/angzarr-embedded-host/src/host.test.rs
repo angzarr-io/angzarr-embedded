@@ -564,3 +564,126 @@ fn running_with_tag(tag: &str) -> usize {
         })
         .count()
 }
+
+/// A valid descriptor of `kind` named "order": what angzarr-cli generates.
+fn described(kind: pb::ComponentKind) -> pb::ComponentDescriptor {
+    let stateful = matches!(
+        kind,
+        pb::ComponentKind::Aggregate | pb::ComponentKind::ProcessManager
+    );
+    let policy = kind == pb::ComponentKind::Policy;
+    pb::ComponentDescriptor {
+        name: "order".to_string(),
+        kind: kind as i32,
+        rules_version: "1.4.2+build.7".to_string(),
+        state: stateful.then(|| pb::StateDescriptor {
+            type_url: "/orders.v1.OrderState".to_string(),
+            options: None,
+        }),
+        inputs: policy
+            .then(|| pb::Target {
+                domain: "order".to_string(),
+            })
+            .into_iter()
+            .collect(),
+        output_domain: if policy {
+            "inventory".to_string()
+        } else {
+            String::new()
+        },
+        starting_types: if kind == pb::ComponentKind::ProcessManager {
+            vec!["orders.v1.Place".to_string()]
+        } else {
+            Vec::new()
+        },
+    }
+}
+
+/// C-0687: the host refuses a policy's descriptor with no output domain,
+/// naming the component, under POLICY_NO_OUTPUT_DOMAIN.
+#[test]
+fn a_policy_descriptor_without_an_output_domain_is_refused() {
+    use angzarr_embedded_diagnostic::Diagnostic;
+    let mut descriptor = described(pb::ComponentKind::Policy);
+    assert_eq!(crate::validate(&descriptor), Ok(()));
+    descriptor.output_domain = String::new();
+    let refused = crate::validate(&descriptor).err().unwrap();
+    assert_eq!(refused.reason(), "POLICY_NO_OUTPUT_DOMAIN");
+    assert_eq!(
+        refused,
+        crate::DescriptorRefused::PolicyNoOutputDomain {
+            component: "order".to_string()
+        }
+    );
+    assert_eq!(
+        refused.code(),
+        "angzarr-embedded-host-descriptor-policy-no-output-domain"
+    );
+}
+
+/// C-0687, every row: each fault refused under its own reason, a valid
+/// descriptor of every kind accepted.
+#[test]
+fn a_descriptor_that_fails_its_validation_is_refused_for_its_reason() {
+    use pb::ComponentKind::{Aggregate, Policy, ProcessManager, Projector};
+    for kind in [Aggregate, Policy, ProcessManager, Projector] {
+        assert_eq!(crate::validate(&described(kind)), Ok(()), "{kind:?}");
+    }
+    let reason = |kind, fault: Fault| {
+        let mut descriptor = described(kind);
+        fault(&mut descriptor);
+        crate::validate(&descriptor).err().map(|r| r.reason())
+    };
+    type Fault = fn(&mut pb::ComponentDescriptor);
+    let cases: [(pb::ComponentKind, Fault, &str); 9] = [
+        (
+            Aggregate,
+            |d| d.rules_version.clear(),
+            "MISSING_RULES_VERSION",
+        ),
+        (Policy, |d| d.rules_version.clear(), "MISSING_RULES_VERSION"),
+        (Aggregate, |d| d.state = None, "MISSING_STATE_TYPE"),
+        (ProcessManager, |d| d.state = None, "MISSING_STATE_TYPE"),
+        (
+            Projector,
+            |d| d.state = Some(Default::default()),
+            "STATE_ON_STATELESS_KIND",
+        ),
+        (
+            Aggregate,
+            |d| d.starting_types = vec!["orders.v1.Place".to_string()],
+            "STARTING_TYPES_ON_NON_PM",
+        ),
+        (
+            Policy,
+            |d| d.output_domain.clear(),
+            "POLICY_NO_OUTPUT_DOMAIN",
+        ),
+        (
+            Policy,
+            |d| {
+                d.inputs.push(pb::Target {
+                    domain: "payment".to_string(),
+                })
+            },
+            "POLICY_INPUT_COUNT",
+        ),
+        (
+            ProcessManager,
+            |d| d.output_domain = "inventory".to_string(),
+            "OUTPUT_DOMAIN_ON_NON_POLICY",
+        ),
+    ];
+    for (kind, fault, expected) in cases {
+        assert_eq!(reason(kind, fault), Some(expected), "{kind:?}");
+    }
+    let mut none = described(Policy);
+    none.inputs.clear();
+    assert_eq!(
+        crate::validate(&none),
+        Err(crate::DescriptorRefused::PolicyInputCount {
+            component: "order".to_string(),
+            input_count: 0
+        })
+    );
+}

@@ -22,3 +22,13 @@ angzarr-embedded-host-config-unreadable = the config { $path } could not be read
 angzarr-embedded-host-config-invalid = the config { $path } is not valid, at byte { $offset }
 angzarr-embedded-host-register = a domain could not be registered: { $cause }
 angzarr-embedded-host-store = the store could not be opened: { $cause }
+angzarr-embedded-host-descriptor-missing-rules-version = component "{ $component }": its descriptor has no rules version
+angzarr-embedded-host-descriptor-starting-types-on-non-pm = component "{ $component }": a { $component_kind } lists starting types; only a process manager may
+angzarr-embedded-host-descriptor-missing-state-type = component "{ $component }": a { $component_kind } has no state type
+angzarr-embedded-host-descriptor-state-on-stateless-kind = component "{ $component }": a { $component_kind } has a state; it may not
+angzarr-embedded-host-descriptor-policy-input-count = component "{ $component }": a policy has { $input_count ->
+        [one] { $input_count } input
+       *[other] { $input_count } inputs
+    }; it must have exactly one
+angzarr-embedded-host-descriptor-policy-no-output-domain = component "{ $component }": a policy has no output domain
+angzarr-embedded-host-descriptor-output-domain-on-non-policy = component "{ $component }": a { $component_kind } has an output domain; only a policy may
