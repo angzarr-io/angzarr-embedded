@@ -324,6 +324,20 @@ impl StepError {
 }
 
 impl KernelError {
+    /// This error as the coordinator answers it on the wire, in the
+    /// router's shape: its reason key (a `CoordinatorReason`'s full name,
+    /// `as_str_name`), its args as metadata, and its status; `None` for an
+    /// error that is not one of the coordinator's answers. A stale expected
+    /// sequence (the early check, or a write lost to a racing command) is
+    /// `COORDINATOR_REASON_EXPECTED_SEQUENCE_STALE`, ABORTED, args
+    /// `expected` and `actual`.
+    ///
+    /// RED (design-by-test, the owner's ruling of 2026-10-30): proposed;
+    /// not implemented.
+    pub fn as_coded(&self) -> Option<angzarr_router::error::CodedError> {
+        todo!("red: KernelError::as_coded (design-by-test, 2026-10-30)")
+    }
+
     pub fn recovery(&self) -> Recovery {
         match self {
             KernelError::Malformed(_)

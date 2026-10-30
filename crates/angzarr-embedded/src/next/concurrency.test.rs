@@ -9,17 +9,23 @@
 //!   kernel's own race. It re-loads and decides again on the new head,
 //!   under the retry policy, and succeeds.
 //! - **An expected sequence**: the caller decided against a head that is
-//!   gone. Its conflict is an immediate business failure: a business-fatal
-//!   rejection under a coordinator reason key, never retried.
+//!   gone. The loss is the same condition as the early check's stale
+//!   sequence (`KernelError::Stale`, the stream already past it at load),
+//!   and gets the same answer (the owner's ruling, 2026-10-30): ABORTED,
+//!   class BusinessImmediate (decision 14.37: a direct caller gets it at
+//!   once; a policy step is run again under the retry cap), under
+//!   `COORDINATOR_REASON_EXPECTED_SEQUENCE_STALE`, args `expected` and
+//!   `actual`.
 //!
 //! Each test forces the race: both commands' handlers wait at a barrier
 //! that only the two of them together can pass, so both have loaded the
 //! same head before either writes. No sleep decides the outcome.
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Barrier, Mutex};
 
-use angzarr_router::error::CodedError;
+use angzarr_router::error::{CodedError, GrpcCode};
 use angzarr_router::pb::CommandHandlerResponse;
 use angzarr_router::router::CommandHandler;
 
@@ -29,16 +35,49 @@ use crate::next::v1::{
     CommandBook, ComponentDescriptor, ComponentKind, ConflictResolution, ContextualCommand,
     EventBook, EventPage, Handling, StateDescriptor, StateOptions,
 };
-use crate::next::{Any, Failure, Handled, Kernel, MemoryDeadLetters, Recovery, Registry, Rejected};
-use angzarr_embedded_diagnostic::Diagnostic;
+use crate::next::{
+    class, Any, Class, Failure, Handled, Kernel, KernelError, MemoryDeadLetters, Recovery,
+    Registry, Rejected,
+};
 
-/// The reason key a lost race is refused under when the command set an
-/// expected sequence. PROPOSED, for review: no key of angzarr-project's
-/// catalog (`catalog/reasons.toml`) fits (CONFLICT_UNRESOLVED is
-/// AGGREGATE_HANDLES's, CONFLICT_OVERLAP COMMUTATIVE's), so this needs a
-/// new coordinator key there, status FAILED_PRECONDITION (business-fatal),
-/// args `expected` and `actual`, and its constant in `next::reasons`.
-const EXPECTED_SEQUENCE_STALE: &str = "EXPECTED_SEQUENCE_STALE";
+/// The reason key a stale expected sequence is answered with: the full
+/// name of `CoordinatorReason::ExpectedSequenceStale`, which angzarr-project's
+/// spec is adding (spec/20261019-draft). Held as text until angzarr-proto
+/// is pinned at a rev that has the value; then
+/// `CoordinatorReason::ExpectedSequenceStale.as_str_name()`. Red for that
+/// reason too.
+const EXPECTED_SEQUENCE_STALE: &str = "COORDINATOR_REASON_EXPECTED_SEQUENCE_STALE";
+
+/// `failure` is the coordinator's stale expected sequence for stream
+/// `cover("till", 1)`, `expected` against `actual`: the kernel's
+/// `Stale`, answered on the wire as ABORTED (BusinessImmediate) under
+/// [`EXPECTED_SEQUENCE_STALE`], its sequences as args; for a direct
+/// caller, a retry (re-read and re-issue).
+fn assert_stale(failure: &Failure<Rejected>, expected: u64, actual: u64) {
+    assert_eq!(
+        failure,
+        &Failure::Kernel(KernelError::Stale {
+            stream: cover("till", 1),
+            expected,
+            actual,
+        })
+    );
+    let Failure::Kernel(error) = failure else {
+        unreachable!()
+    };
+    let coded = error.as_coded().expect("one of the coordinator's answers");
+    assert_eq!(coded.code, EXPECTED_SEQUENCE_STALE);
+    assert_eq!(coded.grpc, GrpcCode::Aborted);
+    assert_eq!(class(coded.grpc as i32), Class::BusinessImmediate);
+    assert_eq!(
+        coded.extras,
+        BTreeMap::from([
+            ("actual".to_string(), actual.to_string()),
+            ("expected".to_string(), expected.to_string()),
+        ])
+    );
+    assert_eq!(failure.recovery(), Recovery::Retry);
+}
 
 /// How many of the first dispatches meet at the barrier: the two racing
 /// commands' first decisions. Any later dispatch (a retry) passes.
@@ -204,12 +243,12 @@ fn a_lost_race_without_an_expected_sequence_is_retried_on_the_new_head() {
 
 /// Both commands expected the empty stream (sequence 0): both pass the
 /// check, both decide, one write wins. The loser decided against a head
-/// that is gone, so it is refused at once: a business-fatal rejection
-/// under its reason key, its expected and actual sequences as args, never
-/// retried (its handler ran once) and never dead-lettered. The stream
-/// holds the winner's event only.
+/// that is gone: the coordinator's stale expected sequence, 0 against 1,
+/// returned to this direct caller at once (its handler ran once, it is not
+/// re-decided) and never dead-lettered. The stream holds the winner's
+/// event only.
 #[test]
-fn a_lost_race_with_an_expected_sequence_is_an_immediate_business_failure() {
+fn a_lost_race_with_an_expected_sequence_is_a_stale_expected_sequence() {
     let racing: &'static Racing = Box::leak(Box::new(Racing::new()));
     let registry = registry_of(racing);
     let log = MemoryDeadLetters::new();
@@ -227,31 +266,47 @@ fn a_lost_race_with_an_expected_sequence_is_an_immediate_business_failure() {
         .count();
     let errors: Vec<_> = results.iter().filter_map(|r| r.as_ref().err()).collect();
     assert_eq!(applied, 1, "one write wins: {errors:?}");
-    let lost = results
-        .iter()
-        .find_map(|r| r.as_ref().err())
-        .expect("one loses");
-    let Failure::Rejected(rejected) = lost else {
-        panic!("a business rejection, not {lost:?}");
-    };
-    assert_eq!(rejected.code(), EXPECTED_SEQUENCE_STALE);
-    let args: Vec<_> = rejected
-        .args()
-        .into_iter()
-        .map(|(name, arg)| (name, format!("{arg:?}")))
-        .collect();
-    assert!(
-        args.iter()
-            .any(|(n, v)| *n == "expected" && v.contains('0'))
-            && args.iter().any(|(n, v)| *n == "actual" && v.contains('1')),
-        "its expected and actual sequences: {args:?}"
-    );
-    assert_eq!(lost.recovery(), Recovery::Business);
+    assert_stale(errors[0], 0, 1);
     assert_eq!(
         racing.dispatched.load(Ordering::SeqCst),
         RACERS,
-        "the loser is not retried"
+        "the loser is not re-decided"
     );
     assert_eq!(pages(&store, &cover("till", 1)).len(), 1);
+    assert!(log.lines().is_empty(), "{:?}", log.lines());
+}
+
+/// The early check: a command expecting sequence 0 of a stream already at
+/// 1 is refused before its handler runs, with the same answer as a lost
+/// race: the coordinator's stale expected sequence, 0 against 1.
+#[test]
+fn an_expected_sequence_already_passed_is_a_stale_expected_sequence() {
+    let racing: &'static Racing = Box::leak(Box::new(Racing::new()));
+    // Past the barrier: no race here, every dispatch passes.
+    racing.dispatched.store(RACERS, Ordering::SeqCst);
+    let registry = registry_of(racing);
+    let log = MemoryDeadLetters::new();
+    let store = MemoryStore::new();
+    let kernel = Kernel::new(&registry, &log);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let first = runtime.block_on(kernel.handle_any(&store, ring(1, None), &at(1), &mut ()));
+    assert!(
+        matches!(first, Ok(Handled::Applied(_))),
+        "{:?}",
+        first.err()
+    );
+
+    let late = runtime
+        .block_on(kernel.handle_any(&store, ring(2, Some(0)), &at(2), &mut ()))
+        .err()
+        .expect("stale");
+    assert_stale(&late, 0, 1);
+    assert_eq!(
+        racing.dispatched.load(Ordering::SeqCst),
+        RACERS + 1,
+        "refused before its handler"
+    );
     assert!(log.lines().is_empty(), "{:?}", log.lines());
 }
