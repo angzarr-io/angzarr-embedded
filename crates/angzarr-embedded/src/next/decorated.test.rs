@@ -1680,7 +1680,7 @@ mod route {
 
     /// A type URL no handler is marked for (a command the proto declares
     /// and the markup does not handle, or another domain's) is the router's
-    /// UNKNOWN_COMMAND_TYPE, not a rejection, and reaches no handler.
+    /// ROUTER_REASON_UNKNOWN_COMMAND_TYPE, not a rejection, and reaches no handler.
     #[test]
     fn an_unmarked_type_url_is_the_routers_unknown_command_type() {
         let registry = registry();
@@ -1690,13 +1690,13 @@ mod route {
 
         match refused {
             Err(Failure::Kernel(KernelError::Router(e))) => {
-                assert_eq!(e.code, "UNKNOWN_COMMAND_TYPE");
+                assert_eq!(e.code, "ROUTER_REASON_UNKNOWN_COMMAND_TYPE");
                 assert_eq!(
                     e.extras.get("type_url").map(String::as_str),
                     Some("/toy.tally.cmd.v1.Count")
                 );
             }
-            other => panic!("the router's UNKNOWN_COMMAND_TYPE, not {other:?}"),
+            other => panic!("the router's ROUTER_REASON_UNKNOWN_COMMAND_TYPE, not {other:?}"),
         }
         assert_eq!(wallet.len(), 2, "nothing was committed");
     }
@@ -1996,7 +1996,7 @@ mod continuation {
     }
 
     /// A fact's steps that never stop are a bug: the ingest panics, which
-    /// the router catches (its cause HANDLER_PANICKED) and the kernel
+    /// the router catches (its cause ROUTER_REASON_HANDLER_PANICKED) and the kernel
     /// dead-letters.
     #[test]
     fn a_facts_steps_past_the_limit_are_a_bug() {
@@ -2012,7 +2012,7 @@ mod continuation {
             matches!(
                 &slipped,
                 Err(Failure::Kernel(KernelError::Router(e)))
-                    if e.extras.get("cause").map(String::as_str) == Some("HANDLER_PANICKED")
+                    if e.extras.get("cause").map(String::as_str) == Some("ROUTER_REASON_HANDLER_PANICKED")
             ),
             "{slipped:?}"
         );
@@ -2393,7 +2393,7 @@ mod failed {
     }
 
     /// A handler's `Failed::Bug` is a bug, never a refusal: INTERNAL
-    /// UNHANDLED_HANDLER_ERROR, `Recovery::Bug`, dead-lettered with the
+    /// ROUTER_REASON_UNHANDLED_HANDLER_ERROR, `Recovery::Bug`, dead-lettered with the
     /// bug's code as its `cause` and its args as `cause.<arg>`, no English,
     /// and nothing written.
     #[test]
@@ -2415,7 +2415,7 @@ mod failed {
         assert!(
             matches!(
                 &failure,
-                Failure::Kernel(KernelError::Router(e)) if e.code == "UNHANDLED_HANDLER_ERROR"
+                Failure::Kernel(KernelError::Router(e)) if e.code == "ROUTER_REASON_UNHANDLED_HANDLER_ERROR"
             ),
             "a bug, not a refusal: {failure:?}"
         );
@@ -2435,7 +2435,7 @@ mod failed {
             lines[0]
         );
         assert!(
-            !lines[0].contains("UNHANDLED_HANDLER_ERROR"),
+            !lines[0].contains("ROUTER_REASON_UNHANDLED_HANDLER_ERROR"),
             "no retired code: {}",
             lines[0]
         );
@@ -2486,7 +2486,7 @@ mod failed {
             lines[0]
         );
         assert!(
-            !lines[0].contains("UNHANDLED_HANDLER_ERROR"),
+            !lines[0].contains("ROUTER_REASON_UNHANDLED_HANDLER_ERROR"),
             "no retired code: {}",
             lines[0]
         );
@@ -2500,7 +2500,7 @@ mod failed {
     }
 
     /// A continuation step's bug fails the whole decision as a handler's
-    /// does: UNHANDLED_HANDLER_ERROR, `Recovery::Bug`, dead-lettered with
+    /// does: ROUTER_REASON_UNHANDLED_HANDLER_ERROR, `Recovery::Bug`, dead-lettered with
     /// its cause, and nothing written, the handler's own event included.
     #[test]
     fn a_steps_bug_fails_the_whole_decision() {
@@ -2512,7 +2512,7 @@ mod failed {
         assert!(
             matches!(
                 &failure,
-                Failure::Kernel(KernelError::Router(e)) if e.code == "UNHANDLED_HANDLER_ERROR"
+                Failure::Kernel(KernelError::Router(e)) if e.code == "ROUTER_REASON_UNHANDLED_HANDLER_ERROR"
             ),
             "a bug, not a refusal: {failure:?}"
         );
@@ -2552,7 +2552,7 @@ mod failed {
         assert!(
             matches!(
                 &failure,
-                Failure::Kernel(KernelError::Router(e)) if e.code == "UNHANDLED_HANDLER_ERROR"
+                Failure::Kernel(KernelError::Router(e)) if e.code == "ROUTER_REASON_UNHANDLED_HANDLER_ERROR"
             ),
             "a bug, not a refusal: {failure:?}"
         );
@@ -2562,7 +2562,7 @@ mod failed {
     }
 
     /// ... and its typed refusal goes out under its status, keyed
-    /// COMMAND_REFUSED with its object's type, the object packed beside.
+    /// ROUTER_REASON_COMMAND_REFUSED with its object's type, the object packed beside.
     #[test]
     fn a_typed_refusal_goes_out_under_its_status_with_its_object() {
         let store = Mem::new();
@@ -3206,7 +3206,7 @@ mod process_manager {
     }
 
     /// A command that is not a starting one, for a correlation with no
-    /// instance, is refused (`PM_NO_INSTANCE`, a business refusal) and
+    /// instance, is refused (`COORDINATOR_REASON_PM_NO_INSTANCE`, a business refusal) and
     /// records nothing. Its code is pinned as a string.
     #[test]
     fn a_non_starting_command_for_no_instance_is_refused() {
@@ -3614,7 +3614,7 @@ mod handler_context {
     }
 
     /// A handler that never acknowledges its window has its output
-    /// discarded: the router's CONFLICT_UNRESOLVED, the kernel's
+    /// discarded: the router's COORDINATOR_REASON_CONFLICT_UNRESOLVED, the kernel's
     /// `Unresolved`, dead-lettered, and nothing recorded.
     #[test]
     fn an_aggregate_handles_handler_that_never_acknowledges_is_unresolved() {
@@ -3698,7 +3698,7 @@ mod typed_refusals {
     use super::*;
     use ::angzarr_embedded::next::v1::Diagnostic as WireDiagnostic;
 
-    /// A typed refusal is keyed, as on the wire, COMMAND_REFUSED with its
+    /// A typed refusal is keyed, as on the wire, ROUTER_REASON_COMMAND_REFUSED with its
     /// object's full type name as `refusal_type`; a message-only refusal by
     /// its own code and args. Each displays its code and args.
     #[test]
@@ -3802,7 +3802,7 @@ mod typed_refusals {
     }
 
     /// As a refused policy receives it: the object packed; keyed
-    /// COMMAND_REFUSED with the object's type as `refusal_type`, as on the
+    /// ROUTER_REASON_COMMAND_REFUSED with the object's type as `refusal_type`, as on the
     /// wire, and its `Display` is that code and args, never English
     /// (decision 14.37).
     #[test]
@@ -4071,14 +4071,14 @@ mod policy_refusals {
         );
         match unhandled {
             Err(Failure::Kernel(KernelError::Router(e))) => {
-                assert_eq!(e.code, "NO_REFUSAL_HANDLER");
+                assert_eq!(e.code, "ROUTER_REASON_NO_REFUSAL_HANDLER");
                 assert_eq!(
                     e.extras.get("command_type").map(String::as_str),
                     Some("/toy.wallet.cmd.v1.Withdraw")
                 );
             }
-            Err(other) => panic!("the router's NO_REFUSAL_HANDLER, not {other}"),
-            Ok(_) => panic!("the router's NO_REFUSAL_HANDLER, not handled"),
+            Err(other) => panic!("the router's ROUTER_REASON_NO_REFUSAL_HANDLER, not {other}"),
+            Ok(_) => panic!("the router's ROUTER_REASON_NO_REFUSAL_HANDLER, not handled"),
         }
     }
 
@@ -4417,7 +4417,7 @@ mod refusal_flow {
     }
 
     /// The dead letter of a refusal with no path carries the code of what
-    /// was missing (the router's `NO_REFUSAL_HANDLER`, as angzarr-embedded's
+    /// was missing (the router's `ROUTER_REASON_NO_REFUSAL_HANDLER`, as angzarr-embedded's
     /// code), never rendered English.
     #[test]
     fn a_refusal_with_no_handlers_dead_letter_carries_its_code() {
@@ -4647,7 +4647,7 @@ mod router {
     }
 
     /// A policy's command to an aggregate with no root is the policy's bug,
-    /// refused by the router (`POLICY_COMMAND_NO_ROOT`), dead-lettered and
+    /// refused by the router (`COORDINATOR_REASON_POLICY_COMMAND_NO_ROOT`), dead-lettered and
     /// never delivered; the trigger's step stays committed.
     #[test]
     fn a_policy_command_to_an_aggregate_with_no_root_is_refused_no_root() {
@@ -4660,7 +4660,7 @@ mod router {
         };
         assert_eq!(
             router_reason(&failed),
-            Some("POLICY_COMMAND_NO_ROOT"),
+            Some("COORDINATOR_REASON_POLICY_COMMAND_NO_ROOT"),
             "{failed}"
         );
         assert_eq!(failed.recovery(), Recovery::Bug);
@@ -4694,7 +4694,7 @@ mod router {
         };
         assert_eq!(
             router_reason(&failed),
-            Some("POLICY_COMMAND_NO_ROOT"),
+            Some("COORDINATOR_REASON_POLICY_COMMAND_NO_ROOT"),
             "{failed}"
         );
         assert_eq!(buy_in_events(&store, &correlation(2)), None);
@@ -4703,7 +4703,7 @@ mod router {
 
     /// A policy's command carrying a correlation other than its trigger's is
     /// the policy's bug, refused by the router
-    /// (`POLICY_COMMAND_OTHER_CORRELATION`), and never delivered.
+    /// (`COORDINATOR_REASON_POLICY_COMMAND_OTHER_CORRELATION`), and never delivered.
     #[test]
     fn a_policy_command_in_another_correlation_is_refused_other_correlation() {
         let (registry, store) = opened_with_dispatch(hold_dispatch(|hold| {
@@ -4719,7 +4719,7 @@ mod router {
         };
         assert_eq!(
             router_reason(&failed),
-            Some("POLICY_COMMAND_OTHER_CORRELATION"),
+            Some("COORDINATOR_REASON_POLICY_COMMAND_OTHER_CORRELATION"),
             "{failed}"
         );
         assert_eq!(
@@ -4819,7 +4819,7 @@ mod router {
 
     /// A refusal only the router makes reaches the caller unchanged: a
     /// command outside the policy's one destination
-    /// (`POLICY_COMMAND_OUTSIDE_DESTINATION`, naming both domains).
+    /// (`COORDINATOR_REASON_POLICY_COMMAND_OUTSIDE_DESTINATION`, naming both domains).
     #[test]
     fn a_refusal_only_the_router_makes_reaches_the_caller() {
         let (registry, store) = opened_with_dispatch(hold_dispatch(|hold| {
@@ -4833,7 +4833,7 @@ mod router {
         };
         assert_eq!(
             router_reason(&failed),
-            Some("POLICY_COMMAND_OUTSIDE_DESTINATION"),
+            Some("COORDINATOR_REASON_POLICY_COMMAND_OUTSIDE_DESTINATION"),
             "{failed}"
         );
         let Failure::Downstream {
@@ -5725,7 +5725,7 @@ mod router {
 
         /// A handler's retryable bug is retried up to the cap, each wait
         /// the backoff less its jitter, through the injected `Wait`; then
-        /// it is dead-lettered as UNHANDLED_HANDLER_ERROR with its cause
+        /// it is dead-lettered as ROUTER_REASON_UNHANDLED_HANDLER_ERROR with its cause
         /// and its retry count, and the caller gets it under its status,
         /// `Recovery::Retry`. Nothing is written.
         #[test]
@@ -5740,7 +5740,10 @@ mod router {
                 .expect("still down after the cap");
 
             let error = coded(&failed);
-            assert_eq!(error.code, "UNHANDLED_HANDLER_ERROR", "{failed:?}");
+            assert_eq!(
+                error.code, "ROUTER_REASON_UNHANDLED_HANDLER_ERROR",
+                "{failed:?}"
+            );
             assert_eq!(error.grpc, GrpcCode::Unavailable, "{failed:?}");
             assert_eq!(failed.recovery(), Recovery::Retry);
             assert_eq!(probe_attempts(), 4, "the first attempt and 3 retries");
@@ -5909,7 +5912,7 @@ mod router {
 
         /// Each `RetryableStatus` a handler picks goes out exactly as that
         /// status, from a handler, a step and a typed-refusal handler
-        /// alike: UNHANDLED_HANDLER_ERROR, its cause beside.
+        /// alike: ROUTER_REASON_UNHANDLED_HANDLER_ERROR, its cause beside.
         #[test]
         fn each_retryable_status_goes_out_exactly() {
             for (n, status) in [
@@ -5937,7 +5940,10 @@ mod router {
 
                     let error = coded(&failed);
                     assert_eq!(error.grpc, GrpcCode::from(status), "{status:?}: {failed:?}");
-                    assert_eq!(error.code, "UNHANDLED_HANDLER_ERROR", "{status:?}");
+                    assert_eq!(
+                        error.code, "ROUTER_REASON_UNHANDLED_HANDLER_ERROR",
+                        "{status:?}"
+                    );
                     assert_eq!(
                         error.extras.get("cause").map(String::as_str),
                         Some("toy-meter-broke"),
@@ -6273,7 +6279,7 @@ mod router {
     }
 
     /// A handler's bug (angzarr-router's `CodedError::bug`, decision
-    /// 14.37) is INTERNAL UNHANDLED_HANDLER_ERROR with the handler's own
+    /// 14.37) is INTERNAL ROUTER_REASON_UNHANDLED_HANDLER_ERROR with the handler's own
     /// code and args as its cause: `Recovery::Bug`, dead-lettered by that
     /// code and its cause (`cause=<code>`, `cause.<arg>`), at the origin and
     /// as a policy's step, whose position moves past the trigger.
@@ -6324,7 +6330,7 @@ mod router {
         assert!(
             matches!(
                 &origin,
-                Failure::Kernel(KernelError::Router(e)) if e.code == "UNHANDLED_HANDLER_ERROR"
+                Failure::Kernel(KernelError::Router(e)) if e.code == "ROUTER_REASON_UNHANDLED_HANDLER_ERROR"
             ),
             "{origin:?}"
         );
@@ -6355,7 +6361,7 @@ mod router {
                 Failure::Downstream {
                     error: StepError::Kernel(KernelError::Router(e)),
                     ..
-                } if e.code == "UNHANDLED_HANDLER_ERROR"
+                } if e.code == "ROUTER_REASON_UNHANDLED_HANDLER_ERROR"
             ),
             "{held:?}"
         );
@@ -6373,7 +6379,7 @@ mod router {
     }
 
     /// A source whose fact handler fails with a fault of the router's own
-    /// (UNHANDLED_HANDLER_ERROR): its commands answer as [`Remote`]'s.
+    /// (ROUTER_REASON_UNHANDLED_HANDLER_ERROR): its commands answer as [`Remote`]'s.
     struct Picky;
 
     impl ::angzarr_embedded::next::angzarr_router::router::CommandHandler for Picky {
@@ -6459,7 +6465,7 @@ mod router {
                 Failure::Downstream {
                     error: StepError::Kernel(KernelError::Router(e)),
                     ..
-                } if e.code == "UNHANDLED_HANDLER_ERROR"
+                } if e.code == "ROUTER_REASON_UNHANDLED_HANDLER_ERROR"
             ),
             "{failed:?}"
         );
@@ -6623,7 +6629,7 @@ mod router {
     }
 
     /// A domain's input goes through the router too: a command type the
-    /// wallet has no handler for is the router's `UNKNOWN_COMMAND_TYPE`.
+    /// wallet has no handler for is the router's `ROUTER_REASON_UNKNOWN_COMMAND_TYPE`.
     #[test]
     fn a_domains_unknown_command_is_the_routers_unknown_command_type() {
         let registry = registry();
@@ -6640,7 +6646,7 @@ mod router {
         };
         assert_eq!(
             router_reason(&failed),
-            Some("UNKNOWN_COMMAND_TYPE"),
+            Some("ROUTER_REASON_UNKNOWN_COMMAND_TYPE"),
             "{failed}"
         );
         assert_eq!(pages(&store, wallet().cover()), None);

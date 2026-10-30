@@ -96,7 +96,7 @@ pub enum KernelError {
         actual: u64,
     },
     /// COMMUTATIVE's window and the command changed overlapping units
-    /// (angzarr's ABORTED, `CONFLICT_OVERLAP`; decision 14.42): the
+    /// (angzarr's ABORTED, `COORDINATOR_REASON_CONFLICT_OVERLAP`; decision 14.42): the
     /// command's events were discarded. `window_units` and `command_units`
     /// are the two sets as the metadata carries them, comma-separated unit
     /// paths. Re-read, then re-issue.
@@ -601,8 +601,10 @@ fn router_diagnostic(
                 )
             }));
             (
-                super::route::reason_code(angzarr_router::error::codes::UNHANDLED_HANDLER_ERROR)
-                    .unwrap_or_default(),
+                super::route::reason_code(
+                    angzarr_router::error::RouterReason::UnhandledHandlerError.as_str_name(),
+                )
+                .unwrap_or_default(),
                 args,
             )
         }

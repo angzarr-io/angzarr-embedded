@@ -57,7 +57,7 @@ use angzarr_proto::v1::{
 use prost_types::Any;
 
 use angzarr_proto::v1::angzarr_dead_letter::Payload;
-use angzarr_router::error::codes;
+use angzarr_router::error::RouterReason;
 
 use super::check::{check, check_refusal, Checked, Identified, Sampled};
 use super::coordinator::{
@@ -1256,7 +1256,9 @@ impl<'k> Run<'k> {
                 .map_err(|e| StepError::Kernel(KernelError::Store(e)))?;
             return Err(StepError::PolicyFailed(failure));
         }
-        if error.code != codes::NO_FACT_HANDLER && error.code != codes::NO_REFUSAL_HANDLER {
+        if error.code != RouterReason::NoFactHandler.as_str_name()
+            && error.code != RouterReason::NoRefusalHandler.as_str_name()
+        {
             if super::route::is_handler_fault(&error) {
                 past_bug(self.policy_bug, port, positions)
                     .await

@@ -9,8 +9,8 @@
 //!
 //! - a handler's bug ([`KernelError::Router`](super::KernelError::Router)
 //!   under a status of the bug class: INTERNAL, UNKNOWN, DATA_LOSS): the
-//!   router's UNHANDLED_HANDLER_ERROR, the handler's own code and args its
-//!   `cause`, a panic's HANDLER_PANICKED; or the router's own error on
+//!   router's ROUTER_REASON_UNHANDLED_HANDLER_ERROR, the handler's own code and args its
+//!   `cause`, a panic's ROUTER_REASON_HANDLER_PANICKED; or the router's own error on
 //!   malformed input. Never a business refusal;
 //! - a policy's book the kernel built malformed (a policy or kernel bug);
 //! - a decide under AGGREGATE_HANDLES that never acknowledged its window

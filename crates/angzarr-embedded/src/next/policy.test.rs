@@ -38,7 +38,10 @@ fn a_command_is_stamped_with_its_triggers_edition() {
     let other = check_reaction("ledger", &trigger, None, vec![record(Some("other"))])
         .err()
         .unwrap();
-    assert_eq!(other.code, "POLICY_COMMAND_OUTSIDE_EDITION");
+    assert_eq!(
+        other.code,
+        "COORDINATOR_REASON_POLICY_COMMAND_OUTSIDE_EDITION"
+    );
     let extra = |key: &str| other.extras.get(key).map(String::as_str);
     assert_eq!(extra("expected_edition"), Some("what-if"));
     assert_eq!(extra("actual_edition"), Some("other"));
@@ -52,7 +55,10 @@ fn every_command_is_held_to_the_destination_before_any_other_rule() {
     let refused = check_reaction("ledger", &trigger, None, vec![record(Some("other")), stray])
         .err()
         .unwrap();
-    assert_eq!(refused.code, "POLICY_COMMAND_OUTSIDE_DESTINATION");
+    assert_eq!(
+        refused.code,
+        "COORDINATOR_REASON_POLICY_COMMAND_OUTSIDE_DESTINATION"
+    );
 }
 
 #[test]
@@ -109,15 +115,21 @@ fn a_translated_fact_that_is_more_than_a_payload_is_the_policys_bug() {
         cover: Some(cover_in("account", 1, "what-if")),
         ..bare()
     };
-    assert_eq!(refused(addressed), code("REFUSAL_FACT_ADDRESSED"));
+    assert_eq!(
+        refused(addressed),
+        code("COORDINATOR_REASON_REFUSAL_FACT_ADDRESSED")
+    );
     let handled = CommandBook {
         handling: Some(Handling::default()),
         ..bare()
     };
-    assert_eq!(refused(handled), code("REFUSAL_FACT_ADDRESSED"));
+    assert_eq!(
+        refused(handled),
+        code("COORDINATOR_REASON_REFUSAL_FACT_ADDRESSED")
+    );
     assert_eq!(
         refused(CommandBook::default()),
-        code("REFUSAL_FACT_NO_PAGE")
+        code("COORDINATOR_REASON_REFUSAL_FACT_NO_PAGE")
     );
     let command = CommandBook {
         page: Some(page(Body::Command(crate::next::v1::Command {
@@ -125,12 +137,18 @@ fn a_translated_fact_that_is_more_than_a_payload_is_the_policys_bug() {
         }))),
         ..CommandBook::default()
     };
-    assert_eq!(refused(command), code("REFUSAL_FACT_NOT_A_FACT"));
+    assert_eq!(
+        refused(command),
+        code("COORDINATOR_REASON_REFUSAL_FACT_NOT_A_FACT")
+    );
     let empty = CommandBook {
         page: Some(page(Body::Fact(Fact { payload: None }))),
         ..CommandBook::default()
     };
-    assert_eq!(refused(empty), code("REFUSAL_FACT_NOT_A_FACT"));
+    assert_eq!(
+        refused(empty),
+        code("COORDINATOR_REASON_REFUSAL_FACT_NOT_A_FACT")
+    );
     let identified = |edit: fn(&mut CommandPage)| {
         let mut book = bare();
         edit(book.page.as_mut().unwrap());
@@ -138,19 +156,19 @@ fn a_translated_fact_that_is_more_than_a_payload_is_the_policys_bug() {
     };
     assert_eq!(
         identified(|p| p.command_id = Some(crate::next::toys::command_id(1))),
-        code("REFUSAL_FACT_IDENTIFIED")
+        code("COORDINATOR_REASON_REFUSAL_FACT_IDENTIFIED")
     );
     assert_eq!(
         identified(|p| p.correlation_id = Some(crate::next::toys::command_id(1))),
-        code("REFUSAL_FACT_IDENTIFIED")
+        code("COORDINATOR_REASON_REFUSAL_FACT_IDENTIFIED")
     );
     assert_eq!(
         identified(|p| p.causation_id = Some(Default::default())),
-        code("REFUSAL_FACT_IDENTIFIED")
+        code("COORDINATOR_REASON_REFUSAL_FACT_IDENTIFIED")
     );
     assert_eq!(
         identified(|p| p.fact_origin = Some(FactOrigin::default())),
-        code("REFUSAL_FACT_IDENTIFIED")
+        code("COORDINATOR_REASON_REFUSAL_FACT_IDENTIFIED")
     );
 }
 
@@ -221,5 +239,8 @@ fn each_reaction_is_held_to_the_page_it_names() {
     let crossed = check_reactions("ledger", &source, vec![reaction(4, vec![carrying(2, 1)])])
         .err()
         .unwrap();
-    assert_eq!(crossed.code, "POLICY_COMMAND_OTHER_CORRELATION");
+    assert_eq!(
+        crossed.code,
+        "COORDINATOR_REASON_POLICY_COMMAND_OTHER_CORRELATION"
+    );
 }

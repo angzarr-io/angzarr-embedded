@@ -106,8 +106,8 @@ angzarr-embedded-next-no-refusal-handler = nothing handles the refusal of this c
 angzarr-embedded-next-no-component-of-kind = the business process hosts no component of the kind dispatched to
 angzarr-embedded-next-duplicate-component = a router hosts one component: register the other in its own
 
-# The coordinator's keys (catalog/reasons.toml) the kernel answers, each
-# under its own code.
+# The coordinator's keys (CoordinatorReason, reasons.proto) the kernel
+# answers, each under its own code.
 angzarr-embedded-next-conflict-unresolved = the handler never acknowledged the events it did not see: a bug in the handler; re-read and re-issue
 angzarr-embedded-next-conflict-overlap = the command's changes overlap changes it did not see: re-read and re-issue
 angzarr-embedded-next-policy-command-outside-destination = a policy sent a command to a domain other than its one destination: a bug in the policy

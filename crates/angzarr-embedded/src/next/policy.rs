@@ -58,33 +58,39 @@ use super::registry::Registry;
 /// A policy's translated refusal fact on the wire (`OnRefusedResponse.fact`,
 /// set), as the kernel takes it (decision 14.42): its payload alone. A fact
 /// that is more than a payload is the policy's bug, refused INTERNAL: one
-/// that sets its own cover or handling (`REFUSAL_FACT_ADDRESSED`), with no
-/// page (`REFUSAL_FACT_NO_PAGE`), that sets its own identity
-/// (`REFUSAL_FACT_IDENTIFIED`), or whose page is not a fact with a payload
-/// (`REFUSAL_FACT_NOT_A_FACT`). An unset fact is no translation, and the
+/// that sets its own cover or handling (`COORDINATOR_REASON_REFUSAL_FACT_ADDRESSED`), with no
+/// page (`COORDINATOR_REASON_REFUSAL_FACT_NO_PAGE`), that sets its own identity
+/// (`COORDINATOR_REASON_REFUSAL_FACT_IDENTIFIED`), or whose page is not a fact with a payload
+/// (`COORDINATOR_REASON_REFUSAL_FACT_NOT_A_FACT`). An unset fact is no translation, and the
 /// kernel passes the refusal through. The kernel addresses and identifies
 /// every refusal fact itself.
 pub fn translated(fact: CommandBook) -> Result<Any, CodedError> {
-    use super::reasons;
+    use super::reasons::CoordinatorReason;
     let refused = |code: &str| super::route::internal(code, []);
     if fact.cover.is_some() || fact.handling.is_some() {
-        return Err(refused(reasons::REFUSAL_FACT_ADDRESSED));
+        return Err(refused(
+            CoordinatorReason::RefusalFactAddressed.as_str_name(),
+        ));
     }
     let page = fact
         .page
-        .ok_or_else(|| refused(reasons::REFUSAL_FACT_NO_PAGE))?;
+        .ok_or_else(|| refused(CoordinatorReason::RefusalFactNoPage.as_str_name()))?;
     if page.command_id.is_some()
         || page.correlation_id.is_some()
         || page.causation_id.is_some()
         || page.fact_origin.is_some()
     {
-        return Err(refused(reasons::REFUSAL_FACT_IDENTIFIED));
+        return Err(refused(
+            CoordinatorReason::RefusalFactIdentified.as_str_name(),
+        ));
     }
     match page.body {
         Some(command_page::Body::Fact(angzarr_proto::v1::Fact {
             payload: Some(payload),
         })) => Ok(payload),
-        _ => Err(refused(reasons::REFUSAL_FACT_NOT_A_FACT)),
+        _ => Err(refused(
+            CoordinatorReason::RefusalFactNotAFact.as_str_name(),
+        )),
     }
 }
 
@@ -122,19 +128,19 @@ pub(crate) fn check_reactions(
 /// rules; one failure refuses the whole answer as the policy's bug,
 /// INTERNAL:
 /// - **destination**: its cover's domain is `output_domain`
-///   (`POLICY_COMMAND_OUTSIDE_DESTINATION`, naming both domains);
+///   (`COORDINATOR_REASON_POLICY_COMMAND_OUTSIDE_DESTINATION`, naming both domains);
 /// - **edition**: unset, or the `trigger` stream's; an unset one is stamped
-///   with the trigger's (`POLICY_COMMAND_OUTSIDE_EDITION`, naming both);
-/// - **root**: named, with bytes (`POLICY_COMMAND_NO_ROOT`);
+///   with the trigger's (`COORDINATOR_REASON_POLICY_COMMAND_OUTSIDE_EDITION`, naming both);
+/// - **root**: named, with bytes (`COORDINATOR_REASON_POLICY_COMMAND_NO_ROOT`);
 /// - **correlation**: unset, or the trigger's, `correlation`
-///   (`POLICY_COMMAND_OTHER_CORRELATION`).
+///   (`COORDINATOR_REASON_POLICY_COMMAND_OTHER_CORRELATION`).
 pub(crate) fn check_reaction(
     output_domain: &str,
     trigger: &Cover,
     correlation: Option<&Uuid>,
     mut commands: Vec<CommandBook>,
 ) -> Result<Vec<CommandBook>, CodedError> {
-    use super::reasons::{self, args};
+    use super::reasons::{args, CoordinatorReason};
     use angzarr_router::error::extras;
     let domain = |c: &CommandBook| {
         c.cover
@@ -144,7 +150,7 @@ pub(crate) fn check_reaction(
     };
     if let Some(stray) = commands.iter().find(|c| domain(c) != output_domain) {
         return Err(super::route::internal(
-            reasons::POLICY_COMMAND_OUTSIDE_DESTINATION,
+            CoordinatorReason::PolicyCommandOutsideDestination.as_str_name(),
             [
                 (args::EXPECTED_DOMAIN.to_string(), output_domain.to_string()),
                 (args::ACTUAL_DOMAIN.to_string(), domain(stray)),
@@ -175,7 +181,7 @@ pub(crate) fn check_reaction(
             .is_some_and(|r| !r.value.is_empty());
         if !named {
             return Err(super::route::internal(
-                reasons::POLICY_COMMAND_NO_ROOT,
+                CoordinatorReason::PolicyCommandNoRoot.as_str_name(),
                 naming(),
             ));
         }
@@ -186,7 +192,7 @@ pub(crate) fn check_reaction(
         if let (Some(carried), Some(trigger)) = (carried, correlation) {
             if carried != trigger {
                 return Err(super::route::internal(
-                    reasons::POLICY_COMMAND_OTHER_CORRELATION,
+                    CoordinatorReason::PolicyCommandOtherCorrelation.as_str_name(),
                     naming(),
                 ));
             }
@@ -196,7 +202,7 @@ pub(crate) fn check_reaction(
             None => cover.edition = edition.clone(),
             Some(named) if Some(named) != edition.as_deref() => {
                 return Err(super::route::internal(
-                    reasons::POLICY_COMMAND_OUTSIDE_EDITION,
+                    CoordinatorReason::PolicyCommandOutsideEdition.as_str_name(),
                     [
                         (
                             args::EXPECTED_EDITION.to_string(),

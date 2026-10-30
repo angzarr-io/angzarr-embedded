@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::rpc::google_rpc::{ErrorInfo, Status as RpcStatus, ERROR_INFO_TYPE_URL};
-use angzarr_embedded::next::reasons::{self, args};
+use angzarr_embedded::next::reasons::{args, CoordinatorReason};
 use angzarr_embedded::next::{class, Class};
 use angzarr_router::error::GrpcCode;
 use prost::Message;
@@ -122,14 +122,14 @@ fn a_child_not_running_is_retryable() {
 fn another_status_keeps_its_code() {
     let status = status_with_details(
         Code::Internal,
-        "UNKNOWN_COMMAND_TYPE",
+        "ROUTER_REASON_UNKNOWN_COMMAND_TYPE",
         vec![error_info(
-            router_codes::UNKNOWN_COMMAND_TYPE,
+            RouterReason::UnknownCommandType.as_str_name(),
             &[("type_url", "/x.Y")],
         )],
     );
     let coded = status_to_coded("player", &status);
-    assert_eq!(coded.code, router_codes::UNKNOWN_COMMAND_TYPE);
+    assert_eq!(coded.code, RouterReason::UnknownCommandType.as_str_name());
     assert_eq!(
         coded.extras,
         BTreeMap::from([("type_url".to_string(), "/x.Y".to_string())])
@@ -143,7 +143,10 @@ fn another_status_keeps_its_code() {
 #[test]
 fn a_status_without_error_info_is_unhandled() {
     let coded = status_to_coded("player", &tonic::Status::internal("boom"));
-    assert_eq!(coded.code, router_codes::UNHANDLED_HANDLER_ERROR);
+    assert_eq!(
+        coded.code,
+        RouterReason::UnhandledHandlerError.as_str_name()
+    );
     assert_eq!(coded.grpc, GrpcCode::Internal);
     assert!(!is_retryable(&coded));
 }
@@ -310,7 +313,10 @@ fn a_childs_retryable_status_keeps_its_class() {
 #[test]
 fn a_childs_own_unknown_is_unhandled() {
     let coded = status_to_coded("player", &tonic::Status::unknown("what"));
-    assert_eq!(coded.code, router_codes::UNHANDLED_HANDLER_ERROR);
+    assert_eq!(
+        coded.code,
+        RouterReason::UnhandledHandlerError.as_str_name()
+    );
     assert!(!is_retryable(&coded));
 }
 
@@ -333,7 +339,7 @@ fn only_unavailability_is_retryable() {
         [],
     );
     assert!(!is_retryable(&other));
-    let stale = CodedError::immediate(reasons::CONFLICT_OVERLAP, []);
+    let stale = CodedError::immediate(CoordinatorReason::ConflictOverlap.as_str_name(), []);
     assert!(!is_retryable(&stale));
 }
 
@@ -371,29 +377,32 @@ fn a_translated_fact_is_a_bare_payload() {
     };
     assert_eq!(
         with(&|f| f.cover = Some(pb::Cover::default())),
-        reasons::REFUSAL_FACT_ADDRESSED
+        CoordinatorReason::RefusalFactAddressed.as_str_name()
     );
     assert_eq!(
         with(&|f| f.handling = Some(pb::Handling::default())),
-        reasons::REFUSAL_FACT_ADDRESSED
+        CoordinatorReason::RefusalFactAddressed.as_str_name()
     );
-    assert_eq!(with(&|f| f.page = None), reasons::REFUSAL_FACT_NO_PAGE);
+    assert_eq!(
+        with(&|f| f.page = None),
+        CoordinatorReason::RefusalFactNoPage.as_str_name()
+    );
     let id = || Some(angzarr_router::pb::Uuid::from_bytes([1; 16]));
     assert_eq!(
         page(&|p| p.command_id = id()),
-        reasons::REFUSAL_FACT_IDENTIFIED
+        CoordinatorReason::RefusalFactIdentified.as_str_name()
     );
     assert_eq!(
         page(&|p| p.correlation_id = id()),
-        reasons::REFUSAL_FACT_IDENTIFIED
+        CoordinatorReason::RefusalFactIdentified.as_str_name()
     );
     assert_eq!(
         page(&|p| p.causation_id = Some(pb::EventRef::default())),
-        reasons::REFUSAL_FACT_IDENTIFIED
+        CoordinatorReason::RefusalFactIdentified.as_str_name()
     );
     assert_eq!(
         page(&|p| p.fact_origin = Some(pb::FactOrigin::default())),
-        reasons::REFUSAL_FACT_IDENTIFIED
+        CoordinatorReason::RefusalFactIdentified.as_str_name()
     );
     assert_eq!(
         page(&|p| {
@@ -401,10 +410,10 @@ fn a_translated_fact_is_a_bare_payload() {
                 payload: Some(payload.clone()),
             }))
         }),
-        reasons::REFUSAL_FACT_NOT_A_FACT
+        CoordinatorReason::RefusalFactNotAFact.as_str_name()
     );
     assert_eq!(
         page(&|p| p.body = Some(pb::command_page::Body::Fact(pb::Fact { payload: None }))),
-        reasons::REFUSAL_FACT_NOT_A_FACT
+        CoordinatorReason::RefusalFactNotAFact.as_str_name()
     );
 }

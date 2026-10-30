@@ -211,10 +211,10 @@
 //!   `why`'s own code, "re-read and re-decide": back to an outside caller
 //!   at once; a policy's step, whose caller is the kernel, is reloaded and
 //!   run again under the capped backoff, then dead-lettered.
-//! - `Failed::bug(&broke)` (bug, fatal): INTERNAL UNHANDLED_HANDLER_ERROR,
+//! - `Failed::bug(&broke)` (bug, fatal): INTERNAL ROUTER_REASON_UNHANDLED_HANDLER_ERROR,
 //!   `broke`'s code as its `cause`; dead-lettered at once.
 //! - `Failed::retryable_bug(status, &down)` (bug, retryable): the
-//!   `markup::RetryableStatus` the handler picks, UNHANDLED_HANDLER_ERROR,
+//!   `markup::RetryableStatus` the handler picks, ROUTER_REASON_UNHANDLED_HANDLER_ERROR,
 //!   `down`'s code as its `cause`; retried with capped backoff, then
 //!   dead-lettered with its `retry_count`. The statuses are not
 //!   interchangeable: `Unavailable` means resend (the dependency is down
@@ -262,7 +262,7 @@
 //!   (`#[handles_cmd(StartBuyIn, starts)]`, `#[handles_fact(F, starts)]`)
 //!   may start an instance; `STARTS` lists them. Any other input for a
 //!   correlation with no instance is not delivered: a fact is skipped
-//!   silently, a command refused (`PM_NO_INSTANCE`), recording nothing.
+//!   silently, a command refused (`COORDINATOR_REASON_PM_NO_INSTANCE`), recording nothing.
 //!   `starts` on an aggregate's handler does not compile. A process
 //!   manager that marks no input `starts` can never start an instance,
 //!   yet angzarr-embedded does not refuse it: the check is angzarr-cli's, a

@@ -25,7 +25,7 @@ fn a_record_of_nothing_is_known_by_its_type_url() {
 #[test]
 fn a_fold_that_fails_carries_its_cause_as_a_key_and_args() {
     use crate::next::toys::{account, command, cover, registry};
-    use angzarr_router::error::codes;
+    use angzarr_router::error::RouterReason;
     use angzarr_router::pb::ContextualCommand;
 
     let registry = registry();
@@ -55,7 +55,7 @@ fn a_fold_that_fails_carries_its_cause_as_a_key_and_args() {
         .expect("registered")
         .dispatch(&request)
         .expect_err("the persisted event does not fold");
-    assert_eq!(error.code, codes::FOLD_FAILED);
+    assert_eq!(error.code, RouterReason::FoldFailed.as_str_name());
     let extra = |key: &str| error.extras.get(key).map(String::as_str);
     assert_eq!(
         extra("cause"),
@@ -72,7 +72,7 @@ fn a_fold_that_fails_carries_its_cause_as_a_key_and_args() {
 /// A handler's refusal goes out under whichever of the six business
 /// statuses it gave, typed or not, and `Rejected::status` reads that same
 /// status back: an untyped refusal under its own code and args, a typed
-/// one keyed COMMAND_REFUSED with its object beside.
+/// one keyed ROUTER_REASON_COMMAND_REFUSED with its object beside.
 #[test]
 fn a_refusal_goes_out_and_reads_back_under_each_business_status() {
     use angzarr_embedded_diagnostic::{Diagnostic, Report};
@@ -113,7 +113,7 @@ fn a_refusal_goes_out_and_reads_back_under_each_business_status() {
 
         let typed = coded(refused(&report, Some(object.clone()), status));
         assert_eq!(typed.grpc, GrpcCode::from(status), "{status:?}");
-        assert_eq!(typed.code, "COMMAND_REFUSED", "{status:?}");
+        assert_eq!(typed.code, "ROUTER_REASON_COMMAND_REFUSED", "{status:?}");
         let read = Rejected::of(&typed);
         assert_eq!(read.status(), status);
         assert_eq!(read.code(), "angzarr-embedded-next-command-refused");
@@ -122,7 +122,7 @@ fn a_refusal_goes_out_and_reads_back_under_each_business_status() {
 }
 
 /// A marked-up handler's retryable bug goes out under exactly the status
-/// it picked, UNHANDLED_HANDLER_ERROR, its report as the cause; its
+/// it picked, ROUTER_REASON_UNHANDLED_HANDLER_ERROR, its report as the cause; its
 /// immediate return as ABORTED under the report's own code and args.
 #[test]
 fn a_retryable_bug_and_an_immediate_return_go_out_under_their_status() {
@@ -146,7 +146,10 @@ fn a_retryable_bug_and_an_immediate_return_go_out_under_their_status() {
             Failed::<Rejection<Report>>::retryable_bug(status, &report()),
         ));
         assert_eq!(out.grpc, GrpcCode::from(status), "{status:?}");
-        assert_eq!(out.code, "UNHANDLED_HANDLER_ERROR", "{status:?}");
+        assert_eq!(
+            out.code, "ROUTER_REASON_UNHANDLED_HANDLER_ERROR",
+            "{status:?}"
+        );
         assert_eq!(
             out.extras.get("cause").map(String::as_str),
             Some("toy-meter-offline"),

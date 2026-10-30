@@ -27,7 +27,11 @@ fn a_dead_letter_line_starts_with_the_warning_and_names_the_command() {
         )),
         reason: Some(Diagnostic {
             code: "angzarr-embedded-next-unhandled-handler-error".to_string(),
-            args: [("cause".to_string(), "HANDLER_PANICKED".to_string())].into(),
+            args: [(
+                "cause".to_string(),
+                "ROUTER_REASON_HANDLER_PANICKED".to_string(),
+            )]
+            .into(),
         }),
         source_component: "account".to_string(),
         source_component_kind: ComponentKind::Aggregate as i32,
@@ -45,7 +49,7 @@ fn a_dead_letter_line_starts_with_the_warning_and_names_the_command() {
     // (decision 14.37).
     assert!(
         line.contains(
-            "account: angzarr-embedded-next-unhandled-handler-error cause=HANDLER_PANICKED"
+            "account: angzarr-embedded-next-unhandled-handler-error cause=ROUTER_REASON_HANDLER_PANICKED"
         ),
         "{line}"
     );
@@ -77,12 +81,12 @@ fn a_panicking_ingest_aborts_the_chain_and_is_logged() {
         .err()
         .expect("a bug, never a business rejection");
     // The router catches the panic: a handler's bug, its cause
-    // HANDLER_PANICKED (decision 14.37).
+    // ROUTER_REASON_HANDLER_PANICKED (decision 14.37).
     assert!(
         matches!(
             &failure,
             Failure::Kernel(KernelError::Router(e))
-                if e.extras.get("cause").map(String::as_str) == Some("HANDLER_PANICKED")
+                if e.extras.get("cause").map(String::as_str) == Some("ROUTER_REASON_HANDLER_PANICKED")
         ),
         "{failure:?}"
     );
@@ -113,7 +117,9 @@ fn a_panicking_ingests_dead_letter_carries_its_code_not_english() {
     let lines = log.lines();
     assert_eq!(lines.len(), 1);
     assert!(
-        lines[0].contains("angzarr-embedded-next-unhandled-handler-error cause=HANDLER_PANICKED"),
+        lines[0].contains(
+            "angzarr-embedded-next-unhandled-handler-error cause=ROUTER_REASON_HANDLER_PANICKED"
+        ),
         "{}",
         lines[0]
     );

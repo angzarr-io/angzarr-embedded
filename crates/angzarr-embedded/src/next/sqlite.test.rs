@@ -502,7 +502,7 @@ async fn resume_after_reopening_runs_what_a_crash_left_owed() {
 // ------------------------------------------------------ one handle
 
 /// A decide that panics is a bug the router answers (decision 14.37:
-/// UNHANDLED_HANDLER_ERROR, its cause HANDLER_PANICKED), never an unwind
+/// ROUTER_REASON_UNHANDLED_HANDLER_ERROR, its cause ROUTER_REASON_HANDLER_PANICKED), never an unwind
 /// through the kernel: nothing is written, and the handle serves the next
 /// command (no transaction left open, no lock held).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -519,7 +519,7 @@ async fn a_panicking_decide_writes_nothing_and_frees_the_handle() {
         matches!(
             &refused,
             Failure::Kernel(KernelError::Router(e))
-                if e.extras.get("cause").map(String::as_str) == Some("HANDLER_PANICKED")
+                if e.extras.get("cause").map(String::as_str) == Some("ROUTER_REASON_HANDLER_PANICKED")
         ),
         "{refused:?}"
     );

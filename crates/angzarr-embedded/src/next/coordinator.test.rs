@@ -403,11 +403,11 @@ mod pipeline {
             matches!(
                 &refused,
                 Failure::Kernel(KernelError::Router(e))
-                    if e.code == "UNKNOWN_COMMAND_TYPE"
+                    if e.code == "ROUTER_REASON_UNKNOWN_COMMAND_TYPE"
                         && e.extras.get("type_url").map(String::as_str)
                             == Some("/toy.account.v9.Bonus")
             ),
-            "the router's UNKNOWN_COMMAND_TYPE, named by its type URL: {refused:?}"
+            "the router's ROUTER_REASON_UNKNOWN_COMMAND_TYPE, named by its type URL: {refused:?}"
         );
         // The router's own error on malformed input is a bug, INTERNAL (the
         // owner's ruling, 2026-10-29), never the sender's to fix.
@@ -1064,7 +1064,7 @@ mod upcasting {
         let Failure::Kernel(KernelError::Router(error)) = &refused else {
             panic!("the router's refusal: {refused:?}");
         };
-        assert_eq!(error.code, "UNKNOWN_COMMAND_TYPE");
+        assert_eq!(error.code, "ROUTER_REASON_UNKNOWN_COMMAND_TYPE");
         let extra = |key: &str| error.extras.get(key).map(String::as_str);
         assert_eq!(
             extra("type_url"),
@@ -1401,7 +1401,7 @@ mod admission {
             matches!(
                 &refused,
                 Failure::Kernel(crate::next::KernelError::Router(e))
-                    if e.code == "REFUSAL_FACT_WRONG_STREAM"
+                    if e.code == "COORDINATOR_REASON_REFUSAL_FACT_WRONG_STREAM"
                         && e.extras.get("domain").map(String::as_str) == Some("account")
             ),
             "{refused:?}"

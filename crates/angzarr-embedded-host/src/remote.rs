@@ -30,7 +30,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use angzarr_router::context::CommandContext;
-use angzarr_router::error::{codes as router_codes, CodedError, GrpcCode};
+use angzarr_router::error::{CodedError, GrpcCode, RouterReason};
 use angzarr_router::pb;
 use angzarr_router::router::{CommandHandler, PolicyComponent, ProjectorHandler};
 use prost::Message;
@@ -308,10 +308,10 @@ impl PolicyComponent for RemotePolicyHandler {
     /// command): its translated fact's payload, or `None` for an empty
     /// answer, no translation (decision 14.42). A translated fact that is
     /// more than a payload is the policy's bug, refused INTERNAL: one that
-    /// sets its own cover or Handling (`REFUSAL_FACT_ADDRESSED`), has no
-    /// page (`REFUSAL_FACT_NO_PAGE`) or a page that is not a fact
-    /// (`REFUSAL_FACT_NOT_A_FACT`), or sets its own identity
-    /// (`REFUSAL_FACT_IDENTIFIED`).
+    /// sets its own cover or Handling (`COORDINATOR_REASON_REFUSAL_FACT_ADDRESSED`), has no
+    /// page (`COORDINATOR_REASON_REFUSAL_FACT_NO_PAGE`) or a page that is not a fact
+    /// (`COORDINATOR_REASON_REFUSAL_FACT_NOT_A_FACT`), or sets its own identity
+    /// (`COORDINATOR_REASON_REFUSAL_FACT_IDENTIFIED`).
     fn dispatch_refusal(
         &self,
         refusal: &pb::Refusal,
@@ -537,7 +537,9 @@ pub(crate) fn status_to_coded(domain: &str, status: &tonic::Status) -> CodedErro
     let (code, extras) = match info {
         Some(info) => (info.reason, info.metadata.into_iter().collect()),
         None => (
-            router_codes::UNHANDLED_HANDLER_ERROR.to_string(),
+            RouterReason::UnhandledHandlerError
+                .as_str_name()
+                .to_string(),
             Default::default(),
         ),
     };

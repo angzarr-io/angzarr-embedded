@@ -4,7 +4,7 @@ Status: **implemented** in `crates/angzarr-embedded/src/next/`, pinned by the te
 beside it (`*.test.rs`). It is angzarr-embedded's one kernel.
 
 The wire contract is angzarr's protos on angzarr-project's spec line
-(`spec/20261019-draft`, the crate pinned at **55eab0f**): `EventMeta.causation`
+(`spec/20261019-draft`, the crate pinned at **47c8e09**): `EventMeta.causation`
 is the event's direct cause, with one arm, `command_id` (a process manager
 is a domain whose inputs are commands and facts, so no event is caused by
 another event); one `command_id` per command, deduplication on the events,
@@ -338,7 +338,7 @@ can never be stale. Present:
   (`Conflict::resolve_conflicts`). The router reports the nonce handed
   back (`CommandHandlerResponse.conflict`), and the kernel keeps the
   events only if it is the one delivered, else the command fails
-  (CONFLICT_UNRESOLVED, the kernel's `KernelError::Unresolved`) and
+  (COORDINATOR_REASON_CONFLICT_UNRESOLVED, the kernel's `KernelError::Unresolved`) and
   nothing is persisted.
 - **COMMUTATIVE**: the same window and nonce; the router computes the unit
   sets and the kernel judges them (below).
@@ -356,7 +356,7 @@ generated `State::changed`, reported to the kernel in the router's
 the events are kept iff the two do not overlap (options.proto's rule:
 equal units or a prefix at a `.`/`[` boundary; a wildcard overlaps any
 non-empty set; an empty set nothing), else the command is stale
-(CONFLICT_OVERLAP, the kernel's `KernelError::Overlap`, naming both unit
+(COORDINATOR_REASON_CONFLICT_OVERLAP, the kernel's `KernelError::Overlap`, naming both unit
 sets as `window_units` and `command_units`) and nothing is persisted. Unmarked fields conflict with
 everything (the fail-safe wildcard), so an unmarked change only makes
 COMMUTATIVE stricter.
@@ -431,10 +431,10 @@ given the output domain its descriptor names),
 one triggering event at a time, and holds every command of each reaction
 (`PolicyResponse.reactions`, by triggering page) to four rules
 (`check_reactions`): the policy's one destination
-(`POLICY_COMMAND_OUTSIDE_DESTINATION`), the trigger's edition, an unset one
-stamped with it (`POLICY_COMMAND_OUTSIDE_EDITION`), a named root
-(`POLICY_COMMAND_NO_ROOT`) and the trigger's correlation, if any
-(`POLICY_COMMAND_OTHER_CORRELATION`). One failure refuses the whole answer
+(`COORDINATOR_REASON_POLICY_COMMAND_OUTSIDE_DESTINATION`), the trigger's edition, an unset one
+stamped with it (`COORDINATOR_REASON_POLICY_COMMAND_OUTSIDE_EDITION`), a named root
+(`COORDINATOR_REASON_POLICY_COMMAND_NO_ROOT`) and the trigger's correlation, if any
+(`COORDINATOR_REASON_POLICY_COMMAND_OTHER_CORRELATION`). One failure refuses the whole answer
 as the policy's bug: nothing is delivered, the trigger is dead-lettered
 and the position stays.
 
@@ -484,8 +484,8 @@ reads, one page at a time; the router upcasts nothing.
 usable snapshot and the events after it (upcast), the command with its ids
 and its handling resolved, the nonce, and the instant the input is
 accepted at (`ContextualCommand.recorded_at`). An unknown command type is
-the router's UNKNOWN_COMMAND_TYPE, an unknown fact type NO_FACT_HANDLER, a
-refusal its source has no handler for NO_REFUSAL_HANDLER: the router's own
+the router's ROUTER_REASON_UNKNOWN_COMMAND_TYPE, an unknown fact type ROUTER_REASON_NO_FACT_HANDLER, a
+refusal its source has no handler for ROUTER_REASON_NO_REFUSAL_HANDLER: the router's own
 errors on malformed input, INTERNAL, bugs. The kernel answers the first two
 with `type_url` the type as sent and `upcast_type_url` the type the router
 was handed (the same when no rule applied).
@@ -503,13 +503,13 @@ never classifies):
 | bug, retryable | every other status (UNAVAILABLE, DEADLINE_EXCEEDED and RESOURCE_EXHAUSTED, a handler's in process or a remote child's as it picked them; UNIMPLEMENTED; a remote child's CANCELLED or UNAUTHENTICATED, and a call that failed on the way, arrive UNAVAILABLE) | retried under the capped backoff, then dead-lettered; `Recovery::Retry` |
 
 A handler's refusal carries its code and args (a typed refusal is keyed
-COMMAND_REFUSED, its object's type as `refusal_type`, the object beside).
+ROUTER_REASON_COMMAND_REFUSED, its object's type as `refusal_type`, the object beside).
 A marked-up command handler, typed-refusal handler or continuation step
 fails with `markup::Failed`, one variant per class:
 
 - `Failed::Rejected` (business, fatal): a refusal under its business
   status (FAILED_PRECONDITION by default; any of the six with
-  `Failed::with_status`, a typed refusal still keyed COMMAND_REFUSED, and
+  `Failed::with_status`, a typed refusal still keyed ROUTER_REASON_COMMAND_REFUSED, and
   `Rejected::status` reads it back).
 - `Failed::Immediate` (business, immediate; `Failed::immediate(&why)`):
   ABORTED under `why`'s own code and args, angzarr-router's
@@ -517,11 +517,11 @@ fails with `markup::Failed`, one variant per class:
   written; a policy's step reloaded and run again under the cap, then
   dead-lettered.
 - `Failed::Bug` (bug, fatal; `Failed::bug(&broke)`): angzarr-router's
-  `CodedError::bug`, INTERNAL UNHANDLED_HANDLER_ERROR, dead-lettered at
+  `CodedError::bug`, INTERNAL ROUTER_REASON_UNHANDLED_HANDLER_ERROR, dead-lettered at
   once.
 - `Failed::RetryableBug` (bug, retryable;
   `Failed::retryable_bug(status, &down)`): angzarr-router's
-  `CodedError::retryable_bug`, UNHANDLED_HANDLER_ERROR under the
+  `CodedError::retryable_bug`, ROUTER_REASON_UNHANDLED_HANDLER_ERROR under the
   `markup::RetryableStatus` the handler picks, its cause as a fatal bug's;
   retried under the cap ([below](#retrying-capped-then-dead-lettered)),
   then dead-lettered with its `retry_count`.
@@ -535,12 +535,13 @@ RESOURCE_EXHAUSTED (`ResourceExhausted`) means wait longer before
 resending: a quota or a capacity limit was hit. Each goes out exactly as
 the handler picked it.
 A handler fails deliberately as a bug with angzarr-router's
-`CodedError::bug`, which answers UNHANDLED_HANDLER_ERROR with the
+`CodedError::bug`, which answers ROUTER_REASON_UNHANDLED_HANDLER_ERROR with the
 handler's own code and args as its cause (`cause=<code>`,
 `cause.<arg>=<value>`); the router catches a handler's panic, its cause
-HANDLER_PANICKED, and an error without a code of its own is
-UNHANDLED_HANDLER_ERROR too. Every router reason is forwarded under an
-angzarr-embedded code of its own (`angzarr-embedded-next-<reason>`), each
+ROUTER_REASON_HANDLER_PANICKED, and an error without a code of its own is
+ROUTER_REASON_UNHANDLED_HANDLER_ERROR too. Every router reason is forwarded under an
+angzarr-embedded code of its own (`angzarr-embedded-next-<reason>`, the reason without its
+`ROUTER_REASON_` or `COORDINATOR_REASON_` prefix), each
 with its own message; a handler's own code that no catalog holds is
 `angzarr-embedded-next-unhandled-handler-error` with that code its
 `cause`. A remote handler that cannot be reached
@@ -557,7 +558,7 @@ marked-up handler's `Context` reads it there.
 **Facts** are recorded, never refused: a fact handler returns its events
 (the router's `FactRecord`: the first as the record, the rest as its flags).
 A panicking fact handler is a bug: the router catches it
-(UNHANDLED_HANDLER_ERROR, cause HANDLER_PANICKED), the chain fails
+(ROUTER_REASON_UNHANDLED_HANDLER_ERROR, cause ROUTER_REASON_HANDLER_PANICKED), the chain fails
 (`KernelError::Router`, `Recovery::Bug`), nothing is written, and the
 kernel logs a [dead letter](#dead-letters-a-logger).
 
@@ -606,7 +607,7 @@ events name the command or the fact's derived id as their cause, and its
 deduplication is `find_command`'s, by command id and fact id. Its start
 rule is the kernel's: for a stream with no instance, an input whose type
 name after upcasting is not one of its descriptor's `starting_types` is
-refused `PM_NO_INSTANCE` if a command and skipped if a fact (decisions
+refused `COORDINATOR_REASON_PM_NO_INSTANCE` if a command and skipped if a fact (decisions
 14.41 and 14.42), a remote process manager's as an in-process one's. Its root is
 the one its input names, whatever the input's correlation (decision 14.36):
 one instance may take inputs of several correlations, its events carrying

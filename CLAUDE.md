@@ -48,7 +48,7 @@ the refusal fact's stream, a process manager's start rule from its
 descriptor's starting types), conflict judgement, a policy's output checks,
 the pass-through refusal fact and its address, a projector's failure
 classes, classification, the coordinator's reason keys (`next::reasons`,
-from angzarr-project's `catalog/reasons.toml`), the store writes,
+angzarr-project's `CoordinatorReason` in `reasons.proto`), the store writes,
 positions and resume. Policies reach it as the router's
 `PolicyComponent`, so a policy in another process runs as an in-process
 one does.
