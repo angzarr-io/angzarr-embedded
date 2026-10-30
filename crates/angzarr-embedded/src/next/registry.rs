@@ -13,7 +13,7 @@
 //! Built once at start-up and shared: it is `Send + Sync`.
 
 use std::any::Any as AnyType;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
@@ -58,6 +58,10 @@ struct Entry {
     /// typed domain's [`Upcaster`], or the port [`Registry::upcast_with`]
     /// gave. `None`: nothing is upcast.
     upcast: Option<Arc<dyn UpcastPort>>,
+    /// A process manager's starting input types, by full name, as its
+    /// descriptor lists them (`ComponentDescriptor.starting_types`): the
+    /// kernel's start rule. `None` for an aggregate.
+    starting: Option<BTreeSet<String>>,
 }
 
 /// A typed [`Domain`]'s parts, erased.
@@ -237,6 +241,15 @@ impl Diagnostic for Misconfigured {
     }
 }
 
+/// The starting types `handler`'s descriptor lists: none when it gives no
+/// descriptor.
+fn starting_types(handler: &dyn CommandHandler) -> BTreeSet<String> {
+    handler
+        .component_descriptor()
+        .map(|descriptor| descriptor.starting_types.into_iter().collect())
+        .unwrap_or_default()
+}
+
 /// Every domain an application runs, by name.
 #[derive(Default)]
 pub struct Registry {
@@ -359,13 +372,15 @@ impl Registry {
             Arc::clone(&fresh),
             process_manager,
         );
+        let handler = handlers(table);
+        let starting = process_manager.then(|| starting_types(&handler));
         let entry = Entry {
             state,
             supported,
             component: D::CONFLICT_RESOLUTION,
             by_command,
             rules_version: rules.current().0.to_string(),
-            handler: Box::new(handlers(table)),
+            handler: Box::new(handler),
             typed: Some(Typed {
                 rules: Box::new(rules),
                 upcaster,
@@ -380,6 +395,7 @@ impl Registry {
             }),
             process_manager,
             upcast: Some(port),
+            starting,
         };
         self.domains.insert(domain, entry);
         Ok(())
@@ -419,6 +435,7 @@ impl Registry {
             })?;
         let supported = supported(&name, &state)?;
         let process_manager = handler.kind() == angzarr_router::pb::ComponentKind::ProcessManager;
+        let starting = process_manager.then(|| descriptor.starting_types.iter().cloned().collect());
         self.domains.insert(
             name,
             Entry {
@@ -431,6 +448,7 @@ impl Registry {
                 typed: None,
                 process_manager,
                 upcast: None,
+                starting,
             },
         );
         Ok(())
@@ -674,6 +692,12 @@ impl Registry {
             .typed
             .as_ref()
             .map(|t| &*t.upcaster)
+    }
+
+    /// `domain`'s starting input types, by full name, if it is a process
+    /// manager's: what the kernel's start rule admits with no instance.
+    pub(crate) fn starting_types(&self, domain: &str) -> Option<&BTreeSet<String>> {
+        self.domains.get(domain)?.starting.as_ref()
     }
 
     /// What `domain`'s incoming payloads are upcast through, if anything.

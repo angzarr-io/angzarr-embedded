@@ -9,7 +9,7 @@ use prost_types::Timestamp;
 
 use super::check::{check, Malformed, Sampled};
 use super::coordinator::{
-    dispatch, expect, refused, resolution, unknown_domain, upcast, with_payload, Contextual,
+    admit, dispatch, expect, resolution, unknown_domain, upcast, Admitted, Contextual,
 };
 use super::dead_letter::DeadLetterLog;
 use super::domain::{Domain, State};
@@ -313,8 +313,8 @@ impl<D: Domain> Stream<D> {
     /// The whole pipeline on this stream, in memory, with no store: for
     /// tests and in-memory use ([`Kernel::handle`](super::Kernel::handle)
     /// is the full loop, with a store and a chain). [`check`](super::check),
-    /// identify, have the router admit it against this stream's own events
-    /// (deduplication, a process manager's start rule), resolve the
+    /// identify, admit it against this stream's own events (deduplication,
+    /// a process manager's start rule), resolve the
     /// handling, dispatch it through the router, commit, then hand each new
     /// event to `handlers`. A book for another stream is
     /// [`KernelError::WrongDomain`] or [`KernelError::Stale`].
@@ -326,7 +326,6 @@ impl<D: Domain> Stream<D> {
         dead_letters: &dyn DeadLetterLog,
         handlers: &mut [&mut dyn Handler<D>],
     ) -> Result<Executed<'_, D::Event>, Failure<Rejected>> {
-        use angzarr_router::domain::{Admission, Arrival, StreamStatus};
         let kernel = Failure::Kernel;
         let checked =
             check(book, registry).map_err(|m| Failure::Kernel(KernelError::Malformed(m)))?;
@@ -345,7 +344,7 @@ impl<D: Domain> Stream<D> {
                 actual: head,
             }));
         }
-        let handler = registry
+        registry
             .handler(D::NAME)
             .ok_or_else(|| kernel(unknown_domain(D::NAME)))?;
         let found = self.command_run(command.command_id());
@@ -354,20 +353,10 @@ impl<D: Domain> Stream<D> {
             .map(Envelope::page)
             .collect();
         let current = upcast(registry, &command);
-        let delivered = match &current {
-            Ok(current) => with_payload(command.to_book(), current),
-            Err(_) => command.to_book(),
-        };
-        let arrival = Arrival {
-            command: &delivered,
-            recorded: &recorded,
-            stream: StreamStatus { exists: head > 0 },
-        };
-        match handler.admit(&arrival) {
-            Ok(Admission::Duplicate(_)) => return Ok(Executed::Duplicate(&self.events[found])),
-            Ok(Admission::Skip) => return Ok(Executed::Applied(&[])),
-            Ok(Admission::Dispatch) => {}
-            Err(error) => return Err(refused(&command, error)),
+        match admit(registry, &command, &current, recorded, head > 0)? {
+            Admitted::Duplicate(_) => return Ok(Executed::Duplicate(&self.events[found])),
+            Admitted::Skip => return Ok(Executed::Applied(&[])),
+            Admitted::Dispatch => {}
         }
         let resolution = resolution(registry, &command, &current).map_err(kernel)?;
         let mut nonces = head;

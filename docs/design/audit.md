@@ -129,7 +129,7 @@ One command, end to end, in angzarr's normative order (`types.proto`, the
 so the order cannot be skipped or reordered:
 
 ```text
-CommandBook ─check──▶ Checked ─identify──▶ Identified ─deduplicate (router: admit)──▶ Deduplicated
+CommandBook ─check──▶ Checked ─identify──▶ Identified ─deduplicate (admit)──▶ Deduplicated
                                                          ├─ Duplicate { events }            (answer: DUPLICATE)
                                                          ├─ Skipped                         (a PM's non-starting fact)
                                                          └─ Novel ─load──▶ Contextual
@@ -140,9 +140,10 @@ CommandBook ─check──▶ Checked ─identify──▶ Identified ─dedupli
 2. **Identify** (`Checked::identify`): command id, correlation, causation.
 3. **Load, then admit** (`deduplicate`): the conflict
    resolution, the snapshot and events are loaded **first**; then the
-   command id is looked up (`find_command`) and angzarr-router admits the
-   input: a refusal fact's address, deduplication by the events found (they
-   are the answer), a process manager's start rule.
+   command id is looked up (`find_command`) and the kernel admits the
+   input (decision 14.42; the router's `admit` is never called): a refusal
+   fact's address, deduplication by the events found (they are the
+   answer), a process manager's start rule (below).
 4. **Resolve** (`load`): the expected sequence stamped or
    checked against the head step 3 loaded (STRICT's stale refusal is
    here), the window and nonce.
@@ -411,11 +412,11 @@ impl Registry {
 ```
 
 **Business dispatch is angzarr-router's**, implemented once for every
-runtime: handlers, typed refusals and the refusal path, the deduplication
-decision, a process manager's start rule, and a policy's commands kept in
-its trigger's edition, with a root and the trigger's correlation. The
-kernel keeps the check, identification, the store reads and writes,
-positions, resume and the edition-not-forked refusal.
+runtime: handlers, typed refusals and the refusal path, and a policy's
+commands kept in its trigger's edition, with a root and the trigger's
+correlation. The kernel keeps the check, identification, upcasting,
+admission, snapshots, the store reads and writes, positions, resume and the
+edition-not-forked refusal.
 
 **A domain is a router table.** `Registry::register` builds angzarr-router's
 `DomainDispatch` over `D::State`: it folds each event through the domain's
@@ -537,9 +538,11 @@ commands, which policies send it, and facts (timeouts, webhooks); it never
 subscribes to another domain's events. So angzarr-embedded needs nothing of its own
 for one: its commands and facts take the five steps like any domain's, its
 events name the command or the fact's derived id as their cause, and its
-deduplication is `find_command`'s, by command id and fact id. It is
-registered on angzarr-router's process-manager table, whose start rule
-admits only a starting input for a stream with no instance. Its root is
+deduplication is `find_command`'s, by command id and fact id. Its start
+rule is the kernel's: for a stream with no instance, an input whose type
+name after upcasting is not one of its descriptor's `starting_types` is
+refused `PM_NO_INSTANCE` if a command and skipped if a fact (decisions
+14.41 and 14.42), a remote process manager's as an in-process one's. Its root is
 the one its input names, whatever the input's correlation (decision 14.36):
 one instance may take inputs of several correlations, its events carrying
 each input's; a correlation left unset is given the root.

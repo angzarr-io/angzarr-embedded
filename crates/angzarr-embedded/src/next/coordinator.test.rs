@@ -1173,4 +1173,89 @@ mod admission {
         let retry = any(&store, &registry, open(), 14).unwrap();
         assert_eq!(retry.outcome().delivery, DeliveryOutcome::Duplicate as i32);
     }
+
+    /// A refusal fact `paid` for account 1 whose causation names `trigger`'s
+    /// stream, as the chain builds one.
+    fn refusal_fact(registry: &Registry, trigger: u128) -> crate::next::Identified {
+        use crate::next::toys::{command_id, correlation};
+        let book = fact(
+            cover("account", 1),
+            AccountFact::PaymentReceived(5).to_any(),
+            "refused",
+        );
+        let mut book = book;
+        book.page.as_mut().unwrap().fact_origin = Some(crate::next::v1::FactOrigin {
+            external_id: command_id(9).to_string(),
+            description: "refused".to_string(),
+        });
+        let trigger = crate::next::v1::EventRef {
+            stream: Some(cover("account", trigger)),
+            sequence: 0,
+        };
+        crate::next::check::check_refusal(book, registry, trigger, correlation(1), command_id(9))
+            .unwrap()
+            .identify(&at(1))
+    }
+
+    #[test]
+    fn a_refusal_fact_is_admitted_only_by_the_stream_its_causation_names() {
+        use super::super::{admit, Admitted};
+        let registry = registry();
+        let addressed = refusal_fact(&registry, 1);
+        let current = Ok(addressed.payload().clone());
+        assert_eq!(
+            admit(&registry, &addressed, &current, Vec::new(), true).unwrap(),
+            Admitted::Dispatch
+        );
+        let misaddressed = refusal_fact(&registry, 2);
+        let refused = admit(&registry, &misaddressed, &current, Vec::new(), true)
+            .err()
+            .unwrap();
+        assert!(
+            matches!(
+                &refused,
+                Failure::Kernel(crate::next::KernelError::Router(e))
+                    if e.code == "REFUSAL_FACT_WRONG_STREAM"
+                        && e.extras.get("domain").map(String::as_str) == Some("account")
+            ),
+            "{refused:?}"
+        );
+    }
+
+    #[test]
+    fn a_start_rule_on_a_payload_that_did_not_upcast_is_the_upcasts_failure() {
+        use super::super::{admit, Admitted};
+        use crate::next::{check, KernelError, UpcastError};
+        let registry = registry();
+        let deposit = command(cover("account", 1), AccountCmd::Deposit(5).to_any()).id(2);
+        let identified = check(deposit, &registry).unwrap().identify(&at(1));
+        let failed: Result<crate::next::Any, UpcastError> = Err(UpcastError::Rule {
+            source: "toy.account.cmd.v1.Deposit".to_string(),
+            error: angzarr_embedded_diagnostic::Report::new("toy-broken"),
+        });
+        let refused = admit(&registry, &identified, &failed, Vec::new(), false)
+            .err()
+            .unwrap();
+        assert!(
+            matches!(refused, Failure::Kernel(KernelError::Upcast { .. })),
+            "{refused:?}"
+        );
+        // An instance exists: no start rule, so the type is not read here.
+        assert_eq!(
+            admit(&registry, &identified, &failed, Vec::new(), true).unwrap(),
+            Admitted::Dispatch
+        );
+        // An aggregate has no start rule.
+        let aggregate = crate::next::toys::registry();
+        let identified = check(
+            command(cover("account", 1), AccountCmd::Deposit(5).to_any()).id(2),
+            &aggregate,
+        )
+        .unwrap()
+        .identify(&at(1));
+        assert_eq!(
+            admit(&aggregate, &identified, &failed, Vec::new(), false).unwrap(),
+            Admitted::Dispatch
+        );
+    }
 }

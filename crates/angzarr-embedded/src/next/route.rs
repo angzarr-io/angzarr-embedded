@@ -1,6 +1,5 @@
 //! Where the kernel meets angzarr-router: the router owns business
-//! dispatch (handlers, typed refusals and the refusal path, the
-//! deduplication decision, a process manager's start rule, a policy's
+//! dispatch (handlers, typed refusals and the refusal path, a policy's
 //! commands kept in its trigger's edition, their root and correlation);
 //! this module turns what the router answers into the kernel's terms.
 //!

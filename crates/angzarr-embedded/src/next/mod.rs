@@ -28,8 +28,9 @@
 //!    and trace metadata, never stamped on its events). An [`Identified`].
 //! 3. **Load, then admit**: the snapshot and newer events are loaded
 //!    first; then the command id is looked up on the addressed stream, and
-//!    angzarr-router admits the input (a refusal fact's address,
-//!    deduplication by the events found, a process manager's start rule).
+//!    the kernel admits the input (a refusal fact's address, deduplication
+//!    by the events found, a process manager's start rule by its type after
+//!    upcasting).
 //!    Events found are answered [`Handled::Duplicate`], and nothing below
 //!    runs. (Loading first closes the race in which a retry's lookup misses
 //!    an original that commits before the retry loads.)

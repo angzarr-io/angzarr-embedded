@@ -15,10 +15,10 @@
 //!    [`Registry::resolve`]; then the newest usable snapshot (under the
 //!    current rules and state type, and below the head) and the events
 //!    after it), **then** look the command id up (the store's
-//!    `find_command`), and ask the router to admit the input: it decides
-//!    what an input meets before its handler runs (a refusal fact's
-//!    address, deduplication by the events found, a process manager's
-//!    start rule). Events found are answered [`Deduplicated::Duplicate`],
+//!    `find_command`), and [`admit`] the input, the kernel's own
+//!    (decision 14.42): what an input meets before its handler runs (a
+//!    refusal fact's address, deduplication by the events found, a
+//!    process manager's start rule). Events found are answered [`Deduplicated::Duplicate`],
 //!    and nothing below runs. The load comes first so that a concurrent
 //!    commit of the same command (a retry racing its original) can never
 //!    slip between the two reads unseen: if it lands after the load, either
@@ -44,8 +44,7 @@
 use angzarr_proto::v1::{
     command_page, CommandBook, ConflictResolution, Cover, EventBook, EventPage, Handling, Snapshot,
 };
-use angzarr_router::domain::{Admission, Arrival, StreamStatus};
-use angzarr_router::error::{codes, extras, CodedError};
+use angzarr_router::error::{codes, extras, BusinessStatus, CodedError};
 use angzarr_router::pb::ContextualCommand;
 use prost_types::{Any, Timestamp};
 
@@ -53,6 +52,7 @@ use super::check::{Identified, Malformed, Sampled};
 use super::dead_letter::{write_dead_letter, DeadLetterLog};
 use super::error::{Failure, KernelError, UpcastError};
 use super::markup::STEP_LIMIT;
+use super::payload::type_name;
 use super::registry::Registry;
 use super::route::{self, Rejected};
 use super::store::Port;
@@ -165,8 +165,8 @@ pub(crate) fn refused(command: &Identified, error: CodedError) -> Failure<Reject
     Failure::Kernel(KernelError::Router(error))
 }
 
-/// Step 3 over `port`: load the stream, look the command up, and have the
-/// router admit it.
+/// Step 3 over `port`: load the stream, look the command up, and
+/// [`admit`] it.
 pub(crate) async fn deduplicate<P: Port>(
     port: &mut P,
     registry: &Registry,
@@ -179,22 +179,14 @@ pub(crate) async fn deduplicate<P: Port>(
         .find_command(command.cover(), command.command_id())
         .await
         .map_err(|e| Failure::Kernel(KernelError::Store(e)))?;
-    let handler = registry
-        .handler(command.domain())
-        .ok_or_else(|| Failure::Kernel(unknown_domain(command.domain())))?;
-    let book = match &loaded.current {
-        Ok(current) => with_payload(command.to_book(), current),
-        Err(_) => command.to_book(),
-    };
-    let arrival = Arrival {
-        command: &book,
-        recorded: &recorded,
-        stream: StreamStatus {
-            exists: loaded.head > 0,
-        },
-    };
-    match handler.admit(&arrival) {
-        Ok(Admission::Duplicate(pages)) => Ok(Deduplicated::Duplicate {
+    match admit(
+        registry,
+        &command,
+        &loaded.current,
+        recorded,
+        loaded.head > 0,
+    )? {
+        Admitted::Duplicate(pages) => Ok(Deduplicated::Duplicate {
             events: EventBook {
                 cover: Some(command.cover().clone()),
                 snapshot: None,
@@ -202,10 +194,80 @@ pub(crate) async fn deduplicate<P: Port>(
                 pages,
             },
         }),
-        Ok(Admission::Skip) => Ok(Deduplicated::Skipped),
-        Ok(Admission::Dispatch) => Ok(Deduplicated::Novel(Box::new(Novel { command, loaded }))),
-        Err(error) => Err(refused(&command, error)),
+        Admitted::Skip => Ok(Deduplicated::Skipped),
+        Admitted::Dispatch => Ok(Deduplicated::Novel(Box::new(Novel { command, loaded }))),
     }
+}
+
+/// What admission decided.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Admitted {
+    /// The stream holds the input's events already: these.
+    Duplicate(Vec<EventPage>),
+    /// A process manager's fact for a stream with no instance, of a type
+    /// that does not start one: skipped.
+    Skip,
+    /// On to its handler.
+    Dispatch,
+}
+
+/// Admission, the kernel's own (decision 14.42; the router's `admit` is
+/// never called): what an input meets before its handler runs, from what
+/// step 3 read (`recorded`, the events found under its id; whether its
+/// stream `exists`), in order:
+/// 1. a refusal fact (a fact with a causation) is admitted only by the
+///    exact stream its causation names (`REFUSAL_FACT_WRONG_STREAM`, a bug);
+/// 2. events found under its id are [`Admitted::Duplicate`];
+/// 3. a process manager's start rule: with no instance, an input whose type
+///    after upcasting (`current`) is not one of its starting types is
+///    refused `PM_NO_INSTANCE` (a business refusal) if a command, and
+///    [`Admitted::Skip`]ped if a fact. Its upcast's failure is
+///    [`KernelError::Upcast`].
+pub(crate) fn admit(
+    registry: &Registry,
+    command: &Identified,
+    current: &Result<Any, UpcastError>,
+    recorded: Vec<EventPage>,
+    exists: bool,
+) -> Result<Admitted, Failure<Rejected>> {
+    let is_fact = command.body().is_fact();
+    if let (true, Some(cause)) = (is_fact, command.causation_id()) {
+        if cause.stream.as_ref() != Some(command.cover()) {
+            return Err(Failure::Kernel(KernelError::Router(route::internal(
+                codes::REFUSAL_FACT_WRONG_STREAM,
+                [(extras::DOMAIN.to_string(), command.domain().to_string())],
+            ))));
+        }
+    }
+    if !recorded.is_empty() {
+        return Ok(Admitted::Duplicate(recorded));
+    }
+    let Some(starting) = registry.starting_types(command.domain()) else {
+        return Ok(Admitted::Dispatch);
+    };
+    if exists {
+        return Ok(Admitted::Dispatch);
+    }
+    let current = current.as_ref().map_err(|error| {
+        Failure::Kernel(KernelError::Upcast {
+            stream: command.cover().clone(),
+            error: error.clone(),
+        })
+    })?;
+    if starting.contains(type_name(&current.type_url)) {
+        return Ok(Admitted::Dispatch);
+    }
+    if is_fact {
+        return Ok(Admitted::Skip);
+    }
+    Err(Failure::Rejected(Rejected::of(&CodedError::rejection(
+        BusinessStatus::FailedPrecondition,
+        codes::PM_NO_INSTANCE,
+        [(
+            extras::TYPE_URL.to_string(),
+            command.payload().type_url.clone(),
+        )],
+    ))))
 }
 
 /// `command`'s payload upcast through its domain's port (decision 14.39),
