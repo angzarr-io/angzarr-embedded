@@ -1455,7 +1455,7 @@ async fn a_purge_that_fails_part_way_deletes_nothing() {
     let path = database();
     let s = stream(1);
     let store = refusing_to_delete_snapshots(&path, s).await;
-    let purged = store.purge(s).await;
+    let purged = store.purge(s, 2).await;
     assert_eq!(
         purged.as_ref().map_err(code),
         Err(Some("angzarr-store-sqlite-unavailable")),
@@ -1479,40 +1479,41 @@ async fn impatient(path: &Path) -> SqliteStore {
 }
 
 #[tokio::test]
-async fn a_purge_racing_an_append_lands_after_it_and_purges_it() {
-    // A write in flight holds the write lock: a purge cannot land inside
-    // it. Issued while it is in flight, the purge waits, and deletes what
-    // the write appended with the rest.
+async fn a_purge_racing_an_append_waits_for_it_then_is_refused() {
+    // 14.43. A write in flight holds the write lock: a purge cannot land
+    // inside it. Issued while it is in flight, at the head its caller read
+    // before the write, the purge waits, then finds the stream grown and
+    // is refused, deleting nothing: the head is checked inside the purge's
+    // transaction, not before it.
     let path = database();
     let s = stream(1);
     let writer = SqliteStore::open(&path).await.unwrap();
     append(&writer, s, 0, &[page(0, 1)]).await.unwrap();
     let purger = SqliteStore::open(&path).await.unwrap();
+    let read = purger.head(s).await.unwrap().next_sequence;
     let writing = inserting(&path, &page(1, 2)).await;
 
     let hasty = impatient(&path).await;
-    let refused = hasty.purge(s).await;
+    let refused = hasty.purge(s, read).await;
     assert_eq!(
         refused.as_ref().map_err(code),
         Err(Some("angzarr-store-sqlite-unavailable")),
         "{refused:?}"
     );
 
-    let (purged, ()) = tokio::join!(purger.purge(s), async {
+    let (purged, ()) = tokio::join!(purger.purge(s, read), async {
         pause(Duration::from_millis(20)).await;
         end(writing, true).await
     });
-    assert_eq!(purged, Ok(2), "appended, then purged");
-    assert_eq!(writer.read(s, 0, None).await, Ok(Slice::default()));
-    assert_eq!(writer.covers("tasks").await, Ok(vec![]));
     assert_eq!(
-        append(&writer, s, 2, &[page(2, 3)]).await,
-        Err(StoreError::Conflict {
-            stream: Box::new(s.to_cover()),
-            expected: 2,
-            actual: 0
-        })
+        purged,
+        Err(StoreError::conflict(s, 1, 2)),
+        "appended, so the purge's read is stale"
     );
+    assert_eq!(pages(&writer, s).await, [page(0, 1), page(1, 2)]);
+    assert_eq!(writer.covers("tasks").await, Ok(covers(&[s])));
+    assert_eq!(purger.purge(s, 2).await, Ok(2), "re-read, purged");
+    assert_eq!(writer.covers("tasks").await, Ok(vec![]));
     drop((writer, purger, hasty));
 }
 
@@ -1604,7 +1605,7 @@ async fn a_read_outside_a_unit_is_one_moment_across_a_purge() {
             append(&writer, stream(1), 0, &[page(0, 1), page(1, 2)])
                 .await
                 .unwrap();
-            writer.purge(stream(1)).await.unwrap();
+            writer.purge(stream(1), 2).await.unwrap();
         }
     })
     .await;
@@ -1733,7 +1734,7 @@ async fn a_writer_waits_on_no_open_read_unit() {
         let mut first = writable_reader.begin_read().await.unwrap();
         let mut second = read_only_reader.begin_read().await.unwrap();
         assert_eq!(append(&hasty, s, 0, &[page(0, 1)]).await, Ok(1));
-        assert_eq!(hasty.purge(s).await, Ok(1));
+        assert_eq!(hasty.purge(s, 1).await, Ok(1));
         assert_eq!(first.covers("tasks").await, Ok(vec![]));
         assert_eq!(second.read(s, 0, None).await, Ok(Slice::default()));
     }
@@ -1862,7 +1863,7 @@ fn every_open_is_a_send_future() {
 fn every_purge_is_a_send_future() {
     drop(send(async {
         let store = SqliteStore::open_in_memory().await?;
-        store.purge(stream(1)).await
+        store.purge(stream(1), 0).await
     }));
 }
 

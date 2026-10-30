@@ -4884,6 +4884,7 @@ mod router {
         > {
             let next = req.events.as_ref().map_or(0, |b| b.next_sequence);
             Ok(pb::CommandHandlerResponse {
+                conflict: None,
                 events: Some(pb::EventBook {
                     pages: vec![pb::EventPage {
                         payload: Some(any(Noted {

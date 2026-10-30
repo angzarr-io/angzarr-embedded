@@ -286,6 +286,7 @@ impl CommandHandlerService for Fake {
             std::process::exit(7);
         }
         Ok(Response::new(pb::CommandHandlerResponse {
+            conflict: None,
             events: Some(pb::EventBook {
                 cover: command.cover,
                 pages: vec![pb::EventPage {
