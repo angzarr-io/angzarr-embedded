@@ -506,3 +506,180 @@ fn a_commutative_command_at_the_head_has_no_window_whatever_its_units() {
         "a window, and every change overlaps it"
     );
 }
+
+/// The kernel judges the router's conflict report (decision 14.42): the
+/// shelf's router table behind a handler that rewrites the report it
+/// answers with `edit`, everything else as the router answered.
+mod judged {
+    use std::sync::Arc;
+
+    use crate::next::angzarr_router::error::CodedError;
+    use crate::next::angzarr_router::pb;
+    use crate::next::angzarr_router::router::CommandHandler;
+    use crate::next::toys::prelude::*;
+    use crate::next::toys::{at, command, cover, handlers, set, Edit, Shelf, ShelfState};
+    use crate::next::v1::ConflictResolution;
+    use crate::next::{Failure, Handled, KernelError, Registry, Rulebook, Upcaster};
+
+    use super::shelf_a_b;
+
+    struct Rewritten {
+        inner: Box<dyn CommandHandler>,
+        edit: fn(&mut pb::ConflictReport),
+    }
+
+    impl CommandHandler for Rewritten {
+        fn name(&self) -> &str {
+            self.inner.name()
+        }
+        fn command_types(&self) -> Vec<String> {
+            self.inner.command_types()
+        }
+        fn dispatch(
+            &self,
+            req: &pb::ContextualCommand,
+        ) -> Result<pb::CommandHandlerResponse, CodedError> {
+            let mut response = self.inner.dispatch(req)?;
+            (self.edit)(response.conflict.get_or_insert_with(Default::default));
+            Ok(response)
+        }
+        fn component_descriptor(&self) -> Result<pb::ComponentDescriptor, CodedError> {
+            self.inner.component_descriptor()
+        }
+    }
+
+    fn rewritten(edit: fn(&mut pb::ConflictReport)) -> Registry {
+        let table = crate::next::route::table::<Shelf>(
+            Arc::new(Rulebook::new("v1", ())),
+            Arc::new(Upcaster::new("shelf-upcaster", "shelf")),
+            Arc::new(ShelfState::default),
+            false,
+        );
+        let inner = handlers::<Shelf>((), "v1")(table);
+        let mut registry = Registry::new();
+        registry
+            .command_handler(
+                "shelf",
+                Rewritten {
+                    inner: Box::new(inner),
+                    edit,
+                },
+            )
+            .unwrap();
+        registry
+    }
+
+    fn handled(
+        store: &MemoryStore,
+        registry: &Registry,
+        book: crate::next::v1::CommandBook,
+    ) -> Result<Handled, Failure<crate::next::Rejected>> {
+        let log = crate::next::MemoryDeadLetters::new();
+        crate::next::Kernel::new(registry, &log)
+            .on_retryable(crate::next::toys::no_retries())
+            .handle_any(store, book, &at(3), &mut ())
+            .ready()
+    }
+
+    /// C-0683: under AGGREGATE_HANDLES the kernel accepts the events only if
+    /// the nonce reported is the one it delivered.
+    #[test]
+    fn an_unresolved_nonce_reported_is_aborted_by_the_kernel() {
+        let store = MemoryStore::new();
+        shelf_a_b(&store);
+        let book = || {
+            command(cover("shelf", 3), set("b", 7))
+                .id(3)
+                .expecting(1, ConflictResolution::AggregateHandles)
+        };
+        let forged = rewritten(|report| report.resolved_nonce = b"forged".to_vec());
+        let failure = handled(&store, &forged, book()).err().unwrap();
+        assert_eq!(
+            failure,
+            Failure::Kernel(KernelError::Unresolved {
+                stream: cover("shelf", 3),
+                expected: 1,
+                actual: 2
+            })
+        );
+        let never = rewritten(|report| report.resolved_nonce = Default::default());
+        assert!(matches!(
+            handled(&store, &never, book()),
+            Err(Failure::Kernel(KernelError::Unresolved { .. }))
+        ));
+        assert_eq!(
+            pages(&store, &cover("shelf", 3)).len(),
+            2,
+            "nothing persisted"
+        );
+
+        let honest = rewritten(|_| {});
+        handled(&store, &honest, book()).unwrap();
+        assert_eq!(pages(&store, &cover("shelf", 3)).len(), 3);
+    }
+
+    /// C-0684: under COMMUTATIVE the kernel keeps the events only if the
+    /// window's units and the command's do not overlap (options.proto,
+    /// Overlap): equal, a prefix at a `.` or `[` boundary, or a wildcard
+    /// against a non-empty set.
+    #[test]
+    fn overlapping_units_reported_are_aborted_by_the_kernel() {
+        let book = |n| {
+            command(cover("shelf", 3), set("a", 5))
+                .id(n)
+                .expecting(1, ConflictResolution::Commutative)
+        };
+        let stale = |store: &MemoryStore, edit| {
+            let failure = handled(store, &rewritten(edit), book(3)).err();
+            assert_eq!(
+                pages(store, &cover("shelf", 3)).len(),
+                2,
+                "nothing persisted"
+            );
+            failure
+        };
+        let aborted = Some(Failure::Kernel(KernelError::Stale {
+            stream: cover("shelf", 3),
+            expected: 1,
+            actual: 2,
+        }));
+        for edit in [
+            (|r: &mut pb::ConflictReport| {
+                r.window_units = vec!["items[a]".to_string()];
+                r.command_units = vec!["items[a]".to_string()];
+            }) as fn(&mut pb::ConflictReport),
+            |r| {
+                r.window_units = vec!["items[a]".to_string()];
+                r.command_units = vec!["items[a].count".to_string()];
+            },
+            |r| {
+                r.window_units = vec!["items[a].count".to_string()];
+                r.command_units = vec!["items".to_string()];
+            },
+            |r| {
+                r.window_units = vec!["*notes".to_string()];
+                r.command_units = vec!["title".to_string()];
+            },
+        ] {
+            let store = MemoryStore::new();
+            shelf_a_b(&store);
+            assert_eq!(stale(&store, edit), aborted);
+        }
+
+        for edit in [
+            (|r: &mut pb::ConflictReport| {
+                r.window_units = vec!["items[a]".to_string()];
+                r.command_units = vec!["items[ab]".to_string()];
+            }) as fn(&mut pb::ConflictReport),
+            |r| {
+                r.window_units = vec!["*".to_string()];
+                r.command_units = Vec::new();
+            },
+        ] {
+            let store = MemoryStore::new();
+            shelf_a_b(&store);
+            handled(&store, &rewritten(edit), book(3)).unwrap();
+            assert_eq!(pages(&store, &cover("shelf", 3)).len(), 3, "disjoint: kept");
+        }
+    }
+}
