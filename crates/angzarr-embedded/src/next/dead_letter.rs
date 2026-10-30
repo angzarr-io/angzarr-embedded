@@ -4,8 +4,9 @@
 //! caller: a fact whose ingest failed (answered PARKED), a reactor's
 //! malformed command. angzarr-embedded is in process and atomic, so there is no
 //! queue, no store and no replay: whatever angzarr would dead-letter fails
-//! the chain back to its caller, nothing is written, and the kernel writes
-//! one line to the application's [`DeadLetterLog`]. Cases:
+//! the chain back to its caller, nothing is written, and the kernel hands
+//! the letter, angzarr's `AngzarrDeadLetter`, to the application's
+//! [`DeadLetterLog`], which writes it as one line. Cases:
 //!
 //! - a handler's bug ([`KernelError::Router`](super::KernelError::Router)
 //!   under a status of the bug class: INTERNAL, UNKNOWN, DATA_LOSS): the
@@ -41,10 +42,18 @@ use super::route::diagnostic;
 /// The start of every dead-letter line: a key to alert on.
 pub const DEAD_LETTER_PREFIX: &str = "DEAD_LETTER";
 
-/// Where dead-letter lines go: the application's log. `&self`, so a
-/// shared logger needs no lock of the kernel's.
+/// Where dead letters go: the application's log. `&self`, so a shared
+/// logger needs no lock of the kernel's.
 pub trait DeadLetterLog: Send + Sync {
+    /// One dead letter as its line ([`dead_letter_line`]).
     fn write(&self, line: &str);
+
+    /// One dead letter, whole, as angzarr's `AngzarrDeadLetter`: its
+    /// payload, its reason and its rejection details. Written as its line
+    /// unless a log keeps more.
+    fn letter(&self, letter: &AngzarrDeadLetter) {
+        self.write(&dead_letter_line(letter));
+    }
 }
 
 /// A dead letter as one line, keys and values only: [`DEAD_LETTER_PREFIX`],
@@ -111,12 +120,12 @@ pub(crate) fn write_letter(
     component: &str,
     reason: &dyn Diagnostic,
 ) {
-    log.write(&dead_letter_line(&AngzarrDeadLetter {
+    log.letter(&AngzarrDeadLetter {
         payload: Some(payload),
         reason: Some(diagnostic(reason)),
         source_component: component.to_string(),
         ..AngzarrDeadLetter::default()
-    }));
+    });
 }
 
 /// Write the dead letter for `book`, which `component` could not take for
@@ -140,9 +149,7 @@ pub(crate) fn write_retries_exhausted(
     failure: &dyn Diagnostic,
     retries: u32,
 ) {
-    log.write(&dead_letter_line(&retries_exhausted(
-        payload, component, failure, retries,
-    )));
+    log.letter(&retries_exhausted(payload, component, failure, retries));
 }
 
 /// The dead letter for `payload` (a command, or a projector's events), whose
@@ -171,9 +178,12 @@ pub(crate) fn retries_exhausted(
     }
 }
 
-/// Dead-letter lines kept in memory: for tests.
+/// Dead letters kept in memory, whole and as their lines: for tests.
 #[derive(Default)]
-pub struct MemoryDeadLetters(Mutex<Vec<String>>);
+pub struct MemoryDeadLetters {
+    lines: Mutex<Vec<String>>,
+    letters: Mutex<Vec<AngzarrDeadLetter>>,
+}
 
 impl MemoryDeadLetters {
     pub fn new() -> Self {
@@ -182,15 +192,28 @@ impl MemoryDeadLetters {
 
     /// Every line written so far.
     pub fn lines(&self) -> Vec<String> {
-        self.0.lock().map(|l| l.clone()).unwrap_or_default()
+        self.lines.lock().map(|l| l.clone()).unwrap_or_default()
+    }
+
+    /// Every letter written so far, whole ([`DeadLetterLog::letter`]); a
+    /// bare line ([`DeadLetterLog::write`]) is in [`Self::lines`] only.
+    pub fn letters(&self) -> Vec<AngzarrDeadLetter> {
+        self.letters.lock().map(|l| l.clone()).unwrap_or_default()
     }
 }
 
 impl DeadLetterLog for MemoryDeadLetters {
     fn write(&self, line: &str) {
-        if let Ok(mut lines) = self.0.lock() {
+        if let Ok(mut lines) = self.lines.lock() {
             lines.push(line.to_string());
         }
+    }
+
+    fn letter(&self, letter: &AngzarrDeadLetter) {
+        if let Ok(mut letters) = self.letters.lock() {
+            letters.push(letter.clone());
+        }
+        self.write(&dead_letter_line(letter));
     }
 }
 

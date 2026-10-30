@@ -60,7 +60,52 @@ fn a_dead_letter_line_starts_with_the_warning_and_names_the_command() {
 
     let log = MemoryDeadLetters::new();
     log.write(&line);
-    assert_eq!(log.lines(), [line]);
+    assert_eq!(log.lines(), std::slice::from_ref(&line));
+    assert!(log.letters().is_empty(), "a bare line is no letter");
+
+    let log = MemoryDeadLetters::new();
+    log.letter(&letter);
+    assert_eq!(
+        log.letters(),
+        std::slice::from_ref(&letter),
+        "the letter, whole"
+    );
+    assert_eq!(log.lines(), std::slice::from_ref(&line), "and its line");
+
+    // A log that keeps lines only writes a letter as its line.
+    #[derive(Default)]
+    struct Lines(std::sync::Mutex<Vec<String>>);
+    impl DeadLetterLog for Lines {
+        fn write(&self, line: &str) {
+            self.0.lock().unwrap().push(line.to_string());
+        }
+    }
+    let lines = Lines::default();
+    lines.letter(&letter);
+    assert_eq!(*lines.0.lock().unwrap(), [line]);
+}
+
+/// An edition removal's dead letter names its stream and the sequence of
+/// its `EditionDeleted`, as failed events do.
+#[test]
+fn an_edition_removals_line_names_its_stream_and_sequence() {
+    use crate::next::v1::EventPage;
+    let letter = AngzarrDeadLetter {
+        payload: Some(angzarr_dead_letter::Payload::FailedEditionRemoval(
+            crate::next::v1::EventBook {
+                cover: Some(cover("account", 1)),
+                pages: vec![EventPage {
+                    sequence: 4,
+                    ..EventPage::default()
+                }],
+                ..crate::next::v1::EventBook::default()
+            },
+        )),
+        source_component: "account".to_string(),
+        ..AngzarrDeadLetter::default()
+    };
+    let line = dead_letter_line(&letter);
+    assert!(line.contains(" sequence=4 stream=account/"), "{line}");
 }
 
 #[test]
