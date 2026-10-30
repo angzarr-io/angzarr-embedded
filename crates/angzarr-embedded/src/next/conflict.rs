@@ -18,10 +18,10 @@
 //! generated code, until the generator exists.
 //!
 //! This module is the generated code's interface: the path type it builds
-//! ([`UnitPath`], with [`Key`]) and the set it returns ([`Units`]). The
-//! overlap rule two sets are compared by is angzarr-router's, which
-//! resolves COMMUTATIVE (`DomainDispatch::with_commutative`): the kernel
-//! hands it each set's paths as text.
+//! ([`UnitPath`], with [`Key`]) and the set it returns ([`Units`]).
+//! angzarr-router resolves COMMUTATIVE (`DomainDispatch::with_commutative`)
+//! and reports both sets' paths as text; the kernel judges them by
+//! options.proto's overlap rule ([`judge`], decision 14.42).
 //!
 //! **The risk.** decide runs on the head, so the invariants it checks still
 //! hold; what no structural comparison sees is a value derived from, or
@@ -34,6 +34,9 @@
 
 use std::collections::BTreeSet;
 use std::fmt;
+
+use angzarr_proto::v1::ConflictResolution;
+use angzarr_router::pb::ConflictReport;
 
 /// One conflict unit's path (`options.proto`, *Unit path syntax*): proto
 /// field names (never JSON names) joined by `.`, a map or keyed-repeated
@@ -174,6 +177,67 @@ impl FromIterator<UnitPath> for Units {
     fn from_iter<I: IntoIterator<Item = UnitPath>>(iter: I) -> Units {
         Units(iter.into_iter().collect())
     }
+}
+
+/// The kernel's judgement of a router's conflict report (decision 14.42).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) enum Judgement {
+    /// The events may be kept.
+    Kept,
+    /// AGGREGATE_HANDLES: the handler did not hand back the nonce
+    /// delivered.
+    Unresolved,
+    /// COMMUTATIVE: the window's units and the command's overlap.
+    Overlap {
+        window: Vec<String>,
+        command: Vec<String>,
+    },
+}
+
+/// A command's conflicts, judged from the router's `report` (none counts
+/// as empty) under the `resolution` it was delivered under with `nonce`:
+/// under AGGREGATE_HANDLES the events are kept only if the reported nonce
+/// is the one delivered; under COMMUTATIVE only if the window's units and
+/// the command's do not [`overlap`]; under STRICT always.
+pub(crate) fn judge(
+    resolution: ConflictResolution,
+    nonce: &[u8],
+    report: Option<&ConflictReport>,
+) -> Judgement {
+    let empty = ConflictReport::default();
+    let report = report.unwrap_or(&empty);
+    match resolution {
+        ConflictResolution::AggregateHandles if report.resolved_nonce[..] != *nonce => {
+            Judgement::Unresolved
+        }
+        ConflictResolution::Commutative if overlap(&report.window_units, &report.command_units) => {
+            Judgement::Overlap {
+                window: report.window_units.clone(),
+                command: report.command_units.clone(),
+            }
+        }
+        _ => Judgement::Kept,
+    }
+}
+
+/// Whether two unit sets, as paths, overlap (`options.proto`, *Overlap*):
+/// neither is empty, and one holds a wildcard, or a unit of one equals a
+/// unit of the other or is a path prefix of it ending at a `.` or `[`
+/// boundary.
+pub(crate) fn overlap(a: &[String], b: &[String]) -> bool {
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    if a.iter().chain(b).any(|unit| unit.starts_with('*')) {
+        return true;
+    }
+    let encloses = |prefix: &str, unit: &str| {
+        unit.len() > prefix.len()
+            && unit.starts_with(prefix)
+            && matches!(unit.as_bytes()[prefix.len()], b'.' | b'[')
+    };
+    a.iter()
+        .any(|x| b.iter().any(|y| x == y || encloses(x, y) || encloses(y, x)))
 }
 
 #[cfg(test)]

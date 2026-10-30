@@ -335,9 +335,13 @@ can never be stale. Present:
 - **AGGREGATE_HANDLES**: the events from it to the head are the window;
   the handler receives them with the nonce (the router's
   `CommandContext.conflict`) and must give the nonce back
-  (`Conflict::resolve_conflicts`), or the router fails the command
-  (CONFLICT_UNRESOLVED, the kernel's `KernelError::Unresolved`).
-- **COMMUTATIVE**: the same window and nonce; the router resolves (below).
+  (`Conflict::resolve_conflicts`). The router reports the nonce handed
+  back (`CommandHandlerResponse.conflict`), and the kernel keeps the
+  events only if it is the one delivered, else the command fails
+  (CONFLICT_UNRESOLVED, the kernel's `KernelError::Unresolved`) and
+  nothing is persisted.
+- **COMMUTATIVE**: the same window and nonce; the router computes the unit
+  sets and the kernel judges them (below).
   At the head there is no window, and the command is handed over as
   STRICT.
 - Past the head: stale under every resolution.
@@ -347,10 +351,14 @@ which the registry configures for a state that lists it). The handler runs
 on the head, so every invariant it checks holds against the window's
 effects. Then `window = changed(state at expected, head)` and `mine =
 changed(head, head with the command's events)`, both by the state's
-generated `State::changed`; the events are kept iff the two do not overlap
-(the router's rule: equal units or a prefix at a `.`/`[` boundary; a
-wildcard overlaps any non-empty set; an empty set nothing), else the
-command is stale (CONFLICT_OVERLAP, the kernel's `KernelError::Stale`). Unmarked fields conflict with
+generated `State::changed`, reported to the kernel in the router's
+`ConflictReport`. The kernel judges (decision 14.42, `conflict::judge`):
+the events are kept iff the two do not overlap (options.proto's rule:
+equal units or a prefix at a `.`/`[` boundary; a wildcard overlaps any
+non-empty set; an empty set nothing), else the command is stale
+(CONFLICT_OVERLAP, the kernel's `KernelError::Stale`) and nothing is
+persisted. The router still makes the same judgement itself, now
+redundant. Unmarked fields conflict with
 everything (the fail-safe wildcard), so an unmarked change only makes
 COMMUTATIVE stricter.
 

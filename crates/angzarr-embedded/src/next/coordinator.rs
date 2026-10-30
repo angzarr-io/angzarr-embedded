@@ -421,7 +421,10 @@ pub(crate) fn decide(
         .ok_or_else(|| kernel(unknown_domain(domain)))?;
     let contextual = contextual_command(command, registry, sampled.now).map_err(kernel)?;
     let recorded_at = contextual.recorded_at.unwrap_or_default();
-    let response = handler.dispatch(&contextual).map_err(|error| {
+    let response = handler
+        .dispatch(&contextual)
+        .and_then(|response| judged(&contextual, response));
+    let response = response.map_err(|error| {
         let error = match error.code.as_str() {
             codes::UNKNOWN_COMMAND_TYPE | codes::NO_FACT_HANDLER => {
                 as_sent(error, identified.payload(), &command.current)
@@ -484,6 +487,38 @@ pub(crate) fn decide(
         _ => None,
     };
     Ok(Decided { pages, snapshot })
+}
+
+/// `response` to `delivered`, judged by its conflict report (decision
+/// 14.42; [`conflict::judge`](super::conflict::judge)): the router's answer
+/// when its events may be kept; otherwise the refusal the kernel answers
+/// with, as the router would have, ABORTED: `CONFLICT_UNRESOLVED`, or
+/// `CONFLICT_OVERLAP` naming both unit sets.
+fn judged(
+    delivered: &ContextualCommand,
+    response: angzarr_router::pb::CommandHandlerResponse,
+) -> Result<angzarr_router::pb::CommandHandlerResponse, CodedError> {
+    use super::conflict::{judge, Judgement};
+    let resolution = delivered
+        .command
+        .as_ref()
+        .and_then(|book| book.handling.as_ref())
+        .map_or(ConflictResolution::Strict, |h| h.conflict_resolution());
+    match judge(
+        resolution,
+        &delivered.conflict_nonce,
+        response.conflict.as_ref(),
+    ) {
+        Judgement::Kept => Ok(response),
+        Judgement::Unresolved => Err(CodedError::stale(codes::CONFLICT_UNRESOLVED, [])),
+        Judgement::Overlap { window, command } => Err(CodedError::stale(
+            codes::CONFLICT_OVERLAP,
+            [
+                (extras::WINDOW_UNITS.to_string(), window.join(",")),
+                (extras::COMMAND_UNITS.to_string(), command.join(",")),
+            ],
+        )),
+    }
 }
 
 /// What step 5 decided: the events, stamped, and the snapshot to write
