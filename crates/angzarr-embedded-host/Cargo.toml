@@ -5,8 +5,9 @@ description = "Hosts an angzarr-embedded application's remote components (domain
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
-# prost 0.14 and tonic 0.14 need 1.85.
-rust-version = "1.85"
+# uuid 1.28 (through angzarr-proto) needs 1.89; tonic 0.14.8 and its
+# companions (tonic-prost, tonic-types, tonic-health, tonic-build) need 1.88.
+rust-version = "1.89"
 
 # A remote component is a child process serving angzarr's
 # CommandHandlerService, PolicyService or ProjectorService, and

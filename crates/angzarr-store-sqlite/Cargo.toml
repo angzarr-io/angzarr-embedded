@@ -5,8 +5,9 @@ description = "angzarr-ports on SQLite: the shared store adapter that angzarr-em
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
-# sqlx 0.8 and prost 0.14 (through angzarr-proto) need 1.85.
-rust-version = "1.85"
+# uuid 1.28 (through angzarr-proto) needs 1.89; sqlx 0.8's graph (icu_*,
+# home) needs 1.88.
+rust-version = "1.89"
 
 # A LEAF: angzarr-ports (and the wire types through it) and SQL, nothing of
 # angzarr-embedded (`a_store_depends_on_nothing_of_angzarr_embedded`), so angzarr's runtimes use

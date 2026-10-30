@@ -5,8 +5,8 @@ description = "angzarr's in-app runtime: a small, deterministic event-sourcing e
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
-# prost 0.14 (through angzarr-proto) needs 1.85.
-rust-version = "1.85"
+# uuid 1.28 (through angzarr-proto) needs 1.89; prost 0.14 needs 1.85.
+rust-version = "1.89"
 
 # The kernel operates on angzarr's wire types directly (`angzarr_embedded::next`), so
 # it depends on angzarr-proto: angzarr's own prost crate for io.angzarr.v1,

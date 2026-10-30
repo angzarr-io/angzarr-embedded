@@ -116,7 +116,7 @@ flowchart TB
   The conflict nonce is a counter.
 - **The kernel stays synchronous.** The only async parts are the async store
   port and the handler over it, with native `impl Future` in traits.
-- **MSRV 1.85** (prost 0.14). **angzarr-embedded builds for
+- **MSRV 1.89** (uuid 1.28, through angzarr-proto). **angzarr-embedded builds for
   `wasm32-unknown-unknown`**, angzarr-proto included; `just wasm` checks it.
 - **Must not preclude hash chaining** (deferred). Stored pages are never
   rewritten; upcasting happens on read; metadata is deterministic; no
