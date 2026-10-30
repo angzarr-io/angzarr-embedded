@@ -50,7 +50,7 @@ use super::check::{Identified, Malformed, Sampled};
 use super::dead_letter::{write_dead_letter, DeadLetterLog};
 use super::error::{Failure, KernelError};
 use super::markup::STEP_LIMIT;
-use super::registry::Registry;
+use super::registry::{Registry, Start};
 use super::route::{self, Rejected};
 use super::store::Port;
 
@@ -191,7 +191,16 @@ pub(crate) async fn deduplicate<P: Port>(
             },
         }),
         Ok(Admission::Skip) => Ok(Deduplicated::Skipped),
-        Ok(Admission::Dispatch) => Ok(Deduplicated::Novel(Box::new(Novel { command, loaded }))),
+        Ok(Admission::Dispatch) => match registry.start_rule(
+            command.domain(),
+            command.payload(),
+            command.body().is_fact(),
+            loaded.head > 0,
+        ) {
+            Ok(Start::Deliver) => Ok(Deduplicated::Novel(Box::new(Novel { command, loaded }))),
+            Ok(Start::Skip) => Ok(Deduplicated::Skipped),
+            Err(error) => Err(refused(&command, error)),
+        },
         Err(error) => Err(refused(&command, error)),
     }
 }

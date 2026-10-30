@@ -36,8 +36,9 @@
 //! - `projector`: a `ProjectorService` of `ANGZARR_FAKE_INPUT`'s events,
 //!   failing an event by its type URL's last segment: `...Break` INTERNAL
 //!   (`PROJECTOR_BROKE`), `...Refuse` FAILED_PRECONDITION
-//!   (`VIEW_REFUSED`), and the first time only, `...Flaky` UNAVAILABLE
-//!   (`VIEW_DB_DOWN`) and `...Stale` ABORTED (`VIEW_STALE`).
+//!   (`VIEW_REFUSED`), `...Down` UNAVAILABLE (`VIEW_DB_DOWN`) every time,
+//!   and the first time only, `...Flaky` UNAVAILABLE (`VIEW_DB_DOWN`) and
+//!   `...Stale` ABORTED (`VIEW_STALE`).
 //!
 //! A policy or projector appends a line to `ANGZARR_FAKE_LOG` for each
 //! call: `handle <type>` per event, `refused <typed refusal type URL>`.
@@ -56,7 +57,7 @@ use tokio::net::UnixListener;
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::{Request, Response, Status};
 
-use crate::config::{DomainConfig, HostConfig, Supervision};
+use crate::config::{ComponentConfig, HostConfig, Supervision};
 use crate::handshake::SOCKET_ENV;
 use crate::rpc::command_handler::command_handler_service_server::{
     CommandHandlerService, CommandHandlerServiceServer,
@@ -146,8 +147,8 @@ pub(crate) fn launch() -> Vec<String> {
 /// A domain whose child is the fake in `mode`, describing itself as
 /// `name`. Its language is Python, whose default launch (uv) the config's
 /// `launch` overrides: the fake is what runs.
-pub(crate) fn domain(name: &str, described: &str, mode: &str) -> DomainConfig {
-    DomainConfig {
+pub(crate) fn domain(name: &str, described: &str, mode: &str) -> ComponentConfig {
+    ComponentConfig {
         name: name.to_string(),
         language: "python".to_string(),
         kind: Default::default(),
@@ -162,12 +163,12 @@ pub(crate) fn domain(name: &str, described: &str, mode: &str) -> DomainConfig {
 }
 
 /// A config of `domains`, with short waits so the tests are quick.
-pub(crate) fn config(domains: Vec<DomainConfig>) -> HostConfig {
+pub(crate) fn config(domains: Vec<ComponentConfig>) -> HostConfig {
     HostConfig {
         store: Default::default(),
         policy: Default::default(),
         retry: Default::default(),
-        domains,
+        components: domains,
         supervision: Supervision {
             handshake_timeout_ms: 20_000,
             initial_backoff_ms: 50,
@@ -499,6 +500,9 @@ impl ProjectorService for Fake {
             }
             if type_url.ends_with("Refuse") {
                 return Err(fail(tonic::Code::FailedPrecondition, "VIEW_REFUSED"));
+            }
+            if type_url.ends_with("Down") {
+                return Err(fail(tonic::Code::Unavailable, "VIEW_DB_DOWN"));
             }
             if first && type_url.ends_with("Flaky") {
                 return Err(fail(tonic::Code::Unavailable, "VIEW_DB_DOWN"));

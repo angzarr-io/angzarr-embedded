@@ -40,10 +40,14 @@ kernel runs on and has no store traits of its own beside.
 angzarr-embedded also depends on `angzarr-router`, a git dependency pinned by
 rev: angzarr's shared client router, through which the kernel dispatches
 business (handlers, typed refusals and the refusal path, deduplication, a
-process manager's start rule, a policy's commands' edition, root and
-correlation), so those rules are implemented once for every runtime. The
-kernel keeps the check, identification, the store writes, positions and
-resume.
+policy's commands' edition, root and correlation), so those rules are
+implemented once for every runtime. The kernel keeps the check,
+identification, a process manager's start rule (from its descriptor's
+starting types: admit is coordinator work, decisions 14.41 and 14.42), the
+pass-through refusal fact and its address, a projector's failure classes,
+the store writes, positions and resume. Policies reach it as the router's
+`PolicyComponent`, so a policy in another process runs as an in-process
+one does.
 
 angzarr-embedded-macros depends on `syn`, `quote` and `proc-macro2`, because it is a
 procedural macro crate that parses a whole impl (its methods' signatures,
@@ -73,7 +77,9 @@ child's server), `tokio`,
 `tower` and `hyper-util` (the runtime and the Unix-socket connector),
 `libc` (SIGTERM to a child at shutdown, which tokio cannot send),
 `angzarr-store-sqlite` (the store `run` opens), and `serde` and `toml`
-(its config, the angzarr.toml the CLI writes), because a remote domain is a child process speaking
+(its config, the angzarr.toml the CLI writes, whose `[[component]]` tables
+name each component's `kind`: domain, policy, projector or upcaster), because a remote
+component (a domain, a policy or a projector) is a child process speaking
 gRPC on a Unix socket: hand-rolling HTTP/2 would be a second, unchecked
 implementation of gRPC. Its stubs are written by `tonic-build`'s manual
 builder from the router's Rust types, so no `io.angzarr.v1` message is

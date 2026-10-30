@@ -1,10 +1,11 @@
-//! angzarr-embedded's host for remote domains: an application's domains
-//! written in another language (or another process) run as child processes
-//! speaking gRPC on a Unix socket, in the HashiCorp go-plugin model, and
-//! reach the application as angzarr-router [`CommandHandler`]s beside its
-//! in-process domains.
+//! angzarr-embedded's host for remote components: an application's domains,
+//! policies and projectors written in another language (or another
+//! process) run as child processes speaking gRPC on a Unix socket, in the
+//! HashiCorp go-plugin model, and reach the kernel beside its in-process
+//! ones: a domain as an angzarr-router [`CommandHandler`], a policy as a
+//! [`PolicyComponent`], a projector as a [`ProjectorHandler`].
 //!
-//! For each remote domain of a [`HostConfig`], [`Host::start`]:
+//! For each remote `[[component]]` of a [`HostConfig`], [`Host::start`]:
 //!
 //! 1. launches the child with its launch command (the config's, or its
 //!    language's default: [`config::default_launch`]), `ANGZARR_SOCKET` set
@@ -12,9 +13,14 @@
 //! 2. reads its handshake, the one stdout line
 //!    `angzarr-handshake v1 unix:<absolute-socket-path>` ([`handshake`]),
 //!    within a timeout;
-//! 3. connects to that socket and calls `ComponentService.Describe`;
-//! 4. hands back a [`RemoteCommandHandler`], whose `dispatch` is
-//!    `CommandHandlerService.Handle` on the socket;
+//! 3. connects to that socket and calls `ComponentService.Describe`,
+//!    refusing a child of another kind than its `kind` says;
+//! 4. hands back, by its kind, a [`RemoteCommandHandler`] over
+//!    `CommandHandlerService`, a [`RemotePolicyHandler`] over
+//!    `PolicyService` or a [`RemoteProjectorHandler`] over
+//!    `ProjectorService`, which [`Host::register`] registers with the
+//!    kernel; a remote process manager's start rule is the kernel's, from
+//!    its descriptor's starting types;
 //! 5. supervises it: a child that exits is restarted with backoff, and
 //!    while it is down its dispatch fails retryably ([`is_retryable`]).
 //!
@@ -22,6 +28,8 @@
 //! host closes its stdin to stop it.
 //!
 //! [`CommandHandler`]: angzarr_router::router::CommandHandler
+//! [`PolicyComponent`]: angzarr_router::router::PolicyComponent
+//! [`ProjectorHandler`]: angzarr_router::router::ProjectorHandler
 
 pub mod app;
 pub mod config;
@@ -33,7 +41,7 @@ pub mod rpc;
 
 pub use app::{run, App};
 pub use config::{
-    ComponentKindConfig, DomainConfig, HostConfig, Launch, Placement, StoreConfig, Supervision,
+    ComponentConfig, ComponentKindConfig, HostConfig, Launch, Placement, StoreConfig, Supervision,
 };
 pub use error::{HandshakeError, HostError};
 pub use host::{ChildExit, Host};

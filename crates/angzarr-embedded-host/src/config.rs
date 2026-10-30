@@ -1,19 +1,25 @@
-//! The host's config: the application's domains, the language each is
-//! written in, and how each remote one is launched. The CLI writes it beside
-//! the thin `main.rs` it generates; its TOML form is
+//! The host's config: the application's components, the language each is
+//! written in, what kind each is, and how each remote one is launched. The
+//! CLI writes it beside the thin `main.rs` it generates; its TOML form is
 //!
 //! ```toml
-//! [[domain]]
+//! [[component]]
 //! name = "table"
 //! language = "rust"            # in-process: registered by main.rs, not launched
 //!
-//! [[domain]]
+//! [[component]]
 //! name = "player"
 //! language = "python"          # launched as `uv run --locked -m player.serve`
 //! entry = ["-m", "player.serve"]
 //! dir = "domains/player"
 //!
-//! [[domain]]
+//! [[component]]
+//! name = "table-player"
+//! kind = "policy"              # a PolicyService child; "domain" by default
+//! language = "python"
+//! entry = ["-m", "table_player.serve"]
+//!
+//! [[component]]
 //! name = "dealer"
 //! language = "go"              # no default: the launch command is given
 //! launch = ["./bin/dealer"]
@@ -37,9 +43,17 @@
 //! jitter = 0.2                 # less up to this fraction of it at random
 //! ```
 //!
-//! A domain's language picks its default launch command and nothing else:
-//! the host speaks one protocol to every child (the handshake, then gRPC on
-//! a Unix socket), so a language with no default here needs only a `launch`.
+//! A component's `kind` is the service its child serves: `"domain"` (the
+//! default: an aggregate or a process manager, `CommandHandlerService`),
+//! `"policy"` (`PolicyService`), `"projector"` (`ProjectorService`) or
+//! `"upcaster"` (an upcaster sidecar, decision 14.39, which the host does
+//! not launch yet: [`HostError::KindUnsupported`]). Its descriptor must
+//! agree ([`HostError::KindMismatch`]).
+//!
+//! A component's language picks its default launch command and nothing
+//! else: the host speaks one protocol to every child (the handshake, then
+//! gRPC on a Unix socket), so a language with no default here needs only a
+//! `launch`.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -49,13 +63,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::HostError;
 
-/// The language whose domains run in the application's own process, as
-/// angzarr-embedded domains: the host launches none of them unless the
+/// The language whose components run in the application's own process, as
+/// angzarr-embedded components: the host launches none of them unless the
 /// config gives one a `launch`.
 pub const IN_PROCESS_LANGUAGE: &str = "rust";
 
 /// The default launch command of each language that has one, before the
-/// domain's `entry`. Python's runs the domain's project with exactly its
+/// component's `entry`. Python's runs the component's project with exactly its
 /// lock file's dependencies.
 pub fn default_launch(language: &str) -> Option<&'static [&'static str]> {
     match language {
@@ -68,10 +82,10 @@ pub fn default_launch(language: &str) -> Option<&'static [&'static str]> {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostConfig {
-    /// Every domain of the application, in-process and remote: the
-    /// `[[domain]]` tables.
-    #[serde(rename = "domain", default)]
-    pub domains: Vec<DomainConfig>,
+    /// Every component of the application, in-process and remote: the
+    /// `[[component]]` tables.
+    #[serde(rename = "component", default)]
+    pub components: Vec<ComponentConfig>,
     /// How the host waits for, restarts and stops its children.
     #[serde(default)]
     pub supervision: Supervision,
@@ -186,22 +200,19 @@ impl Default for StoreConfig {
     }
 }
 
-/// One `[[domain]]` table.
+/// One `[[component]]` table.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DomainConfig {
-    /// The domain's name: the component name its child must describe.
+pub struct ComponentConfig {
+    /// The component's name: for a domain, the domain's.
     pub name: String,
     /// The language it is written in (`"rust"`, `"python"`, `"go"`, ...),
     /// lowercase.
     pub language: String,
     /// The service its child serves: `"domain"` (the default: an
     /// aggregate or a process manager, `CommandHandlerService`),
-    /// `"policy"` (`PolicyService`) or `"projector"`
-    /// (`ProjectorService`).
-    ///
-    /// RED STUB (feat/host-admit-policies): parsed, not yet acted on; the
-    /// host still dials every child as a domain.
+    /// `"policy"` (`PolicyService`), `"projector"` (`ProjectorService`)
+    /// or `"upcaster"` (an upcaster sidecar, not launched yet).
     #[serde(default, skip_serializing_if = "ComponentKindConfig::is_domain")]
     pub kind: ComponentKindConfig,
     /// The command that starts its child, program first. Overrides the
@@ -222,8 +233,8 @@ pub struct DomainConfig {
     pub env: BTreeMap<String, String>,
 }
 
-/// A `[[domain]]` table's `kind`: which of angzarr's component services
-/// its child serves. Its descriptor's kind must agree.
+/// A `[[component]]` table's `kind`: which of angzarr's component
+/// services its child serves. Its descriptor's kind must agree.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ComponentKindConfig {
@@ -235,11 +246,25 @@ pub enum ComponentKindConfig {
     Policy,
     /// A projector (`ProjectorService`).
     Projector,
+    /// An upcaster sidecar (`UpcasterService`, decision 14.39): refused at
+    /// start for now ([`HostError::KindUnsupported`]).
+    Upcaster,
 }
 
 impl ComponentKindConfig {
     fn is_domain(&self) -> bool {
         *self == ComponentKindConfig::Domain
+    }
+
+    /// Its TOML form: `"domain"`, `"policy"`, `"projector"` or
+    /// `"upcaster"`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ComponentKindConfig::Domain => "domain",
+            ComponentKindConfig::Policy => "policy",
+            ComponentKindConfig::Projector => "projector",
+            ComponentKindConfig::Upcaster => "upcaster",
+        }
     }
 }
 
@@ -288,7 +313,7 @@ impl Default for Supervision {
     }
 }
 
-/// Where a domain runs.
+/// Where a component runs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Placement {
     /// In the application's process: main.rs registers it; the host does
@@ -298,7 +323,7 @@ pub enum Placement {
     Remote(Launch),
 }
 
-/// A child's resolved launch: what [`DomainConfig::placement`] makes of the
+/// A child's resolved launch: what [`ComponentConfig::placement`] makes of the
 /// config.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Launch {
@@ -308,10 +333,10 @@ pub struct Launch {
     pub env: BTreeMap<String, String>,
 }
 
-impl DomainConfig {
-    /// Where this domain runs and, when remote, how it is launched: its
+impl ComponentConfig {
+    /// Where this component runs and, when remote, how it is launched: its
     /// `launch`, else its language's default followed by its `entry`. A
-    /// `"rust"` domain with no `launch` is in-process. Refused when the
+    /// `"rust"` component with no `launch` is in-process. Refused when the
     /// launch is empty, or when no launch is given for a language with no
     /// default.
     pub fn placement(&self) -> Result<Placement, HostError> {

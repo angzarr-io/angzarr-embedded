@@ -7,7 +7,7 @@ use angzarr_router::router::CommandHandler;
 use prost_types::Any;
 
 use super::*;
-use crate::config::DomainConfig;
+use crate::config::ComponentConfig;
 use crate::error::HandshakeError;
 use crate::fake_child::{self, config, domain, mode};
 use crate::remote::is_retryable;
@@ -34,11 +34,11 @@ fn command(domain: &str, type_url: &str) -> pb::ContextualCommand {
     }
 }
 
-fn player(mode: &str) -> DomainConfig {
+fn player(mode: &str) -> ComponentConfig {
     domain("player", "player", mode)
 }
 
-fn started(domains: Vec<DomainConfig>) -> Host {
+fn started(domains: Vec<ComponentConfig>) -> Host {
     Host::start(config(domains)).expect("the host starts")
 }
 
@@ -83,7 +83,7 @@ fn start_describes_each_remote_domain() {
 /// in-process ones are not launched and get no handler.
 #[test]
 fn in_process_domains_are_left_to_the_caller() {
-    let table = DomainConfig {
+    let table = ComponentConfig {
         name: "table".to_string(),
         language: "rust".to_string(),
         kind: Default::default(),
@@ -347,7 +347,7 @@ fn the_python_player_comes_up_by_its_default_launch() {
             PathBuf::from(std::env::var_os("HOME").unwrap())
                 .join("workspace/worktrees/examples-python--player-bot/player")
         });
-    let player = DomainConfig {
+    let player = ComponentConfig {
         name: "player".to_string(),
         language: "python".to_string(),
         kind: Default::default(),
@@ -459,7 +459,7 @@ fn a_failed_start_stops_the_children_it_started() {
         domain("dealer", "dealer", mode::SERVE),
         player(mode::MALFORMED),
     ]);
-    for domain in &mut config.domains {
+    for domain in &mut config.components {
         domain.env.insert(TAG_ENV.to_string(), tag.clone());
     }
     assert!(Host::start(config).is_err());

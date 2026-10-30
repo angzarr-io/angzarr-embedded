@@ -2,22 +2,23 @@
 //! the host's remote process managers apply their start rule, and the host
 //! carries policy and projector children beside its domains.
 //!
-//! - A remote process manager's start rule is the host's, from the child's
-//!   descriptor (`ComponentDescriptor.starting_types`), applied in
-//!   `RemoteCommandHandler::admit` with no call to the child: admit is
-//!   coordinator work, and the coordinator upcasts inputs before it
-//!   (decision 14.39; the proposal is 14.41), so the payload admit sees is
-//!   already current. There is no admit RPC.
-//! - A `[[domain]]` of `kind = "policy"` is a `PolicyService` child, run by
-//!   the kernel as any policy of its source; one of `kind = "projector"` a
-//!   `ProjectorService` child, run after each commit of its source's
-//!   events, its failures following the four classes (decision 14.37).
+//! - A remote process manager's start rule is the kernel's, from the
+//!   child's descriptor (`ComponentDescriptor.starting_types`), with no
+//!   call to the child: admit is coordinator work (decisions 14.39, 14.41,
+//!   14.42). There is no admit RPC.
+//! - A `[[component]]` of `kind = "policy"` is a `PolicyService` child, run
+//!   by the kernel as any policy of its source; one of `kind = "projector"`
+//!   a `ProjectorService` child, run after each commit of its source's
+//!   events, its failures following the four classes (decision 14.37). A
+//!   child that describes itself as another kind is refused at start.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use angzarr_embedded::next::angzarr_router::error::{CodedError, GrpcCode};
-use angzarr_embedded::next::angzarr_router::router::CommandHandler;
+use angzarr_embedded::next::angzarr_router::router::{
+    CommandHandler, PolicyComponent, ProjectorHandler,
+};
 use angzarr_embedded::next::v1::{
     command_page, Command, CommandBook, CommandPage, ComponentDescriptor, ComponentKind,
     ConflictResolution, ContextualCommand, Cover, EventBook, EventPage, Fact, FactOrigin,
@@ -32,11 +33,17 @@ use angzarr_ports::memory::MemoryStore;
 use angzarr_router::pb::CommandHandlerResponse;
 
 use super::Host;
-use crate::config::{ComponentKindConfig, DomainConfig};
+use crate::config::{ComponentConfig, ComponentKindConfig};
+use crate::error::HostError;
 use crate::fake_child::{
     config, domain, kind, mode, noted, HOLD, HOLD_TOO_MUCH, INPUT_ENV, KIND_ENV, LOG_ENV,
     SEAT_RELEASED, STARTING_ENV, TARGET_ENV,
 };
+
+/// The kernel's key for angzarr's `PM_NO_INSTANCE` (a router code reaches
+/// the caller under the kernel's own key, `angzarr-embedded-next-` and the
+/// code in kebab case).
+const PM_NO_INSTANCE: &str = "angzarr-embedded-next-pm-no-instance";
 
 fn root() -> Uuid {
     Uuid::from_bytes([0x0b; 16])
@@ -246,7 +253,7 @@ fn log_lines(path: &Path) -> Vec<String> {
         .collect()
 }
 
-fn with_env(mut domain: DomainConfig, env: &[(&str, &str)]) -> DomainConfig {
+fn with_env(mut domain: ComponentConfig, env: &[(&str, &str)]) -> ComponentConfig {
     for (k, v) in env {
         domain.env.insert(k.to_string(), v.to_string());
     }
@@ -295,7 +302,7 @@ fn a_remote_process_managers_non_starting_command_with_no_instance_is_refused() 
     let Err(Failure::Rejected(rejected)) = &refused else {
         panic!("refused PM_NO_INSTANCE: {:?}", refused.err());
     };
-    assert_eq!(rejected.code(), "PM_NO_INSTANCE");
+    assert_eq!(rejected.code(), PM_NO_INSTANCE);
     assert!(log.lines().is_empty(), "{:?}", log.lines());
     host.shutdown();
 }
@@ -384,7 +391,7 @@ fn a_remote_process_managers_start_rule_matches_by_type_name_whatever_the_prefix
         &mut (),
     ));
     assert!(
-        matches!(&refused, Err(Failure::Rejected(r)) if r.code() == "PM_NO_INSTANCE"),
+        matches!(&refused, Err(Failure::Rejected(r)) if r.code() == PM_NO_INSTANCE),
         "an unlisted type does not start one: {:?}",
         refused.err()
     );
@@ -409,7 +416,7 @@ fn a_remote_process_managers_start_rule_matches_by_type_name_whatever_the_prefix
 
 /// A remote policy `table-wallet`, `kind = "policy"`, from `table` to
 /// `wallet`, logging its calls to `log`.
-fn policy_domain(log: &Path) -> DomainConfig {
+fn policy_domain(log: &Path) -> ComponentConfig {
     let mut policy = with_env(
         domain("table-wallet", "TableWalletPolicy", mode::SERVE),
         &[
@@ -528,7 +535,7 @@ fn a_refusal_of_a_remote_policys_command_is_answered_by_its_on_refused() {
 
 /// A remote projector `table-view`, `kind = "projector"`, of `table`,
 /// logging its calls to `log`.
-fn projector_domain(log: &Path) -> DomainConfig {
+fn projector_domain(log: &Path) -> ComponentConfig {
     let mut projector = with_env(
         domain("table-view", "TableView", mode::SERVE),
         &[
@@ -647,10 +654,11 @@ fn a_remote_projectors_bug_is_fatal_not_retried_and_dead_lettered() {
     host.shutdown();
 }
 
-/// A projector's business status (FAILED_PRECONDITION: business, fatal)
-/// is returned, never retried, and not dead-lettered.
+/// A projector has no business refusal (decision 14.41): a business
+/// status from one (FAILED_PRECONDITION) is its bug, dead-lettered as a
+/// fatal one, never retried.
 #[test]
-fn a_remote_projectors_business_status_is_returned_and_not_retried() {
+fn a_remote_projectors_business_status_is_its_bug() {
     let log_path = log_file("projector-business");
     let (host, registry) = projected(&log_path);
     let store = MemoryStore::new();
@@ -677,8 +685,127 @@ fn a_remote_projectors_business_status_is_returned_and_not_retried() {
         "{}",
         failures[0].1
     );
+    let lines = log.lines();
+    assert_eq!(lines.len(), 1, "dead-lettered: {lines:?}");
+    assert!(lines[0].contains("VIEW_REFUSED"), "{}", lines[0]);
+    host.shutdown();
+}
+
+/// A retryable failure that keeps failing is retried up to the cap, then
+/// dead-lettered with its retry count.
+#[test]
+fn a_remote_projectors_retryable_failure_is_dead_lettered_at_the_cap() {
+    let log_path = log_file("projector-cap");
+    let (host, registry) = projected(&log_path);
+    let store = MemoryStore::new();
+    let log = MemoryDeadLetters::new();
+    let kernel = Kernel::new(&registry, &log).on_retryable(quick());
+
+    let failed = block_on(kernel.handle_any(
+        &store,
+        send("table", 1, any("/test.table.v1.SeatDown")),
+        &sampled(1),
+        &mut (),
+    ));
+
+    assert_eq!(
+        log_lines(&log_path).len(),
+        4,
+        "the first call and three retries"
+    );
+    assert!(
+        matches!(&failed, Err(Failure::Projection { .. })),
+        "{:?}",
+        failed.err()
+    );
+    let lines = log.lines();
+    assert_eq!(lines.len(), 1, "dead-lettered: {lines:?}");
+    assert!(lines[0].contains("VIEW_DB_DOWN"), "{}", lines[0]);
+    assert!(lines[0].contains("retry_count=3"), "{}", lines[0]);
+    host.shutdown();
+}
+
+/// With retrying off, a retryable failure is returned at once and not
+/// dead-lettered, as a step's is.
+#[test]
+fn a_remote_projectors_retryable_failure_with_retrying_off_is_returned() {
+    let log_path = log_file("projector-off");
+    let (host, registry) = projected(&log_path);
+    let store = MemoryStore::new();
+    let log = MemoryDeadLetters::new();
+    let kernel = Kernel::new(&registry, &log).on_retryable(OnRetryable {
+        max_retries: 0,
+        ..quick()
+    });
+
+    let failed = block_on(kernel.handle_any(
+        &store,
+        send("table", 1, any("/test.table.v1.SeatFlaky")),
+        &sampled(1),
+        &mut (),
+    ));
+
+    assert_eq!(log_lines(&log_path).len(), 1, "called once");
+    assert!(
+        matches!(&failed, Err(Failure::Projection { .. })),
+        "{:?}",
+        failed.err()
+    );
     assert!(log.lines().is_empty(), "{:?}", log.lines());
     host.shutdown();
+}
+
+// ---------------------------------------------------------------------
+// The kind a child is configured as.
+// ---------------------------------------------------------------------
+
+/// A child that describes itself as another kind than its `kind` says is
+/// refused at start: here a `kind = "policy"` child that is an aggregate.
+#[test]
+fn a_child_of_another_kind_than_configured_is_refused() {
+    let mut policy = domain("table-wallet", "TableWalletPolicy", mode::SERVE);
+    policy.kind = ComponentKindConfig::Policy;
+    let refused = Host::start(config(vec![policy])).err();
+    assert_eq!(
+        refused,
+        Some(HostError::KindMismatch {
+            domain: "table-wallet".to_string(),
+            configured: "policy".to_string(),
+            described: "AGGREGATE".to_string(),
+        })
+    );
+}
+
+/// A policy child that names no input domain is refused at start: it has
+/// no source.
+#[test]
+fn a_policy_child_with_no_input_is_refused() {
+    let log = log_file("policy-no-input");
+    let mut policy = policy_domain(&log);
+    policy.env.remove(INPUT_ENV);
+    let refused = Host::start(config(vec![policy])).err();
+    assert_eq!(
+        refused,
+        Some(HostError::NoInput {
+            domain: "table-wallet".to_string(),
+        })
+    );
+}
+
+/// A remote upcaster sidecar is not launched yet: refused at start,
+/// before any child is.
+#[test]
+fn a_remote_upcaster_is_refused_for_now() {
+    let mut upcaster = domain("table-upcaster", "TableUpcaster", mode::SERVE);
+    upcaster.kind = ComponentKindConfig::Upcaster;
+    let refused = Host::start(config(vec![upcaster])).err();
+    assert_eq!(
+        refused,
+        Some(HostError::KindUnsupported {
+            domain: "table-upcaster".to_string(),
+            kind: "upcaster".to_string(),
+        })
+    );
 }
 
 /// A projector's retryable bug (UNAVAILABLE) and its immediate-return

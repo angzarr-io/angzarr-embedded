@@ -1,4 +1,4 @@
-//! The host's errors: why a remote domain could not be started. Each is a
+//! The host's errors: why a remote component could not be started. Each is a
 //! code and its args (`angzarr_embedded_diagnostic::Diagnostic`), and its
 //! `Display` is those, never English. A failure once a domain is running is not
 //! one of these: it is the router's [`CodedError`], from
@@ -56,13 +56,14 @@ impl Diagnostic for HandshakeError {
     }
 }
 
-/// Why the host could not start: a config it refuses, or a remote domain
-/// that did not come up. Every variant names its domain.
+/// Why the host could not start: a config it refuses, or a remote
+/// component that did not come up. Every variant about one component names
+/// it as `domain`: its `[[component]]` name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HostError {
-    /// Two `[[domain]]` tables with one name.
+    /// Two `[[component]]` tables with one name.
     DuplicateDomain { domain: String },
-    /// A remote domain whose language has no default launch command, and
+    /// A remote component whose language has no default launch command, and
     /// whose config gives none.
     NoLaunch { domain: String, language: String },
     /// A `launch` with no program in it.
@@ -84,6 +85,19 @@ pub enum HostError {
     /// `ComponentService.Describe` failed; `grpc_code` is the status's wire
     /// code.
     Describe { domain: String, grpc_code: i32 },
+    /// The child described itself as another kind than its `kind` says:
+    /// `described` is its descriptor's `ComponentKind`, by name.
+    KindMismatch {
+        domain: String,
+        configured: String,
+        described: String,
+    },
+    /// A policy or projector whose descriptor names no input domain: it
+    /// has no source.
+    NoInput { domain: String },
+    /// A `kind` the host cannot run yet (`upcaster`: the sidecar lands
+    /// with the kernel's upcasting, decision 14.39).
+    KindUnsupported { domain: String, kind: String },
     /// The configured `socket_dir` is too long for a Unix socket path to
     /// hold the host's socket names in it: at most `max_bytes` bytes.
     SocketDirTooLong { dir: String, max_bytes: u64 },
@@ -118,6 +132,9 @@ impl Diagnostic for HostError {
             HostError::Handshake { .. } => "angzarr-embedded-host-handshake",
             HostError::Connect { .. } => "angzarr-embedded-host-connect",
             HostError::Describe { .. } => "angzarr-embedded-host-describe",
+            HostError::KindMismatch { .. } => "angzarr-embedded-host-kind-mismatch",
+            HostError::NoInput { .. } => "angzarr-embedded-host-no-input",
+            HostError::KindUnsupported { .. } => "angzarr-embedded-host-kind-unsupported",
             HostError::SocketDirTooLong { .. } => "angzarr-embedded-host-socket-dir-too-long",
             HostError::ConfigUnreadable { .. } => "angzarr-embedded-host-config-unreadable",
             HostError::ConfigInvalid { .. } => "angzarr-embedded-host-config-invalid",
@@ -130,7 +147,9 @@ impl Diagnostic for HostError {
     fn args(&self) -> Vec<(&'static str, Arg)> {
         let domain = |d: &str| ("domain", Arg::from(d));
         match self {
-            HostError::DuplicateDomain { domain: d } | HostError::EmptyLaunch { domain: d } => {
+            HostError::DuplicateDomain { domain: d }
+            | HostError::EmptyLaunch { domain: d }
+            | HostError::NoInput { domain: d } => {
                 vec![domain(d)]
             }
             HostError::NoLaunch {
@@ -156,6 +175,18 @@ impl Diagnostic for HostError {
                 domain: d,
                 grpc_code,
             } => vec![domain(d), ("grpc_code", (*grpc_code).into())],
+            HostError::KindMismatch {
+                domain: d,
+                configured,
+                described,
+            } => vec![
+                domain(d),
+                ("configured", configured.as_str().into()),
+                ("described", described.as_str().into()),
+            ],
+            HostError::KindUnsupported { domain: d, kind } => {
+                vec![domain(d), ("kind", kind.as_str().into())]
+            }
             HostError::SocketDirTooLong { dir, max_bytes } => vec![
                 ("dir", dir.as_str().into()),
                 ("max_bytes", (*max_bytes).into()),
@@ -212,6 +243,16 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn Diagnostic>> {
         Box::new(HostError::Describe {
             domain: d(),
             grpc_code: 14,
+        }),
+        Box::new(HostError::KindMismatch {
+            domain: d(),
+            configured: "policy".to_string(),
+            described: "AGGREGATE".to_string(),
+        }),
+        Box::new(HostError::NoInput { domain: d() }),
+        Box::new(HostError::KindUnsupported {
+            domain: d(),
+            kind: "upcaster".to_string(),
         }),
         Box::new(HostError::SocketDirTooLong {
             dir: "/very/deep/directory".to_string(),

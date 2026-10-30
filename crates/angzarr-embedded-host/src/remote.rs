@@ -1,6 +1,11 @@
-//! A remote domain as angzarr-router's [`CommandHandler`]: `dispatch` is
-//! `CommandHandlerService.Handle` on the child's socket, and the descriptor
-//! is the one its `ComponentService.Describe` gave when it came up.
+//! A remote component as angzarr-router sees one: a domain (an aggregate
+//! or a process manager) as a [`CommandHandler`] over
+//! `CommandHandlerService`, a policy as a [`PolicyComponent`] over
+//! `PolicyService`, a projector as a [`ProjectorHandler`] over
+//! `ProjectorService`, each on its child's socket, its descriptor the one
+//! its `ComponentService.Describe` gave when it came up. A remote process
+//! manager's start rule is the kernel's, from that descriptor's starting
+//! types (decisions 14.41, 14.42): no call reaches the child.
 //!
 //! What comes back is in the router's terms:
 //!
@@ -24,15 +29,18 @@
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+use angzarr_router::context::CommandContext;
 use angzarr_router::error::{codes as router_codes, extras, CodedError, GrpcCode};
 use angzarr_router::pb;
-use angzarr_router::router::CommandHandler;
+use angzarr_router::router::{CommandHandler, PolicyComponent, ProjectorHandler};
 use prost::Message;
 use tonic::transport::Channel;
 use tonic::Code;
 
 use crate::rpc::command_handler::command_handler_service_client::CommandHandlerServiceClient;
 use crate::rpc::google_rpc::{ErrorInfo, Status as RpcStatus, ERROR_INFO_NAME};
+use crate::rpc::policy::policy_service_client::PolicyServiceClient;
+use crate::rpc::projector::projector_service_client::ProjectorServiceClient;
 
 /// The router-style codes a remote handler's dispatch adds to the router's
 /// own (`angzarr_router::error::codes`).
@@ -68,27 +76,22 @@ pub fn is_retryable(error: &CodedError) -> bool {
     error.code == codes::REMOTE_HANDLER_UNAVAILABLE
 }
 
-/// A remote domain's handler. Cloning it is cheap; every clone reaches the
-/// same supervised child, whichever process it currently is.
-#[derive(Clone)]
-pub struct RemoteCommandHandler {
-    inner: Arc<Remote>,
-}
-
+/// One remote component: its configured name, the descriptor `Describe`
+/// gave when it first came up, and the link to its current child.
 struct Remote {
-    domain: String,
+    name: String,
     descriptor: pb::ComponentDescriptor,
     link: Arc<Link>,
     runtime: tokio::runtime::Handle,
     call_timeout: Duration,
 }
 
-/// The connection to a domain's current child, which its supervisor sets
-/// when a child comes up and clears when it exits.
+/// The connection to a component's current child, which its supervisor
+/// sets when a child comes up and clears when it exits.
 pub(crate) struct Link {
-    pub(crate) client: RwLock<Option<CommandHandlerServiceClient<Channel>>>,
+    pub(crate) channel: RwLock<Option<Channel>>,
     /// How many children have come up: the supervisor counts each one
-    /// after setting its client, so a watcher that sees `n` reaches the
+    /// after setting its channel, so a watcher that sees `n` reaches the
     /// `n`th child.
     pub(crate) generation: tokio::sync::watch::Sender<u64>,
 }
@@ -96,15 +99,67 @@ pub(crate) struct Link {
 impl Default for Link {
     fn default() -> Self {
         Link {
-            client: RwLock::new(None),
+            channel: RwLock::new(None),
             generation: tokio::sync::watch::channel(0).0,
         }
     }
 }
 
+impl Remote {
+    /// `rpc` on the current child's channel, blocking until it answers or
+    /// the call timeout passes (retryable). Safe to call from inside a
+    /// tokio runtime: the call runs on the host's own.
+    fn call<T, F, Fut>(&self, rpc: F) -> Result<T, CodedError>
+    where
+        T: Send + 'static,
+        F: FnOnce(Channel) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<tonic::Response<T>, tonic::Status>> + Send,
+    {
+        let name = &self.name;
+        let channel = self
+            .link
+            .channel
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let Some(channel) = channel else {
+            return Err(unavailable(name, causes::NOT_RUNNING));
+        };
+        let call_timeout = self.call_timeout;
+        let (answer, answered) = std::sync::mpsc::sync_channel(1);
+        self.runtime.spawn(async move {
+            let _ = answer.send(tokio::time::timeout(call_timeout, rpc(channel)).await);
+        });
+        match answered.recv() {
+            Ok(Ok(Ok(response))) => Ok(response.into_inner()),
+            Ok(Ok(Err(status))) => Err(status_to_coded(name, &status)),
+            Ok(Err(_elapsed)) => Err(unavailable(name, causes::TIMEOUT)),
+            // The host's runtime stopped, dropping the call.
+            Err(_) => Err(unavailable(name, causes::TRANSPORT)),
+        }
+    }
+
+    /// The domain its descriptor names as its one input: a policy's or a
+    /// projector's source. Empty for a domain.
+    fn input(&self) -> &str {
+        self.descriptor
+            .inputs
+            .first()
+            .map_or("", |t| t.domain.as_str())
+    }
+}
+
+/// A remote domain's handler (an aggregate or a process manager). Cloning
+/// it is cheap; every clone reaches the same supervised child, whichever
+/// process it currently is.
+#[derive(Clone)]
+pub struct RemoteCommandHandler {
+    inner: Arc<Remote>,
+}
+
 impl RemoteCommandHandler {
     pub(crate) fn new(
-        domain: String,
+        name: String,
         descriptor: pb::ComponentDescriptor,
         link: Arc<Link>,
         runtime: tokio::runtime::Handle,
@@ -112,7 +167,7 @@ impl RemoteCommandHandler {
     ) -> Self {
         RemoteCommandHandler {
             inner: Arc::new(Remote {
-                domain,
+                name,
                 descriptor,
                 link,
                 runtime,
@@ -126,19 +181,18 @@ impl RemoteCommandHandler {
     pub(crate) fn generations(&self) -> tokio::sync::watch::Receiver<u64> {
         self.inner.link.generation.subscribe()
     }
-}
 
-impl RemoteCommandHandler {
-    /// The domain this handler is configured for: its `[[domain]]` name.
+    /// The domain this handler is configured for: its `[[component]]`
+    /// name.
     pub fn domain(&self) -> &str {
-        &self.inner.domain
+        &self.inner.name
     }
 }
 
 impl std::fmt::Debug for RemoteCommandHandler {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RemoteCommandHandler")
-            .field("domain", &self.inner.domain)
+            .field("domain", &self.inner.name)
             .finish_non_exhaustive()
     }
 }
@@ -163,36 +217,15 @@ impl CommandHandler for RemoteCommandHandler {
     }
 
     /// `CommandHandlerService.Handle` on the child, blocking until it
-    /// answers or the call timeout passes (retryable). Safe to call from inside a tokio runtime: the call runs on
-    /// the host's own.
+    /// answers or the call timeout passes (retryable).
     fn dispatch(
         &self,
         req: &pb::ContextualCommand,
     ) -> Result<pb::CommandHandlerResponse, CodedError> {
-        let domain = &self.inner.domain;
-        let client = self
-            .inner
-            .link
-            .client
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
-        let Some(mut client) = client else {
-            return Err(unavailable(domain, causes::NOT_RUNNING));
-        };
         let req = req.clone();
-        let call_timeout = self.inner.call_timeout;
-        let (answer, answered) = std::sync::mpsc::sync_channel(1);
-        self.inner.runtime.spawn(async move {
-            let _ = answer.send(tokio::time::timeout(call_timeout, client.handle(req)).await);
-        });
-        match answered.recv() {
-            Ok(Ok(Ok(response))) => Ok(response.into_inner()),
-            Ok(Ok(Err(status))) => Err(status_to_coded(domain, &status)),
-            Ok(Err(_elapsed)) => Err(unavailable(domain, causes::TIMEOUT)),
-            // The host's runtime stopped, dropping the call.
-            Err(_) => Err(unavailable(domain, causes::TRANSPORT)),
-        }
+        self.inner.call(move |channel| async move {
+            CommandHandlerServiceClient::new(channel).handle(req).await
+        })
     }
 
     /// The descriptor `Describe` gave when the domain first came up.
@@ -202,52 +235,192 @@ impl CommandHandler for RemoteCommandHandler {
 }
 
 /// A remote policy's handler: its child serves `PolicyService`, and the
-/// kernel runs it as any policy of its source ([`Self::input_domain`]).
-///
-/// RED STUB (feat/host-admit-policies): the host does not hand one back
-/// yet ([`crate::Host::policy`] is always `None`).
-#[derive(Clone, Debug)]
+/// kernel runs it as any policy of its source
+/// ([`PolicyComponent::input_domain`], its descriptor's one input).
+/// Cloning it is cheap.
+#[derive(Clone)]
 pub struct RemotePolicyHandler {
-    descriptor: pb::ComponentDescriptor,
+    inner: Arc<Remote>,
 }
 
 impl RemotePolicyHandler {
+    pub(crate) fn new(
+        name: String,
+        descriptor: pb::ComponentDescriptor,
+        link: Arc<Link>,
+        runtime: tokio::runtime::Handle,
+        call_timeout: Duration,
+    ) -> Self {
+        RemotePolicyHandler {
+            inner: Arc::new(Remote {
+                name,
+                descriptor,
+                link,
+                runtime,
+                call_timeout,
+            }),
+        }
+    }
+
+    /// The `[[component]]` name it is configured as.
+    pub fn configured(&self) -> &str {
+        &self.inner.name
+    }
+}
+
+impl std::fmt::Debug for RemotePolicyHandler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemotePolicyHandler")
+            .field("component", &self.inner.name)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PolicyComponent for RemotePolicyHandler {
     /// The component's name, as its descriptor gives it.
-    pub fn name(&self) -> &str {
-        &self.descriptor.name
+    fn name(&self) -> &str {
+        &self.inner.descriptor.name
     }
 
     /// The domain whose events it handles: its descriptor's one input.
-    pub fn input_domain(&self) -> &str {
-        self.descriptor
-            .inputs
-            .first()
-            .map_or("", |t| t.domain.as_str())
+    fn input_domain(&self) -> &str {
+        self.inner.input()
+    }
+
+    /// `PolicyService.Handle` on the child.
+    fn dispatch(&self, source: &pb::EventBook) -> Result<pb::PolicyResponse, CodedError> {
+        let source = source.clone();
+        self.inner.call(move |channel| async move {
+            PolicyServiceClient::new(channel).handle(source).await
+        })
+    }
+
+    /// `PolicyService.OnRefused` on the child, with the refusal (`ctx`
+    /// stays here: the child's library rebuilds it from the refused
+    /// command): its translated fact's payload, or `None` for an empty
+    /// answer, no translation (decision 14.42). A translated fact that is
+    /// more than a payload is the policy's bug, refused INTERNAL: one that
+    /// sets its own cover or Handling (`REFUSAL_FACT_ADDRESSED`), has no
+    /// page (`REFUSAL_FACT_NO_PAGE`) or a page that is not a fact
+    /// (`REFUSAL_FACT_NOT_A_FACT`), or sets its own identity
+    /// (`REFUSAL_FACT_IDENTIFIED`).
+    fn dispatch_refusal(
+        &self,
+        refusal: &pb::Refusal,
+        _ctx: &CommandContext,
+    ) -> Result<Option<prost_types::Any>, CodedError> {
+        let refusal = refusal.clone();
+        let answer = self.inner.call(move |channel| async move {
+            PolicyServiceClient::new(channel).on_refused(refusal).await
+        })?;
+        let Some(fact) = answer.fact else {
+            return Ok(None);
+        };
+        translated(fact).map(Some)
+    }
+}
+
+impl RemotePolicyHandler {
+    /// The descriptor `Describe` gave when the policy first came up.
+    pub fn descriptor(&self) -> &pb::ComponentDescriptor {
+        &self.inner.descriptor
+    }
+}
+
+/// A translated refusal fact's payload, the fact refused INTERNAL as a
+/// policy bug when it is more than one (see
+/// [`RemotePolicyHandler`]'s `dispatch_refusal`).
+fn translated(fact: pb::CommandBook) -> Result<prost_types::Any, CodedError> {
+    let malformed = |code: &str| CodedError {
+        code: code.to_string(),
+        extras: Default::default(),
+        grpc: GrpcCode::Internal,
+        refusal: None,
+    };
+    if fact.cover.is_some() || fact.handling.is_some() {
+        return Err(malformed(router_codes::REFUSAL_FACT_ADDRESSED));
+    }
+    let page = fact
+        .page
+        .ok_or_else(|| malformed(router_codes::REFUSAL_FACT_NO_PAGE))?;
+    if page.command_id.is_some()
+        || page.correlation_id.is_some()
+        || page.causation_id.is_some()
+        || page.fact_origin.is_some()
+    {
+        return Err(malformed(router_codes::REFUSAL_FACT_IDENTIFIED));
+    }
+    match page.body {
+        Some(pb::command_page::Body::Fact(pb::Fact {
+            payload: Some(payload),
+        })) => Ok(payload),
+        _ => Err(malformed(router_codes::REFUSAL_FACT_NOT_A_FACT)),
     }
 }
 
 /// A remote projector's handler: its child serves `ProjectorService`, and
-/// the kernel runs it after each commit that records its source's events.
-///
-/// RED STUB (feat/host-admit-policies): the host does not hand one back
-/// yet ([`crate::Host::projector`] is always `None`).
-#[derive(Clone, Debug)]
+/// the kernel runs it after each commit that records events of its
+/// [`Self::source`]. Cloning it is cheap.
+#[derive(Clone)]
 pub struct RemoteProjectorHandler {
-    descriptor: pb::ComponentDescriptor,
+    inner: Arc<Remote>,
 }
 
 impl RemoteProjectorHandler {
-    /// The component's name, as its descriptor gives it.
-    pub fn name(&self) -> &str {
-        &self.descriptor.name
+    pub(crate) fn new(
+        name: String,
+        descriptor: pb::ComponentDescriptor,
+        link: Arc<Link>,
+        runtime: tokio::runtime::Handle,
+        call_timeout: Duration,
+    ) -> Self {
+        RemoteProjectorHandler {
+            inner: Arc::new(Remote {
+                name,
+                descriptor,
+                link,
+                runtime,
+                call_timeout,
+            }),
+        }
+    }
+
+    /// The `[[component]]` name it is configured as.
+    pub fn configured(&self) -> &str {
+        &self.inner.name
     }
 
     /// The domain whose events it projects: its descriptor's one input.
     pub fn source(&self) -> &str {
-        self.descriptor
-            .inputs
-            .first()
-            .map_or("", |t| t.domain.as_str())
+        self.inner.input()
+    }
+}
+
+impl std::fmt::Debug for RemoteProjectorHandler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteProjectorHandler")
+            .field("component", &self.inner.name)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ProjectorHandler for RemoteProjectorHandler {
+    /// The component's name, as its descriptor gives it.
+    fn name(&self) -> &str {
+        &self.inner.descriptor.name
+    }
+
+    /// `ProjectorService.Handle` on the child.
+    fn dispatch(&self, events: &pb::EventBook) -> Result<pb::Projection, CodedError> {
+        let events = events.clone();
+        self.inner.call(move |channel| async move {
+            ProjectorServiceClient::new(channel).handle(events).await
+        })
+    }
+
+    /// The descriptor `Describe` gave when the projector first came up.
+    fn component_descriptor(&self) -> Result<pb::ComponentDescriptor, CodedError> {
+        Ok(self.inner.descriptor.clone())
     }
 }
 

@@ -29,7 +29,9 @@
 //! 3. **Load, then admit**: the snapshot and newer events are loaded
 //!    first; then the command id is looked up on the addressed stream, and
 //!    angzarr-router admits the input (a refusal fact's address,
-//!    deduplication by the events found, a process manager's start rule).
+//!    deduplication by the events found), and the kernel applies a process
+//!    manager's start rule, its own, from the descriptor's starting types
+//!    (decisions 14.41, 14.42).
 //!    Events found are answered [`Handled::Duplicate`], and nothing below
 //!    runs. (Loading first closes the race in which a retry's lookup misses
 //!    an original that commits before the retry loads.)
@@ -50,7 +52,8 @@
 //! Each step is ONE atomic write to the store (no unit of work): one
 //! stream's events at the length it was loaded at, with the step's
 //! positions. Then every [`Policy`] for the source's domain runs, through
-//! angzarr-router's `PolicyDispatch`, on the written events, each of its commands a step of its own in its target,
+//! angzarr-router's `PolicyComponent` (a `PolicyDispatch`, or a policy in
+//! another process), on the written events, each of its commands a step of its own in its target,
 //! depth first, with the policy's position written with it; a step that
 //! fails keeps every write before it ([`Failure`], with the path to the
 //! failing [`Step`]), and what is owed is resumed by position
@@ -386,7 +389,7 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn angzarr_embedded_diagnostic::D
     }));
     samples.push(Box::new(Failure::<WireError>::Projection {
         committed: Vec::new(),
-        failures: vec![("balances", report())],
+        failures: vec![("balances".to_string(), report())],
     }));
     for reason in angzarr_router::error::codes::ALL {
         samples.push(Box::new(KernelError::Router(route::internal(reason, []))));

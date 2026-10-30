@@ -180,7 +180,12 @@ fn a_retried_steps_dead_letter_holds_its_command_failure_and_retry_count() {
     .identify(&at(30))
     .to_book();
     let failure = Report::new("toy-down").arg("seat", 3u32);
-    let letter = super::retries_exhausted(book.clone(), "account", &failure, 3);
+    let letter = super::retries_exhausted(
+        angzarr_dead_letter::Payload::RejectedCommand(book.clone()),
+        "account",
+        &failure,
+        3,
+    );
     let reason = Diagnostic {
         code: "toy-down".to_string(),
         args: [("seat".to_string(), "3".to_string())].into(),

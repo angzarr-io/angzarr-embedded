@@ -1,20 +1,21 @@
 [package]
 name = "angzarr-embedded-host"
 version = "0.1.0"
-description = "Hosts an angzarr-embedded application's remote domains: launches each as a child process, reads its handshake, connects over gRPC on a Unix socket, describes and supervises it, and hands each back as an angzarr-router CommandHandler. Part of angzarr-embedded, angzarr's in-app runtime; for the distributed system see angzarr core, https://github.com/angzarr-io/angzarr."
+description = "Hosts an angzarr-embedded application's remote components (domains, policies, projectors): launches each as a child process, reads its handshake, connects over gRPC on a Unix socket, describes and supervises it, and hands each back to the kernel by its kind. Part of angzarr-embedded, angzarr's in-app runtime; for the distributed system see angzarr core, https://github.com/angzarr-io/angzarr."
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 # prost 0.14 and tonic 0.14 need 1.85.
 rust-version = "1.85"
 
-# A remote domain is a child process serving angzarr's CommandHandlerService
-# and ComponentService over gRPC on a Unix socket (the go-plugin model), so
+# A remote component is a child process serving angzarr's
+# CommandHandlerService, PolicyService or ProjectorService, and
+# ComponentService, over gRPC on a Unix socket (the go-plugin model), so
 # this crate needs a gRPC client (tonic, with its prost codec), the async
 # runtime it runs on (tokio), and the connector glue for a Unix socket
 # (tower, hyper-util), all of which tonic itself depends on; google.rpc's
 # Status and ErrorInfo come from tonic-types (its maintained prost types,
-# at tonic's version). serde derives the config. The handler it builds is angzarr-router's CommandHandler,
+# at tonic's version). serde derives the config. The handlers it builds are angzarr-router's (CommandHandler, PolicyComponent, ProjectorHandler),
 # on the router's types, so angzarr-router and angzarr-proto are pinned at
 # the revs the router itself names: ONE angzarr-proto in the graph.
 [dependencies]
@@ -25,7 +26,7 @@ angzarr-embedded-diagnostic = { path = "../angzarr-embedded-diagnostic" }
 # The store `run` opens: SQLite, at the config's [store] path or in memory.
 angzarr-store-sqlite = { path = "../angzarr-store-sqlite" }
 angzarr-proto = { git = "https://github.com/angzarr-io/angzarr-project", rev = "a0be9386a8e535141dea3a5c27499e838ec6abc8" }
-angzarr-router = { git = "https://github.com/angzarr-io/angzarr-router", rev = "fc6d3a6d2c7944744f22362a0f83504dfe0e81ab" }
+angzarr-router = { git = "https://github.com/angzarr-io/angzarr-router", rev = "9cf224256b12328cc93d331b4d925b62b2b19cb3" }
 hyper-util = { version = "0.1", features = ["tokio"] }
 # SIGTERM for a child that outlives its stdin at shutdown: tokio's Child
 # sends only SIGKILL. In the graph already, through tokio.

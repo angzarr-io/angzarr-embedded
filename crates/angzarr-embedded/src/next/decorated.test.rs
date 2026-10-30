@@ -6561,7 +6561,10 @@ mod projector {
             panic!("the failures are the caller's Failure::Projection");
         };
         assert_eq!(
-            failures.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+            failures
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
             ["balances", "audit"]
         );
         assert_eq!(*trail.seen.lock().unwrap(), ["Opened", "Deposited"]);

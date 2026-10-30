@@ -34,8 +34,11 @@
 //!   dead-lettered.
 //! - **Projections run** on what each step wrote: a [`Project`]ion route's
 //!   failure is reported in [`Recorded::projector_failures`]; a marked-up
-//!   projector's ([`Registry::projector`]) is the caller's
-//!   [`Failure::Projection`]. A failing projection never undoes a write.
+//!   projector's ([`Registry::projector`]) and a `ProjectorHandler`'s
+//!   ([`Registry::projector_handler`], a projector in another process,
+//!   its failures by their class: retried, then dead-lettered, or
+//!   dead-lettered at once) are the caller's [`Failure::Projection`]. A
+//!   failing projection never undoes a write.
 //!
 //! Which policies run is the registry's one list
 //! ([`Registry::policy`]), in registration order, so a chain can come back
@@ -48,13 +51,13 @@ use std::collections::VecDeque;
 use std::convert::Infallible;
 
 use angzarr_proto::v1::{
-    self as v1, CommandBook, CommandPage, Cover, DeliveryOutcome, EventBook, EventPage, EventRef,
-    FactOrigin, Outcome,
+    self as v1, command_page, refusal_response, CommandBook, CommandPage, CommandRefused, Cover,
+    DeliveryOutcome, EventBook, EventPage, EventRef, Fact, FactOrigin, Outcome,
 };
+use prost_types::Any;
 
 use angzarr_proto::v1::angzarr_dead_letter::Payload;
 use angzarr_router::error::codes;
-use angzarr_router::policy::address_refusal_fact;
 
 use super::check::{check, check_refusal, Checked, Identified, Sampled};
 use super::coordinator::{contextual_command, deduplicate, dispatch, load, Deduplicated};
@@ -65,12 +68,13 @@ use super::handler::Handler;
 use super::markup::{self, ProjectionContext};
 use super::payload::type_name;
 use super::policy::{answered, projection, Projection};
-use super::registry::{PolicyEntry, Registry};
+use super::registry::{PolicyEntry, ProjectorInstance, Registry};
 use super::route::Rejected;
 use super::store::{Port, Store, StorePort};
 use super::stream::{Envelope, Stream};
 use angzarr_embedded_diagnostic::Report;
 use angzarr_router::error::ErrorClass;
+use angzarr_router::router::ProjectorHandler;
 
 /// How deep a chain may go before it is a [`KernelError::ChainTooDeep`],
 /// unless the kernel says otherwise ([`Kernel::limit`]).
@@ -564,11 +568,12 @@ impl<'k> Kernel<'k> {
         Ok(handled)
     }
 
-    /// Every marked-up projector over the `committed` events of its
-    /// source, in registration order, each event in stream order: a
-    /// projector stops at its first failure, the others go on. The
+    /// Every registered projector over the `committed` events of its
+    /// source, in registration order: a marked-up one each event in stream
+    /// order, a `ProjectorHandler` each book whole ([`Self::project_book`]).
+    /// A projector stops at its first failure, the others go on. The
     /// failures, by projector.
-    async fn run_projectors(&self, committed: &[EventBook]) -> Vec<(&'static str, Report)> {
+    async fn run_projectors(&self, committed: &[EventBook]) -> Vec<(String, Report)> {
         let mut failures = Vec::new();
         for entry in self.registry.projectors() {
             let books: Vec<&EventBook> = committed
@@ -582,11 +587,22 @@ impl<'k> Kernel<'k> {
             if books.iter().all(|book| book.pages.is_empty()) {
                 continue;
             }
+            let instance = match &entry.instance {
+                ProjectorInstance::Marked(instance) => instance,
+                ProjectorInstance::Handler(handler) => {
+                    for book in books.into_iter().filter(|book| !book.pages.is_empty()) {
+                        if let Err(error) = self.project_book(&entry.name, &**handler, book).await {
+                            failures.push((entry.name.clone(), error));
+                            break;
+                        }
+                    }
+                    continue;
+                }
+            };
             // The one instance is out of the lock while it runs; a
             // concurrent command waits for it.
-            let mut instance = loop {
-                let taken = entry
-                    .instance
+            let mut taken_instance = loop {
+                let taken = instance
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .take();
@@ -605,22 +621,73 @@ impl<'k> Kernel<'k> {
                         .unwrap_or_default();
                     let ctx = ProjectionContext::new(cover.clone(), page.sequence, recorded_at);
                     let payload = page.payload.clone().unwrap_or_default();
-                    let run = instance.project(&payload, &ctx);
+                    let run = taken_instance.project(&payload, &ctx);
                     if let Some(Err(error)) = match run {
                         Some(run) => Some(run.await),
                         None => None,
                     } {
-                        failures.push((entry.name, error));
+                        failures.push((entry.name.clone(), error));
                         break 'books;
                     }
                 }
             }
-            *entry
-                .instance
+            *instance
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(instance);
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(taken_instance);
         }
         failures
+    }
+
+    /// One committed `book` through the projector `handler`, named `name`,
+    /// its failure by its class (decision 14.37, 14.41): a retryable bug,
+    /// and an ABORTED (the kernel being the caller), are run again under
+    /// [`OnRetryable`], then dead-lettered with their retry count; any other
+    /// (a bug, or a business status, which a projector never has a right
+    /// to) is dead-lettered at once. With retrying off, a retryable failure
+    /// is returned and not dead-lettered, as a step's is.
+    async fn project_book(
+        &self,
+        name: &str,
+        handler: &dyn ProjectorHandler,
+        book: &EventBook,
+    ) -> Result<(), Report> {
+        let mut retries = 0;
+        loop {
+            let error = match handler.dispatch(book) {
+                Ok(_) => return Ok(()),
+                Err(error) => error,
+            };
+            let retryable = matches!(
+                error.grpc.class(),
+                ErrorClass::BugRetryable | ErrorClass::BusinessImmediate
+            );
+            let error = KernelError::Router(error);
+            if !retryable {
+                write_letter(
+                    self.dead_letters,
+                    Payload::RejectedEvents(book.clone()),
+                    name,
+                    &error,
+                );
+                return Err(Report::of(&error));
+            }
+            if self.retry.max_retries == 0 {
+                return Err(Report::of(&error));
+            }
+            if retries >= self.retry.max_retries {
+                write_retries_exhausted(
+                    self.dead_letters,
+                    Payload::RejectedEvents(book.clone()),
+                    name,
+                    &error,
+                    retries,
+                );
+                return Err(Report::of(&error));
+            }
+            let backoff = self.retry.backoff(retries, self.wait.draw());
+            self.wait.wait(backoff).await;
+            retries += 1;
+        }
     }
 
     /// Step 1 for a `D` stream: the book checked, and naming a `D` stream.
@@ -718,6 +785,30 @@ struct Run<'k> {
     wait: &'k dyn Wait,
 }
 
+/// The pass-through refusal fact, the kernel's own (decision 14.42), for
+/// a refusal its policy does not translate: the standard
+/// `CommandRefused { command, refusal, trigger }`, `refusal` the typed
+/// refusal object still packed (none for an untyped rejection), `trigger`
+/// the triggering event.
+fn passed_through(refusal: &markup::v1::Refusal) -> Any {
+    let event = refusal.event.as_ref();
+    let fact = CommandRefused {
+        command: refusal.command.clone(),
+        refusal: refusal.response.as_ref().and_then(|r| match &r.reason {
+            Some(refusal_response::Reason::Refusal(any)) => Some(any.clone()),
+            _ => None,
+        }),
+        trigger: Some(EventRef {
+            stream: event.and_then(|e| e.cover.clone()),
+            sequence: event.and_then(|e| e.pages.last()).map_or(0, |p| p.sequence),
+        }),
+    };
+    Any {
+        type_url: angzarr_router::type_url(&<CommandRefused as prost::Name>::full_name()),
+        value: prost::Message::encode_to_vec(&fact),
+    }
+}
+
 /// What the originating command's step came to.
 enum Origin {
     /// Step 3 found its events already: these.
@@ -807,7 +898,7 @@ impl<'k> Run<'k> {
         if *retries >= self.retry.max_retries {
             write_retries_exhausted(
                 self.dead_letters,
-                command.to_book(),
+                Payload::RejectedCommand(command.to_book()),
                 command.domain(),
                 failure,
                 *retries,
@@ -1084,13 +1175,15 @@ impl<'k> Run<'k> {
                 return Err(StepError::PolicyFailed(failure));
             }
         };
-        let addressed = address_refusal_fact(refusal, &answer).map_err(kernel)?;
+        let fact = answer.unwrap_or_else(|| passed_through(refusal));
         let trigger = delivered.causation_id().cloned().unwrap_or_default();
-        let page = addressed.page.unwrap_or_default();
         let book = CommandBook {
-            cover: addressed.cover,
+            // The exact stream of the triggering event.
+            cover: refusal.event.as_ref().and_then(|e| e.cover.clone()),
             page: Some(CommandPage {
-                body: page.body,
+                body: Some(command_page::Body::Fact(Fact {
+                    payload: Some(fact),
+                })),
                 fact_origin: Some(FactOrigin {
                     external_id: delivered.command_id().to_string(),
                     description: format!(

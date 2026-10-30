@@ -14,7 +14,7 @@ use super::domain::{Domain, State};
 use super::error::{unreadable, Failure, KernelError, PayloadError, ReplayError};
 use super::handler::{Committed, Handler};
 use super::payload::{pack, type_name, Payload};
-use super::registry::Registry;
+use super::registry::{Registry, Start};
 use super::route::Rejected;
 use super::upcast::Upcaster;
 use super::version::Rulebook;
@@ -361,6 +361,16 @@ impl<D: Domain> Stream<D> {
             Ok(Admission::Duplicate(_)) => return Ok(Executed::Duplicate(&self.events[found])),
             Ok(Admission::Skip) => return Ok(Executed::Applied(&[])),
             Ok(Admission::Dispatch) => {}
+            Err(error) => return Err(refused(&command, error)),
+        }
+        match registry.start_rule(
+            D::NAME,
+            command.payload(),
+            command.body().is_fact(),
+            head > 0,
+        ) {
+            Ok(Start::Deliver) => {}
+            Ok(Start::Skip) => return Ok(Executed::Applied(&[])),
             Err(error) => return Err(refused(&command, error)),
         }
         let resolution = resolution(registry, &command).map_err(kernel)?;
