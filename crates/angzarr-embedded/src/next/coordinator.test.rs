@@ -839,3 +839,167 @@ mod snapshot {
         assert_eq!(reason.code(), "angzarr-embedded-next-payload-invalid");
     }
 }
+
+mod upcasting {
+    //! The kernel upcasts every incoming payload before dispatch, through
+    //! the domain's upcaster port (decision 14.39): the router is handed the
+    //! current type only.
+    use std::sync::{Arc, Mutex};
+
+    use crate::next::angzarr_router::error::CodedError;
+    use crate::next::angzarr_router::pb;
+    use crate::next::angzarr_router::router::CommandHandler;
+    use crate::next::toys::prelude::*;
+    use crate::next::toys::{
+        account, account_upcaster, at, command, cover, fees, handlers, payloads, Account,
+        AccountCmd, AccountEvent, Edit,
+    };
+    use crate::next::{pack, Failure, KernelError, Payload, Registry, Upcaster};
+
+    /// The account's router table with no upcaster of its own, recording
+    /// the type of every command it is handed.
+    pub(crate) struct Seen {
+        inner: Box<dyn CommandHandler>,
+        seen: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl CommandHandler for Seen {
+        fn name(&self) -> &str {
+            self.inner.name()
+        }
+        fn command_types(&self) -> Vec<String> {
+            self.inner.command_types()
+        }
+        fn dispatch(
+            &self,
+            req: &pb::ContextualCommand,
+        ) -> Result<pb::CommandHandlerResponse, CodedError> {
+            let sent = req
+                .command
+                .as_ref()
+                .and_then(|book| book.page.as_ref())
+                .and_then(|page| match &page.body {
+                    Some(pb::command_page::Body::Command(c)) => c.payload.clone(),
+                    Some(pb::command_page::Body::Fact(f)) => f.payload.clone(),
+                    None => None,
+                })
+                .map(|payload| payload.type_url)
+                .unwrap_or_default();
+            self.seen.lock().unwrap().push(sent);
+            self.inner.dispatch(req)
+        }
+        fn component_descriptor(&self) -> Result<pb::ComponentDescriptor, CodedError> {
+            self.inner.component_descriptor()
+        }
+    }
+
+    /// A registry whose account is [`Seen`], upcast through `upcaster`.
+    fn seen_account(upcaster: Upcaster) -> (Registry, Arc<Mutex<Vec<String>>>) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let rules = fees();
+        let (version, current) = rules.current();
+        let table = crate::next::route::table::<Account>(
+            Arc::new(fees()),
+            Arc::new(Upcaster::new("account-upcaster", "account")),
+            Arc::new(account::AccountState::default),
+            false,
+        );
+        let inner = handlers::<Account>(*current, version)(table);
+        let mut registry = Registry::new();
+        registry
+            .command_handler(
+                "account",
+                Seen {
+                    inner: Box::new(inner),
+                    seen: Arc::clone(&seen),
+                },
+            )
+            .unwrap();
+        registry.upcast_with("account", upcaster);
+        (registry, seen)
+    }
+
+    fn any(
+        store: &MemoryStore,
+        registry: &Registry,
+        book: crate::next::v1::CommandBook,
+        seconds: i64,
+    ) -> Result<crate::next::Handled, Failure<crate::next::Rejected>> {
+        let log = crate::next::MemoryDeadLetters::new();
+        crate::next::Kernel::new(registry, &log)
+            .on_retryable(crate::next::toys::no_retries())
+            .handle_any(store, book, &at(seconds), &mut ())
+            .ready()
+    }
+
+    #[test]
+    fn an_old_command_reaches_the_router_as_the_current_type() {
+        let (registry, seen) = seen_account(account_upcaster());
+        let store = MemoryStore::new();
+        let open = command(cover("account", 1), AccountCmd::Open.to_any()).id(1);
+        any(&store, &registry, open, 10).unwrap();
+
+        let old = command(
+            cover("account", 1),
+            pack(&account::cmd::v0::Credit { euros: 2 }),
+        )
+        .id(2);
+        let handled = any(&store, &registry, old, 11).unwrap();
+        assert_eq!(
+            payloads::<AccountEvent>(&handled.books()),
+            [AccountEvent::Deposited(200)],
+            "decided as the current type"
+        );
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [
+                "/toy.account.cmd.v1.Open".to_string(),
+                "/toy.account.cmd.v1.Deposit".to_string()
+            ],
+            "the router is handed the current type only"
+        );
+    }
+
+    #[test]
+    fn an_unknown_type_after_upcasting_names_the_type_sent_and_the_type_upcast() {
+        let upcaster = Upcaster::new("account-upcaster", "account")
+            .rule::<account::cmd::v0::Credit, account::v9::Bonus>(|c| {
+                Ok(account::v9::Bonus { cents: c.euros })
+            });
+        let (registry, seen) = seen_account(upcaster);
+        let store = MemoryStore::new();
+        let old = command(
+            cover("account", 1),
+            pack(&account::cmd::v0::Credit { euros: 2 }),
+        )
+        .id(2);
+        let refused = any(&store, &registry, old, 11).err().unwrap();
+        let Failure::Kernel(KernelError::Router(error)) = &refused else {
+            panic!("the router's refusal: {refused:?}");
+        };
+        assert_eq!(error.code, "UNKNOWN_COMMAND_TYPE");
+        let extra = |key: &str| error.extras.get(key).map(String::as_str);
+        assert_eq!(
+            extra("type_url"),
+            Some("/toy.account.cmd.v0.Credit"),
+            "as sent"
+        );
+        assert_eq!(
+            extra("upcast_type_url"),
+            Some("/toy.account.v9.Bonus"),
+            "where the upcaster's chain ended"
+        );
+        assert_eq!(*seen.lock().unwrap(), ["/toy.account.v9.Bonus".to_string()]);
+
+        // No rule applied: the two are the same.
+        let (registry, _) = seen_account(Upcaster::new("account-upcaster", "account"));
+        let bonus = command(cover("account", 1), pack(&account::v9::Bonus { cents: 1 })).id(3);
+        let refused = any(&store, &registry, bonus, 12).err().unwrap();
+        let Failure::Kernel(KernelError::Router(error)) = &refused else {
+            panic!("the router's refusal: {refused:?}");
+        };
+        let extra = |key: &str| error.extras.get(key).map(String::as_str);
+        assert_eq!(extra("type_url"), Some("/toy.account.v9.Bonus"));
+        assert_eq!(extra("upcast_type_url"), Some("/toy.account.v9.Bonus"));
+    }
+}

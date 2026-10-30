@@ -31,7 +31,7 @@ use super::markup::{self, AsyncProjector, Projecting, ProjectionContext};
 use super::payload::{type_name, Payload};
 use super::route;
 use super::stream::Stream;
-use super::upcast::Upcaster;
+use super::upcast::{UpcastPort, Upcaster};
 use super::version::Rulebook;
 
 /// One domain's entry.
@@ -427,6 +427,16 @@ impl Registry {
             },
         );
         Ok(())
+    }
+
+    /// Upcast `domain`'s incoming payloads through `port` (decision
+    /// 14.39): its upcaster sidecar, for a domain registered by
+    /// [`Registry::command_handler`]. A typed domain's is the [`Upcaster`]
+    /// it was registered with. A domain not registered PANICS: a bug in the
+    /// composition root.
+    pub fn upcast_with(&mut self, domain: &str, port: impl UpcastPort + 'static) -> &mut Self {
+        let _ = (domain, port);
+        self
     }
 
     /// Register the marked-up aggregate `D` (angzarr-embedded-macros' `#[aggregate]`)

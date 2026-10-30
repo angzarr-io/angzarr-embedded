@@ -134,7 +134,7 @@ pub use store::{
     SnapshotStore, Store, StoreError, StreamRef, Watch, Write, Written,
 };
 pub use stream::{Envelope, Executed, Stream};
-pub use upcast::{UpcastFn, Upcaster};
+pub use upcast::{UpcastFn, UpcastPort, Upcaster};
 pub use version::Rulebook;
 pub use wire::WireError;
 

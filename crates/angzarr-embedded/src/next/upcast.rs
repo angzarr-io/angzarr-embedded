@@ -48,6 +48,21 @@ use super::payload::{pack, type_name};
 /// `UpcastFn` (with angzarr-embedded's error type).
 pub type UpcastFn = Box<dyn Fn(&Any) -> Result<Any, UpcastError> + Send + Sync>;
 
+/// What the kernel upcasts an incoming payload through (decision 14.39):
+/// its component's upcaster sidecar, `UpcasterService.Upcast`'s body. An
+/// in-process [`Upcaster`] is one, called directly under the same
+/// contract; angzarr-embedded-host's `kind = "upcaster"` child is another.
+pub trait UpcastPort: Send + Sync {
+    /// Every page of `request` through the chain, for `request.domain`.
+    fn upcast(&self, request: &UpcastRequest) -> Result<UpcastResponse, UpcastError>;
+}
+
+impl UpcastPort for Upcaster {
+    fn upcast(&self, request: &UpcastRequest) -> Result<UpcastResponse, UpcastError> {
+        self.dispatch(request)
+    }
+}
+
 /// One rule: its source type's full name, its target's when known (typed
 /// rules), and the transform.
 struct Rule {
