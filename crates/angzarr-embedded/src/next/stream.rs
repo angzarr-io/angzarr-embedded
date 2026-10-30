@@ -363,12 +363,7 @@ impl<D: Domain> Stream<D> {
             Ok(Admission::Dispatch) => {}
             Err(error) => return Err(refused(&command, error)),
         }
-        match registry.start_rule(
-            D::NAME,
-            command.payload(),
-            command.body().is_fact(),
-            head > 0,
-        ) {
+        match registry.start_rule(D::NAME, command.payload(), command.body().is_fact(), head) {
             Ok(Start::Deliver) => {}
             Ok(Start::Skip) => return Ok(Executed::Applied(&[])),
             Err(error) => return Err(refused(&command, error)),

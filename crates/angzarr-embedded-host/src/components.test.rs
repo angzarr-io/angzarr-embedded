@@ -443,6 +443,9 @@ fn a_policy_child_comes_up_as_a_policy_not_a_domain() {
         .expect("handed back as a policy");
     assert_eq!(policy.name(), "TableWalletPolicy");
     assert_eq!(policy.input_domain(), "table");
+    assert_eq!(policy.configured(), "table-wallet");
+    assert_eq!(policy.descriptor().name, "TableWalletPolicy");
+    assert!(format!("{policy:?}").contains("table-wallet"), "{policy:?}");
     assert!(
         host.handler("table-wallet").is_none(),
         "a policy is not a domain"
@@ -581,6 +584,15 @@ fn a_projector_child_comes_up_as_a_projector_not_a_domain() {
         .expect("handed back as a projector");
     assert_eq!(projector.name(), "TableView");
     assert_eq!(projector.source(), "table");
+    assert_eq!(projector.configured(), "table-view");
+    assert_eq!(
+        projector.component_descriptor().expect("described").name,
+        "TableView"
+    );
+    assert!(
+        format!("{projector:?}").contains("table-view"),
+        "{projector:?}"
+    );
     assert!(
         host.handler("table-view").is_none(),
         "a projector is not a domain"

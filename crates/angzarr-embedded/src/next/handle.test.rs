@@ -1796,3 +1796,58 @@ fn an_outside_callers_lost_race_goes_back_at_once() {
     assert!(waits.0.lock().unwrap().is_empty(), "not retried");
     assert!(log.lines().is_empty(), "{:?}", log.lines());
 }
+
+/// The kernel's pass-through refusal fact (decision 14.42): the refused
+/// command, its typed refusal still packed (none for an untyped
+/// rejection), and the triggering event as the trigger.
+#[test]
+fn a_refusal_passes_through_as_command_refused() {
+    use crate::next::v1::{refusal_response, CommandRefused, Cover, Diagnostic, RefusalResponse};
+    use prost::Message;
+    let trigger = Cover {
+        domain: "table".to_string(),
+        ..Cover::default()
+    };
+    let command = CommandBook {
+        cover: Some(Cover {
+            domain: "wallet".to_string(),
+            ..Cover::default()
+        }),
+        ..CommandBook::default()
+    };
+    let typed = prost_types::Any {
+        type_url: "/test.wallet.v1.Insufficient".to_string(),
+        value: vec![8, 1],
+    };
+    let refusal = |reason| crate::next::markup::v1::Refusal {
+        event: Some(crate::next::v1::EventBook {
+            cover: Some(trigger.clone()),
+            pages: vec![crate::next::v1::EventPage {
+                sequence: 4,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }),
+        command: Some(command.clone()),
+        response: Some(RefusalResponse { reason }),
+    };
+    let fact = super::passed_through(&refusal(Some(refusal_response::Reason::Refusal(
+        typed.clone(),
+    ))));
+    assert_eq!(fact.type_url, "/io.angzarr.v1.CommandRefused");
+    let decoded = CommandRefused::decode(fact.value.as_slice()).unwrap();
+    assert_eq!(decoded.command, Some(command.clone()));
+    assert_eq!(decoded.refusal, Some(typed));
+    assert_eq!(
+        decoded.trigger,
+        Some(EventRef {
+            stream: Some(trigger.clone()),
+            sequence: 4,
+        })
+    );
+    let untyped = super::passed_through(&refusal(Some(refusal_response::Reason::Diagnostic(
+        Diagnostic::default(),
+    ))));
+    let decoded = CommandRefused::decode(untyped.value.as_slice()).unwrap();
+    assert_eq!(decoded.refusal, None, "an untyped rejection packs none");
+}

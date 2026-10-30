@@ -195,7 +195,7 @@ pub(crate) async fn deduplicate<P: Port>(
             command.domain(),
             command.payload(),
             command.body().is_fact(),
-            loaded.head > 0,
+            loaded.head,
         ) {
             Ok(Start::Deliver) => Ok(Deduplicated::Novel(Box::new(Novel { command, loaded }))),
             Ok(Start::Skip) => Ok(Deduplicated::Skipped),

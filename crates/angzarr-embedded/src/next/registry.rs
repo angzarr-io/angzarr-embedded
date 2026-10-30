@@ -684,7 +684,7 @@ impl Registry {
 
     /// A process manager's start rule, the kernel's own (process_manager.proto,
     /// Starting an instance; decisions 14.41, 14.42): for a root with no
-    /// instance (`exists` false), an input of a type its descriptor lists
+    /// instance (its stream's `head`, its length, 0), an input of a type its descriptor lists
     /// as starting is delivered, any other fact skipped, and any other
     /// command refused FAILED_PRECONDITION, `PM_NO_INSTANCE`, naming the
     /// type as sent. The type is matched by name, after the domain's
@@ -697,12 +697,13 @@ impl Registry {
         domain: &str,
         sent: &prost_types::Any,
         is_fact: bool,
-        exists: bool,
+        head: u64,
     ) -> Result<Start, angzarr_router::error::CodedError> {
         let Some(starting) = self.domains.get(domain).and_then(|e| e.starting.as_ref()) else {
             return Ok(Start::Deliver);
         };
-        if exists {
+        // An instance exists once its stream holds an event.
+        if head > 0 {
             return Ok(Start::Deliver);
         }
         let current = self
