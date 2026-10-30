@@ -580,7 +580,7 @@ impl Registry {
     /// router's table for it ([`PolicyDispatch`]): ONE list, in
     /// registration order, which is the order the kernel runs every policy
     /// of a source in, for each of its events. Registering one twice (by
-    /// name) PANICS at startup.
+    /// name), or one of a remote domain's events, PANICS at startup.
     pub fn policy<P: super::Policy>(&mut self, policy: P) -> &mut Self {
         let answers_refusals = P::ANSWERS_REFUSALS;
         let dispatch = super::policy::dispatch(policy);
@@ -619,6 +619,7 @@ impl Registry {
         output_domain: String,
         answers_refusals: bool,
     ) -> &mut Self {
+        self.refuse_remote_source(dispatch.input_domain(), dispatch.name());
         if self
             .policies
             .iter()
@@ -702,6 +703,7 @@ impl Registry {
         source: &str,
         instance: ProjectorInstance,
     ) -> &mut Self {
+        self.refuse_remote_source(source, name);
         if self.projectors.iter().any(|entry| entry.name == name) {
             panic!("projector \"{name}\" is registered already");
         }
@@ -850,7 +852,9 @@ impl Registry {
     /// its streams ([`super::target`]): every command naming it, the
     /// application's and every policy step's, is handed to the port, and
     /// nothing of it is loaded or written here. Refused for a domain
-    /// registered already, here or remote.
+    /// registered already, here or remote, and for one whose events a
+    /// policy or projector here handles ([`Misconfigured::RemoteSource`]):
+    /// a remote domain stays remote, its events never here.
     pub fn remote(
         &mut self,
         domain: &str,
@@ -859,6 +863,20 @@ impl Registry {
         if self.taken(domain) {
             return Err(Misconfigured::AlreadyRegistered {
                 domain: domain.to_string(),
+            });
+        }
+        let policies = self.policies.iter().map(|p| (p.source(), p.name()));
+        let projectors = self
+            .projectors
+            .iter()
+            .map(|p| (p.source.as_str(), p.name.as_str()));
+        if let Some((_, component)) = policies
+            .chain(projectors)
+            .find(|(source, _)| *source == domain)
+        {
+            return Err(Misconfigured::RemoteSource {
+                domain: domain.to_string(),
+                component: component.to_string(),
             });
         }
         self.remotes
@@ -876,6 +894,21 @@ impl Registry {
                 .remotes
                 .get(domain)
                 .map(|port| super::Target::Remote(&**port)),
+        }
+    }
+
+    /// PANICS at startup, [`Misconfigured::RemoteSource`], when `source`
+    /// is a remote domain: `component` here would handle events that are
+    /// never here.
+    fn refuse_remote_source(&self, source: &str, component: &str) {
+        if self.remotes.contains_key(source) {
+            panic!(
+                "{}",
+                Misconfigured::RemoteSource {
+                    domain: source.to_string(),
+                    component: component.to_string(),
+                }
+            );
         }
     }
 

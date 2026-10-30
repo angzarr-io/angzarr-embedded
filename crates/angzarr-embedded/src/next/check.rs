@@ -563,6 +563,8 @@ impl Checked {
             entry,
             process_manager,
         } = self;
+        // A reaction's correlation is its trigger's: the kernel's, set.
+        let correlation_sent = correlation_id.is_some() || !matches!(entry, Entry::Client);
         let (command_id, correlation_id, causation_id) = match (entry, &body) {
             (
                 Entry::Policy {
@@ -603,6 +605,7 @@ impl Checked {
             body,
             command_id,
             correlation_id,
+            correlation_sent,
             causation_id,
             expected_sequence,
             conflict_resolution,
@@ -620,6 +623,9 @@ pub struct Identified {
     body: Body,
     command_id: Uuid,
     correlation_id: Uuid,
+    /// Whether the correlation was the sender's (or a reaction's
+    /// trigger's), not a default filled in here.
+    correlation_sent: bool,
     causation_id: Option<EventRef>,
     expected_sequence: Option<u64>,
     conflict_resolution: Option<ConflictResolution>,
@@ -721,6 +727,22 @@ impl Identified {
             }),
             handling: (handling != Handling::default()).then_some(handling),
         }
+    }
+
+    /// The book handed to a remote domain's coordinator: as
+    /// [`Identified::to_book`], its command id fixed here, but a
+    /// correlation the sender left unset is unset still, so the remote
+    /// coordinator applies its own default (a process manager's root,
+    /// decision 14.31; owner ruling, 2026-10-30): remote defaults are the
+    /// remote's.
+    pub fn to_remote_book(&self) -> CommandBook {
+        let mut book = self.to_book();
+        if !self.correlation_sent {
+            if let Some(page) = book.page.as_mut() {
+                page.correlation_id = None;
+            }
+        }
+        book
     }
 }
 

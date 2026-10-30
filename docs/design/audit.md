@@ -483,7 +483,12 @@ never both (`Misconfigured::AlreadyRegistered`). A command for a remote
 domain, the application's or a policy's step, is checked and identified
 here, its command id fixed before it leaves so a retry is deduplicated
 there, then handed to the port; nothing of its stream is loaded or written
-here. Its answer comes back as a local domain's: its events (in the
+here. **Remote stays remote** (owner rulings, 2026-10-30): a correlation
+its sender left unset is forwarded unset, so the remote coordinator
+applies its own defaults (a process manager's root, decision 14.31); and
+a policy or projector here whose source is a remote domain is refused at
+registration, in either order (`Misconfigured::RemoteSource`), since that
+domain's events are never here. Its answer comes back as a local domain's: its events (in the
 chain's books, not among the steps written here), DUPLICATE, or a refusal
 by its status's class. A policy's position is written here as ever. Only
 the seam is the kernel's: a transport behind the port is the composition

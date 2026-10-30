@@ -11,9 +11,12 @@
 //! root's, so a transport is added without touching the kernel.
 //!
 //! A command for a remote domain is checked and identified here (its
-//! command id and correlation fixed before it leaves, so a retry is
-//! deduplicated there), then handed to the port ([`forward`]); nothing of
-//! its stream is loaded, admitted, decided or written here. Its answer
+//! command id fixed before it leaves, so a retry is deduplicated there; a
+//! correlation its sender left unset is left unset, for the remote
+//! coordinator's own default), then handed to the port ([`forward`]);
+//! nothing of its stream is loaded, admitted, decided or written here, and
+//! no policy or projector here handles its events
+//! ([`Misconfigured::RemoteSource`](super::Misconfigured::RemoteSource)). Its answer
 //! comes back as a local domain's would: its events, a duplicate, or a
 //! refusal under the class its status gives. A policy's step into a remote
 //! domain goes the same way, the policy's position written here.
@@ -40,7 +43,8 @@ pub type Coordinated<'a> =
 /// A coordinator elsewhere that owns a domain's streams, as the kernel
 /// reaches it: angzarr's `CommandHandlerCoordinatorService.Handle`. It is
 /// handed the book as the kernel identified it (its command id fixed
-/// here, so a retry is deduplicated there) and answers as `Handle` does:
+/// here, so a retry is deduplicated there; its correlation as its sender
+/// set it, or unset) and answers as `Handle` does:
 /// the persisted events, under `outcome.delivery` APPLIED or DUPLICATE; or
 /// a refusal, as the router carries one ([`CodedError`]: a business
 /// refusal's code and args, a bug, a retryable failure), which the kernel
@@ -88,7 +92,7 @@ pub(crate) async fn forward(
     command: &Identified,
     dead_letters: &dyn DeadLetterLog,
 ) -> Result<Forwarded, Failure<Rejected>> {
-    match port.handle(command.to_book()).await {
+    match port.handle(command.to_remote_book()).await {
         Ok(response) => {
             let mut events = response.events.unwrap_or_default();
             if events.cover.is_none() {

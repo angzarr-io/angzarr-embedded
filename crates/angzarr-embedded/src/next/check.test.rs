@@ -26,6 +26,7 @@ fn policy_command(trigger: EventRef) -> Identified {
         },
         command_id,
         correlation_id: uuid(8),
+        correlation_sent: true,
         causation_id: Some(trigger),
         expected_sequence: None,
         conflict_resolution: None,
@@ -682,8 +683,12 @@ mod identify {
             let again = check(first.to_book(), &registry)
                 .expect("its ids are well formed, a fact's the derived one")
                 .identify(&at(41));
+            // Its correlation, filled in when unset, is set in the book: so
+            // the re-read's is the sender's, which only a remote
+            // coordinator's book tells apart (`to_remote_book`).
             assert_eq!(
-                again, first,
+                again.to_book(),
+                first.to_book(),
                 "a DLQ entry or an audit line re-reads as sent"
             );
         }
