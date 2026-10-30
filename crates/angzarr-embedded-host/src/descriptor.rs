@@ -2,7 +2,10 @@
 //! angzarr-cli generates the `ComponentDescriptor` at build time and the
 //! child answers `Describe` with it unchanged; the host, as its
 //! coordinator, refuses one that fails a rule, as a readiness failure,
-//! naming the component and the reason key (`catalog/reasons.toml`).
+//! naming the component and the reason key (`catalog/reasons.toml`):
+//! [`Host::start`](crate::Host::start) refuses such a child as
+//! [`HostError::Descriptor`](crate::HostError::Descriptor), after its kind
+//! is checked against its `kind`, and on every restart.
 
 use std::fmt;
 

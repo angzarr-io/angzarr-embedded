@@ -14,7 +14,8 @@
 //!    `angzarr-handshake v1 unix:<absolute-socket-path>` ([`handshake`]),
 //!    within a timeout;
 //! 3. connects to that socket and calls `ComponentService.Describe`,
-//!    refusing a child of another kind than its `kind` says;
+//!    refusing a child of another kind than its `kind` says, and one
+//!    whose descriptor fails validation ([`descriptor::validate`]);
 //! 4. hands back, by its kind, a [`RemoteCommandHandler`] over
 //!    `CommandHandlerService`, a [`RemotePolicyHandler`] over
 //!    `PolicyService` or a [`RemoteProjectorHandler`] over
