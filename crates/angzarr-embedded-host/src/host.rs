@@ -245,6 +245,15 @@ impl Host {
         })
     }
 
+    /// The remote upcaster sidecar configured as `name` (a `[[component]]`
+    /// of `kind = "upcaster"`).
+    pub fn upcaster(&self, name: &str) -> Option<RemoteUpcaster> {
+        self.hosted(name).and_then(|hosted| match hosted {
+            Hosted::Upcaster(upcaster) => Some(upcaster.clone()),
+            _ => None,
+        })
+    }
+
     fn hosted(&self, name: &str) -> Option<&Hosted> {
         self.domains
             .iter()
@@ -602,11 +611,11 @@ impl Supervisor {
             // An upcaster sidecar has no descriptor (decision 14.39): it
             // serves UpcasterService alone, and is up once connected.
             if self.kind == ComponentKindConfig::Upcaster {
-                let descriptor = pb::ComponentDescriptor {
-                    name: self.domain.clone(),
-                    ..Default::default()
-                };
-                return Ok((channel, descriptor, handshake.socket));
+                return Ok((
+                    channel,
+                    pb::ComponentDescriptor::default(),
+                    handshake.socket,
+                ));
             }
             let descriptor = ComponentServiceClient::new(channel.clone())
                 .describe(())

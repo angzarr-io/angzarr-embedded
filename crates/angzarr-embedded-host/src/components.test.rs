@@ -881,6 +881,25 @@ fn upcast() -> (Host, Registry) {
     (host, registry)
 }
 
+/// `kind = "upcaster"` launches an `UpcasterService` child, handed back as
+/// its domain's sidecar, never as a domain.
+#[test]
+fn an_upcaster_child_comes_up_as_its_domains_sidecar() {
+    let host = Host::start(config(vec![upcaster_domain()])).expect("the host starts");
+    let upcaster = host
+        .upcaster("table-upcaster")
+        .expect("handed back as an upcaster");
+    assert_eq!(upcaster.configured(), "table-upcaster");
+    assert_eq!(upcaster.upcasts(), "table");
+    let shown = format!("{upcaster:?}");
+    assert!(
+        shown.contains("table-upcaster") && shown.contains("\"table\""),
+        "{shown}"
+    );
+    assert!(host.handler("table-upcaster").is_none(), "not a domain");
+    assert!(host.upcaster("table").is_none());
+}
+
 /// A remote upcaster sidecar upcasts its domain's inputs before the kernel
 /// dispatches them (decision 14.39): an old `Sit` reaches the in-process
 /// table as the current `Seat`, which it records as `Seated`.
@@ -933,6 +952,20 @@ fn a_remote_upcaster_that_is_down_is_retryable() {
         "{failure:?}"
     );
     assert_eq!(failure.recovery(), angzarr_embedded::next::Recovery::Retry);
+    let Failure::Kernel(angzarr_embedded::next::KernelError::Upcast {
+        error: angzarr_embedded::next::UpcastError::Unavailable { cause },
+        ..
+    }) = &failure
+    else {
+        unreachable!()
+    };
+    assert!(
+        cause
+            .args()
+            .iter()
+            .any(|(name, arg)| *name == "stream" && format!("{arg:?}").contains("table")),
+        "the sidecar's domain: {cause:?}"
+    );
     assert!(payloads(&store, &cover("table")).is_empty());
 }
 
