@@ -75,7 +75,8 @@ pub enum StepError {
     /// translating callback) or its source's `#[on_refused]` handler
     /// answered an error, or a marked event did not decode. A defect, never a business refusal: policies react to
     /// events the application's own domains recorded, so an error is a
-    /// bug. Its report (code and args) is the dead letter's reason, and the
+    /// bug. Its report (code and args) is the `cause` of the dead letter's
+    /// reason, `ROUTER_REASON_UNHANDLED_HANDLER_ERROR`, and the
     /// policy's position moved past the trigger (or stayed at it, under
     /// [`OnPolicyBug::Stay`](super::OnPolicyBug::Stay)).
     PolicyFailed(Report),

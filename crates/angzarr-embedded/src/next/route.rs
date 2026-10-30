@@ -105,6 +105,7 @@ pub(crate) const TOO_MANY_STEPS: &str = "ANGZARR_EMBEDDED_TOO_MANY_STEPS";
 #[derive(Clone, PartialEq, Debug)]
 pub struct Rejected {
     report: Report,
+    key: &'static str,
     refusal: Option<Any>,
     status: BusinessStatus,
 }
@@ -122,6 +123,7 @@ impl Rejected {
             });
         Rejected {
             report,
+            key: intern(&error.code),
             refusal: error.refusal.as_deref().cloned(),
             status: BusinessStatus::try_from(error.grpc)
                 .unwrap_or(BusinessStatus::FailedPrecondition),
@@ -131,6 +133,16 @@ impl Rejected {
     /// The refusal as a report: its code and args.
     pub fn report(&self) -> &Report {
         &self.report
+    }
+
+    /// The refusal as the wire carries it: the refusing handler's key (a
+    /// typed refusal's ROUTER_REASON_COMMAND_REFUSED), not angzarr-embedded's
+    /// code for it, and its args.
+    pub(crate) fn wire(&self) -> angzarr_proto::v1::Diagnostic {
+        angzarr_proto::v1::Diagnostic {
+            code: self.key.to_string(),
+            args: flat_args(&self.report).into_iter().collect(),
+        }
     }
 
     /// The business status the refusal went out under.

@@ -120,6 +120,7 @@ angzarr-embedded-next-policy-command-outside-destination = a policy sent a comma
 angzarr-embedded-next-policy-command-outside-edition = a policy sent a command into an edition other than its trigger's: a bug in the policy
 angzarr-embedded-next-policy-command-no-root = a policy sent a command naming no root: a bug in the policy, which names the root of every command
 angzarr-embedded-next-policy-command-other-correlation = a policy sent a command in a correlation other than its trigger's: a bug in the policy
+angzarr-embedded-next-policy-command-with-handling = a policy sent a command carrying an expected sequence or a conflict resolution, which only its target sets: a bug in the policy
 angzarr-embedded-next-pm-no-instance = the process manager has no instance here, and only a starting input starts one: start it first
 angzarr-embedded-next-refusal-fact-wrong-stream = a refusal fact was addressed to a stream other than its trigger's: a bug in the runtime
 angzarr-embedded-next-refusal-fact-addressed = a policy set its refusal fact's cover or handling: a bug in the policy

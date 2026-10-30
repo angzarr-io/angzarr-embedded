@@ -38,7 +38,8 @@ use std::sync::Arc;
 use angzarr_embedded_diagnostic::Report;
 use angzarr_proto::v1::angzarr_dead_letter::Payload as Letter;
 use angzarr_proto::v1::{
-    command_page, Command, CommandBook, CommandPage, Cover, EventBook, EventPage, EventRef, Uuid,
+    command_page, Command, CommandBook, CommandPage, Cover, EventBook, EventPage, EventRef,
+    Handling, Uuid,
 };
 use angzarr_router::error::CodedError;
 use angzarr_router::pb::PolicyReaction;
@@ -46,7 +47,7 @@ use angzarr_router::policy::PolicyDispatch;
 use prost_types::Any;
 
 use super::check::{check_policy_command, Checked, Malformed};
-use super::dead_letter::{write_dead_letter, write_letter, DeadLetterLog};
+use super::dead_letter::{self, Cause, DeadLetterLog};
 use super::domain::Domain;
 use super::handler::{Committed, Handler};
 use super::markup::{self, CommandContext, Commands, PolicyContext, TypeName};
@@ -124,7 +125,7 @@ pub(crate) fn check_reactions(
 }
 
 /// One triggering event's commands, as a policy answered them, checked and
-/// stamped by the kernel (decision 14.42), every command against four
+/// stamped by the kernel (decision 14.42), every command against five
 /// rules; one failure refuses the whole answer as the policy's bug,
 /// INTERNAL:
 /// - **destination**: its cover's domain is `output_domain`
@@ -132,6 +133,9 @@ pub(crate) fn check_reactions(
 /// - **edition**: unset, or the `trigger` stream's; an unset one is stamped
 ///   with the trigger's (`COORDINATOR_REASON_POLICY_COMMAND_OUTSIDE_EDITION`, naming both);
 /// - **root**: named, with bytes (`COORDINATOR_REASON_POLICY_COMMAND_NO_ROOT`);
+/// - **handling**: none, an empty one being none: a reaction command's
+///   target stamps its own head (`COORDINATOR_REASON_POLICY_COMMAND_WITH_HANDLING`,
+///   naming its domain and type; decision 14.48);
 /// - **correlation**: unset, or the trigger's, `correlation`
 ///   (`COORDINATOR_REASON_POLICY_COMMAND_OTHER_CORRELATION`).
 pub(crate) fn check_reaction(
@@ -182,6 +186,16 @@ pub(crate) fn check_reaction(
         if !named {
             return Err(super::route::internal(
                 CoordinatorReason::PolicyCommandNoRoot.as_str_name(),
+                naming(),
+            ));
+        }
+        if command
+            .handling
+            .as_ref()
+            .is_some_and(|h| *h != Handling::default())
+        {
+            return Err(super::route::internal(
+                CoordinatorReason::PolicyCommandWithHandling.as_str_name(),
                 naming(),
             ));
         }
@@ -271,8 +285,9 @@ pub trait Policy: Send + Sync + 'static {
     /// that cannot happen, or one of a type it handles that does not
     /// decode): its step fails as
     /// [`StepError::PolicyFailed`](super::StepError::PolicyFailed), is
-    /// dead-lettered with the error's code and args as its reason, and its
-    /// position moves past the event.
+    /// dead-lettered as a handler's bug (its reason
+    /// `ROUTER_REASON_UNHANDLED_HANDLER_ERROR`, the error's code and args
+    /// its `cause`), and its position moves past the event.
     /// Policies should not fail for business reasons: they react to events
     /// the application's own domains created, so an `Err` is a bug.
     fn on_event(
@@ -377,7 +392,12 @@ impl Order {
         dead_letters: &dyn DeadLetterLog,
     ) -> Result<Checked, Malformed> {
         self.check(registry).inspect_err(|malformed| {
-            write_dead_letter(dead_letters, self.book(), &self.policy, malformed)
+            dead_letter::write(
+                dead_letters,
+                Letter::RejectedCommand(self.book()),
+                &self.policy,
+                Cause::Malformed(malformed),
+            )
         })
     }
 
@@ -400,8 +420,8 @@ impl Order {
 /// A policy as a [`Handler`] of its source: each committed event becomes
 /// one [`Order`] per command, handed to `sink` in order. An event the policy
 /// fails on hands over nothing, and is dead-lettered to `dead_letters` as
-/// the kernel dead-letters a policy's failed step: its error's code as the
-/// reason, its args as the metadata.
+/// the kernel dead-letters a policy's failed step: a handler's bug, its
+/// error's code and args the `cause`.
 pub fn policy<'p, P: Policy, F: FnMut(Order)>(
     policy: &'p P,
     dead_letters: &'p dyn DeadLetterLog,
@@ -450,11 +470,11 @@ impl<P: Policy, F: FnMut(Order)> Handler<P::Source> for PolicyHandler<'_, P, F> 
                     }],
                     ..EventBook::default()
                 };
-                write_letter(
+                dead_letter::write(
                     self.dead_letters,
                     Letter::RejectedEvents(trigger),
                     P::NAME,
-                    &failure,
+                    Cause::PolicyFailed(&failure),
                 );
                 return;
             }

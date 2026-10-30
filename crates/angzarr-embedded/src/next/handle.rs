@@ -64,7 +64,7 @@ use super::check::{check, check_refusal, Checked, Identified, Sampled};
 use super::coordinator::{
     contextual_command, decide, deduplicate, load, write_snapshot, Contextual, Deduplicated,
 };
-use super::dead_letter::{write_dead_letter, write_letter, write_retries_exhausted, DeadLetterLog};
+use super::dead_letter::{self, write_at_cap, Cause, DeadLetterLog};
 use super::domain::Domain;
 use super::error::{class, Class};
 use super::error::{Failure, KernelError, Step, StepError};
@@ -730,11 +730,11 @@ impl<'k> Kernel<'k> {
             );
             let error = KernelError::Router(error);
             if !retryable {
-                write_letter(
+                dead_letter::write(
                     self.dead_letters,
                     Payload::RejectedEvents(book.clone()),
                     name,
-                    &error,
+                    Cause::Kernel(&error),
                 );
                 return Err(Report::of(&error));
             }
@@ -742,11 +742,11 @@ impl<'k> Kernel<'k> {
                 return Err(Report::of(&error));
             }
             if retries >= self.retry.max_retries {
-                write_retries_exhausted(
+                write_at_cap(
                     self.dead_letters,
                     Payload::RejectedEvents(book.clone()),
                     name,
-                    &error,
+                    Cause::Kernel(&error),
                     retries,
                 );
                 return Err(Report::of(&error));
@@ -1051,11 +1051,11 @@ impl<'k> Run<'k> {
                     attempts: tries.races,
                     cap,
                 };
-                write_dead_letter(
+                dead_letter::write(
                     self.dead_letters,
-                    command.to_book(),
+                    Payload::RejectedCommand(command.to_book()),
                     command.domain(),
-                    &given_up,
+                    Cause::Kernel(&given_up),
                 );
                 return Err(Failure::Kernel(given_up));
             }
@@ -1067,13 +1067,16 @@ impl<'k> Run<'k> {
             return Ok(false);
         }
         if tries.retries >= self.retry.max_retries {
-            write_retries_exhausted(
-                self.dead_letters,
-                Payload::RejectedCommand(command.to_book()),
-                command.domain(),
-                failure,
-                tries.retries,
-            );
+            // Only a kernel error is retried ([`failure_class`]).
+            if let Failure::Kernel(error) = failure {
+                write_at_cap(
+                    self.dead_letters,
+                    Payload::RejectedCommand(command.to_book()),
+                    command.domain(),
+                    Cause::Kernel(error),
+                    tries.retries,
+                );
+            }
             return Ok(false);
         }
         let backoff = self.retry.backoff(tries.retries, self.wait.draw());
@@ -1179,7 +1182,7 @@ impl<'k> Run<'k> {
     /// its own, its position written with the last (or alone, when no step
     /// writes it). The kernel's refusal of the answer ([`check_reactions`]:
     /// a command outside the policy's destination or its trigger's edition,
-    /// with no root or another correlation) is the policy's bug, as is the
+    /// with no root, with Handling, or in another correlation) is the policy's bug, as is the
     /// router's own error: dead-lettered, and the position stays. The policy's own error ([`StepError::PolicyFailed`]) and a
     /// handler's bug in one of its steps are dead-lettered by their code
     /// and args, and the position moves past the event (or stays, under
@@ -1214,11 +1217,11 @@ impl<'k> Run<'k> {
             Ok(commands) => commands,
             Err(error) => {
                 if let Some(failure) = super::route::policy_failure(&error) {
-                    write_letter(
+                    dead_letter::write(
                         self.dead_letters,
                         Payload::RejectedEvents(event),
                         policy.name(),
-                        &failure,
+                        Cause::PolicyFailed(&failure),
                     );
                     past_bug(self.policy_bug, port, &position)
                         .await
@@ -1226,11 +1229,11 @@ impl<'k> Run<'k> {
                     return Err((path.to_vec(), StepError::PolicyFailed(failure)));
                 }
                 let error = KernelError::Router(error);
-                write_letter(
+                dead_letter::write(
                     self.dead_letters,
                     Payload::RejectedEvents(event),
                     policy.name(),
-                    &error,
+                    Cause::Kernel(&error),
                 );
                 return Err((path.to_vec(), StepError::Kernel(error)));
             }
@@ -1273,11 +1276,11 @@ impl<'k> Run<'k> {
                 Ok(Stepped::Nothing) => {}
                 Err(Failure::Rejected(rejected)) => {
                     if !policy.answers_refusals {
-                        write_dead_letter(
+                        dead_letter::write(
                             self.dead_letters,
-                            order.book(),
+                            Payload::RejectedCommand(delivered.to_book()),
                             policy.name(),
-                            &rejected,
+                            Cause::Refused(&rejected),
                         );
                         port.write_positions(&position)
                             .await
@@ -1352,11 +1355,11 @@ impl<'k> Run<'k> {
                 let Some(failure) = super::route::policy_failure(&error) else {
                     return Err(kernel(error));
                 };
-                write_letter(
+                dead_letter::write(
                     self.dead_letters,
                     Payload::RejectedCommand(delivered.to_book()),
                     policy.name(),
-                    &failure,
+                    Cause::PolicyFailed(&failure),
                 );
                 past_bug(self.policy_bug, port, positions)
                     .await
@@ -1393,7 +1396,12 @@ impl<'k> Run<'k> {
             delivered.command_id().clone(),
         )
         .map_err(|m| {
-            write_dead_letter(self.dead_letters, book, policy.name(), &m);
+            dead_letter::write(
+                self.dead_letters,
+                Payload::RejectedCommand(book),
+                policy.name(),
+                Cause::Malformed(&m),
+            );
             StepError::Kernel(KernelError::Malformed(m))
         })?;
         let fact = checked.identify(self.sampled);
@@ -1417,11 +1425,11 @@ impl<'k> Run<'k> {
             }
         };
         if let Some(failure) = super::route::policy_failure(&error) {
-            write_letter(
+            dead_letter::write(
                 self.dead_letters,
                 Payload::RejectedCommand(fact.to_book()),
                 fact.domain(),
-                &failure,
+                Cause::PolicyFailed(&failure),
             );
             past_bug(self.policy_bug, port, positions)
                 .await

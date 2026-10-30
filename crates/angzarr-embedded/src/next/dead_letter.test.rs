@@ -1,5 +1,6 @@
 //! angzarr-embedded's dead-letter queue is a logger whose every line warns that it
 //! almost certainly indicates a problem.
+use super::Cause;
 use crate::next::toys::prelude::*;
 use crate::next::v1::{angzarr_dead_letter, AngzarrDeadLetter, ComponentKind, Diagnostic};
 use crate::next::{
@@ -220,15 +221,51 @@ fn a_dead_letters_ambiguous_value_is_quoted() {
 }
 
 /// A step whose retryable failure outlasted its retries is dead-lettered
-/// with its command, its failure's code and args as the reason and as the
-/// processing failure's, transient, with how many retries it had; its line
-/// shows the count.
+/// with its command, its failure's own key and args as the reason and as
+/// the processing failure's, transient, with how many retries it had; its
+/// line shows the count.
 #[test]
 fn a_retried_steps_dead_letter_holds_its_command_failure_and_retry_count() {
-    use crate::next::v1::angzarr_dead_letter::RejectionDetails;
-    use crate::next::v1::ProcessingFailedDetails;
-    use angzarr_embedded_diagnostic::Report;
-    let book = check(
+    use crate::next::angzarr_router::error::{CodedError, RetryableStatus};
+    use crate::next::toys::{processing_failed, wire};
+    let book = deposit_book();
+    let error = KernelError::Router(CodedError::retryable_bug(
+        RetryableStatus::Unavailable,
+        "toy-down",
+        [("seat".to_string(), "3".to_string())],
+    ));
+    let letter = super::at_cap(
+        angzarr_dead_letter::Payload::RejectedCommand(book.clone()),
+        "account",
+        Cause::Kernel(&error),
+        3,
+    );
+    let reason = wire(
+        "ROUTER_REASON_UNHANDLED_HANDLER_ERROR",
+        &[("cause", "toy-down"), ("cause.seat", "3")],
+    );
+    assert_eq!(
+        letter.payload,
+        Some(angzarr_dead_letter::Payload::RejectedCommand(book))
+    );
+    assert_eq!(letter.reason, Some(reason.clone()));
+    assert_eq!(
+        letter.rejection_details,
+        Some(processing_failed(&reason, 3, true))
+    );
+    assert_eq!(letter.source_component, "account");
+    let line = dead_letter_line(&letter);
+    assert!(
+        line.contains(
+            "account: ROUTER_REASON_UNHANDLED_HANDLER_ERROR cause=toy-down cause.seat=3 retry_count=3 command_id="
+        ),
+        "{line}"
+    );
+}
+
+/// A command (5) to account 1, its ids assigned.
+fn deposit_book() -> crate::next::v1::CommandBook {
+    check(
         command(
             cover("account", 1),
             pack(&account::cmd::Deposit { cents: 1 }),
@@ -238,38 +275,249 @@ fn a_retried_steps_dead_letter_holds_its_command_failure_and_retry_count() {
     )
     .unwrap()
     .identify(&at(30))
-    .to_book();
-    let failure = Report::new("toy-down").arg("seat", 3u32);
-    let letter = super::retries_exhausted(
-        angzarr_dead_letter::Payload::RejectedCommand(book.clone()),
+    .to_book()
+}
+
+/// The letter for `cause`, about the deposit book.
+fn letter_for(cause: Cause) -> AngzarrDeadLetter {
+    super::letter(
+        angzarr_dead_letter::Payload::RejectedCommand(deposit_book()),
         "account",
-        &failure,
-        3,
-    );
-    let reason = Diagnostic {
-        code: "toy-down".to_string(),
-        args: [("seat".to_string(), "3".to_string())].into(),
+        cause,
+    )
+}
+
+/// Each sequence key's letter carries `sequence_mismatch`: the command's
+/// expected sequence, and the head as `actual_sequence` (decision 14.48).
+#[test]
+fn a_sequence_keys_letter_carries_the_expected_sequence_and_the_head() {
+    use crate::next::toys::{sequence_mismatch, wire};
+    let stream = cover("account", 1);
+    let stale = KernelError::Stale {
+        stream: stream.clone(),
+        expected: 2,
+        actual: 5,
     };
+    let letter = letter_for(Cause::Kernel(&stale));
     assert_eq!(
-        letter.payload,
-        Some(angzarr_dead_letter::Payload::RejectedCommand(book))
+        letter.reason,
+        Some(wire(
+            "COORDINATOR_REASON_EXPECTED_SEQUENCE_STALE",
+            &[("actual", "5"), ("expected", "2")]
+        ))
+    );
+    assert_eq!(letter.rejection_details, Some(sequence_mismatch(2, 5)));
+
+    let ahead = KernelError::ExpectedSequenceAhead {
+        stream: stream.clone(),
+        expected: 7,
+        head: 3,
+    };
+    let letter = letter_for(Cause::Kernel(&ahead));
+    assert_eq!(
+        letter.reason,
+        Some(wire(
+            "COORDINATOR_REASON_EXPECTED_SEQUENCE_AHEAD",
+            &[("expected", "7"), ("head", "3")]
+        ))
+    );
+    assert_eq!(letter.rejection_details, Some(sequence_mismatch(7, 3)));
+
+    let overlap = KernelError::Overlap {
+        stream: stream.clone(),
+        expected: 1,
+        actual: 4,
+        window_units: "a".to_string(),
+        command_units: "a,b".to_string(),
+    };
+    let letter = letter_for(Cause::Kernel(&overlap));
+    assert_eq!(
+        letter.reason,
+        Some(wire(
+            "COORDINATOR_REASON_CONFLICT_OVERLAP",
+            &[("command_units", "a,b"), ("window_units", "a")]
+        ))
+    );
+    assert_eq!(letter.rejection_details, Some(sequence_mismatch(1, 4)));
+}
+
+/// A kernel error the spec has no key for keeps angzarr-embedded's code: a
+/// fatal bug, `processing_failed`, never retried, not transient.
+#[test]
+fn a_kernel_error_with_no_spec_key_keeps_its_own_code() {
+    use crate::next::toys::processing_failed;
+    let error = KernelError::ChainTooDeep { limit: 4 };
+    let letter = letter_for(Cause::Kernel(&error));
+    let reason = crate::next::route::diagnostic(&error);
+    assert_eq!(reason.code, "angzarr-embedded-next-chain-too-deep");
+    assert_eq!(letter.reason, Some(reason.clone()));
+    assert_eq!(
+        letter.rejection_details,
+        Some(processing_failed(&reason, 0, false))
+    );
+}
+
+/// An unreachable remote handler's letter is keyed as it answered:
+/// REMOTE_HANDLER_UNAVAILABLE, its domain and cause.
+#[test]
+fn an_unavailable_handlers_letter_names_its_domain_and_cause() {
+    use crate::next::toys::{processing_failed, wire};
+    let error = KernelError::HandlerUnavailable {
+        stream: cover("account", 1),
+        cause: "not-running".to_string(),
+    };
+    let letter = letter_for(Cause::Kernel(&error));
+    let reason = wire(
+        "REMOTE_HANDLER_UNAVAILABLE",
+        &[("cause", "not-running"), ("domain", "account")],
     );
     assert_eq!(letter.reason, Some(reason.clone()));
     assert_eq!(
         letter.rejection_details,
-        Some(RejectionDetails::ProcessingFailed(
-            ProcessingFailedDetails {
-                failure: Some(reason),
-                retry_count: 3,
-                is_transient: true,
-                ..ProcessingFailedDetails::default()
-            }
+        Some(processing_failed(&reason, 0, false))
+    );
+}
+
+/// A book the kernel built that its check refused is keyed by the
+/// coordinator's key where the spec has one, naming the book's domain and
+/// its payload's type; otherwise by angzarr-embedded's code. Wrapped as a
+/// kernel error, the same.
+#[test]
+fn a_malformed_kernel_books_letter_is_keyed_where_the_spec_has_a_key() {
+    use crate::next::toys::{processing_failed, wire};
+    use crate::next::Malformed;
+    let naming = [
+        ("command_type", "toy.account.cmd.v1.Deposit"),
+        ("domain", "account"),
+    ];
+    for (malformed, reason) in [
+        (
+            Malformed::HandlingOnPolicyCommand,
+            wire("COORDINATOR_REASON_POLICY_COMMAND_WITH_HANDLING", &naming),
+        ),
+        (
+            Malformed::NoRoot,
+            wire("COORDINATOR_REASON_POLICY_COMMAND_NO_ROOT", &naming),
+        ),
+        (
+            Malformed::BadRoot { len: 3 },
+            wire("COORDINATOR_REASON_POLICY_COMMAND_NO_ROOT", &naming),
+        ),
+        (
+            Malformed::RefusalMisaddressed,
+            wire(
+                "COORDINATOR_REASON_REFUSAL_FACT_WRONG_STREAM",
+                &[("domain", "account")],
+            ),
+        ),
+        (
+            Malformed::FactFromPolicy,
+            wire("angzarr-embedded-next-malformed-fact-from-policy", &[]),
+        ),
+    ] {
+        let letter = letter_for(Cause::Malformed(&malformed));
+        assert_eq!(letter.reason, Some(reason.clone()), "{malformed:?}");
+        assert_eq!(
+            letter.rejection_details,
+            Some(processing_failed(&reason, 0, false)),
+            "{malformed:?}"
+        );
+        let wrapped = KernelError::Malformed(malformed.clone());
+        assert_eq!(
+            letter_for(Cause::Kernel(&wrapped)).reason,
+            Some(reason),
+            "{malformed:?}"
+        );
+    }
+    // A fact's payload type names it too.
+    let fact = check(
+        crate::next::toys::fact(
+            cover("account", 1),
+            pack(&account::fact::PaymentReceived { cents: 1 }),
+            "pi_1",
+        ),
+        &registry(),
+    )
+    .unwrap()
+    .identify(&at(30))
+    .to_book();
+    let letter = super::letter(
+        angzarr_dead_letter::Payload::RejectedCommand(fact),
+        "account",
+        Cause::Malformed(&Malformed::NoRoot),
+    );
+    assert_eq!(
+        letter
+            .reason
+            .unwrap()
+            .args
+            .get("command_type")
+            .map(String::as_str),
+        Some("toy.account.fact.v1.PaymentReceived")
+    );
+    // Events name no command: empty.
+    let letter = super::letter(
+        angzarr_dead_letter::Payload::RejectedEvents(crate::next::v1::EventBook {
+            cover: Some(cover("account", 1)),
+            ..crate::next::v1::EventBook::default()
+        }),
+        "account",
+        Cause::Malformed(&Malformed::NoRoot),
+    );
+    assert_eq!(
+        letter.reason,
+        Some(wire(
+            "COORDINATOR_REASON_POLICY_COMMAND_NO_ROOT",
+            &[("command_type", ""), ("domain", "")]
         ))
     );
-    assert_eq!(letter.source_component, "account");
-    let line = dead_letter_line(&letter);
-    assert!(
-        line.contains("account: toy-down seat=3 retry_count=3 command_id="),
-        "{line}"
+}
+
+/// A refusal's letter is keyed as the refusing handler answered, never
+/// angzarr-embedded's code for it; a typed one carries its object whole
+/// in `command_refused`, an untyped one `processing_failed`.
+#[test]
+fn a_refusals_letter_is_keyed_as_answered() {
+    use crate::next::angzarr_router::error::{BusinessStatus, CodedError};
+    use crate::next::toys::{processing_failed, wire};
+    use crate::next::v1::angzarr_dead_letter::RejectionDetails;
+    use crate::next::v1::CommandRefusedDetails;
+    let untyped = crate::next::route::Rejected::of(&CodedError::rejection(
+        BusinessStatus::FailedPrecondition,
+        "toy-ledger-too-large",
+        [("cents".to_string(), "2000".to_string())],
+    ));
+    let letter = letter_for(Cause::Refused(&untyped));
+    let reason = wire("toy-ledger-too-large", &[("cents", "2000")]);
+    assert_eq!(letter.reason, Some(reason.clone()));
+    assert_eq!(
+        letter.rejection_details,
+        Some(processing_failed(&reason, 0, false))
     );
+
+    let object = pack(&account::cmd::Deposit { cents: 9 });
+    let typed = crate::next::route::Rejected::of(&CodedError::refused(object.clone()));
+    let letter = letter_for(Cause::Refused(&typed));
+    assert_eq!(
+        letter.reason,
+        Some(wire(
+            "ROUTER_REASON_COMMAND_REFUSED",
+            &[("refusal_type", "toy.account.cmd.v1.Deposit")]
+        ))
+    );
+    assert_eq!(
+        letter.rejection_details,
+        Some(RejectionDetails::CommandRefused(CommandRefusedDetails {
+            refusal_type: "toy.account.cmd.v1.Deposit".to_string(),
+            refusal: Some(object),
+        }))
+    );
+}
+
+/// A line shows a letter's retry count only where it was retried.
+#[test]
+fn a_line_shows_no_retry_count_for_a_letter_never_retried() {
+    let error = KernelError::ChainTooDeep { limit: 4 };
+    let line = dead_letter_line(&letter_for(Cause::Kernel(&error)));
+    assert!(!line.contains("retry_count"), "{line}");
 }

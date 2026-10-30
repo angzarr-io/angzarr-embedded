@@ -24,6 +24,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use angzarr_proto::v1::angzarr_dead_letter::Payload;
 use angzarr_proto::v1::{CommandBook, DeliveryOutcome, EventBook};
 use angzarr_router::error::CodedError;
 use angzarr_router::pb::CommandResponse;
@@ -31,7 +32,7 @@ use angzarr_router::router::DynCommandHandler;
 
 use super::check::Identified;
 use super::coordinator::refused;
-use super::dead_letter::{write_dead_letter, DeadLetterLog};
+use super::dead_letter::{self, Cause, DeadLetterLog};
 use super::error::{Failure, KernelError};
 use super::route::{self, Rejected};
 
@@ -110,7 +111,12 @@ pub(crate) async fn forward(
             let failure = refused(command, error);
             if let Failure::Kernel(error @ KernelError::Router(coded)) = &failure {
                 if route::is_handler_fault(coded) {
-                    write_dead_letter(dead_letters, command.to_book(), command.domain(), error);
+                    dead_letter::write(
+                        dead_letters,
+                        Payload::RejectedCommand(command.to_book()),
+                        command.domain(),
+                        Cause::Kernel(error),
+                    );
                 }
             }
             Err(failure)

@@ -505,11 +505,12 @@ kernel runs a policy through angzarr-router's `PolicyComponent` (a
 `PolicyDispatch`, or one in another process: `Registry::policy_component`,
 given the output domain its descriptor names),
 one triggering event at a time, and holds every command of each reaction
-(`PolicyResponse.reactions`, by triggering page) to four rules
+(`PolicyResponse.reactions`, by triggering page) to five rules
 (`check_reactions`): the policy's one destination
 (`COORDINATOR_REASON_POLICY_COMMAND_OUTSIDE_DESTINATION`), the trigger's edition, an unset one
 stamped with it (`COORDINATOR_REASON_POLICY_COMMAND_OUTSIDE_EDITION`), a named root
-(`COORDINATOR_REASON_POLICY_COMMAND_NO_ROOT`) and the trigger's correlation, if any
+(`COORDINATOR_REASON_POLICY_COMMAND_NO_ROOT`), no Handling, which only the target stamps
+(`COORDINATOR_REASON_POLICY_COMMAND_WITH_HANDLING`), and the trigger's correlation, if any
 (`COORDINATOR_REASON_POLICY_COMMAND_OTHER_CORRELATION`). One failure refuses the whole answer
 as the policy's bug: nothing is delivered, the trigger is dead-lettered
 and the position stays.
@@ -782,8 +783,8 @@ kernel.resume(&store, &sampled, &mut projections).await?;                       
   refused command of a type it translates that does not decode) and an error of
   the source's `#[on_refused]` handler fail the step as `StepError::PolicyFailed`, a
   defect (`Recovery::Bug`), never a business `Rejected`: the step is
-  dead-lettered with the error's code and args as its reason, never
-  English, and the policy's position moves past the trigger, so nothing
+  dead-lettered as a handler's bug, the error's code and args its
+  `cause`, never English, and the policy's position moves past the trigger, so nothing
   runs it again.
 - <a id="a-policys-bug-and-its-position"></a>**A policy's bug and its
   position** are a setting: `Kernel::on_policy_bug(OnPolicyBug)`, one for
@@ -934,26 +935,49 @@ floor for the next `recorded_at` comes from the store
 angzarr dead-letters what it cannot deliver and cannot refuse to a caller.
 angzarr-embedded is in process and atomic: there is no queue, no store and no replay.
 Whatever angzarr would dead-letter fails the chain back to its caller with
-nothing written, and the kernel writes one line to the application's
-`DeadLetterLog`:
+nothing written, and the kernel hands the letter, angzarr's
+`AngzarrDeadLetter`, to the application's `DeadLetterLog`, which writes it
+as one line:
 
 ```rust
 pub const DEAD_LETTER_PREFIX: &str = "DEAD_LETTER";
-pub trait DeadLetterLog: Send + Sync { fn write(&self, line: &str); }
+pub trait DeadLetterLog: Send + Sync {
+    fn write(&self, line: &str);
+    fn letter(&self, letter: &AngzarrDeadLetter) { self.write(&dead_letter_line(letter)) }
+}
 pub fn dead_letter_line(letter: &AngzarrDeadLetter) -> String;   // prefix, component, reason's code and args, retry_count, command or event
 ```
 
-A letter's reason is its error's `Diagnostic` (`AngzarrDeadLetter.reason`):
-its code and its args, never English (decision 14.37); the line is keys
-and values only. Cases: a handler's bug (a fatal bug's status, a panic
-included), and the router's own error on malformed input; a policy's
-book the kernel built malformed; a decide under AGGREGATE_HANDLES that
-never acknowledged its window; a policy that failed on its trigger; a
-step whose retryable failure outlasted its retries, with their count
-(`ProcessingFailedDetails.retry_count`). **Every line starts with the
-prefix**: anything arriving there almost certainly indicates a problem, so
-an operator alerts on it. The line is built from angzarr's own
-`AngzarrDeadLetter`, so it says what an angzarr DLQ entry would.
+A letter's reason (`AngzarrDeadLetter.reason`) is the key the spec spells
+and its args, as they were answered, never angzarr-embedded's own code
+and never English (decisions 14.37 and 14.48); the line is keys and
+values only. It carries the one `rejection_details` variant its reason
+chooses, by the mapping on `AngzarrDeadLetter.rejection_details` in
+angzarr's `types.proto`:
+
+- `sequence_mismatch`: `COORDINATOR_REASON_CONFLICT_UNRESOLVED`, a decide
+  under AGGREGATE_HANDLES that never acknowledged its window, with the
+  command's expected sequence and the head;
+- `command_refused`: `ROUTER_REASON_COMMAND_REFUSED` with its
+  `refusal_type`, a policy's command refused by a typed refusal that no
+  OnRefused answers, the refusal object kept whole;
+- `processing_failed`, its failure the reason: an untyped refusal of
+  such a command, under the handler's own key; a command or fact given up
+  at a write-race cap, `COORDINATOR_REASON_RETRY_CAP_EXHAUSTED`
+  (`retry_count` its attempts, transient); a fatal bug, never retried and
+  not transient (a handler's, `ROUTER_REASON_UNHANDLED_HANDLER_ERROR`
+  with its code and args the `cause`, a panic included; whatever key a
+  remote handler answered; the router's own error on malformed input; a
+  policy's own error, keyed as a handler's bug; the kernel's refusal of a
+  policy's answer, `COORDINATOR_REASON_POLICY_COMMAND_*`; a projector's
+  failure; a book the kernel built malformed); and a step whose retryable
+  failure outlasted its retries, under its own key as last answered, never
+  the retry cap's (`retry_count` its retries, transient).
+
+**Every line starts with the prefix**: anything arriving there almost
+certainly indicates a problem, so an operator alerts on it. The line is
+built from angzarr's own `AngzarrDeadLetter`, so it says what an angzarr
+DLQ entry would.
 angzarr-embedded never answers PARKED.
 
 ## Retrying, capped, then dead-lettered

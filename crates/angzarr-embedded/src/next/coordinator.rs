@@ -41,6 +41,7 @@
 //!    kernel stamps every event it answers with the input's
 //!    [`Identified::meta`]. The router catches a panicking handler, a bug.
 
+use angzarr_proto::v1::angzarr_dead_letter::Payload;
 use angzarr_proto::v1::{
     command_page, CommandBook, ConflictResolution, Cover, EventBook, EventPage, Handling, Snapshot,
 };
@@ -51,7 +52,7 @@ use angzarr_router::pb::ContextualCommand;
 use prost_types::{Any, Timestamp};
 
 use super::check::{Identified, Malformed, Sampled};
-use super::dead_letter::{write_dead_letter, DeadLetterLog};
+use super::dead_letter::{self, Cause, DeadLetterLog};
 use super::error::{Failure, KernelError, UpcastError};
 use super::markup::STEP_LIMIT;
 use super::payload::type_name;
@@ -459,14 +460,24 @@ pub(crate) async fn decide(
                     expected,
                     actual,
                 };
-                write_dead_letter(dead_letters, identified.to_book(), domain, &unresolved);
+                dead_letter::write(
+                    dead_letters,
+                    Payload::RejectedCommand(identified.to_book()),
+                    domain,
+                    Cause::Kernel(&unresolved),
+                );
                 Failure::Kernel(unresolved)
             }
             _ => {
                 let failure = refused(identified, error);
                 if let Failure::Kernel(error @ KernelError::Router(coded)) = &failure {
                     if route::is_handler_fault(coded) {
-                        write_dead_letter(dead_letters, identified.to_book(), domain, error);
+                        dead_letter::write(
+                            dead_letters,
+                            Payload::RejectedCommand(identified.to_book()),
+                            domain,
+                            Cause::Kernel(error),
+                        );
                     }
                 }
                 failure

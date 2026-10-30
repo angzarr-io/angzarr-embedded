@@ -30,6 +30,7 @@ pub const ANSWERED: &[CoordinatorReason] = &[
     CoordinatorReason::PolicyCommandOutsideEdition,
     CoordinatorReason::PolicyCommandNoRoot,
     CoordinatorReason::PolicyCommandOtherCorrelation,
+    CoordinatorReason::PolicyCommandWithHandling,
     CoordinatorReason::RefusalFactAddressed,
     CoordinatorReason::RefusalFactNoPage,
     CoordinatorReason::RefusalFactNotAFact,

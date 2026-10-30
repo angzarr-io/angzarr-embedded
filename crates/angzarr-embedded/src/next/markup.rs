@@ -1459,7 +1459,7 @@ pub fn __translating<C: DomainMessage>(
 
 /// A translating callback's answer, as `Policy::on_refused` gives it: its
 /// fact, one its source `S` ingests, packed; or its error as a report (its
-/// code and args the dead letter's reason).
+/// code and args the dead letter's `cause`).
 #[doc(hidden)]
 pub fn __domestic<S: Ingests<F>, F: DomainMessage, E: angzarr_embedded_diagnostic::Diagnostic>(
     answer: Result<F, E>,
@@ -1470,8 +1470,8 @@ pub fn __domestic<S: Ingests<F>, F: DomainMessage, E: angzarr_embedded_diagnosti
 }
 
 /// A policy's `#[on_event]` handler's answer, as `Policy::on_event` gives
-/// it: its commands, or its error as a report (its code the dead letter's
-/// reason, with its args).
+/// it: its commands, or its error as a report (its code and args the dead
+/// letter's `cause`).
 #[doc(hidden)]
 pub fn __answered<T: Domain, E: angzarr_embedded_diagnostic::Diagnostic>(
     answer: Result<Commands<T>, E>,

@@ -4332,8 +4332,10 @@ mod refusal_flow {
         let lines = log.lines();
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(
-            lines[0].contains("toy-buyin-impossible-short short=23"),
-            "its code and args: {}",
+            lines[0].contains(
+                "buyin: ROUTER_REASON_UNHANDLED_HANDLER_ERROR cause=toy-buyin-impossible-short cause.short=23"
+            ),
+            "a handler's bug, its code and args the cause: {}",
             lines[0]
         );
         assert!(
@@ -4503,8 +4505,8 @@ mod refusal_flow {
         let lines = log.lines();
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(
-            lines[0].contains("angzarr-embedded-next-no-refusal-handler"),
-            "{lines:?}"
+            lines[0].contains("wallet: ROUTER_REASON_NO_REFUSAL_HANDLER command_type="),
+            "the router's key as the spec spells it: {lines:?}"
         );
         assert!(!lines[0].contains("nothing handles"), "{lines:?}");
     }
@@ -5554,7 +5556,7 @@ mod router {
             let lines = log.lines();
             assert_eq!(lines.len(), 1, "{policy_bug:?}: {lines:?}");
             assert!(
-                lines[0].contains("angzarr-embedded-next-handler-unavailable"),
+                lines[0].contains("remote: REMOTE_HANDLER_UNAVAILABLE cause=not-running domain=remote retry_count=3"),
                 "{lines:?}"
             );
             let _ = ready(kernel.resume(&store, &sampled_at(3), &mut ()));
@@ -5952,8 +5954,11 @@ mod router {
         #[test]
         fn a_policy_steps_retryable_bug_or_immediate_return_is_rerun_then_dead_lettered() {
             for (status, cause) in [
-                (1, "cause=toy-meter-broke cause.seat=5"),
-                (4, "cause=toy-meter-moved"),
+                (
+                    1,
+                    ": ROUTER_REASON_UNHANDLED_HANDLER_ERROR cause=toy-meter-broke cause.seat=5",
+                ),
+                (4, ": toy-meter-moved seat=5"),
             ] {
                 probe_down_for(u32::MAX);
                 let registry = probing(status);
@@ -6244,8 +6249,8 @@ mod router {
                     lines[0]
                 );
                 assert!(
-                    lines[0].contains("remote: angzarr-embedded-next-unhandled-handler-error cause=PLAYER_BROKE cause.seat=3"),
-                    "{grpc:?}, its code and args: {}",
+                    lines[0].contains("remote: PLAYER_BROKE seat=3"),
+                    "{grpc:?}, its own key and args, as answered: {}",
                     lines[0]
                 );
                 assert!(!lines[0].contains("broke"), "no English: {}", lines[0]);
@@ -6399,9 +6404,10 @@ mod router {
                 lines[0]
             );
             assert!(
-                lines[0]
-                    .contains("remote: angzarr-embedded-next-unhandled-handler-error cause=PLAYER_BROKE cause.seat=3"),
-                "its code, and the handler's code and args as its cause: {}",
+                lines[0].contains(
+                    "remote: ROUTER_REASON_UNHANDLED_HANDLER_ERROR cause=PLAYER_BROKE cause.seat=3"
+                ),
+                "its key, and the handler's code and args as its cause: {}",
                 lines[0]
             );
             assert!(!lines[0].contains("broke"), "no English: {}", lines[0]);
@@ -6589,9 +6595,8 @@ mod router {
         let lines = log.lines();
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(
-            lines[0].contains(
-                "picky: angzarr-embedded-next-unhandled-handler-error cause=PICKY_FACT_BROKE"
-            ),
+            lines[0]
+                .contains("picky: ROUTER_REASON_UNHANDLED_HANDLER_ERROR cause=PICKY_FACT_BROKE"),
             "the source's handler's bug, its code the cause: {}",
             lines[0]
         );
@@ -6669,8 +6674,10 @@ mod router {
         assert_eq!(waits.micros(), [10_000, 30_000, 50_000]);
         let lines = log.lines();
         assert_eq!(lines.len(), 1, "{lines:?}");
-        assert!(lines[0].contains("cause=PICKY_BUSY"), "{lines:?}");
-        assert!(lines[0].contains("retry_count=3"), "{lines:?}");
+        assert!(
+            lines[0].contains("picky: PICKY_BUSY retry_count=3"),
+            "its own key, as last answered: {lines:?}"
+        );
 
         let log = MemoryDeadLetters::new();
         let kernel = ::angzarr_embedded::next::Kernel::new(&registry, &log).on_retryable(
@@ -6745,12 +6752,13 @@ mod router {
         assert_eq!(pages(&store, wallet().cover()), None);
         // The router's own error on malformed input is a bug (INTERNAL;
         // the owner's ruling, 2026-10-29): alerted and dead-lettered under
-        // the kernel's code, with its args, never a refusal.
+        // the router's key, with its args, never a refusal (decision
+        // 14.48).
         assert_eq!(failed.recovery(), Recovery::Bug);
         let lines = log.lines();
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(
-            lines[0].contains("angzarr-embedded-next-unknown-command-type"),
+            lines[0].contains("wallet: ROUTER_REASON_UNKNOWN_COMMAND_TYPE "),
             "{lines:?}"
         );
         assert!(
