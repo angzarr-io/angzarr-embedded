@@ -66,7 +66,7 @@ use super::error::{Failure, KernelError, Step, StepError};
 use super::handler::Handler;
 use super::markup::{self, ProjectionContext};
 use super::payload::type_name;
-use super::policy::{answered, projection, Projection};
+use super::policy::{answered, check_reaction, projection, Projection};
 use super::registry::{PolicyEntry, Registry};
 use super::route::Rejected;
 use super::store::{Port, Store, StorePort};
@@ -907,13 +907,13 @@ impl<'k> Run<'k> {
         Ok(())
     }
 
-    /// One policy on one event of `source` (`page`, upcast), through the
-    /// router: each command it answers a step of its own, its position
-    /// written with the last (or alone, when no step writes it). The
-    /// router's refusal of the answer (a command outside the policy's
-    /// destination or its trigger's edition, with no root or another
-    /// correlation) is the policy's bug: dead-lettered, and the position
-    /// stays. The policy's own error ([`StepError::PolicyFailed`]) and a
+    /// One policy on one event of `source` (`page`, upcast), through its
+    /// [`PolicyPort`](super::PolicyPort): each command it answers a step of
+    /// its own, its position written with the last (or alone, when no step
+    /// writes it). The kernel's refusal of the answer ([`check_reaction`]:
+    /// a command outside the policy's destination or its trigger's edition,
+    /// with no root or another correlation) is the policy's bug, as is the
+    /// router's own error: dead-lettered, and the position stays. The policy's own error ([`StepError::PolicyFailed`]) and a
     /// handler's bug in one of its steps are dead-lettered by their code
     /// and args, and the position moves past the event (or stays, under
     /// [`OnPolicyBug::Stay`]).
@@ -936,8 +936,17 @@ impl<'k> Run<'k> {
             pages: vec![page.clone()],
             ..EventBook::default()
         };
-        let commands = match policy.dispatch.dispatch(&event) {
-            Ok(response) => response.commands,
+        let correlation = page.meta.as_ref().and_then(|m| m.correlation_id.as_ref());
+        let checked = policy.dispatch.dispatch(&event).and_then(|commands| {
+            check_reaction(
+                policy.dispatch.output_domain(),
+                source,
+                correlation,
+                commands,
+            )
+        });
+        let commands = match checked {
+            Ok(commands) => commands,
             Err(error) => {
                 if let Some(failure) = super::route::policy_failure(&error) {
                     write_letter(
@@ -1087,6 +1096,17 @@ impl<'k> Run<'k> {
                     .map_err(|e| StepError::Kernel(KernelError::Store(e)))?;
                 return Err(StepError::PolicyFailed(failure));
             }
+        };
+        let answer = angzarr_router::pb::OnRefusedResponse {
+            fact: answer.map(|payload| CommandBook {
+                page: Some(CommandPage {
+                    body: Some(v1::command_page::Body::Fact(v1::Fact {
+                        payload: Some(payload),
+                    })),
+                    ..CommandPage::default()
+                }),
+                ..CommandBook::default()
+            }),
         };
         let addressed = address_refusal_fact(refusal, &answer).map_err(kernel)?;
         let trigger = delivered.causation_id().cloned().unwrap_or_default();

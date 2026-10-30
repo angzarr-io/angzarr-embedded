@@ -412,11 +412,24 @@ impl Registry {
 ```
 
 **Business dispatch is angzarr-router's**, implemented once for every
-runtime: handlers, typed refusals and the refusal path, and a policy's
-commands kept in its trigger's edition, with a root and the trigger's
-correlation. The kernel keeps the check, identification, upcasting,
-admission, snapshots, the store reads and writes, positions, resume and the
-edition-not-forked refusal.
+runtime: handlers and typed refusals. The kernel keeps the check,
+identification, upcasting, admission, snapshots, a policy's output checks,
+the store reads and writes, positions, resume and the edition-not-forked
+refusal.
+
+**A policy's answer is the kernel's to check** (decision 14.42). The
+kernel runs a policy through its `PolicyPort` (angzarr-router's
+`PolicyDispatch`, or one behind another router: `Registry::policy_port`),
+one triggering event at a time, and holds every command it answers to four
+rules (`check_reaction`): the policy's one destination
+(`POLICY_COMMAND_OUTSIDE_DESTINATION`), the trigger's edition, an unset one
+stamped with it (`POLICY_COMMAND_OUTSIDE_EDITION`), a named root
+(`POLICY_COMMAND_NO_ROOT`) and the trigger's correlation, if any
+(`POLICY_COMMAND_OTHER_CORRELATION`). One failure refuses the whole answer
+as the policy's bug: nothing is delivered, the trigger is dead-lettered
+and the position stays. Until angzarr-router answers
+`PolicyResponse.reactions`, grouping by trigger is the kernel's one page
+per call.
 
 **A domain is a router table.** `Registry::register` builds angzarr-router's
 `DomainDispatch` over `D::State`: it folds each event through the domain's
@@ -627,7 +640,7 @@ kernel.resume(&store, &sampled, &mut projections).await?;                       
   position moves past it. A policy's own error and a handler's bug in the
   step are dead-lettered and move it past too, unless the kernel says to
   stay ([below](#a-policys-bug-and-its-position)). Any other bug (a
-  malformed policy book, the depth limit, the router refusing the policy's
+  malformed policy book, the depth limit, the kernel refusing the policy's
   answer) or a store failure writes nothing more: the position stays where
   the last committed step put it, and `resume` runs the step again.
 - **A refusal is a fact.** A policy that answers refusals (every marked-up

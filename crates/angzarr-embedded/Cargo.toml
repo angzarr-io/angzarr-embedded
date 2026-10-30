@@ -25,10 +25,10 @@ prost-types = "0.14"
 # types.
 angzarr-ports = { git = "https://github.com/angzarr-io/angzarr-project", rev = "a0be9386a8e535141dea3a5c27499e838ec6abc8" }
 # angzarr's shared client router: business dispatch (handlers, typed
-# refusals and the refusal path, a policy's commands kept in its trigger's
-# edition, their root and correlation), implemented once for every runtime.
-# The kernel calls it and keeps the check, identification, admission,
-# upcasting, snapshots, the store writes, positions and resume.
+# refusals and the refusal path), implemented once for every runtime. The
+# kernel calls it and keeps the check, identification, admission,
+# upcasting, snapshots, a policy's output checks, the store writes,
+# positions and resume.
 angzarr-router = { git = "https://github.com/angzarr-io/angzarr-router", rev = "fc6d3a6d2c7944744f22362a0f83504dfe0e81ab" }
 
 # The kernel's tests run on angzarr-ports' MemoryStore and, on a tokio

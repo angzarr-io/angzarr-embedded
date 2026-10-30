@@ -54,6 +54,141 @@ use super::registry::Registry;
 
 // ---------------------------------------------------------------- policies
 
+/// angzarr-router's table as the kernel runs it. It still checks its own
+/// answer (its destination, edition, root and correlation), which the
+/// kernel's [`check_reaction`] makes redundant; until it answers
+/// `PolicyResponse.reactions` the kernel hands it one triggering page at a
+/// time, so its commands are that page's.
+impl PolicyPort for PolicyDispatch {
+    fn name(&self) -> &str {
+        PolicyDispatch::name(self)
+    }
+
+    fn input_domain(&self) -> &str {
+        PolicyDispatch::input_domain(self)
+    }
+
+    fn output_domain(&self) -> &str {
+        PolicyDispatch::output_domain(self)
+    }
+
+    fn dispatch(&self, source: &EventBook) -> Result<Vec<CommandBook>, CodedError> {
+        PolicyDispatch::dispatch(self, source).map(|response| response.commands)
+    }
+
+    fn dispatch_refusal(
+        &self,
+        refusal: &markup::v1::Refusal,
+        ctx: &CommandContext,
+    ) -> Result<Option<Any>, CodedError> {
+        let answer = PolicyDispatch::dispatch_refusal(self, refusal, ctx)?;
+        Ok(answer
+            .fact
+            .and_then(|fact| fact.page)
+            .and_then(|page| match page.body {
+                Some(command_page::Body::Fact(fact)) => fact.payload,
+                _ => None,
+            }))
+    }
+}
+
+/// One triggering event's commands, as a policy answered them, checked and
+/// stamped by the kernel (decision 14.42), every command against four
+/// rules; one failure refuses the whole answer as the policy's bug,
+/// INTERNAL:
+/// - **destination**: its cover's domain is `output_domain`
+///   (`POLICY_COMMAND_OUTSIDE_DESTINATION`, naming both domains);
+/// - **edition**: unset, or the `trigger` stream's; an unset one is stamped
+///   with the trigger's (`POLICY_COMMAND_OUTSIDE_EDITION`, naming both);
+/// - **root**: named, with bytes (`POLICY_COMMAND_NO_ROOT`);
+/// - **correlation**: unset, or the trigger's, `correlation`
+///   (`POLICY_COMMAND_OTHER_CORRELATION`).
+pub(crate) fn check_reaction(
+    output_domain: &str,
+    trigger: &Cover,
+    correlation: Option<&Uuid>,
+    mut commands: Vec<CommandBook>,
+) -> Result<Vec<CommandBook>, CodedError> {
+    use angzarr_router::error::{codes, extras};
+    let domain = |c: &CommandBook| {
+        c.cover
+            .as_ref()
+            .map_or("", |c| c.domain.as_str())
+            .to_string()
+    };
+    if let Some(stray) = commands.iter().find(|c| domain(c) != output_domain) {
+        return Err(super::route::internal(
+            codes::POLICY_COMMAND_OUTSIDE_DESTINATION,
+            [
+                (
+                    extras::EXPECTED_DOMAIN.to_string(),
+                    output_domain.to_string(),
+                ),
+                (extras::ACTUAL_DOMAIN.to_string(), domain(stray)),
+            ],
+        ));
+    }
+    let edition = trigger.edition.clone().filter(|e| !e.is_empty());
+    for command in &mut commands {
+        let naming = || {
+            let command_type = command
+                .page
+                .as_ref()
+                .and_then(|p| match &p.body {
+                    Some(command_page::Body::Command(c)) => c.payload.as_ref(),
+                    Some(command_page::Body::Fact(f)) => f.payload.as_ref(),
+                    None => None,
+                })
+                .map_or("", |p| type_name(&p.type_url));
+            [
+                (extras::DOMAIN.to_string(), domain(command)),
+                (extras::COMMAND_TYPE.to_string(), command_type.to_string()),
+            ]
+        };
+        let named = command
+            .cover
+            .as_ref()
+            .and_then(|c| c.root.as_ref())
+            .is_some_and(|r| !r.value.is_empty());
+        if !named {
+            return Err(super::route::internal(
+                codes::POLICY_COMMAND_NO_ROOT,
+                naming(),
+            ));
+        }
+        let carried = command
+            .page
+            .as_ref()
+            .and_then(|p| p.correlation_id.as_ref());
+        if let (Some(carried), Some(trigger)) = (carried, correlation) {
+            if carried != trigger {
+                return Err(super::route::internal(
+                    codes::POLICY_COMMAND_OTHER_CORRELATION,
+                    naming(),
+                ));
+            }
+        }
+        let cover = command.cover.get_or_insert_with(Cover::default);
+        match cover.edition.as_deref().filter(|e| !e.is_empty()) {
+            None => cover.edition = edition.clone(),
+            Some(named) if Some(named) != edition.as_deref() => {
+                return Err(super::route::internal(
+                    codes::POLICY_COMMAND_OUTSIDE_EDITION,
+                    [
+                        (
+                            extras::EXPECTED_EDITION.to_string(),
+                            edition.clone().unwrap_or_default(),
+                        ),
+                        (extras::ACTUAL_EDITION.to_string(), named.to_string()),
+                    ],
+                ));
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(commands)
+}
+
 /// A policy as the kernel runs it, whatever its router: decision 14.41's
 /// `PolicyComponent`, the kernel's own until angzarr-router's lands. The
 /// kernel hands it one triggering event at a time, and owns everything
@@ -382,9 +517,9 @@ pub(crate) fn orders(
 }
 
 /// The orders policy `policy` owes for `trigger` (in `correlation_id`):
-/// the router's answer, `books`, each the target's stream (the router held
-/// it to the trigger's edition, a named root and the trigger's
-/// correlation) and its command, in order.
+/// the answer, `books`, each the target's stream (the kernel held it to
+/// the trigger's edition, a named root and the trigger's correlation,
+/// [`check_reaction`]) and its command, in order.
 pub(crate) fn answered(
     policy: &str,
     trigger: &EventRef,
@@ -415,9 +550,9 @@ pub(crate) fn answered(
 /// answers refusals, each command type it translates (its `TRANSLATES`, or
 /// every command of its target for a hand-written one) is answered by
 /// [`Policy::on_refused`], with the refused command's context; either's
-/// error is carried as the policy's failure. The router holds the answer to the policy's one
-/// destination, the trigger's edition, a named root and the trigger's
-/// correlation.
+/// error is carried as the policy's failure. The kernel holds the answer
+/// to the policy's one destination, the trigger's edition, a named root and
+/// the trigger's correlation ([`check_reaction`]).
 pub(crate) fn dispatch<P: Policy>(policy: P) -> PolicyDispatch {
     let policy = Arc::new(policy);
     let target = <P::Target as Domain>::NAME;
@@ -483,3 +618,7 @@ pub(crate) fn dispatch<P: Policy>(policy: P) -> PolicyDispatch {
     }
     table
 }
+
+#[cfg(test)]
+#[path = "policy.test.rs"]
+mod tests;

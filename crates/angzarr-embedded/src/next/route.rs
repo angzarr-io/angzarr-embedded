@@ -1,7 +1,5 @@
 //! Where the kernel meets angzarr-router: the router owns business
-//! dispatch (handlers, typed refusals and the refusal path, a policy's
-//! commands kept in its trigger's edition, their root and correlation);
-//! this module turns what the router answers into the kernel's terms.
+//! dispatch (handlers, typed refusals and the refusal path); this module turns what the router answers into the kernel's terms.
 //!
 //! - [`reason_code`]: every reason the router answers with, each
 //!   forwarded under an angzarr-embedded code of its own with its own

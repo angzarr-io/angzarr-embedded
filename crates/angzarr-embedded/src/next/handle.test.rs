@@ -2002,6 +2002,11 @@ fn a_policys_commands_in_their_triggers_edition_and_correlation_are_delivered() 
         )
         .ready()
         .unwrap();
-    assert_eq!(pages(&store, &ledger_cover()).len(), 1, "{:?}", log.lines());
+    assert_eq!(
+        pages(&store, &ledger_cover()).len(),
+        2,
+        "both delivered: {:?}",
+        log.lines()
+    );
     assert_eq!(position(&store, "unchecked", &cover("account", 1)), 1);
 }

@@ -93,7 +93,7 @@ pub(crate) struct ProjectorEntry {
 /// A registered policy, as angzarr-router dispatches it, held in the
 /// registry's one list in registration order.
 pub(crate) struct PolicyEntry {
-    pub(crate) dispatch: PolicyDispatch,
+    pub(crate) dispatch: Box<dyn PolicyPort>,
     /// Whether a refusal of its command is answered by its refusal fact
     /// (the router's OnRefused); a policy that does not has its refused
     /// command fail the step.
@@ -541,7 +541,7 @@ impl Registry {
     /// name) PANICS at startup.
     pub fn policy<P: super::Policy>(&mut self, policy: P) -> &mut Self {
         let answers_refusals = P::ANSWERS_REFUSALS;
-        self.push_policy(super::policy::dispatch(policy), answers_refusals)
+        self.push_policy(Box::new(super::policy::dispatch(policy)), answers_refusals)
     }
 
     /// Register a policy built as angzarr-router's dispatch table, written
@@ -550,7 +550,7 @@ impl Registry {
     /// are answered by its OnRefused. Registering one twice (by name)
     /// PANICS at startup.
     pub fn policy_dispatch(&mut self, dispatch: PolicyDispatch) -> &mut Self {
-        self.push_policy(dispatch, true)
+        self.push_policy(Box::new(dispatch), true)
     }
 
     /// Register `port`, a policy behind any router (a remote one, say), in
@@ -558,11 +558,10 @@ impl Registry {
     /// and its target its output domain. Its refused commands are answered
     /// by its OnRefused. Registering one twice (by name) PANICS at startup.
     pub fn policy_port(&mut self, port: impl PolicyPort + 'static) -> &mut Self {
-        let _ = port;
-        self
+        self.push_policy(Box::new(port), true)
     }
 
-    fn push_policy(&mut self, dispatch: PolicyDispatch, answers_refusals: bool) -> &mut Self {
+    fn push_policy(&mut self, dispatch: Box<dyn PolicyPort>, answers_refusals: bool) -> &mut Self {
         if self
             .policies
             .iter()
