@@ -29,7 +29,7 @@ angzarr-ports = { git = "https://github.com/angzarr-io/angzarr-project", rev = "
 # kernel calls it and keeps the check, identification, admission,
 # upcasting, snapshots, a policy's output checks, the store writes,
 # positions and resume.
-angzarr-router = { git = "https://github.com/angzarr-io/angzarr-router", rev = "8fc078ff1a0c9e5493a47304a4b507562ba29d8c" }
+angzarr-router = { git = "https://github.com/angzarr-io/angzarr-router", rev = "b71612ef5ada5fb16cc700159a07d697938cfb18" }
 
 # The kernel's tests run on angzarr-ports' MemoryStore and, on a tokio
 # runtime, on the shared SQLite adapter (sqlite.test.rs); and a decorated

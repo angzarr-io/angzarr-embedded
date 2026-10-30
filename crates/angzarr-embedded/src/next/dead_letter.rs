@@ -126,31 +126,33 @@ pub(crate) fn write_dead_letter(
     write_letter(log, Payload::RejectedCommand(book), component, reason);
 }
 
-/// Write the dead letter for `book`, whose step at `component` failed for
+/// Write the dead letter for `payload` (a command, or a projector's events),
+/// whose step at `component` failed for
 /// the retryable `failure` after `retries` retries ([`retries_exhausted`]).
 pub(crate) fn write_retries_exhausted(
     log: &dyn DeadLetterLog,
-    book: CommandBook,
+    payload: Payload,
     component: &str,
     failure: &dyn Diagnostic,
     retries: u32,
 ) {
     log.write(&dead_letter_line(&retries_exhausted(
-        book, component, failure, retries,
+        payload, component, failure, retries,
     )));
 }
 
-/// The dead letter for `book`, whose step at `component` failed for the
+/// The dead letter for `payload` (a command, or a projector's events), whose
+/// step at `component` failed for the
 /// retryable `failure` after `retries` retries: the reason, and the
 /// processing failure's details, transient, with its retry count.
 pub(crate) fn retries_exhausted(
-    book: CommandBook,
+    payload: Payload,
     component: &str,
     failure: &dyn Diagnostic,
     retries: u32,
 ) -> AngzarrDeadLetter {
     AngzarrDeadLetter {
-        payload: Some(Payload::RejectedCommand(book)),
+        payload: Some(payload),
         reason: Some(diagnostic(failure)),
         rejection_details: Some(RejectionDetails::EventProcessingFailed(
             EventProcessingFailedDetails {

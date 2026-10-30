@@ -51,7 +51,8 @@
 //! Each step is ONE atomic write to the store (no unit of work): one
 //! stream's events at the length it was loaded at, with the step's
 //! positions. Then every [`Policy`] for the source's domain runs, through
-//! angzarr-router's `PolicyDispatch`, on the written events, each of its commands a step of its own in its target,
+//! angzarr-router's `PolicyComponent` (a `PolicyDispatch`, or a policy in
+//! another process), on the written events, each of its commands a step of its own in its target,
 //! depth first, with the policy's position written with it; a step that
 //! fails keeps every write before it ([`Failure`], with the path to the
 //! failing [`Step`]), and what is owed is resumed by position
@@ -125,7 +126,7 @@ pub use handle::{
 pub use handler::{Committed, Handler};
 pub use payload::{decode_as, pack, type_name, Decoder, Payload};
 pub use policy::{
-    policy, projection, target_cover, Order, Policy, PolicyHandler, PolicyPort, Projection,
+    policy, projection, target_cover, translated, Order, Policy, PolicyHandler, Projection,
     Projector,
 };
 pub use registry::{Aggregate, Misconfigured, Registry};
@@ -388,7 +389,7 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn angzarr_embedded_diagnostic::D
     }));
     samples.push(Box::new(Failure::<WireError>::Projection {
         committed: Vec::new(),
-        failures: vec![("balances", report())],
+        failures: vec![("balances".to_string(), report())],
     }));
     for reason in angzarr_router::error::codes::ALL {
         samples.push(Box::new(KernelError::Router(route::internal(reason, []))));

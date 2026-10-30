@@ -1,7 +1,9 @@
-//! The host: launches every remote domain of a [`HostConfig`], waits for its
-//! handshake, connects, describes it, and hands back a
-//! [`RemoteCommandHandler`] per domain to register with the application's
-//! registry beside its in-process domains. Then it supervises: a child that
+//! The host: launches every remote component of a [`HostConfig`], waits for
+//! its handshake, connects, describes it, and hands back a handler of its
+//! kind (a [`RemoteCommandHandler`] per domain, a [`RemotePolicyHandler`]
+//! per policy, a [`RemoteProjectorHandler`] per projector) to register with
+//! the application's registry beside its in-process ones. Then it
+//! supervises: a child that
 //! exits is restarted, after a backoff that grows while restarts fail; while
 //! it is down its handler's dispatch is retryable
 //! ([`crate::is_retryable`]).
@@ -13,7 +15,7 @@
 //! let host = Host::start(config)?;
 //! let mut registry = Registry::new();
 //! registry.aggregate::<table::Table>(Default::default)?; // in-process
-//! host.register(&mut registry)?; // every remote domain, by its domain
+//! host.register(&mut registry)?; // every remote component, by its kind
 //! let kernel = Kernel::new(&registry, &dead_letters);
 //! // ... kernel.handle_any(&store, book, &sampled, &mut ()) for any domain;
 //! // dropping `host` stops the children.
@@ -35,11 +37,10 @@ use tokio::io::BufReader;
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::oneshot;
 
-use crate::config::{HostConfig, Launch, Placement, Supervision};
+use crate::config::{ComponentKindConfig, HostConfig, Launch, Placement, Supervision};
 use crate::error::HostError;
 use crate::handshake::{read_handshake, SOCKET_ENV};
-use crate::remote::{Link, RemoteCommandHandler};
-use crate::rpc::command_handler::command_handler_service_client::CommandHandlerServiceClient;
+use crate::remote::{Link, RemoteCommandHandler, RemotePolicyHandler, RemoteProjectorHandler};
 use crate::rpc::component::component_service_client::ComponentServiceClient;
 use crate::rpc::connect_unix;
 
@@ -65,9 +66,19 @@ pub struct Host {
     domains: Vec<Supervised>,
 }
 
-/// One remote domain under supervision.
+/// What a remote component is handed back as, by its kind.
+#[derive(Clone)]
+enum Hosted {
+    Domain(RemoteCommandHandler),
+    Policy(RemotePolicyHandler),
+    Projector(RemoteProjectorHandler),
+}
+
+/// One remote component under supervision.
 struct Supervised {
-    handler: RemoteCommandHandler,
+    /// Its `[[component]]` name.
+    name: String,
+    hosted: Hosted,
     /// Tells the supervisor to stop the child; taken when sent.
     stop: Option<oneshot::Sender<()>>,
     /// How the child ended, once the supervisor has stopped it.
@@ -75,8 +86,12 @@ struct Supervised {
 }
 
 impl Host {
-    /// Starts every remote domain of `config` and waits for each to come
-    /// up: launched, handshaken, connected, and described. In-process domains are left to the caller. Refused, with every
+    /// Starts every remote component of `config` and waits for each to come
+    /// up: launched, handshaken, connected, and described, its descriptor of
+    /// the kind its `kind` says ([`HostError::KindMismatch`]; a policy's or
+    /// projector's naming its input, [`HostError::NoInput`]). A remote
+    /// `kind = "upcaster"` is refused before any child starts
+    /// ([`HostError::KindUnsupported`]). In-process domains are left to the caller. Refused, with every
     /// child already started stopped again, when any domain's config is
     /// refused or any child fails to come up the first time.
     pub fn start(config: HostConfig) -> Result<Host, HostError> {
@@ -87,14 +102,20 @@ impl Host {
     fn start_with(config: HostConfig, hooks: Hooks) -> Result<Host, HostError> {
         let mut names = BTreeSet::new();
         let mut remote = Vec::new();
-        for domain in &config.domains {
-            if !names.insert(domain.name.as_str()) {
+        for component in &config.components {
+            if !names.insert(component.name.as_str()) {
                 return Err(HostError::DuplicateDomain {
-                    domain: domain.name.clone(),
+                    domain: component.name.clone(),
                 });
             }
-            if let Placement::Remote(launch) = domain.placement()? {
-                remote.push((domain.name.clone(), launch));
+            if let Placement::Remote(launch) = component.placement()? {
+                if component.kind == ComponentKindConfig::Upcaster {
+                    return Err(HostError::KindUnsupported {
+                        domain: component.name.clone(),
+                        kind: component.kind.as_str().to_string(),
+                    });
+                }
+                remote.push((component.name.clone(), component.kind, launch));
             }
         }
         let socket_dir = socket_dir(
@@ -113,13 +134,14 @@ impl Host {
             runtime: None,
             domains: Vec::new(),
         };
-        for (domain, launch) in remote {
+        for (domain, kind, launch) in remote {
             let link = Arc::new(Link::default());
             let (stop, stopped) = oneshot::channel();
             let (up, came_up) = mpsc::channel();
             let (end, ended) = mpsc::channel();
             let supervisor = Supervisor {
                 domain: domain.clone(),
+                kind,
                 launch,
                 supervision: config.supervision.clone(),
                 socket_dir: socket_dir.clone(),
@@ -131,14 +153,29 @@ impl Host {
             });
             let error = match came_up.recv() {
                 Ok(Ok(descriptor)) => {
+                    let parts = (
+                        domain.clone(),
+                        descriptor,
+                        link,
+                        runtime.handle().clone(),
+                        Duration::from_millis(config.supervision.call_timeout_ms),
+                    );
+                    let hosted = match kind {
+                        ComponentKindConfig::Policy => Hosted::Policy(RemotePolicyHandler::new(
+                            parts.0, parts.1, parts.2, parts.3, parts.4,
+                        )),
+                        ComponentKindConfig::Projector => {
+                            Hosted::Projector(RemoteProjectorHandler::new(
+                                parts.0, parts.1, parts.2, parts.3, parts.4,
+                            ))
+                        }
+                        _ => Hosted::Domain(RemoteCommandHandler::new(
+                            parts.0, parts.1, parts.2, parts.3, parts.4,
+                        )),
+                    };
                     host.domains.push(Supervised {
-                        handler: RemoteCommandHandler::new(
-                            domain,
-                            descriptor,
-                            link,
-                            runtime.handle().clone(),
-                            Duration::from_millis(config.supervision.call_timeout_ms),
-                        ),
+                        name: domain,
+                        hosted,
                         stop: Some(stop),
                         ended,
                     });
@@ -161,28 +198,75 @@ impl Host {
         Ok(host)
     }
 
-    /// One handler per remote domain, in the config's order.
+    /// One handler per remote domain, in the config's order: not its
+    /// policies or projectors.
     pub fn handlers(&self) -> Vec<RemoteCommandHandler> {
-        self.domains.iter().map(|d| d.handler.clone()).collect()
-    }
-
-    /// The handler of the remote domain named `domain`.
-    pub fn handler(&self, domain: &str) -> Option<RemoteCommandHandler> {
         self.domains
             .iter()
-            .find(|d| d.handler.domain() == domain)
-            .map(|d| d.handler.clone())
+            .filter_map(|d| match &d.hosted {
+                Hosted::Domain(handler) => Some(handler.clone()),
+                _ => None,
+            })
+            .collect()
     }
 
-    /// Registers every remote domain's handler into `registry`, as the
-    /// domain it is configured for: the kernel then dispatches that
-    /// domain's commands, and its policies' steps into it, through the
-    /// child (`Kernel::handle_any`). In-process domains are registered by
-    /// the caller as ever. Refused as the registry refuses a domain (one
-    /// registered already, a descriptor with no state or rules version).
+    /// The handler of the remote domain named `domain`; `None` for a
+    /// policy or a projector.
+    pub fn handler(&self, domain: &str) -> Option<RemoteCommandHandler> {
+        self.hosted(domain).and_then(|hosted| match hosted {
+            Hosted::Domain(handler) => Some(handler.clone()),
+            _ => None,
+        })
+    }
+
+    /// The handler of the remote policy configured as `name` (a
+    /// `[[component]]` of `kind = "policy"`).
+    pub fn policy(&self, name: &str) -> Option<RemotePolicyHandler> {
+        self.hosted(name).and_then(|hosted| match hosted {
+            Hosted::Policy(handler) => Some(handler.clone()),
+            _ => None,
+        })
+    }
+
+    /// The handler of the remote projector configured as `name` (a
+    /// `[[component]]` of `kind = "projector"`).
+    pub fn projector(&self, name: &str) -> Option<RemoteProjectorHandler> {
+        self.hosted(name).and_then(|hosted| match hosted {
+            Hosted::Projector(handler) => Some(handler.clone()),
+            _ => None,
+        })
+    }
+
+    fn hosted(&self, name: &str) -> Option<&Hosted> {
+        self.domains
+            .iter()
+            .find(|d| d.name == name)
+            .map(|d| &d.hosted)
+    }
+
+    /// Registers every remote component into `registry`: a domain's
+    /// handler as the domain it is configured for (the kernel then
+    /// dispatches that domain's commands, and its policies' steps into it,
+    /// through the child: `Kernel::handle_any`); a policy beside every
+    /// other policy of its source; a projector of its source. In-process
+    /// components are registered by the caller as ever. Refused as the
+    /// registry refuses a domain (one registered already, a descriptor with
+    /// no state or rules version); a policy or projector of a name
+    /// registered already PANICS, as the registry's every such
+    /// registration does.
     pub fn register(&self, registry: &mut Registry) -> Result<(), Misconfigured> {
-        for domain in &self.domains {
-            registry.command_handler(domain.handler.domain(), domain.handler.clone())?;
+        for component in &self.domains {
+            match &component.hosted {
+                Hosted::Domain(handler) => {
+                    registry.command_handler(handler.domain(), handler.clone())?;
+                }
+                Hosted::Policy(handler) => {
+                    registry.policy_component(handler.clone(), &handler.descriptor().output_domain);
+                }
+                Hosted::Projector(handler) => {
+                    registry.projector_handler(handler.source(), handler.clone());
+                }
+            }
         }
         Ok(())
     }
@@ -206,7 +290,7 @@ impl Host {
             .drain(..)
             .map(|d| {
                 let exit = d.ended.recv().unwrap_or(ChildExit::NotRunning);
-                (d.handler.domain().to_string(), exit)
+                (d.name, exit)
             })
             .collect();
         if let Some(runtime) = self.runtime.take() {
@@ -221,6 +305,52 @@ impl Drop for Host {
     fn drop(&mut self) {
         self.stop_all();
     }
+}
+
+/// Refuses a child whose descriptor is of another kind than its `kind`
+/// says ([`HostError::KindMismatch`]: a domain is an aggregate or a process
+/// manager), and a policy or projector that names no input domain
+/// ([`HostError::NoInput`]).
+fn check_kind(
+    domain: &str,
+    kind: ComponentKindConfig,
+    descriptor: &pb::ComponentDescriptor,
+) -> Result<(), HostError> {
+    let described = descriptor.kind();
+    let agrees = match kind {
+        ComponentKindConfig::Domain => matches!(
+            described,
+            pb::ComponentKind::Aggregate | pb::ComponentKind::ProcessManager
+        ),
+        ComponentKindConfig::Policy => described == pb::ComponentKind::Policy,
+        ComponentKindConfig::Projector => described == pb::ComponentKind::Projector,
+        ComponentKindConfig::Upcaster => false,
+    };
+    if !agrees {
+        return Err(HostError::KindMismatch {
+            domain: domain.to_string(),
+            configured: kind.as_str().to_string(),
+            described: described
+                .as_str_name()
+                .trim_start_matches("COMPONENT_KIND_")
+                .to_string(),
+        });
+    }
+    let stateless = matches!(
+        kind,
+        ComponentKindConfig::Policy | ComponentKindConfig::Projector
+    );
+    if stateless
+        && descriptor
+            .inputs
+            .first()
+            .is_none_or(|t| t.domain.is_empty())
+    {
+        return Err(HostError::NoInput {
+            domain: domain.to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// Sends SIGTERM to the child `pid`.
@@ -283,7 +413,7 @@ struct Up {
     child: Child,
     stdin: Option<ChildStdin>,
     stdout: Option<BufReader<ChildStdout>>,
-    client: CommandHandlerServiceClient<tonic::transport::Channel>,
+    channel: tonic::transport::Channel,
     descriptor: pb::ComponentDescriptor,
     socket: PathBuf,
 }
@@ -307,10 +437,11 @@ impl Hooks {
     }
 }
 
-/// One remote domain's supervisor: it starts the child, restarts it when it
+/// One remote component's supervisor: it starts the child, restarts it when it
 /// exits, and stops it when told.
 struct Supervisor {
     domain: String,
+    kind: ComponentKindConfig,
     launch: Launch,
     supervision: Supervision,
     socket_dir: PathBuf,
@@ -340,7 +471,7 @@ impl Supervisor {
                     backoff = initial;
                     // Published before `start` hears the child is up, so
                     // the handler it hands back reaches the child at once.
-                    self.set_client(Some(child.client.clone()));
+                    self.set_channel(Some(child.channel.clone()));
                     self.link.generation.send_modify(|n| *n += 1);
                     if let Some(up) = up.take() {
                         let _ = up.send(Ok(child.descriptor.clone()));
@@ -356,11 +487,11 @@ impl Supervisor {
                     }
                     tokio::select! {
                         _ = child.child.wait() => {
-                            self.set_client(None);
+                            self.set_channel(None);
                             let _ = std::fs::remove_file(&child.socket);
                         }
                         _ = &mut stop => {
-                            self.set_client(None);
+                            self.set_channel(None);
                             let exit = self.stop_child(&mut child).await;
                             let _ = std::fs::remove_file(&child.socket);
                             return exit;
@@ -382,12 +513,12 @@ impl Supervisor {
         }
     }
 
-    fn set_client(&self, client: Option<CommandHandlerServiceClient<tonic::transport::Channel>>) {
+    fn set_channel(&self, channel: Option<tonic::transport::Channel>) {
         *self
             .link
-            .client
+            .channel
             .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = client;
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = channel;
     }
 
     /// Closes the child's stdin and gives it the grace to exit; then sends
@@ -457,6 +588,7 @@ impl Supervisor {
                     grpc_code: status.code() as i32,
                 })?
                 .into_inner();
+            check_kind(&self.domain, self.kind, &descriptor)?;
             Ok((channel, descriptor, handshake.socket))
         }
         .await;
@@ -465,7 +597,7 @@ impl Supervisor {
                 child,
                 stdin,
                 stdout: Some(stdout),
-                client: CommandHandlerServiceClient::new(channel),
+                channel,
                 descriptor,
                 socket,
             }),
@@ -485,3 +617,7 @@ mod tests;
 #[cfg(test)]
 #[path = "kernel.test.rs"]
 mod kernel_tests;
+
+#[cfg(test)]
+#[path = "components.test.rs"]
+mod component_tests;

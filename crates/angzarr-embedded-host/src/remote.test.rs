@@ -339,3 +339,75 @@ fn only_unavailability_is_retryable() {
     let stale = CodedError::stale(router_codes::CONFLICT_OVERLAP, []);
     assert!(!is_retryable(&stale));
 }
+
+/// A remote policy's translated refusal fact is a bare payload; anything
+/// more is the policy's bug, refused INTERNAL under the router's keys.
+#[test]
+fn a_translated_fact_is_a_bare_payload() {
+    use angzarr_embedded::next::translated;
+    let payload = Any {
+        type_url: "/test.table.v1.SeatReleased".to_string(),
+        value: vec![1],
+    };
+    let bare = || pb::CommandBook {
+        page: Some(pb::CommandPage {
+            body: Some(pb::command_page::Body::Fact(pb::Fact {
+                payload: Some(payload.clone()),
+            })),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    assert_eq!(translated(bare()), Ok(payload.clone()));
+    let refused = |fact: pb::CommandBook| {
+        let error = translated(fact).expect_err("refused");
+        assert_eq!(error.grpc, GrpcCode::Internal);
+        error.code
+    };
+    let with = |change: &dyn Fn(&mut pb::CommandBook)| {
+        let mut fact = bare();
+        change(&mut fact);
+        refused(fact)
+    };
+    let page = |change: &dyn Fn(&mut pb::CommandPage)| {
+        with(&|fact: &mut pb::CommandBook| change(fact.page.as_mut().unwrap()))
+    };
+    assert_eq!(
+        with(&|f| f.cover = Some(pb::Cover::default())),
+        router_codes::REFUSAL_FACT_ADDRESSED
+    );
+    assert_eq!(
+        with(&|f| f.handling = Some(pb::Handling::default())),
+        router_codes::REFUSAL_FACT_ADDRESSED
+    );
+    assert_eq!(with(&|f| f.page = None), router_codes::REFUSAL_FACT_NO_PAGE);
+    let id = || Some(angzarr_router::pb::Uuid::from_bytes([1; 16]));
+    assert_eq!(
+        page(&|p| p.command_id = id()),
+        router_codes::REFUSAL_FACT_IDENTIFIED
+    );
+    assert_eq!(
+        page(&|p| p.correlation_id = id()),
+        router_codes::REFUSAL_FACT_IDENTIFIED
+    );
+    assert_eq!(
+        page(&|p| p.causation_id = Some(pb::EventRef::default())),
+        router_codes::REFUSAL_FACT_IDENTIFIED
+    );
+    assert_eq!(
+        page(&|p| p.fact_origin = Some(pb::FactOrigin::default())),
+        router_codes::REFUSAL_FACT_IDENTIFIED
+    );
+    assert_eq!(
+        page(&|p| {
+            p.body = Some(pb::command_page::Body::Command(pb::Command {
+                payload: Some(payload.clone()),
+            }))
+        }),
+        router_codes::REFUSAL_FACT_NOT_A_FACT
+    );
+    assert_eq!(
+        page(&|p| p.body = Some(pb::command_page::Body::Fact(pb::Fact { payload: None }))),
+        router_codes::REFUSAL_FACT_NOT_A_FACT
+    );
+}

@@ -426,8 +426,9 @@ the store reads and writes, positions, resume and the edition-not-forked
 refusal.
 
 **A policy's answer is the kernel's to check** (decision 14.42). The
-kernel runs a policy through its `PolicyPort` (angzarr-router's
-`PolicyDispatch`, or one behind another router: `Registry::policy_port`),
+kernel runs a policy through angzarr-router's `PolicyComponent` (a
+`PolicyDispatch`, or one in another process: `Registry::policy_component`,
+given the output domain its descriptor names),
 one triggering event at a time, and holds every command of each reaction
 (`PolicyResponse.reactions`, by triggering page) to four rules
 (`check_reactions`): the policy's one destination

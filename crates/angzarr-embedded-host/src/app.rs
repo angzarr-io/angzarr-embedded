@@ -24,8 +24,8 @@ use crate::error::HostError;
 use crate::host::{ChildExit, Host};
 
 /// Runs the application the config at `config` describes: reads it
-/// (TOML), starts its remote domains ([`Host::start`]), registers them by
-/// domain and calls `register` to register the in-process ones, and opens
+/// (TOML), starts its remote components ([`Host::start`]), registers them by
+/// kind and calls `register` to register the in-process ones, and opens
 /// its store (SQLite, `[store]`). The [`App`] is how the application sends
 /// commands and reads its streams; dropping it stops the children.
 pub fn run(
@@ -78,7 +78,7 @@ pub fn run(
     })
 }
 
-/// A running application: its registry, store, kernel and remote domains.
+/// A running application: its registry, store, kernel and remote components.
 /// Its blocking methods ([`App::handle`], [`App::events`]) run on its own
 /// runtime, so they are called, and the App dropped, outside an async
 /// context; inside one, use [`App::kernel`] and [`App::store`] directly.
@@ -114,7 +114,7 @@ impl App {
         &self.registry
     }
 
-    /// The host of the remote domains.
+    /// The host of the remote components.
     pub fn host(&self) -> &Host {
         &self.host
     }
@@ -140,7 +140,7 @@ impl App {
         Ok(self.block_on(self.store().read(stream, 0, None))?.pages)
     }
 
-    /// Stops the remote domains' children ([`Host::shutdown`]) and closes
+    /// Stops the remote components' children ([`Host::shutdown`]) and closes
     /// the store.
     pub fn shutdown(self) -> Vec<(String, ChildExit)> {
         self.host.shutdown()

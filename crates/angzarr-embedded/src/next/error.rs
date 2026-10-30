@@ -49,7 +49,7 @@ pub enum Failure<R> {
     /// [`Recovery::Retry`]: a retry is answered DUPLICATE.
     Projection {
         committed: Vec<EventBook>,
-        failures: Vec<(&'static str, Report)>,
+        failures: Vec<(String, Report)>,
     },
 }
 
@@ -371,7 +371,7 @@ impl<R: Diagnostic> Diagnostic for Failure<R> {
             Failure::Projection { failures, .. } => {
                 let mut args = vec![("failures", failures.len().into())];
                 if let Some((projector, error)) = failures.first() {
-                    args.push(("projector", (*projector).into()));
+                    args.push(("projector", projector.as_str().into()));
                     args.push(("error", Arg::nested(error)));
                 }
                 args

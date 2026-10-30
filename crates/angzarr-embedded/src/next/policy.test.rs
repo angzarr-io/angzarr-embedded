@@ -75,7 +75,6 @@ fn a_command_carrying_its_triggers_correlation_passes() {
 #[test]
 fn a_translated_fact_that_is_more_than_a_payload_is_the_policys_bug() {
     use super::translated;
-    use crate::next::angzarr_router::pb::OnRefusedResponse;
     use crate::next::v1::{command_page::Body, CommandPage, Fact, FactOrigin, Handling};
     let payload = crate::next::pack(&ledger::Record {
         source_sequence: 0,
@@ -90,20 +89,21 @@ fn a_translated_fact_that_is_more_than_a_payload_is_the_policys_bug() {
             payload: Some(payload.clone()),
         })
     };
-    let answer = |book: CommandBook| OnRefusedResponse { fact: Some(book) };
     let bare = || CommandBook {
         page: Some(page(fact())),
         ..CommandBook::default()
     };
 
-    assert_eq!(
-        translated(&OnRefusedResponse { fact: None }),
-        Ok(None),
-        "no translation"
-    );
-    assert_eq!(translated(&answer(bare())), Ok(Some(payload.clone())));
+    assert_eq!(translated(bare()), Ok(payload.clone()));
 
-    let refused = |book: CommandBook| translated(&answer(book)).err().map(|e| e.code);
+    let refused = |book: CommandBook| {
+        let error = translated(book).err().unwrap();
+        assert_eq!(
+            error.grpc,
+            crate::next::angzarr_router::error::GrpcCode::Internal
+        );
+        Some(error.code)
+    };
     let code = |c: &str| Some(c.to_string());
     let addressed = CommandBook {
         cover: Some(cover_in("account", 1, "what-if")),
@@ -126,12 +126,16 @@ fn a_translated_fact_that_is_more_than_a_payload_is_the_policys_bug() {
         ..CommandBook::default()
     };
     assert_eq!(refused(command), code("REFUSAL_FACT_NOT_A_FACT"));
+    let empty = CommandBook {
+        page: Some(page(Body::Fact(Fact { payload: None }))),
+        ..CommandBook::default()
+    };
+    assert_eq!(refused(empty), code("REFUSAL_FACT_NOT_A_FACT"));
     let identified = |edit: fn(&mut CommandPage)| {
         let mut book = bare();
         edit(book.page.as_mut().unwrap());
         refused(book)
     };
-
     assert_eq!(
         identified(|p| p.command_id = Some(crate::next::toys::command_id(1))),
         code("REFUSAL_FACT_IDENTIFIED")

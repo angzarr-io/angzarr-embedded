@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 use angzarr_proto::v1::{ConflictResolution, EventPage, Snapshot, StateDescriptor};
 use angzarr_router::domain::DomainDispatch;
 use angzarr_router::policy::PolicyDispatch;
-use angzarr_router::router::CommandHandler;
+use angzarr_router::router::{CommandHandler, PolicyComponent, ProjectorHandler};
 
 use angzarr_embedded_diagnostic::{Arg, Diagnostic};
 
@@ -29,7 +29,6 @@ use super::domain::{Domain, State};
 use super::error::{KernelError, UpcastChainError};
 use super::markup::{self, AsyncProjector, Projecting, ProjectionContext};
 use super::payload::{type_name, Payload};
-use super::policy::PolicyPort;
 use super::route;
 use super::stream::Stream;
 use super::upcast::{UpcastPort, Upcaster};
@@ -65,6 +64,22 @@ struct Entry {
     starting: Option<BTreeSet<String>>,
 }
 
+/// A process manager's starting types, by name, from its descriptor:
+/// `None` for any other kind. A listed type URL counts by the name it ends
+/// in.
+fn starting_types(
+    kind: angzarr_router::pb::ComponentKind,
+    descriptor: &angzarr_router::pb::ComponentDescriptor,
+) -> Option<BTreeSet<String>> {
+    (kind == angzarr_router::pb::ComponentKind::ProcessManager).then(|| {
+        descriptor
+            .starting_types
+            .iter()
+            .map(|t| type_name(t).to_string())
+            .collect()
+    })
+}
+
 /// A typed [`Domain`]'s parts, erased.
 struct Typed {
     /// The `Arc<Rulebook<D::Rules>>`, boxed.
@@ -85,15 +100,28 @@ type Factory<S> = Arc<dyn Fn() -> S + Send + Sync>;
 /// A marked-up projector, erased, its one instance held here: out of the
 /// lock while it runs.
 pub(crate) struct ProjectorEntry {
-    pub(crate) name: &'static str,
-    pub(crate) source: &'static str,
-    pub(crate) instance: Mutex<Option<Box<dyn ErasedProjector>>>,
+    pub(crate) name: String,
+    pub(crate) source: String,
+    pub(crate) instance: ProjectorInstance,
+}
+
+/// What a registered projector runs.
+pub(crate) enum ProjectorInstance {
+    /// A marked-up projector's ONE instance, out of the lock while it runs.
+    Marked(Mutex<Option<Box<dyn ErasedProjector>>>),
+    /// A projector written as angzarr-router's `ProjectorHandler` (one in
+    /// another process, behind its `ProjectorService`), handed each
+    /// committed book of its source whole.
+    Handler(Box<dyn ProjectorHandler>),
 }
 
 /// A registered policy, as angzarr-router dispatches it, held in the
 /// registry's one list in registration order.
 pub(crate) struct PolicyEntry {
-    pub(crate) dispatch: Box<dyn PolicyPort>,
+    pub(crate) dispatch: Box<dyn PolicyComponent>,
+    /// The one domain its commands may go to (`ComponentDescriptor.output_domain`):
+    /// what the kernel holds them to (decision 14.42).
+    pub(crate) output_domain: String,
     /// Whether a refusal of its command is answered by its refusal fact
     /// (the router's OnRefused); a policy that does not has its refused
     /// command fail the step.
@@ -242,15 +270,6 @@ impl Diagnostic for Misconfigured {
     }
 }
 
-/// The starting types `handler`'s descriptor lists: none when it gives no
-/// descriptor.
-fn starting_types(handler: &dyn CommandHandler) -> BTreeSet<String> {
-    handler
-        .component_descriptor()
-        .map(|descriptor| descriptor.starting_types.into_iter().collect())
-        .unwrap_or_default()
-}
-
 /// Every domain an application runs, by name.
 #[derive(Default)]
 pub struct Registry {
@@ -373,15 +392,18 @@ impl Registry {
             Arc::clone(&fresh),
             process_manager,
         );
-        let handler = handlers(table);
-        let starting = process_manager.then(|| starting_types(&handler));
+        let handler: Box<dyn CommandHandler> = Box::new(handlers(table));
+        let starting = handler
+            .component_descriptor()
+            .ok()
+            .and_then(|descriptor| starting_types(handler.kind(), &descriptor));
         let entry = Entry {
             state,
             supported,
             component: D::CONFLICT_RESOLUTION,
             by_command,
             rules_version: rules.current().0.to_string(),
-            handler: Box::new(handler),
+            handler,
             typed: Some(Typed {
                 rules: Box::new(rules),
                 upcaster,
@@ -429,6 +451,7 @@ impl Registry {
                 },
             }
         })?;
+        let starting = starting_types(handler.kind(), &descriptor);
         let state = descriptor
             .state
             .ok_or_else(|| Misconfigured::BadStateDescriptor {
@@ -436,7 +459,6 @@ impl Registry {
             })?;
         let supported = supported(&name, &state)?;
         let process_manager = handler.kind() == angzarr_router::pb::ComponentKind::ProcessManager;
-        let starting = process_manager.then(|| descriptor.starting_types.iter().cloned().collect());
         self.domains.insert(
             name,
             Entry {
@@ -541,7 +563,9 @@ impl Registry {
     /// name) PANICS at startup.
     pub fn policy<P: super::Policy>(&mut self, policy: P) -> &mut Self {
         let answers_refusals = P::ANSWERS_REFUSALS;
-        self.push_policy(Box::new(super::policy::dispatch(policy)), answers_refusals)
+        let dispatch = super::policy::dispatch(policy);
+        let output_domain = dispatch.output_domain().to_string();
+        self.push_policy(Box::new(dispatch), output_domain, answers_refusals)
     }
 
     /// Register a policy built as angzarr-router's dispatch table, written
@@ -550,18 +574,31 @@ impl Registry {
     /// are answered by its OnRefused. Registering one twice (by name)
     /// PANICS at startup.
     pub fn policy_dispatch(&mut self, dispatch: PolicyDispatch) -> &mut Self {
-        self.push_policy(Box::new(dispatch), true)
+        let output_domain = dispatch.output_domain().to_string();
+        self.push_policy(Box::new(dispatch), output_domain, true)
     }
 
-    /// Register `port`, a policy behind any router (a remote one, say), in
-    /// the ONE list beside every other policy: its source its input domain
-    /// and its target its output domain. Its refused commands are answered
-    /// by its OnRefused. Registering one twice (by name) PANICS at startup.
-    pub fn policy_port(&mut self, port: impl PolicyPort + 'static) -> &mut Self {
-        self.push_policy(Box::new(port), true)
+    /// Register a policy written as angzarr-router's `PolicyComponent`: a
+    /// policy in another process, behind its `PolicyService` (the host's
+    /// remote policy), or any other. In the ONE list, beside every other
+    /// policy, its source its input domain and its commands held to
+    /// `output_domain` (its descriptor's); its refused commands are
+    /// answered by its OnRefused. Registering one twice (by name) PANICS
+    /// at startup.
+    pub fn policy_component(
+        &mut self,
+        policy: impl PolicyComponent + 'static,
+        output_domain: &str,
+    ) -> &mut Self {
+        self.push_policy(Box::new(policy), output_domain.to_string(), true)
     }
 
-    fn push_policy(&mut self, dispatch: Box<dyn PolicyPort>, answers_refusals: bool) -> &mut Self {
+    fn push_policy(
+        &mut self,
+        dispatch: Box<dyn PolicyComponent>,
+        output_domain: String,
+        answers_refusals: bool,
+    ) -> &mut Self {
         if self
             .policies
             .iter()
@@ -571,6 +608,7 @@ impl Registry {
         }
         self.policies.push(PolicyEntry {
             dispatch,
+            output_domain,
             answers_refusals,
         });
         self
@@ -608,13 +646,49 @@ impl Registry {
     /// ([`Failure::Projection`](super::Failure::Projection); the events stay committed), and does not
     /// stop the other projectors. Registering one twice PANICS at startup.
     pub fn projector<P: AsyncProjector>(&mut self, projector: P) -> &mut Self {
-        if self.projectors.iter().any(|entry| entry.name == P::NAME) {
-            panic!("projector \"{}\" is registered already", P::NAME);
+        self.push_projector(
+            P::NAME,
+            <P::Source as Domain>::NAME,
+            ProjectorInstance::Marked(Mutex::new(Some(Box::new(projector)))),
+        )
+    }
+
+    /// Register `projector`, written as angzarr-router's
+    /// `ProjectorHandler` (a projector in another process, behind its
+    /// `ProjectorService`: the host's remote projector), projecting
+    /// `source`'s events. The kernel runs it as it runs a marked-up one,
+    /// after each commit that records its source's events, handing it each
+    /// committed book of them; its failures follow their class (decision
+    /// 14.37, 14.41): a retryable one and an ABORTED one are run again
+    /// under the kernel's [`OnRetryable`](super::OnRetryable), then
+    /// dead-lettered, and any other is dead-lettered at once. Registering
+    /// one twice (by name) PANICS at startup.
+    pub fn projector_handler(
+        &mut self,
+        source: &str,
+        projector: impl ProjectorHandler + 'static,
+    ) -> &mut Self {
+        let name = projector.name().to_string();
+        self.push_projector(
+            &name,
+            source,
+            ProjectorInstance::Handler(Box::new(projector)),
+        )
+    }
+
+    fn push_projector(
+        &mut self,
+        name: &str,
+        source: &str,
+        instance: ProjectorInstance,
+    ) -> &mut Self {
+        if self.projectors.iter().any(|entry| entry.name == name) {
+            panic!("projector \"{name}\" is registered already");
         }
         self.projectors.push(ProjectorEntry {
-            name: P::NAME,
-            source: <P::Source as Domain>::NAME,
-            instance: Mutex::new(Some(Box::new(projector))),
+            name: name.to_string(),
+            source: source.to_string(),
+            instance,
         });
         self
     }

@@ -55,66 +55,24 @@ use super::registry::Registry;
 
 // ---------------------------------------------------------------- policies
 
-/// angzarr-router's table as the kernel runs it. It still checks its own
-/// answer (its destination, edition, root and correlation), which the
-/// kernel's [`check_reactions`] makes redundant.
-impl PolicyPort for PolicyDispatch {
-    fn name(&self) -> &str {
-        PolicyDispatch::name(self)
-    }
-
-    fn input_domain(&self) -> &str {
-        PolicyDispatch::input_domain(self)
-    }
-
-    fn output_domain(&self) -> &str {
-        PolicyDispatch::output_domain(self)
-    }
-
-    fn dispatch(&self, source: &EventBook) -> Result<Vec<PolicyReaction>, CodedError> {
-        PolicyDispatch::dispatch(self, source).map(|response| response.reactions)
-    }
-
-    fn dispatch_refusal(
-        &self,
-        refusal: &markup::v1::Refusal,
-        ctx: &CommandContext,
-    ) -> Result<Option<Any>, CodedError> {
-        // Its pass-through is the kernel's to build: answered as none.
-        let refused = <markup::v1::CommandRefused as prost::Name>::full_name();
-        Ok(
-            translated(&PolicyDispatch::dispatch_refusal(self, refusal, ctx)?)?
-                .filter(|payload| type_name(&payload.type_url) != refused),
-        )
-    }
-}
-
-/// A policy's `OnRefused` answer on the wire, as the kernel takes it
-/// (decision 14.42): no fact is no translation (`None`); a translated fact
-/// is its payload alone, and one that is more than a payload is the
-/// policy's bug, refused INTERNAL: one that sets its own cover or handling
-/// (`REFUSAL_FACT_ADDRESSED`), with no page (`REFUSAL_FACT_NO_PAGE`), whose
-/// page is not a fact (`REFUSAL_FACT_NOT_A_FACT`), or that sets its own
-/// identity (`REFUSAL_FACT_IDENTIFIED`). The kernel addresses and
-/// identifies every refusal fact itself.
-pub(crate) fn translated(
-    answer: &angzarr_router::pb::OnRefusedResponse,
-) -> Result<Option<Any>, CodedError> {
+/// A policy's translated refusal fact on the wire (`OnRefusedResponse.fact`,
+/// set), as the kernel takes it (decision 14.42): its payload alone. A fact
+/// that is more than a payload is the policy's bug, refused INTERNAL: one
+/// that sets its own cover or handling (`REFUSAL_FACT_ADDRESSED`), with no
+/// page (`REFUSAL_FACT_NO_PAGE`), that sets its own identity
+/// (`REFUSAL_FACT_IDENTIFIED`), or whose page is not a fact with a payload
+/// (`REFUSAL_FACT_NOT_A_FACT`). An unset fact is no translation, and the
+/// kernel passes the refusal through. The kernel addresses and identifies
+/// every refusal fact itself.
+pub fn translated(fact: CommandBook) -> Result<Any, CodedError> {
     use angzarr_router::error::codes;
     let refused = |code: &str| super::route::internal(code, []);
-    let Some(fact) = answer.fact.as_ref() else {
-        return Ok(None);
-    };
     if fact.cover.is_some() || fact.handling.is_some() {
         return Err(refused(codes::REFUSAL_FACT_ADDRESSED));
     }
     let page = fact
         .page
-        .as_ref()
         .ok_or_else(|| refused(codes::REFUSAL_FACT_NO_PAGE))?;
-    let Some(command_page::Body::Fact(body)) = &page.body else {
-        return Err(refused(codes::REFUSAL_FACT_NOT_A_FACT));
-    };
     if page.command_id.is_some()
         || page.correlation_id.is_some()
         || page.causation_id.is_some()
@@ -122,7 +80,12 @@ pub(crate) fn translated(
     {
         return Err(refused(codes::REFUSAL_FACT_IDENTIFIED));
     }
-    Ok(body.payload.clone())
+    match page.body {
+        Some(command_page::Body::Fact(angzarr_proto::v1::Fact {
+            payload: Some(payload),
+        })) => Ok(payload),
+        _ => Err(refused(codes::REFUSAL_FACT_NOT_A_FACT)),
+    }
 }
 
 /// A policy's `reactions` to `source`, checked and stamped by the kernel
@@ -249,36 +212,6 @@ pub(crate) fn check_reaction(
         }
     }
     Ok(commands)
-}
-
-/// A policy as the kernel runs it, whatever its router: decision 14.41's
-/// `PolicyComponent`, the kernel's own until angzarr-router's lands. The
-/// kernel hands it one triggering event at a time, and owns everything
-/// generic about its answer (decision 14.42): it checks every command
-/// against the policy's one destination, the trigger's edition (stamping an
-/// unset one), a named root and the trigger's correlation, and it builds
-/// and addresses every refusal fact. angzarr-router's [`PolicyDispatch`] is
-/// one; a remote policy is another.
-pub trait PolicyPort: Send + Sync {
-    /// Its name: its commands' component and its position's handler.
-    fn name(&self) -> &str;
-    /// The one domain whose events it handles.
-    fn input_domain(&self) -> &str;
-    /// The one domain its commands may go to.
-    fn output_domain(&self) -> &str;
-    /// `PolicyService.Handle` for `source`: its reactions
-    /// (`PolicyResponse.reactions`), one per page it handled, each the
-    /// commands business code returned for that triggering page, unchecked.
-    fn dispatch(&self, source: &EventBook) -> Result<Vec<PolicyReaction>, CodedError>;
-    /// `PolicyService.OnRefused` for `refusal`, its translating callback
-    /// handed `ctx`, the refused command's context: the translated fact's
-    /// payload, or `None` for no translation (the kernel then passes the
-    /// refusal through as a `CommandRefused`).
-    fn dispatch_refusal(
-        &self,
-        refusal: &markup::v1::Refusal,
-        ctx: &CommandContext,
-    ) -> Result<Option<Any>, CodedError>;
 }
 
 /// Event → commands: one source domain, one target domain, and the

@@ -3,10 +3,11 @@ use std::path::PathBuf;
 
 use super::*;
 
-fn domain(name: &str, language: &str) -> DomainConfig {
-    DomainConfig {
+fn domain(name: &str, language: &str) -> ComponentConfig {
+    ComponentConfig {
         name: name.to_string(),
         language: language.to_string(),
+        kind: Default::default(),
         launch: None,
         entry: Vec::new(),
         dir: None,
@@ -18,15 +19,16 @@ fn strings(words: &[&str]) -> Vec<String> {
     words.iter().map(|w| w.to_string()).collect()
 }
 
-/// The CLI writes `[[domain]]` tables (the `domain` key holds the list);
+/// The CLI writes `[[component]]` tables (the `component` key holds the
+/// list);
 /// every key but `name` and `language` may be left out, and
 /// `[supervision]` keeps the defaults of the keys it leaves out. Read here
 /// through serde_json, the serde format in the graph: the shape is serde's,
 /// whatever the format.
 #[test]
-fn the_domain_tables_deserialize() {
+fn the_component_tables_deserialize() {
     let text = r#"{
-        "domain": [
+        "component": [
             { "name": "table", "language": "rust" },
             {
                 "name": "player",
@@ -49,7 +51,7 @@ fn the_domain_tables_deserialize() {
     assert_eq!(
         config,
         HostConfig {
-            domains: vec![domain("table", "rust"), player, dealer],
+            components: vec![domain("table", "rust"), player, dealer],
             supervision: Supervision {
                 handshake_timeout_ms: 10_000,
                 ..Supervision::default()
@@ -66,17 +68,23 @@ fn the_domain_tables_deserialize() {
 #[test]
 fn the_documented_toml_reads() {
     let text = r#"
-        [[domain]]
+        [[component]]
         name = "table"
         language = "rust"
 
-        [[domain]]
+        [[component]]
         name = "player"
         language = "python"
         entry = ["-m", "player.serve"]
         dir = "domains/player"
 
-        [[domain]]
+        [[component]]
+        name = "table-player"
+        kind = "policy"
+        language = "python"
+        entry = ["-m", "table_player.serve"]
+
+        [[component]]
         name = "dealer"
         language = "go"
         launch = ["./bin/dealer"]
@@ -98,8 +106,18 @@ fn the_documented_toml_reads() {
         jitter = 0.2
     "#;
     let config: HostConfig = toml::from_str(text).unwrap();
-    assert_eq!(config.domains.len(), 3);
-    assert_eq!(config.domains[1].placement(), {
+    assert_eq!(config.components.len(), 4);
+    let kinds: Vec<_> = config.components.iter().map(|c| c.kind).collect();
+    assert_eq!(
+        kinds,
+        [
+            ComponentKindConfig::Domain,
+            ComponentKindConfig::Domain,
+            ComponentKindConfig::Policy,
+            ComponentKindConfig::Domain
+        ]
+    );
+    assert_eq!(config.components[1].placement(), {
         let mut player = domain("player", "python");
         player.entry = strings(&["-m", "player.serve"]);
         player.dir = Some(PathBuf::from("domains/player"));
@@ -112,7 +130,7 @@ fn the_documented_toml_reads() {
     assert_eq!(config.retry, RetryConfig::default());
     let memory: HostConfig = toml::from_str("[store]\nin_memory = true\n").unwrap();
     assert!(memory.store.in_memory);
-    assert!(memory.domains.is_empty());
+    assert!(memory.components.is_empty());
 }
 
 /// A misspelt key is refused, not ignored: `lanuch` would otherwise run the
@@ -120,12 +138,16 @@ fn the_documented_toml_reads() {
 #[test]
 fn an_unknown_key_is_refused() {
     let text = r#"{
-        "domain": [
+        "component": [
             { "name": "player", "language": "python", "lanuch": ["python3", "serve.py"] }
         ]
     }"#;
     assert!(serde_json::from_str::<HostConfig>(text).is_err());
     assert!(serde_json::from_str::<HostConfig>(r#"{ "domains": [] }"#).is_err());
+    assert!(
+        serde_json::from_str::<HostConfig>(r#"{ "domain": [] }"#).is_err(),
+        "the old [[domain]] tables are refused, not read as none"
+    );
 }
 
 /// `[policy] on_bug` is what a policy step that hits a bug does with the
@@ -301,4 +323,36 @@ fn an_empty_launch_is_refused() {
             domain: "player".to_string(),
         })
     );
+}
+
+/// A `[[component]]`'s `kind` names the service its child serves:
+/// `"domain"` by default, `"policy"`, `"projector"` or `"upcaster"`;
+/// anything else is refused.
+#[test]
+fn a_components_kind_is_domain_policy_projector_or_upcaster() {
+    let kind = |text: &str| {
+        toml::from_str::<HostConfig>(&format!(
+            "[[component]]\nname = \"x\"\nlanguage = \"python\"\n{text}"
+        ))
+        .map(|c| c.components[0].kind)
+    };
+    assert_eq!(kind("").unwrap(), ComponentKindConfig::Domain);
+    assert_eq!(
+        kind("kind = \"domain\"").unwrap(),
+        ComponentKindConfig::Domain
+    );
+    assert_eq!(
+        kind("kind = \"policy\"").unwrap(),
+        ComponentKindConfig::Policy
+    );
+    assert_eq!(
+        kind("kind = \"projector\"").unwrap(),
+        ComponentKindConfig::Projector
+    );
+    assert_eq!(
+        kind("kind = \"upcaster\"").unwrap(),
+        ComponentKindConfig::Upcaster
+    );
+    assert!(kind("kind = \"saga\"").is_err());
+    assert!(kind("kind = \"Policy\"").is_err());
 }

@@ -1804,27 +1804,26 @@ struct Unchecked {
     answer: fn(&crate::next::v1::EventBook) -> Vec<CommandBook>,
 }
 
-impl crate::next::PolicyPort for Unchecked {
+impl crate::next::angzarr_router::router::PolicyComponent for Unchecked {
     fn name(&self) -> &str {
         "unchecked"
     }
     fn input_domain(&self) -> &str {
         "account"
     }
-    fn output_domain(&self) -> &str {
-        "ledger"
-    }
     fn dispatch(
         &self,
         source: &crate::next::v1::EventBook,
     ) -> Result<
-        Vec<crate::next::angzarr_router::pb::PolicyReaction>,
+        crate::next::angzarr_router::pb::PolicyResponse,
         crate::next::angzarr_router::error::CodedError,
     > {
-        Ok(vec![crate::next::angzarr_router::pb::PolicyReaction {
-            trigger_sequence: source.pages[0].sequence,
-            commands: (self.answer)(source),
-        }])
+        Ok(crate::next::angzarr_router::pb::PolicyResponse {
+            reactions: vec![crate::next::angzarr_router::pb::PolicyReaction {
+                trigger_sequence: source.pages[0].sequence,
+                commands: (self.answer)(source),
+            }],
+        })
     }
     fn dispatch_refusal(
         &self,
@@ -1854,17 +1853,20 @@ fn record_for(cover: crate::next::v1::Cover) -> CommandBook {
 #[test]
 fn a_policy_command_outside_its_destination_is_refused_by_the_kernel() {
     let mut registry = registry();
-    registry.policy_port(Unchecked {
-        answer: |_| {
-            vec![
-                record_for(ledger_cover()),
-                record_for(crate::next::v1::Cover {
-                    domain: "shelf".to_string(),
-                    ..ledger_cover()
-                }),
-            ]
+    registry.policy_component(
+        Unchecked {
+            answer: |_| {
+                vec![
+                    record_for(ledger_cover()),
+                    record_for(crate::next::v1::Cover {
+                        domain: "shelf".to_string(),
+                        ..ledger_cover()
+                    }),
+                ]
+            },
         },
-    });
+        "ledger",
+    );
     let log = MemoryDeadLetters::new();
     let store = MemoryStore::new();
     let failure = Kernel::new(&registry, &log)
@@ -1904,7 +1906,7 @@ fn unchecked_refusal(
     answer: fn(&crate::next::v1::EventBook) -> Vec<CommandBook>,
 ) -> crate::next::angzarr_router::error::CodedError {
     let mut registry = registry();
-    registry.policy_port(Unchecked { answer });
+    registry.policy_component(Unchecked { answer }, "ledger");
     let log = MemoryDeadLetters::new();
     let store = MemoryStore::new();
     let failure = Kernel::new(&registry, &log)
@@ -1986,17 +1988,20 @@ fn a_policys_commands_are_held_to_their_trigger_by_the_kernel() {
 #[test]
 fn a_policys_commands_in_their_triggers_edition_and_correlation_are_delivered() {
     let mut registry = registry();
-    registry.policy_port(Unchecked {
-        answer: |source| {
-            let trigger = source.pages[0]
-                .meta
-                .as_ref()
-                .and_then(|m| m.correlation_id.clone());
-            let mut named = record_for(ledger_cover());
-            named.page.as_mut().unwrap().correlation_id = trigger;
-            vec![record_for(ledger_cover()), named]
+    registry.policy_component(
+        Unchecked {
+            answer: |source| {
+                let trigger = source.pages[0]
+                    .meta
+                    .as_ref()
+                    .and_then(|m| m.correlation_id.clone());
+                let mut named = record_for(ledger_cover());
+                named.page.as_mut().unwrap().correlation_id = trigger;
+                vec![record_for(ledger_cover()), named]
+            },
         },
-    });
+        "ledger",
+    );
     let log = MemoryDeadLetters::new();
     let store = MemoryStore::new();
     Kernel::new(&registry, &log)
@@ -2088,28 +2093,31 @@ fn no_translation_makes_the_kernel_build_the_pass_through_fact() {
         crate::next::Upcaster::new("ledger-upcaster", "ledger"),
     )
     .unwrap();
-    registry.policy_port(Unchecked {
-        answer: |source| {
-            let deposited = source.pages[0]
-                .payload
-                .as_ref()
-                .is_some_and(|p| p.type_url.ends_with("Deposited"));
-            match deposited {
-                true => {
-                    let mut book = record_for(ledger_cover());
-                    book.page.as_mut().unwrap().body =
-                        Some(Body::Command(crate::next::v1::Command {
-                            payload: Some(crate::next::pack(&ledger::Record {
-                                source_sequence: 1,
-                                cents: LEDGER_LIMIT + 1,
-                            })),
-                        }));
-                    vec![book]
+    registry.policy_component(
+        Unchecked {
+            answer: |source| {
+                let deposited = source.pages[0]
+                    .payload
+                    .as_ref()
+                    .is_some_and(|p| p.type_url.ends_with("Deposited"));
+                match deposited {
+                    true => {
+                        let mut book = record_for(ledger_cover());
+                        book.page.as_mut().unwrap().body =
+                            Some(Body::Command(crate::next::v1::Command {
+                                payload: Some(crate::next::pack(&ledger::Record {
+                                    source_sequence: 1,
+                                    cents: LEDGER_LIMIT + 1,
+                                })),
+                            }));
+                        vec![book]
+                    }
+                    false => Vec::new(),
                 }
-                false => Vec::new(),
-            }
+            },
         },
-    });
+        "ledger",
+    );
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry, &log).on_retryable(crate::next::toys::no_retries());
     let store = MemoryStore::new();
@@ -2160,4 +2168,59 @@ fn no_translation_makes_the_kernel_build_the_pass_through_fact() {
         page.fact_origin.as_ref().map(|o| o.external_id.clone()),
         Some(refused_id.to_string())
     );
+}
+
+/// The kernel's pass-through refusal fact (decision 14.42): the refused
+/// command, its typed refusal still packed (none for an untyped
+/// rejection), and the triggering event as the trigger.
+#[test]
+fn a_refusal_passes_through_as_command_refused() {
+    use crate::next::v1::{refusal_response, CommandRefused, Cover, Diagnostic, RefusalResponse};
+    use prost::Message;
+    let trigger = Cover {
+        domain: "table".to_string(),
+        ..Cover::default()
+    };
+    let command = CommandBook {
+        cover: Some(Cover {
+            domain: "wallet".to_string(),
+            ..Cover::default()
+        }),
+        ..CommandBook::default()
+    };
+    let typed = prost_types::Any {
+        type_url: "/test.wallet.v1.Insufficient".to_string(),
+        value: vec![8, 1],
+    };
+    let refusal = |reason| crate::next::markup::v1::Refusal {
+        event: Some(crate::next::v1::EventBook {
+            cover: Some(trigger.clone()),
+            pages: vec![crate::next::v1::EventPage {
+                sequence: 4,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }),
+        command: Some(command.clone()),
+        response: Some(RefusalResponse { reason }),
+    };
+    let fact = super::passed_through(&refusal(Some(refusal_response::Reason::Refusal(
+        typed.clone(),
+    ))));
+    assert_eq!(fact.type_url, "/io.angzarr.v1.CommandRefused");
+    let decoded = CommandRefused::decode(fact.value.as_slice()).unwrap();
+    assert_eq!(decoded.command, Some(command.clone()));
+    assert_eq!(decoded.refusal, Some(typed));
+    assert_eq!(
+        decoded.trigger,
+        Some(EventRef {
+            stream: Some(trigger.clone()),
+            sequence: 4,
+        })
+    );
+    let untyped = super::passed_through(&refusal(Some(refusal_response::Reason::Diagnostic(
+        Diagnostic::default(),
+    ))));
+    let decoded = CommandRefused::decode(untyped.value.as_slice()).unwrap();
+    assert_eq!(decoded.refusal, None, "an untyped rejection packs none");
 }
