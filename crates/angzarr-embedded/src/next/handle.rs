@@ -54,7 +54,6 @@ use angzarr_proto::v1::{
 
 use angzarr_proto::v1::angzarr_dead_letter::Payload;
 use angzarr_router::error::codes;
-use angzarr_router::policy::address_refusal_fact;
 
 use super::check::{check, check_refusal, Checked, Identified, Sampled};
 use super::coordinator::{
@@ -1060,8 +1059,10 @@ impl<'k> Run<'k> {
     }
 
     /// `delivered`'s refusal fact, the policy's OnRefused answer to
-    /// `refusal`, its translating callback handed `ctx`, the context
-    /// `delivered` was handed at its target, addressed by the router, as a
+    /// `refusal` (its translating callback handed `ctx`, the context
+    /// `delivered` was handed at its target), or with no translation the
+    /// pass-through `CommandRefused` the kernel builds, addressed by the
+    /// kernel (decision 14.42), as a
     /// step of its own in the stream of the triggering event, with the
     /// refused command's id and correlation. A refusal its source has no handler for is
     /// dead-lettered, and writes only `positions`; one whose handler fails
@@ -1097,24 +1098,17 @@ impl<'k> Run<'k> {
                 return Err(StepError::PolicyFailed(failure));
             }
         };
-        let answer = angzarr_router::pb::OnRefusedResponse {
-            fact: answer.map(|payload| CommandBook {
-                page: Some(CommandPage {
-                    body: Some(v1::command_page::Body::Fact(v1::Fact {
-                        payload: Some(payload),
-                    })),
-                    ..CommandPage::default()
-                }),
-                ..CommandBook::default()
-            }),
-        };
-        let addressed = address_refusal_fact(refusal, &answer).map_err(kernel)?;
+        // No translation: the pass-through `CommandRefused`, the kernel's
+        // to build (decision 14.42). Either is addressed to the exact stream
+        // of the triggering event, under the refused command's identity.
+        let payload = answer.unwrap_or_else(|| markup::__pass_through(refusal));
         let trigger = delivered.causation_id().cloned().unwrap_or_default();
-        let page = addressed.page.unwrap_or_default();
         let book = CommandBook {
-            cover: addressed.cover,
+            cover: refusal.event.as_ref().and_then(|event| event.cover.clone()),
             page: Some(CommandPage {
-                body: page.body,
+                body: Some(v1::command_page::Body::Fact(v1::Fact {
+                    payload: Some(payload),
+                })),
                 fact_origin: Some(FactOrigin {
                     external_id: delivered.command_id().to_string(),
                     description: format!(

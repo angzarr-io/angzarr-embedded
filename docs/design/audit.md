@@ -648,7 +648,11 @@ kernel.resume(&store, &sampled, &mut projections).await?;                       
   to the stream of the triggering event as a fact, a step of its own,
   whose id is the refused command's and whose cause the trigger; a refusal
   its source has no handler for is dead-lettered. The target recorded
-  nothing.
+  nothing. The kernel builds and addresses every refusal fact (decision
+  14.42): the policy answers a translated payload, or none, and with none
+  the kernel passes the refusal through as angzarr's `CommandRefused`. A
+  translated fact on the wire that is more than a payload (its own cover,
+  handling or identity, no page, not a fact) is the policy's bug.
 - **Resumed by position.** A policy's position on a source stream is the
   next sequence it has yet to handle, in angzarr-ports' `PositionStore`.
   `Kernel::resume` runs, for every stream of every policy's source, each

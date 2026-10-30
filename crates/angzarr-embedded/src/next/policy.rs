@@ -81,7 +81,12 @@ impl PolicyPort for PolicyDispatch {
         refusal: &markup::v1::Refusal,
         ctx: &CommandContext,
     ) -> Result<Option<Any>, CodedError> {
-        translated(&PolicyDispatch::dispatch_refusal(self, refusal, ctx)?)
+        // Its pass-through is the kernel's to build: answered as none.
+        let refused = <markup::v1::CommandRefused as prost::Name>::full_name();
+        Ok(
+            translated(&PolicyDispatch::dispatch_refusal(self, refusal, ctx)?)?
+                .filter(|payload| type_name(&payload.type_url) != refused),
+        )
     }
 }
 
@@ -96,14 +101,29 @@ impl PolicyPort for PolicyDispatch {
 pub(crate) fn translated(
     answer: &angzarr_router::pb::OnRefusedResponse,
 ) -> Result<Option<Any>, CodedError> {
-    Ok(answer
-        .fact
+    use angzarr_router::error::codes;
+    let refused = |code: &str| super::route::internal(code, []);
+    let Some(fact) = answer.fact.as_ref() else {
+        return Ok(None);
+    };
+    if fact.cover.is_some() || fact.handling.is_some() {
+        return Err(refused(codes::REFUSAL_FACT_ADDRESSED));
+    }
+    let page = fact
+        .page
         .as_ref()
-        .and_then(|fact| fact.page.as_ref())
-        .and_then(|page| match &page.body {
-            Some(command_page::Body::Fact(fact)) => fact.payload.clone(),
-            _ => None,
-        }))
+        .ok_or_else(|| refused(codes::REFUSAL_FACT_NO_PAGE))?;
+    let Some(command_page::Body::Fact(body)) = &page.body else {
+        return Err(refused(codes::REFUSAL_FACT_NOT_A_FACT));
+    };
+    if page.command_id.is_some()
+        || page.correlation_id.is_some()
+        || page.causation_id.is_some()
+        || page.fact_origin.is_some()
+    {
+        return Err(refused(codes::REFUSAL_FACT_IDENTIFIED));
+    }
+    Ok(body.payload.clone())
 }
 
 /// One triggering event's commands, as a policy answered them, checked and
