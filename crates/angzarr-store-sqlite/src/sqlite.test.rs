@@ -41,11 +41,18 @@ use crate::{Damage, Integrity};
 /// it drops after them.
 fn database() -> Database {
     static RUN: AtomicUsize = AtomicUsize::new(0);
-    Database(std::env::temp_dir().join(format!(
-        "angzarr-store-sqlite-test-{}-{}.db",
-        std::process::id(),
-        RUN.fetch_add(1, Ordering::Relaxed)
-    )))
+    database_in(&std::env::temp_dir(), || {
+        format!(
+            "angzarr-store-sqlite-test-{}-{}",
+            std::process::id(),
+            RUN.fetch_add(1, Ordering::Relaxed)
+        )
+    })
+}
+
+/// A database path in `root`, named from `name`.
+fn database_in(root: &Path, mut name: impl FnMut() -> String) -> Database {
+    Database(root.join(format!("{}.db", name())))
 }
 
 /// A database file's path, removed on drop.
@@ -107,6 +114,25 @@ fn a_directory_made_at_a_database_path_is_gone_once_dropped() {
     let path = dir.to_path_buf();
     drop(dir);
     assert!(!path.exists(), "{} was left behind", path.display());
+}
+
+/// A database left where this test's would be, by a run before the
+/// guards removed theirs, or one killed before its guard dropped, and in
+/// WAL mode: the name it was made under comes round again (a pid reused,
+/// a counter restarted in every process), and the helper still gives a
+/// path at which nothing is, so a file opened there starts in its rollback
+/// journal.
+#[tokio::test]
+async fn a_database_path_never_lands_on_a_leftover() {
+    let root = database();
+    std::fs::create_dir(&root).unwrap();
+    let leftover = database_in(&root, || "taken".to_string());
+    drop(SqliteStore::open(&leftover).await.unwrap());
+    assert_eq!(journal_mode(&leftover).await, "wal");
+    std::mem::forget(leftover);
+    let mut names = ["taken", "free"].into_iter().map(str::to_string);
+    let path = database_in(&root, || names.next().unwrap());
+    migrated_in_rollback_mode(&path).await;
 }
 
 /// The `tasks` stream `n`, on the main timeline.

@@ -225,11 +225,18 @@ async fn count(store: &SqliteStore, registry: &Registry, stream: &Cover) -> i64 
 /// it, it drops after them.
 fn database() -> Database {
     static RUN: AtomicUsize = AtomicUsize::new(0);
-    Database(std::env::temp_dir().join(format!(
-        "angzarr-embedded-kernel-on-sqlite-{}-{}.db",
-        std::process::id(),
-        RUN.fetch_add(1, Ordering::Relaxed)
-    )))
+    database_in(&std::env::temp_dir(), || {
+        format!(
+            "angzarr-embedded-kernel-on-sqlite-{}-{}",
+            std::process::id(),
+            RUN.fetch_add(1, Ordering::Relaxed)
+        )
+    })
+}
+
+/// A database path in `root`, named from `name`.
+fn database_in(root: &Path, mut name: impl FnMut() -> String) -> Database {
+    Database(root.join(format!("{}.db", name())))
 }
 
 /// A database file's path, the file and its WAL files removed on drop.
@@ -271,6 +278,30 @@ fn a_database_and_its_wal_files_are_gone_once_dropped() {
     for file in &files {
         assert!(!file.exists(), "{} was left behind", file.display());
     }
+}
+
+/// A database left where this test's would be, by a run before the
+/// guards removed theirs, or one killed before its guard dropped, holding
+/// an account: the name it was made under comes round again (a pid
+/// reused, a counter restarted in every process), and the helper still
+/// gives a path at which nothing is, so a store opened there holds
+/// nothing.
+#[tokio::test]
+async fn a_database_path_never_lands_on_a_leftover() {
+    let root = database();
+    std::fs::create_dir(&*root).unwrap();
+    let leftover = database_in(&root, || "taken".to_string());
+    {
+        let store = SqliteStore::open(&leftover).await.unwrap();
+        handle::<toys::Account>(&store, &toys::registry(), open_account())
+            .await
+            .unwrap();
+    }
+    std::mem::forget(leftover);
+    let mut names = ["taken", "free"].into_iter().map(str::to_string);
+    let path = database_in(&root, || names.next().unwrap());
+    let store = SqliteStore::open(&path).await.unwrap();
+    assert_eq!(pages(&store, &cover("account", 1)).await.len(), 0);
 }
 
 fn ledger_cover() -> Cover {
