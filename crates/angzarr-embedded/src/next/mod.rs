@@ -386,6 +386,9 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn angzarr_embedded_diagnostic::D
     samples.extend(payload.map(|e| Box::new(e) as Box<_>));
     samples.extend(chain.map(|e| Box::new(e) as Box<_>));
     samples.extend(misconfigured.map(|e| Box::new(e) as Box<_>));
+    samples.push(Box::new(UpcastError::Unavailable {
+        cause: Report::new("angzarr-embedded-host-remote-unavailable").arg("cause", "not-running"),
+    }));
     samples.push(Box::new(UpcastError::Rule {
         source: "toy.v0.Credited".to_string(),
         error: report(),

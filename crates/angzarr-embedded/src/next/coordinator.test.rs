@@ -1008,6 +1008,44 @@ mod upcasting {
         );
     }
 
+    /// An upcaster sidecar that is down (decision 14.39, C-0681).
+    struct Down;
+
+    impl crate::next::UpcastPort for Down {
+        fn upcast(
+            &self,
+            _: &crate::next::v1::UpcastRequest,
+        ) -> Result<crate::next::v1::UpcastResponse, crate::next::UpcastError> {
+            Err(crate::next::UpcastError::Unavailable {
+                cause: angzarr_embedded_diagnostic::Report::new("toy-sidecar-down"),
+            })
+        }
+    }
+
+    /// A sidecar that cannot be reached delivers nothing that needs it, and
+    /// its caller is answered to retry (C-0681).
+    #[test]
+    fn a_sidecar_that_is_down_is_retried_and_writes_nothing() {
+        let (mut registry, seen) = seen_account(Upcaster::new("account-upcaster", "account"));
+        registry.upcast_with("account", Down);
+        let store = MemoryStore::new();
+        let open = command(cover("account", 1), AccountCmd::Open.to_any()).id(1);
+        let failure = any(&store, &registry, open, 10).err().unwrap();
+        assert!(
+            matches!(
+                &failure,
+                Failure::Kernel(KernelError::Upcast {
+                    error: crate::next::UpcastError::Unavailable { .. },
+                    ..
+                })
+            ),
+            "{failure:?}"
+        );
+        assert_eq!(failure.recovery(), crate::next::Recovery::Retry);
+        assert!(seen.lock().unwrap().is_empty(), "nothing delivered");
+        assert!(pages(&store, &cover("account", 1)).is_empty());
+    }
+
     #[test]
     fn an_unknown_type_after_upcasting_names_the_type_sent_and_the_type_upcast() {
         let upcaster = Upcaster::new("account-upcaster", "account")

@@ -242,6 +242,11 @@ pub enum UpcastError {
     Payload(PayloadError),
     /// The rule from `source` failed for the domain's own reason.
     Rule { source: String, error: Report },
+    /// The upcaster sidecar could not be reached, or answered under a
+    /// retryable status (decision 14.39): what needs upcasting waits, and
+    /// a caller is answered UNAVAILABLE, to retry. `cause` is why, as the
+    /// sidecar's port reported it.
+    Unavailable { cause: Report },
 }
 
 /// An upcaster whose rules cannot all run, found by
@@ -737,6 +742,7 @@ impl Diagnostic for UpcastError {
         match self {
             UpcastError::Payload(error) => error.code(),
             UpcastError::Rule { .. } => "angzarr-embedded-next-upcast-rule",
+            UpcastError::Unavailable { .. } => "angzarr-embedded-next-upcast-unavailable",
         }
     }
 
@@ -747,6 +753,7 @@ impl Diagnostic for UpcastError {
                 ("source", source.as_str().into()),
                 ("error", Arg::nested(error)),
             ],
+            UpcastError::Unavailable { cause } => vec![("cause", Arg::nested(cause))],
         }
     }
 }

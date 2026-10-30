@@ -390,6 +390,7 @@ impl angzarr_router::PayloadUpcaster for CommandUpcaster {
             let (source, reason) = match &error {
                 UpcastError::Payload(e) => (payload.type_url.clone(), Report::of(e)),
                 UpcastError::Rule { source, error } => (source.clone(), error.clone()),
+                UpcastError::Unavailable { cause } => (payload.type_url.clone(), cause.clone()),
             };
             let flattened = flat_args(&reason)
                 .into_iter()

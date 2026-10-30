@@ -40,6 +40,17 @@ pub mod projector {
     ));
 }
 
+/// `io.angzarr.v1.UpcasterService` (upcaster.proto): `Upcast`, a
+/// domain's pages in, upcast; what an upcaster sidecar serves (decision
+/// 14.39).
+#[allow(clippy::all, missing_docs)]
+pub mod upcaster {
+    include!(concat!(
+        env!("OUT_DIR"),
+        "/io.angzarr.v1.UpcasterService.rs"
+    ));
+}
+
 /// `io.angzarr.v1.ComponentService` (component.proto): `Describe`, the
 /// component's descriptor.
 #[allow(clippy::all, missing_docs)]

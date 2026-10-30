@@ -215,6 +215,10 @@ pub struct ComponentConfig {
     /// or `"upcaster"` (an upcaster sidecar, not launched yet).
     #[serde(default, skip_serializing_if = "ComponentKindConfig::is_domain")]
     pub kind: ComponentKindConfig,
+    /// An upcaster's: the domain whose payloads it upcasts (decision
+    /// 14.39); unset for every other kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upcasts: Option<String>,
     /// The command that starts its child, program first. Overrides the
     /// language's default (and its `entry`) entirely.
     #[serde(default, skip_serializing_if = "Option::is_none")]

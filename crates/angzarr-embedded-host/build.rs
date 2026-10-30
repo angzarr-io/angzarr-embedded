@@ -1,6 +1,6 @@
 //! Writes the gRPC client and server stubs for the services a remote
 //! component serves (angzarr-project's command_handler.proto,
-//! component.proto, policy.proto and projector.proto, package `io.angzarr.v1`), with tonic-build's manual
+//! component.proto, policy.proto, projector.proto and upcaster.proto, package `io.angzarr.v1`), with tonic-build's manual
 //! builder: angzarr-proto compiles no services and ships no service protos,
 //! so the stubs are written from the Rust types instead, and those are
 //! angzarr-router's `pb` (angzarr-proto's `v1` re-exported, plus the
@@ -77,9 +77,22 @@ fn main() {
                 .build(),
         )
         .build();
+    let upcaster = Service::builder()
+        .name("UpcasterService")
+        .package("io.angzarr.v1")
+        .method(
+            Method::builder()
+                .name("upcast")
+                .route_name("Upcast")
+                .input_type("::angzarr_router::pb::UpcastRequest")
+                .output_type("::angzarr_router::pb::UpcastResponse")
+                .codec_path(CODEC)
+                .build(),
+        )
+        .build();
     Builder::new()
         .build_client(true)
         .build_server(true)
         .build_transport(true)
-        .compile(&[command_handler, component, policy, projector]);
+        .compile(&[command_handler, component, policy, projector, upcaster]);
 }

@@ -805,22 +805,6 @@ fn a_policy_child_with_no_input_is_refused() {
     );
 }
 
-/// A remote upcaster sidecar is not launched yet: refused at start,
-/// before any child is.
-#[test]
-fn a_remote_upcaster_is_refused_for_now() {
-    let mut upcaster = domain("table-upcaster", "TableUpcaster", mode::SERVE);
-    upcaster.kind = ComponentKindConfig::Upcaster;
-    let refused = Host::start(config(vec![upcaster])).err();
-    assert_eq!(
-        refused,
-        Some(HostError::KindUnsupported {
-            domain: "table-upcaster".to_string(),
-            kind: "upcaster".to_string(),
-        })
-    );
-}
-
 /// A projector's retryable bug (UNAVAILABLE) and its immediate-return
 /// status (ABORTED, re-read and re-decide, the runtime being the caller)
 /// are both retried under the kernel's backoff: the second call succeeds,
@@ -870,6 +854,128 @@ fn a_policy_child_with_no_output_domain_is_refused_at_start() {
             cause: crate::DescriptorRefused::PolicyNoOutputDomain {
                 component: "TableWalletPolicy".to_string(),
             },
+        })
+    );
+}
+
+/// A `kind = "upcaster"` sidecar child for `table` (decision 14.39),
+/// launched by the host and serving `UpcasterService`.
+fn upcaster_domain() -> ComponentConfig {
+    let mut upcaster = with_env(
+        domain("table-upcaster", "TableUpcaster", mode::SERVE),
+        &[(KIND_ENV, kind::UPCASTER)],
+    );
+    upcaster.kind = ComponentKindConfig::Upcaster;
+    upcaster.upcasts = Some("table".to_string());
+    upcaster
+}
+
+/// The host, the in-process table and the table's remote upcaster,
+/// registered.
+fn upcast() -> (Host, Registry) {
+    let host = Host::start(config(vec![upcaster_domain()])).expect("the host starts");
+    let mut registry = Registry::new();
+    registry.command_handler("table", Table).unwrap();
+    host.register(&mut registry)
+        .expect("an upcaster registers as its domain's sidecar");
+    (host, registry)
+}
+
+/// A remote upcaster sidecar upcasts its domain's inputs before the kernel
+/// dispatches them (decision 14.39): an old `Sit` reaches the in-process
+/// table as the current `Seat`, which it records as `Seated`.
+#[test]
+fn a_remote_upcaster_upcasts_its_domains_inputs_before_dispatch() {
+    let (_host, registry) = upcast();
+    let log = MemoryDeadLetters::new();
+    let store = MemoryStore::new();
+    let kernel = Kernel::new(&registry, &log);
+    block_on(kernel.handle_any(
+        &store,
+        send("table", 1, any("/test.table.v0.Sit")),
+        &sampled(1),
+        &mut (),
+    ))
+    .expect("handled");
+    assert_eq!(
+        payloads(&store, &cover("table")),
+        [Some(any("/test.table.v1.Seated"))]
+    );
+}
+
+/// A sidecar that dies mid-call is not serving (C-0681): the input is not
+/// delivered, and its caller is answered to retry.
+#[test]
+fn a_remote_upcaster_that_is_down_is_retryable() {
+    let (_host, registry) = upcast();
+    let log = MemoryDeadLetters::new();
+    let store = MemoryStore::new();
+    let kernel = Kernel::new(&registry, &log).on_retryable(OnRetryable {
+        max_retries: 0,
+        ..OnRetryable::default()
+    });
+    let failure = block_on(kernel.handle_any(
+        &store,
+        send("table", 1, any("/test.table.v0.Die")),
+        &sampled(1),
+        &mut (),
+    ))
+    .err()
+    .expect("not delivered");
+    assert!(
+        matches!(
+            &failure,
+            Failure::Kernel(angzarr_embedded::next::KernelError::Upcast {
+                error: angzarr_embedded::next::UpcastError::Unavailable { .. },
+                ..
+            })
+        ),
+        "{failure:?}"
+    );
+    assert_eq!(failure.recovery(), angzarr_embedded::next::Recovery::Retry);
+    assert!(payloads(&store, &cover("table")).is_empty());
+}
+
+/// A rule the sidecar fails on is a bug (decision 14.39, 5.8): the
+/// upcast's failure, naming the rule's reason, never retried.
+#[test]
+fn a_remote_upcasters_failing_rule_is_a_bug() {
+    let (_host, registry) = upcast();
+    let log = MemoryDeadLetters::new();
+    let store = MemoryStore::new();
+    let failure = block_on(Kernel::new(&registry, &log).handle_any(
+        &store,
+        send("table", 1, any("/test.table.v0.Bad")),
+        &sampled(1),
+        &mut (),
+    ))
+    .err()
+    .expect("not delivered");
+    let Failure::Kernel(angzarr_embedded::next::KernelError::Upcast {
+        error: angzarr_embedded::next::UpcastError::Rule { source, error },
+        ..
+    }) = &failure
+    else {
+        panic!("the rule's failure: {failure:?}");
+    };
+    assert_eq!(source, "test.table.v0.Bad");
+    assert!(
+        error.code().contains("upcast-rule-broke"),
+        "{}",
+        error.code()
+    );
+    assert_eq!(failure.recovery(), angzarr_embedded::next::Recovery::Bug);
+}
+
+/// An upcaster that names no domain to upcast is refused at start.
+#[test]
+fn an_upcaster_naming_no_domain_is_refused() {
+    let mut upcaster = upcaster_domain();
+    upcaster.upcasts = None;
+    assert_eq!(
+        Host::start(config(vec![upcaster])).err(),
+        Some(HostError::UpcasterNoDomain {
+            domain: "table-upcaster".to_string(),
         })
     );
 }

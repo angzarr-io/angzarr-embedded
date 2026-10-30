@@ -75,6 +75,7 @@ angzarr-embedded-next-payload-decode = a payload of type { $type_url } does not 
 angzarr-embedded-next-payload-invalid = a payload of type { $type_url } is not a valid value: { $reason }
 angzarr-embedded-next-wire-missing = { $message }.{ $field } is required and absent
 angzarr-embedded-next-wire-unknown-enum = { $message }.{ $field } holds { $value }, which no variant defines
+angzarr-embedded-next-upcast-unavailable = the upcaster sidecar is not serving ({ $cause }): retry
 angzarr-embedded-next-upcast-rule = the upcast rule from { $source } failed: { $error }
 angzarr-embedded-next-upcaster-duplicate = domain { $domain }'s upcaster has two typed rules from { $source }: the second never runs
 angzarr-embedded-next-upcaster-out-of-order = domain { $domain }'s upcaster registers the rule from { $source } before the rule from { $produced_by }, which produces it

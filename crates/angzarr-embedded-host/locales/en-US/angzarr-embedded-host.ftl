@@ -15,6 +15,7 @@ angzarr-embedded-host-connect = component "{ $domain }": could not connect to { 
 angzarr-embedded-host-describe = component "{ $domain }": Describe failed with gRPC code { $grpc_code }
 angzarr-embedded-host-kind-mismatch = component "{ $domain }" is configured as a { $configured } but describes itself as { $described }
 angzarr-embedded-host-no-input = component "{ $domain }" names no input domain in its descriptor
+angzarr-embedded-host-upcaster-no-domain = component "{ $domain }" is an upcaster that names no domain to upcast: give it `upcasts`
 angzarr-embedded-host-descriptor = component "{ $domain }": its descriptor is refused: { $cause }
 angzarr-embedded-host-kind-unsupported = component "{ $domain }": kind "{ $kind }" is not run by the host yet
 angzarr-embedded-host-runtime = the host's runtime could not be built ({ $kind })

@@ -95,6 +95,9 @@ pub enum HostError {
     /// A policy or projector whose descriptor names no input domain: it
     /// has no source.
     NoInput { domain: String },
+    /// A `kind = "upcaster"` component that names no domain to upcast
+    /// (`upcasts`).
+    UpcasterNoDomain { domain: String },
     /// The child's descriptor fails the coordinator's validation
     /// (decision 14.42, C-0687; [`DescriptorRefused`](crate::DescriptorRefused)).
     Descriptor {
@@ -142,6 +145,7 @@ impl Diagnostic for HostError {
             HostError::NoInput { .. } => "angzarr-embedded-host-no-input",
             HostError::KindUnsupported { .. } => "angzarr-embedded-host-kind-unsupported",
             HostError::Descriptor { .. } => "angzarr-embedded-host-descriptor",
+            HostError::UpcasterNoDomain { .. } => "angzarr-embedded-host-upcaster-no-domain",
             HostError::SocketDirTooLong { .. } => "angzarr-embedded-host-socket-dir-too-long",
             HostError::ConfigUnreadable { .. } => "angzarr-embedded-host-config-unreadable",
             HostError::ConfigInvalid { .. } => "angzarr-embedded-host-config-invalid",
@@ -156,7 +160,8 @@ impl Diagnostic for HostError {
         match self {
             HostError::DuplicateDomain { domain: d }
             | HostError::EmptyLaunch { domain: d }
-            | HostError::NoInput { domain: d } => {
+            | HostError::NoInput { domain: d }
+            | HostError::UpcasterNoDomain { domain: d } => {
                 vec![domain(d)]
             }
             HostError::NoLaunch {
@@ -260,6 +265,7 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn Diagnostic>> {
             described: "AGGREGATE".to_string(),
         }),
         Box::new(HostError::NoInput { domain: d() }),
+        Box::new(HostError::UpcasterNoDomain { domain: d() }),
         Box::new(HostError::Descriptor {
             domain: d(),
             cause: crate::DescriptorRefused::PolicyNoOutputDomain {

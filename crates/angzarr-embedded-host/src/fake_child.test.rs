@@ -43,6 +43,12 @@
 //! A policy or projector appends a line to `ANGZARR_FAKE_LOG` for each
 //! call: `handle <type>` per event, `refused <typed refusal type URL>`.
 //!
+//! - `upcaster`: an upcaster sidecar (decision 14.39), serving
+//!   `UpcasterService` and nothing else (no descriptor): a page whose
+//!   payload is `/test.table.v0.Sit` comes back `/test.table.v1.Seat`;
+//!   `...v0.Die` exits with code 7 mid-call; `...v0.Bad` is INTERNAL
+//!   (`UPCAST_RULE_BROKE`); any other passes through.
+//!
 //! It exits with code 0 when its stdin reaches end of file.
 
 use std::collections::BTreeMap;
@@ -65,6 +71,7 @@ use crate::rpc::command_handler::command_handler_service_server::{
 use crate::rpc::component::component_service_server::{ComponentService, ComponentServiceServer};
 use crate::rpc::policy::policy_service_server::{PolicyService, PolicyServiceServer};
 use crate::rpc::projector::projector_service_server::{ProjectorService, ProjectorServiceServer};
+use crate::rpc::upcaster::upcaster_service_server::{UpcasterService, UpcasterServiceServer};
 use crate::rpc::DescribeRequest;
 
 /// The variable naming the fake's mode.
@@ -91,6 +98,7 @@ pub(crate) mod kind {
     pub(crate) const PROCESS_MANAGER: &str = "process_manager";
     pub(crate) const POLICY: &str = "policy";
     pub(crate) const PROJECTOR: &str = "projector";
+    pub(crate) const UPCASTER: &str = "upcaster";
 }
 
 /// The command a policy answers `...Seated` with.
@@ -152,6 +160,7 @@ pub(crate) fn domain(name: &str, described: &str, mode: &str) -> ComponentConfig
         name: name.to_string(),
         language: "python".to_string(),
         kind: Default::default(),
+        upcasts: None,
         launch: Some(launch()),
         entry: vec!["-m".to_string(), "never.used".to_string()],
         dir: None,
@@ -244,6 +253,14 @@ fn serve(name: String, close_stdout: bool) -> ! {
         }
         let fake = Fake { name };
         let kind = std::env::var(KIND_ENV).unwrap_or_default();
+        if kind == kind::UPCASTER {
+            tonic::transport::Server::builder()
+                .add_service(UpcasterServiceServer::new(fake))
+                .serve_with_incoming(UnixListenerStream::new(listener))
+                .await
+                .unwrap();
+            return;
+        }
         let server = tonic::transport::Server::builder()
             .add_service(ComponentServiceServer::new(fake.clone()));
         let server = match kind.as_str() {
@@ -278,6 +295,36 @@ fn close_stdout_for_good() {
 #[derive(Clone)]
 struct Fake {
     name: String,
+}
+
+#[tonic::async_trait]
+impl UpcasterService for Fake {
+    async fn upcast(
+        &self,
+        request: Request<pb::UpcastRequest>,
+    ) -> Result<Response<pb::UpcastResponse>, Status> {
+        let mut events = request.into_inner().events;
+        for page in &mut events {
+            let Some(payload) = page.payload.as_mut() else {
+                continue;
+            };
+            match payload.type_url.as_str() {
+                "/test.table.v0.Sit" => payload.type_url = "/test.table.v1.Seat".to_string(),
+                "/test.table.v0.Die" => std::process::exit(7),
+                "/test.table.v0.Bad" => {
+                    return Err(status(
+                        tonic::Code::Internal,
+                        "the upcast rule broke",
+                        "UPCAST_RULE_BROKE",
+                        ("type_url", "/test.table.v0.Bad"),
+                        None,
+                    ))
+                }
+                _ => {}
+            }
+        }
+        Ok(Response::new(pb::UpcastResponse { events }))
+    }
 }
 
 fn rules_version() -> String {

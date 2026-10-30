@@ -8,6 +8,7 @@ fn domain(name: &str, language: &str) -> ComponentConfig {
         name: name.to_string(),
         language: language.to_string(),
         kind: Default::default(),
+        upcasts: None,
         launch: None,
         entry: Vec::new(),
         dir: None,
