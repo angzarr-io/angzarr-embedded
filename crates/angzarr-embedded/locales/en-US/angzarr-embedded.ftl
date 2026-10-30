@@ -50,6 +50,7 @@ angzarr-embedded-next-projection-failed = the command committed, then { $failure
 }
 angzarr-embedded-next-downstream = a policy command down the chain failed, at depth { $depth }: { $error }
 angzarr-embedded-next-stale = stream { $stream } is at { $actual }, not the { $expected } expected: re-read and re-issue
+angzarr-embedded-next-expected-sequence-ahead = stream { $stream } is at { $head }, behind the { $expected } expected: the command names a sequence the stream never reached
 angzarr-embedded-next-overlap = the window of stream { $stream } from { $expected } to { $actual } changed { $window_units }, which the command's change to { $command_units } overlaps: re-read and re-issue
 angzarr-embedded-next-unresolved = decide never acknowledged the window of stream { $stream } from { $expected } to { $actual }
 angzarr-embedded-next-unknown-type = stream { $stream }'s domain does not decode the type { $type_url }

@@ -1611,6 +1611,11 @@ mod tests;
 #[path = "concurrency.test.rs"]
 mod concurrency_tests;
 
+// The conflict-resolution contract at load and at the write, and the caps.
+#[cfg(test)]
+#[path = "races.test.rs"]
+mod races_tests;
+
 /// A future that is pending once, waking itself: a turn for another task.
 struct Yield(bool);
 

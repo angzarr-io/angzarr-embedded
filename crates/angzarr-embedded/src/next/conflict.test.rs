@@ -261,8 +261,10 @@ fn outside_strict_a_lost_write_is_never_the_stale_key() {
     );
 }
 
+/// An expected sequence past the head is malformed under every
+/// resolution (decision 14.47), never stale.
 #[test]
-fn an_expected_sequence_past_the_head_is_stale() {
+fn an_expected_sequence_past_the_head_is_ahead() {
     let registry = registry();
     let store = MemoryStore::new();
     shelf_a_b(&store);
@@ -281,7 +283,11 @@ fn an_expected_sequence_past_the_head_is_stale() {
             handle::<Shelf>(&store, &registry, ahead, &at(5))
                 .err()
                 .unwrap(),
-            stale(5, 2),
+            Failure::Kernel(KernelError::ExpectedSequenceAhead {
+                stream: cover("shelf", 3),
+                expected: 5,
+                head: 2,
+            }),
             "{resolution:?}"
         );
     }

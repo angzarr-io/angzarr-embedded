@@ -86,14 +86,25 @@ pub enum StepError {
 pub enum KernelError {
     /// The book was refused at step 1, before anything else ran.
     Malformed(Malformed),
-    /// The stream is not at the sequence expected: a book's
-    /// `expected_sequence` under STRICT (or past the head under any
-    /// resolution), or a decision committed to a stream that moved.
-    /// angzarr's ABORTED: re-read, then re-issue.
+    /// Under STRICT, the stream is past the sequence expected: a book's
+    /// `expected_sequence` behind the head when it is loaded, or a write
+    /// lost to another write to the same stream (decision 14.45). angzarr's
+    /// ABORTED, `COORDINATOR_REASON_EXPECTED_SEQUENCE_STALE`: re-read, then
+    /// re-issue.
     Stale {
         stream: Cover,
         expected: u64,
         actual: u64,
+    },
+    /// A book's `expected_sequence` ahead of the stream's head, under any
+    /// resolution: it names a state the stream never held, so the command
+    /// is malformed (decision 14.47), refused when it is loaded, before
+    /// business code. angzarr's INVALID_ARGUMENT,
+    /// `COORDINATOR_REASON_EXPECTED_SEQUENCE_AHEAD`: fix the command.
+    ExpectedSequenceAhead {
+        stream: Cover,
+        expected: u64,
+        head: u64,
     },
     /// COMMUTATIVE's window and the command changed overlapping units
     /// (angzarr's ABORTED, `COORDINATOR_REASON_CONFLICT_OVERLAP`; decision 14.42): the
@@ -327,27 +338,43 @@ impl KernelError {
     /// This error as the coordinator answers it on the wire, in the
     /// router's shape: its reason key (a `CoordinatorReason`'s full name,
     /// `as_str_name`), its args as metadata, and its status; `None` for an
-    /// error that is not one of the coordinator's answers. Each is ABORTED
-    /// (business, immediate return; decision 14.37):
+    /// error that is not one of the coordinator's answers:
     ///
-    /// - a stale expected sequence under STRICT (the early check, or a
-    ///   write lost to a racing command; decision 14.45) is
-    ///   `COORDINATOR_REASON_EXPECTED_SEQUENCE_STALE`, args `expected` and
-    ///   `actual`;
+    /// - an expected sequence ahead of the head, under any resolution, is
+    ///   `COORDINATOR_REASON_EXPECTED_SEQUENCE_AHEAD`, INVALID_ARGUMENT
+    ///   (business, fatal; decision 14.47), args `expected` and `head`;
+    ///
+    /// and, each ABORTED (business, immediate return; decision 14.37):
+    ///
+    /// - a stale expected sequence, behind the head, under STRICT (the
+    ///   early check, or a write lost to a racing command; decision 14.45)
+    ///   is `COORDINATOR_REASON_EXPECTED_SEQUENCE_STALE`, args `expected`
+    ///   and `actual`;
     /// - a COMMUTATIVE overlap is `COORDINATOR_REASON_CONFLICT_OVERLAP`,
     ///   args `window_units` and `command_units`;
     /// - an unacknowledged AGGREGATE_HANDLES window is
     ///   `COORDINATOR_REASON_CONFLICT_UNRESOLVED`, no args.
     pub fn as_coded(&self) -> Option<angzarr_router::error::CodedError> {
         use super::reasons::{args, CoordinatorReason};
+        use angzarr_router::error::{BusinessStatus, CodedError};
         let (reason, extras) = match self {
+            KernelError::ExpectedSequenceAhead { expected, head, .. } => {
+                return Some(CodedError::rejection(
+                    BusinessStatus::InvalidArgument,
+                    CoordinatorReason::ExpectedSequenceAhead.as_str_name(),
+                    [
+                        (args::EXPECTED.to_string(), expected.to_string()),
+                        (args::HEAD.to_string(), head.to_string()),
+                    ],
+                ));
+            }
             KernelError::Stale {
                 expected, actual, ..
             } => (
                 CoordinatorReason::ExpectedSequenceStale,
                 vec![
-                    ("expected".to_string(), expected.to_string()),
-                    ("actual".to_string(), actual.to_string()),
+                    (args::EXPECTED.to_string(), expected.to_string()),
+                    (args::ACTUAL.to_string(), actual.to_string()),
                 ],
             ),
             KernelError::Overlap {
@@ -373,6 +400,7 @@ impl KernelError {
     pub fn recovery(&self) -> Recovery {
         match self {
             KernelError::Malformed(_)
+            | KernelError::ExpectedSequenceAhead { .. }
             | KernelError::UnknownType { .. }
             | KernelError::InvalidPayload { .. } => Recovery::Invalid,
             KernelError::Stale { .. }
@@ -483,6 +511,9 @@ impl Diagnostic for KernelError {
         match self {
             KernelError::Malformed(m) => m.code(),
             KernelError::Stale { .. } => "angzarr-embedded-next-stale",
+            KernelError::ExpectedSequenceAhead { .. } => {
+                "angzarr-embedded-next-expected-sequence-ahead"
+            }
             KernelError::Unresolved { .. } => "angzarr-embedded-next-unresolved",
             KernelError::Overlap { .. } => "angzarr-embedded-next-overlap",
             KernelError::UnknownType { .. } => "angzarr-embedded-next-unknown-type",
@@ -517,6 +548,15 @@ impl Diagnostic for KernelError {
                 ("stream", stream(s)),
                 ("expected", (*expected).into()),
                 ("actual", (*actual).into()),
+            ],
+            KernelError::ExpectedSequenceAhead {
+                stream: s,
+                expected,
+                head,
+            } => vec![
+                ("stream", stream(s)),
+                ("expected", (*expected).into()),
+                ("head", (*head).into()),
             ],
             KernelError::Overlap {
                 stream: s,

@@ -223,6 +223,11 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn angzarr_embedded_diagnostic::D
             expected: 2,
             actual: 4,
         },
+        KernelError::ExpectedSequenceAhead {
+            stream: stream(),
+            expected: 7,
+            head: 3,
+        },
         KernelError::Unresolved {
             stream: stream(),
             expected: 2,

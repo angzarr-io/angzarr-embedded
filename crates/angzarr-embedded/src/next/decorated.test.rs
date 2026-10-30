@@ -5967,12 +5967,11 @@ mod router {
         }
     }
 
-    /// A caller's own `expected_sequence` that comes back stale goes back
-    /// to the caller at once, to reload: never retried, never
-    /// dead-lettered. (A policy's step, whose expected sequence the kernel
-    /// stamps, is retried.)
+    /// A caller's own `expected_sequence` ahead of the head goes back to
+    /// the caller at once, malformed (decision 14.47): never retried,
+    /// never dead-lettered.
     #[test]
-    fn a_callers_stale_expected_sequence_goes_back_at_once() {
+    fn a_callers_expected_sequence_ahead_goes_back_at_once() {
         let (registry, _) = recovering(0);
         let store = Mem::new();
         let log = MemoryDeadLetters::new();
@@ -5987,9 +5986,16 @@ mod router {
         });
         let failed = ready(kernel.handle_any(&store, stale, &sampled_at(9), &mut ()))
             .err()
-            .expect("stale");
+            .expect("ahead");
         assert!(
-            matches!(&failed, Failure::Kernel(KernelError::Stale { .. })),
+            matches!(
+                &failed,
+                Failure::Kernel(KernelError::ExpectedSequenceAhead {
+                    expected: 5,
+                    head: 0,
+                    ..
+                })
+            ),
             "{failed:?}"
         );
         assert!(waits.micros().is_empty(), "{:?}", waits.micros());

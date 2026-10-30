@@ -52,6 +52,12 @@ pub fn unprefixed(key: &str) -> &str {
 /// The catalog's arg names for the coordinator's keys (the `ErrorInfo`
 /// metadata keys) that angzarr-router's `error::extras` does not name.
 pub mod args {
+    /// A command's expected sequence (`CommandBook.handling.expected_sequence`).
+    pub const EXPECTED: &str = "expected";
+    /// The stream's head, its next sequence, where the command is stale.
+    pub const ACTUAL: &str = "actual";
+    /// The stream's head, its next sequence, where the command is ahead.
+    pub const HEAD: &str = "head";
     /// The domain a refusal fact or a policy's command was addressed to.
     pub const DOMAIN: &str = "domain";
     /// The window's conflict units, comma-separated.
