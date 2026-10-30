@@ -50,7 +50,55 @@ impl DescriptorRefused {
 /// manager, none on a policy or a projector; a policy's one input and its
 /// output domain, and no output domain on any other kind.
 pub fn validate(descriptor: &ComponentDescriptor) -> Result<(), DescriptorRefused> {
-    let _ = descriptor;
+    let component = || descriptor.name.clone();
+    let kind = descriptor.kind();
+    let kind_name = || kind.as_str_name().to_string();
+    if descriptor.rules_version.is_empty() {
+        return Err(DescriptorRefused::MissingRulesVersion {
+            component: component(),
+        });
+    }
+    if kind != ComponentKind::ProcessManager && !descriptor.starting_types.is_empty() {
+        return Err(DescriptorRefused::StartingTypesOnNonPm {
+            component: component(),
+            kind: kind_name(),
+        });
+    }
+    let stateful = matches!(
+        kind,
+        ComponentKind::Aggregate | ComponentKind::ProcessManager
+    );
+    let stateless = matches!(kind, ComponentKind::Policy | ComponentKind::Projector);
+    if stateful && descriptor.state.is_none() {
+        return Err(DescriptorRefused::MissingStateType {
+            component: component(),
+            kind: kind_name(),
+        });
+    }
+    if stateless && descriptor.state.is_some() {
+        return Err(DescriptorRefused::StateOnStatelessKind {
+            component: component(),
+            kind: kind_name(),
+        });
+    }
+    if kind == ComponentKind::Policy {
+        if descriptor.inputs.len() != 1 {
+            return Err(DescriptorRefused::PolicyInputCount {
+                component: component(),
+                input_count: descriptor.inputs.len() as u64,
+            });
+        }
+        if descriptor.output_domain.is_empty() {
+            return Err(DescriptorRefused::PolicyNoOutputDomain {
+                component: component(),
+            });
+        }
+    } else if !descriptor.output_domain.is_empty() {
+        return Err(DescriptorRefused::OutputDomainOnNonPolicy {
+            component: component(),
+            kind: kind_name(),
+        });
+    }
     Ok(())
 }
 
