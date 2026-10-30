@@ -32,6 +32,27 @@ fn shelf_events(handled: &Handled) -> Vec<ShelfEvent> {
     payloads(&handled.books())
 }
 
+/// The shelf's units the window and the command changed, if `failure` is
+/// COMMUTATIVE's overlap at `expected` with the head at `actual`.
+fn overlap(
+    failure: &Failure<crate::next::Rejected>,
+    expected: u64,
+    actual: u64,
+) -> Option<(String, String)> {
+    match failure {
+        Failure::Kernel(KernelError::Overlap {
+            stream,
+            expected: e,
+            actual: a,
+            window_units,
+            command_units,
+        }) if *stream == cover("shelf", 3) && (*e, *a) == (expected, actual) => {
+            Some((window_units.clone(), command_units.clone()))
+        }
+        _ => None,
+    }
+}
+
 fn stale(expected: u64, actual: u64) -> Failure<crate::next::Rejected> {
     Failure::Kernel(KernelError::Stale {
         stream: cover("shelf", 3),
@@ -69,7 +90,11 @@ fn commutative_is_the_default_for_a_state_with_conflict_units() {
     let failure = handle::<Shelf>(&store, &registry, overlapping, &at(4))
         .err()
         .unwrap();
-    assert_eq!(failure, stale(1, 3));
+    assert_eq!(
+        overlap(&failure, 1, 3),
+        Some(("items[b]".to_string(), "items[b]".to_string())),
+        "the overlap names both unit sets: {failure:?}"
+    );
     assert_eq!(failure.recovery(), Recovery::Retry);
 }
 
@@ -131,12 +156,12 @@ fn an_unmarked_field_conflicts_with_everything() {
     let behind = command(cover("shelf", 3), set("c", 1))
         .id(4)
         .expecting(2, ConflictResolution::Commutative);
-    assert_eq!(
-        handle::<Shelf>(&store, &registry, behind, &at(4))
-            .err()
-            .unwrap(),
-        stale(2, 3),
-        "never a blind merge"
+    let failure = handle::<Shelf>(&store, &registry, behind, &at(4))
+        .err()
+        .unwrap();
+    assert!(
+        overlap(&failure, 2, 3).is_some_and(|(window, _)| window.starts_with('*')),
+        "never a blind merge: {failure:?}"
     );
 }
 
@@ -498,10 +523,12 @@ fn a_commutative_command_at_the_head_has_no_window_whatever_its_units() {
             &at(4),
         )
         .err(),
-        Some(Failure::Kernel(KernelError::Stale {
+        Some(Failure::Kernel(KernelError::Overlap {
             stream: cover("tally", 1),
             expected: 1,
             actual: 3,
+            window_units: "*".to_string(),
+            command_units: "*".to_string(),
         })),
         "a window, and every change overlaps it"
     );
@@ -638,11 +665,17 @@ mod judged {
             );
             failure
         };
-        let aborted = Some(Failure::Kernel(KernelError::Stale {
-            stream: cover("shelf", 3),
-            expected: 1,
-            actual: 2,
-        }));
+        let aborted = |edit: fn(&mut pb::ConflictReport)| {
+            let mut report = pb::ConflictReport::default();
+            edit(&mut report);
+            Some(Failure::Kernel(KernelError::Overlap {
+                stream: cover("shelf", 3),
+                expected: 1,
+                actual: 2,
+                window_units: report.window_units.join(","),
+                command_units: report.command_units.join(","),
+            }))
+        };
         for edit in [
             (|r: &mut pb::ConflictReport| {
                 r.window_units = vec!["items[a]".to_string()];
@@ -663,7 +696,7 @@ mod judged {
         ] {
             let store = MemoryStore::new();
             shelf_a_b(&store);
-            assert_eq!(stale(&store, edit), aborted);
+            assert_eq!(stale(&store, edit), aborted(edit));
         }
 
         for edit in [

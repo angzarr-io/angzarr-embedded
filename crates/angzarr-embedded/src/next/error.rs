@@ -88,13 +88,24 @@ pub enum KernelError {
     Malformed(Malformed),
     /// The stream is not at the sequence expected: a book's
     /// `expected_sequence` under STRICT (or past the head under any
-    /// resolution), COMMUTATIVE's window overlapping the command, or a
-    /// decision committed to a stream that moved. angzarr's ABORTED:
-    /// re-read, then re-issue.
+    /// resolution), or a decision committed to a stream that moved.
+    /// angzarr's ABORTED: re-read, then re-issue.
     Stale {
         stream: Cover,
         expected: u64,
         actual: u64,
+    },
+    /// COMMUTATIVE's window and the command changed overlapping units
+    /// (angzarr's ABORTED, `CONFLICT_OVERLAP`; decision 14.42): the
+    /// command's events were discarded. `window_units` and `command_units`
+    /// are the two sets as the metadata carries them, comma-separated unit
+    /// paths. Re-read, then re-issue.
+    Overlap {
+        stream: Cover,
+        expected: u64,
+        actual: u64,
+        window_units: String,
+        command_units: String,
     },
     /// A decide under AGGREGATE_HANDLES returned `Ok` without acknowledging
     /// the window with this delivery's nonce: its events were discarded,
@@ -313,7 +324,9 @@ impl KernelError {
             KernelError::Malformed(_)
             | KernelError::UnknownType { .. }
             | KernelError::InvalidPayload { .. } => Recovery::Invalid,
-            KernelError::Stale { .. } | KernelError::Unresolved { .. } => Recovery::Retry,
+            KernelError::Stale { .. }
+            | KernelError::Overlap { .. }
+            | KernelError::Unresolved { .. } => Recovery::Retry,
             KernelError::Store(error) => store_recovery(error),
             KernelError::Router(error) => router_recovery(error),
             KernelError::HandlerUnavailable { .. } => Recovery::Retry,
@@ -416,6 +429,7 @@ impl Diagnostic for KernelError {
             KernelError::Malformed(m) => m.code(),
             KernelError::Stale { .. } => "angzarr-embedded-next-stale",
             KernelError::Unresolved { .. } => "angzarr-embedded-next-unresolved",
+            KernelError::Overlap { .. } => "angzarr-embedded-next-overlap",
             KernelError::UnknownType { .. } => "angzarr-embedded-next-unknown-type",
             KernelError::InvalidPayload { .. } => "angzarr-embedded-next-invalid-payload",
             KernelError::Upcast { .. } => "angzarr-embedded-next-upcast",
@@ -448,6 +462,19 @@ impl Diagnostic for KernelError {
                 ("stream", stream(s)),
                 ("expected", (*expected).into()),
                 ("actual", (*actual).into()),
+            ],
+            KernelError::Overlap {
+                stream: s,
+                expected,
+                actual,
+                window_units,
+                command_units,
+            } => vec![
+                ("stream", stream(s)),
+                ("expected", (*expected).into()),
+                ("actual", (*actual).into()),
+                ("window_units", window_units.as_str().into()),
+                ("command_units", command_units.as_str().into()),
             ],
             KernelError::UnknownType {
                 stream: s,

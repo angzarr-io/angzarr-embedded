@@ -219,6 +219,13 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn angzarr_embedded_diagnostic::D
             expected: 2,
             actual: 4,
         },
+        KernelError::Overlap {
+            stream: stream(),
+            expected: 2,
+            actual: 4,
+            window_units: "items[a],items[b]".to_string(),
+            command_units: "items[b].count".to_string(),
+        },
         KernelError::UnknownType {
             stream: stream(),
             type_url: "/toy.v9.Bonus".to_string(),
