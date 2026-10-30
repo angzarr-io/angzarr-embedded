@@ -357,3 +357,19 @@ fn a_components_kind_is_domain_policy_projector_or_upcaster() {
     assert!(kind("kind = \"saga\"").is_err());
     assert!(kind("kind = \"Policy\"").is_err());
 }
+
+/// A component's kind writes back as it reads: a domain's, the default, is
+/// left out, and every other kind is written.
+#[test]
+fn a_components_kind_is_written_unless_it_is_the_default() {
+    let mut policy = domain("table-player", "python");
+    policy.kind = ComponentKindConfig::Policy;
+    let config = HostConfig {
+        components: vec![domain("player", "python"), policy],
+        ..HostConfig::default()
+    };
+    let text = toml::to_string(&config).unwrap();
+    assert_eq!(text.matches("kind = ").count(), 1, "{text}");
+    assert!(text.contains("kind = \"policy\""), "{text}");
+    assert_eq!(toml::from_str::<HostConfig>(&text).unwrap(), config);
+}
