@@ -761,6 +761,58 @@ fn a_stamped_command_runs_again_with_retrying_off() {
     assert_eq!(orders.seen().len(), 2);
 }
 
+/// A race re-run cap of 0 runs a stamped command that loses the race at
+/// its write no more: the lost race goes back to its caller at once as the
+/// store's conflict, retryable, after one run of business code, with no
+/// wait, nothing dead-lettered and nothing of its own persisted, for a
+/// caller that owns its retry loop. Whatever `max_retries` says.
+#[test]
+fn with_no_race_reruns_a_lost_race_goes_back_as_the_stores_conflict() {
+    for max_retries in [0, 3] {
+        let store = store_at_three();
+        let orders = Orders::scripted(
+            Some(&store),
+            vec![Delivery::racing(Reported::Nothing), Delivery::plain()],
+        );
+        let registry = registry_of(orders);
+        let log = MemoryDeadLetters::new();
+        let waits = Waits::default();
+        let retry = OnRetryable {
+            max_retries,
+            max_race_runs: 0,
+            ..OnRetryable::default()
+        };
+        let failure = kernel(&registry, &log, &waits, retry)
+            .handle_any(&store, add_item(1), &at(1), &mut ())
+            .ready()
+            .err()
+            .expect("the race was lost");
+        assert!(
+            matches!(
+                failure,
+                Failure::Kernel(KernelError::Store(crate::next::StoreError::Conflict { .. }))
+            ),
+            "max_retries {max_retries}: {failure:?}"
+        );
+        assert_eq!(
+            failure.recovery(),
+            Recovery::Retry,
+            "max_retries {max_retries}"
+        );
+        assert_eq!(
+            orders.seen().len(),
+            1,
+            "max_retries {max_retries}: run once"
+        );
+        assert!(
+            waits.waited().is_empty(),
+            "max_retries {max_retries}: no wait"
+        );
+        assert!(log.lines().is_empty(), "{:?}", log.lines());
+        assert_eq!(stored(&store), notes(1), "max_retries {max_retries}");
+    }
+}
+
 /// C-0725: with the race re-run cap at 3 runs and the retry cap higher (5
 /// deliveries, never reached), a command with no expected sequence that
 /// loses the race at every write runs 3 times, each against a newer head,
