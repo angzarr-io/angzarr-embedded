@@ -206,7 +206,11 @@ pub enum KernelError {
         reason: Report,
     },
     Replay(ReplayError),
-    /// The store's own error, angzarr-ports' (codes `angzarr-ports-*`).
+    /// The store's own error, angzarr-ports' (codes `angzarr-ports-*`). On
+    /// the wire ([`KernelError::as_coded`]) a conflict is
+    /// `COORDINATOR_REASON_STORE_CONFLICT` and a store that could not
+    /// answer `COORDINATOR_REASON_STORE_UNAVAILABLE`, each UNAVAILABLE
+    /// (decision 14.51).
     Store(StoreError),
     /// angzarr-router refused the input or a policy's answer: its
     /// `CodedError`, whose `code` (SCREAMING_SNAKE, angzarr's `ErrorInfo`
@@ -376,7 +380,23 @@ impl KernelError {
     ///
     /// and a command given up at a cap, every write lost to a racing one,
     /// is `COORDINATOR_REASON_RETRY_CAP_EXHAUSTED`, INTERNAL (a fatal bug's
-    /// status; decision 14.46), args `attempts` and `cap`.
+    /// status; decision 14.46), args `attempts` and `cap`;
+    ///
+    /// and, each UNAVAILABLE (bug, retryable), so that when the retries are
+    /// spent the key is what is reported (decision 14.51):
+    ///
+    /// - the store's conflict, a race lost at the write handed back at a
+    ///   race re-run cap of 0, is `COORDINATOR_REASON_STORE_CONFLICT`, args
+    ///   `expected` (the head stamped) and `actual` (the head found);
+    /// - the store failing to answer is
+    ///   `COORDINATOR_REASON_STORE_UNAVAILABLE`, the store's failure its
+    ///   `cause` (and `cause.<arg>`);
+    /// - an upcaster sidecar that could not be reached is
+    ///   `COORDINATOR_REASON_UPCASTER_UNAVAILABLE`, args `domain` and
+    ///   `cause`;
+    /// - a handler that could not be reached is
+    ///   `COORDINATOR_REASON_HANDLER_UNAVAILABLE` (decision 14.49), args
+    ///   `domain` and `cause`.
     pub fn as_coded(&self) -> Option<angzarr_router::error::CodedError> {
         use super::reasons::{args, CoordinatorReason};
         use angzarr_router::error::{BusinessStatus, CodedError};
@@ -433,6 +453,31 @@ impl KernelError {
                     [(args::LIMIT.to_string(), limit.to_string())],
                 ));
             }
+            KernelError::Store(StoreError::Conflict {
+                expected, actual, ..
+            }) => {
+                return Some(unavailable(
+                    CoordinatorReason::StoreConflict,
+                    vec![
+                        (args::EXPECTED.to_string(), expected.to_string()),
+                        (args::ACTUAL.to_string(), actual.to_string()),
+                    ],
+                ));
+            }
+            KernelError::Store(error @ StoreError::Unavailable(_)) => {
+                return Some(unavailable(
+                    CoordinatorReason::StoreUnavailable,
+                    super::route::flat_args(&store_report(error)),
+                ));
+            }
+            KernelError::Upcast {
+                stream,
+                error: error @ UpcastError::Unavailable { .. },
+            } => {
+                let mut extras = vec![(args::DOMAIN.to_string(), stream.domain.clone())];
+                extras.extend(super::route::flat_args(error));
+                return Some(unavailable(CoordinatorReason::UpcasterUnavailable, extras));
+            }
             KernelError::HandlerUnavailable { stream, cause } => {
                 return Some(CodedError {
                     code: super::route::HANDLER_UNAVAILABLE.to_string(),
@@ -483,6 +528,30 @@ impl KernelError {
             | KernelError::Replay(_) => Recovery::Bug,
         }
     }
+}
+
+/// `reason` under UNAVAILABLE, a retryable bug's status (decision 14.37),
+/// `extras` its metadata.
+fn unavailable(
+    reason: super::reasons::CoordinatorReason,
+    extras: Vec<(String, String)>,
+) -> angzarr_router::error::CodedError {
+    angzarr_router::error::CodedError {
+        code: reason.as_str_name().to_string(),
+        extras: extras.into_iter().collect(),
+        grpc: angzarr_router::error::GrpcCode::Unavailable,
+        refusal: None,
+    }
+}
+
+/// A store's error as a report: angzarr-ports' code and args, as
+/// [`KernelError::Store`] forwards them.
+fn store_report(error: &StoreError) -> Report {
+    store_args(error)
+        .into_iter()
+        .fold(Report::new(error.code()), |report, (name, arg)| {
+            report.arg(name, arg)
+        })
 }
 
 /// A stream as an error names it: `domain/root`, then `@edition` outside

@@ -126,7 +126,9 @@ pub struct Kernel<'k> {
 /// [`Handled::Parked`]). `max_race_runs = 0` turns race re-runs off, for a
 /// caller that owns its retry loop: a stamped command's lost race goes
 /// back to the caller at once as the store's conflict
-/// ([`StoreError::Conflict`], [`Recovery::Retry`](super::Recovery::Retry)),
+/// ([`StoreError::Conflict`], [`Recovery::Retry`](super::Recovery::Retry);
+/// on the wire UNAVAILABLE `COORDINATOR_REASON_STORE_CONFLICT`,
+/// [`KernelError::as_coded`], decision 14.51),
 /// not run again and not dead-lettered; a policy's step that loses it
 /// holds the policy's position at the trigger, so the next catch-up runs
 /// it again.
@@ -137,7 +139,8 @@ pub struct OnRetryable {
     /// Runs of a stamped command's business code, the first included,
     /// while it loses the race at its write: the race re-run cap. 0 turns
     /// race re-runs off: the first lost race goes back to the caller as the
-    /// store's conflict (retryable), not dead-lettered.
+    /// store's conflict (retryable; `COORDINATOR_REASON_STORE_CONFLICT`),
+    /// not dead-lettered.
     pub max_race_runs: u32,
     /// The wait before the first retry.
     pub initial_backoff: std::time::Duration,

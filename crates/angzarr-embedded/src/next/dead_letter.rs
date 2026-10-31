@@ -48,9 +48,11 @@
 //!   malformed;
 //! - a step whose retryable failure outlasted its retries
 //!   ([`OnRetryable`](super::OnRetryable)): the failure's own key as last
-//!   answered (`COORDINATOR_REASON_HANDLER_UNAVAILABLE`, a handler's retryable bug, a
-//!   policy step's ABORTED), `processing_failed`, `retry_count` its
-//!   retries, transient.
+//!   answered (`COORDINATOR_REASON_HANDLER_UNAVAILABLE`,
+//!   `COORDINATOR_REASON_STORE_UNAVAILABLE`,
+//!   `COORDINATOR_REASON_UPCASTER_UNAVAILABLE`, a handler's retryable bug, a
+//!   policy step's ABORTED; every retryable failure carries a key, decision
+//!   14.51), `processing_failed`, `retry_count` its retries, transient.
 //!
 //! Every letter names the component that could not take its payload and
 //! its kind ([`Component`]: `source_component`, `source_component_kind`):
