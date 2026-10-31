@@ -354,12 +354,19 @@ mod list_streams {
     );
 }
 
+/// The outbox checks of this workspace's angzarr-ports pin but its
+/// store-wide `the_outbox_drains_oldest_first_and_clears`, which the owner's
+/// ruling of 2026-10-31 (Q7) replaces with core's per-stream check, held
+/// here as `the_outbox_drains_each_stream_in_order_and_clears` until the
+/// pin moves to it; then this is `store_contract!(outbox, ..)` again.
 mod outbox {
     use super::*;
-    angzarr_ports::store_contract!(
-        outbox,
-        #[tokio::test],
-        SqliteStore::open_in_memory().await.unwrap()
+    angzarr_ports::store_contract!(@each [#[tokio::test]], SqliteStore::open_in_memory().await.unwrap();
+        an_outbox_entry_lands_with_its_write_or_not_at_all,
+        a_pending_entry_is_redelivered_until_cleared,
+        an_entry_put_again_while_pending_keeps_its_first_message,
+        a_cleared_id_put_again_is_a_new_pending_entry,
+        an_outbox_entry_keeps_its_edition,
     );
 }
 
@@ -956,6 +963,8 @@ fn every_migration_runs_inside_the_open_transaction() {
 //   ordering is per stream, there is no global position): the
 //   `commit_position` table and `events.position` (SQLite's DROP COLUMN,
 //   3.35 and later). 0002 itself stays, byte for byte.
+// - A new 0005 rekeys 0003's outbox per stream (owner ruling 2026-10-31:
+//   no outbox sequence), carrying what is pending; 0003 stays as released.
 
 /// The tables of the database at `path`, and the columns of its `events`,
 /// each sorted.
@@ -1971,22 +1980,29 @@ async fn a_handle_counts_the_statements_it_sends() {
 // released) and keys each entry by the stream its write appends to and
 // that write's first sequence, then its place in the write.
 
-/// The columns of the outbox at `path`, sorted, and whether SQLite keeps
-/// an AUTOINCREMENT counter (`sqlite_sequence`) for any table.
+/// The columns of the outbox at `path`, sorted, and whether SQLite counts
+/// for it (an AUTOINCREMENT in its definition, or a row of its in
+/// `sqlite_sequence`, which outlives 0003's table).
 async fn outbox_schema(path: &Path) -> (Vec<String>, bool) {
     let mut conn = raw(path).await;
     let columns = sqlx::query_scalar("SELECT name FROM pragma_table_info('outbox') ORDER BY name")
         .fetch_all(&mut conn)
         .await
         .unwrap();
-    let counted: Vec<String> = sqlx::query_scalar(
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'sqlite_sequence'",
+    let definition: String = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'outbox'",
     )
-    .fetch_all(&mut conn)
+    .fetch_one(&mut conn)
     .await
     .unwrap();
+    let counters: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM sqlite_sequence WHERE name = 'outbox'")
+            .fetch_all(&mut conn)
+            .await
+            .unwrap_or_default();
     conn.close().await.unwrap();
-    (columns, !counted.is_empty())
+    let counted = definition.to_ascii_uppercase().contains("AUTOINCREMENT") || !counters.is_empty();
+    (columns, counted)
 }
 
 /// A migrated store's outbox keeps no sequence of its own: no `seq`

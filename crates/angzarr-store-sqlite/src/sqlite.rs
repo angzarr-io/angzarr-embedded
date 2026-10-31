@@ -832,12 +832,37 @@ impl<C: DerefMut<Target = SqliteConnection>> Exec<'_, C> {
         Ok(next.unsigned_abs())
     }
 
-    async fn put_outbox(&mut self, entry: &OutboxEntry) -> Result<(), StoreError> {
+    /// Keep `entry`, the `place`th of its write, under `at`: the stream
+    /// its write appended to and that write's first sequence, or no stream
+    /// at 0 for a write that appended to none (owner ruling 2026-10-31,
+    /// Q7: the outbox orders per stream, with no sequence of its own).
+    async fn put_outbox(
+        &mut self,
+        entry: &OutboxEntry,
+        at: Option<(StreamRef<'_>, u64)>,
+        place: usize,
+    ) -> Result<(), StoreError> {
+        let ([domain, root, edition], sequence) = match at {
+            Some((stream, sequence)) => (view_of(stream), sequence),
+            None => (
+                [
+                    Value::Text(String::new()),
+                    Value::Blob(Vec::new()),
+                    Value::Text(String::new()),
+                ],
+                0,
+            ),
+        };
         let values = [
             Value::Blob(entry.id.as_bytes().to_vec()),
             Value::Text(entry.origin.clone()),
             Value::Blob(entry.message.encode_to_vec()),
             Value::MaybeText(entry.edition.clone()),
+            domain,
+            edition,
+            root,
+            Value::Int(i64::try_from(sequence).unwrap_or(i64::MAX)),
+            Value::Int(i64::try_from(place).unwrap_or(i64::MAX)),
         ];
         self.execute(statements::PUT_OUTBOX, values).await.map(drop)
     }
@@ -890,8 +915,9 @@ impl EventStore for SqliteStore {
         for (key, next) in write.positions {
             ex.put_position(*key, *next).await?;
         }
-        for entry in write.outbox {
-            ex.put_outbox(entry).await?;
+        let at = write.events.map(|append| (append.stream, append.expected));
+        for (place, entry) in write.outbox.iter().enumerate() {
+            ex.put_outbox(entry, at, place).await?;
         }
         ex.count();
         ex.conn.commit().await.map_err(unavailable)?;

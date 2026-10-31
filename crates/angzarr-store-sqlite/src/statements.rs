@@ -118,14 +118,20 @@ pub(crate) const PUT_POSITION: &str =
 pub(crate) const DELETE_POSITIONS: &str =
     "DELETE FROM positions WHERE domain = ?1 AND edition = ?2 AND root = ?3";
 
-/// Keep an outbox entry, unless its id is pending already.
+/// Keep an outbox entry, unless its id is pending already, under the
+/// stream its write appended to (`?5` to `?7`: domain, edition, root; an
+/// empty domain for none), that write's first sequence (`?8`) and its
+/// place in the write (`?9`).
 pub(crate) const PUT_OUTBOX: &str =
-    "INSERT INTO outbox (id, origin, message, edition) VALUES (?1, ?2, ?3, ?4) \
-     ON CONFLICT (id) DO NOTHING";
+    "INSERT INTO outbox (id, origin, message, edition, domain, stream_edition, root, sequence, place) \
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) ON CONFLICT (id) DO NOTHING";
 
-/// Rows `(id, origin, message, edition)`: the oldest `?1` pending entries.
-pub(crate) const PENDING: &str =
-    "SELECT id, origin, message, edition FROM outbox ORDER BY seq LIMIT ?1";
+/// Rows `(id, origin, message, edition)`: up to `?1` pending entries, each
+/// stream's in its order (its sequence, then the place in the write), so a
+/// limit takes each stream's oldest first. The order across streams is
+/// the index's, which promises nothing.
+pub(crate) const PENDING: &str = "SELECT id, origin, message, edition FROM outbox \
+     ORDER BY domain, stream_edition, root, sequence, place LIMIT ?1";
 
 /// Clear one pending entry by its id.
 pub(crate) const CLEAR: &str = "DELETE FROM outbox WHERE id = ?1";
