@@ -143,7 +143,7 @@ pub use policy::{
     policy, projection, target_cover, translated, CommandTarget, EventSource, Order, Policy,
     PolicyHandler, Projection, Projector,
 };
-pub use registry::{Aggregate, Misconfigured, Registry};
+pub use registry::{Aggregate, Description, Misconfigured, Registry};
 pub use route::{rejection, Rejected};
 pub use store::{
     Append, ChangeToken, EventStore, Head, ListStreams, Outbox, OutboxEntry, PositionKey,

@@ -3,7 +3,7 @@
 //! `CommandHandlerService`, a policy as a [`PolicyComponent`] over
 //! `PolicyService`, a projector as a [`ProjectorHandler`] over
 //! `ProjectorService`, each on its child's socket, its descriptor the one
-//! its `ComponentService.Describe` gave when it came up. A remote process
+//! its current child's `ComponentService.Describe` gave. A remote process
 //! manager's start rule is the kernel's, from that descriptor's starting
 //! types (decisions 14.41, 14.42): no call reaches the child.
 //!
@@ -26,7 +26,7 @@
 //!   UNAUTHENTICATED) arrives UNAVAILABLE: a retryable bug, as the owner
 //!   ruled.
 
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use angzarr_router::context::CommandContext;
@@ -44,7 +44,7 @@ use crate::rpc::policy::policy_service_client::PolicyServiceClient;
 use crate::rpc::projector::projector_service_client::ProjectorServiceClient;
 use crate::rpc::upcaster::upcaster_service_client::UpcasterServiceClient;
 use angzarr_embedded::next::reasons::args;
-use angzarr_embedded::next::{KernelError, UpcastError, UpcastPort};
+use angzarr_embedded::next::{Description, KernelError, UpcastError, UpcastPort};
 use angzarr_embedded_diagnostic::Report;
 
 /// The router-style codes a remote handler's dispatch adds to the router's
@@ -85,7 +85,8 @@ pub fn is_retryable(error: &CodedError) -> bool {
 }
 
 /// One remote component: its configured name, the descriptor `Describe`
-/// gave when it first came up, and the link to its current child.
+/// gave when it first came up (what it is named, of which kind, and
+/// routed by, for good), and the link to its current child.
 struct Remote {
     name: String,
     descriptor: pb::ComponentDescriptor,
@@ -98,6 +99,14 @@ struct Remote {
 /// its health turns SERVING and when it turns otherwise).
 pub(crate) struct Link {
     pub(crate) channel: RwLock<Option<Channel>>,
+    /// What the component is registered by: its current child's
+    /// descriptor, and once [`Host::register`](crate::Host::register) has
+    /// registered a domain, its registration's [`Description`]. The
+    /// supervisor replaces both, under this lock, before it publishes a
+    /// child described again (C-0563), so registering never misses a
+    /// child's descriptor and a child never gets work before it is
+    /// registered.
+    pub(crate) registered: Mutex<Registered>,
     /// How many times a child has come up: the supervisor counts each one
     /// after setting its channel (a sidecar's each time its health turns
     /// SERVING), so a watcher that sees `n` reaches the `n`th.
@@ -108,12 +117,38 @@ impl Default for Link {
     fn default() -> Self {
         Link {
             channel: RwLock::new(None),
+            registered: Mutex::new(Registered::default()),
             generation: tokio::sync::watch::channel(0).0,
         }
     }
 }
 
+/// What a component is registered by ([`Link::registered`]).
+#[derive(Default)]
+pub(crate) struct Registered {
+    /// The descriptor its current child (or, while it is down, its last)
+    /// answered `Describe` with.
+    pub(crate) descriptor: pb::ComponentDescriptor,
+    /// A registered domain's registration, which a child described again
+    /// replaces its descriptor through.
+    pub(crate) description: Option<Description>,
+}
+
+impl Link {
+    /// [`Link::registered`], locked: never held across an await.
+    pub(crate) fn registered(&self) -> std::sync::MutexGuard<'_, Registered> {
+        self.registered
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
 impl Remote {
+    /// The descriptor its current child answered `Describe` with.
+    fn current(&self) -> pb::ComponentDescriptor {
+        self.link.registered().descriptor.clone()
+    }
+
     /// `rpc` on the current child's channel, awaited on the caller's
     /// runtime until it answers or the call timeout passes (retryable). No
     /// thread is blocked: the caller's task yields while the call is out.
@@ -187,10 +222,16 @@ impl RemoteCommandHandler {
         &self.inner.name
     }
 
-    /// The descriptor `Describe` gave when the domain first came up: what
-    /// the kernel registers the domain by.
-    pub fn descriptor(&self) -> &pb::ComponentDescriptor {
-        &self.inner.descriptor
+    /// The descriptor its current child answered `Describe` with (its
+    /// last, while it is down): what the kernel registers the domain by.
+    pub fn descriptor(&self) -> pb::ComponentDescriptor {
+        self.inner.current()
+    }
+
+    /// The link to its children, which [`Host::register`](crate::Host::register)
+    /// registers the domain through.
+    pub(crate) fn link(&self) -> &Link {
+        &self.inner.link
     }
 }
 
@@ -326,9 +367,10 @@ impl PolicyComponent for RemotePolicyHandler {
 }
 
 impl RemotePolicyHandler {
-    /// The descriptor `Describe` gave when the policy first came up.
-    pub fn descriptor(&self) -> &pb::ComponentDescriptor {
-        &self.inner.descriptor
+    /// The descriptor its current child answered `Describe` with (its
+    /// last, while it is down).
+    pub fn descriptor(&self) -> pb::ComponentDescriptor {
+        self.inner.current()
     }
 }
 

@@ -21,6 +21,7 @@ angzarr-embedded-host-upcaster-no-domain = component "{ $domain }" is an upcaste
 angzarr-embedded-host-not-exposable = component "{ $domain }" is a { $kind }: only an aggregate may be exposed
 angzarr-embedded-host-not-exposed = a request for "{ $domain }" from { $arrival } was answered as an unknown domain: its component is exposed { $expose }
 angzarr-embedded-host-descriptor = component "{ $domain }": its descriptor is refused: { $cause }
+angzarr-embedded-host-descriptor-changed = component "{ $domain }" restarted describing another component than it is registered as: restart the host to take the change
 angzarr-embedded-host-runtime = the host's runtime could not be built ({ $kind })
 angzarr-embedded-host-socket-dir-too-long = socket_dir "{ $dir }" is too long for a Unix socket path: at most { $max_bytes ->
         [one] { $max_bytes } byte

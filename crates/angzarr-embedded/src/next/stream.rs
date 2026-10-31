@@ -371,10 +371,7 @@ impl<D: Domain> Stream<D> {
         let snapshot = (self.first > 0).then(|| Snapshot {
             sequence: self.first - 1,
             state: Some(pack(&self.base.to_snapshot())),
-            rules_version: registry
-                .rules_version(D::NAME)
-                .unwrap_or_default()
-                .to_string(),
+            rules_version: registry.rules_version(D::NAME).unwrap_or_default(),
         });
         let current = current.map_err(|error| {
             kernel(KernelError::Upcast {
@@ -512,7 +509,7 @@ impl<D: Domain> Stream<D> {
         Some(Snapshot {
             sequence,
             state: Some(pack(&self.state.to_snapshot())),
-            rules_version: registry.rules_version(D::NAME)?.to_string(),
+            rules_version: registry.rules_version(D::NAME)?,
         })
     }
 

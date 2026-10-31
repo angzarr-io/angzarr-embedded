@@ -744,3 +744,165 @@ fn a_host_dropped_on_a_current_thread_runtime_stops_its_children() {
         .block_on(async move { drop(host) });
     assert!(!alive(&pid));
 }
+
+/// A restarted child is registered by its new descriptor only if it is
+/// the same component: its name and kind, and for a policy or projector
+/// its inputs and output domain, which its registration routes by. A
+/// domain may change anything else (its rules version, its state, its
+/// starting types).
+#[test]
+fn a_restarted_child_must_describe_the_same_component() {
+    use pb::ComponentKind::{Aggregate, Policy, Projector};
+    use ComponentKindConfig::{Domain, Policy as PolicyKind, Projector as ProjectorKind};
+    let aggregate = described(Aggregate);
+    let rebuilt = pb::ComponentDescriptor {
+        rules_version: "1.5.0".to_string(),
+        state: None,
+        inputs: vec![pb::Target {
+            domain: "elsewhere".to_string(),
+        }],
+        ..aggregate.clone()
+    };
+    assert!(same_component(Domain, &aggregate, &rebuilt));
+    let renamed = pb::ComponentDescriptor {
+        name: "other".to_string(),
+        ..aggregate.clone()
+    };
+    assert!(!same_component(Domain, &aggregate, &renamed));
+    let rekinded = pb::ComponentDescriptor {
+        kind: pb::ComponentKind::ProcessManager as i32,
+        ..aggregate.clone()
+    };
+    assert!(!same_component(Domain, &aggregate, &rekinded));
+
+    let policy = described(Policy);
+    let rebuilt = pb::ComponentDescriptor {
+        rules_version: "1.5.0".to_string(),
+        ..policy.clone()
+    };
+    assert!(same_component(PolicyKind, &policy, &rebuilt));
+    let rerouted = pb::ComponentDescriptor {
+        output_domain: "billing".to_string(),
+        ..policy.clone()
+    };
+    assert!(!same_component(PolicyKind, &policy, &rerouted));
+    let resourced = pb::ComponentDescriptor {
+        inputs: vec![pb::Target {
+            domain: "cart".to_string(),
+        }],
+        ..policy.clone()
+    };
+    assert!(!same_component(PolicyKind, &policy, &resourced));
+
+    let projector = pb::ComponentDescriptor {
+        inputs: vec![pb::Target {
+            domain: "order".to_string(),
+        }],
+        ..described(Projector)
+    };
+    let more = pb::ComponentDescriptor {
+        inputs: vec![
+            pb::Target {
+                domain: "order".to_string(),
+            },
+            pb::Target {
+                domain: "cart".to_string(),
+            },
+        ],
+        ..projector.clone()
+    };
+    assert!(same_component(
+        ProjectorKind,
+        &projector,
+        &projector.clone()
+    ));
+    assert!(!same_component(ProjectorKind, &projector, &more));
+}
+
+/// A restarted child describing another component is not registered, and
+/// leaves its component's registration as it was: the host refuses it
+/// ([`HostError::DescriptorChanged`]); one the registry refuses is
+/// [`HostError::Register`]. The first child's is taken as it is.
+#[test]
+fn a_child_described_again_is_refused_unless_the_registry_takes_it() {
+    let supervisor = |kind| Supervisor {
+        domain: "order".to_string(),
+        kind,
+        launch: Launch {
+            program: "true".to_string(),
+            args: Vec::new(),
+            env: Default::default(),
+            dir: None,
+        },
+        supervision: Supervision::default(),
+        socket_dir: PathBuf::from("/tmp"),
+        link: Arc::new(crate::remote::Link::default()),
+        hooks: Hooks::default(),
+    };
+    let order = supervisor(ComponentKindConfig::Domain);
+    let first = pb::ComponentDescriptor {
+        state: Some(pb::StateDescriptor {
+            type_url: "/orders.v1.OrderState".to_string(),
+            options: Some(pb::StateOptions {
+                conflict_resolutions: vec![
+                    pb::ConflictResolution::Strict as i32,
+                    pb::ConflictResolution::AggregateHandles as i32,
+                ],
+            }),
+        }),
+        ..described(pb::ComponentKind::Aggregate)
+    };
+    assert_eq!(order.registered_by(&first, true), Ok(()));
+    assert_eq!(order.link.registered().descriptor, first);
+    let renamed = pb::ComponentDescriptor {
+        name: "other".to_string(),
+        ..first.clone()
+    };
+    assert_eq!(
+        order.registered_by(&renamed, false),
+        Err(HostError::DescriptorChanged {
+            domain: "order".to_string()
+        })
+    );
+    assert_eq!(order.link.registered().descriptor, first, "the old kept");
+
+    let mut registry = Registry::new();
+    let description = registry
+        .described_handler(
+            "order",
+            RemoteCommandHandler::new(
+                "order".to_string(),
+                first.clone(),
+                order.link.clone(),
+                Duration::from_millis(1),
+            ),
+            first.clone(),
+        )
+        .unwrap();
+    order.link.registered().description = Some(description);
+    let unversioned = pb::ComponentDescriptor {
+        rules_version: String::new(),
+        ..first.clone()
+    };
+    let refused = order.registered_by(&unversioned, false);
+    assert!(
+        matches!(&refused, Err(HostError::Register { cause }) if angzarr_embedded_diagnostic::Diagnostic::code(cause) == "angzarr-embedded-next-misconfigured-empty-rules-version"),
+        "{refused:?}"
+    );
+    assert_eq!(order.link.registered().descriptor, first, "the old kept");
+    let rebuilt = pb::ComponentDescriptor {
+        rules_version: "1.5.0".to_string(),
+        ..first.clone()
+    };
+    assert_eq!(order.registered_by(&rebuilt, false), Ok(()));
+    assert_eq!(order.link.registered().descriptor, rebuilt);
+    assert_eq!(registry.rules_version("order").as_deref(), Some("1.5.0"));
+
+    let sidecar = supervisor(ComponentKindConfig::Upcaster);
+    assert_eq!(sidecar.registered_by(&renamed, false), Ok(()));
+    assert_eq!(
+        sidecar.link.registered().descriptor,
+        pb::ComponentDescriptor::default(),
+        "a sidecar is not described"
+    );
+}

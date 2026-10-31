@@ -121,6 +121,11 @@ pub enum HostError {
         domain: String,
         cause: crate::DescriptorRefused,
     },
+    /// A restarted child described another component than its first
+    /// child did: another name or kind, or a policy or projector of other
+    /// inputs or another output domain. It is not published; the host
+    /// takes such a change only when it starts.
+    DescriptorChanged { domain: String },
     /// The configured `socket_dir` is too long for a Unix socket path to
     /// hold the host's socket names in it: at most `max_bytes` bytes.
     SocketDirTooLong { dir: String, max_bytes: u64 },
@@ -178,6 +183,7 @@ impl Diagnostic for HostError {
             HostError::KindMismatch { .. } => "angzarr-embedded-host-kind-mismatch",
             HostError::NoInput { .. } => "angzarr-embedded-host-no-input",
             HostError::Descriptor { .. } => "angzarr-embedded-host-descriptor",
+            HostError::DescriptorChanged { .. } => "angzarr-embedded-host-descriptor-changed",
             HostError::UpcasterNoDomain { .. } => "angzarr-embedded-host-upcaster-no-domain",
             HostError::NotExposable { .. } => "angzarr-embedded-host-not-exposable",
             HostError::SocketDirTooLong { .. } => "angzarr-embedded-host-socket-dir-too-long",
@@ -197,6 +203,7 @@ impl Diagnostic for HostError {
             HostError::DuplicateDomain { domain: d }
             | HostError::EmptyLaunch { domain: d }
             | HostError::NoInput { domain: d }
+            | HostError::DescriptorChanged { domain: d }
             | HostError::UpcasterNoDomain { domain: d } => {
                 vec![domain(d)]
             }
@@ -344,6 +351,7 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn Diagnostic>> {
                 component: "TableWalletPolicy".to_string(),
             },
         }),
+        Box::new(HostError::DescriptorChanged { domain: d() }),
         Box::new(HostError::SocketDirTooLong {
             dir: "/very/deep/directory".to_string(),
             max_bytes: 65,

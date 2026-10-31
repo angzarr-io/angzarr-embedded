@@ -19,7 +19,7 @@ fn registration_fills_the_state_descriptor_from_the_generated_impl() {
         "no conflict units"
     );
     assert!(!registry.supports("nowhere", ConflictResolution::Strict));
-    assert_eq!(registry.rules_version("account"), Some("v2"));
+    assert_eq!(registry.rules_version("account").as_deref(), Some("v2"));
     assert_eq!(
         registry.domains().collect::<Vec<_>>(),
         ["account", "ledger", "shelf"]
@@ -403,7 +403,7 @@ fn a_command_handler_registers_by_its_descriptor() {
     assert!(registry.is_process_manager("hello"));
     assert_eq!(registry.kind("hello"), ComponentKind::ProcessManager);
     assert_eq!(registry.kind("nowhere"), ComponentKind::Unspecified);
-    assert_eq!(registry.rules_version("hello"), Some("h1"));
+    assert_eq!(registry.rules_version("hello").as_deref(), Some("h1"));
     let mut aggregate = crate::next::Registry::new();
     aggregate
         .command_handler(
@@ -416,6 +416,82 @@ fn a_command_handler_registers_by_its_descriptor() {
         .unwrap();
     assert!(!aggregate.is_process_manager("hello"));
     assert_eq!(aggregate.kind("hello"), ComponentKind::Aggregate);
+}
+
+/// C-0563: a domain registered by its descriptor is described again
+/// through its [`Description`](crate::next::Description): the new
+/// descriptor replaces the old whole (its rules version, its state, a
+/// process manager's starting types), and one the registry refuses
+/// leaves the old in place.
+#[test]
+fn a_described_domain_is_replaced_whole_by_its_new_descriptor() {
+    use angzarr_router::pb::ComponentKind;
+    let mut registry = crate::next::Registry::new();
+    let description = registry
+        .described_handler(
+            "hello",
+            Hello {
+                kind: ComponentKind::ProcessManager,
+            },
+            angzarr_router::pb::ComponentDescriptor {
+                starting_types: vec!["toy.hello.v1.Start".to_string()],
+                ..hello(Some(base_state()))
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        format!("{description:?}"),
+        "Description { domain: \"hello\", .. }"
+    );
+    let commutative = crate::next::v1::StateDescriptor {
+        type_url: "/toy.hello.v2.State".to_string(),
+        options: Some(crate::next::v1::StateOptions {
+            conflict_resolutions: vec![
+                ConflictResolution::Commutative as i32,
+                ConflictResolution::Strict as i32,
+                ConflictResolution::AggregateHandles as i32,
+            ],
+        }),
+    };
+    description
+        .replace(angzarr_router::pb::ComponentDescriptor {
+            rules_version: "h2".to_string(),
+            starting_types: vec!["toy.hello.v1.Begin".to_string()],
+            ..hello(Some(commutative.clone()))
+        })
+        .unwrap();
+    assert_eq!(registry.rules_version("hello").as_deref(), Some("h2"));
+    assert_eq!(registry.state("hello"), Some(commutative));
+    assert!(registry.supports("hello", ConflictResolution::Commutative));
+    assert_eq!(
+        registry.starting_types("hello"),
+        Some(["toy.hello.v1.Begin".to_string()].into())
+    );
+
+    let refused = description.replace(angzarr_router::pb::ComponentDescriptor {
+        rules_version: String::new(),
+        ..hello(Some(base_state()))
+    });
+    assert_eq!(
+        refused,
+        Err(Misconfigured::EmptyRulesVersion {
+            domain: "hello".to_string()
+        })
+    );
+    assert_eq!(
+        registry.rules_version("hello").as_deref(),
+        Some("h2"),
+        "the old kept"
+    );
+    assert!(registry
+        .described_handler(
+            "hello",
+            Hello {
+                kind: ComponentKind::Aggregate,
+            },
+            hello(Some(base_state())),
+        )
+        .is_err());
 }
 
 /// A domain's name as a component of an application is decision 14.50's

@@ -6,7 +6,11 @@
 //! supervises: a child that
 //! exits is restarted, after a backoff that grows while restarts fail; while
 //! it is down its handler's dispatch is retryable
-//! ([`crate::is_retryable`]). An upcaster sidecar is not described: it is
+//! ([`crate::is_retryable`]). A restarted child is described again, and its
+//! component registered by its new descriptor before it is published
+//! (C-0563): a registered domain's whole descriptor is replaced, and a
+//! child describing another component (another name or kind, or a policy
+//! or projector of other inputs or another output domain) is not published. An upcaster sidecar is not described: it is
 //! up while its gRPC health reports SERVING, and down while it does not.
 //!
 //! The generated `main.rs` calls [`crate::run`], which holds the
@@ -319,11 +323,16 @@ impl Host {
         for component in &self.domains {
             match &component.hosted {
                 Hosted::Domain(handler) => {
-                    registry.command_handler(
+                    // Under the lock the supervisor describes a restarted
+                    // child under: registered by the current child's
+                    // descriptor, and every later one's replaces it.
+                    let mut registered = handler.link().registered();
+                    let description = registry.described_handler(
                         handler.domain(),
                         handler.clone(),
-                        handler.descriptor().clone(),
+                        registered.descriptor.clone(),
                     )?;
+                    registered.description = Some(description);
                 }
                 Hosted::Policy(handler) => {
                     registry.policy_component(handler.clone(), &handler.descriptor().output_domain);
@@ -433,6 +442,28 @@ fn check_kind(
         });
     }
     Ok(())
+}
+
+/// Whether `described`, a restarted child's descriptor, is of the same
+/// component as `registered`, the one its component was registered by: the
+/// same name and kind, and for a policy or a projector (`kind`) the same
+/// input domains and output domain, which its registration routes by.
+fn same_component(
+    kind: ComponentKindConfig,
+    registered: &pb::ComponentDescriptor,
+    described: &pb::ComponentDescriptor,
+) -> bool {
+    let inputs = |d: &pb::ComponentDescriptor| -> Vec<String> {
+        d.inputs.iter().map(|t| t.domain.clone()).collect()
+    };
+    let routed = match kind {
+        ComponentKindConfig::Policy | ComponentKindConfig::Projector => {
+            inputs(registered) == inputs(described)
+                && registered.output_domain == described.output_domain
+        }
+        ComponentKindConfig::Domain | ComponentKindConfig::Upcaster => true,
+    };
+    routed && registered.name == described.name && registered.kind == described.kind
 }
 
 /// Sends SIGTERM to the child `pid`.
@@ -584,6 +615,19 @@ impl Supervisor {
                 started = self.come_up() => started,
                 _ = &mut stop => return ChildExit::NotRunning,
             };
+            let started = match started {
+                // Every child is registered by its descriptor before it is
+                // published: a restarted one is described again (C-0563).
+                Ok(mut child) => match self.registered_by(&child.descriptor, up.is_some()) {
+                    Ok(()) => Ok(child),
+                    Err(error) => {
+                        let _ = child.child.kill().await;
+                        let _ = std::fs::remove_file(&child.socket);
+                        Err(error)
+                    }
+                },
+                Err(error) => Err(error),
+            };
             match started {
                 Ok(mut child) => {
                     backoff = initial;
@@ -634,6 +678,43 @@ impl Supervisor {
                 _ = &mut stop => return ChildExit::NotRunning,
             }
         }
+    }
+
+    /// Registers a child by `descriptor`, its answer to `Describe` (an
+    /// upcaster sidecar, which is not described, is left as it is): the
+    /// `first` child's is the one its component is registered by; a
+    /// restarted child's replaces it, its registered domain's descriptor
+    /// replaced whole
+    /// ([`Description::replace`](angzarr_embedded::next::Description::replace)),
+    /// under the lock [`Host::register`] registers under, before the child
+    /// is published. Refused, the old registration kept, when the registry
+    /// refuses it ([`HostError::Register`]) or it describes another
+    /// component than the first child did ([`HostError::DescriptorChanged`]):
+    /// another name or kind, or a policy or projector of other inputs or
+    /// another output domain, which the kernel routes by for good.
+    fn registered_by(
+        &self,
+        descriptor: &pb::ComponentDescriptor,
+        first: bool,
+    ) -> Result<(), HostError> {
+        if self.kind == ComponentKindConfig::Upcaster {
+            return Ok(());
+        }
+        let mut registered = self.link.registered();
+        if !first && !same_component(self.kind, &registered.descriptor, descriptor) {
+            return Err(HostError::DescriptorChanged {
+                domain: self.domain.clone(),
+            });
+        }
+        if let Some(description) = &registered.description {
+            description
+                .replace(descriptor.clone())
+                .map_err(|cause| HostError::Register {
+                    cause: angzarr_embedded_diagnostic::Report::of(&cause),
+                })?;
+        }
+        registered.descriptor = descriptor.clone();
+        Ok(())
     }
 
     /// Publishes `channel`, the child up, counting it; or, `None`,

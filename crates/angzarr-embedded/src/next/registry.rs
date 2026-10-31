@@ -15,7 +15,7 @@
 use std::any::Any as AnyType;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
 
 use angzarr_proto::v1::{ConflictResolution, EventPage, Snapshot, StateDescriptor};
 use angzarr_router::domain::DomainDispatch;
@@ -36,19 +36,30 @@ use super::stream::Stream;
 use super::upcast::{UpcastPort, Upcaster};
 use super::version::Rulebook;
 
-/// One domain's entry.
-struct Entry {
+/// What a domain's descriptor tells the kernel: replaced whole, under
+/// its lock, when the domain is described again ([`Description::replace`]).
+struct Described {
     /// The state's descriptor: generated (`D::State::descriptor()`), or a
     /// hand-built handler's.
     state: StateDescriptor,
-    /// The resolutions it lists, read once at registration.
+    /// The resolutions it lists, read when it is described.
     supported: Vec<ConflictResolution>,
+    /// The registered rules version.
+    rules_version: String,
+    /// A process manager's starting input types, by full name, as its
+    /// descriptor lists them (`ComponentDescriptor.starting_types`): the
+    /// kernel's start rule. `None` for an aggregate.
+    starting: Option<BTreeSet<String>>,
+}
+
+/// One domain's entry.
+struct Entry {
+    /// What its descriptor says, shared with its [`Description`].
+    described: Arc<RwLock<Described>>,
     /// `D::CONFLICT_RESOLUTION`.
     component: Option<ConflictResolution>,
     /// `D::CONFLICT_RESOLUTION_BY_COMMAND`, by full type name.
     by_command: BTreeMap<String, ConflictResolution>,
-    /// The current rules version.
-    rules_version: String,
     /// What dispatches the domain's inputs: angzarr-router's.
     handler: Box<dyn DynCommandHandler>,
     /// What only a typed domain has: its rulebook, upcaster, payload types,
@@ -60,10 +71,83 @@ struct Entry {
     /// typed domain's [`Upcaster`], or the port [`Registry::upcast_with`]
     /// gave. `None`: nothing is upcast.
     upcast: Option<Arc<dyn UpcastPort>>,
-    /// A process manager's starting input types, by full name, as its
-    /// descriptor lists them (`ComponentDescriptor.starting_types`): the
-    /// kernel's start rule. `None` for an aggregate.
-    starting: Option<BTreeSet<String>>,
+}
+
+impl Entry {
+    /// What its descriptor says, read under its lock: never held across an
+    /// await.
+    fn described(&self) -> RwLockReadGuard<'_, Described> {
+        self.described
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// A domain registered by its descriptor ([`Registry::described_handler`]):
+/// what its coordinator holds to describe it again. A business process
+/// that reconnects is described again (component.proto, Registration;
+/// C-0563), and [`Description::replace`] registers its new descriptor
+/// whole, at once, before anything more is delivered to it.
+#[derive(Clone)]
+pub struct Description {
+    domain: String,
+    kind: angzarr_router::pb::ComponentKind,
+    described: Arc<RwLock<Described>>,
+}
+
+impl fmt::Debug for Description {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Description")
+            .field("domain", &self.domain)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Description {
+    /// Register `descriptor` as the domain's in place of the one it was
+    /// registered by: its state, its resolutions, its rules version and a
+    /// process manager's starting types, all at once. Refused, the old
+    /// one kept, as [`Registry::command_handler`] refuses a descriptor.
+    pub fn replace(
+        &self,
+        descriptor: angzarr_router::pb::ComponentDescriptor,
+    ) -> Result<(), Misconfigured> {
+        let described = described(&self.domain, self.kind, descriptor)?;
+        *self
+            .described
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = described;
+        Ok(())
+    }
+}
+
+/// What `descriptor` says of `domain`, a handler of `kind`, refused
+/// without a rules version or a state type, or with a state whose
+/// resolutions are not resolutions.
+fn described(
+    domain: &str,
+    kind: angzarr_router::pb::ComponentKind,
+    descriptor: angzarr_router::pb::ComponentDescriptor,
+) -> Result<Described, Misconfigured> {
+    if descriptor.rules_version.is_empty() {
+        return Err(Misconfigured::EmptyRulesVersion {
+            domain: domain.to_string(),
+        });
+    }
+    let starting = starting_types(kind, &descriptor);
+    let state = descriptor
+        .state
+        .filter(|state| !state.type_url.is_empty())
+        .ok_or_else(|| Misconfigured::BadStateDescriptor {
+            domain: domain.to_string(),
+        })?;
+    let supported = supported(domain, &state)?;
+    Ok(Described {
+        state,
+        supported,
+        rules_version: descriptor.rules_version,
+        starting,
+    })
 }
 
 /// A process manager's starting types, by name, from its descriptor:
@@ -409,11 +493,14 @@ impl Registry {
         let table = route::table::<D>(Arc::clone(&rules), Arc::clone(&fresh), process_manager);
         let handler: Box<dyn DynCommandHandler> = Box::new(handlers(table));
         let entry = Entry {
-            state,
-            supported,
+            described: Arc::new(RwLock::new(Described {
+                state,
+                supported,
+                rules_version: rules.current().0.to_string(),
+                starting,
+            })),
             component: D::CONFLICT_RESOLUTION,
             by_command,
-            rules_version: rules.current().0.to_string(),
             handler,
             typed: Some(Typed {
                 rules: Box::new(rules),
@@ -429,7 +516,6 @@ impl Registry {
             }),
             process_manager,
             upcast: Some(port),
-            starting,
         };
         self.domains.insert(domain, entry);
         Ok(())
@@ -453,38 +539,44 @@ impl Registry {
         handler: impl router::CommandHandler + 'static,
         descriptor: angzarr_router::pb::ComponentDescriptor,
     ) -> Result<(), Misconfigured> {
+        self.described_handler(domain, handler, descriptor)
+            .map(drop)
+    }
+
+    /// [`Registry::command_handler`], answering the domain's
+    /// [`Description`]: what its coordinator replaces its descriptor
+    /// through when the domain is described again (a child restarted,
+    /// C-0563).
+    pub fn described_handler(
+        &mut self,
+        domain: &str,
+        handler: impl router::CommandHandler + 'static,
+        descriptor: angzarr_router::pb::ComponentDescriptor,
+    ) -> Result<Description, Misconfigured> {
         let name = domain.to_string();
         if self.taken(&name) {
             return Err(Misconfigured::AlreadyRegistered { domain: name });
         }
-        if descriptor.rules_version.is_empty() {
-            return Err(Misconfigured::EmptyRulesVersion { domain: name });
-        }
-        let starting = starting_types(handler.kind(), &descriptor);
-        let state = descriptor
-            .state
-            .filter(|state| !state.type_url.is_empty())
-            .ok_or_else(|| Misconfigured::BadStateDescriptor {
-                domain: name.clone(),
-            })?;
-        let supported = supported(&name, &state)?;
-        let process_manager = handler.kind() == angzarr_router::pb::ComponentKind::ProcessManager;
+        let kind = handler.kind();
+        let described = Arc::new(RwLock::new(described(&name, kind, descriptor)?));
+        let process_manager = kind == angzarr_router::pb::ComponentKind::ProcessManager;
         self.domains.insert(
-            name,
+            name.clone(),
             Entry {
-                state,
-                supported,
+                described: Arc::clone(&described),
                 component: None,
                 by_command: BTreeMap::new(),
-                rules_version: descriptor.rules_version,
                 handler: Box::new(handler),
                 typed: None,
                 process_manager,
                 upcast: None,
-                starting,
             },
         );
-        Ok(())
+        Ok(Description {
+            domain: name,
+            kind,
+            described,
+        })
     }
 
     /// Upcast `domain`'s incoming payloads through `port` (decision
@@ -758,8 +850,10 @@ impl Registry {
 
     /// `domain`'s state descriptor, if registered: what [`check`](super::check)
     /// reads capabilities from.
-    pub fn state(&self, domain: &str) -> Option<&StateDescriptor> {
-        self.domains.get(domain).map(|e| &e.state)
+    pub fn state(&self, domain: &str) -> Option<StateDescriptor> {
+        self.domains
+            .get(domain)
+            .map(|e| e.described().state.clone())
     }
 
     /// Whether `domain`'s state supports `resolution`. `false` for a domain
@@ -767,7 +861,7 @@ impl Registry {
     pub fn supports(&self, domain: &str, resolution: ConflictResolution) -> bool {
         self.domains
             .get(domain)
-            .is_some_and(|e| e.supported.contains(&resolution))
+            .is_some_and(|e| e.described().supported.contains(&resolution))
     }
 
     /// The resolution for a command of type `command_type_url` to `domain`
@@ -783,7 +877,11 @@ impl Registry {
         requested: Option<ConflictResolution>,
     ) -> Option<ConflictResolution> {
         let entry = self.domains.get(domain)?;
-        let built_in = if entry.supported.contains(&ConflictResolution::Commutative) {
+        let supported = entry
+            .described()
+            .supported
+            .contains(&ConflictResolution::Commutative);
+        let built_in = if supported {
             ConflictResolution::Commutative
         } else {
             ConflictResolution::Strict
@@ -796,9 +894,12 @@ impl Registry {
         )
     }
 
-    /// `domain`'s current rules version: what its events are stamped with.
-    pub fn rules_version(&self, domain: &str) -> Option<&str> {
-        self.domains.get(domain).map(|e| e.rules_version.as_str())
+    /// `domain`'s registered rules version: what its events are stamped
+    /// with.
+    pub fn rules_version(&self, domain: &str) -> Option<String> {
+        self.domains
+            .get(domain)
+            .map(|e| e.described().rules_version.clone())
     }
 
     /// `D`'s rulebook, if `D` is registered.
@@ -823,8 +924,8 @@ impl Registry {
 
     /// `domain`'s starting input types, by full name, if it is a process
     /// manager's: what the kernel's start rule admits with no instance.
-    pub(crate) fn starting_types(&self, domain: &str) -> Option<&BTreeSet<String>> {
-        self.domains.get(domain)?.starting.as_ref()
+    pub(crate) fn starting_types(&self, domain: &str) -> Option<BTreeSet<String>> {
+        self.domains.get(domain)?.described().starting.clone()
     }
 
     /// What `domain`'s incoming payloads are upcast through, if anything.
@@ -840,11 +941,12 @@ impl Registry {
         let Some(entry) = self.domains.get(domain) else {
             return false;
         };
-        snapshot.rules_version == entry.rules_version
+        let described = entry.described();
+        snapshot.rules_version == described.rules_version
             && snapshot
                 .state
                 .as_ref()
-                .is_some_and(|s| type_name(&s.type_url) == type_name(&entry.state.type_url))
+                .is_some_and(|s| type_name(&s.type_url) == type_name(&described.state.type_url))
     }
 
     /// Check every domain's upcaster against the types it decodes
@@ -994,7 +1096,7 @@ impl<'r, D: Domain<State = D, Rules = ()> + markup::Routed> Aggregate<'r, D> {
         let Some(entry) = self.registry.domains.remove(D::NAME) else {
             return self;
         };
-        let starting = entry.starting;
+        let starting = entry.described().starting.clone();
         let fresh = (entry.typed)
             .and_then(|typed| typed.fresh.downcast::<Factory<D>>().ok())
             .map(|fresh| *fresh);

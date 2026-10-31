@@ -486,7 +486,6 @@ pub(crate) async fn decide(
     })?;
     let rules_version = registry
         .rules_version(domain)
-        .map(str::to_string)
         .unwrap_or(response.rules_version);
     let meta = identified.meta(recorded_at, &rules_version);
     let events = response.events.unwrap_or_default();
