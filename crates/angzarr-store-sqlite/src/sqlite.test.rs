@@ -2122,3 +2122,70 @@ async fn the_outbox_drains_each_stream_in_order_and_clears() {
     assert_eq!(store.clear(&[e2.id, e5.id]).await, Ok(2));
     assert_eq!(store.pending(10).await, Ok(vec![]));
 }
+
+/// Owner ruling 2026-10-31 on angzarr-ports' FLAG(O7): a write that
+/// appends no events but writes outbox entries (a policy's step) orders
+/// them on its trigger's stream, at the triggering event's sequence (the
+/// position it moves to, less one), then by their order in the write. The
+/// step's write is forced to land before the write of an earlier event of
+/// that stream, and still drains after it.
+#[tokio::test]
+async fn a_policy_steps_entries_order_on_its_triggers_stream() {
+    use angzarr_ports::contract::entry;
+    use angzarr_ports::{OutboxEntry, Write};
+    let store = SqliteStore::open_in_memory().await.unwrap();
+    let a = main_stream("a", 1);
+    let appended = |at: u64, entries: &'static [u8]| {
+        let entries: Vec<OutboxEntry> = entries.iter().map(|n| entry(*n, "a", 1)).collect();
+        (at, entries)
+    };
+    let (at0, e0) = appended(0, &[10]);
+    let pages = [page(at0, 1)];
+    store
+        .write(Write {
+            outbox: &e0,
+            ..Write::append(a, at0, &pages)
+        })
+        .await
+        .unwrap();
+    // The step for the event at sequence 2, landing first: its position on
+    // `a` moves to 3.
+    let step = [entry(30, "a", 1), entry(31, "a", 1)];
+    let key = PositionKey {
+        handler: "a-policy",
+        stream: a,
+    };
+    store
+        .write(Write {
+            positions: &[(key, 3)],
+            outbox: &step,
+            ..Write::default()
+        })
+        .await
+        .unwrap();
+    let (at1, e1) = appended(1, &[20]);
+    let pages = [page(at1, 1), page(at1 + 1, 1)];
+    store
+        .write(Write {
+            outbox: &e1,
+            ..Write::append(a, at1, &pages)
+        })
+        .await
+        .unwrap();
+    let pending = store.pending(10).await.unwrap();
+    let ids: Vec<_> = pending
+        .iter()
+        .filter(|e| e.origin == "a")
+        .map(|e| e.id)
+        .collect();
+    assert_eq!(
+        ids,
+        [
+            entry(10, "a", 1).id,
+            entry(20, "a", 1).id,
+            step[0].id,
+            step[1].id
+        ],
+        "on a's sequence: 0, 1, then the step's trigger at 2, in write order"
+    );
+}
