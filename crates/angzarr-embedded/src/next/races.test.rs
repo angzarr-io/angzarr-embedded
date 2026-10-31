@@ -659,11 +659,13 @@ fn under_commutative_a_race_lost_at_the_write_redelivers_the_widened_window() {
 /// C-0724: with the retry cap reached after 3 deliveries (two retries), an
 /// AGGREGATE_HANDLES or COMMUTATIVE command that accepts every window and
 /// loses the race at every write is delivered 3 times, each a wider window
-/// with a fresh nonce, then dead-lettered and its caller answered INTERNAL,
-/// `COORDINATOR_REASON_RETRY_CAP_EXHAUSTED`, attempts 3 and cap 3. It
-/// persists nothing, and is never answered the stale key.
+/// with a fresh nonce, then its caller is answered INTERNAL,
+/// `COORDINATOR_REASON_RETRY_CAP_EXHAUSTED`, attempts 3 and cap 3. Its
+/// caller is waiting, so nothing is dead-lettered (owner ruling,
+/// 2026-10-31: only work with no caller left is). It persists nothing, and
+/// is never answered the stale key.
 #[test]
-fn a_window_lost_at_every_write_until_the_retry_cap_is_dead_lettered() {
+fn a_window_lost_at_every_write_until_the_retry_cap_is_answered_given_up() {
     for (resolution, accepted) in [
         (ConflictResolution::AggregateHandles, Reported::ThisNonce),
         (
@@ -698,7 +700,7 @@ fn a_window_lost_at_every_write_until_the_retry_cap_is_dead_lettered() {
         let nonces: BTreeSet<_> = seen.iter().map(|s| s.nonce.clone()).collect();
         assert_eq!(nonces.len(), 3, "{case}: each nonce fresh");
         assert_cap_exhausted(&failure, 3, 3);
-        assert_dead_lettered_at_cap(&log, 3, 3);
+        assert!(log.lines().is_empty(), "{case}: {:?}", log.lines());
         assert_eq!(stored(&store), notes(3), "{case}: nothing persisted");
         assert_eq!(waits.waited(), backoffs(2), "{case}");
     }
@@ -821,9 +823,10 @@ fn with_no_race_reruns_a_lost_race_goes_back_as_the_stores_conflict() {
 /// C-0725: with the race re-run cap at 3 runs and the retry cap higher (5
 /// deliveries, never reached), a command with no expected sequence that
 /// loses the race at every write runs 3 times, each against a newer head,
-/// backing off between runs, then is dead-lettered and its caller
-/// answered INTERNAL, `COORDINATOR_REASON_RETRY_CAP_EXHAUSTED`, attempts 3
-/// and cap 3. It persists nothing, and is never answered the stale key.
+/// backing off between runs, then its caller is answered INTERNAL,
+/// `COORDINATOR_REASON_RETRY_CAP_EXHAUSTED`, attempts 3 and cap 3. Its
+/// caller is waiting, so nothing is dead-lettered (owner ruling,
+/// 2026-10-31). It persists nothing, and is never answered the stale key.
 #[test]
 fn a_stamped_command_losing_every_race_stops_at_the_race_rerun_cap() {
     let store = store_at_three();
@@ -844,7 +847,7 @@ fn a_stamped_command_losing_every_race_stops_at_the_race_rerun_cap() {
     let heads: Vec<_> = orders.seen().iter().map(|s| s.head).collect();
     assert_eq!(heads, [3, 4, 5], "each run against a newer head");
     assert_cap_exhausted(&failure, 3, 3);
-    assert_dead_lettered_at_cap(&log, 3, 3);
+    assert!(log.lines().is_empty(), "{:?}", log.lines());
     assert_eq!(stored(&store), notes(3), "nothing persisted");
     assert_eq!(waits.waited(), backoffs(2), "backed off between runs");
 }

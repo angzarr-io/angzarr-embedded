@@ -5473,10 +5473,11 @@ mod router {
     /// a bug) is retried with exponential backoff (10, 30, then 50 ms, the
     /// most, not 90), each wait less its jitter (a draw of 0.5 at a jitter
     /// of 0.5 takes a quarter off), as many times as the cap allows, then
-    /// dead-lettered as a visible failure under its key and args, with how
-    /// many times it was retried; the caller still gets it.
+    /// handed back to its caller as last answered. The caller is waiting,
+    /// so nothing is dead-lettered (owner ruling, 2026-10-31: only work
+    /// with no caller left is; a policy's step is, below).
     #[test]
-    fn a_retryable_failure_is_retried_with_backoff_and_jitter_then_dead_lettered() {
+    fn a_retryable_failure_is_retried_with_backoff_and_jitter_then_handed_back() {
         use std::sync::atomic::Ordering::SeqCst;
         let (registry, calls) = recovering(usize::MAX);
         let store = Mem::new();
@@ -5502,22 +5503,7 @@ mod router {
         );
         assert_eq!(calls.load(SeqCst), 4, "the first attempt and 3 retries");
         assert_eq!(waits.micros(), [7_500, 22_500, 37_500]);
-        let lines = log.lines();
-        assert_eq!(lines.len(), 1, "dead-lettered once, visibly: {lines:?}");
-        assert!(lines[0].contains("retry_count=3"), "{lines:?}");
-        // A retryable bug at its cap records its own key and args as last
-        // answered, never the retry cap's; processing_failed, its retries,
-        // transient (decision 14.48).
-        let reason = crate::next::toys::wire(
-            "COORDINATOR_REASON_HANDLER_UNAVAILABLE",
-            &[("cause", "not-running"), ("domain", "remote")],
-        );
-        crate::next::toys::assert_letter(
-            &crate::next::toys::one_letter(log.letters()),
-            ::angzarr_embedded::next::v1::ComponentKind::Aggregate,
-            &reason,
-            crate::next::toys::processing_failed(&reason, 3, true),
-        );
+        assert!(log.lines().is_empty(), "{:?}", log.lines());
     }
 
     /// `max_retries = 0` turns retrying off: a retryable failure goes back
