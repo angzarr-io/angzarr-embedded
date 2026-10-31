@@ -15,7 +15,7 @@ rust-version = "1.89"
 # a query builder and a driver, and hand-rolling either is a second,
 # unchecked implementation of the dialect.
 [dependencies]
-angzarr-ports = { git = "https://github.com/angzarr-io/angzarr", rev = "6741a98ba2ed07124546ae3ed1a4531fbcd9a26c" }
+angzarr-ports = { git = "https://github.com/angzarr-io/angzarr", rev = "bfbe8d3e51bbc754ee80f955e9fbb64d83beabb7" }
 prost = "0.14"
 prost-types = "0.14"
 sea-query = "0.32"
@@ -28,7 +28,7 @@ tokio = { version = "1", default-features = false, features = ["sync"] }
 
 # The conformance suite, run on this store under tokio.
 [dev-dependencies]
-angzarr-ports = { git = "https://github.com/angzarr-io/angzarr", rev = "6741a98ba2ed07124546ae3ed1a4531fbcd9a26c", features = ["contract"] }
+angzarr-ports = { git = "https://github.com/angzarr-io/angzarr", rev = "bfbe8d3e51bbc754ee80f955e9fbb64d83beabb7", features = ["contract"] }
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
 
 [lints]
