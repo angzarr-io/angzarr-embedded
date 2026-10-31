@@ -42,7 +42,9 @@
 //!                              # (0: never), then dead-lettered; waiting
 //! max_race_runs = 10           # a command that keeps losing its write to
 //!                              # another write to its stream runs this
-//!                              # often, then is dead-lettered; waiting
+//!                              # often, then is dead-lettered (0: never
+//!                              # again, the conflict back to the caller,
+//!                              # retryable, not dead-lettered); waiting
 //! initial_backoff_ms = 100     # this long first,
 //! multiplier = 2.0             # this many times longer each retry,
 //! max_backoff_ms = 5000        # at most this long,
@@ -131,7 +133,9 @@ pub struct RetryConfig {
     pub max_retries: u32,
     /// Runs of a command stamped with the head it loaded while it loses its
     /// write to another write to its stream, the first included: the race
-    /// re-run cap (decision 14.46), then it is dead-lettered.
+    /// re-run cap (decision 14.46), then it is dead-lettered. 0 turns race
+    /// re-runs off: the first lost race goes back to the caller as the
+    /// store's conflict, retryable, and is not dead-lettered.
     pub max_race_runs: u32,
     /// The wait before the first retry.
     pub initial_backoff_ms: u64,

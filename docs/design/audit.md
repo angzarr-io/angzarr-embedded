@@ -302,7 +302,9 @@ another stream is never a conflict. The loser:
   step, under the race re-run cap (`OnRetryable::max_race_runs`, default
   10 runs, the first included; decision 14.46), with the retry policy's
   backoff and jitter between runs, whatever `max_retries` says; its
-  handler runs once per run.
+  handler runs once per run. A race re-run cap of 0 turns this off, for a
+  caller that owns its retry loop: the first lost race goes back to the
+  caller as the store's `Conflict` (retryable), not dead-lettered.
 - **set one, under STRICT**: it decided against a head that is gone, the
   early check's condition found late: `KernelError::Stale`, `expected`
   its sequence and `actual` the head the store found, ABORTED under

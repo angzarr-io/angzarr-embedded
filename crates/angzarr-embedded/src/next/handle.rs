@@ -123,13 +123,19 @@ pub struct Kernel<'k> {
 /// under a cap of its own, `max_race_runs` (decision 14.46), with the same
 /// backoff and jitter between runs. At either cap the command is
 /// dead-lettered, [`KernelError::RetryCapExhausted`] (a fact,
-/// [`Handled::Parked`]).
+/// [`Handled::Parked`]). `max_race_runs = 0` turns race re-runs off, for a
+/// caller that owns its retry loop: a stamped command's lost race goes
+/// back to the caller at once as the store's conflict
+/// ([`StoreError::Conflict`], [`Recovery::Retry`](super::Recovery::Retry)),
+/// not run again and not dead-lettered.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct OnRetryable {
     /// Retries after the first attempt; 0 turns retrying off.
     pub max_retries: u32,
     /// Runs of a stamped command's business code, the first included,
-    /// while it loses the race at its write: the race re-run cap. 0 is 1.
+    /// while it loses the race at its write: the race re-run cap. 0 turns
+    /// race re-runs off: the first lost race goes back to the caller as the
+    /// store's conflict (retryable), not dead-lettered.
     pub max_race_runs: u32,
     /// The wait before the first retry.
     pub initial_backoff: std::time::Duration,
@@ -1031,7 +1037,9 @@ impl<'k> Run<'k> {
     /// lost at the write ([`raced`]) runs again up to its cap: the race
     /// re-run cap for a stamped command, `max_retries + 1` deliveries for a
     /// re-delivered window; at the cap it is dead-lettered and given up,
-    /// [`KernelError::RetryCapExhausted`] in its place (`Err`).
+    /// [`KernelError::RetryCapExhausted`] in its place (`Err`). A race
+    /// re-run cap of 0 runs a stamped command's lost race no more and does
+    /// not dead-letter it (`Ok(false)`): its caller is handed the conflict.
     async fn again(
         &mut self,
         failure: &Failure<Rejected>,
@@ -1040,9 +1048,12 @@ impl<'k> Run<'k> {
         command: &Identified,
     ) -> Result<bool, Failure<Rejected>> {
         if let Some(race) = raced(failure, command) {
+            if matches!(race, Race::Rerun) && self.retry.max_race_runs == 0 {
+                return Ok(false);
+            }
             tries.races += 1;
             let cap = match race {
-                Race::Rerun => self.retry.max_race_runs.max(1),
+                Race::Rerun => self.retry.max_race_runs,
                 Race::Redeliver => self.retry.max_retries.saturating_add(1),
             };
             if tries.races >= cap {
