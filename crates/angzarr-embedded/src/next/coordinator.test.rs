@@ -1452,3 +1452,149 @@ mod admission {
         );
     }
 }
+
+mod rules_version {
+    //! The rules version an answer reports (command_handler.proto,
+    //! `CommandHandlerResponse.rules_version`): stamped in full, and refused
+    //! as a handler bug when it is not the registered one (C-0558).
+    use crate::next::angzarr_router::error::CodedError;
+    use crate::next::angzarr_router::pb;
+    use crate::next::toys::prelude::*;
+    use crate::next::toys::{at, command, cover, Edit};
+    use crate::next::{Failure, Recovery, Registry};
+
+    /// A hand-written handler answering every command with one event,
+    /// reporting `reported`.
+    struct Reporting {
+        reported: &'static str,
+    }
+
+    impl crate::next::angzarr_router::router::CommandHandler for Reporting {
+        fn name(&self) -> &str {
+            "order"
+        }
+
+        fn command_types(&self) -> Vec<String> {
+            Vec::new()
+        }
+
+        async fn dispatch(
+            &self,
+            _: &pb::ContextualCommand,
+        ) -> Result<pb::CommandHandlerResponse, CodedError> {
+            Ok(pb::CommandHandlerResponse {
+                conflict: None,
+                events: Some(pb::EventBook {
+                    pages: vec![pb::EventPage {
+                        payload: Some(crate::next::Any {
+                            type_url: "/orders.v1.ItemAdded".to_string(),
+                            value: Vec::new(),
+                        }),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }),
+                rules_version: self.reported.to_string(),
+            })
+        }
+    }
+
+    /// `order`, registered at "1.4.2+build.7", answering `reported`.
+    fn order(reported: &'static str) -> Registry {
+        let mut registry = Registry::new();
+        registry
+            .command_handler(
+                "order",
+                Reporting { reported },
+                pb::ComponentDescriptor {
+                    name: "order".to_string(),
+                    kind: pb::ComponentKind::Aggregate as i32,
+                    rules_version: "1.4.2+build.7".to_string(),
+                    state: Some(pb::StateDescriptor {
+                        type_url: "/orders.v1.OrderState".to_string(),
+                        options: Some(pb::StateOptions {
+                            conflict_resolutions: vec![
+                                pb::ConflictResolution::Strict as i32,
+                                pb::ConflictResolution::AggregateHandles as i32,
+                            ],
+                        }),
+                    }),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        registry
+    }
+
+    fn add_item() -> crate::next::v1::CommandBook {
+        command(
+            cover("order", 1),
+            crate::next::Any {
+                type_url: "/orders.v1.AddItem".to_string(),
+                value: Vec::new(),
+            },
+        )
+        .id(1)
+    }
+
+    /// C-0518: the version reported is stamped on every event, in full.
+    #[test]
+    fn every_event_records_the_reported_version_in_full() {
+        let registry = order("1.4.2+build.7");
+        let store = MemoryStore::new();
+        let log = crate::next::MemoryDeadLetters::new();
+        crate::next::Kernel::new(&registry, &log)
+            .handle_any(&store, add_item(), &at(10), &mut ())
+            .ready()
+            .expect("applied");
+        let written = pages(&store, &cover("order", 1));
+        assert_eq!(
+            written[0].meta.as_ref().map(|m| m.rules_version.as_str()),
+            Some("1.4.2+build.7")
+        );
+    }
+
+    /// C-0558: an answer reporting another version than the registered one
+    /// (an empty one included) is a handler bug, refused INTERNAL, and
+    /// nothing is persisted; it is dead-lettered, as every handler bug is.
+    #[test]
+    fn an_answer_reporting_another_version_is_refused_and_persists_nothing() {
+        for reported in ["1.5.0+build.9", "1.4.2+build.8", ""] {
+            let registry = order(reported);
+            let store = MemoryStore::new();
+            let log = crate::next::MemoryDeadLetters::new();
+            let failure = crate::next::Kernel::new(&registry, &log)
+                .handle_any(&store, add_item(), &at(10), &mut ())
+                .ready()
+                .err()
+                .unwrap_or_else(|| panic!("{reported:?} is refused"));
+            assert_eq!(failure.recovery(), Recovery::Bug, "{reported:?}");
+            let Failure::Kernel(error) = &failure else {
+                panic!("a kernel error: {failure:?}");
+            };
+            let coded = error.as_coded().expect("a spec key");
+            assert_eq!(coded.code, "HOST_REASON_DESCRIPTOR_RULES_VERSION_MISMATCH");
+            assert_eq!(
+                coded.grpc,
+                crate::next::angzarr_router::error::GrpcCode::Internal
+            );
+            assert_eq!(
+                coded.extras.get("described").map(String::as_str),
+                Some("1.4.2+build.7")
+            );
+            assert_eq!(
+                coded.extras.get("reported").map(String::as_str),
+                Some(reported)
+            );
+            assert_eq!(
+                coded.extras.get("component").map(String::as_str),
+                Some("order")
+            );
+            assert!(
+                pages(&store, &cover("order", 1)).is_empty(),
+                "nothing persisted"
+            );
+            assert_eq!(log.letters().len(), 1, "dead-lettered: {:?}", log.lines());
+        }
+    }
+}

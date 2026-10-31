@@ -567,3 +567,51 @@ fn the_registry_names_its_policies_and_projectors_in_order() {
 fn a_projector_with_no_source_panics() {
     Registry::new().projector_handler(&[], Named("no-view"));
 }
+
+/// types.proto's Snapshot region, the default rule: a snapshot is offered
+/// when its version, one leading "v" or "V" stripped, has the registered
+/// version's SemVer major and minor (C-0522, C-0523); a version that is
+/// not SemVer, so stripped, only under exact equality (C-0524).
+#[test]
+fn a_snapshot_is_usable_under_the_registered_major_and_minor() {
+    let mut registry = crate::next::Registry::new();
+    for (domain, version) in [("hello", "1.4.2+build.7"), ("label", "release-7")] {
+        registry
+            .command_handler(
+                domain,
+                Hello {
+                    kind: angzarr_router::pb::ComponentKind::Aggregate,
+                },
+                angzarr_router::pb::ComponentDescriptor {
+                    rules_version: version.to_string(),
+                    ..hello(Some(base_state()))
+                },
+            )
+            .unwrap();
+    }
+    let snapshot = |rules: &str| Snapshot {
+        sequence: 3,
+        state: Some(crate::next::Any {
+            type_url: "/toy.hello.v1.State".to_string(),
+            value: Vec::new(),
+        }),
+        rules_version: rules.to_string(),
+    };
+    for usable in ["1.4.2+build.7", "1.4.0", "v1.4.9", "V1.4.2", "1.4.3-rc.1"] {
+        assert!(
+            registry.snapshot_usable("hello", &snapshot(usable)),
+            "{usable}"
+        );
+    }
+    for unusable in [
+        "1.5.0", "2.4.2", "0.4.2", "vv1.4.2", "1.4", "", "1.04.2", "x1.4.2",
+    ] {
+        assert!(
+            !registry.snapshot_usable("hello", &snapshot(unusable)),
+            "{unusable}"
+        );
+    }
+    assert!(registry.snapshot_usable("label", &snapshot("release-7")));
+    assert!(!registry.snapshot_usable("label", &snapshot("release-8")));
+    assert!(!registry.snapshot_usable("label", &snapshot("vrelease-7")));
+}

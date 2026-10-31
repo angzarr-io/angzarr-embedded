@@ -41,8 +41,7 @@ use ::angzarr_embedded::next::markup::v1::{refusal_response, RefusalResponse};
 use ::angzarr_embedded::next::markup::{
     self, assert_step_idempotent, BusinessStatus, CommandContext, CommandRefused, Commands,
     Context, DomainMessage, Emit, Failed, Policy, PolicyContext, ProcessManager, ProjectionContext,
-    Record, Refusal, Refuses, Refusing, Rejection, RetryableStatus, TypeName, MARKUP_RULES_VERSION,
-    STEP_LIMIT,
+    Record, Refusal, Refuses, Refusing, Rejection, RetryableStatus, TypeName, STEP_LIMIT,
 };
 use ::angzarr_embedded::next::v1::event_meta::Causation;
 use ::angzarr_embedded::next::v1::{
@@ -2224,14 +2223,19 @@ mod fact_continuations {
 mod registration {
     use super::*;
 
-    /// A marked-up aggregate's events are recorded under the markup's one
-    /// rules version, whatever registered it.
+    /// A marked-up aggregate's rules version is its crate's build version
+    /// (`CARGO_PKG_VERSION`, the version angzarr-build writes into its
+    /// descriptor), and its events are recorded under it.
     #[test]
-    fn its_events_carry_the_markups_rules_version() {
+    fn its_events_carry_its_crates_build_version() {
         let registry = registry();
+        assert_eq!(
+            registry.rules_version("wallet").as_deref(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
         let wallet = opened(&registry, 5);
         for envelope in wallet.events() {
-            assert_eq!(envelope.rules_version(), MARKUP_RULES_VERSION);
+            assert_eq!(envelope.rules_version(), env!("CARGO_PKG_VERSION"));
         }
     }
 
