@@ -17,7 +17,7 @@ ignore = []
 
 [licenses]
 version = 2
-# angzarr-embedded is BSD-3-Clause and used as a library by applications under other
+# angzarr-embedded is Apache-2.0 OR BSD-3-Clause and used as a library by applications under other
 # licences, so a dependency's licence must be permissive: it must not impose
 # its terms on angzarr-embedded or on what links it. Copyleft is not on this list.
 allow = [
@@ -40,7 +40,7 @@ confidence-threshold = 0.9
 # In normal builds those crates are:
 #   `angzarr-embedded`, `angzarr-embedded-host`, `angzarr-store-sqlite`
 # and the rest (angzarr-embedded-diagnostic, angzarr-embedded-graph, angzarr-embedded-yaml,
-# angzarr-embedded-catalog-check) are BSD-3-Clause only (README, *Licence*;
+# angzarr-embedded-catalog-check) are Apache-2.0 OR BSD-3-Clause only (README, *Licence*;
 # `just licence-check` holds both to `cargo tree`). Accepted with the
 # dependency; any other copyleft crate fails here.
 exceptions = [

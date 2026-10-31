@@ -60,7 +60,7 @@ _lint:
 
 # Hold the README's *Licence* lists and deny.toml's comment to `cargo tree`:
 # the crates that carry angzarr-proto (AGPL-3.0-only) in a normal build, with
-# every feature on, and the rest of the workspace as BSD-3-Clause only.
+# every feature on, and the rest of the workspace as Apache-2.0 OR BSD-3-Clause only.
 [no-exit-message]
 licence-check:
     #!/usr/bin/env bash
@@ -85,9 +85,9 @@ licence-check:
         fi
     }
     check "README's carry-angzarr-proto bullet" "$(bullet '- **Carry angzarr-proto:**' | names)" "$actual"
-    check "README's BSD-3-Clause-only bullet" "$(bullet '- **BSD-3-Clause only:**' | names)" "$bsd"
+    check "README's Apache-2.0 OR BSD-3-Clause-only bullet" "$(bullet '- **Apache-2.0 OR BSD-3-Clause only:**' | names)" "$bsd"
     check "deny.toml's comment" "$(grep -A1 'In normal builds those crates are:' deny.toml | tail -n1 | names)" "$actual"
-    [ "$fail" = 0 ] && echo "licence-check: angzarr-proto in" $actual"; BSD-3-Clause only:" $bsd
+    [ "$fail" = 0 ] && echo "licence-check: angzarr-proto in" $actual"; Apache-2.0 OR BSD-3-Clause only:" $bsd
     exit "$fail"
 
 # Build the crates that must run in a browser for wasm32-unknown-unknown.

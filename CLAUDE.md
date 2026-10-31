@@ -95,10 +95,11 @@ Protobuf code lives in angzarr-embedded (angzarr's types) and
 angzarr-embedded-host (the service stubs); every other crate stays
 dependency-free except as above.
 
-## Licence: BSD-3-Clause; not published
+## Licence: Apache-2.0 OR BSD-3-Clause; not published
 
-angzarr-embedded is licensed under the BSD 3-Clause License (`LICENSE`).
-Every crate has `license = "BSD-3-Clause"` and `publish = false`, both inherited
+Licensed under either of Apache License 2.0 or BSD 3-Clause, at your option
+(`LICENSE-APACHE`, `LICENSE-BSD`).
+Every crate has `license = "Apache-2.0 OR BSD-3-Clause"` and `publish = false`, both inherited
 from `[workspace.package]`. A new crate sets `license.workspace = true` and
 `publish.workspace = true`.
 
