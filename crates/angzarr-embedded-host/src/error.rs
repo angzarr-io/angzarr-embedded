@@ -68,6 +68,15 @@ pub enum HostError {
     NoLaunch { domain: String, language: String },
     /// A `launch` with no program in it.
     EmptyLaunch { domain: String },
+    /// A component whose `language` is not one of the languages loaded
+    /// (`config::Languages`): `key` its TOML key path
+    /// (`component[1].language`), `loaded` the loaded languages' names, in
+    /// order, comma-separated.
+    UnknownLanguage {
+        key: String,
+        language: String,
+        loaded: String,
+    },
     /// The launch command's program could not be started. `kind` is the I/O
     /// error's `std::io::ErrorKind`, by name.
     Spawn {
@@ -160,6 +169,7 @@ impl Diagnostic for HostError {
             HostError::DuplicateDomain { .. } => "angzarr-embedded-host-duplicate-domain",
             HostError::NoLaunch { .. } => "angzarr-embedded-host-no-launch",
             HostError::EmptyLaunch { .. } => "angzarr-embedded-host-empty-launch",
+            HostError::UnknownLanguage { .. } => "angzarr-embedded-host-unknown-language",
             HostError::Spawn { .. } => "angzarr-embedded-host-spawn",
             HostError::Handshake { .. } => "angzarr-embedded-host-handshake",
             HostError::Connect { .. } => "angzarr-embedded-host-connect",
@@ -238,6 +248,15 @@ impl Diagnostic for HostError {
                 ("dir", dir.as_str().into()),
                 ("max_bytes", (*max_bytes).into()),
             ],
+            HostError::UnknownLanguage {
+                key,
+                language,
+                loaded,
+            } => vec![
+                ("key", key.as_str().into()),
+                ("language", language.as_str().into()),
+                ("loaded", loaded.as_str().into()),
+            ],
             HostError::ConfigUnreadable { path, kind } => vec![
                 ("path", path.as_str().into()),
                 ("kind", kind.as_str().into()),
@@ -282,6 +301,11 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn Diagnostic>> {
             language: "go".to_string(),
         }),
         Box::new(HostError::EmptyLaunch { domain: d() }),
+        Box::new(HostError::UnknownLanguage {
+            key: "component[1].language".to_string(),
+            language: "go".to_string(),
+            loaded: "python,rust".to_string(),
+        }),
         Box::new(HostError::Spawn {
             domain: d(),
             program: "uv".to_string(),

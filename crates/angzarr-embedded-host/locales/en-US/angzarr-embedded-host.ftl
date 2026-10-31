@@ -8,6 +8,7 @@ angzarr-embedded-host-handshake-closed = stdout closed before a handshake
 angzarr-embedded-host-handshake-unreadable = stdout could not be read ({ $kind })
 angzarr-embedded-host-duplicate-domain = component "{ $domain }" is configured twice
 angzarr-embedded-host-no-launch = component "{ $domain }": language "{ $language }" has no default launch command; give one
+angzarr-embedded-host-unknown-language = the config's "{ $key }" names language "{ $language }", which is not loaded; the languages loaded are { $loaded }
 angzarr-embedded-host-empty-launch = component "{ $domain }": the launch command is empty
 angzarr-embedded-host-spawn = component "{ $domain }": could not start "{ $program }" ({ $kind })
 angzarr-embedded-host-handshake = component "{ $domain }": { $cause }

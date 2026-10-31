@@ -37,7 +37,7 @@ use angzarr_embedded_diagnostic::Report;
 use angzarr_router::pb::{CommandResponse, ComponentKind};
 use angzarr_store_sqlite::SqliteStore;
 
-use crate::config::{Expose, HostConfig};
+use crate::config::{Expose, HostConfig, Languages};
 use crate::error::HostError;
 use crate::exposure::{Arrival, NotExposed};
 use crate::host::{ChildExit, Host};
@@ -54,16 +54,32 @@ use crate::host::{ChildExit, Host};
 /// stops the children. A component exposed (`expose`) that is registered
 /// as a process manager is refused ([`HostError::NotExposable`]): only an
 /// aggregate is served through the host's listener. On any refusal the
-/// children started are stopped again.
+/// children started are stopped again. Its components' languages are the
+/// built-in ones ([`Languages::builtin`]); [`run_with_languages`] loads
+/// more.
 pub async fn run(
     config: impl AsRef<Path>,
     register: impl FnOnce(&mut Registry),
 ) -> Result<App, HostError> {
+    run_with_languages(config, Languages::builtin(), register).await
+}
+
+/// [`run`], its components' `language` one of `languages`: the built-in
+/// ones and those the application loads before it starts
+/// (`Languages::builtin().with(Language::child("go"))`). A component in a
+/// language not among them is refused before anything starts
+/// ([`HostError::UnknownLanguage`], its key path and the languages
+/// loaded).
+pub async fn run_with_languages(
+    config: impl AsRef<Path>,
+    languages: Languages,
+    register: impl FnOnce(&mut Registry),
+) -> Result<App, HostError> {
     let path = config.as_ref().to_path_buf();
-    let (config, host) = blocking(move || {
+    let (config, host, languages) = blocking(move || {
         let config = read(&path)?;
-        let host = Host::start(config.clone())?;
-        Ok((config, host))
+        let host = Host::start_with_languages(config.clone(), &languages)?;
+        Ok((config, host, languages))
     })
     .await?;
     let mut registry = Registry::new();
@@ -78,7 +94,7 @@ pub async fn run(
     let hosted = Registered::of(&registry);
     register(&mut registry);
     let local = Registered::of(&registry).since(&hosted);
-    if let Err(error) = listed(&config, &local, &registry) {
+    if let Err(error) = listed(&config, &languages, &local, &registry) {
         return Err(stopped(host, error).await);
     }
     let exposed: BTreeMap<String, Expose> = config
@@ -196,12 +212,21 @@ impl Registered {
 /// order; then one registered that no in-process `[[component]]` of its
 /// kind lists is [`HostError::NotListed`], domains first, then policies,
 /// then projectors.
-fn listed(config: &HostConfig, local: &Registered, registry: &Registry) -> Result<(), HostError> {
+fn listed(
+    config: &HostConfig,
+    languages: &Languages,
+    local: &Registered,
+    registry: &Registry,
+) -> Result<(), HostError> {
     use crate::config::{ComponentKindConfig as Kind, Placement};
     let in_process: Vec<_> = config
         .components
         .iter()
-        .filter(|c| matches!(c.placement(), Ok(Placement::InProcess)))
+        .filter(|c| {
+            languages
+                .get(&c.language)
+                .is_some_and(|language| matches!(c.placement(language), Ok(Placement::InProcess)))
+        })
         .collect();
     for component in &in_process {
         let registered = match component.kind {

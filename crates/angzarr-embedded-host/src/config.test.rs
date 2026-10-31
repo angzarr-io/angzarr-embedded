@@ -21,6 +21,16 @@ fn strings(words: &[&str]) -> Vec<String> {
     words.iter().map(|w| w.to_string()).collect()
 }
 
+/// `component`'s placement in its language, as the built-in languages
+/// define it.
+fn placed(component: &ComponentConfig) -> Result<Placement, HostError> {
+    let languages = Languages::builtin();
+    let language = languages
+        .get(&component.language)
+        .expect("a built-in language");
+    component.placement(language)
+}
+
 /// The CLI writes `[[component]]` tables (the `component` key holds the
 /// list);
 /// every key but `name`, `language` and `kind` may be left out, and
@@ -124,11 +134,11 @@ fn the_documented_toml_reads() {
             ComponentKindConfig::Domain
         ]
     );
-    assert_eq!(config.components[1].placement(), {
+    assert_eq!(placed(&config.components[1]), {
         let mut player = domain("player", "python");
         player.entry = strings(&["-m", "player.serve"]);
         player.dir = Some(PathBuf::from("domains/player"));
-        player.placement()
+        placed(&player)
     });
     assert_eq!(config.supervision.handshake_timeout_ms, 10_000);
     assert_eq!(config.supervision.call_timeout_ms, 30_000);
@@ -243,18 +253,34 @@ fn the_policy_setting_round_trips() {
     assert_eq!(toml::from_str::<HostConfig>(&text).unwrap(), config);
 }
 
+/// The host knows two languages of its own: Rust, in process, and Python,
+/// a child launched by `uv run --locked`.
+#[test]
+fn the_built_in_languages_are_rust_in_process_and_python_by_uv() {
+    let languages = Languages::builtin();
+    assert_eq!(languages.names().collect::<Vec<_>>(), ["python", "rust"]);
+    assert_eq!(
+        languages.get(IN_PROCESS_LANGUAGE),
+        Some(&Language::in_process("rust"))
+    );
+    assert_eq!(
+        languages.get("python"),
+        Some(&Language::child("python").launched_by(["uv", "run", "--locked"]))
+    );
+    assert_eq!(languages.get("go"), None);
+    assert_eq!(Languages::default(), languages);
+    assert_eq!(Language::child("go").launched_by(["./go"]).name(), "go");
+    assert_eq!(Language::in_process("rust").name(), "rust");
+}
+
 #[test]
 fn python_defaults_to_uv_run_locked_then_its_entry() {
-    assert_eq!(
-        default_launch("python"),
-        Some(&["uv", "run", "--locked"][..])
-    );
     let mut player = domain("player", "python");
     player.entry = strings(&["-m", "player.serve"]);
     player.dir = Some(PathBuf::from("domains/player"));
     player.env = BTreeMap::from([("K".to_string(), "v".to_string())]);
     assert_eq!(
-        player.placement(),
+        placed(&player),
         Ok(Placement::Remote(Launch {
             program: "uv".to_string(),
             args: strings(&["run", "--locked", "-m", "player.serve"]),
@@ -271,7 +297,7 @@ fn a_configured_launch_overrides_the_default() {
     player.entry = strings(&["-m", "player.serve"]);
     player.launch = Some(strings(&["python3", "serve.py", "--fast"]));
     assert_eq!(
-        player.placement(),
+        placed(&player),
         Ok(Placement::Remote(Launch {
             program: "python3".to_string(),
             args: strings(&["serve.py", "--fast"]),
@@ -283,11 +309,7 @@ fn a_configured_launch_overrides_the_default() {
 
 #[test]
 fn a_rust_domain_without_a_launch_is_in_process() {
-    assert_eq!(default_launch(IN_PROCESS_LANGUAGE), None);
-    assert_eq!(
-        domain("table", "rust").placement(),
-        Ok(Placement::InProcess)
-    );
+    assert_eq!(placed(&domain("table", "rust")), Ok(Placement::InProcess));
 }
 
 /// A Rust domain may be remote too: a `launch` makes it a child.
@@ -296,7 +318,7 @@ fn a_rust_domain_with_a_launch_is_remote() {
     let mut table = domain("table", "rust");
     table.launch = Some(strings(&["./target/release/table-server"]));
     assert_eq!(
-        table.placement(),
+        placed(&table),
         Ok(Placement::Remote(Launch {
             program: "./target/release/table-server".to_string(),
             args: Vec::new(),
@@ -306,13 +328,14 @@ fn a_rust_domain_with_a_launch_is_remote() {
     );
 }
 
-/// Nothing here knows Go: it needs only its `launch`, and without one it
-/// is refused by name, not guessed at.
+/// A language the application loads with no default launch needs the
+/// component's `launch`, and without one it is refused by name, not
+/// guessed at.
 #[test]
-fn a_language_with_no_default_needs_a_launch() {
-    assert_eq!(default_launch("go"), None);
+fn a_loaded_language_with_no_default_needs_a_launch() {
+    let go = Language::child("go");
     assert_eq!(
-        domain("dealer", "go").placement(),
+        domain("dealer", "go").placement(&go),
         Err(HostError::NoLaunch {
             domain: "dealer".to_string(),
             language: "go".to_string(),
@@ -320,7 +343,53 @@ fn a_language_with_no_default_needs_a_launch() {
     );
     let mut dealer = domain("dealer", "go");
     dealer.launch = Some(strings(&["./bin/dealer"]));
-    assert!(matches!(dealer.placement(), Ok(Placement::Remote(_))));
+    assert!(matches!(dealer.placement(&go), Ok(Placement::Remote(_))));
+}
+
+/// A loaded language's default launch, then the component's entry.
+#[test]
+fn a_loaded_language_launches_by_its_default() {
+    let node = Language::child("node").launched_by(["node"]);
+    let mut dealer = domain("dealer", "node");
+    dealer.entry = strings(&["dealer.js"]);
+    assert_eq!(
+        dealer.placement(&node),
+        Ok(Placement::Remote(Launch {
+            program: "node".to_string(),
+            args: strings(&["dealer.js"]),
+            dir: None,
+            env: BTreeMap::new(),
+        }))
+    );
+}
+
+/// `language` is a closed set, the languages loaded: the built-in ones and
+/// those the application loads before it starts (owner ruling, 2026-10-31).
+/// One outside it is refused with its key path and the languages loaded,
+/// in name order; loading it admits it, and a language loaded again under
+/// a built-in's name replaces it.
+#[test]
+fn a_language_not_loaded_is_refused_with_its_key_path_and_the_loaded_languages() {
+    let text = "[[component]]\nname = \"table\"\nkind = \"domain\"\nlanguage = \"rust\"\n\n\
+                [[component]]\nname = \"dealer\"\nkind = \"domain\"\nlanguage = \"go\"\n\
+                launch = [\"./bin/dealer\"]\n";
+    let config = HostConfig::from_toml(text, "angzarr.toml").unwrap();
+    assert_eq!(
+        config.check_languages(&Languages::builtin()),
+        Err(HostError::UnknownLanguage {
+            key: "component[1].language".to_string(),
+            language: "go".to_string(),
+            loaded: "python,rust".to_string(),
+        })
+    );
+    let loaded = Languages::builtin().with(Language::child("go"));
+    assert_eq!(loaded.names().collect::<Vec<_>>(), ["go", "python", "rust"]);
+    assert_eq!(config.check_languages(&loaded), Ok(()));
+    let replaced = Languages::builtin().with(Language::child("python").launched_by(["python3"]));
+    assert_eq!(
+        replaced.get("python"),
+        Some(&Language::child("python").launched_by(["python3"]))
+    );
 }
 
 #[test]
@@ -328,7 +397,7 @@ fn an_empty_launch_is_refused() {
     let mut player = domain("player", "python");
     player.launch = Some(Vec::new());
     assert_eq!(
-        player.placement(),
+        placed(&player),
         Err(HostError::EmptyLaunch {
             domain: "player".to_string(),
         })

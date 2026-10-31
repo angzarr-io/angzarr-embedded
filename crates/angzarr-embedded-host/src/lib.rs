@@ -8,7 +8,7 @@
 //! For each remote `[[component]]` of a [`HostConfig`], [`Host::start`]:
 //!
 //! 1. launches the child with its launch command (the config's, or its
-//!    language's default: [`config::default_launch`]), `ANGZARR_SOCKET` set
+//!    language's default: [`Language::launched_by`]), `ANGZARR_SOCKET` set
 //!    to the socket path the host chose;
 //! 2. reads its handshake, the one stdout line
 //!    `angzarr-handshake v1 unix:<absolute-socket-path>` ([`handshake`]),
@@ -47,10 +47,10 @@ pub mod host;
 pub mod remote;
 pub mod rpc;
 
-pub use app::{run, App};
+pub use app::{run, run_with_languages, App};
 pub use config::{
-    ComponentConfig, ComponentKindConfig, Expose, HostConfig, Launch, Placement, StoreConfig,
-    Supervision,
+    ComponentConfig, ComponentKindConfig, Expose, HostConfig, Language, Languages, Launch,
+    Placement, StoreConfig, Supervision,
 };
 pub use descriptor::{validate, DescriptorRefused};
 pub use error::{HandshakeError, HostError};

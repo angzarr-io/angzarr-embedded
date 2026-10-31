@@ -271,6 +271,40 @@ async fn an_invalid_config_is_refused_where_it_goes_wrong() {
     ));
 }
 
+/// A component in a language the application did not load is refused
+/// before anything starts, with its key path and the languages loaded; the
+/// application that loads the language runs (owner ruling, 2026-10-31:
+/// `language` is a closed set, populated by the languages loaded).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_language_not_loaded_is_refused_and_one_loaded_runs() {
+    use crate::config::{Language, Languages};
+    let dir = scratch("languages");
+    let path = dir.join("angzarr.toml");
+    std::fs::write(
+        &path,
+        "[[component]]\nname = \"table\"\nkind = \"domain\"\nlanguage = \"rustacean\"\n\n\
+         [store]\nin_memory = true\n",
+    )
+    .unwrap();
+    let refused = run(&path, nothing).await.err();
+    assert_eq!(
+        refused,
+        Some(HostError::UnknownLanguage {
+            key: "component[0].language".to_string(),
+            language: "rustacean".to_string(),
+            loaded: "python,rust".to_string(),
+        })
+    );
+    let languages = Languages::builtin().with(Language::in_process("rustacean"));
+    let app = run_with_languages(&path, languages, |registry: &mut Registry| {
+        registry
+            .command_handler("table", NoHandler, fixtures::descriptor("table"))
+            .unwrap();
+    })
+    .await;
+    assert!(app.is_ok(), "{:?}", app.err());
+}
+
 /// A store that cannot be opened fails the run, its cause the kernel's
 /// store error; the children started are stopped.
 #[tokio::test(flavor = "multi_thread")]

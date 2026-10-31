@@ -33,8 +33,8 @@
 //! [[component]]
 //! name = "dealer"
 //! kind = "domain"
-//! language = "go"              # no default: the launch command is given
-//! launch = ["./bin/dealer"]
+//! language = "go"              # loaded by the application, with no
+//! launch = ["./bin/dealer"]    # default: the launch command is given
 //!
 //! [supervision]
 //! handshake_timeout_ms = 10000
@@ -78,8 +78,14 @@
 //! The config is read strictly ([`HostConfig::from_toml`]): an unknown key
 //! in any table, a missing required key, and a value outside a closed set
 //! (`kind`, `expose`, `[policy] on_bug`) are refused, naming the TOML key
-//! path where it goes wrong ([`HostError::ConfigInvalid`]). `language` is
-//! open: a language with no default launch command needs its `launch`.
+//! path where it goes wrong ([`HostError::ConfigInvalid`]). `language` is a
+//! closed set too, populated by the languages loaded ([`Languages`]): the
+//! built-in Rust (in process) and Python (a child, `uv run --locked`), and
+//! any the application loads before it starts
+//! ([`crate::run_with_languages`]); one not loaded is refused with its key
+//! path and the languages loaded ([`HostError::UnknownLanguage`]). A loaded
+//! language with no default launch command needs each component's
+//! `launch`.
 //!
 //! ```toml
 //! [[component]]
@@ -90,10 +96,11 @@
 //! entry = ["-m", "table_upcaster.serve"]
 //! ```
 //!
-//! A component's language picks its default launch command and nothing
-//! else: the host speaks one protocol to every child (the handshake, then
-//! gRPC on a Unix socket), so a language with no default here needs only a
-//! `launch`.
+//! A component's language picks where it runs and its default launch
+//! command, and nothing else: the host speaks one protocol to every child
+//! (the handshake, then gRPC on a Unix socket), so a language is loaded
+//! with no more than its name ([`Language::child`]) and, if it has one, its
+//! default launch ([`Language::launched_by`]).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -103,18 +110,102 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::HostError;
 
-/// The language whose components run in the application's own process, as
-/// angzarr-embedded components: the host launches none of them unless the
-/// config gives one a `launch`.
+/// The built-in language whose components run in the application's own
+/// process, as angzarr-embedded components: the host launches none of them
+/// unless the config gives one a `launch`.
 pub const IN_PROCESS_LANGUAGE: &str = "rust";
 
-/// The default launch command of each language that has one, before the
-/// component's `entry`. Python's runs the component's project with exactly its
-/// lock file's dependencies.
-pub fn default_launch(language: &str) -> Option<&'static [&'static str]> {
-    match language {
-        "python" => Some(&["uv", "run", "--locked"]),
-        _ => None,
+/// A language a component may be written in, as the host knows it: its
+/// name (a `[[component]]`'s `language`) and where a component in it runs
+/// when the config gives no `launch`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Language {
+    name: String,
+    runs: Runs,
+}
+
+/// Where a component of a [`Language`] with no `launch` runs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Runs {
+    /// In the application's process, registered by its `register`.
+    InProcess,
+    /// As a child, launched by this command (program first) followed by the
+    /// component's `entry`; with none, every component needs its `launch`.
+    Child(Option<Vec<String>>),
+}
+
+impl Language {
+    /// A language whose components with no `launch` run in process,
+    /// registered by the application's `register`.
+    pub fn in_process(name: impl Into<String>) -> Language {
+        Language {
+            name: name.into(),
+            runs: Runs::InProcess,
+        }
+    }
+
+    /// A language whose components run as children, each launched by its
+    /// own `launch` until [`Language::launched_by`] gives a default.
+    pub fn child(name: impl Into<String>) -> Language {
+        Language {
+            name: name.into(),
+            runs: Runs::Child(None),
+        }
+    }
+
+    /// This language with `command` (program first) as its default launch,
+    /// before a component's `entry`. A child language.
+    pub fn launched_by<W: Into<String>>(self, command: impl IntoIterator<Item = W>) -> Language {
+        Language {
+            name: self.name,
+            runs: Runs::Child(Some(command.into_iter().map(Into::into).collect())),
+        }
+    }
+
+    /// Its name, as a `[[component]]`'s `language` names it.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+/// The languages the host knows: a closed set, the built-in ones
+/// ([`Languages::builtin`]) and those the application loads before it
+/// starts ([`Languages::with`]; [`crate::run_with_languages`]). A
+/// `[[component]]` whose `language` is not among them is refused
+/// ([`HostConfig::check_languages`]). Its default is the built-in ones.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Languages(BTreeMap<String, Language>);
+
+impl Languages {
+    /// The host's own: Rust ([`IN_PROCESS_LANGUAGE`]), in process, and
+    /// Python, a child launched by `uv run --locked` (the component's
+    /// project with exactly its lock file's dependencies).
+    pub fn builtin() -> Languages {
+        Languages(BTreeMap::new())
+            .with(Language::in_process(IN_PROCESS_LANGUAGE))
+            .with(Language::child("python").launched_by(["uv", "run", "--locked"]))
+    }
+
+    /// These and `language`, which replaces one of its name.
+    pub fn with(mut self, language: Language) -> Languages {
+        self.0.insert(language.name.clone(), language);
+        self
+    }
+
+    /// The language named `name`, if loaded.
+    pub fn get(&self, name: &str) -> Option<&Language> {
+        self.0.get(name)
+    }
+
+    /// The loaded languages' names, in order.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.0.keys().map(String::as_str)
+    }
+}
+
+impl Default for Languages {
+    fn default() -> Languages {
+        Languages::builtin()
     }
 }
 
@@ -159,6 +250,32 @@ impl HostConfig {
                 ext_err_txt: error.message().to_string(),
             }
         })
+    }
+
+    /// Whether every component's `language` is one of `languages`: the
+    /// first that is not is refused as [`HostError::UnknownLanguage`],
+    /// naming its key path (`component[1].language`) and the languages
+    /// loaded.
+    pub fn check_languages(&self, languages: &Languages) -> Result<(), HostError> {
+        (0..self.components.len())
+            .try_for_each(|index| self.language_of(index, languages).map(|_| ()))
+    }
+
+    /// The language of component `index` among `languages`, or
+    /// [`HostError::UnknownLanguage`] naming its key path.
+    pub(crate) fn language_of<'l>(
+        &self,
+        index: usize,
+        languages: &'l Languages,
+    ) -> Result<&'l Language, HostError> {
+        let component = &self.components[index];
+        languages
+            .get(&component.language)
+            .ok_or_else(|| HostError::UnknownLanguage {
+                key: format!("component[{index}].language"),
+                language: component.language.clone(),
+                loaded: languages.names().collect::<Vec<_>>().join(","),
+            })
     }
 }
 
@@ -339,8 +456,9 @@ pub struct ComponentConfig {
     /// and its domain. A remote domain is registered as the domain this
     /// names.
     pub name: String,
-    /// The language it is written in (`"rust"`, `"python"`, `"go"`, ...),
-    /// lowercase.
+    /// The language it is written in: one of the languages loaded
+    /// ([`Languages`]: `"rust"`, `"python"`, and any the application
+    /// loads), lowercase.
     pub language: String,
     /// What it is, required: `"domain"` (an aggregate or a process
     /// manager; a child serves `CommandHandlerService`), `"policy"`
@@ -506,21 +624,21 @@ pub struct Launch {
 }
 
 impl ComponentConfig {
-    /// Where this component runs and, when remote, how it is launched: its
-    /// `launch`, else its language's default followed by its `entry`. A
-    /// `"rust"` component with no `launch` is in-process. Refused when the
-    /// launch is empty, or when no launch is given for a language with no
-    /// default.
-    pub fn placement(&self) -> Result<Placement, HostError> {
-        let words: Vec<String> = match (&self.launch, default_launch(&self.language)) {
+    /// Where this component, written in `language`, runs and, when remote,
+    /// how it is launched: its `launch`, else, for an in-process language,
+    /// in process, and for a child language its default followed by its
+    /// `entry`. Refused when the launch is empty, or when no launch is
+    /// given for a child language with no default.
+    pub fn placement(&self, language: &Language) -> Result<Placement, HostError> {
+        let words: Vec<String> = match (&self.launch, &language.runs) {
             (Some(launch), _) => launch.clone(),
-            (None, _) if self.language == IN_PROCESS_LANGUAGE => return Ok(Placement::InProcess),
-            (None, Some(default)) => default
+            (None, Runs::InProcess) => return Ok(Placement::InProcess),
+            (None, Runs::Child(Some(default))) => default
                 .iter()
-                .map(|w| w.to_string())
+                .cloned()
                 .chain(self.entry.iter().cloned())
                 .collect(),
-            (None, None) => {
+            (None, Runs::Child(None)) => {
                 return Err(HostError::NoLaunch {
                     domain: self.name.clone(),
                     language: self.language.clone(),

@@ -44,7 +44,9 @@ use tokio::io::BufReader;
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::oneshot;
 
-use crate::config::{ComponentKindConfig, Expose, HostConfig, Launch, Placement, Supervision};
+use crate::config::{
+    ComponentKindConfig, Expose, HostConfig, Languages, Launch, Placement, Supervision,
+};
 use crate::error::HostError;
 use crate::handshake::{read_handshake, SOCKET_ENV};
 use crate::remote::{
@@ -117,14 +119,32 @@ impl Host {
     /// the first time. It blocks until then: an async caller calls it off
     /// its workers.
     pub fn start(config: HostConfig) -> Result<Host, HostError> {
-        Host::start_with(config, Hooks::default())
+        Host::start_with_languages(config, &Languages::builtin())
+    }
+
+    /// [`Host::start`] knowing `languages`: the built-in ones and those
+    /// the application loads. A component in a language not among them is
+    /// refused before any child starts ([`HostError::UnknownLanguage`]).
+    pub fn start_with_languages(
+        config: HostConfig,
+        languages: &Languages,
+    ) -> Result<Host, HostError> {
+        Host::started(config, languages, Hooks::default())
     }
 
     /// [`Host::start`], its supervisors held at `hooks`' points.
+    #[cfg(test)]
     fn start_with(config: HostConfig, hooks: Hooks) -> Result<Host, HostError> {
+        Host::started(config, &Languages::builtin(), hooks)
+    }
+
+    /// [`Host::start_with_languages`], its supervisors held at `hooks`'
+    /// points.
+    fn started(config: HostConfig, languages: &Languages, hooks: Hooks) -> Result<Host, HostError> {
+        config.check_languages(languages)?;
         let mut names = BTreeSet::new();
         let mut remote = Vec::new();
-        for component in &config.components {
+        for (index, component) in config.components.iter().enumerate() {
             if !names.insert(component.name.as_str()) {
                 return Err(HostError::DuplicateDomain {
                     domain: component.name.clone(),
@@ -142,7 +162,8 @@ impl Host {
                     domain: component.name.clone(),
                 });
             }
-            if let Placement::Remote(launch) = component.placement()? {
+            let language = config.language_of(index, languages)?;
+            if let Placement::Remote(launch) = component.placement(language)? {
                 remote.push((component.name.clone(), component.kind, launch, upcasts));
             }
         }
