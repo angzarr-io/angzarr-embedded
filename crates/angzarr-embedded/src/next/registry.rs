@@ -882,6 +882,20 @@ impl Registry {
         self.domains.keys().map(String::as_str)
     }
 
+    /// `domain`'s name as a component of an application, what a host's
+    /// `[[component]]` lists it by (decision 14.50's default
+    /// `component_name`): an aggregate's is its domain, a process
+    /// manager's `pmg-` and its domain. `None` for a domain not registered
+    /// here.
+    pub fn component_name(&self, domain: &str) -> Option<String> {
+        self.domains
+            .get(domain)
+            .map(|entry| match entry.process_manager {
+                true => format!("pmg-{domain}"),
+                false => domain.to_string(),
+            })
+    }
+
     /// Route `domain` to `coordinator`, a coordinator elsewhere that owns
     /// its streams ([`super::target`]): every command naming it, the
     /// application's and every policy step's, is handed to the port, and

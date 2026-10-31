@@ -779,10 +779,26 @@ mod exposure_edges {
         }
     }
 
-    /// `quiet`, registered as `kind`, its component exposed `expose`.
+    /// `quiet`, registered as `kind`, its component (named as decision
+    /// 14.50 names it by default) exposed `expose`.
     async fn quiet(dir: &Path, kind: ComponentKind, expose: Expose) -> Result<App, HostError> {
+        let name = match kind {
+            ComponentKind::ProcessManager => "pmg-quiet",
+            _ => "quiet",
+        };
+        quiet_as(dir, name, kind, expose).await
+    }
+
+    /// `quiet`, registered as `kind`, listed as component `name`, exposed
+    /// `expose`.
+    async fn quiet_as(
+        dir: &Path,
+        name: &str,
+        kind: ComponentKind,
+        expose: Expose,
+    ) -> Result<App, HostError> {
         let mut config = HostConfig {
-            components: vec![in_process("quiet", expose)],
+            components: vec![in_process(name, expose)],
             ..HostConfig::default()
         };
         config.store.in_memory = true;
@@ -810,7 +826,7 @@ mod exposure_edges {
                 .await
                 .err(),
             Some(HostError::NotExposable {
-                domain: "quiet".to_string(),
+                domain: "pmg-quiet".to_string(),
                 kind: "process_manager".to_string(),
             })
         );
@@ -818,6 +834,41 @@ mod exposure_edges {
         assert!(hidden.is_ok(), "{:?}", hidden.err());
         let aggregate = quiet(&dir, ComponentKind::Aggregate, Expose::Loopback).await;
         assert!(aggregate.is_ok(), "{:?}", aggregate.err());
+    }
+
+    /// An in-process process manager's `[[component]]` names it by its
+    /// component name (decision 14.50: `pmg-` and its domain), not by its
+    /// domain: listed by its domain it is refused as listed and not
+    /// registered.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_process_manager_is_listed_by_its_component_name() {
+        let dir = scratch("pm-name");
+        let named = quiet_as(
+            &dir,
+            "pmg-quiet",
+            ComponentKind::ProcessManager,
+            Expose::None,
+        )
+        .await;
+        assert!(named.is_ok(), "{:?}", named.err());
+        assert_eq!(
+            quiet_as(&dir, "quiet", ComponentKind::ProcessManager, Expose::None)
+                .await
+                .err(),
+            Some(HostError::NotRegistered {
+                domain: "quiet".to_string(),
+                kind: "domain".to_string(),
+            })
+        );
+        assert_eq!(
+            quiet_as(&dir, "pmg-quiet", ComponentKind::Aggregate, Expose::None)
+                .await
+                .err(),
+            Some(HostError::NotRegistered {
+                domain: "pmg-quiet".to_string(),
+                kind: "domain".to_string(),
+            })
+        );
     }
 
     /// A decision with no events is answered APPLIED, with the addressed

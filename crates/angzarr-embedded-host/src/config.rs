@@ -334,7 +334,10 @@ impl Default for StoreConfig {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ComponentConfig {
-    /// The component's name: for a domain, the domain's.
+    /// The component's name. An in-process domain's is its component name
+    /// (decision 14.50): an aggregate's domain, a process manager's `pmg-`
+    /// and its domain. A remote domain is registered as the domain this
+    /// names.
     pub name: String,
     /// The language it is written in (`"rust"`, `"python"`, `"go"`, ...),
     /// lowercase.

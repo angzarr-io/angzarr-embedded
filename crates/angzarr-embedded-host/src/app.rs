@@ -87,9 +87,9 @@ pub async fn run(
         .filter(|c| c.expose != Expose::None)
         .map(|c| (c.name.clone(), c.expose))
         .collect();
-    if let Some(domain) = exposed.keys().find(|d| process_manager(&registry, d)) {
+    if let Some(name) = exposed.keys().find(|name| process_manager(&registry, name)) {
         let error = HostError::NotExposable {
-            domain: domain.clone(),
+            domain: name.clone(),
             kind: PROCESS_MANAGER.to_string(),
         };
         return Err(stopped(host, error).await);
@@ -123,12 +123,20 @@ pub async fn run(
 /// its descriptor's kind.
 const PROCESS_MANAGER: &str = "process_manager";
 
-/// Whether `domain` is registered here as a process manager.
-fn process_manager(registry: &Registry, domain: &str) -> bool {
-    matches!(
-        registry.target(domain),
-        Some(Target::Local(handler)) if handler.kind() == ComponentKind::ProcessManager
-    )
+/// Whether the component `name` is registered here as a process manager:
+/// a domain whose component name it is (decision 14.50), or a remote
+/// domain the host registered under its `[[component]]` name.
+fn process_manager(registry: &Registry, name: &str) -> bool {
+    let is = |domain: &str| {
+        matches!(
+            registry.target(domain),
+            Some(Target::Local(handler)) if handler.kind() == ComponentKind::ProcessManager
+        )
+    };
+    is(name)
+        || registry
+            .domains()
+            .any(|domain| registry.component_name(domain).as_deref() == Some(name) && is(domain))
 }
 
 /// The config at `path`, read as TOML.
@@ -140,7 +148,8 @@ fn read(path: &Path) -> Result<HostConfig, HostError> {
     HostConfig::from_toml(&text, &path.display().to_string())
 }
 
-/// What a registry holds by name: its domains, policies and projectors.
+/// What a registry holds by name: its domains (by component name,
+/// decision 14.50), policies and projectors.
 #[derive(Default)]
 struct Registered {
     domains: BTreeSet<String>,
@@ -153,7 +162,10 @@ impl Registered {
     fn of(registry: &Registry) -> Registered {
         let names = |names: &mut dyn Iterator<Item = &str>| names.map(str::to_string).collect();
         Registered {
-            domains: names(&mut registry.domains()),
+            domains: registry
+                .domains()
+                .filter_map(|domain| registry.component_name(domain))
+                .collect(),
             policies: names(&mut registry.policy_names()),
             projectors: names(&mut registry.projector_names()),
         }
@@ -176,7 +188,9 @@ impl Registered {
 
 /// The config's in-process components held to what `register`
 /// registered in process, `local` (the registry's domains, policies and
-/// projectors the host did not register), each by name and kind: a listed
+/// projectors the host did not register), each by name and kind, a
+/// domain by its component name (an aggregate's domain, a process
+/// manager's `pmg-` and its domain: decision 14.50): a listed
 /// one registered of no such kind and name is [`HostError::NotRegistered`]
 /// (an upcaster's `upcasts` no domain registered at all), in the config's
 /// order; then one registered that no in-process `[[component]]` of its

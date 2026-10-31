@@ -418,6 +418,32 @@ fn a_command_handler_registers_by_its_descriptor() {
     assert_eq!(aggregate.kind("hello"), ComponentKind::Aggregate);
 }
 
+/// A domain's name as a component of an application is decision 14.50's
+/// default: an aggregate's is its domain, a process manager's `pmg-` and
+/// its domain; a domain not registered here has none.
+#[test]
+fn a_domain_is_named_as_a_component_by_its_kind() {
+    use angzarr_router::pb::ComponentKind;
+    let named = |kind| {
+        let mut registry = crate::next::Registry::new();
+        registry
+            .command_handler("hello", Hello { kind }, hello(Some(base_state())))
+            .unwrap();
+        (
+            registry.component_name("hello"),
+            registry.component_name("nowhere"),
+        )
+    };
+    assert_eq!(
+        named(ComponentKind::Aggregate),
+        (Some("hello".to_string()), None)
+    );
+    assert_eq!(
+        named(ComponentKind::ProcessManager),
+        (Some("pmg-hello".to_string()), None)
+    );
+}
+
 /// A projector, as the router's `ProjectorHandler`, named `name`, that
 /// projects nothing.
 struct Named(&'static str);
