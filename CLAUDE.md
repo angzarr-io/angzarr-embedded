@@ -107,13 +107,14 @@ angzarr.yaml the CLI writes, whose `component` entries name each
 component's `kind`: domain, policy, projector or upcaster), because a remote
 component (a domain, a policy or a projector) is a child process speaking
 gRPC on a Unix socket: hand-rolling HTTP/2 would be a second, unchecked
-implementation of gRPC. Its stubs are written by `tonic-build`'s manual
-builder from the router's Rust types, so no `io.angzarr.v1` message is
-generated twice. Nothing else in the workspace depends on it but the catalog
-check's tests.
+implementation of gRPC. Its stubs are angzarr-proto's (its `grpc`
+feature), generated once from the spec's protos with the messages, so no
+`io.angzarr.v1` message or service is written by hand or generated
+twice. Nothing else in the workspace depends on it but the catalog check's
+tests.
 
-Protobuf code lives in angzarr-embedded (angzarr's types) and
-angzarr-embedded-host (the service stubs); every other crate stays
+Protobuf code lives in angzarr-proto (core's shared crate: every
+message, and the service stubs behind `grpc`); every other crate stays
 dependency-free except as above.
 
 ## Licence: Apache-2.0 OR BSD-3-Clause; not published
