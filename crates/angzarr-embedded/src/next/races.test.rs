@@ -1047,3 +1047,75 @@ fn a_policy_step_losing_every_race_is_dead_lettered_at_the_cap() {
         "past the trigger"
     );
 }
+
+/// A race re-run cap of 0 turns race re-runs off for a policy's step too:
+/// a step that loses the race at its write comes back like any failure
+/// the kernel does not retry: the store's conflict, retryable, after one
+/// run of business code, with no wait, nothing dead-lettered and nothing
+/// persisted, and the policy's position held at the trigger (never
+/// `on_policy_bug`'s move past it), so a resume runs the step again.
+#[test]
+fn with_no_race_reruns_a_policy_step_that_loses_the_race_goes_back_as_the_stores_conflict() {
+    let store = store_at_three();
+    let orders = Orders::scripted(
+        Some(&store),
+        vec![Delivery::racing(Reported::Nothing), Delivery::plain()],
+    );
+    let mut registry = registry_of(orders);
+    registry
+        .command_handler("bell", Bell, bell_descriptor())
+        .unwrap();
+    registry.policy_dispatch(PolicyDispatch::new("bell-order", "bell", "order").on_event(
+        RUNG,
+        |_, _| {
+            Ok(vec![CommandBook {
+                cover: Some(order()),
+                page: Some(CommandPage {
+                    body: Some(command_page::Body::Command(Command {
+                        payload: Some(any("/toy.order.v1.AddItem")),
+                    })),
+                    ..CommandPage::default()
+                }),
+                handling: None,
+            }])
+        },
+    ));
+    let log = MemoryDeadLetters::new();
+    let waits = Waits::default();
+    let retry = OnRetryable {
+        max_race_runs: 0,
+        ..OnRetryable::default()
+    };
+    let failure = kernel(&registry, &log, &waits, retry)
+        .handle_any(
+            &store,
+            command(cover("bell", 1), any("/toy.bell.v1.Ring")),
+            &at(1),
+            &mut (),
+        )
+        .ready()
+        .err()
+        .expect("the step lost the race");
+    assert!(
+        matches!(
+            &failure,
+            Failure::Downstream {
+                error: StepError::Kernel(KernelError::Store(
+                    crate::next::StoreError::Conflict { .. }
+                )),
+                ..
+            }
+        ),
+        "{failure:?}"
+    );
+    assert_eq!(failure.recovery(), Recovery::Retry);
+    assert_eq!(orders.seen().len(), 1, "run once");
+    assert!(waits.waited().is_empty(), "no wait");
+    assert!(log.lines().is_empty(), "{:?}", log.lines());
+    assert_eq!(stored(&store), notes(1), "the step persisted nothing");
+    assert_eq!(
+        position(&store, "bell-order", &cover("bell", 1)),
+        0,
+        "held at the trigger"
+    );
+}
