@@ -122,6 +122,39 @@ fn a_refusal_goes_out_and_reads_back_under_each_business_status() {
     }
 }
 
+/// An untyped refusal reaches a refused policy's OnRefused as
+/// `RefusalResponse.diagnostic`, the rejection's ErrorInfo reason as its
+/// code: the key it went out under, the handler's own or the spec's (a
+/// process manager's `COORDINATOR_REASON_PM_NO_INSTANCE`), never
+/// angzarr-embedded's code for it; its metadata the args.
+#[test]
+fn an_untyped_refusal_reaches_on_refused_under_the_key_it_went_out_under() {
+    use angzarr_proto::v1::refusal_response::Reason;
+    use angzarr_proto::v1::Diagnostic;
+    use angzarr_router::error::{BusinessStatus, CodedError};
+
+    use super::Rejected;
+
+    for (key, arg) in [
+        ("COORDINATOR_REASON_PM_NO_INSTANCE", "type_url"),
+        ("toy-meter-low", "reading"),
+    ] {
+        let rejected = Rejected::of(&CodedError::rejection(
+            BusinessStatus::FailedPrecondition,
+            key,
+            [(arg.to_string(), "3".to_string())],
+        ));
+        assert_eq!(
+            rejected.response().reason,
+            Some(Reason::Diagnostic(Diagnostic {
+                code: key.to_string(),
+                args: [(arg.to_string(), "3".to_string())].into(),
+            })),
+            "{key}"
+        );
+    }
+}
+
 /// A marked-up handler's retryable bug goes out under exactly the status
 /// it picked, ROUTER_REASON_UNHANDLED_HANDLER_ERROR, its report as the cause; its
 /// immediate return as ABORTED under the report's own code and args.

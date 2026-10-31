@@ -208,6 +208,10 @@ fn each_reaction_is_held_to_the_page_it_names() {
         trigger_sequence,
         commands,
     };
+    let trigger = crate::next::v1::EventRef {
+        stream: source.cover.clone(),
+        sequence: 5,
+    };
     let checked = check_reactions(
         "ledger",
         &source,
@@ -216,6 +220,8 @@ fn each_reaction_is_held_to_the_page_it_names() {
             reaction(4, vec![carrying(1, 2), carrying(1, 3)]),
             reaction(9, vec![carrying(7, 4)]),
         ],
+        "bookkeeping",
+        &trigger,
     )
     .unwrap();
     let cents: Vec<i64> = checked
@@ -236,11 +242,153 @@ fn each_reaction_is_held_to_the_page_it_names() {
         .iter()
         .all(|b| b.cover.as_ref().unwrap().edition.as_deref() == Some("what-if")));
 
-    let crossed = check_reactions("ledger", &source, vec![reaction(4, vec![carrying(2, 1)])])
-        .err()
-        .unwrap();
+    let crossed = check_reactions(
+        "ledger",
+        &source,
+        vec![reaction(4, vec![carrying(2, 1)])],
+        "bookkeeping",
+        &trigger,
+    )
+    .err()
+    .unwrap();
     assert_eq!(
         crossed.code,
         "COORDINATOR_REASON_POLICY_COMMAND_OTHER_CORRELATION"
+    );
+}
+
+/// A reaction that is a Fact, or a command carrying `fact_origin`, is the
+/// policy's bug, refused INTERNAL naming its domain and type (decision
+/// 14.48, amended): `COORDINATOR_REASON_POLICY_COMMAND_IS_FACT`,
+/// `COORDINATOR_REASON_POLICY_COMMAND_FACT_ORIGIN`. A policy's business
+/// code emits Commands only.
+#[test]
+fn a_reaction_is_a_command_and_carries_no_fact_origin() {
+    use crate::next::v1::{command_page::Body, Fact, FactOrigin};
+    let trigger = cover_in("account", 1, "what-if");
+    let refused = |book: CommandBook| {
+        let error = check_reaction("ledger", &trigger, None, vec![record(None), book])
+            .err()
+            .unwrap();
+        assert_eq!(
+            error.grpc,
+            crate::next::angzarr_router::error::GrpcCode::Internal
+        );
+        let extra = |key: &str| error.extras.get(key).cloned();
+        assert_eq!(extra("domain").as_deref(), Some("ledger"));
+        assert_eq!(
+            extra("command_type").as_deref(),
+            Some("toy.ledger.cmd.v1.Record")
+        );
+        error.code
+    };
+    let mut fact = record(None);
+    let page = fact.page.as_mut().unwrap();
+    let Some(Body::Command(command)) = page.body.take() else {
+        unreachable!()
+    };
+    page.body = Some(Body::Fact(Fact {
+        payload: command.payload,
+    }));
+    assert_eq!(refused(fact), "COORDINATOR_REASON_POLICY_COMMAND_IS_FACT");
+    let mut origin = record(None);
+    origin.page.as_mut().unwrap().fact_origin = Some(FactOrigin::default());
+    assert_eq!(
+        refused(origin),
+        "COORDINATOR_REASON_POLICY_COMMAND_FACT_ORIGIN"
+    );
+}
+
+/// A reaction's own command id and causation, where set, are the ones its
+/// coordinator stamps: the id derived from the trigger, the policy and
+/// the command's index in the whole answer, and the trigger. Any other is
+/// `COORDINATOR_REASON_POLICY_COMMAND_OTHER_IDENTITY` naming its domain,
+/// type and the `field` (decision 14.48, amended).
+#[test]
+fn a_reactions_identity_is_unset_or_the_stamp() {
+    use super::check_reactions;
+    use crate::next::angzarr_router::pb::PolicyReaction;
+    use crate::next::v1::{EventBook, EventPage, EventRef};
+    let source = EventBook {
+        cover: Some(cover_in("account", 1, "what-if")),
+        pages: vec![EventPage {
+            sequence: 4,
+            ..EventPage::default()
+        }],
+        ..EventBook::default()
+    };
+    let trigger = EventRef {
+        stream: source.cover.clone(),
+        sequence: 4,
+    };
+    let stamp =
+        |index| crate::next::ids::policy_command_id(&trigger, "bookkeeping", index).unwrap();
+    let identified = |id: Option<u32>, cause: Option<u64>| {
+        let mut book = record(None);
+        let page = book.page.as_mut().unwrap();
+        page.command_id = id.map(stamp);
+        page.causation_id = cause.map(|sequence| EventRef {
+            stream: source.cover.clone(),
+            sequence,
+        });
+        book
+    };
+    let checked = |reactions: Vec<Vec<CommandBook>>| {
+        check_reactions(
+            "ledger",
+            &source,
+            reactions
+                .into_iter()
+                .map(|commands| PolicyReaction {
+                    trigger_sequence: 4,
+                    commands,
+                })
+                .collect(),
+            "bookkeeping",
+            &trigger,
+        )
+    };
+    // Each its own stamp, by its index across reactions.
+    assert!(checked(vec![
+        vec![identified(Some(0), Some(4)), identified(None, None)],
+        vec![identified(Some(2), None), identified(None, Some(4))],
+    ])
+    .is_ok());
+
+    let field = |reactions| {
+        let error = checked(reactions).err().unwrap();
+        assert_eq!(
+            error.code,
+            "COORDINATOR_REASON_POLICY_COMMAND_OTHER_IDENTITY"
+        );
+        assert_eq!(
+            error.grpc,
+            crate::next::angzarr_router::error::GrpcCode::Internal
+        );
+        assert_eq!(
+            error.extras.get("domain").map(String::as_str),
+            Some("ledger")
+        );
+        assert_eq!(
+            error.extras.get("command_type").map(String::as_str),
+            Some("toy.ledger.cmd.v1.Record")
+        );
+        error.extras.get("field").cloned().unwrap()
+    };
+    // Another index's id: the first command's at the second, in the
+    // second reaction.
+    assert_eq!(
+        field(vec![
+            vec![identified(None, None)],
+            vec![identified(Some(0), None)]
+        ]),
+        "command_id"
+    );
+    assert_eq!(field(vec![vec![identified(Some(1), None)]]), "command_id");
+    assert_eq!(field(vec![vec![identified(None, Some(3))]]), "causation_id");
+    // Both other: the command id is named first.
+    assert_eq!(
+        field(vec![vec![identified(Some(1), Some(3))]]),
+        "command_id"
     );
 }

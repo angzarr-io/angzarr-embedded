@@ -768,6 +768,11 @@ fn processing_failed(log: &MemoryDeadLetters, key: &str, retry_count: u32, is_tr
     let letter = &letters[0];
     let reason = letter.reason.clone().expect("a reason");
     assert_eq!(reason.code, key, "{letter:?}");
+    assert_eq!(
+        letter.source_component_kind(),
+        angzarr_embedded::next::v1::ComponentKind::Projector,
+        "{letter:?}"
+    );
     let Some(RejectionDetails::ProcessingFailed(details)) = &letter.rejection_details else {
         panic!("processing_failed: {letter:?}");
     };

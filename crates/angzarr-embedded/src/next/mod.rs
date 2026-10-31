@@ -201,7 +201,9 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn angzarr_embedded_diagnostic::D
         Malformed::BadCommandId { len: 1 },
         Malformed::BadCorrelationId { len: 17 },
         Malformed::CausationFromOutside,
-        Malformed::IdOnPolicyCommand,
+        Malformed::IdOnPolicyCommand {
+            field: "command_id",
+        },
         Malformed::FactFromPolicy,
         Malformed::HandlingOnPolicyCommand,
         Malformed::BadTrigger(ids::UuidError::MissingTrigger),

@@ -312,6 +312,33 @@ fn a_remote_refusal_is_the_callers_rejection() {
     assert!(log.lines().is_empty(), "{:?}", log.lines());
 }
 
+/// The coordinator's bug is dead-lettered here, as a local handler's is,
+/// from the remote domain; of no kind known here, its descriptor being
+/// its coordinator's: `source_component_kind` UNSPECIFIED.
+#[test]
+fn a_remote_bug_is_dead_lettered_from_its_domain_of_no_known_kind() {
+    let bug = CodedError::bug("BANK_BROKE", [("seat".to_string(), "3".to_string())]);
+    let coordinator = FakeCoordinator::answering(Answer::Refused(bug));
+    let registry = registry_with(&coordinator);
+    let log = MemoryDeadLetters::new();
+    let failed = Kernel::new(&registry, &log)
+        .handle_any(&MemoryStore::new(), deposit(1), &at(1), &mut ())
+        .ready()
+        .err()
+        .expect("a bug");
+    assert!(
+        matches!(&failed, Failure::Kernel(KernelError::Router(_))),
+        "{failed:?}"
+    );
+    let letters = log.letters();
+    assert_eq!(letters.len(), 1, "{letters:?}");
+    assert_eq!(letters[0].source_component, "bank");
+    assert_eq!(
+        letters[0].source_component_kind(),
+        ComponentKind::Unspecified
+    );
+}
+
 /// A domain neither here nor remote is refused as before: the unknown
 /// domain, and no coordinator is asked.
 #[test]

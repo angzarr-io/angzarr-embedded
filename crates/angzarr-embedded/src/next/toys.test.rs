@@ -1429,13 +1429,16 @@ pub fn one_letter(
     letters.into_iter().next().unwrap()
 }
 
-/// `letter`'s reason is `reason` and its one rejection detail `details`
+/// `letter` names the kind of the component that dead-lettered it,
+/// `kind`; its reason is `reason` and its one rejection detail `details`
 /// (decision 14.48), and its line leads with the reason's key.
 pub fn assert_letter(
     letter: &crate::next::v1::AngzarrDeadLetter,
+    kind: crate::next::v1::ComponentKind,
     reason: &crate::next::v1::Diagnostic,
     details: crate::next::v1::angzarr_dead_letter::RejectionDetails,
 ) {
+    assert_eq!(letter.source_component_kind(), kind, "{letter:?}");
     assert_eq!(letter.reason.as_ref(), Some(reason), "{letter:?}");
     assert_eq!(letter.rejection_details, Some(details), "{letter:?}");
     let line = crate::next::dead_letter_line(letter);

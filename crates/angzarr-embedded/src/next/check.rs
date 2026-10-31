@@ -67,8 +67,9 @@ pub enum Malformed {
     /// issues reactions (angzarr's PERMISSION_DENIED for a client).
     CausationFromOutside,
     /// A policy's book that names its own command, correlation or causation
-    /// id: the kernel derives all three from the trigger.
-    IdOnPolicyCommand,
+    /// id (`field`, the first set, by its `CommandPage` name): the kernel
+    /// derives all three from the trigger.
+    IdOnPolicyCommand { field: &'static str },
     /// A policy's book with a fact: a reaction can never inject a fact.
     FactFromPolicy,
     /// A policy's book with handling: the target stamps its own head.
@@ -130,7 +131,9 @@ impl Diagnostic for Malformed {
             Malformed::CausationFromOutside => {
                 "angzarr-embedded-next-malformed-causation-from-outside"
             }
-            Malformed::IdOnPolicyCommand => "angzarr-embedded-next-malformed-id-on-policy-command",
+            Malformed::IdOnPolicyCommand { .. } => {
+                "angzarr-embedded-next-malformed-id-on-policy-command"
+            }
             Malformed::FactFromPolicy => "angzarr-embedded-next-malformed-fact-from-policy",
             Malformed::HandlingOnPolicyCommand => {
                 "angzarr-embedded-next-malformed-handling-on-policy-command"
@@ -174,6 +177,7 @@ impl Diagnostic for Malformed {
                 };
                 vec![("reason", reason.into())]
             }
+            Malformed::IdOnPolicyCommand { field } => vec![("field", (*field).into())],
             Malformed::UnknownConflictResolution { value } => vec![("value", (*value).into())],
             Malformed::UnsupportedConflictResolution { domain, requested } => vec![
                 ("domain", domain.as_str().into()),
@@ -394,8 +398,20 @@ fn parse(
     let entry = match policy {
         None if causation_id.is_some() => return Err(Malformed::CausationFromOutside),
         None => Entry::Client,
-        Some(_) if command_id.is_some() || correlation_id.is_some() || causation_id.is_some() => {
-            return Err(Malformed::IdOnPolicyCommand)
+        Some(_) if command_id.is_some() => {
+            return Err(Malformed::IdOnPolicyCommand {
+                field: "command_id",
+            })
+        }
+        Some(_) if correlation_id.is_some() => {
+            return Err(Malformed::IdOnPolicyCommand {
+                field: "correlation_id",
+            })
+        }
+        Some(_) if causation_id.is_some() => {
+            return Err(Malformed::IdOnPolicyCommand {
+                field: "causation_id",
+            })
         }
         Some(entry @ Entry::Refusal { .. }) => entry,
         Some(_) if is_fact => return Err(Malformed::FactFromPolicy),

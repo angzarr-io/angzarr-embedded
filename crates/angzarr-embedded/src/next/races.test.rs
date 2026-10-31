@@ -384,8 +384,8 @@ fn assert_cap_exhausted(failure: &Failure<Rejected>, attempts: u32, cap: u32) {
 /// `log` holds one dead letter, the kernel giving up at a cap: its reason
 /// the retry cap's key as the spec spells it,
 /// `COORDINATOR_REASON_RETRY_CAP_EXHAUSTED`, with `attempts` and `cap`, and
-/// its one detail `processing_failed`, `retry_count` the attempts,
-/// transient (decision 14.48).
+/// its one detail `processing_failed`, `retry_count` the retries (the
+/// attempts after the first), transient (decision 14.48).
 fn assert_dead_lettered_at_cap(log: &MemoryDeadLetters, attempts: u32, cap: u32) {
     use crate::next::toys::{assert_letter, one_letter, processing_failed, wire};
     let lines = log.lines();
@@ -400,7 +400,14 @@ fn assert_dead_lettered_at_cap(log: &MemoryDeadLetters, attempts: u32, cap: u32)
         ],
     );
     let letter = one_letter(log.letters());
-    assert_letter(&letter, &reason, processing_failed(&reason, attempts, true));
+    // retry_count counts the retries, the runs after the first
+    // (ProcessingFailedDetails.retry_count), not the attempts.
+    assert_letter(
+        &letter,
+        crate::next::v1::ComponentKind::Aggregate,
+        &reason,
+        processing_failed(&reason, attempts - 1, true),
+    );
     assert!(
         matches!(
             letter.payload,

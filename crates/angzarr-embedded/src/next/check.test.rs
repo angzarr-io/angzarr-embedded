@@ -181,15 +181,21 @@ fn a_policys_book_names_no_ids_no_fact_and_no_handling() {
     };
     assert_eq!(
         with(|b| b.page.as_mut().unwrap().command_id = Some(uuid(1))),
-        Some(Malformed::IdOnPolicyCommand)
+        Some(Malformed::IdOnPolicyCommand {
+            field: "command_id"
+        })
     );
     assert_eq!(
         with(|b| b.page.as_mut().unwrap().correlation_id = Some(uuid(1))),
-        Some(Malformed::IdOnPolicyCommand)
+        Some(Malformed::IdOnPolicyCommand {
+            field: "correlation_id"
+        })
     );
     assert_eq!(
         with(|b| b.page.as_mut().unwrap().causation_id = Some(trigger())),
-        Some(Malformed::IdOnPolicyCommand)
+        Some(Malformed::IdOnPolicyCommand {
+            field: "causation_id"
+        })
     );
     assert_eq!(
         with(|b| {

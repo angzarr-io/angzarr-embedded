@@ -54,7 +54,7 @@ use std::sync::Mutex;
 use angzarr_embedded_diagnostic::Diagnostic;
 use angzarr_proto::v1::angzarr_dead_letter::{Payload, RejectionDetails};
 use angzarr_proto::v1::{
-    command_page, AngzarrDeadLetter, CommandRefusedDetails, ProcessingFailedDetails,
+    command_page, AngzarrDeadLetter, CommandRefusedDetails, ComponentKind, ProcessingFailedDetails,
     SequenceMismatchDetails,
 };
 use angzarr_router::error::{extras, CodedError};
@@ -63,6 +63,7 @@ use super::check::Malformed;
 use super::error::{cover_text, KernelError};
 use super::payload::type_name;
 use super::reasons::{args, CoordinatorReason};
+use super::registry::Registry;
 use super::route::{self, diagnostic, flat_args, Rejected};
 
 /// The start of every dead-letter line: a key to alert on.
@@ -140,6 +141,41 @@ pub fn dead_letter_line(letter: &AngzarrDeadLetter) -> String {
     line
 }
 
+/// The component a letter is from (`AngzarrDeadLetter.source_component`
+/// and `source_component_kind`): the one that could not take its payload.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) struct Component<'a> {
+    pub(crate) name: &'a str,
+    pub(crate) kind: ComponentKind,
+}
+
+impl<'a> Component<'a> {
+    /// The policy `name`.
+    pub(crate) fn policy(name: &'a str) -> Self {
+        Component {
+            name,
+            kind: ComponentKind::Policy,
+        }
+    }
+
+    /// The projector `name`.
+    pub(crate) fn projector(name: &'a str) -> Self {
+        Component {
+            name,
+            kind: ComponentKind::Projector,
+        }
+    }
+
+    /// The domain `name`, of the kind `registry` holds it as
+    /// ([`Registry::kind`]).
+    pub(crate) fn domain(registry: &Registry, name: &'a str) -> Self {
+        Component {
+            name,
+            kind: registry.kind(name),
+        }
+    }
+}
+
 /// Why the kernel dead-letters a payload, as it holds it.
 pub(crate) enum Cause<'a> {
     /// A kernel error: a bug, a conflict, a cap.
@@ -156,7 +192,7 @@ pub(crate) enum Cause<'a> {
 
 /// Write the dead letter for `payload`, which `component` could not take
 /// for `cause` ([`letter`]).
-pub(crate) fn write(log: &dyn DeadLetterLog, payload: Payload, component: &str, cause: Cause) {
+pub(crate) fn write(log: &dyn DeadLetterLog, payload: Payload, component: Component, cause: Cause) {
     log.letter(&letter(payload, component, cause));
 }
 
@@ -166,7 +202,7 @@ pub(crate) fn write(log: &dyn DeadLetterLog, payload: Payload, component: &str, 
 pub(crate) fn write_at_cap(
     log: &dyn DeadLetterLog,
     payload: Payload,
-    component: &str,
+    component: Component,
     cause: Cause,
     retries: u32,
 ) {
@@ -180,7 +216,7 @@ pub(crate) fn write_at_cap(
 /// `processing_failed`, the same Diagnostic as its failure, transient with
 /// the attempts made at the retry cap, else never retried and not
 /// transient.
-pub(crate) fn letter(payload: Payload, component: &str, cause: Cause) -> AngzarrDeadLetter {
+pub(crate) fn letter(payload: Payload, component: Component, cause: Cause) -> AngzarrDeadLetter {
     let reason = reason(&cause, &payload);
     let details = match cause {
         Cause::Kernel(
@@ -213,7 +249,7 @@ pub(crate) fn letter(payload: Payload, component: &str, cause: Cause) -> Angzarr
         payload: Some(payload),
         reason: Some(reason),
         rejection_details: Some(details),
-        source_component: component.to_string(),
+        source_component: component.name.to_string(),
         ..AngzarrDeadLetter::default()
     }
 }
@@ -225,7 +261,7 @@ pub(crate) fn letter(payload: Payload, component: &str, cause: Cause) -> Angzarr
 /// `processing_failed`, transient, with its retry count.
 pub(crate) fn at_cap(
     payload: Payload,
-    component: &str,
+    component: Component,
     cause: Cause,
     retries: u32,
 ) -> AngzarrDeadLetter {
@@ -234,7 +270,7 @@ pub(crate) fn at_cap(
         payload: Some(payload),
         rejection_details: Some(processing_failed(&reason, retries, true)),
         reason: Some(reason),
-        source_component: component.to_string(),
+        source_component: component.name.to_string(),
         ..AngzarrDeadLetter::default()
     }
 }

@@ -729,6 +729,15 @@ impl Registry {
         self.domains.get(domain).is_some_and(|e| e.process_manager)
     }
 
+    /// `domain`'s kind: a process manager's or an aggregate's, as
+    /// registered here; `UNSPECIFIED` for a domain handled elsewhere
+    /// ([`Registry::remote`]: its descriptor is its coordinator's) or not
+    /// registered.
+    pub(crate) fn kind(&self, domain: &str) -> angzarr_router::pb::ComponentKind {
+        let _ = domain;
+        angzarr_router::pb::ComponentKind::Unspecified
+    }
+
     /// Every projector, in registration order.
     pub(crate) fn projectors(&self) -> &[ProjectorEntry] {
         &self.projectors

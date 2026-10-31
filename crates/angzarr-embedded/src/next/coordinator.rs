@@ -52,7 +52,7 @@ use angzarr_router::pb::ContextualCommand;
 use prost_types::{Any, Timestamp};
 
 use super::check::{Identified, Malformed, Sampled};
-use super::dead_letter::{self, Cause, DeadLetterLog};
+use super::dead_letter::{self, Cause, Component, DeadLetterLog};
 use super::error::{Failure, KernelError, UpcastError};
 use super::markup::STEP_LIMIT;
 use super::payload::type_name;
@@ -463,7 +463,7 @@ pub(crate) async fn decide(
                 dead_letter::write(
                     dead_letters,
                     Payload::RejectedCommand(identified.to_book()),
-                    domain,
+                    Component::domain(registry, domain),
                     Cause::Kernel(&unresolved),
                 );
                 Failure::Kernel(unresolved)
@@ -475,7 +475,7 @@ pub(crate) async fn decide(
                         dead_letter::write(
                             dead_letters,
                             Payload::RejectedCommand(identified.to_book()),
-                            domain,
+                            Component::domain(registry, domain),
                             Cause::Kernel(error),
                         );
                     }

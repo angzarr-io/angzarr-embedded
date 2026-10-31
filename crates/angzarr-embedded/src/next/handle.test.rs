@@ -138,6 +138,7 @@ fn a_rejected_policy_step_keeps_the_commands_commit_and_is_dead_lettered() {
     let reason = crate::next::toys::wire("toy-ledger-too-large", &[]);
     crate::next::toys::assert_letter(
         &letter,
+        crate::next::v1::ComponentKind::Policy,
         &reason,
         crate::next::toys::processing_failed(&reason, 0, false),
     );
@@ -560,6 +561,7 @@ fn a_policys_error_dead_letters_its_step_and_moves_its_position_past_it() {
     );
     crate::next::toys::assert_letter(
         &letter,
+        crate::next::v1::ComponentKind::Policy,
         &reason,
         crate::next::toys::processing_failed(&reason, 0, false),
     );
@@ -977,6 +979,7 @@ fn a_policys_error_as_a_handler_of_its_source_is_dead_lettered() {
     );
     crate::next::toys::assert_letter(
         &crate::next::toys::one_letter(log.letters()),
+        crate::next::v1::ComponentKind::Policy,
         &reason,
         crate::next::toys::processing_failed(&reason, 0, false),
     );
@@ -1467,6 +1470,7 @@ fn a_policys_refusal_answer_error_dead_letters_as_policy_failed() {
     );
     crate::next::toys::assert_letter(
         &crate::next::toys::one_letter(log.letters()),
+        crate::next::v1::ComponentKind::Policy,
         &reason,
         crate::next::toys::processing_failed(&reason, 0, false),
     );
@@ -2016,6 +2020,7 @@ fn a_policy_command_outside_its_destination_is_refused_by_the_kernel() {
     let letter = crate::next::toys::one_letter(log.letters());
     crate::next::toys::assert_letter(
         &letter,
+        crate::next::v1::ComponentKind::Policy,
         &reason,
         crate::next::toys::processing_failed(&reason, 0, false),
     );
@@ -2065,6 +2070,7 @@ fn unchecked_refusal(
     };
     crate::next::toys::assert_letter(
         &crate::next::toys::one_letter(log.letters()),
+        crate::next::v1::ComponentKind::Policy,
         &reason,
         crate::next::toys::processing_failed(&reason, 0, false),
     );
@@ -2235,6 +2241,157 @@ fn a_policys_commands_in_their_triggers_edition_and_correlation_are_delivered() 
         log.lines()
     );
     assert_eq!(position(&store, "unchecked", &cover("account", 1)), 1);
+}
+
+/// A policy's reaction that is not a bare command refuses the whole answer
+/// as the policy's bug, keyed as the spec spells it, naming its domain and
+/// type (decision 14.48, amended): a command id or causation other than
+/// the one its coordinator stamps,
+/// `COORDINATOR_REASON_POLICY_COMMAND_OTHER_IDENTITY` with the `field`; a
+/// Fact, `COORDINATOR_REASON_POLICY_COMMAND_IS_FACT`; a command carrying
+/// `fact_origin`, `COORDINATOR_REASON_POLICY_COMMAND_FACT_ORIGIN`. Never
+/// delivered with the field dropped, nor a fact delivered as a command.
+#[test]
+fn a_policys_reaction_that_is_not_a_bare_command_is_refused_by_the_kernel() {
+    use crate::next::v1::{command_page::Body, Fact, FactOrigin};
+    let named = |refused: &crate::next::angzarr_router::error::CodedError, code: &str| {
+        assert_eq!(refused.code, code, "{refused:?}");
+        assert_eq!(
+            refused.extras.get("domain").map(String::as_str),
+            Some("ledger"),
+            "{refused:?}"
+        );
+        assert_eq!(
+            refused.extras.get("command_type").map(String::as_str),
+            Some("toy.ledger.cmd.v1.Record"),
+            "{refused:?}"
+        );
+        assert_eq!(
+            refused.grpc,
+            crate::next::angzarr_router::error::GrpcCode::Internal
+        );
+    };
+    let field = |refused: &crate::next::angzarr_router::error::CodedError| {
+        refused.extras.get("field").cloned()
+    };
+
+    let other_id = unchecked_refusal(|_| {
+        let mut book = record_for(ledger_cover());
+        book.page.as_mut().unwrap().command_id = Some(crate::next::toys::command_id(77));
+        vec![book]
+    });
+    named(
+        &other_id,
+        "COORDINATOR_REASON_POLICY_COMMAND_OTHER_IDENTITY",
+    );
+    assert_eq!(field(&other_id).as_deref(), Some("command_id"));
+
+    let other_cause = unchecked_refusal(|source| {
+        let mut book = record_for(ledger_cover());
+        book.page.as_mut().unwrap().causation_id = Some(EventRef {
+            stream: source.cover.clone(),
+            sequence: source.pages[0].sequence + 9,
+        });
+        vec![book]
+    });
+    named(
+        &other_cause,
+        "COORDINATOR_REASON_POLICY_COMMAND_OTHER_IDENTITY",
+    );
+    assert_eq!(field(&other_cause).as_deref(), Some("causation_id"));
+
+    let is_fact = unchecked_refusal(|_| {
+        let mut book = record_for(ledger_cover());
+        let page = book.page.as_mut().unwrap();
+        let Some(Body::Command(command)) = page.body.take() else {
+            unreachable!()
+        };
+        page.body = Some(Body::Fact(Fact {
+            payload: command.payload,
+        }));
+        page.fact_origin = Some(FactOrigin {
+            external_id: "pi_1".to_string(),
+            ..FactOrigin::default()
+        });
+        vec![book]
+    });
+    named(&is_fact, "COORDINATOR_REASON_POLICY_COMMAND_IS_FACT");
+    assert_eq!(field(&is_fact), None);
+
+    let origin = unchecked_refusal(|_| {
+        let mut book = record_for(ledger_cover());
+        book.page.as_mut().unwrap().fact_origin = Some(FactOrigin {
+            external_id: "pi_1".to_string(),
+            ..FactOrigin::default()
+        });
+        vec![book]
+    });
+    named(&origin, "COORDINATOR_REASON_POLICY_COMMAND_FACT_ORIGIN");
+    assert_eq!(field(&origin), None);
+}
+
+/// A policy's commands naming exactly the command id and causation their
+/// coordinator stamps (decision 14.48, amended: no id that DIFFERS from
+/// the stamp) are delivered, each by its own index in the answer.
+#[test]
+fn a_policys_commands_naming_their_stamped_identity_are_delivered() {
+    let mut registry = registry();
+    registry.policy_component(
+        Unchecked {
+            answer: |source| {
+                let trigger = EventRef {
+                    stream: source.cover.clone(),
+                    sequence: source.pages[0].sequence,
+                };
+                (0..2)
+                    .map(|index| {
+                        let mut book = record_for(ledger_cover());
+                        let page = book.page.as_mut().unwrap();
+                        page.command_id = Some(
+                            crate::next::ids::policy_command_id(&trigger, "unchecked", index)
+                                .unwrap(),
+                        );
+                        page.causation_id = Some(trigger.clone());
+                        book
+                    })
+                    .collect()
+            },
+        },
+        "ledger",
+    );
+    let log = MemoryDeadLetters::new();
+    let store = MemoryStore::new();
+    Kernel::new(&registry, &log)
+        .handle::<Account, _, _>(
+            &store,
+            command(cover("account", 1), AccountCmd::Open.to_any()),
+            &at(30),
+            &mut (),
+        )
+        .ready()
+        .expect("delivered");
+    assert!(log.lines().is_empty(), "{:?}", log.lines());
+    assert_eq!(pages(&store, &ledger_cover()).len(), 2);
+
+    // The first command's id at the second's index is another's: refused.
+    let swapped = unchecked_refusal(|source| {
+        let trigger = EventRef {
+            stream: source.cover.clone(),
+            sequence: source.pages[0].sequence,
+        };
+        let id = crate::next::ids::policy_command_id(&trigger, "unchecked", 0).unwrap();
+        (0..2)
+            .map(|_| {
+                let mut book = record_for(ledger_cover());
+                book.page.as_mut().unwrap().command_id = Some(id.clone());
+                book
+            })
+            .collect()
+    });
+    assert_eq!(
+        swapped.code,
+        "COORDINATOR_REASON_POLICY_COMMAND_OTHER_IDENTITY"
+    );
 }
 
 /// The account's router table behind a handler recording every book it is

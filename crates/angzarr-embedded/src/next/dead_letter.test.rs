@@ -1,6 +1,6 @@
 //! angzarr-embedded's dead-letter queue is a logger whose every line warns that it
 //! almost certainly indicates a problem.
-use super::Cause;
+use super::{Cause, Component};
 use crate::next::toys::prelude::*;
 use crate::next::v1::{angzarr_dead_letter, AngzarrDeadLetter, ComponentKind, Diagnostic};
 use crate::next::{
@@ -175,6 +175,7 @@ fn a_panicking_ingests_dead_letter_carries_its_code_not_english() {
     );
     crate::next::toys::assert_letter(
         &crate::next::toys::one_letter(log.letters()),
+        crate::next::v1::ComponentKind::Aggregate,
         &reason,
         crate::next::toys::processing_failed(&reason, 0, false),
     );
@@ -236,7 +237,7 @@ fn a_retried_steps_dead_letter_holds_its_command_failure_and_retry_count() {
     ));
     let letter = super::at_cap(
         angzarr_dead_letter::Payload::RejectedCommand(book.clone()),
-        "account",
+        ACCOUNT,
         Cause::Kernel(&error),
         3,
     );
@@ -263,6 +264,49 @@ fn a_retried_steps_dead_letter_holds_its_command_failure_and_retry_count() {
     );
 }
 
+/// The account aggregate, as a letter names it.
+const ACCOUNT: Component<'static> = Component {
+    name: "account",
+    kind: ComponentKind::Aggregate,
+};
+
+/// A letter names the component that could not take its payload, and its
+/// kind (`source_component`, `source_component_kind`), retried or not: a
+/// policy, a projector, or a domain of the kind the registry holds it as.
+#[test]
+fn a_letter_names_its_component_and_its_kind() {
+    let error = KernelError::ChainTooDeep { limit: 4 };
+    let payload = || angzarr_dead_letter::Payload::RejectedCommand(deposit_book());
+    for component in [
+        ACCOUNT,
+        Component::policy("bookkeeping"),
+        Component::projector("balances"),
+        Component::domain(&registry(), "account"),
+    ] {
+        for letter in [
+            super::letter(payload(), component, Cause::Kernel(&error)),
+            super::at_cap(payload(), component, Cause::Kernel(&error), 2),
+        ] {
+            assert_eq!(letter.source_component, component.name);
+            assert_eq!(letter.source_component_kind(), component.kind);
+        }
+    }
+    assert_eq!(Component::policy("bookkeeping").kind, ComponentKind::Policy);
+    assert_eq!(
+        Component::projector("balances").kind,
+        ComponentKind::Projector
+    );
+    assert_eq!(
+        Component::domain(&registry(), "account").kind,
+        ComponentKind::Aggregate
+    );
+    assert_eq!(
+        Component::domain(&registry(), "nowhere").kind,
+        ComponentKind::Unspecified,
+        "not registered here: no kind known"
+    );
+}
+
 /// A command (5) to account 1, its ids assigned.
 fn deposit_book() -> crate::next::v1::CommandBook {
     check(
@@ -282,7 +326,7 @@ fn deposit_book() -> crate::next::v1::CommandBook {
 fn letter_for(cause: Cause) -> AngzarrDeadLetter {
     super::letter(
         angzarr_dead_letter::Payload::RejectedCommand(deposit_book()),
-        "account",
+        ACCOUNT,
         cause,
     )
 }
@@ -412,7 +456,42 @@ fn a_malformed_kernel_books_letter_is_keyed_where_the_spec_has_a_key() {
         ),
         (
             Malformed::FactFromPolicy,
-            wire("angzarr-embedded-next-malformed-fact-from-policy", &[]),
+            wire("COORDINATOR_REASON_POLICY_COMMAND_IS_FACT", &naming),
+        ),
+        (
+            Malformed::CommandWithFactOrigin,
+            wire("COORDINATOR_REASON_POLICY_COMMAND_FACT_ORIGIN", &naming),
+        ),
+        (
+            Malformed::IdOnPolicyCommand {
+                field: "command_id",
+            },
+            wire(
+                "COORDINATOR_REASON_POLICY_COMMAND_OTHER_IDENTITY",
+                &[naming[0], naming[1], ("field", "command_id")],
+            ),
+        ),
+        (
+            Malformed::IdOnPolicyCommand {
+                field: "causation_id",
+            },
+            wire(
+                "COORDINATOR_REASON_POLICY_COMMAND_OTHER_IDENTITY",
+                &[naming[0], naming[1], ("field", "causation_id")],
+            ),
+        ),
+        (
+            Malformed::IdOnPolicyCommand {
+                field: "correlation_id",
+            },
+            wire(
+                "COORDINATOR_REASON_POLICY_COMMAND_OTHER_CORRELATION",
+                &naming,
+            ),
+        ),
+        (
+            Malformed::NoBody,
+            wire("angzarr-embedded-next-malformed-no-body", &[]),
         ),
     ] {
         let letter = letter_for(Cause::Malformed(&malformed));
@@ -443,7 +522,7 @@ fn a_malformed_kernel_books_letter_is_keyed_where_the_spec_has_a_key() {
     .to_book();
     let letter = super::letter(
         angzarr_dead_letter::Payload::RejectedCommand(fact),
-        "account",
+        ACCOUNT,
         Cause::Malformed(&Malformed::NoRoot),
     );
     assert_eq!(
@@ -461,7 +540,7 @@ fn a_malformed_kernel_books_letter_is_keyed_where_the_spec_has_a_key() {
             cover: Some(cover("account", 1)),
             ..crate::next::v1::EventBook::default()
         }),
-        "account",
+        ACCOUNT,
         Cause::Malformed(&Malformed::NoRoot),
     );
     assert_eq!(

@@ -47,7 +47,7 @@ use angzarr_router::policy::PolicyDispatch;
 use prost_types::Any;
 
 use super::check::{check_policy_command, Checked, Malformed};
-use super::dead_letter::{self, Cause, DeadLetterLog};
+use super::dead_letter::{self, Cause, Component, DeadLetterLog};
 use super::domain::Domain;
 use super::handler::{Committed, Handler};
 use super::markup::{self, CommandContext, Commands, PolicyContext, TypeName};
@@ -104,6 +104,8 @@ pub(crate) fn check_reactions(
     output_domain: &str,
     source: &EventBook,
     reactions: Vec<PolicyReaction>,
+    _component: &str,
+    _trigger: &EventRef,
 ) -> Result<Vec<CommandBook>, CodedError> {
     let trigger = source.cover.clone().unwrap_or_default();
     let mut commands = Vec::new();
@@ -395,7 +397,7 @@ impl Order {
             dead_letter::write(
                 dead_letters,
                 Letter::RejectedCommand(self.book()),
-                &self.policy,
+                Component::policy(&self.policy),
                 Cause::Malformed(malformed),
             )
         })
@@ -473,7 +475,7 @@ impl<P: Policy, F: FnMut(Order)> Handler<P::Source> for PolicyHandler<'_, P, F> 
                 dead_letter::write(
                     self.dead_letters,
                     Letter::RejectedEvents(trigger),
-                    P::NAME,
+                    Component::policy(P::NAME),
                     Cause::PolicyFailed(&failure),
                 );
                 return;

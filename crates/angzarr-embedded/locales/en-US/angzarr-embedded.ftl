@@ -25,7 +25,7 @@ angzarr-embedded-next-malformed-bad-correlation-id = the correlation id is { $le
        *[other] { $len } bytes
     }, not a UUID's 16
 angzarr-embedded-next-malformed-causation-from-outside = a client's book names a causation: only the kernel's chain issues policy commands
-angzarr-embedded-next-malformed-id-on-policy-command = a policy's book names its own ids: the kernel derives them from the trigger
+angzarr-embedded-next-malformed-id-on-policy-command = a policy's book names its own { $field }: the kernel derives its ids from the trigger
 angzarr-embedded-next-malformed-fact-from-policy = a policy's book holds a fact: a policy never injects one
 angzarr-embedded-next-malformed-handling-on-policy-command = a policy's book has handling: its target stamps its own head
 angzarr-embedded-next-malformed-bad-trigger = the policy command's trigger cannot name a command id: { $reason ->

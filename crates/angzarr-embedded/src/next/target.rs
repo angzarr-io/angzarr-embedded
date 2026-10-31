@@ -25,14 +25,14 @@ use std::future::Future;
 use std::pin::Pin;
 
 use angzarr_proto::v1::angzarr_dead_letter::Payload;
-use angzarr_proto::v1::{CommandBook, DeliveryOutcome, EventBook};
+use angzarr_proto::v1::{CommandBook, ComponentKind, DeliveryOutcome, EventBook};
 use angzarr_router::error::CodedError;
 use angzarr_router::pb::CommandResponse;
 use angzarr_router::router::DynCommandHandler;
 
 use super::check::Identified;
 use super::coordinator::refused;
-use super::dead_letter::{self, Cause, DeadLetterLog};
+use super::dead_letter::{self, Cause, Component, DeadLetterLog};
 use super::error::{Failure, KernelError};
 use super::route::{self, Rejected};
 
@@ -114,7 +114,11 @@ pub(crate) async fn forward(
                     dead_letter::write(
                         dead_letters,
                         Payload::RejectedCommand(command.to_book()),
-                        command.domain(),
+                        // Its kind is its coordinator's to say: unknown here.
+                        Component {
+                            name: command.domain(),
+                            kind: ComponentKind::Unspecified,
+                        },
                         Cause::Kernel(error),
                     );
                 }

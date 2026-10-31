@@ -344,6 +344,12 @@ fn a_remote_internal_failure_under_its_own_code_is_a_dead_lettered_bug() {
     let letters = log.letters();
     let reason = letters[0].reason.clone().expect("a reason");
     assert_eq!(reason.code, "PLAYER_BROKE");
+    assert_eq!(letters[0].source_component, "player");
+    assert_eq!(
+        letters[0].source_component_kind(),
+        angzarr_embedded::next::v1::ComponentKind::Aggregate,
+        "the child's kind, as its descriptor says"
+    );
     assert_eq!(
         letters[0].rejection_details,
         Some(

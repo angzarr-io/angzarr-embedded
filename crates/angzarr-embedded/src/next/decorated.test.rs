@@ -2483,6 +2483,7 @@ mod failed {
         );
         assert_letter(
             &one_letter(log.letters()),
+            ::angzarr_embedded::next::v1::ComponentKind::Aggregate,
             &reason,
             processing_failed(&reason, 0, false),
         );
@@ -3645,6 +3646,7 @@ mod handler_context {
         let letter = one_letter(log.letters());
         assert_letter(
             &letter,
+            ::angzarr_embedded::next::v1::ComponentKind::Aggregate,
             &wire("COORDINATOR_REASON_CONFLICT_UNRESOLVED", &[]),
             sequence_mismatch(0, 1),
         );
@@ -3757,6 +3759,7 @@ mod typed_refusals {
         );
         crate::next::toys::assert_letter(
             &letter,
+            ::angzarr_embedded::next::v1::ComponentKind::Policy,
             &reason,
             RejectionDetails::CommandRefused(CommandRefusedDetails {
                 refusal_type: "toy.wallet.v1.InsufficientFunds".to_string(),
@@ -5476,6 +5479,7 @@ mod router {
         );
         crate::next::toys::assert_letter(
             &crate::next::toys::one_letter(log.letters()),
+            ::angzarr_embedded::next::v1::ComponentKind::Aggregate,
             &reason,
             crate::next::toys::processing_failed(&reason, 3, true),
         );
@@ -5712,6 +5716,7 @@ mod router {
         let reason = crate::next::toys::wire("SEAT_MOVED", &[]);
         crate::next::toys::assert_letter(
             &crate::next::toys::one_letter(log.letters()),
+            ::angzarr_embedded::next::v1::ComponentKind::Aggregate,
             &reason,
             crate::next::toys::processing_failed(&reason, 3, true),
         );
@@ -5843,6 +5848,7 @@ mod router {
             );
             crate::next::toys::assert_letter(
                 &crate::next::toys::one_letter(log.letters()),
+                ::angzarr_embedded::next::v1::ComponentKind::Aggregate,
                 &reason,
                 crate::next::toys::processing_failed(&reason, 3, true),
             );

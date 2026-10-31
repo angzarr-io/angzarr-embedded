@@ -64,7 +64,7 @@ use super::check::{check, check_refusal, Checked, Identified, Sampled};
 use super::coordinator::{
     contextual_command, decide, deduplicate, load, write_snapshot, Contextual, Deduplicated,
 };
-use super::dead_letter::{self, write_at_cap, Cause, DeadLetterLog};
+use super::dead_letter::{self, write_at_cap, Cause, Component, DeadLetterLog};
 use super::domain::Domain;
 use super::error::{class, Class};
 use super::error::{Failure, KernelError, Step, StepError};
@@ -733,7 +733,7 @@ impl<'k> Kernel<'k> {
                 dead_letter::write(
                     self.dead_letters,
                     Payload::RejectedEvents(book.clone()),
-                    name,
+                    Component::projector(name),
                     Cause::Kernel(&error),
                 );
                 return Err(Report::of(&error));
@@ -745,7 +745,7 @@ impl<'k> Kernel<'k> {
                 write_at_cap(
                     self.dead_letters,
                     Payload::RejectedEvents(book.clone()),
-                    name,
+                    Component::projector(name),
                     Cause::Kernel(&error),
                     retries,
                 );
@@ -1054,7 +1054,7 @@ impl<'k> Run<'k> {
                 dead_letter::write(
                     self.dead_letters,
                     Payload::RejectedCommand(command.to_book()),
-                    command.domain(),
+                    Component::domain(self.registry, command.domain()),
                     Cause::Kernel(&given_up),
                 );
                 return Err(Failure::Kernel(given_up));
@@ -1072,7 +1072,7 @@ impl<'k> Run<'k> {
                 write_at_cap(
                     self.dead_letters,
                     Payload::RejectedCommand(command.to_book()),
-                    command.domain(),
+                    Component::domain(self.registry, command.domain()),
                     Cause::Kernel(error),
                     tries.retries,
                 );
@@ -1211,7 +1211,13 @@ impl<'k> Run<'k> {
             .dispatch(&event)
             .await
             .and_then(|reactions| {
-                check_reactions(&policy.output_domain, &event, reactions.reactions)
+                check_reactions(
+                    &policy.output_domain,
+                    &event,
+                    reactions.reactions,
+                    policy.name(),
+                    &trigger,
+                )
             });
         let commands = match checked {
             Ok(commands) => commands,
@@ -1220,7 +1226,7 @@ impl<'k> Run<'k> {
                     dead_letter::write(
                         self.dead_letters,
                         Payload::RejectedEvents(event),
-                        policy.name(),
+                        Component::policy(policy.name()),
                         Cause::PolicyFailed(&failure),
                     );
                     past_bug(self.policy_bug, port, &position)
@@ -1232,7 +1238,7 @@ impl<'k> Run<'k> {
                 dead_letter::write(
                     self.dead_letters,
                     Payload::RejectedEvents(event),
-                    policy.name(),
+                    Component::policy(policy.name()),
                     Cause::Kernel(&error),
                 );
                 return Err((path.to_vec(), StepError::Kernel(error)));
@@ -1279,7 +1285,7 @@ impl<'k> Run<'k> {
                         dead_letter::write(
                             self.dead_letters,
                             Payload::RejectedCommand(delivered.to_book()),
-                            policy.name(),
+                            Component::policy(policy.name()),
                             Cause::Refused(&rejected),
                         );
                         port.write_positions(&position)
@@ -1358,7 +1364,7 @@ impl<'k> Run<'k> {
                 dead_letter::write(
                     self.dead_letters,
                     Payload::RejectedCommand(delivered.to_book()),
-                    policy.name(),
+                    Component::policy(policy.name()),
                     Cause::PolicyFailed(&failure),
                 );
                 past_bug(self.policy_bug, port, positions)
@@ -1399,7 +1405,7 @@ impl<'k> Run<'k> {
             dead_letter::write(
                 self.dead_letters,
                 Payload::RejectedCommand(book),
-                policy.name(),
+                Component::policy(policy.name()),
                 Cause::Malformed(&m),
             );
             StepError::Kernel(KernelError::Malformed(m))
@@ -1428,7 +1434,7 @@ impl<'k> Run<'k> {
             dead_letter::write(
                 self.dead_letters,
                 Payload::RejectedCommand(fact.to_book()),
-                fact.domain(),
+                Component::domain(self.registry, fact.domain()),
                 Cause::PolicyFailed(&failure),
             );
             past_bug(self.policy_bug, port, positions)
