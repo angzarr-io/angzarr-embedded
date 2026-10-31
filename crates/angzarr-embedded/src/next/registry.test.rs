@@ -584,14 +584,39 @@ fn a_snapshot_is_usable_under_the_registered_major_and_minor() {
         }),
         rules_version: rules.to_string(),
     };
-    for usable in ["1.4.2+build.7", "1.4.0", "v1.4.9", "V1.4.2", "1.4.3-rc.1"] {
+    for usable in [
+        "1.4.2+build.7",
+        "1.4.0",
+        "v1.4.9",
+        "V1.4.2",
+        "1.4.3-rc.1",
+        "1.4.3-rc-1.x-y",
+        "1.4.3+build-7.a-b",
+        "1.4.3-0",
+    ] {
         assert!(
             registry.snapshot_usable("hello", &snapshot(usable)),
             "{usable}"
         );
     }
     for unusable in [
-        "1.5.0", "2.4.2", "0.4.2", "vv1.4.2", "1.4", "", "1.04.2", "x1.4.2",
+        "1.5.0",
+        "2.4.2",
+        "0.4.2",
+        "vv1.4.2",
+        "1.4",
+        "",
+        "1.04.2",
+        "x1.4.2",
+        "1.4.2.0",
+        // Not SemVer, so equal only to themselves: an empty or invalid
+        // build or pre-release identifier, a numeric one with a leading 0.
+        "1.4.2+",
+        "1.4.2+build..7",
+        "1.4.2+bu_ild",
+        "1.4.2-",
+        "1.4.2-rc_1",
+        "1.4.2-01",
     ] {
         assert!(
             !registry.snapshot_usable("hello", &snapshot(unusable)),
