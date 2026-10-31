@@ -950,11 +950,12 @@ impl<T: Domain> Commands<T> {
 }
 
 /// What a policy's handler reads besides the event: the triggering event's
-/// `EventRef` (its stream and sequence), its correlation and when it was
-/// recorded.
+/// `EventRef` (its stream and sequence), the root of that stream, its
+/// correlation and when it was recorded.
 #[derive(Clone, PartialEq, Debug)]
 pub struct PolicyContext {
     trigger: EventRef,
+    source_root: Uuid,
     correlation_id: Uuid,
     recorded_at: Timestamp,
 }
@@ -963,8 +964,14 @@ impl PolicyContext {
     /// A context for a policy's own unit tests; the router builds the real
     /// one from the committed event.
     pub fn new(trigger: EventRef, correlation_id: Uuid, recorded_at: Timestamp) -> Self {
+        let source_root = trigger
+            .stream
+            .as_ref()
+            .and_then(|cover| cover.root.clone())
+            .unwrap_or_default();
         PolicyContext {
             trigger,
+            source_root,
             correlation_id,
             recorded_at,
         }
@@ -973,6 +980,15 @@ impl PolicyContext {
     /// The event reacted to.
     pub fn trigger(&self) -> &EventRef {
         &self.trigger
+    }
+
+    /// The root of the stream the event was recorded on, the source's: the
+    /// trigger's `stream.root`. A policy whose target stream is the source
+    /// stream's counterpart (the same root in another domain) sends its
+    /// command there. The kernel's trigger always names its stream; a
+    /// context built by hand whose trigger names none has the empty root.
+    pub fn source_root(&self) -> &Uuid {
+        &self.source_root
     }
 
     /// The event's correlation: the root of a process manager's instance.

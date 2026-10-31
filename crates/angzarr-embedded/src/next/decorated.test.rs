@@ -3460,6 +3460,32 @@ mod policy_events {
         );
     }
 
+    /// A policy's context names the root of the stream its trigger was
+    /// recorded on, the source's: what a policy addressing the source's
+    /// own counterpart reads, with no unpacking of the trigger.
+    #[test]
+    fn a_policy_context_names_the_triggers_root() {
+        let source = Uuid::from_bytes([0x5a; 16]);
+        let trigger = EventRef {
+            stream: Some(Cover {
+                domain: "wallet".to_string(),
+                root: Some(source.clone()),
+                edition: None,
+            }),
+            sequence: 3,
+        };
+        let ctx = PolicyContext::new(trigger, correlation(1), at(1));
+        assert_eq!(ctx.source_root(), &source);
+    }
+
+    /// A context whose trigger names no stream (one only a test builds)
+    /// has the empty root.
+    #[test]
+    fn a_trigger_with_no_stream_has_the_empty_root() {
+        let ctx = PolicyContext::new(EventRef::default(), correlation(1), at(1));
+        assert_eq!(ctx.source_root(), &Uuid::default());
+    }
+
     /// An event the policy has no handler for answers nothing.
     #[test]
     fn an_event_it_does_not_handle_answers_nothing() {
