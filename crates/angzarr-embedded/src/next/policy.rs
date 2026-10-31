@@ -333,6 +333,58 @@ impl<D: Domain> CommandTarget for D {
     }
 }
 
+/// What a policy reads events of ([`Policy::Source`]): a domain known by
+/// its name and the events it records, wherever it is decided. Every
+/// [`Domain`] is one, so a policy is sourced from a domain registered here
+/// by its own type; a domain served by a child process (registered by
+/// [`Registry::command_handler`](super::Registry::command_handler), not
+/// written in Rust) is named by an event set written for it, with no
+/// stand-in aggregate:
+///
+/// ```ignore
+/// pub struct Player;
+///
+/// impl EventSource for Player {
+///     const DOMAIN: &'static str = "player";
+///     fn event_types() -> Vec<String> {
+///         vec![TypeName::of::<wire::MoveDecided>().full_name()]
+///     }
+/// }
+///
+/// impl Ingests<Seated> for Player {} // what an `#[on_refused]` may answer
+/// ```
+///
+/// A remote domain ([`Registry::remote`](super::Registry::remote)) is
+/// never a policy's source here: its events are its coordinator's, and
+/// registering such a policy is refused
+/// ([`Misconfigured::RemoteSource`](super::Misconfigured::RemoteSource)).
+///
+/// Its `DOMAIN` is [`CommandTarget::DOMAIN`]'s twin: for a type that is
+/// both (every [`Domain`]), name the one meant,
+/// `<Counter as EventSource>::DOMAIN`.
+pub trait EventSource: 'static {
+    /// The domain's name: the `Cover.domain` of the streams whose events
+    /// the policy reads, and to which its refusal facts go.
+    const DOMAIN: &'static str;
+
+    /// The full names (`"pkg.v1.MoveDecided"`) of the events it records:
+    /// the events a policy that names no [`Policy::EVENTS`] reads.
+    fn event_types() -> Vec<String>;
+}
+
+/// A domain is the source of its own events: its name, and its
+/// [`Domain::Event`]'s types.
+impl<D: Domain> EventSource for D {
+    const DOMAIN: &'static str = D::NAME;
+
+    fn event_types() -> Vec<String> {
+        <D::Event as Payload>::type_urls()
+            .iter()
+            .map(|url| type_name(url).to_string())
+            .collect()
+    }
+}
+
 /// Event → commands: one source domain, one target domain, and the
 /// commands each source event is owed, each with the root of the target
 /// stream it is for. Stateless: what it owes is a function of the event.
@@ -364,8 +416,10 @@ pub trait Policy: Send + Sync + 'static {
     /// rewritten (angzarr decision 13.4).
     const NAME: &'static str;
     /// The one domain whose events it handles, and to which it delivers
-    /// its refusal facts.
-    type Source: Domain;
+    /// its refusal facts, known by its name and its events
+    /// ([`EventSource`]): a domain here, by its own type, or a
+    /// child-hosted one's event set.
+    type Source: EventSource;
     /// The one domain it sends commands to, known by its name and its
     /// commands ([`CommandTarget`]): a domain here, by its own type, or a
     /// remote one's command set.
@@ -552,7 +606,10 @@ pub struct PolicyHandler<'p, P, F> {
 /// See [`projection`].
 pub struct Projector<'p, P>(&'p mut P);
 
-impl<P: Policy, F: FnMut(Order)> Handler<P::Source> for PolicyHandler<'_, P, F> {
+impl<P: Policy, F: FnMut(Order)> Handler<P::Source> for PolicyHandler<'_, P, F>
+where
+    P::Source: Domain,
+{
     fn handle(&mut self, committed: &Committed<'_, P::Source>) {
         let ctx = PolicyContext::new(
             committed.event_ref(),
@@ -680,12 +737,9 @@ pub(crate) fn answered(
 pub(crate) fn dispatch<P: Policy>(policy: P) -> PolicyDispatch {
     let policy = Arc::new(policy);
     let target = <P::Target as CommandTarget>::DOMAIN;
-    let mut table = PolicyDispatch::new(P::NAME, <P::Source as Domain>::NAME, target);
+    let mut table = PolicyDispatch::new(P::NAME, <P::Source as EventSource>::DOMAIN, target);
     let events: Vec<String> = match P::EVENTS.is_empty() {
-        true => <<P::Source as Domain>::Event as Payload>::type_urls()
-            .iter()
-            .map(|url| type_name(url).to_string())
-            .collect(),
+        true => <P::Source as EventSource>::event_types(),
         false => P::EVENTS.iter().map(TypeName::full_name).collect(),
     };
     for event_type in events {

@@ -493,10 +493,11 @@ pub trait ProcessManager: Domain<State = Self, Rules = ()> {
 /// one per command.
 pub trait Decides<C: DomainMessage>: CommandTarget {}
 
-/// That `A` ingests fact `F`: `#[handles_fact(F)]` on its impl. What a
-/// translating policy's callback is checked against: it must return a fact
-/// its source ingests. Emitted by the macro, one per fact.
-pub trait Ingests<F: DomainMessage>: Domain {}
+/// That `A` ingests fact `F`: `#[handles_fact(F)]` on its impl, or, for
+/// a child-hosted domain's event set ([`EventSource`]), written beside it.
+/// What a translating policy's callback is checked against: it must return
+/// a fact its source ingests. Emitted by the macro, one per fact.
+pub trait Ingests<F: DomainMessage>: EventSource {}
 
 // ---------------------------------------------------------------- refusals
 
@@ -902,7 +903,7 @@ impl<C> Refusal<C> {
 /// they react to events the application's own domains created, so an `Err`
 /// is a bug, dead-lettered as
 /// [`StepError::PolicyFailed`](super::StepError::PolicyFailed).
-pub use super::policy::{CommandTarget, Policy};
+pub use super::policy::{CommandTarget, EventSource, Policy};
 
 /// What a policy's `#[on_event(E)]` handler returns as its `Ok` (its `Err`
 /// is any [`Diagnostic`](angzarr_embedded_diagnostic::Diagnostic): a bug,

@@ -720,7 +720,8 @@ needs a snapshot migration.
 ```rust
 pub trait Policy: Send + Sync + 'static {
     const NAME: &'static str;            // its commands' component; its position's handler
-    type Source: Domain; type Target: Domain;
+    type Source: EventSource;            // a Domain, or a child-hosted domain's name and events
+    type Target: CommandTarget;          // a Domain, or a remote domain's name and commands
     const ANSWERS_REFUSALS: bool = false; // every marked-up policy answers them
     fn on_event(&self, event: &Any, ctx: &PolicyContext)
         -> Result<Option<Commands<Self::Target>>, Report>;

@@ -14,17 +14,25 @@
 //! the kernel runs as the next step. A policy's target known by its name
 //! and commands alone (`CommandTarget`), a domain a coordinator elsewhere
 //! owns (`Registry::remote`), needs no stand-in aggregate: its step goes
-//! to that coordinator.
+//! to that coordinator. A policy's source known by its name and events
+//! alone (`EventSource`), a domain a child process serves
+//! (`Registry::command_handler`), needs none either: its events set the
+//! policy off as a typed domain's do.
 
 use std::convert::Infallible;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use ::angzarr_embedded::next::angzarr_router::domain::DomainDispatch;
-use ::angzarr_embedded::next::angzarr_router::pb::CommandResponse;
+use ::angzarr_embedded::next::angzarr_router::error::CodedError;
+use ::angzarr_embedded::next::angzarr_router::pb::{
+    CommandHandlerResponse, CommandResponse, ComponentDescriptor, ComponentKind,
+    ConflictResolution, ContextualCommand, StateOptions,
+};
+use ::angzarr_embedded::next::angzarr_router::router::CommandHandler;
 use ::angzarr_embedded::next::markup::{
-    self, CommandTarget, Commands, Context, Decides, DomainMessage, NoSnapshot, Policy,
-    PolicyContext, Rejection, Routed, TypeName,
+    self, CommandTarget, Commands, Context, Decides, DomainMessage, EventSource, Ingests,
+    NoSnapshot, Policy, PolicyContext, Rejection, Routed, TypeName,
 };
 use ::angzarr_embedded::next::v1::{
     command_page, Command, CommandBook, CommandPage, Cover, DeliveryOutcome, EventBook, EventPage,
@@ -414,6 +422,7 @@ impl Routed for Counter {
     }
 }
 
+impl Decides<Bump> for Counter {}
 impl Decides<Note> for Counter {}
 
 // ------------------------------------------------------------- the policy
@@ -665,7 +674,7 @@ fn a_policy_targets_a_remote_domain_by_its_command_set_alone() {
 /// domain's: its name and the full names of its commands.
 #[test]
 fn a_domain_is_its_own_command_target() {
-    assert_eq!(Counter::DOMAIN, "counter");
+    assert_eq!(<Counter as CommandTarget>::DOMAIN, "counter");
     assert_eq!(
         <Counter as CommandTarget>::command_types(),
         ["toy.counter.v1.Bump", "toy.counter.v1.Note"]
@@ -723,4 +732,200 @@ fn a_typed_refusal_reads_back_as_its_type() {
     let refusal = markup::TypedRefusal::of(&TooBig { by: 9 });
     assert_eq!(refusal.object::<TooBig>(), Some(TooBig { by: 9 }));
     assert_eq!(refusal.object::<Bump>(), None);
+}
+
+// ------------------------------------------------ a child-hosted source
+
+/// The player's events: a domain a child process serves (not Rust), known
+/// here by its name and the events it records. No aggregate stands in for
+/// it.
+pub struct Player;
+
+const MOVE_DECIDED: &str = "toy.player.v1.MoveDecided";
+
+impl EventSource for Player {
+    const DOMAIN: &'static str = "player";
+
+    fn event_types() -> Vec<String> {
+        vec![MOVE_DECIDED.to_string()]
+    }
+}
+
+/// The fact a translating policy of the player's would answer with: one
+/// the player ingests, written beside its event set as `Decides` is beside
+/// a command set.
+impl Ingests<Noted> for Player {}
+
+/// The child, as the host registers it: every command is answered with
+/// one `MoveDecided`.
+struct PlayerChild;
+
+impl CommandHandler for PlayerChild {
+    fn name(&self) -> &str {
+        "Player"
+    }
+
+    fn command_types(&self) -> Vec<String> {
+        vec!["toy.player.v1.Decide".to_string()]
+    }
+
+    async fn dispatch(&self, _: &ContextualCommand) -> Result<CommandHandlerResponse, CodedError> {
+        Ok(CommandHandlerResponse {
+            conflict: None,
+            events: Some(EventBook {
+                pages: vec![EventPage {
+                    payload: Some(Any {
+                        type_url: format!("/{MOVE_DECIDED}"),
+                        value: Vec::new(),
+                    }),
+                    ..EventPage::default()
+                }],
+                ..EventBook::default()
+            }),
+            rules_version: "player-1".to_string(),
+        })
+    }
+}
+
+/// The child's descriptor, as it answers `Describe`.
+fn player_descriptor() -> ComponentDescriptor {
+    ComponentDescriptor {
+        name: "Player".to_string(),
+        kind: ComponentKind::Aggregate as i32,
+        rules_version: "player-1".to_string(),
+        state: Some(StateDescriptor {
+            type_url: "/toy.player.v1.State".to_string(),
+            options: Some(StateOptions {
+                conflict_resolutions: vec![
+                    ConflictResolution::Strict as i32,
+                    ConflictResolution::AggregateHandles as i32,
+                ],
+            }),
+        }),
+        ..ComponentDescriptor::default()
+    }
+}
+
+/// Bumps the counter of the player's own root for every move the player
+/// decides. It names no `EVENTS`, so it reads every event its source
+/// records: the source's `event_types`.
+pub struct PlayerBumps;
+
+impl Policy for PlayerBumps {
+    const NAME: &'static str = "player-bumps";
+    type Source = Player;
+    type Target = Counter;
+
+    fn on_event(
+        &self,
+        event: &Any,
+        ctx: &PolicyContext,
+    ) -> Result<Option<Commands<Counter>>, Report> {
+        if type_name(&event.type_url) != MOVE_DECIDED {
+            return Ok(None);
+        }
+        markup::policy_answer::<Counter, Infallible>(Ok(
+            Commands::none().to(ctx.source_root().clone(), Bump { by: 1 })
+        ))
+    }
+}
+
+/// A decision of the player at [`root`], as a client sends it.
+fn decide() -> CommandBook {
+    CommandBook {
+        cover: Some(Cover {
+            domain: Player::DOMAIN.to_string(),
+            root: Some(root()),
+            edition: None,
+        }),
+        page: Some(CommandPage {
+            body: Some(command_page::Body::Command(Command {
+                payload: Some(Any {
+                    type_url: "/toy.player.v1.Decide".to_string(),
+                    value: Vec::new(),
+                }),
+            })),
+            ..CommandPage::default()
+        }),
+        handling: None,
+    }
+}
+
+/// A policy whose source is a child-hosted domain's event set: the
+/// player's event, recorded here through its child, sets off the
+/// counter's step, with no aggregate of the player's here.
+#[test]
+fn a_policy_is_sourced_from_a_child_hosted_domain_by_its_event_set_alone() {
+    let mut registry = Registry::new();
+    registry.aggregate::<Counter>(Counter::default);
+    registry
+        .command_handler(Player::DOMAIN, PlayerChild, player_descriptor())
+        .unwrap();
+    registry.policy(PlayerBumps);
+    let store = Mem::default();
+    let log = MemoryDeadLetters::new();
+    let sampled = Sampled {
+        now: Timestamp {
+            seconds: 1,
+            nanos: 0,
+        },
+        command_id: Uuid::from_bytes([0x72; 16]),
+    };
+    let kernel = Kernel::new(&registry, &log);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("a runtime");
+    let handled = runtime.block_on(kernel.handle_any(&store, decide(), &sampled, &mut ()));
+    let recorded = match handled {
+        Ok(Handled::Applied(recorded)) => recorded,
+        Ok(_) => panic!("not applied"),
+        Err(failure) => panic!("{failure:?}"),
+    };
+    let steps: Vec<(String, Vec<String>)> = recorded
+        .steps()
+        .iter()
+        .map(|book| {
+            let domain = book.cover.as_ref().map(|c| c.domain.clone());
+            let types = book
+                .pages
+                .iter()
+                .map(|p| type_name(&p.payload.as_ref().unwrap().type_url).to_string())
+                .collect();
+            (domain.unwrap_or_default(), types)
+        })
+        .collect();
+    assert_eq!(
+        steps,
+        [
+            ("player".to_string(), vec![MOVE_DECIDED.to_string()]),
+            (
+                "counter".to_string(),
+                vec!["toy.counter.v1.Bumped".to_string()]
+            ),
+        ]
+    );
+    assert!(log.letters().is_empty(), "{:?}", log.letters());
+}
+
+/// A domain's event set, as a policy's source reads it, is the domain's:
+/// its name and the full names of its events.
+#[test]
+fn a_domain_is_its_own_event_source() {
+    assert_eq!(<Counter as EventSource>::DOMAIN, "counter");
+    assert_eq!(
+        <Counter as EventSource>::event_types(),
+        ["toy.counter.v1.Bumped", "toy.counter.v1.Noted"]
+    );
+}
+
+/// A translating policy's fact for a child-hosted source is checked
+/// against what the source's event set says it ingests, and packs as any
+/// fact does.
+#[test]
+fn a_fact_for_a_child_hosted_source_packs_as_any_fact() {
+    let fact = markup::translated_fact::<Player, Noted, Infallible>(Ok(Noted));
+    assert_eq!(
+        fact.ok().map(|any| any.type_url),
+        Some("/toy.counter.v1.Noted".to_string())
+    );
 }

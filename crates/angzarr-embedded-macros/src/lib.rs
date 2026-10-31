@@ -288,8 +288,9 @@
 //! ```
 //!
 //! - [`policy`], on an inherent impl: `name` (the component its commands'
-//!   ids are derived from), `source` (a domain) and `target` (a
-//!   `markup::CommandTarget`: a domain here, by its type, or a remote
+//!   ids are derived from), `source` (a `markup::EventSource`: a domain
+//!   here, by its type, or a child-hosted domain's event set) and `target`
+//!   (a `markup::CommandTarget`: a domain here, by its type, or a remote
 //!   domain's command set): one source, one target.
 //! - [`on_event`]`(Event)`, one per event of the source it handles:
 //!   `fn(&self, event: &Event, ctx: &PolicyContext) -> Result<Commands<Target>, E>`,
@@ -2881,9 +2882,11 @@ pub fn state_factory(_attr: TokenStream, _item: TokenStream) -> TokenStream {
 }
 
 /// Marks an inherent impl as a POLICY: `#[policy(name = "..", source = <domain>,
-/// target = <domain>)]` (see the crate docs), its target any
-/// `markup::CommandTarget`: a domain here, by its type, or a remote
-/// domain's command set, with no stand-in aggregate. Generates `markup::Policy`:
+/// target = <domain>)]` (see the crate docs), its source any
+/// `markup::EventSource` (a domain here, by its type, or a child-hosted
+/// domain's event set) and its target any `markup::CommandTarget` (a
+/// domain here, by its type, or a remote domain's command set), with no
+/// stand-in aggregate for either. Generates `markup::Policy`:
 /// its refusal pass-through, and translate for each command its
 /// `#[on_refused]` callbacks name.
 ///
