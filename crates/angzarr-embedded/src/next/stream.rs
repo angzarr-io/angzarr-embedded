@@ -19,7 +19,6 @@ use super::payload::{pack, type_name, Payload};
 use super::registry::Registry;
 use super::route::Rejected;
 use super::upcast::Upcaster;
-use super::version::Rulebook;
 
 /// One recorded event, checked and decoded: an [`EventPage`] whose
 /// `EventMeta` had every field a recorded event always has (so its
@@ -76,7 +75,9 @@ impl<E> Envelope<E> {
         self.recorded_at
     }
 
-    /// The rules the event was decided under, and that apply folds it with.
+    /// The full version of the build that decided the event
+    /// (`EventMeta.rules_version`): it explains the decision, and is never
+    /// read to fold it.
     pub fn rules_version(&self) -> &str {
         &self.rules_version
     }
@@ -242,27 +243,13 @@ impl<D: Domain> Stream<D> {
         }
     }
 
-    /// `D`'s rulebook and upcaster. Without them nothing of `D` decodes.
-    fn typed(registry: &Registry) -> Result<(&Rulebook<D::Rules>, &Upcaster), KernelError> {
+    /// `D`'s upcaster. Without it nothing of `D` decodes.
+    fn typed(registry: &Registry) -> Result<&Upcaster, KernelError> {
         registry
-            .rules::<D>()
-            .zip(registry.upcaster(D::NAME))
+            .upcaster(D::NAME)
             .ok_or_else(|| KernelError::UnregisteredDomain {
                 domain: D::NAME.to_string(),
             })
-    }
-
-    /// The rules `envelope` names.
-    fn rules_for<'r>(
-        rulebook: &'r Rulebook<D::Rules>,
-        envelope: &Envelope<D::Event>,
-    ) -> Result<&'r D::Rules, KernelError> {
-        rulebook.get(&envelope.rules_version).ok_or_else(|| {
-            KernelError::Replay(ReplayError::UnknownRules {
-                sequence: envelope.sequence,
-                version: envelope.rules_version.clone(),
-            })
-        })
     }
 
     fn check_domain(cover: &Cover) -> Result<(), KernelError> {
@@ -279,7 +266,7 @@ impl<D: Domain> Stream<D> {
     /// Fold stored `pages` onto the end of the stream, each checked as
     /// [`Stream::replay`] says.
     fn fold(&mut self, pages: &[EventPage], registry: &Registry) -> Result<(), KernelError> {
-        let (rulebook, upcaster) = Self::typed(registry)?;
+        let upcaster = Self::typed(registry)?;
         for (index, page) in pages.iter().enumerate() {
             if page.sequence != self.len() {
                 return Err(KernelError::Replay(ReplayError::OutOfSequence {
@@ -297,15 +284,14 @@ impl<D: Domain> Stream<D> {
                     }));
                 }
             }
-            let rules = Self::rules_for(rulebook, &envelope)?;
-            self.push(envelope, rules);
+            self.push(envelope);
         }
         Ok(())
     }
 
     /// Fold one event in and hold it.
-    fn push(&mut self, envelope: Envelope<D::Event>, rules: &D::Rules) {
-        D::apply(&mut self.state, &envelope.event, rules);
+    fn push(&mut self, envelope: Envelope<D::Event>) {
+        D::apply(&mut self.state, &envelope.event);
         self.last_recorded_at = Some(envelope.recorded_at);
         self.events.push(envelope);
     }
@@ -431,10 +417,8 @@ impl<D: Domain> Stream<D> {
     /// Rebuild a stream from its whole stored log, from a fresh state (the
     /// registry's factory for `D`, if it holds one, else the default), each
     /// page decoded
-    /// ([`Envelope::decode`], upcast) and folded with the rules its
-    /// `rules_version` names, from the registry's rulebook; the caller does
-    /// not choose them. Refuses a cover of another domain, a rules version
-    /// the rulebook lacks, a sequence out of order, a triggering event in
+    /// ([`Envelope::decode`], upcast) and folded by `D::apply`. Refuses a
+    /// cover of another domain, a sequence out of order, a triggering event in
     /// this stream that is not earlier, and a `recorded_at` earlier than the
     /// event before.
     pub fn replay(
@@ -499,7 +483,7 @@ impl<D: Domain> Stream<D> {
 
     /// The stream's state as an angzarr `Snapshot`: the last sequence, the
     /// state packed as `Any` (its type URL is what a load compares), the
-    /// current rules version. `None` for an empty stream, and for a state
+    /// registered rules version. `None` for an empty stream, and for a state
     /// with no snapshot form ([`State::SNAPSHOTS`] `false`).
     pub fn snapshot(&self, registry: &Registry) -> Option<Snapshot> {
         if !D::State::SNAPSHOTS {
@@ -533,14 +517,10 @@ impl<D: Domain> Stream<D> {
         if from >= self.len() {
             return Ok(());
         }
-        let (rulebook, _) = Self::typed(registry)?;
+        Self::typed(registry)?;
         let mut state = self.base.clone();
         for envelope in &self.events {
-            D::apply(
-                &mut state,
-                &envelope.event,
-                Self::rules_for(rulebook, envelope)?,
-            );
+            D::apply(&mut state, &envelope.event);
             if envelope.sequence >= from {
                 let committed = Committed {
                     cover: &self.cover,

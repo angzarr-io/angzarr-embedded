@@ -1,8 +1,8 @@
 //! Toy domains for the kernel's tests, their payloads prost messages under
 //! versioned packages, as hatpick's will be:
 //!
-//! - an **account**: no conflict units (STRICT by default), rules with a
-//!   fee, facts from a payment provider, an old command type
+//! - an **account**: no conflict units (STRICT by default), a fee on
+//!   every withdrawal, facts from a payment provider, an old command type
 //!   (`toy.account.cmd.v0.Credit`, whole euros) and an old event type
 //!   (`toy.account.v0.Credited`) that upcast to the current ones;
 //! - a **shelf**: shaped like hatpick's `ListState`, its state declaring
@@ -28,7 +28,7 @@ use crate::next::v1::{
 };
 use crate::next::{
     ids, pack, Any, Decoder, Domain, Key, Misconfigured, Payload, PayloadError, Policy, Registry,
-    Rulebook, Sampled, State, Timestamp, UnitPath, Units, Upcaster,
+    Sampled, State, Timestamp, UnitPath, Units, Upcaster,
 };
 use crate::next::{EventStore, ListStreams, PositionKey, PositionStore, Store, StreamRef};
 use angzarr_embedded_diagnostic::{Arg, Diagnostic, Report};
@@ -202,15 +202,16 @@ impl Edit for CommandBook {
 /// What a toy's handler reads besides the state and its input: the
 /// router's `CommandContext` (the stream, the input's ids, a fact's origin,
 /// the conflict under AGGREGATE_HANDLES), the instant the kernel records at,
-/// and the current rules. (A fixture standing in for a domain's handlers.)
+/// and the domain's rules version. (A fixture standing in for a domain's
+/// handlers.)
 pub struct ToyCtx<'a, D: Domain> {
     pub stream: Cover,
     pub command_id: Uuid,
     pub correlation_id: Uuid,
     pub source: Option<FactOrigin>,
     pub recorded_at: Timestamp,
-    pub rules: &'a D::Rules,
     pub rules_version: &'a str,
+    pub domain: std::marker::PhantomData<fn() -> D>,
     /// The stream's next sequence.
     pub head: u64,
     pub conflict: Option<Conflict>,
@@ -219,7 +220,7 @@ pub struct ToyCtx<'a, D: Domain> {
 /// A toy domain's handlers, written against the state: its command
 /// handler, which may refuse, and its fact handler, which may not.
 /// Registered on the router's table by [`register`].
-pub trait Toy: Domain<Rules: Clone> {
+pub trait Toy: Domain {
     fn decide(
         cmd: &Self::Command,
         state: &Self::State,
@@ -232,41 +233,29 @@ pub trait Toy: Domain<Rules: Clone> {
     }
 }
 
-/// The router's context, with the kernel's instant and the rules, as a
-/// toy reads it.
-fn toy_ctx<'a, D: Domain>(
-    cctx: CommandContext,
-    rules: &'a D::Rules,
-    version: &'a str,
-) -> ToyCtx<'a, D> {
+/// The router's context, with the kernel's instant and the domain's rules
+/// version, as a toy reads it.
+fn toy_ctx<'a, D: Domain>(cctx: CommandContext) -> ToyCtx<'a, D> {
     ToyCtx {
         stream: cctx.cover.unwrap_or_default(),
         command_id: cctx.command_id.unwrap_or_default(),
         correlation_id: cctx.correlation_id.unwrap_or_default(),
         source: cctx.fact_origin,
         recorded_at: cctx.recorded_at.unwrap_or_default(),
-        rules,
-        rules_version: version,
+        rules_version: D::RULES_VERSION,
+        domain: std::marker::PhantomData,
         head: cctx.next_sequence,
         conflict: cctx.conflict,
     }
 }
 
-/// `D`'s handlers under `rules` (current `version`), on the router's table.
-pub fn handlers<D: Toy>(
-    rules: D::Rules,
-    version: &str,
-) -> impl FnOnce(DomainDispatch<D::State>) -> DomainDispatch<D::State>
-where
-    D::Rules: Clone,
-{
-    let version = version.to_string();
+/// `D`'s handlers, on the router's table.
+pub fn handlers<D: Toy>() -> impl FnOnce(DomainDispatch<D::State>) -> DomainDispatch<D::State> {
     move |mut table| {
         for url in <D::Command as Payload>::type_urls() {
-            let (rules, version) = (rules.clone(), version.clone());
             table = table.on_command(crate::next::type_name(&url), move |any, state, cctx| {
                 let cmd = D::Command::from_any(any).expect("the router routed it by type");
-                let ctx = toy_ctx::<D>(cctx, &rules, &version);
+                let ctx = toy_ctx::<D>(cctx);
                 match D::decide(&cmd, state, &ctx) {
                     Ok(events) => Ok(Some(crate::next::v1::EventBook {
                         pages: events
@@ -283,12 +272,11 @@ where
             });
         }
         for url in <D::Fact as Payload>::type_urls() {
-            let (rules, version) = (rules.clone(), version.clone());
             table = table.on_fact_with_context(
                 crate::next::type_name(&url),
                 move |any, state, cctx| {
                     let fact = D::Fact::from_any(any).expect("the router routed it by type");
-                    let ctx = toy_ctx::<D>(cctx, &rules, &version);
+                    let ctx = toy_ctx::<D>(cctx);
                     let mut events = D::ingest(state, &fact, &ctx)
                         .into_iter()
                         .map(|e| e.to_any());
@@ -304,18 +292,9 @@ where
     }
 }
 
-/// Register toy `D` with `rules` and `upcaster`, its handlers [`handlers`].
-pub fn register<D: Toy>(
-    registry: &mut Registry,
-    rules: Rulebook<D::Rules>,
-    upcaster: Upcaster,
-) -> Result<(), Misconfigured>
-where
-    D::Rules: Clone,
-{
-    let (version, current) = rules.current();
-    let handlers = handlers::<D>(current.clone(), version);
-    registry.register::<D>(rules, upcaster, handlers)
+/// Register toy `D` with `upcaster`, its handlers [`handlers`].
+pub fn register<D: Toy>(registry: &mut Registry, upcaster: Upcaster) -> Result<(), Misconfigured> {
+    registry.register::<D>(upcaster, handlers::<D>())
 }
 
 /// The descriptor angzarr-build generates for typed domain `D` when a
@@ -342,43 +321,18 @@ pub fn descriptor_of<D: Domain>(
 /// [`registry_with_upcasters`]'s).
 pub fn registry() -> Registry {
     let mut registry = Registry::new();
-    register::<Account>(
-        &mut registry,
-        fees(),
-        Upcaster::new("account-upcaster", "account"),
-    )
-    .unwrap();
-    register::<Shelf>(
-        &mut registry,
-        Rulebook::new("v1", ()),
-        Upcaster::new("shelf-upcaster", "shelf"),
-    )
-    .unwrap();
-    register::<Ledger>(
-        &mut registry,
-        Rulebook::new("v1", ()),
-        Upcaster::new("ledger-upcaster", "ledger"),
-    )
-    .unwrap();
+    register::<Account>(&mut registry, Upcaster::new("account-upcaster", "account")).unwrap();
+    register::<Shelf>(&mut registry, Upcaster::new("shelf-upcaster", "shelf")).unwrap();
+    register::<Ledger>(&mut registry, Upcaster::new("ledger-upcaster", "ledger")).unwrap();
     registry
 }
 
 /// [`registry`], the account upcasting its v0 command and event.
 pub fn registry_with_upcasters() -> Registry {
     let mut registry = Registry::new();
-    register::<Account>(&mut registry, fees(), account_upcaster()).unwrap();
-    register::<Shelf>(
-        &mut registry,
-        Rulebook::new("v1", ()),
-        Upcaster::new("shelf-upcaster", "shelf"),
-    )
-    .unwrap();
-    register::<Ledger>(
-        &mut registry,
-        Rulebook::new("v1", ()),
-        Upcaster::new("ledger-upcaster", "ledger"),
-    )
-    .unwrap();
+    register::<Account>(&mut registry, account_upcaster()).unwrap();
+    register::<Shelf>(&mut registry, Upcaster::new("shelf-upcaster", "shelf")).unwrap();
+    register::<Ledger>(&mut registry, Upcaster::new("ledger-upcaster", "ledger")).unwrap();
     registry
 }
 
@@ -499,16 +453,8 @@ pub mod account {
 
 use account::AccountState;
 
-/// The rules: a fee taken from every withdrawal, in cents. Version `v2` is
-/// current; `v1` charged nothing.
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub struct Fees {
-    pub withdrawal: i64,
-}
-
-pub fn fees() -> Rulebook<Fees> {
-    Rulebook::new("v2", Fees { withdrawal: 1 }).with("v1", Fees { withdrawal: 0 })
-}
+/// The fee taken from every withdrawal, in cents.
+pub const FEE: i64 = 1;
 
 /// v0 → v1 for the command and the event, both in cents.
 pub fn account_upcaster() -> Upcaster {
@@ -691,17 +637,15 @@ impl Domain for Account {
     type Fact = AccountFact;
     type Event = AccountEvent;
     type Rejection = Refused;
-    type Rules = Fees;
 
     const NAME: &'static str = "account";
+    const RULES_VERSION: &'static str = "v2";
 
-    /// The fee is the rules': replaying under the wrong rules would give
-    /// the wrong balance.
-    fn apply(s: &mut AccountState, e: &AccountEvent, rules: &Fees) {
+    fn apply(s: &mut AccountState, e: &AccountEvent) {
         match e {
             AccountEvent::Opened => s.open = true,
             AccountEvent::Deposited(cents) => s.cents += cents,
-            AccountEvent::Withdrew(cents) => s.cents -= cents + rules.withdrawal,
+            AccountEvent::Withdrew(cents) => s.cents -= cents + FEE,
             AccountEvent::Received(r) => {
                 if r.matched {
                     s.cents += r.cents;
@@ -718,7 +662,7 @@ impl Toy for Account {
     fn decide(
         cmd: &AccountCmd,
         s: &AccountState,
-        ctx: &ToyCtx<'_, Self>,
+        _: &ToyCtx<'_, Self>,
     ) -> Result<Vec<AccountEvent>, Refused> {
         Ok(match *cmd {
             AccountCmd::Open => {
@@ -734,7 +678,7 @@ impl Toy for Account {
                 vec![AccountEvent::Deposited(cents)]
             }
             AccountCmd::Withdraw(cents) => {
-                let total = cents + ctx.rules.withdrawal;
+                let total = cents + FEE;
                 if total > s.cents {
                     return Err(Refused::Overdrawn {
                         short: total - s.cents,
@@ -743,7 +687,7 @@ impl Toy for Account {
                 vec![AccountEvent::Withdrew(cents)]
             }
             AccountCmd::Sweep => {
-                let all = s.cents - ctx.rules.withdrawal;
+                let all = s.cents - FEE;
                 match all > 0 {
                     true => vec![AccountEvent::Withdrew(all)],
                     false => Vec::new(),
@@ -765,7 +709,6 @@ impl Toy for Account {
         assert_eq!(ctx.stream.domain, "account");
         assert_eq!(ctx.command_id, ids::fact_command_id(&source.external_id));
         assert!(ctx.correlation_id.is_well_formed());
-        assert_eq!(ctx.rules, &Fees { withdrawal: 1 }, "the current rules");
         vec![AccountEvent::Received(account::Received {
             cents,
             external_id: source.external_id.clone(),
@@ -1006,16 +949,16 @@ impl Domain for Shelf {
     type Fact = Infallible;
     type Event = ShelfEvent;
     type Rejection = Infallible;
-    type Rules = ();
 
     const NAME: &'static str = "shelf";
+    const RULES_VERSION: &'static str = "v1";
 
     /// A note is free text a person reads as a whole against the items: a
     /// stale one is refused rather than merged.
     const CONFLICT_RESOLUTION_BY_COMMAND: &'static [(&'static str, ConflictResolution)] =
         &[("toy.shelf.cmd.v1.Note", ConflictResolution::Strict)];
 
-    fn apply(s: &mut ShelfState, e: &ShelfEvent, (): &()) {
+    fn apply(s: &mut ShelfState, e: &ShelfEvent) {
         match e {
             ShelfEvent::WasSet(set) => {
                 s.items.insert(set.item.clone(), set.count);
@@ -1218,11 +1161,11 @@ impl Domain for Ledger {
     type Fact = Infallible;
     type Event = ledger::Recorded;
     type Rejection = TooLarge;
-    type Rules = ();
 
     const NAME: &'static str = "ledger";
+    const RULES_VERSION: &'static str = "v1";
 
-    fn apply(s: &mut LedgerState, e: &ledger::Recorded, (): &()) {
+    fn apply(s: &mut LedgerState, e: &ledger::Recorded) {
         s.next_source = e.source_sequence + 1;
         s.total += e.cents;
     }

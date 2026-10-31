@@ -400,12 +400,16 @@ mod fixtures {
         }
     }
 
+    /// The build version every fixture aggregate is described at and
+    /// answers with.
+    pub const VERSION: &str = "1.0.0";
+
     /// An aggregate's descriptor, as angzarr-build generates it.
     pub fn descriptor(name: &str) -> ComponentDescriptor {
         ComponentDescriptor {
             name: name.to_string(),
             kind: ComponentKind::Aggregate as i32,
-            rules_version: format!("{name}-1"),
+            rules_version: VERSION.to_string(),
             state: Some(StateDescriptor {
                 type_url: format!("/test.{name}.v1.State"),
                 options: Some(StateOptions {
@@ -487,7 +491,7 @@ mod fixtures {
             _: &ContextualCommand,
         ) -> Result<CommandHandlerResponse, CodedError> {
             let met = self.0.meet();
-            Ok(decided(if met { MET } else { ALONE }, "meeting-1"))
+            Ok(decided(if met { MET } else { ALONE }, VERSION))
         }
     }
 }
@@ -807,7 +811,7 @@ mod exposure_edges {
             _: &ContextualCommand,
         ) -> Result<CommandHandlerResponse, CodedError> {
             Ok(CommandHandlerResponse {
-                rules_version: "quiet-1".to_string(),
+                rules_version: VERSION.to_string(),
                 ..CommandHandlerResponse::default()
             })
         }

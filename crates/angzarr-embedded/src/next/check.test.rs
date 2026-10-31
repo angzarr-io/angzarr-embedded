@@ -39,7 +39,7 @@ mod empty {
 
     use angzarr_proto::v1::{ConflictResolution, StateDescriptor, StateOptions};
 
-    use crate::next::{Domain, Registry, Rulebook, State, Upcaster};
+    use crate::next::{Domain, Registry, State, Upcaster};
 
     #[derive(Clone, PartialEq, prost::Message)]
     pub struct Nothing {}
@@ -81,11 +81,11 @@ mod empty {
         type Fact = Infallible;
         type Event = Infallible;
         type Rejection = Infallible;
-        type Rules = ();
+        const RULES_VERSION: &'static str = "v1";
 
         const NAME: &'static str = "ledger";
 
-        fn apply(_: &mut Nothing, event: &Infallible, (): &()) {
+        fn apply(_: &mut Nothing, event: &Infallible) {
             match *event {}
         }
     }
@@ -93,7 +93,7 @@ mod empty {
     pub fn registry() -> Registry {
         let mut registry = Registry::new();
         registry
-            .register::<Ledger>(Rulebook::new("v1", ()), Upcaster::new("u", "ledger"), |t| t)
+            .register::<Ledger>(Upcaster::new("u", "ledger"), |t| t)
             .unwrap();
         registry
     }

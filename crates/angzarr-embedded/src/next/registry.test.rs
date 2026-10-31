@@ -2,9 +2,9 @@
 //! by `cover.domain`, and the conflict-resolution defaults. These run.
 
 use crate::next::v1::{ConflictResolution, Snapshot};
-use crate::next::{pack, Misconfigured, Registry, Rulebook, Upcaster};
+use crate::next::{pack, Misconfigured, Registry, Upcaster};
 
-use crate::next::toys::{account, fees, registry, shelf, Account, Shelf};
+use crate::next::toys::{account, registry, shelf, Account};
 
 #[test]
 fn registration_fills_the_state_descriptor_from_the_generated_impl() {
@@ -24,7 +24,6 @@ fn registration_fills_the_state_descriptor_from_the_generated_impl() {
         registry.domains().collect::<Vec<_>>(),
         ["account", "ledger", "shelf"]
     );
-    assert!(registry.rules::<Account>().is_some());
 }
 
 #[test]
@@ -64,12 +63,8 @@ fn misconfiguration_is_refused_at_registration() {
     let mut registry = registry();
     assert_eq!(
         registry.register::<Account>(
-            fees(),
             Upcaster::new("u", "account"),
-            crate::next::toys::handlers::<crate::next::toys::Account>(
-                crate::next::toys::Fees { withdrawal: 1 },
-                "v2"
-            )
+            crate::next::toys::handlers::<crate::next::toys::Account>()
         ),
         Err(Misconfigured::AlreadyRegistered {
             domain: "account".to_string()
@@ -79,26 +74,30 @@ fn misconfiguration_is_refused_at_registration() {
     let mut fresh = Registry::new();
     assert_eq!(
         fresh.register::<Account>(
-            fees(),
             Upcaster::new("u", "ledger"),
-            crate::next::toys::handlers::<crate::next::toys::Account>(
-                crate::next::toys::Fees { withdrawal: 1 },
-                "v2"
-            )
+            crate::next::toys::handlers::<crate::next::toys::Account>()
         ),
         Err(Misconfigured::UpcasterForAnotherDomain {
             domain: "account".to_string(),
             upcaster: "ledger".to_string()
         })
     );
+    /// An account built without a version.
+    struct Unversioned;
+    impl crate::next::Domain for Unversioned {
+        type State = account::AccountState;
+        type Command = std::convert::Infallible;
+        type Fact = std::convert::Infallible;
+        type Event = crate::next::toys::AccountEvent;
+        type Rejection = std::convert::Infallible;
+        const RULES_VERSION: &'static str = "";
+        const NAME: &'static str = "unversioned";
+        fn apply(_: &mut account::AccountState, _: &Self::Event) {}
+    }
     assert_eq!(
-        fresh.register::<Shelf>(
-            Rulebook::new("", ()),
-            Upcaster::new("u", "shelf"),
-            crate::next::toys::handlers::<crate::next::toys::Shelf>((), "v1")
-        ),
+        fresh.register::<Unversioned>(Upcaster::new("u", "unversioned"), |t| t),
         Err(Misconfigured::EmptyRulesVersion {
-            domain: "shelf".to_string()
+            domain: "unversioned".to_string()
         })
     );
     assert!(fresh.domains().next().is_none(), "nothing half-registered");
@@ -117,19 +116,15 @@ fn a_configured_resolution_the_state_lacks_is_refused() {
         type Fact = std::convert::Infallible;
         type Event = crate::next::toys::AccountEvent;
         type Rejection = std::convert::Infallible;
-        type Rules = ();
+        const RULES_VERSION: &'static str = "v1";
         const NAME: &'static str = "eager";
         const CONFLICT_RESOLUTION: Option<ConflictResolution> =
             Some(ConflictResolution::Commutative);
-        fn apply(_: &mut AccountState, _: &Self::Event, (): &()) {}
+        fn apply(_: &mut AccountState, _: &Self::Event) {}
     }
 
     assert_eq!(
-        Registry::new().register::<Eager>(
-            Rulebook::new("v1", ()),
-            Upcaster::new("u", "eager"),
-            |t| t
-        ),
+        Registry::new().register::<Eager>(Upcaster::new("u", "eager"), |t| t),
         Err(Misconfigured::UnsupportedResolution {
             domain: "eager".to_string(),
             command_type: None,
@@ -139,7 +134,7 @@ fn a_configured_resolution_the_state_lacks_is_refused() {
 }
 
 #[test]
-fn a_snapshot_is_usable_only_under_the_current_rules_and_state_type() {
+fn a_snapshot_is_usable_only_under_a_compatible_version_and_the_state_type() {
     let registry = registry();
     let state = pack(&account::AccountState::default());
     let snapshot = |rules: &str, state: &crate::next::Any| Snapshot {
@@ -150,7 +145,7 @@ fn a_snapshot_is_usable_only_under_the_current_rules_and_state_type() {
     assert!(registry.snapshot_usable("account", &snapshot("v2", &state)));
     assert!(
         !registry.snapshot_usable("account", &snapshot("v1", &state)),
-        "folded under other rules: discarded"
+        "another build's, not SemVer: not offered"
     );
     assert!(
         !registry.snapshot_usable(
@@ -204,22 +199,18 @@ fn a_state_descriptor_without_the_implicit_base_is_refused() {
         type Fact = std::convert::Infallible;
         type Event = std::convert::Infallible;
         type Rejection = std::convert::Infallible;
-        type Rules = ();
+        const RULES_VERSION: &'static str = "v1";
 
         const NAME: &'static str = "bad";
 
-        fn apply(_: &mut StrictOnly, event: &std::convert::Infallible, (): &()) {
+        fn apply(_: &mut StrictOnly, event: &std::convert::Infallible) {
             match *event {}
         }
     }
 
     let mut registry = crate::next::Registry::new();
     assert_eq!(
-        registry.register::<Bad>(
-            crate::next::Rulebook::new("v1", ()),
-            crate::next::Upcaster::new("u", "bad"),
-            |t| t
-        ),
+        registry.register::<Bad>(crate::next::Upcaster::new("u", "bad"), |t| t),
         Err(crate::next::Misconfigured::BadStateDescriptor {
             domain: "bad".to_string()
         })
@@ -275,22 +266,18 @@ fn a_state_descriptor_naming_another_type_than_its_snapshot_is_refused() {
         type Fact = std::convert::Infallible;
         type Event = std::convert::Infallible;
         type Rejection = std::convert::Infallible;
-        type Rules = ();
+        const RULES_VERSION: &'static str = "v1";
 
         const NAME: &'static str = "bad";
 
-        fn apply(_: &mut Misnamed, event: &std::convert::Infallible, (): &()) {
+        fn apply(_: &mut Misnamed, event: &std::convert::Infallible) {
             match *event {}
         }
     }
 
     let mut registry = crate::next::Registry::new();
     assert_eq!(
-        registry.register::<Bad>(
-            crate::next::Rulebook::new("v1", ()),
-            crate::next::Upcaster::new("u", "bad"),
-            |t| t
-        ),
+        registry.register::<Bad>(crate::next::Upcaster::new("u", "bad"), |t| t),
         Err(crate::next::Misconfigured::BadStateDescriptor {
             domain: "bad".to_string()
         })

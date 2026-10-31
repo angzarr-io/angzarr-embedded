@@ -94,10 +94,10 @@ mod tx {
     use crate::next::v1::{ConflictResolution, StateDescriptor, StateOptions, Uuid};
     use crate::next::{
         ids, pack, Decoder, Domain, Kernel, MemoryDeadLetters, Payload, PayloadError, Policy,
-        Registry, Rulebook, State, Upcaster,
+        Registry, State, Upcaster,
     };
 
-    use crate::next::toys::{at, command, cover, fees, opened, Account, AccountCmd, Edit};
+    use crate::next::toys::{at, command, cover, opened, Account, AccountCmd, Edit};
 
     #[derive(Clone, PartialEq, prost::Message)]
     pub struct ProbeState {
@@ -247,11 +247,11 @@ mod tx {
         type Fact = Infallible;
         type Event = ProbeEvent;
         type Rejection = Infallible;
-        type Rules = ();
+        const RULES_VERSION: &'static str = "p7";
 
         const NAME: &'static str = "probe";
 
-        fn apply(s: &mut ProbeState, e: &ProbeEvent, (): &()) {
+        fn apply(s: &mut ProbeState, e: &ProbeEvent) {
             if let ProbeEvent::Bumped = e {
                 s.bumps += 1;
             }
@@ -292,7 +292,6 @@ mod tx {
                 conflicts,
                 emitted_before: 0,
             };
-            let () = *ctx.rules;
             Ok(vec![ProbeEvent::Bumped, ProbeEvent::Probed(probed)])
         }
     }
@@ -325,19 +324,14 @@ mod tx {
         let mut registry = Registry::new();
         registry
             .register::<Account>(
-                fees(),
                 Upcaster::new("u", "account"),
-                crate::next::toys::handlers::<crate::next::toys::Account>(
-                    crate::next::toys::Fees { withdrawal: 1 },
-                    "v2",
-                ),
+                crate::next::toys::handlers::<crate::next::toys::Account>(),
             )
             .unwrap();
         registry
             .register::<ProbeDomain>(
-                Rulebook::new("p7", ()),
                 Upcaster::new("u", "probe"),
-                crate::next::toys::handlers::<ProbeDomain>((), "p7"),
+                crate::next::toys::handlers::<ProbeDomain>(),
             )
             .unwrap();
         registry
@@ -359,7 +353,7 @@ mod tx {
     }
 
     #[test]
-    fn decide_reads_the_rules_the_stream_the_instant_and_the_ids() {
+    fn decide_reads_the_rules_version_the_stream_the_instant_and_the_ids() {
         let plain = registry();
         let mut registry = registry();
         registry.policy(Probing);
@@ -454,9 +448,8 @@ mod tx {
         registry.policy(ProbeToLedger);
         registry
             .register::<crate::next::toys::Ledger>(
-                Rulebook::new("v1", ()),
                 Upcaster::new("u", "ledger"),
-                crate::next::toys::handlers::<crate::next::toys::Ledger>((), "v1"),
+                crate::next::toys::handlers::<crate::next::toys::Ledger>(),
             )
             .unwrap();
         let log = MemoryDeadLetters::new();

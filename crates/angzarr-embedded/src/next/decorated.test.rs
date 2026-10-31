@@ -50,8 +50,8 @@ use ::angzarr_embedded::next::v1::{
 };
 use ::angzarr_embedded::next::{
     pack, type_name, Any, Decoder, Domain, Envelope, Executed, Failure, Handled, KernelError,
-    MemoryDeadLetters, Payload, PayloadError, Recovery, Registry, Rejected, Rulebook, Sampled,
-    State, StepError, Stream, Timestamp, Upcaster, WireError,
+    MemoryDeadLetters, Payload, PayloadError, Recovery, Registry, Rejected, Sampled, State,
+    StepError, Stream, Timestamp, Upcaster, WireError,
 };
 use angzarr_embedded_diagnostic::{Arg, Diagnostic, Report};
 use angzarr_embedded_macros::{
@@ -1416,11 +1416,11 @@ impl Domain for Tally {
     type Fact = Infallible;
     type Event = Counted;
     type Rejection = Infallible;
-    type Rules = ();
+    const RULES_VERSION: &'static str = "v1";
 
     const NAME: &'static str = "tally";
 
-    fn apply(state: &mut TallyState, _: &Counted, (): &()) {
+    fn apply(state: &mut TallyState, _: &Counted) {
         state.count += 1;
     }
 }
@@ -1459,11 +1459,7 @@ fn configured(config: WalletConfig) -> Registry {
         .aggregate::<Ladder>(Ladder::default)
         .aggregate::<Pot>(Pot::default);
     registry
-        .register::<Tally>(
-            Rulebook::new("v1", ()),
-            Upcaster::new("tally-upcaster", "tally"),
-            tally_handlers,
-        )
+        .register::<Tally>(Upcaster::new("tally-upcaster", "tally"), tally_handlers)
         .unwrap();
     registry
 }

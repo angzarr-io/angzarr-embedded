@@ -7,8 +7,8 @@
 //! and see only what angzarr's coordinator sees: the state's
 //! `StateDescriptor` (its type URL and the conflict resolutions it
 //! supports), the configured resolutions, and the rules version. The typed
-//! parts (the rulebook, the upcaster, the decoders) are held here too, for
-//! the typed step.
+//! parts (the upcaster, the decoders) are held here too, for the typed
+//! step.
 //!
 //! Built once at start-up and shared: it is `Send + Sync`.
 
@@ -34,7 +34,6 @@ use super::payload::{type_name, Payload};
 use super::route;
 use super::stream::Stream;
 use super::upcast::{UpcastPort, Upcaster};
-use super::version::Rulebook;
 
 /// What a domain's descriptor tells the kernel: replaced whole, under
 /// its lock, when the domain is described again ([`Description::replace`]).
@@ -62,8 +61,8 @@ struct Entry {
     by_command: BTreeMap<String, ConflictResolution>,
     /// What dispatches the domain's inputs: angzarr-router's.
     handler: Box<dyn DynCommandHandler>,
-    /// What only a typed domain has: its rulebook, upcaster, payload types,
-    /// factory and typed replay.
+    /// What only a typed domain has: its upcaster, payload types, factory
+    /// and typed replay.
     typed: Option<Typed>,
     /// Whether it is a process manager: an absent correlation is its root.
     process_manager: bool,
@@ -168,8 +167,6 @@ fn starting_types(
 
 /// A typed [`Domain`]'s parts, erased.
 struct Typed {
-    /// The `Arc<Rulebook<D::Rules>>`, boxed.
-    rules: Box<dyn AnyType + Send + Sync>,
     upcaster: Arc<Upcaster>,
     /// The current event, command and fact type URLs: what an upcast chain
     /// must end at.
@@ -281,7 +278,7 @@ pub enum Misconfigured {
     AlreadyRegistered { domain: String },
     /// The upcaster names another domain.
     UpcasterForAnotherDomain { domain: String, upcaster: String },
-    /// The rulebook's current version is empty: every event is stamped with
+    /// The domain's rules version is empty: every event is stamped with
     /// it, so it must say something.
     EmptyRulesVersion { domain: String },
     /// The state's descriptor lists a value that is not a resolution, or
@@ -369,6 +366,60 @@ impl Diagnostic for Misconfigured {
     }
 }
 
+/// types.proto's default snapshot compatibility rule: strip ONE leading
+/// "v" or "V" from each version; if both then parse as SemVer 2.0.0, their
+/// major and minor numbers are equal (patch, pre-release and build
+/// metadata ignored); otherwise the versions, as recorded, are equal.
+pub(crate) fn compatible(snapshot: &str, registered: &str) -> bool {
+    let stripped = |v: &str| v.strip_prefix(['v', 'V']).unwrap_or(v).to_string();
+    match (
+        major_minor(&stripped(snapshot)),
+        major_minor(&stripped(registered)),
+    ) {
+        (Some(a), Some(b)) => a == b,
+        _ => snapshot == registered,
+    }
+}
+
+/// `version`'s major and minor numbers, if it is a SemVer 2.0.0 version:
+/// `MAJOR.MINOR.PATCH`, each a number with no leading zero, then an
+/// optional `-` pre-release and an optional `+` build, each of
+/// dot-separated non-empty `[0-9A-Za-z-]` identifiers (a numeric
+/// pre-release identifier with no leading zero).
+fn major_minor(version: &str) -> Option<(u64, u64)> {
+    let (rest, build) = match version.split_once('+') {
+        Some((rest, build)) => (rest, Some(build)),
+        None => (version, None),
+    };
+    let (core, pre) = match rest.split_once('-') {
+        Some((core, pre)) => (core, Some(pre)),
+        None => (rest, None),
+    };
+    let identifier =
+        |id: &str| !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
+    let numeric = |n: &str| {
+        !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) && (n == "0" || !n.starts_with('0'))
+    };
+    if let Some(build) = build {
+        if !build.split('.').all(identifier) {
+            return None;
+        }
+    }
+    if let Some(pre) = pre {
+        let valid =
+            |id: &str| identifier(id) && (!id.bytes().all(|b| b.is_ascii_digit()) || numeric(id));
+        if !pre.split('.').all(valid) {
+            return None;
+        }
+    }
+    let mut parts = core.split('.');
+    let (major, minor, patch) = (parts.next()?, parts.next()?, parts.next()?);
+    if parts.next().is_some() || ![major, minor, patch].into_iter().all(numeric) {
+        return None;
+    }
+    Some((major.parse().ok()?, minor.parse().ok()?))
+}
+
 /// Every domain an application runs, by name.
 #[derive(Default)]
 pub struct Registry {
@@ -415,9 +466,8 @@ impl Registry {
         Self::default()
     }
 
-    /// Register `D` under `D::NAME`, with its rules (whose current version
-    /// is stamped on every event, and under which each event folds), its
-    /// upcaster (for events and, discouraged, commands), and its handlers:
+    /// Register `D` under `D::NAME`, at its rules version
+    /// (`D::RULES_VERSION`, stamped on every event), its upcaster (for events and, discouraged, commands), and its handlers:
     /// `handlers` registers them on the router's table for `D`
     /// (`DomainDispatch`, over `D::State`, already folding, restoring
     /// snapshots and resolving COMMUTATIVE through `D`), with
@@ -427,12 +477,11 @@ impl Registry {
     /// configuration the state does not support.
     pub fn register<D: Domain>(
         &mut self,
-        rules: Rulebook<D::Rules>,
         upcaster: Upcaster,
         handlers: impl FnOnce(DomainDispatch<D::State>) -> DomainDispatch<D::State>,
     ) -> Result<(), Misconfigured> {
         let fresh: Factory<D::State> = Arc::new(D::State::default);
-        self.typed::<D>(rules, upcaster, fresh, None, handlers)
+        self.typed::<D>(upcaster, fresh, None, handlers)
     }
 
     /// Register typed `D`, built fresh by `fresh`, a process manager if it
@@ -440,7 +489,6 @@ impl Registry {
     /// `handlers`.
     fn typed<D: Domain>(
         &mut self,
-        rules: Rulebook<D::Rules>,
         upcaster: Upcaster,
         fresh: Factory<D::State>,
         starting: Option<BTreeSet<String>>,
@@ -456,7 +504,7 @@ impl Registry {
                 upcaster: upcaster.domain().to_string(),
             });
         }
-        if rules.current().0.is_empty() {
+        if D::RULES_VERSION.is_empty() {
             return Err(Misconfigured::EmptyRulesVersion { domain });
         }
         let state = D::State::descriptor();
@@ -486,24 +534,22 @@ impl Registry {
             }
             by_command.insert(command_type.to_string(), *resolution);
         }
-        let rules = Arc::new(rules);
         let upcaster = Arc::new(upcaster);
         let port: Arc<dyn UpcastPort> = upcaster.clone();
         let process_manager = starting.is_some();
-        let table = route::table::<D>(Arc::clone(&rules), Arc::clone(&fresh), process_manager);
+        let table = route::table::<D>(Arc::clone(&fresh), process_manager);
         let handler: Box<dyn DynCommandHandler> = Box::new(handlers(table));
         let entry = Entry {
             described: Arc::new(RwLock::new(Described {
                 state,
                 supported,
-                rules_version: rules.current().0.to_string(),
+                rules_version: D::RULES_VERSION.to_string(),
                 starting,
             })),
             component: D::CONFLICT_RESOLUTION,
             by_command,
             handler,
             typed: Some(Typed {
-                rules: Box::new(rules),
                 upcaster,
                 current: || {
                     let mut urls = D::Event::type_urls();
@@ -603,10 +649,9 @@ impl Registry {
     ///
     /// This is the whole registration of a marked-up aggregate, with no
     /// error path: its handlers are the router's table its markup
-    /// generates ([`Routed`](super::markup::Routed)), its rules are `()`,
-    /// recorded under the fixed
-    /// [`MARKUP_RULES_VERSION`](super::markup::MARKUP_RULES_VERSION), and
-    /// its upcaster an empty one unless [`Aggregate::upcaster`] gives one.
+    /// generates ([`Routed`](super::markup::Routed)), its rules version its
+    /// crate's build version (`D::RULES_VERSION`, which the markup gives
+    /// as `CARGO_PKG_VERSION`), and its upcaster an empty one unless [`Aggregate::upcaster`] gives one.
     /// What [`Registry::register`] would refuse (a domain registered twice,
     /// a bad descriptor) is a bug in the composition root, which PANICS
     /// there, at startup. A hand-written domain keeps `register`.
@@ -619,7 +664,7 @@ impl Registry {
         factory: impl Fn() -> D + Send + Sync + 'static,
     ) -> Aggregate<'_, D>
     where
-        D: Domain<State = D, Rules = ()> + markup::Routed,
+        D: Domain<State = D> + markup::Routed,
     {
         self.marked_up::<D>(Arc::new(factory), Upcaster::new(D::NAME, D::NAME), None);
         Aggregate {
@@ -631,7 +676,7 @@ impl Registry {
     /// Register the marked-up process manager `P` (`#[process_manager]`)
     /// with `factory`, which builds every fresh instance. A process manager
     /// is a domain, registered as [`Registry::aggregate`] registers one
-    /// (the markup's rules version, an empty upcaster, a second
+    /// (its crate's build version, an empty upcaster, a second
     /// registration PANICS at startup), on the router's process-manager
     /// table: only a starting input type may start an instance.
     pub fn process_manager<P>(
@@ -661,10 +706,9 @@ impl Registry {
         upcaster: Upcaster,
         starting: Option<BTreeSet<String>>,
     ) where
-        D: Domain<State = D, Rules = ()> + markup::Routed,
+        D: Domain<State = D> + markup::Routed,
     {
-        let rules = Rulebook::new(markup::MARKUP_RULES_VERSION, ());
-        if let Err(problem) = self.typed::<D>(rules, upcaster, factory, starting, D::route) {
+        if let Err(problem) = self.typed::<D>(upcaster, factory, starting, D::route) {
             panic!("{problem}");
         }
     }
@@ -902,17 +946,6 @@ impl Registry {
             .map(|e| e.described().rules_version.clone())
     }
 
-    /// `D`'s rulebook, if `D` is registered.
-    pub fn rules<D: Domain>(&self) -> Option<&Rulebook<D::Rules>> {
-        self.domains
-            .get(D::NAME)?
-            .typed
-            .as_ref()?
-            .rules
-            .downcast_ref::<Arc<Rulebook<D::Rules>>>()
-            .map(|rules| &**rules)
-    }
-
     /// `domain`'s upcaster, if registered.
     pub fn upcaster(&self, domain: &str) -> Option<&Upcaster> {
         self.domains
@@ -933,16 +966,18 @@ impl Registry {
         self.domains.get(domain)?.upcast.as_deref()
     }
 
-    /// Whether a load may start from `snapshot` of a `domain` stream: its
-    /// state's type URL is the registered state's, and its rules version
-    /// the current one. On a mismatch the snapshot is discarded and the
-    /// stream replayed from its events, never migrated.
+    /// Whether a load may start from `snapshot` of a `domain` stream
+    /// (types.proto, the Snapshot region's validity): its state's type URL
+    /// is the registered state's, and its rules version passes the default
+    /// compatibility rule against the registered one ([`compatible`]). A
+    /// snapshot that fails is not offered: the stream is replayed from its
+    /// events, never migrated.
     pub fn snapshot_usable(&self, domain: &str, snapshot: &Snapshot) -> bool {
         let Some(entry) = self.domains.get(domain) else {
             return false;
         };
         let described = entry.described();
-        snapshot.rules_version == described.rules_version
+        compatible(&snapshot.rules_version, &described.rules_version)
             && snapshot
                 .state
                 .as_ref()
@@ -1082,7 +1117,7 @@ pub struct Aggregate<'r, D: Domain> {
     domain: std::marker::PhantomData<fn() -> D>,
 }
 
-impl<'r, D: Domain<State = D, Rules = ()> + markup::Routed> Aggregate<'r, D> {
+impl<'r, D: Domain<State = D> + markup::Routed> Aggregate<'r, D> {
     /// Read the aggregate's old events through `upcaster` (its domain must
     /// be `D::NAME`; another panics, as a composition-root bug).
     pub fn upcaster(self, upcaster: super::Upcaster) -> Aggregate<'r, D> {

@@ -9,7 +9,7 @@
 //!   refusing handler's code and args, and its typed refusal object.
 //! - The table a typed [`Domain`] is dispatched by: the router's
 //!   `DomainDispatch` over the domain's state, folding with the domain's
-//!   own `apply` under the rules each event names, with the state's codec,
+//!   own `apply`, with the state's codec,
 //!   resolving COMMUTATIVE by the state's conflict units; the domain's
 //!   handlers are registered on it.
 
@@ -29,7 +29,6 @@ use super::domain::{Domain, State};
 use super::error::PayloadError;
 use super::markup::Failed;
 use super::payload::{type_name, Payload};
-use super::version::Rulebook;
 
 /// The angzarr-embedded code a reason in the router's shape is forwarded
 /// under, for every reason angzarr-router answers with (each `RouterReason`
@@ -384,19 +383,16 @@ pub(crate) const HANDLER_UNAVAILABLE: &str = "COORDINATOR_REASON_HANDLER_UNAVAIL
 
 /// The router's table for typed domain `D`, before its handlers: named
 /// `D::NAME` (a process manager's if `process_manager`), folding each
-/// event, upcast by the kernel before it is handed over, through `D::apply`
-/// under the rules its `rules_version` names (an event just emitted, under
-/// the current ones), with the state's codec when it has a snapshot form
+/// event, upcast by the kernel before it is handed over, through `D::apply`,
+/// answering `D::RULES_VERSION`, with the state's codec when it has a snapshot form
 /// (a delivered starting state restored onto a fresh state from `fresh`,
 /// and the state every answer carries), resolving COMMUTATIVE by
 /// [`State::changed`] when the state supports it.
 pub(crate) fn table<D: Domain>(
-    rules: Arc<Rulebook<D::Rules>>,
     fresh: Arc<dyn Fn() -> D::State + Send + Sync>,
     process_manager: bool,
 ) -> DomainDispatch<D::State> {
     let snapshot_form = <<D::State as State>::Snapshot as prost::Name>::full_name();
-    let fold_rules = Arc::clone(&rules);
     let restore_fresh = Arc::clone(&fresh);
     let mut rebuilder = Rebuilder::new(move || fresh())
         .with_fold(move |state, pages, _cover| {
@@ -410,18 +406,7 @@ pub(crate) fn table<D: Domain>(
                 };
                 let any = page.payload.clone().unwrap_or_default();
                 let event = D::Event::from_any(&any).map_err(|e| failed(&e))?;
-                // A stored event names its rules; one just emitted has no
-                // metadata yet, and is under the current ones.
-                let rules = match page.meta.as_ref().map(|m| m.rules_version.as_str()) {
-                    Some(version) => fold_rules.get(version).ok_or_else(|| {
-                        failed(&super::error::ReplayError::UnknownRules {
-                            sequence: page.sequence,
-                            version: version.to_string(),
-                        })
-                    })?,
-                    None => fold_rules.current().1,
-                };
-                D::apply(state, &event, rules);
+                D::apply(state, &event);
             }
             Ok(())
         })
@@ -452,7 +437,7 @@ pub(crate) fn table<D: Domain>(
         true => DomainDispatch::process_manager(D::NAME, D::NAME, rebuilder),
         false => DomainDispatch::new(D::NAME, D::NAME, rebuilder),
     };
-    let base = base.with_rules_version(rules.current().0);
+    let base = base.with_rules_version(D::RULES_VERSION);
     let commutative = <D::State as State>::descriptor().options.is_some_and(|o| {
         o.conflict_resolutions
             .contains(&(ConflictResolution::Commutative as i32))

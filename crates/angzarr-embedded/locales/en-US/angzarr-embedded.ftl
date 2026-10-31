@@ -56,6 +56,7 @@ angzarr-embedded-next-retry-cap-exhausted = gave up on stream { $stream } after 
         [one] one run
        *[other] { $attempts } runs
     }, each losing its write to another write to the stream, at the cap of { $cap }: dead-lettered, nothing persisted
+angzarr-embedded-next-rules-version-mismatch = the handler of stream { $stream } answered as rules version "{ $reported }", not "{ $registered }", the version it is registered at: a bug in the handler; nothing was kept
 angzarr-embedded-next-unresolved = decide never acknowledged the window of stream { $stream } from { $expected } to { $actual }
 angzarr-embedded-next-unknown-type = stream { $stream }'s domain does not decode the type { $type_url }
 angzarr-embedded-next-invalid-payload = a { $type_url } for stream { $stream } is not a valid value: { $reason }
@@ -71,7 +72,6 @@ angzarr-embedded-next-replay-out-of-sequence = page { $index } of the log claims
 angzarr-embedded-next-replay-recorded-backwards = event { $sequence } was recorded before the event before it
 angzarr-embedded-next-replay-incomplete-meta = event { $sequence }'s metadata lacks a well-formed { $field }
 angzarr-embedded-next-replay-wrong-domain = a { $found } log was given to the { $expected } domain's code
-angzarr-embedded-next-replay-unknown-rules = event { $sequence } was decided under rules { $version }, which the rulebook does not hold
 
 angzarr-embedded-next-unreadable = event { $sequence } of stream { $stream } cannot be replayed: { $reason }
 

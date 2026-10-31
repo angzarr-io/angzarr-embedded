@@ -24,7 +24,7 @@ pub struct ReplayFixture<'a, S> {
     pub states: Vec<(u64, S)>,
 }
 
-/// Replay every fixture through the registry's upcaster and rulebook for
+/// Replay every fixture through the registry's upcaster for
 /// `D`, and compare each listed state. Every failure is listed, one line
 /// each, naming its fixture (and the type URL, for a page that does not
 /// read).

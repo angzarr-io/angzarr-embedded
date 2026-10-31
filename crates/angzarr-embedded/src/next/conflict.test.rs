@@ -368,14 +368,13 @@ impl prost::Name for OldNote {
 
 #[test]
 fn an_old_command_type_has_its_current_types_resolution() {
-    use crate::next::{Registry, Rulebook, Upcaster};
+    use crate::next::{Registry, Upcaster};
     let mut registry = Registry::new();
     registry
         .register::<Shelf>(
-            Rulebook::new("v1", ()),
             Upcaster::new("shelf-upcaster", "shelf")
                 .rule::<OldNote, shelf::Note>(|old| Ok(shelf::Note { note: old.text })),
-            crate::next::toys::handlers::<crate::next::toys::Shelf>((), "v1"),
+            crate::next::toys::handlers::<crate::next::toys::Shelf>(),
         )
         .unwrap();
     let store = MemoryStore::new();
@@ -423,11 +422,10 @@ fn an_old_command_type_has_its_current_types_resolution() {
     let mut failing = Registry::new();
     failing
         .register::<Shelf>(
-            Rulebook::new("v1", ()),
             Upcaster::new("shelf-upcaster", "shelf").rule::<OldNote, shelf::Note>(|_| {
                 Err(angzarr_embedded_diagnostic::Report::new("toy-no"))
             }),
-            crate::next::toys::handlers::<crate::next::toys::Shelf>((), "v1"),
+            crate::next::toys::handlers::<crate::next::toys::Shelf>(),
         )
         .unwrap();
     assert!(matches!(
@@ -518,11 +516,11 @@ mod tally {
         type Fact = Infallible;
         type Event = Count;
         type Rejection = Infallible;
-        type Rules = ();
+        const RULES_VERSION: &'static str = "v1";
 
         const NAME: &'static str = "tally";
 
-        fn apply(state: &mut Tally, _: &Count, (): &()) {
+        fn apply(state: &mut Tally, _: &Count) {
             state.count += 1;
         }
     }
@@ -544,14 +542,10 @@ mod tally {
 
 #[test]
 fn a_commutative_command_at_the_head_has_no_window_whatever_its_units() {
-    use crate::next::{Registry, Rulebook, Upcaster};
+    use crate::next::{Registry, Upcaster};
     let mut registry = Registry::new();
     registry
-        .register::<tally::Counter>(
-            Rulebook::new("v1", ()),
-            Upcaster::new("tally-upcaster", "tally"),
-            tally::handlers,
-        )
+        .register::<tally::Counter>(Upcaster::new("tally-upcaster", "tally"), tally::handlers)
         .unwrap();
     let store = MemoryStore::new();
     let count = |n: u128| command(cover("tally", 1), crate::next::pack(&tally::Count {})).id(n);
@@ -599,7 +593,7 @@ mod judged {
     use crate::next::toys::prelude::*;
     use crate::next::toys::{at, command, cover, handlers, set, Edit, Shelf, ShelfState};
     use crate::next::v1::ConflictResolution;
-    use crate::next::{Failure, Handled, KernelError, Registry, Rulebook};
+    use crate::next::{Failure, Handled, KernelError, Registry};
 
     use super::shelf_a_b;
 
@@ -626,12 +620,8 @@ mod judged {
     }
 
     fn rewritten(edit: fn(&mut pb::ConflictReport)) -> Registry {
-        let table = crate::next::route::table::<Shelf>(
-            Arc::new(Rulebook::new("v1", ())),
-            Arc::new(ShelfState::default),
-            false,
-        );
-        let inner = handlers::<Shelf>((), "v1")(table);
+        let table = crate::next::route::table::<Shelf>(Arc::new(ShelfState::default), false);
+        let inner = handlers::<Shelf>()(table);
         let mut registry = Registry::new();
         registry
             .command_handler(

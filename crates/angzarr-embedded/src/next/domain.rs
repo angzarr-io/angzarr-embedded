@@ -97,14 +97,19 @@ pub trait Domain: Sized + 'static {
     /// and typed refusal object. Kernel faults are never folded into it:
     /// see [`Failure`](super::Failure).
     type Rejection: Diagnostic + Send + 'static;
-    /// Immutable reference data the fold reads, one value per rules
-    /// version, found through a [`Rulebook`](super::Rulebook).
-    type Rules: Send + Sync + 'static;
-
     /// The domain's name: the `Cover.domain` of every stream of this
     /// domain, and its key in the [`Registry`](super::Registry). Stable
     /// across releases; never contains `':'`.
     const NAME: &'static str;
+
+    /// The full version of the build the domain is (types.proto,
+    /// `EventMeta.rules_version`): its crate's `CARGO_PKG_VERSION`, the
+    /// version angzarr-build writes into its descriptor, never a label
+    /// chosen by hand (`#[aggregate]` and `#[process_manager]` give
+    /// `env!("CARGO_PKG_VERSION")`). The domain is registered at it, and its
+    /// answers report it; the kernel reads it only to choose which
+    /// snapshots to offer ([`Registry::snapshot_usable`](super::Registry::snapshot_usable)).
+    const RULES_VERSION: &'static str;
 
     /// The domain's configured conflict resolution (angzarr's component
     /// configuration). `None`: the built-in default, COMMUTATIVE where the
@@ -120,9 +125,9 @@ pub trait Domain: Sized + 'static {
     /// only current types are named here.
     const CONFLICT_RESOLUTION_BY_COMMAND: &'static [(&'static str, ConflictResolution)] = &[];
 
-    /// Fold one event into the state. Pure: the same state, event and rules
+    /// Fold one event into the state. Pure: the same state and event
     /// always give the same result. Never sees the event's metadata.
-    fn apply(state: &mut Self::State, event: &Self::Event, rules: &Self::Rules);
+    fn apply(state: &mut Self::State, event: &Self::Event);
 }
 
 #[cfg(test)]

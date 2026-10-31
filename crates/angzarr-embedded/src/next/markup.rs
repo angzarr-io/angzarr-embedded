@@ -37,8 +37,6 @@
 //!   and its handler's context. [`Decides`] and [`Ingests`] say what a
 //!   domain takes, for the checks on a policy.
 //! - [`AsyncProjector`] and [`ProjectionContext`]: a projector.
-//! - [`MARKUP_RULES_VERSION`]: the rules version every marked-up
-//!   domain's events are recorded under.
 //! - [`STEP_LIMIT`] and [`assert_step_idempotent`]: the cap on a decision's
 //!   continuation steps, and the test helper for a step.
 //! - [`TypeName`]: a message's package and name, as the generated
@@ -439,17 +437,6 @@ records_shape! {
     [T] Vec<T>;
 }
 
-/// The rules version every marked-up domain's events (an aggregate's or a
-/// process manager's) are recorded under
-/// ([`Registry::aggregate`](super::Registry::aggregate) and
-/// [`Registry::process_manager`](super::Registry::process_manager)
-/// register it):
-/// fixed, because the markup has no rulebook of its own (`Rules = ()`).
-/// What changes how old events read is an upcaster
-/// ([`Aggregate::upcaster`](super::Aggregate::upcaster)), not a
-/// rules version.
-pub const MARKUP_RULES_VERSION: &str = "markup-1";
-
 /// A process manager written in the markup (`#[process_manager]`). A
 /// process manager IS A DOMAIN: its inputs are commands (which policies send
 /// it, and which it may refuse) and facts (timeouts, webhooks, refusal
@@ -481,7 +468,7 @@ pub const MARKUP_RULES_VERSION: &str = "markup-1";
 /// The kernel registers it on the router's process-manager table, and
 /// applies the start rule by `STARTS`: the descriptor's starting types,
 /// which the markup generates (decision 14.42).
-pub trait ProcessManager: Domain<State = Self, Rules = ()> {
+pub trait ProcessManager: Domain<State = Self> {
     /// The input types (commands and facts) that may start an instance,
     /// in marker order: angzarr's `ComponentDescriptor.starting_types`.
     const STARTS: &'static [TypeName];
@@ -1116,7 +1103,7 @@ pub const STEP_LIMIT: usize = 16;
 /// result, or a chain through it never settles.
 pub fn assert_step_idempotent<A, S, O, E>(instance: A, step: S, ctx: &Context) -> A
 where
-    A: Domain<State = A, Rules = ()>,
+    A: Domain<State = A>,
     A::Event: fmt::Debug,
     S: Fn(&A, &Context) -> Result<O, E>,
     O: Emits<A>,
@@ -1130,7 +1117,7 @@ where
     let mut emit = first;
     for _ in 0..=STEP_LIMIT {
         for event in std::mem::take(&mut emit.events) {
-            A::apply(&mut instance, &event, &());
+            A::apply(&mut instance, &event);
         }
         let Some(next) = emit.next.take() else {
             break;
@@ -1356,7 +1343,7 @@ pub fn run_command<A, R, C, O, E>(
     handler: impl FnOnce(&A, C, &Context) -> Result<O, E>,
 ) -> Result<Option<EventBook>, angzarr_router::error::HandlerError>
 where
-    A: Domain<State = A, Rules = (), Rejection = Rejection<R>> + Clone,
+    A: Domain<State = A, Rejection = Rejection<R>> + Clone,
     R: angzarr_embedded_diagnostic::Diagnostic,
     C: DomainMessage,
     O: Emits<A>,
@@ -1373,7 +1360,7 @@ where
     let mut steps = 0;
     loop {
         for event in std::mem::take(&mut emit.events) {
-            A::apply(&mut working, &event, &());
+            A::apply(&mut working, &event);
             events.push(event);
         }
         let Some(next) = emit.next.take() else {
@@ -1409,7 +1396,7 @@ pub fn run_fact<A, F, Rr>(
     handler: impl FnOnce(&A, F, &Context) -> Rr,
 ) -> Result<angzarr_router::domain::FactRecord, angzarr_router::error::HandlerError>
 where
-    A: Domain<State = A, Rules = ()> + Clone,
+    A: Domain<State = A> + Clone,
     F: DomainMessage,
     Rr: Records<A>,
 {
@@ -1439,7 +1426,7 @@ pub fn run_on_refused<A, C, Rr, E>(
     handler: impl FnOnce(&A, CommandRefused<C>, &Context) -> Result<Rr, E>,
 ) -> Result<angzarr_router::domain::FactRecord, angzarr_router::error::HandlerError>
 where
-    A: Domain<State = A, Rules = ()> + Clone,
+    A: Domain<State = A> + Clone,
     C: DomainMessage,
     Rr: Records<A>,
     E: angzarr_embedded_diagnostic::Diagnostic,
@@ -1461,7 +1448,7 @@ where
 /// A fact's record run as one decision on a working copy of `state`.
 fn record<A, Rr>(state: &A, ctx: &Context, recorded: Rr) -> Vec<A::Event>
 where
-    A: Domain<State = A, Rules = ()> + Clone,
+    A: Domain<State = A> + Clone,
     Rr: Records<A>,
 {
     let mut working = state.clone();
@@ -1470,7 +1457,7 @@ where
     let mut steps = 0;
     loop {
         for event in std::mem::take(&mut record.events) {
-            A::apply(&mut working, &event, &());
+            A::apply(&mut working, &event);
             events.push(event);
         }
         let Some(next) = record.next.take() else {

@@ -757,12 +757,8 @@ fn a_policy_book_for_an_unregistered_target_is_a_dead_lettered_bug() {
     registry.policy(Bookkeeping);
     registry
         .register::<Account>(
-            crate::next::toys::fees(),
             crate::next::Upcaster::new("u", "account"),
-            crate::next::toys::handlers::<crate::next::toys::Account>(
-                crate::next::toys::Fees { withdrawal: 1 },
-                "v2",
-            ),
+            crate::next::toys::handlers::<crate::next::toys::Account>(),
         )
         .unwrap();
     let log = MemoryDeadLetters::new();
@@ -1646,11 +1642,11 @@ impl crate::next::Domain for Impostor {
     type Fact = std::convert::Infallible;
     type Event = std::convert::Infallible;
     type Rejection = std::convert::Infallible;
-    type Rules = ();
+    const RULES_VERSION: &'static str = "v1";
 
     const NAME: &'static str = "account";
 
-    fn apply(_: &mut crate::next::toys::LedgerState, event: &std::convert::Infallible, (): &()) {
+    fn apply(_: &mut crate::next::toys::LedgerState, event: &std::convert::Infallible) {
         match *event {}
     }
 }
@@ -2433,14 +2429,11 @@ fn no_translation_makes_the_kernel_build_the_pass_through_fact() {
     use crate::next::v1::command_page::Body;
     let books = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let mut registry = crate::next::Registry::new();
-    let fees = crate::next::toys::fees();
-    let (version, current) = fees.current();
     let table = crate::next::route::table::<Account>(
-        std::sync::Arc::new(crate::next::toys::fees()),
         std::sync::Arc::new(crate::next::toys::account::AccountState::default),
         false,
     );
-    let inner = crate::next::toys::handlers::<Account>(*current, version)(table);
+    let inner = crate::next::toys::handlers::<Account>()(table);
     registry
         .command_handler(
             "account",
@@ -2450,14 +2443,13 @@ fn no_translation_makes_the_kernel_build_the_pass_through_fact() {
             },
             crate::next::toys::descriptor_of::<Account>(
                 crate::next::v1::ComponentKind::Aggregate,
-                version,
+                "v2",
                 &[],
             ),
         )
         .unwrap();
     crate::next::toys::register::<Ledger>(
         &mut registry,
-        crate::next::Rulebook::new("v1", ()),
         crate::next::Upcaster::new("ledger-upcaster", "ledger"),
     )
     .unwrap();

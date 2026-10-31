@@ -38,7 +38,7 @@ places:
 |---|---|---|
 | A1 | `Envelope` holds only seq, cause and event: no when, no why. Consumers put metadata in the payload (hatpick's `Stamp`). | Every event carries angzarr's `EventMeta`, stamped by the kernel. Business code emits payloads only. [Metadata](#metadata) |
 | A2 | `cause` is only within a stream; there is no correlation id. | Every event names its direct cause, its command; a policy command names its trigger as its own `causation_id`; correlation is always set and kept through every policy step. [Identification](#step-2-identification), [Metadata](#metadata) |
-| A3 | `Header.rules` is a free string replay never checks. | The rules version is registered, stamped per event, resolved by a `Rulebook` at replay, and invalidates snapshots. [Rules versions](#rules-versions) |
+| A3 | `Header.rules` is a free string replay never checks. | The rules version is the build's full version: registered, checked against every answer, stamped per event, and read only to choose which snapshots to offer. [Rules versions](#rules-versions) |
 | A5 | `Header.schema` is unused; there is no upcasting. | A payload's type URL is its version. Old types are upcast by type URL, strictly, events at read and (discouraged) commands before decode. [Dispatch](#step-5-dispatch-through-angzarr-router) |
 | A6 | Events emitted before a rejection stay in the `Stream`. | Decide is pure and stages its events; a rejection leaves nothing. |
 | B1 | The old kernel's policy was a stateless saga with an undocumented target-contiguity invariant, its backlog replaying the source once per target. | One `Policy` trait and one registration list; every step committed on its own, with the policy's position on its source, and resumed by position. [Policies](#policies-and-the-chain) |
@@ -254,7 +254,7 @@ command is atomic with its effects, with nothing else to keep consistent.
 processed ids in the stream.)
 
 **Accepted costs** (the first two are angzarr's decision 12.2, the same in
-both runtimes; the third is angzarr-embedded's own, divergence 10):
+both runtimes; the third is angzarr-embedded's own, divergence 9):
 
 - **A decision that produced no events leaves nothing to find**, so a
   redelivery of it is decided again, against the stream as it is then
@@ -367,8 +367,9 @@ registration (`Misconfigured::UnsupportedResolution`); a book's request, at
 step 1.
 
 **The load.** The newest snapshot, if usable (its state's type URL is the
-registered state's and its rules version the current one; otherwise it is
-discarded and the stream replayed from 0, never migrated), then the events
+registered state's and its rules version compatible with the registered
+one, [Snapshots](#snapshots); otherwise it is not offered and the stream
+is replayed from 0, never migrated), then the events
 after it to the head. Under AGGREGATE_HANDLES and COMMUTATIVE the snapshot
 used is **at or below expected−1**, so no part of the window is hidden in
 snapshot state; a newer one is not used.
@@ -454,15 +455,15 @@ pub trait Domain: Sized + 'static {
     type Fact: Payload + Send + 'static;           // Infallible: none
     type Event: Payload + Clone + Send + Sync + 'static;
     type Rejection: Diagnostic + Send + 'static;   // what its handlers refuse with
-    type Rules: Send + Sync + 'static;
     const NAME: &'static str;                      // the Cover.domain; the registry key
+    const RULES_VERSION: &'static str;             // the build's version: env!("CARGO_PKG_VERSION")
     const CONFLICT_RESOLUTION: Option<ConflictResolution> = None;
     const CONFLICT_RESOLUTION_BY_COMMAND: &'static [(&'static str, ConflictResolution)] = &[];
-    fn apply(state: &mut Self::State, event: &Self::Event, rules: &Self::Rules);
+    fn apply(state: &mut Self::State, event: &Self::Event);
 }
 
 impl Registry {
-    pub fn register<D: Domain>(&mut self, rules: Rulebook<D::Rules>, upcaster: Upcaster,
+    pub fn register<D: Domain>(&mut self, upcaster: Upcaster,
         handlers: impl FnOnce(DomainDispatch<D::State>) -> DomainDispatch<D::State>)
         -> Result<(), Misconfigured>;
     pub fn command_handler(&mut self, domain: &str, handler: impl CommandHandler + 'static,
@@ -526,9 +527,8 @@ and the position stays.
 
 **A domain is a router table.** `Registry::register` builds angzarr-router's
 `DomainDispatch` over `D::State`: it folds each event, upcast by the kernel
-before it is handed over, through `D::apply` under the rules the event's
-`rules_version` names (an event just emitted, under the current ones); a
-state with a snapshot form has the state's codec (`with_state_codec`: a
+before it is handed over, through `D::apply`, and answers
+`D::RULES_VERSION` with every decision; a state with a snapshot form has the state's codec (`with_state_codec`: a
 delivered starting state restored onto a fresh state, and the state every
 answer carries); and it resolves COMMUTATIVE by `State::changed`. The
 domain's handlers are registered on it: `#[aggregate]` and
@@ -545,8 +545,10 @@ one; they are generated). A marked-up process manager's starting types are
 its markup's: the macro generates `markup::ProcessManager::STARTS` from the
 inputs marked `starts`, the same list angzarr-build writes into its
 descriptor, and `Registry::process_manager` reads it. A typed domain's
-state descriptor is its `State::descriptor()` and its rules version its
-`Rulebook`'s. A domain registered by `Registry::command_handler` is given
+state descriptor is its `State::descriptor()` and its rules version
+`D::RULES_VERSION`, which the markup gives as its crate's
+`CARGO_PKG_VERSION`: the version angzarr-build writes into its
+descriptor. A domain registered by `Registry::command_handler` is given
 its descriptor: an application's, decoded from the `angzarr-descriptors.rs`
 angzarr-build generates, or, for a child, the one it answers `Describe`
 with (angzarr-embedded-host). The kernel does not read
@@ -666,7 +668,7 @@ Every event carries angzarr's `EventMeta`, the same in both runtimes:
 | `fact` | the fact's `FactOrigin`, for a fact; unset otherwise |
 | `correlation_id` | the producing command's; never unset |
 | `recorded_at` | `max(Sampled::now, the stream's last recorded_at)`: non-decreasing per stream, one instant per chain, so as-of-time reads are prefixes |
-| `rules_version` | the registered rulebook's current version |
+| `rules_version` | the version the answer reports, in full, which must be the registered one (an answer reporting another is refused, `KernelError::RulesVersionMismatch`, with nothing kept) |
 
 **No trigger on a policy command's events**: a policy's command names its trigger
 (`CommandPage.causation_id`), its events name the command. The edge from
@@ -706,14 +708,18 @@ each input's; a correlation left unset is given the root.
 
 ## Rules versions
 
-A rules version is a short label the domain's author chooses (`"v3"`) and
-bumps whenever decide, ingest or apply semantics change. The domain
-registers a `Rulebook` (the current version and every older one its logs
-name); the current version is stamped on every event. In angzarr-embedded it is
-**load-bearing**: replay folds each event with the rules its version names
-(`ReplayError::UnknownRules` if the rulebook lacks it), and a snapshot
-folded under another version is discarded. A rules change therefore never
-needs a snapshot migration.
+A rules version is the full version of the build that decides
+(`"1.4.2+build.7"`), never a label chosen by hand: an in-process Rust
+domain's is its crate's `CARGO_PKG_VERSION` (`Domain::RULES_VERSION`), the
+same value angzarr-build writes into its descriptor, and a child's is its
+descriptor's. The domain is registered at it; a child restarted on a new
+build is described again and registered at its new version before it gets
+work (C-0563). Every answer reports it, and an answer reporting another
+version than the registered one is a handler bug: refused, nothing kept,
+dead-lettered (C-0558). The kernel stamps it in full on every event and
+snapshot, and reads it only to choose which snapshots to offer
+([Snapshots](#snapshots)); replay never reads it. A rules change therefore
+never needs a snapshot migration: the next load replays.
 
 ## Policies and the chain
 
@@ -937,7 +943,10 @@ step's write, and a cache: its failure fails nothing. A state with no
 snapshot form returns none, and none is written. `Stream::snapshot` makes
 one from a stream run in memory, for the application to write. On
 load the coordinator uses it only if `Registry::snapshot_usable` (the
-state's type URL and the rules version match the registration), its
+state's type URL is the registered one, and its rules version passes
+types.proto's default rule against the registered version: one leading
+`v` or `V` stripped from each, equal SemVer major and minor, or, when
+either is not SemVer, the versions equal as recorded), its
 sequence is below the head (one at or past it claims events the stream
 does not hold: a purge left it, or it was written ahead of them) and,
 under AGGREGATE_HANDLES and COMMUTATIVE, its sequence is at or below
@@ -1070,7 +1079,7 @@ type itself:
 
 angzarr-embedded's own types are the ones angzarr has no message for, because they
 are execution, not wire: `Checked`, `Identified`, `Contextual`, `Prepared`,
-`Envelope` (a checked, decoded page), `Stream`, `Rejected`, `Rulebook`,
+`Envelope` (a checked, decoded page), `Stream`, `Rejected`,
 `Registry`, `Order`, `Kernel`.
 
 ## Key signatures
@@ -1101,7 +1110,7 @@ impl<D: Domain> Stream<D> {
 }
 // registration
 impl Registry {
-    pub fn register<D: Domain>(&mut self, rules: Rulebook<D::Rules>, upcaster: Upcaster,
+    pub fn register<D: Domain>(&mut self, upcaster: Upcaster,
         handlers: impl FnOnce(DomainDispatch<D::State>) -> DomainDispatch<D::State>) -> Result<(), Misconfigured>;
     pub fn command_handler(&mut self, domain: &str, handler: impl CommandHandler + 'static) -> Result<(), Misconfigured>;
     pub fn policy<P: Policy>(&mut self, policy: P) -> &mut Self;   // one list, run in registration order
@@ -1137,22 +1146,19 @@ is not. This list matches angzarr's `docs/design/audit-meta/annals-divergence.md
    `causation_id`; it is never persisted on events, in either runtime.)
 4. **The dead-letter queue is a logger**, every line prefixed with its
    warning; there is no PARKED and no replay.
-5. **`rules_version` is load-bearing**: replay resolves rules per event, and
-   snapshot validity is checked by the domain-blind coordinator through the
-   registry (in angzarr, by the client library).
-6. **COMMUTATIVE and AGGREGATE_HANDLES resolve in the kernel**, which is
+5. **COMMUTATIVE and AGGREGATE_HANDLES resolve in the kernel**, which is
    both coordinator and client library; the nonce is an in-process token,
    not bytes on a `ContextualCommand`.
-7. **Configuration lives on the domain** (`CONFLICT_RESOLUTION`,
+6. **Configuration lives on the domain** (`CONFLICT_RESOLUTION`,
    `CONFLICT_RESOLUTION_BY_COMMAND`), checked at registration; there is no
    configuration that forbids a `Handling` override.
-8. **No edition lifecycle.** Editions are angzarr's, created by its
+7. **No edition lifecycle.** Editions are angzarr's, created by its
    system layer; angzarr-embedded creates none. A command to an edition stream
    never forked is refused by the store at the write
    (`EDITION_NOT_FORKED`), with nothing written.
-9. **`recorded_at` is sampled by the application** once per call, then
+8. **`recorded_at` is sampled by the application** once per call, then
    raised per stream; same guarantee as angzarr's stamp at persist.
-10. **A stream can be purged** where its store opts in
+9. **A stream can be purged** where its store opts in
     ([the store port](#the-store-port)). angzarr's events are
     permanent and its deduplication forever; in angzarr-embedded deduplication lasts
     as long as the stream, and a redelivery after a purge is decided again.
@@ -1168,8 +1174,8 @@ no actor), and reactor re-runs deduplicate in both, with no switch.
 - Events, commands and facts are prost messages with `prost::Name` under
   versioned packages (`hatpick.list.v1`, `hatpick.draw_system.v1`), one
   message per kind; each domain's enums implement `Payload` with a
-  `Decoder`. Each domain registers an `Upcaster` (empty to start) and a
-  `Rulebook::new("v1", ())` in one `Registry`.
+  `Decoder`. Each domain registers an `Upcaster` (empty to start) in one
+  `Registry`.
 - Each domain gains `type Fact` (`Infallible` today) and `ingest`.
 - **`Stamp` goes, and with it every actor.** Who did what is written by the
   server to its security log, keyed by the command id; events record no
@@ -1228,7 +1234,8 @@ no actor), and reactor re-runs deduplicate in both, with no switch.
 2. **Snapshot validity in the coordinator**, not the typed step. The
    registry holds the state's type URL and the rules version, so the
    domain-blind coordinator can discard early and load from 0 in one read.
-   I recommend keeping it there (divergence 5).
+   I recommend keeping it there, as the spec puts it (types.proto, the
+   Snapshot region: the coordinator decides).
 3. **Dedup for policy commands inside a chain.** Uniform with the origin,
    cheap with the index, and it makes a chain that revisits a stream
    idempotent by construction. I recommend keeping it.
@@ -1309,12 +1316,14 @@ runs it in full); angzarr-embedded tests the kernel over it, not the store.
   a redelivered fact is found by its derived id, a rejection leaves
   nothing, a retry racing its original is never applied twice, **an
   applied STRICT retry is DUPLICATE, never stale**); the coordinator's
-  order (dedup, load, decode) and its window and nonce; snapshots (one
-  under another rules version or state type is discarded, one never hides
+  order (dedup, load, decode) and its window and nonce; the rules version
+  an answer reports (stamped in full, refused when it is not the registered
+  one); snapshots (one under an incompatible rules version or another state
+  type is not offered, one never hides
   part of the window, one at or past the head is not used).
 - **domain.test.rs**: ingest reads a read-only context; a fact is never
-  refused and is stamped at the head; decide reads the rules, stream,
-  instant and ids; a nonce acknowledges only its own delivery.
+  refused and is stamped at the head; decide reads the rules version,
+  stream, instant and ids; a nonce acknowledges only its own delivery.
 - **upcast.test.rs**: upcasting runs the chain in registration order; old
   events replay through the upcaster and are never rewritten; an old
   command is upcast then decided; an upcaster is checked whole.

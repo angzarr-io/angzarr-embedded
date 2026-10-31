@@ -901,8 +901,8 @@ mod upcasting {
     use crate::next::angzarr_router::router::CommandHandler;
     use crate::next::toys::prelude::*;
     use crate::next::toys::{
-        account, account_upcaster, at, command, cover, fees, handlers, payloads, Account,
-        AccountCmd, AccountEvent, Edit,
+        account, account_upcaster, at, command, cover, handlers, payloads, Account, AccountCmd,
+        AccountEvent, Edit,
     };
     use crate::next::{pack, Failure, KernelError, Payload, Registry, Upcaster};
 
@@ -943,14 +943,9 @@ mod upcasting {
     /// A registry whose account is [`Seen`], upcast through `upcaster`.
     fn seen_account(upcaster: Upcaster) -> (Registry, Arc<Mutex<Vec<String>>>) {
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let rules = fees();
-        let (version, current) = rules.current();
-        let table = crate::next::route::table::<Account>(
-            Arc::new(fees()),
-            Arc::new(account::AccountState::default),
-            false,
-        );
-        let inner = handlers::<Account>(*current, version)(table);
+        let table =
+            crate::next::route::table::<Account>(Arc::new(account::AccountState::default), false);
+        let inner = handlers::<Account>()(table);
         let mut registry = Registry::new();
         registry
             .command_handler(
@@ -961,7 +956,7 @@ mod upcasting {
                 },
                 crate::next::toys::descriptor_of::<Account>(
                     crate::next::v1::ComponentKind::Aggregate,
-                    version,
+                    "v2",
                     &[],
                 ),
             )
@@ -1129,14 +1124,9 @@ mod upcasting {
     /// `upcaster` as its sidecar; beside it the ledger.
     fn handled_account(upcaster: Upcaster) -> (Registry, Arc<Mutex<Vec<String>>>) {
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let rules = fees();
-        let (version, current) = rules.current();
-        let table = crate::next::route::table::<Account>(
-            Arc::new(fees()),
-            Arc::new(account::AccountState::default),
-            false,
-        );
-        let inner = handlers::<Account>(*current, version)(table);
+        let table =
+            crate::next::route::table::<Account>(Arc::new(account::AccountState::default), false);
+        let inner = handlers::<Account>()(table);
         let mut registry = Registry::new();
         registry
             .command_handler(
@@ -1147,7 +1137,7 @@ mod upcasting {
                 },
                 crate::next::toys::descriptor_of::<Account>(
                     crate::next::v1::ComponentKind::Aggregate,
-                    version,
+                    "v2",
                     &[],
                 ),
             )
@@ -1155,8 +1145,7 @@ mod upcasting {
         registry.upcast_with("account", upcaster);
         crate::next::toys::register::<crate::next::toys::Ledger>(
             &mut registry,
-            crate::next::Rulebook::new("v1", ()),
-            Upcaster::new("ledger-upcaster", "ledger"),
+            crate::next::Upcaster::new("ledger-upcaster", "ledger"),
         )
         .unwrap();
         (registry, seen)
@@ -1260,7 +1249,7 @@ mod admission {
     use crate::next::angzarr_router::router::CommandHandler;
     use crate::next::toys::prelude::*;
     use crate::next::toys::{
-        at, command, cover, fact, fees, handlers, payloads, Account, AccountCmd, AccountEvent,
+        at, command, cover, fact, handlers, payloads, Account, AccountCmd, AccountEvent,
         AccountFact, Edit,
     };
     use crate::next::v1::DeliveryOutcome;
@@ -1289,14 +1278,11 @@ mod admission {
     }
 
     fn registry() -> Registry {
-        let rules = fees();
-        let (version, current) = rules.current();
         let table = crate::next::route::table::<Account>(
-            Arc::new(fees()),
             Arc::new(crate::next::toys::account::AccountState::default),
             true,
         );
-        let inner = handlers::<Account>(*current, version)(table);
+        let inner = handlers::<Account>()(table);
         let mut registry = Registry::new();
         registry
             .command_handler(
@@ -1304,7 +1290,7 @@ mod admission {
                 AsProcessManager(Box::new(inner)),
                 crate::next::toys::descriptor_of::<Account>(
                     pb::ComponentKind::ProcessManager,
-                    version,
+                    "v2",
                     &["toy.account.cmd.v1.Open"],
                 ),
             )

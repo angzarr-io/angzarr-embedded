@@ -12,8 +12,9 @@
 //! 3. [`deduplicate`]: **load the stream first** (resolve the conflict
 //!    resolution: the book's, the command type's, the domain's, else
 //!    COMMUTATIVE where the state supports it and STRICT otherwise,
-//!    [`Registry::resolve`]; then the newest usable snapshot (under the
-//!    current rules and state type, and below the head) and the events
+//!    [`Registry::resolve`]; then the newest usable snapshot (of the
+//!    registered state type, its rules version compatible with the
+//!    registered one, [`Registry::snapshot_usable`], and below the head) and the events
 //!    after it), **then** look the command id up (the store's
 //!    `find_command`), and [`admit`] the input, the kernel's own
 //!    (decision 14.42): what an input meets before its handler runs (a
@@ -39,7 +40,8 @@
 //!    payload upcast through the domain's port before step 3 decided
 //!    anything by its type, decision 14.39; the nonce) through the router, whose handler decides or records; the
 //!    kernel stamps every event it answers with the input's
-//!    [`Identified::meta`]. The router catches a panicking handler, a bug.
+//!    [`Identified::meta`] and the rules version the answer reports, which
+//!    must be the registered one. The router catches a panicking handler, a bug.
 
 use angzarr_proto::v1::angzarr_dead_letter::Payload;
 use angzarr_proto::v1::{
@@ -409,8 +411,11 @@ pub(crate) fn load(novel: Novel, nonces: &mut u64) -> Result<Contextual, KernelE
 /// Step 5: `command` through its domain's router, against its stream's
 /// history: the events it answers, stamped at the instant the input was
 /// accepted, `recorded_at = max(sampled now, the stream's last)` (the
-/// `ContextualCommand.recorded_at` its handler read), with the domain's
-/// rules version, from the head on. The router catches a handler's panic,
+/// `ContextualCommand.recorded_at` its handler read), with the rules
+/// version the answer reports, in full, from the head on. An answer
+/// reporting another version than the registered one is a handler bug
+/// (command_handler.proto, C-0558): [`KernelError::RulesVersionMismatch`],
+/// nothing kept, dead-lettered. The router catches a handler's panic,
 /// a bug (ROUTER_REASON_UNHANDLED_HANDLER_ERROR, cause ROUTER_REASON_HANDLER_PANICKED). A bug
 /// ([`route::is_handler_fault`]) fails it as [`KernelError::Router`], and
 /// `dead_letters` gets a line of its code and args.
@@ -484,9 +489,24 @@ pub(crate) async fn decide(
             }
         }
     })?;
-    let rules_version = registry
-        .rules_version(domain)
-        .unwrap_or(response.rules_version);
+    // Read after the answer: a child described again is registered by its
+    // new descriptor before it gets work, so its answer meets its version.
+    let registered = registry.rules_version(domain).unwrap_or_default();
+    if response.rules_version != registered {
+        let mismatch = KernelError::RulesVersionMismatch {
+            stream: identified.cover().clone(),
+            registered,
+            reported: response.rules_version,
+        };
+        dead_letter::write(
+            dead_letters,
+            Payload::RejectedCommand(identified.to_book()),
+            Component::domain(registry, domain),
+            Cause::Kernel(&mismatch),
+        );
+        return Err(Failure::Kernel(mismatch));
+    }
+    let rules_version = response.rules_version;
     let meta = identified.meta(recorded_at, &rules_version);
     let events = response.events.unwrap_or_default();
     let pages: Vec<EventPage> = (command.head..)
@@ -554,7 +574,7 @@ pub(crate) struct Decided {
     /// The events, from the head on.
     pub(crate) pages: Vec<EventPage>,
     /// The state the router returned with them, as the snapshot at the last
-    /// event under the rules they were stamped with (decision 14.40);
+    /// event under the rules version they were stamped with (decision 14.40);
     /// `None` with no events, or for a state with no snapshot form.
     pub(crate) snapshot: Option<Snapshot>,
 }

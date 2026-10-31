@@ -89,7 +89,6 @@ mod store;
 mod stream;
 mod target;
 mod upcast;
-mod version;
 mod wire;
 
 // The toy domains the kernel's tests run on.
@@ -153,7 +152,6 @@ pub use store::{
 pub use stream::{Envelope, Executed, Stream};
 pub use target::{Coordinated, CoordinatorPort, Target};
 pub use upcast::{UpcastFn, UpcastPort, Upcaster};
-pub use version::Rulebook;
 pub use wire::WireError;
 
 /// angzarr's id helpers: `Display`/`FromStr` for [`v1::Uuid`] (text only at
@@ -246,6 +244,11 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn angzarr_embedded_diagnostic::D
             expected: 2,
             actual: 4,
         },
+        KernelError::RulesVersionMismatch {
+            stream: stream(),
+            registered: "1.4.2+build.7".to_string(),
+            reported: "1.5.0+build.9".to_string(),
+        },
         KernelError::Overlap {
             stream: stream(),
             expected: 2,
@@ -305,10 +308,6 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn angzarr_embedded_diagnostic::D
         ReplayError::WrongDomain {
             found: "ledger".to_string(),
             expected: "account",
-        },
-        ReplayError::UnknownRules {
-            sequence: 4,
-            version: "v0".to_string(),
         },
     ];
     // The store's errors are angzarr-ports': forwarded under their own

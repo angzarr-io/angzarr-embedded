@@ -393,11 +393,11 @@ impl Domain for Counter {
     type Fact = Infallible;
     type Event = CounterEvent;
     type Rejection = Rejection<Refused>;
-    type Rules = ();
+    const RULES_VERSION: &'static str = "v1";
 
     const NAME: &'static str = "counter";
 
-    fn apply(state: &mut Self, event: &CounterEvent, (): &()) {
+    fn apply(state: &mut Self, event: &CounterEvent) {
         if let CounterEvent::Bumped(bumped) = event {
             state.total += bumped.by;
         }

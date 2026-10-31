@@ -8,8 +8,8 @@ use crate::next::{
 };
 
 use crate::next::toys::{
-    account, account_upcaster, at, command, command_id, cover, fees, handle, instant, opened,
-    payloads, registry, registry_with_upcasters, Account, AccountEvent, Edit,
+    account, account_upcaster, at, command, command_id, cover, handle, instant, opened, payloads,
+    registry, registry_with_upcasters, Account, AccountEvent, Edit,
 };
 
 fn page(sequence: u64, payload: crate::next::Any) -> EventPage {
@@ -149,12 +149,8 @@ fn an_upcaster_is_checked_whole() {
         let mut registry = Registry::new();
         registry
             .register::<Account>(
-                fees(),
                 upcaster,
-                crate::next::toys::handlers::<crate::next::toys::Account>(
-                    crate::next::toys::Fees { withdrawal: 1 },
-                    "v2",
-                ),
+                crate::next::toys::handlers::<crate::next::toys::Account>(),
             )
             .unwrap();
         registry
@@ -198,12 +194,8 @@ fn an_upcaster_is_checked_for_order_and_untyped_rules_are_not_followed() {
         let mut registry = Registry::new();
         registry
             .register::<Account>(
-                fees(),
                 upcaster,
-                crate::next::toys::handlers::<crate::next::toys::Account>(
-                    crate::next::toys::Fees { withdrawal: 1 },
-                    "v2",
-                ),
+                crate::next::toys::handlers::<crate::next::toys::Account>(),
             )
             .unwrap();
         registry
@@ -283,12 +275,8 @@ fn an_upcast_rule_reports_its_own_failure_and_bytes_it_cannot_read() {
         let mut registry = Registry::new();
         registry
             .register::<Account>(
-                fees(),
                 refusing,
-                crate::next::toys::handlers::<crate::next::toys::Account>(
-                    crate::next::toys::Fees { withdrawal: 1 },
-                    "v2",
-                ),
+                crate::next::toys::handlers::<crate::next::toys::Account>(),
             )
             .unwrap();
         registry
@@ -335,12 +323,8 @@ fn an_upcaster_names_itself_and_each_problem_once() {
         let mut registry = Registry::new();
         registry
             .register::<Account>(
-                fees(),
                 upcaster,
-                crate::next::toys::handlers::<crate::next::toys::Account>(
-                    crate::next::toys::Fees { withdrawal: 1 },
-                    "v2",
-                ),
+                crate::next::toys::handlers::<crate::next::toys::Account>(),
             )
             .unwrap();
         registry

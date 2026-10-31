@@ -434,10 +434,11 @@
 //!     type Fact = __wallet_markup::Fact;
 //!     type Event = __wallet_markup::Event;
 //!     type Rejection = markup::Rejection<Refused>; // Refused inferred
-//!     type Rules = ();
 //!     const NAME: &'static str = "wallet";
+//!     // The crate's build version, as angzarr-build's descriptor has it.
+//!     const RULES_VERSION: &'static str = env!("CARGO_PKG_VERSION");
 //!
-//!     fn apply(state: &mut Self, event: &Event, (): &()) {
+//!     fn apply(state: &mut Self, event: &Event) {
 //!         match event {
 //!             Event::Deposited(event) => state.deposited(event.clone()),
 //!             ..
@@ -502,7 +503,7 @@
 //! signature is checked against it. Checking the marker against the
 //! message's declared kind in the proto is an open question.
 //!
-//! **Not on angzarr-embedded.** `Rules` is `()`. [`rejected`] and [`state_factory`],
+//! **Not on angzarr-embedded.** [`rejected`] and [`state_factory`],
 //! angzarr-macros' rejection handlers and state factories, are a
 //! `compile_error!` here: a refusal reaches the policy's source as a fact,
 //! handled in `#[on_refused]`, and the instance is built by `Default` or
@@ -3872,11 +3873,11 @@ fn domain(attr: Tokens, item: Tokens, kind: Kind) -> syn::Result<Tokens> {
             type Fact = #fact_set;
             type Event = #event_set;
             type Rejection = #rejection_ty;
-            type Rules = ();
 
             const NAME: &'static str = #domain;
+            const RULES_VERSION: &'static str = ::core::env!("CARGO_PKG_VERSION");
 
-            fn apply(state: &mut Self, event: &#event_set, _rules: &()) {
+            fn apply(state: &mut Self, event: &#event_set) {
                 #apply_body
             }
         }

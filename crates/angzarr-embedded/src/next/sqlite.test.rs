@@ -22,8 +22,8 @@ use crate::next::v1::{
 };
 use crate::next::{
     pack, Any, Domain, EventStore, Failure, Handled, Kernel, KernelError, MemoryDeadLetters,
-    Payload, PayloadError, PositionKey, PositionStore, Recovery, Registry, Rejected, Rulebook,
-    Sampled, SnapshotStore, State, StoreError, Stream, StreamRef, Timestamp, Upcaster,
+    Payload, PayloadError, PositionKey, PositionStore, Recovery, Registry, Rejected, Sampled,
+    SnapshotStore, State, StoreError, Stream, StreamRef, Timestamp, Upcaster,
 };
 
 /// A message in `tally.v1`.
@@ -132,10 +132,10 @@ impl Domain for Tally {
     type Fact = std::convert::Infallible;
     type Event = Added;
     type Rejection = Never;
-    type Rules = ();
+    const RULES_VERSION: &'static str = "v1";
     const NAME: &'static str = "tally";
 
-    fn apply(state: &mut Count, event: &Added, _: &()) {
+    fn apply(state: &mut Count, event: &Added) {
         state.n += event.n;
     }
 }
@@ -161,11 +161,7 @@ fn tally_handlers(
 fn registry() -> Registry {
     let mut registry = Registry::new();
     registry
-        .register::<Tally>(
-            Rulebook::new("v1", ()),
-            Upcaster::new("tally-up", "tally"),
-            tally_handlers,
-        )
+        .register::<Tally>(Upcaster::new("tally-up", "tally"), tally_handlers)
         .unwrap();
     registry
 }

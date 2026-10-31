@@ -36,7 +36,8 @@ fn page(sequence: u64, payload: crate::next::Any) -> EventPage {
     }
 }
 
-/// An open account that deposited 100 then withdrew 10 (under v1, no fee).
+/// An open account that deposited 100 then withdrew 10 (and its fee of 1),
+/// the withdrawal decided by another build, `v1`.
 fn log() -> Vec<EventPage> {
     let mut withdrew = page(2, pack(&account::Withdrew { cents: 10 }));
     withdrew.meta.as_mut().unwrap().rules_version = "v1".to_string();
@@ -52,9 +53,9 @@ fn replay(pages: &[EventPage]) -> Result<Stream<Account>, KernelError> {
 }
 
 #[test]
-fn replay_folds_each_event_with_the_rules_it_names() {
+fn replay_folds_each_event_and_keeps_the_version_that_decided_it() {
     let stream = replay(&log()).unwrap();
-    assert_eq!(stream.state().cents, 90, "v1 charged no fee");
+    assert_eq!(stream.state().cents, 89);
     assert_eq!(stream.len(), 3);
     assert_eq!(stream.last_recorded_at(), Some(instant(2)));
     assert_eq!(stream.events()[2].rules_version(), "v1");
@@ -69,7 +70,7 @@ fn replay_folds_each_event_with_the_rules_it_names() {
     assert_eq!(stream.find_command(&command_id(1)).len(), 1);
     assert!(stream.find_command(&command_id(9)).is_empty());
     let (c, events, state) = stream.into_parts();
-    assert_eq!((c, events.len(), state.cents), (cover("account", 1), 3, 90));
+    assert_eq!((c, events.len(), state.cents), (cover("account", 1), 3, 89));
 }
 
 #[test]
@@ -97,12 +98,9 @@ fn replay_refuses_a_log_that_does_not_hold_together() {
 
     let mut pages = log();
     pages[2].meta.as_mut().unwrap().rules_version = "v0".to_string();
-    assert_eq!(
-        replay(&pages).err(),
-        Some(KernelError::Replay(ReplayError::UnknownRules {
-            sequence: 2,
-            version: "v0".to_string()
-        }))
+    assert!(
+        replay(&pages).is_ok(),
+        "an event another build decided folds as any: its version is never read to fold it"
     );
 
     for (field, edit) in [
@@ -168,7 +166,7 @@ fn a_stream_resumes_from_a_snapshot_and_dispatches_only_after_it() {
     let mut seen = Vec::new();
     let mut handler = |c: &Committed<'_, Account>| seen.push((c.sequence(), c.state.cents));
     resumed.dispatch(2, &registry, &mut [&mut handler]).unwrap();
-    assert_eq!(seen, [(2, 90)], "the snapshot's state, then the event");
+    assert_eq!(seen, [(2, 89)], "the snapshot's state, then the event");
     assert_eq!(
         resumed.dispatch(1, &registry, &mut []),
         Err(KernelError::BeforeSnapshot {
@@ -229,7 +227,7 @@ fn dispatch_hands_out_the_state_just_after_each_event_from_a_sequence() {
             .dispatch(from, &registry, &mut [&mut handler])
             .unwrap();
     }
-    assert_eq!(seen, [(1, 100), (2, 90)], "nothing at or past the end");
+    assert_eq!(seen, [(1, 100), (2, 89)], "nothing at or past the end");
 }
 
 #[test]

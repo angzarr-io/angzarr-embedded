@@ -144,6 +144,19 @@ pub enum KernelError {
         attempts: u32,
         cap: u32,
     },
+    /// The handler of `stream`'s domain answered reporting rules version
+    /// `reported`, not `registered`, the version its domain is registered
+    /// at (`CommandHandlerResponse.rules_version`, C-0558): a handler bug,
+    /// refused with nothing persisted, and dead-lettered as every handler
+    /// bug is. angzarr's INTERNAL, under the spec's key for a component
+    /// whose answers report another version than its descriptor,
+    /// `HOST_REASON_DESCRIPTOR_RULES_VERSION_MISMATCH` (component,
+    /// described, reported).
+    RulesVersionMismatch {
+        stream: Cover,
+        registered: String,
+        reported: String,
+    },
     /// A command's or fact's payload type that the domain does not decode,
     /// after the upcaster: refused naming its type URL (angzarr's
     /// INVALID_ARGUMENT). Found at step 5, after deduplication.
@@ -248,8 +261,6 @@ pub enum ReplayError {
         found: String,
         expected: &'static str,
     },
-    /// Event `sequence` was decided under rules the rulebook does not hold.
-    UnknownRules { sequence: u64, version: String },
 }
 
 /// A payload that is not one of the types a domain decodes.
@@ -441,6 +452,20 @@ impl KernelError {
                     ],
                 ));
             }
+            KernelError::RulesVersionMismatch {
+                stream,
+                registered,
+                reported,
+            } => {
+                return Some(super::route::internal(
+                    angzarr_proto::v1::HostReason::DescriptorRulesVersionMismatch.as_str_name(),
+                    [
+                        ("component".to_string(), stream.domain.clone()),
+                        ("described".to_string(), registered.clone()),
+                        ("reported".to_string(), reported.clone()),
+                    ],
+                ));
+            }
             KernelError::ChainTooDeep { limit } => {
                 return Some(super::route::internal(
                     CoordinatorReason::ChainTooDeep.as_str_name(),
@@ -519,6 +544,7 @@ impl KernelError {
             } => Recovery::Retry,
             KernelError::Upcast { .. }
             | KernelError::RetryCapExhausted { .. }
+            | KernelError::RulesVersionMismatch { .. }
             | KernelError::WrongDomain { .. }
             | KernelError::ChainTooDeep { .. }
             | KernelError::TooManySteps { .. }
@@ -645,6 +671,9 @@ impl Diagnostic for KernelError {
             }
             KernelError::Unresolved { .. } => "angzarr-embedded-next-unresolved",
             KernelError::RetryCapExhausted { .. } => "angzarr-embedded-next-retry-cap-exhausted",
+            KernelError::RulesVersionMismatch { .. } => {
+                "angzarr-embedded-next-rules-version-mismatch"
+            }
             KernelError::Overlap { .. } => "angzarr-embedded-next-overlap",
             KernelError::UnknownType { .. } => "angzarr-embedded-next-unknown-type",
             KernelError::InvalidPayload { .. } => "angzarr-embedded-next-invalid-payload",
@@ -709,6 +738,15 @@ impl Diagnostic for KernelError {
                 ("stream", stream(s)),
                 ("attempts", (*attempts).into()),
                 ("cap", (*cap).into()),
+            ],
+            KernelError::RulesVersionMismatch {
+                stream: s,
+                registered,
+                reported,
+            } => vec![
+                ("stream", stream(s)),
+                ("registered", registered.as_str().into()),
+                ("reported", reported.as_str().into()),
             ],
             KernelError::UnknownType {
                 stream: s,
@@ -853,7 +891,6 @@ impl Diagnostic for ReplayError {
             }
             ReplayError::IncompleteMeta { .. } => "angzarr-embedded-next-replay-incomplete-meta",
             ReplayError::WrongDomain { .. } => "angzarr-embedded-next-replay-wrong-domain",
-            ReplayError::UnknownRules { .. } => "angzarr-embedded-next-replay-unknown-rules",
         }
     }
 
@@ -869,10 +906,6 @@ impl Diagnostic for ReplayError {
             ReplayError::WrongDomain { found, expected } => vec![
                 ("found", found.as_str().into()),
                 ("expected", (*expected).into()),
-            ],
-            ReplayError::UnknownRules { sequence, version } => vec![
-                ("sequence", (*sequence).into()),
-                ("version", version.as_str().into()),
             ],
         }
     }
