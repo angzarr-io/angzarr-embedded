@@ -204,3 +204,110 @@ fn a_retryable_bug_and_an_immediate_return_go_out_under_their_status() {
     assert_eq!(out.extras.get("seat").map(String::as_str), Some("3"));
     assert_eq!(out.extras.get("cause"), None);
 }
+
+/// What this thread holds allocated, net: every allocation counted against
+/// the thread that made it, every free against the thread that freed it.
+/// The test binary's allocator: the system's, counting.
+mod counted {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+
+    thread_local! {
+        // Const-initialized and without a destructor: reading it never
+        // allocates, so the allocator may.
+        static LIVE: Cell<isize> = const { Cell::new(0) };
+    }
+
+    pub struct Counting;
+
+    fn count(delta: isize) {
+        let _ = LIVE.try_with(|live| live.set(live.get() + delta));
+    }
+
+    // SAFETY: every call is the system allocator's, with its arguments
+    // unchanged; the count beside it touches no allocation.
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            count(layout.size() as isize);
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            count(-(layout.size() as isize));
+            unsafe { System.dealloc(ptr, layout) }
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            count(layout.size() as isize);
+            unsafe { System.alloc_zeroed(layout) }
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            count(new_size as isize - layout.size() as isize);
+            unsafe { System.realloc(ptr, layout, new_size) }
+        }
+    }
+
+    #[global_allocator]
+    static COUNTING: Counting = Counting;
+
+    /// The bytes this thread holds allocated, net, so far.
+    pub fn live() -> isize {
+        LIVE.with(Cell::get)
+    }
+}
+
+/// A3: the codes and arg names a handler answers are held while its error
+/// is, and freed with it. A child answers arbitrary strings, so a stream of
+/// distinct codes must not grow what the process holds: each error, its
+/// refusal, its diagnostic and its display, made and dropped, leaves
+/// nothing behind.
+#[test]
+fn a_stream_of_distinct_child_codes_leaks_nothing() {
+    use angzarr_embedded_diagnostic::Diagnostic;
+    use angzarr_router::error::{BusinessStatus, CodedError};
+
+    let answered = |n: usize| {
+        let refusal = CodedError::rejection(
+            BusinessStatus::FailedPrecondition,
+            &format!("CHILD_REFUSED_{n}"),
+            [(format!("seat_{n}"), n.to_string())],
+        );
+        let rejected = super::Rejected::of(&refusal);
+        let shown = (
+            rejected.to_string(),
+            rejected.code().len(),
+            rejected.args().len(),
+        );
+        let bug = super::internal(
+            &format!("CHILD_BROKE_{n}"),
+            [(format!("table_{n}"), n.to_string())],
+        );
+        let routed = crate::next::KernelError::Router(bug.clone());
+        let routed = (routed.to_string(), routed.code().len(), routed.args().len());
+        let failure = super::policy_failed(&angzarr_embedded_diagnostic::Report::new(
+            "toy-policy-broke",
+        ));
+        drop((shown, routed, failure));
+        let failed = super::internal(
+            super::POLICY_FAILED,
+            [
+                ("policy-reason".to_string(), format!("CHILD_POLICY_{n}")),
+                (format!("hand_{n}"), n.to_string()),
+            ],
+        );
+        let reported = super::policy_failure(&failed).map(|r| r.to_string());
+        drop(reported);
+    };
+    // Whatever is built once, on first use, is built before counting.
+    answered(0);
+    let before = counted::live();
+    for n in 1..=2_000 {
+        answered(n);
+    }
+    let held = counted::live() - before;
+    assert!(
+        held < 1_024,
+        "{held} bytes still held after 2000 distinct codes were answered and dropped"
+    );
+}
