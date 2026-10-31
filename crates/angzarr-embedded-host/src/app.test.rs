@@ -1211,3 +1211,128 @@ mod listing {
         );
     }
 }
+
+/// A4: the application resumes, at start, the policy work owed when it
+/// last stopped. The crash is forced, not waited for: a first process
+/// commits `left`'s event and stops before its policy step runs (its
+/// registry has no policy); the next starts with the policy registered and,
+/// before any command, has run the step `left`'s event owes into `right`.
+mod resume {
+    use angzarr_embedded::next::angzarr_router::policy::PolicyDispatch;
+    use angzarr_embedded::next::v1::{command_page, Command, CommandBook, CommandPage};
+    use angzarr_embedded::next::{EventStore, MemoryDeadLetters, StreamRef};
+
+    use super::fixtures::*;
+    use super::*;
+    use crate::config::{ComponentConfig, ComponentKindConfig, Expose};
+
+    fn listed(name: &str, kind: ComponentKindConfig) -> ComponentConfig {
+        ComponentConfig {
+            name: name.to_string(),
+            language: "rust".to_string(),
+            kind,
+            upcasts: None,
+            launch: None,
+            entry: Vec::new(),
+            dir: None,
+            env: Default::default(),
+            expose: Expose::None,
+        }
+    }
+
+    /// `left` as a domain whose every command decides [`MET`].
+    fn left(registry: &mut Registry) {
+        registry
+            .command_handler(
+                "left",
+                Meeting(std::sync::Arc::new(Rendezvous::of(1))),
+                descriptor("left"),
+            )
+            .unwrap();
+    }
+
+    /// `left-right`: every [`MET`] of `left` sends a Meet to `right`'s
+    /// stream of the same root.
+    fn left_right() -> PolicyDispatch {
+        PolicyDispatch::new("left-right", "left", "right").on_event(
+            MET.trim_start_matches('/'),
+            |_, source| {
+                Ok(vec![CommandBook {
+                    cover: Some(angzarr_embedded::next::v1::Cover {
+                        domain: "right".to_string(),
+                        root: source.and_then(|c| c.root.clone()),
+                        edition: None,
+                    }),
+                    page: Some(CommandPage {
+                        body: Some(command_page::Body::Command(Command {
+                            payload: Some(any("/test.meet.v1.Meet")),
+                        })),
+                        ..Default::default()
+                    }),
+                    handling: None,
+                }])
+            },
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn policy_work_owed_at_a_crash_is_resumed_at_start() {
+        let dir = scratch("resume");
+        let db = dir.join("app.db");
+
+        // The first process: `left`'s event committed, its step never run.
+        {
+            let store = SqliteStore::open(&db).await.unwrap();
+            let mut registry = Registry::new();
+            left(&mut registry);
+            let log = MemoryDeadLetters::new();
+            Kernel::new(&registry, &log)
+                .handle_any(
+                    &store,
+                    book("left", 1, 1, "/test.meet.v1.Meet"),
+                    &sampled(1),
+                    &mut (),
+                )
+                .await
+                .expect("left's event committed");
+            let right_cover = cover("right", 1);
+            let right = StreamRef::try_from(&right_cover).unwrap();
+            assert!(
+                store.read(right, 0, None).await.unwrap().pages.is_empty(),
+                "the step is owed"
+            );
+        }
+
+        let mut config = HostConfig {
+            components: vec![
+                listed("left", ComponentKindConfig::Domain),
+                listed("right", ComponentKindConfig::Domain),
+                listed("left-right", ComponentKindConfig::Policy),
+            ],
+            ..HostConfig::default()
+        };
+        config.store.path = db.clone();
+        let app = run(written(&dir, &config), |registry: &mut Registry| {
+            left(registry);
+            registry
+                .command_handler(
+                    "right",
+                    Meeting(std::sync::Arc::new(Rendezvous::of(1))),
+                    descriptor("right"),
+                )
+                .unwrap();
+            registry.policy_dispatch(left_right());
+        })
+        .await
+        .expect("the app runs");
+        let right: Vec<_> = app
+            .events(&cover("right", 1))
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|p| p.payload)
+            .collect();
+        assert_eq!(right, [Some(any(MET))], "resumed before any command");
+        drop(app);
+    }
+}
