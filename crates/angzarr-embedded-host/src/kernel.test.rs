@@ -391,3 +391,70 @@ fn register_is_refused_for_a_domain_registered_already() {
     );
     host.shutdown();
 }
+
+/// C-0563: a child that restarts is described again, and its new
+/// descriptor is what the domain is registered by before the new child
+/// gets any work. The fake reports `pid-<n>`, so every child is a new
+/// build. The restart is forced (the child dies mid-call) and awaited by
+/// the supervisor's count of children published, never polled for: at the
+/// moment the second child is published, the registry already holds its
+/// version, and the next command's events are stamped with it.
+#[test]
+fn a_restarted_child_is_registered_at_its_new_version_before_it_gets_work() {
+    let host = host();
+    let mut registry = Registry::new();
+    host.register(&mut registry).unwrap();
+    let handler = host.handler("player").unwrap();
+    let first = registry
+        .rules_version("player")
+        .map(|v| v.to_string())
+        .expect("registered");
+    let mut generations = handler.generations();
+    let died = block_on(handler.dispatch(&ContextualCommand {
+        command: Some(send("player", 9, any("/test.player.v1.Die"))),
+        ..Default::default()
+    }));
+    assert!(died.is_err(), "the child died mid-call: {died:?}");
+    // The timeout is a safety net for a broken restart, never the way the
+    // test passes.
+    let published = block_on(async {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            generations.wait_for(|n| *n >= 2),
+        )
+        .await
+        .map(|seen| seen.is_ok())
+    });
+    assert_eq!(published, Ok(true), "the child was restarted");
+    let registered = registry
+        .rules_version("player")
+        .map(|v| v.to_string())
+        .expect("registered");
+    assert_ne!(
+        registered, first,
+        "the new child's descriptor is registered before it is published"
+    );
+
+    let store = MemoryStore::new();
+    let log = MemoryDeadLetters::new();
+    let kernel = Kernel::new(&registry, &log);
+    block_on(kernel.handle_any(
+        &store,
+        send("player", 1, any("/test.player.v1.SitDown")),
+        &sampled(1),
+        &mut (),
+    ))
+    .expect("handled");
+    let written = pages(&store, &cover("player"));
+    assert_eq!(
+        written[0].meta.as_ref().map(|m| m.rules_version.as_str()),
+        Some(registered.as_str()),
+        "stamped with the build that decided"
+    );
+    assert_eq!(
+        host.handler("player").unwrap().descriptor().rules_version,
+        registered,
+        "the handler's descriptor is the new child's"
+    );
+    host.shutdown();
+}
