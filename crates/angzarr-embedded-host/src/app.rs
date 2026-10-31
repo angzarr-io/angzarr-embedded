@@ -34,7 +34,7 @@ use angzarr_embedded::{
     EventStore, Failure, Handled, Kernel, KernelError, Malformed, MemoryDeadLetters, OnPolicyBug,
     OnRetryable, Registry, Rejected, Sampled, StoreError, StreamRef, Target,
 };
-use angzarr_router::pb::{CommandResponse, ComponentKind};
+use angzarr_proto::v1::{CommandResponse, ComponentKind};
 use angzarr_store_sqlite::SqliteStore;
 
 use crate::config::{on_policy_bug, on_retryable, Expose, HostConfig, Languages};

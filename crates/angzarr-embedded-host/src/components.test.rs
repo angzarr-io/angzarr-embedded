@@ -28,7 +28,7 @@ use angzarr_embedded::{
     StreamRef, Timestamp,
 };
 use angzarr_ports::memory::MemoryStore;
-use angzarr_router::pb::CommandHandlerResponse;
+use angzarr_proto::v1::CommandHandlerResponse;
 
 use super::{Hooks, Host};
 use crate::config::{ComponentConfig, ComponentKindConfig};

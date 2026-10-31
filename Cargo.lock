@@ -20,7 +20,7 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 [[package]]
 name = "angzarr-diagnostic"
 version = "0.1.0"
-source = "git+https://github.com/angzarr-io/angzarr?rev=a75eb28f8416ca485aea2e28fe7b45924404d3fe#a75eb28f8416ca485aea2e28fe7b45924404d3fe"
+source = "git+https://github.com/angzarr-io/angzarr?rev=d5bb6692bd0fbc6ed8450b1db280578de21a48bc#d5bb6692bd0fbc6ed8450b1db280578de21a48bc"
 
 [[package]]
 name = "angzarr-embedded"
@@ -68,7 +68,6 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tonic",
- "tonic-build",
  "tonic-health",
  "tonic-prost",
  "tonic-types",
@@ -99,7 +98,7 @@ dependencies = [
 [[package]]
 name = "angzarr-ports"
 version = "0.1.0"
-source = "git+https://github.com/angzarr-io/angzarr?rev=a75eb28f8416ca485aea2e28fe7b45924404d3fe#a75eb28f8416ca485aea2e28fe7b45924404d3fe"
+source = "git+https://github.com/angzarr-io/angzarr?rev=d5bb6692bd0fbc6ed8450b1db280578de21a48bc#d5bb6692bd0fbc6ed8450b1db280578de21a48bc"
 dependencies = [
  "angzarr-diagnostic",
  "angzarr-proto",
@@ -110,25 +109,26 @@ dependencies = [
 [[package]]
 name = "angzarr-proto"
 version = "0.1.0"
-source = "git+https://github.com/angzarr-io/angzarr?rev=a75eb28f8416ca485aea2e28fe7b45924404d3fe#a75eb28f8416ca485aea2e28fe7b45924404d3fe"
+source = "git+https://github.com/angzarr-io/angzarr?rev=d5bb6692bd0fbc6ed8450b1db280578de21a48bc#d5bb6692bd0fbc6ed8450b1db280578de21a48bc"
 dependencies = [
  "bytes",
  "prost",
  "prost-build",
  "prost-types",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
  "uuid",
 ]
 
 [[package]]
 name = "angzarr-router"
 version = "0.1.0"
-source = "git+https://github.com/angzarr-io/angzarr-router?rev=6a736aed134fd64b7b0b83dc21641bbc2d6ff91f#6a736aed134fd64b7b0b83dc21641bbc2d6ff91f"
+source = "git+https://github.com/angzarr-io/angzarr-router?rev=c02faddb560323c0eb15150f6285b887fc0f51af#c02faddb560323c0eb15150f6285b887fc0f51af"
 dependencies = [
  "angzarr-ports",
  "angzarr-proto",
- "heck 0.5.0",
  "prost",
- "prost-build",
  "prost-types",
  "tracing",
 ]
@@ -149,7 +149,7 @@ dependencies = [
 [[package]]
 name = "angzarr-yaml"
 version = "0.1.0"
-source = "git+https://github.com/angzarr-io/angzarr?rev=a75eb28f8416ca485aea2e28fe7b45924404d3fe#a75eb28f8416ca485aea2e28fe7b45924404d3fe"
+source = "git+https://github.com/angzarr-io/angzarr?rev=d5bb6692bd0fbc6ed8450b1db280578de21a48bc#d5bb6692bd0fbc6ed8450b1db280578de21a48bc"
 dependencies = [
  "angzarr-diagnostic",
  "serde",
@@ -644,6 +644,17 @@ dependencies = [
  "cfg-if",
  "libc",
  "wasi",
+]
+
+[[package]]
+name = "getrandom"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "r-efi",
 ]
 
 [[package]]
@@ -1381,6 +1392,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "r-efi"
+version = "6.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
+
+[[package]]
 name = "rand"
 version = "0.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1407,7 +1424,7 @@ version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
 dependencies = [
- "getrandom",
+ "getrandom 0.2.17",
 ]
 
 [[package]]
@@ -1955,6 +1972,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -2114,6 +2132,22 @@ dependencies = [
  "bytes",
  "prost",
  "tonic",
+]
+
+[[package]]
+name = "tonic-prost-build"
+version = "0.14.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4a05d8957fac6b3542999796cb4449d45da790751962f974a457e5e00c43d78c"
+dependencies = [
+ "prettyplease",
+ "proc-macro2",
+ "prost-build",
+ "prost-types",
+ "quote",
+ "syn 2.0.119",
+ "tempfile",
+ "tonic-build",
 ]
 
 [[package]]

@@ -587,12 +587,12 @@ mod judged {
     use std::sync::Arc;
 
     use crate::angzarr_router::error::CodedError;
-    use crate::angzarr_router::pb;
     use crate::angzarr_router::router::CommandHandler;
     use crate::toys::prelude::*;
     use crate::toys::{at, command, cover, handlers, set, Edit, Shelf, ShelfState};
     use crate::v1::ConflictResolution;
     use crate::{Failure, Handled, KernelError, Registry};
+    use angzarr_proto::v1 as pb;
 
     use super::shelf_a_b;
 
@@ -658,7 +658,7 @@ mod judged {
                 .id(3)
                 .expecting(1, ConflictResolution::AggregateHandles)
         };
-        let forged = rewritten(|report| report.resolved_nonce = b"forged".to_vec());
+        let forged = rewritten(|report| report.resolved_nonce = b"forged".to_vec().into());
         let failure = handled(&store, &forged, book()).err().unwrap();
         assert_eq!(
             failure,

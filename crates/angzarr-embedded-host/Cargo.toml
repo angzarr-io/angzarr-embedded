@@ -6,7 +6,7 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 # uuid 1.28 (through angzarr-proto) needs 1.89; tonic 0.14.8 and its
-# companions (tonic-prost, tonic-types, tonic-health, tonic-build) need 1.88.
+# companions (tonic-prost, tonic-types, tonic-health) need 1.88.
 rust-version = "1.89"
 
 # A remote component is a child process serving angzarr's
@@ -20,7 +20,9 @@ rust-version = "1.89"
 # serves, from tonic-health (its messages and client, at tonic's version).
 # The handlers it builds are angzarr-router's (CommandHandler, PolicyComponent, ProjectorHandler),
 # on the router's types, so angzarr-router and angzarr-proto are pinned at
-# the revs the router itself names: ONE angzarr-proto in the graph.
+# the revs the router itself names: ONE angzarr-proto in the graph. The
+# gRPC client and server stubs are angzarr-proto's (its `grpc` feature,
+# generated from the spec's service protos), not this crate's.
 [dependencies]
 # The kernel's Registry, which Host::register fills with the remote
 # domains.
@@ -28,11 +30,11 @@ angzarr-embedded = { path = "../angzarr-embedded" }
 # The config's schema and its versioned loader: angzarr.yaml, which the CLI
 # writes, read strictly.
 angzarr-embedded-host-config = { path = "../angzarr-embedded-host-config" }
-angzarr-diagnostic = { git = "https://github.com/angzarr-io/angzarr", rev = "a75eb28f8416ca485aea2e28fe7b45924404d3fe" }
+angzarr-diagnostic = { git = "https://github.com/angzarr-io/angzarr", rev = "d5bb6692bd0fbc6ed8450b1db280578de21a48bc" }
 # The store `run` opens: SQLite, at the config's [store] path or in memory.
 angzarr-store-sqlite = { path = "../angzarr-store-sqlite" }
-angzarr-proto = { git = "https://github.com/angzarr-io/angzarr", rev = "a75eb28f8416ca485aea2e28fe7b45924404d3fe" }
-angzarr-router = { git = "https://github.com/angzarr-io/angzarr-router", rev = "6a736aed134fd64b7b0b83dc21641bbc2d6ff91f" }
+angzarr-proto = { git = "https://github.com/angzarr-io/angzarr", rev = "d5bb6692bd0fbc6ed8450b1db280578de21a48bc", features = ["grpc"] }
+angzarr-router = { git = "https://github.com/angzarr-io/angzarr-router", rev = "c02faddb560323c0eb15150f6285b887fc0f51af" }
 hyper-util = { version = "0.1", features = ["tokio"] }
 # SIGTERM for a child that outlives its stdin at shutdown: tokio's Child
 # sends only SIGKILL. In the graph already, through tokio.
@@ -52,16 +54,9 @@ tower = { version = "0.5", default-features = false, features = ["util"] }
 # The kernel test runs on angzarr-ports' MemoryStore (the kernel's own
 # store contract, at its rev).
 [dev-dependencies]
-angzarr-ports = { git = "https://github.com/angzarr-io/angzarr", rev = "a75eb28f8416ca485aea2e28fe7b45924404d3fe", features = ["memory"] }
+angzarr-ports = { git = "https://github.com/angzarr-io/angzarr", rev = "d5bb6692bd0fbc6ed8450b1db280578de21a48bc", features = ["memory"] }
 tonic = { version = "0.14", default-features = false, features = ["router"] }
 tokio-stream = { version = "0.1", features = ["net"] }
-
-# The gRPC stubs are written from Rust types with tonic-build's manual
-# builder, not from .proto files: angzarr-proto compiles no services and
-# ships no service protos, and the stubs' messages are angzarr-router's
-# (its pb, which is angzarr-proto's types plus CommandHandlerResponse).
-[build-dependencies]
-tonic-build = { version = "0.14", default-features = false, features = ["transport"] }
 
 [lints]
 workspace = true

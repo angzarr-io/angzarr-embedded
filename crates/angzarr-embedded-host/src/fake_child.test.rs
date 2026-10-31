@@ -60,7 +60,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use crate::rpc::google_rpc::{ErrorInfo, Status as RpcStatus, ERROR_INFO_TYPE_URL};
-use angzarr_router::pb;
+use angzarr_proto::v1 as pb;
 use prost::Message;
 use prost_types::Any;
 use tokio::net::UnixListener;
@@ -69,14 +69,14 @@ use tonic::{Request, Response, Status};
 
 use crate::config::{ComponentConfig, HostConfig, Supervision};
 use crate::handshake::SOCKET_ENV;
-use crate::rpc::command_handler::command_handler_service_server::{
+use angzarr_proto::v1::command_handler_service_server::{
     CommandHandlerService, CommandHandlerServiceServer,
 };
-use crate::rpc::component::component_service_server::{ComponentService, ComponentServiceServer};
-use crate::rpc::policy::policy_service_server::{PolicyService, PolicyServiceServer};
-use crate::rpc::projector::projector_service_server::{ProjectorService, ProjectorServiceServer};
-use crate::rpc::upcaster::upcaster_service_server::{UpcasterService, UpcasterServiceServer};
-use crate::rpc::DescribeRequest;
+use angzarr_proto::v1::component_service_server::{ComponentService, ComponentServiceServer};
+use angzarr_proto::v1::policy_service_server::{PolicyService, PolicyServiceServer};
+use angzarr_proto::v1::projector_service_server::{ProjectorService, ProjectorServiceServer};
+use angzarr_proto::v1::upcaster_service_server::{UpcasterService, UpcasterServiceServer};
+use angzarr_proto::v1::DescribeRequest;
 use tonic_health::pb::health_check_response::ServingStatus;
 use tonic_health::pb::health_server::{Health, HealthServer};
 use tonic_health::pb::{HealthCheckRequest, HealthCheckResponse};

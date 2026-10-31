@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use angzarr_proto::v1 as pb;
 use angzarr_router::error::GrpcCode;
-use angzarr_router::pb;
 use angzarr_router::router::CommandHandler;
 use prost_types::Any;
 

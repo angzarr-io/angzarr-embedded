@@ -1,65 +1,14 @@
-//! The gRPC stubs for the services a remote component serves, written by
-//! build.rs on angzarr-router's types, and the Unix-socket channel they run
-//! on.
+//! The Unix-socket channel a remote component's gRPC stubs run on. The
+//! stubs themselves (`CommandHandlerService`, `ComponentService`,
+//! `PolicyService`, `ProjectorService`, `UpcasterService`) are
+//! angzarr-proto's, generated from the spec's service protos (its `grpc`
+//! feature): `angzarr_proto::v1::<service>_client` and `_server`.
 
 use std::path::PathBuf;
 
 use hyper_util::rt::TokioIo;
 use tokio::net::UnixStream;
 use tonic::transport::{Channel, Endpoint, Uri};
-
-/// `io.angzarr.v1.DescribeRequest`, an empty message: `()`, which prost
-/// encodes as one.
-pub type DescribeRequest = ();
-
-/// `io.angzarr.v1.CommandHandlerService` (command_handler.proto): `Handle`,
-/// a contextual command in, the events it emits out.
-#[allow(clippy::all, missing_docs)]
-pub mod command_handler {
-    include!(concat!(
-        env!("OUT_DIR"),
-        "/io.angzarr.v1.CommandHandlerService.rs"
-    ));
-}
-
-/// `io.angzarr.v1.PolicyService` (policy.proto): `Handle`, a source
-/// event in, the commands it answers out; `OnRefused`, a refusal of one of
-/// them in, the refusal fact for its source out.
-#[allow(clippy::all, missing_docs)]
-pub mod policy {
-    include!(concat!(env!("OUT_DIR"), "/io.angzarr.v1.PolicyService.rs"));
-}
-
-/// `io.angzarr.v1.ProjectorService` (projector.proto): `Handle`, events
-/// in, a projection out.
-#[allow(clippy::all, missing_docs)]
-pub mod projector {
-    include!(concat!(
-        env!("OUT_DIR"),
-        "/io.angzarr.v1.ProjectorService.rs"
-    ));
-}
-
-/// `io.angzarr.v1.UpcasterService` (upcaster.proto): `Upcast`, a
-/// domain's pages in, upcast; what an upcaster sidecar serves (decision
-/// 14.39).
-#[allow(clippy::all, missing_docs)]
-pub mod upcaster {
-    include!(concat!(
-        env!("OUT_DIR"),
-        "/io.angzarr.v1.UpcasterService.rs"
-    ));
-}
-
-/// `io.angzarr.v1.ComponentService` (component.proto): `Describe`, the
-/// component's descriptor.
-#[allow(clippy::all, missing_docs)]
-pub mod component {
-    include!(concat!(
-        env!("OUT_DIR"),
-        "/io.angzarr.v1.ComponentService.rs"
-    ));
-}
 
 /// A channel to the server listening on the Unix socket at `socket`. The
 /// endpoint's URI is a placeholder tonic requires; every connection is the

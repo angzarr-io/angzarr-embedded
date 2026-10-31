@@ -50,7 +50,7 @@ use angzarr_proto::v1::{
 use angzarr_router::error::{extras, BusinessStatus, CodedError, RouterReason};
 
 use super::reasons::{args, CoordinatorReason};
-use angzarr_router::pb::ContextualCommand;
+use angzarr_proto::v1::ContextualCommand;
 use prost_types::{Any, Timestamp};
 
 use super::check::{Identified, Malformed, Sampled};
@@ -540,8 +540,8 @@ pub(crate) async fn decide(
 /// `COORDINATOR_REASON_CONFLICT_OVERLAP` naming both unit sets.
 fn judged(
     delivered: &ContextualCommand,
-    response: angzarr_router::pb::CommandHandlerResponse,
-) -> Result<angzarr_router::pb::CommandHandlerResponse, CodedError> {
+    response: angzarr_proto::v1::CommandHandlerResponse,
+) -> Result<angzarr_proto::v1::CommandHandlerResponse, CodedError> {
     use super::conflict::{judge, Judgement};
     let resolution = delivered
         .command

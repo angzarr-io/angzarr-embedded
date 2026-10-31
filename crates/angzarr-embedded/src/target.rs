@@ -25,9 +25,9 @@ use std::future::Future;
 use std::pin::Pin;
 
 use angzarr_proto::v1::angzarr_dead_letter::Payload;
+use angzarr_proto::v1::CommandResponse;
 use angzarr_proto::v1::{CommandBook, ComponentKind, DeliveryOutcome, EventBook};
 use angzarr_router::error::CodedError;
-use angzarr_router::pb::CommandResponse;
 use angzarr_router::router::DynCommandHandler;
 
 use super::check::Identified;

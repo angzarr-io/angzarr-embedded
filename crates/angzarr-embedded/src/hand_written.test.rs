@@ -23,12 +23,12 @@ use std::convert::Infallible;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
-use ::angzarr_embedded::angzarr_router::domain::DomainDispatch;
-use ::angzarr_embedded::angzarr_router::error::CodedError;
-use ::angzarr_embedded::angzarr_router::pb::{
+use ::angzarr_embedded::angzarr_proto::v1::{
     CommandHandlerResponse, CommandResponse, ComponentDescriptor, ComponentKind,
     ConflictResolution, ContextualCommand, StateOptions,
 };
+use ::angzarr_embedded::angzarr_router::domain::DomainDispatch;
+use ::angzarr_embedded::angzarr_router::error::CodedError;
 use ::angzarr_embedded::angzarr_router::router::CommandHandler;
 use ::angzarr_embedded::markup::{
     self, CommandTarget, Commands, Context, Decides, DomainMessage, EventSource, Ingests,

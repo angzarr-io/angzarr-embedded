@@ -43,7 +43,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
 use angzarr_embedded::{Misconfigured, Registry};
-use angzarr_router::pb;
+use angzarr_proto::v1 as pb;
 use tokio::io::BufReader;
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::oneshot;
@@ -56,8 +56,8 @@ use crate::handshake::{read_handshake, SOCKET_ENV};
 use crate::remote::{
     Link, RemoteCommandHandler, RemotePolicyHandler, RemoteProjectorHandler, RemoteUpcaster,
 };
-use crate::rpc::component::component_service_client::ComponentServiceClient;
 use crate::rpc::connect_unix;
+use angzarr_proto::v1::component_service_client::ComponentServiceClient;
 use tonic_health::pb::health_check_response::ServingStatus;
 use tonic_health::pb::health_client::HealthClient;
 use tonic_health::pb::{HealthCheckRequest, HealthCheckResponse};
@@ -817,7 +817,7 @@ impl Supervisor {
                 ));
             }
             let descriptor = ComponentServiceClient::new(channel.clone())
-                .describe(())
+                .describe(pb::DescribeRequest::default())
                 .await
                 .map_err(|status| HostError::Describe {
                     domain: domain(),

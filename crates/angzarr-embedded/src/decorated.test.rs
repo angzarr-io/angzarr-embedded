@@ -4657,8 +4657,8 @@ impl SharedBuyIn {
 
 mod router {
     use super::*;
+    use ::angzarr_embedded::angzarr_proto::v1 as pb;
     use ::angzarr_embedded::angzarr_router::error::HandlerError;
-    use ::angzarr_embedded::angzarr_router::pb;
     use ::angzarr_embedded::angzarr_router::policy::PolicyDispatch;
     use ::angzarr_embedded::StepError;
 

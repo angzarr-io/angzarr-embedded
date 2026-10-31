@@ -1003,7 +1003,7 @@ impl PolicyContext {
 /// `RefusalResponse` and `Refusal`, decision 14.31), as angzarr-router
 /// carries them.
 pub mod v1 {
-    pub use angzarr_router::pb::{refusal_response, CommandRefused, Refusal, RefusalResponse};
+    pub use angzarr_proto::v1::{refusal_response, CommandRefused, Refusal, RefusalResponse};
 }
 
 /// A projector written in the markup (`#[projector]`): one or more source

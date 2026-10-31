@@ -90,7 +90,7 @@ impl Entry {
 #[derive(Clone)]
 pub struct Description {
     domain: String,
-    kind: angzarr_router::pb::ComponentKind,
+    kind: angzarr_proto::v1::ComponentKind,
     described: Arc<RwLock<Described>>,
 }
 
@@ -109,7 +109,7 @@ impl Description {
     /// one kept, as [`Registry::command_handler`] refuses a descriptor.
     pub fn replace(
         &self,
-        descriptor: angzarr_router::pb::ComponentDescriptor,
+        descriptor: angzarr_proto::v1::ComponentDescriptor,
     ) -> Result<(), Misconfigured> {
         let described = described(&self.domain, self.kind, descriptor)?;
         *self
@@ -125,8 +125,8 @@ impl Description {
 /// resolutions are not resolutions.
 fn described(
     domain: &str,
-    kind: angzarr_router::pb::ComponentKind,
-    descriptor: angzarr_router::pb::ComponentDescriptor,
+    kind: angzarr_proto::v1::ComponentKind,
+    descriptor: angzarr_proto::v1::ComponentDescriptor,
 ) -> Result<Described, Misconfigured> {
     if descriptor.rules_version.is_empty() {
         return Err(Misconfigured::EmptyRulesVersion {
@@ -153,10 +153,10 @@ fn described(
 /// `None` for any other kind. A listed type URL counts by the name it ends
 /// in.
 fn starting_types(
-    kind: angzarr_router::pb::ComponentKind,
-    descriptor: &angzarr_router::pb::ComponentDescriptor,
+    kind: angzarr_proto::v1::ComponentKind,
+    descriptor: &angzarr_proto::v1::ComponentDescriptor,
 ) -> Option<BTreeSet<String>> {
-    (kind == angzarr_router::pb::ComponentKind::ProcessManager).then(|| {
+    (kind == angzarr_proto::v1::ComponentKind::ProcessManager).then(|| {
         descriptor
             .starting_types
             .iter()
@@ -581,7 +581,7 @@ impl Registry {
         &mut self,
         domain: &str,
         handler: impl router::CommandHandler + 'static,
-        descriptor: angzarr_router::pb::ComponentDescriptor,
+        descriptor: angzarr_proto::v1::ComponentDescriptor,
     ) -> Result<(), Misconfigured> {
         self.described_handler(domain, handler, descriptor)
             .map(drop)
@@ -595,7 +595,7 @@ impl Registry {
         &mut self,
         domain: &str,
         handler: impl router::CommandHandler + 'static,
-        descriptor: angzarr_router::pb::ComponentDescriptor,
+        descriptor: angzarr_proto::v1::ComponentDescriptor,
     ) -> Result<Description, Misconfigured> {
         let name = domain.to_string();
         if self.taken(&name) {
@@ -603,7 +603,7 @@ impl Registry {
         }
         let kind = handler.kind();
         let described = Arc::new(RwLock::new(described(&name, kind, descriptor)?));
-        let process_manager = kind == angzarr_router::pb::ComponentKind::ProcessManager;
+        let process_manager = kind == angzarr_proto::v1::ComponentKind::ProcessManager;
         self.domains.insert(
             name.clone(),
             Entry {
@@ -876,8 +876,8 @@ impl Registry {
     /// registered here; `UNSPECIFIED` for a domain handled elsewhere
     /// ([`Registry::remote`]: its descriptor is its coordinator's) or not
     /// registered.
-    pub(crate) fn kind(&self, domain: &str) -> angzarr_router::pb::ComponentKind {
-        use angzarr_router::pb::ComponentKind;
+    pub(crate) fn kind(&self, domain: &str) -> angzarr_proto::v1::ComponentKind {
+        use angzarr_proto::v1::ComponentKind;
         match self.domains.get(domain) {
             Some(entry) if entry.process_manager => ComponentKind::ProcessManager,
             Some(_) => ComponentKind::Aggregate,

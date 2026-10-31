@@ -37,12 +37,12 @@ use std::sync::Arc;
 
 use angzarr_diagnostic::Report;
 use angzarr_proto::v1::angzarr_dead_letter::Payload as Letter;
+use angzarr_proto::v1::PolicyReaction;
 use angzarr_proto::v1::{
     command_page, Command, CommandBook, CommandPage, Cover, EventBook, EventPage, EventRef,
     Handling, Uuid,
 };
 use angzarr_router::error::CodedError;
-use angzarr_router::pb::PolicyReaction;
 use angzarr_router::policy::PolicyDispatch;
 use prost_types::Any;
 

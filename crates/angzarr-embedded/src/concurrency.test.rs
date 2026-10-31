@@ -25,8 +25,8 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Barrier, Mutex};
 
+use angzarr_proto::v1::CommandHandlerResponse;
 use angzarr_router::error::{CodedError, GrpcCode};
-use angzarr_router::pb::CommandHandlerResponse;
 use angzarr_router::router::CommandHandler;
 
 use crate::toys::prelude::*;

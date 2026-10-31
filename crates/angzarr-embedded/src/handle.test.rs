@@ -1906,10 +1906,9 @@ impl crate::angzarr_router::router::PolicyComponent for Unchecked {
     async fn dispatch(
         &self,
         source: &crate::v1::EventBook,
-    ) -> Result<crate::angzarr_router::pb::PolicyResponse, crate::angzarr_router::error::CodedError>
-    {
-        Ok(crate::angzarr_router::pb::PolicyResponse {
-            reactions: vec![crate::angzarr_router::pb::PolicyReaction {
+    ) -> Result<angzarr_proto::v1::PolicyResponse, crate::angzarr_router::error::CodedError> {
+        Ok(angzarr_proto::v1::PolicyResponse {
+            reactions: vec![angzarr_proto::v1::PolicyReaction {
                 trigger_sequence: source.pages[0].sequence,
                 commands: (self.answer)(source),
             }],
@@ -2385,11 +2384,9 @@ impl crate::angzarr_router::router::CommandHandler for Recorded {
     }
     async fn dispatch(
         &self,
-        req: &crate::angzarr_router::pb::ContextualCommand,
-    ) -> Result<
-        crate::angzarr_router::pb::CommandHandlerResponse,
-        crate::angzarr_router::error::CodedError,
-    > {
+        req: &angzarr_proto::v1::ContextualCommand,
+    ) -> Result<angzarr_proto::v1::CommandHandlerResponse, crate::angzarr_router::error::CodedError>
+    {
         self.books
             .lock()
             .unwrap()

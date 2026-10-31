@@ -11,7 +11,7 @@ use std::fmt;
 
 use angzarr_diagnostic::{Arg, Diagnostic};
 use angzarr_embedded::reasons::CoordinatorReason;
-use angzarr_router::pb::{ComponentDescriptor, ComponentKind};
+use angzarr_proto::v1::{ComponentDescriptor, ComponentKind};
 
 /// Why a descriptor is refused: one variant per reason key, each naming
 /// the component, in the order the rules are checked.

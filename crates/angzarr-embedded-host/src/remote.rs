@@ -29,23 +29,23 @@
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
+use angzarr_proto::v1 as pb;
 use angzarr_router::context::CommandContext;
 use angzarr_router::error::{CodedError, GrpcCode, RouterReason};
-use angzarr_router::pb;
 use angzarr_router::router::{CommandHandler, PolicyComponent, ProjectorHandler};
 use angzarr_router::send::BoxFuture;
 use prost::Message;
 use tonic::transport::Channel;
 use tonic::Code;
 
-use crate::rpc::command_handler::command_handler_service_client::CommandHandlerServiceClient;
 use crate::rpc::google_rpc::{ErrorInfo, Status as RpcStatus, ERROR_INFO_NAME};
-use crate::rpc::policy::policy_service_client::PolicyServiceClient;
-use crate::rpc::projector::projector_service_client::ProjectorServiceClient;
-use crate::rpc::upcaster::upcaster_service_client::UpcasterServiceClient;
 use angzarr_diagnostic::Report;
 use angzarr_embedded::reasons::args;
 use angzarr_embedded::{Description, KernelError, UpcastError, UpcastPort};
+use angzarr_proto::v1::command_handler_service_client::CommandHandlerServiceClient;
+use angzarr_proto::v1::policy_service_client::PolicyServiceClient;
+use angzarr_proto::v1::projector_service_client::ProjectorServiceClient;
+use angzarr_proto::v1::upcaster_service_client::UpcasterServiceClient;
 
 /// The router-style codes a remote handler's dispatch adds to the router's
 /// own (`angzarr_router::error::codes`).

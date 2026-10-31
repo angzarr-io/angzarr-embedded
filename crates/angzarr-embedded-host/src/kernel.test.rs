@@ -17,7 +17,7 @@ use angzarr_embedded::{
     Recovery, Registry, Sampled, StreamRef, Timestamp, DEAD_LETTER_PREFIX,
 };
 use angzarr_ports::memory::MemoryStore;
-use angzarr_router::pb::CommandHandlerResponse;
+use angzarr_proto::v1::CommandHandlerResponse;
 
 use super::Host;
 use crate::fake_child::{config, domain, mode, noted};

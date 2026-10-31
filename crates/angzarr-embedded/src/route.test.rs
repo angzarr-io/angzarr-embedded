@@ -25,8 +25,8 @@ fn a_record_of_nothing_is_known_by_its_type_url() {
 #[test]
 fn a_fold_that_fails_carries_its_cause_as_a_key_and_args() {
     use crate::toys::{account, command, cover, registry, Ready};
+    use angzarr_proto::v1::ContextualCommand;
     use angzarr_router::error::RouterReason;
-    use angzarr_router::pb::ContextualCommand;
 
     let registry = registry();
     let stream = cover("account", 1);

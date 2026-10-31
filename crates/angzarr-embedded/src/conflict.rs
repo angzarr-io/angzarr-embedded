@@ -35,8 +35,8 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
+use angzarr_proto::v1::ConflictReport;
 use angzarr_proto::v1::ConflictResolution;
-use angzarr_router::pb::ConflictReport;
 
 /// One conflict unit's path (`options.proto`, *Unit path syntax*): proto
 /// field names (never JSON names) joined by `.`, a map or keyed-repeated

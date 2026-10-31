@@ -403,7 +403,7 @@ fn a_translated_fact_is_a_bare_payload() {
         with(&|f| f.page = None),
         CoordinatorReason::RefusalFactNoPage.as_str_name()
     );
-    let id = || Some(angzarr_router::pb::Uuid::from_bytes([1; 16]));
+    let id = || Some(angzarr_proto::v1::Uuid::from_bytes([1; 16]));
     assert_eq!(
         page(&|p| p.command_id = id()),
         CoordinatorReason::RefusalFactIdentified.as_str_name()

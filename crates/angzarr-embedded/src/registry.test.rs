@@ -286,7 +286,7 @@ fn a_state_descriptor_naming_another_type_than_its_snapshot_is_refused() {
 
 /// A hand-written handler of `kind`, registered by its descriptor.
 struct Hello {
-    kind: angzarr_router::pb::ComponentKind,
+    kind: angzarr_proto::v1::ComponentKind,
 }
 
 impl angzarr_router::router::CommandHandler for Hello {
@@ -294,7 +294,7 @@ impl angzarr_router::router::CommandHandler for Hello {
         "hello"
     }
 
-    fn kind(&self) -> angzarr_router::pb::ComponentKind {
+    fn kind(&self) -> angzarr_proto::v1::ComponentKind {
         self.kind
     }
 
@@ -304,14 +304,14 @@ impl angzarr_router::router::CommandHandler for Hello {
 
     async fn dispatch(
         &self,
-        _: &angzarr_router::pb::ContextualCommand,
-    ) -> Result<angzarr_router::pb::CommandHandlerResponse, angzarr_router::error::CodedError> {
+        _: &angzarr_proto::v1::ContextualCommand,
+    ) -> Result<angzarr_proto::v1::CommandHandlerResponse, angzarr_router::error::CodedError> {
         Ok(Default::default())
     }
 }
 
-fn hello(state: Option<crate::v1::StateDescriptor>) -> angzarr_router::pb::ComponentDescriptor {
-    angzarr_router::pb::ComponentDescriptor {
+fn hello(state: Option<crate::v1::StateDescriptor>) -> angzarr_proto::v1::ComponentDescriptor {
+    angzarr_proto::v1::ComponentDescriptor {
         name: "hello".to_string(),
         rules_version: "h1".to_string(),
         state,
@@ -336,7 +336,7 @@ fn base_state() -> crate::v1::StateDescriptor {
 /// rules version or a state type, a process manager's kind kept.
 #[test]
 fn a_command_handler_registers_by_its_descriptor() {
-    use angzarr_router::pb::ComponentKind;
+    use angzarr_proto::v1::ComponentKind;
     let refused = |descriptor| {
         crate::Registry::new()
             .command_handler(
@@ -348,7 +348,7 @@ fn a_command_handler_registers_by_its_descriptor() {
             )
             .err()
     };
-    let unversioned = angzarr_router::pb::ComponentDescriptor {
+    let unversioned = angzarr_proto::v1::ComponentDescriptor {
         rules_version: String::new(),
         ..hello(Some(base_state()))
     };
@@ -410,7 +410,7 @@ fn a_command_handler_registers_by_its_descriptor() {
 /// leaves the old in place.
 #[test]
 fn a_described_domain_is_replaced_whole_by_its_new_descriptor() {
-    use angzarr_router::pb::ComponentKind;
+    use angzarr_proto::v1::ComponentKind;
     let mut registry = crate::Registry::new();
     let description = registry
         .described_handler(
@@ -418,7 +418,7 @@ fn a_described_domain_is_replaced_whole_by_its_new_descriptor() {
             Hello {
                 kind: ComponentKind::ProcessManager,
             },
-            angzarr_router::pb::ComponentDescriptor {
+            angzarr_proto::v1::ComponentDescriptor {
                 starting_types: vec!["toy.hello.v1.Start".to_string()],
                 ..hello(Some(base_state()))
             },
@@ -439,7 +439,7 @@ fn a_described_domain_is_replaced_whole_by_its_new_descriptor() {
         }),
     };
     description
-        .replace(angzarr_router::pb::ComponentDescriptor {
+        .replace(angzarr_proto::v1::ComponentDescriptor {
             rules_version: "h2".to_string(),
             starting_types: vec!["toy.hello.v1.Begin".to_string()],
             ..hello(Some(commutative.clone()))
@@ -453,7 +453,7 @@ fn a_described_domain_is_replaced_whole_by_its_new_descriptor() {
         Some(["toy.hello.v1.Begin".to_string()].into())
     );
 
-    let refused = description.replace(angzarr_router::pb::ComponentDescriptor {
+    let refused = description.replace(angzarr_proto::v1::ComponentDescriptor {
         rules_version: String::new(),
         ..hello(Some(base_state()))
     });
@@ -484,7 +484,7 @@ fn a_described_domain_is_replaced_whole_by_its_new_descriptor() {
 /// its domain; a domain not registered here has none.
 #[test]
 fn a_domain_is_named_as_a_component_by_its_kind() {
-    use angzarr_router::pb::ComponentKind;
+    use angzarr_proto::v1::ComponentKind;
     let named = |kind| {
         let mut registry = crate::Registry::new();
         registry
@@ -565,9 +565,9 @@ fn a_snapshot_is_usable_under_the_registered_major_and_minor() {
             .command_handler(
                 domain,
                 Hello {
-                    kind: angzarr_router::pb::ComponentKind::Aggregate,
+                    kind: angzarr_proto::v1::ComponentKind::Aggregate,
                 },
-                angzarr_router::pb::ComponentDescriptor {
+                angzarr_proto::v1::ComponentDescriptor {
                     rules_version: version.to_string(),
                     ..hello(Some(base_state()))
                 },

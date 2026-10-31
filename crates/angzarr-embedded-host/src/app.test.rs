@@ -353,7 +353,7 @@ impl angzarr_embedded::angzarr_router::router::CommandHandler for NoHandler {
         &self,
         _: &angzarr_embedded::v1::ContextualCommand,
     ) -> Result<
-        angzarr_router::pb::CommandHandlerResponse,
+        angzarr_proto::v1::CommandHandlerResponse,
         angzarr_embedded::angzarr_router::error::CodedError,
     > {
         unreachable!("never registered")
@@ -382,7 +382,7 @@ mod fixtures {
         StateOptions, Uuid,
     };
     use angzarr_embedded::Any;
-    use angzarr_router::pb::CommandHandlerResponse;
+    use angzarr_proto::v1::CommandHandlerResponse;
 
     /// How long a dispatch waits for what a test is forcing: past it, the
     /// test fails rather than hangs.
@@ -779,7 +779,7 @@ mod exposure_edges {
     use angzarr_embedded::angzarr_router::error::CodedError;
     use angzarr_embedded::angzarr_router::router::CommandHandler;
     use angzarr_embedded::v1::{ComponentKind, ContextualCommand, DeliveryOutcome, EventBook};
-    use angzarr_router::pb::CommandHandlerResponse;
+    use angzarr_proto::v1::CommandHandlerResponse;
 
     use super::fixtures::*;
     use super::*;

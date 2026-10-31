@@ -172,9 +172,9 @@ fn a_translated_fact_that_is_more_than_a_payload_is_the_policys_bug() {
 #[test]
 fn each_reaction_is_held_to_the_page_it_names() {
     use super::check_reactions;
-    use crate::angzarr_router::pb::PolicyReaction;
     use crate::toys::correlation;
     use crate::v1::{EventBook, EventMeta, EventPage};
+    use angzarr_proto::v1::PolicyReaction;
     let page = |sequence, n| EventPage {
         sequence,
         meta: Some(EventMeta {
@@ -299,8 +299,8 @@ fn a_reaction_is_a_command_and_carries_no_fact_origin() {
 #[test]
 fn a_reactions_identity_is_unset_or_the_stamp() {
     use super::check_reactions;
-    use crate::angzarr_router::pb::PolicyReaction;
     use crate::v1::{EventBook, EventPage, EventRef};
+    use angzarr_proto::v1::PolicyReaction;
     let source = EventBook {
         cover: Some(cover_in("account", 1, "what-if")),
         pages: vec![EventPage {

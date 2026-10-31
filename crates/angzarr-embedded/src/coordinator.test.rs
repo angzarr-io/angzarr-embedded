@@ -875,7 +875,6 @@ mod upcasting {
     use std::sync::{Arc, Mutex};
 
     use crate::angzarr_router::error::CodedError;
-    use crate::angzarr_router::pb;
     use crate::angzarr_router::router::CommandHandler;
     use crate::toys::prelude::*;
     use crate::toys::{
@@ -883,6 +882,7 @@ mod upcasting {
         AccountEvent, Edit,
     };
     use crate::{pack, Failure, KernelError, Payload, Registry, Upcaster};
+    use angzarr_proto::v1 as pb;
 
     /// The account's router table with no upcaster of its own, recording
     /// the type of every command it is handed.
@@ -1219,7 +1219,6 @@ mod admission {
     use angzarr_diagnostic::Diagnostic;
 
     use crate::angzarr_router::error::CodedError;
-    use crate::angzarr_router::pb;
     use crate::angzarr_router::router::CommandHandler;
     use crate::toys::prelude::*;
     use crate::toys::{
@@ -1228,6 +1227,7 @@ mod admission {
     };
     use crate::v1::DeliveryOutcome;
     use crate::{Failure, Handled, Payload, Registry};
+    use angzarr_proto::v1 as pb;
 
     /// The account's table, as a process manager: its descriptor (in
     /// [`registry`]) has it started only by `Open`.
@@ -1415,10 +1415,10 @@ mod rules_version {
     //! `CommandHandlerResponse.rules_version`): stamped in full, and refused
     //! as a handler bug when it is not the registered one (C-0558).
     use crate::angzarr_router::error::CodedError;
-    use crate::angzarr_router::pb;
     use crate::toys::prelude::*;
     use crate::toys::{at, command, cover, Edit};
     use crate::{Failure, Recovery, Registry};
+    use angzarr_proto::v1 as pb;
 
     /// A hand-written handler answering every command with one event,
     /// reporting `reported`.

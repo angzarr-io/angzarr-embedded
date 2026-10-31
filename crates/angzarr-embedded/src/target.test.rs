@@ -8,8 +8,8 @@
 
 use std::sync::{Arc, Mutex};
 
+use angzarr_proto::v1::{CommandHandlerResponse, CommandResponse};
 use angzarr_router::error::{CodedError, HandlerError};
-use angzarr_router::pb::{CommandHandlerResponse, CommandResponse};
 use angzarr_router::policy::PolicyDispatch;
 use angzarr_router::router::CommandHandler;
 

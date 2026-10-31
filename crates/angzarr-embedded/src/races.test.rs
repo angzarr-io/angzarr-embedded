@@ -25,8 +25,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 use std::time::Duration;
 
+use angzarr_proto::v1::{CommandHandlerResponse, ConflictReport};
 use angzarr_router::error::{CodedError, GrpcCode};
-use angzarr_router::pb::{CommandHandlerResponse, ConflictReport};
 use angzarr_router::policy::PolicyDispatch;
 use angzarr_router::router::CommandHandler;
 
@@ -193,11 +193,11 @@ impl CommandHandler for &'static Orders {
         let conflict = match delivery.reported {
             Reported::Nothing => None,
             Reported::ThisNonce => Some(ConflictReport {
-                resolved_nonce: nonce,
+                resolved_nonce: nonce.into(),
                 ..ConflictReport::default()
             }),
             Reported::FirstNonce => Some(ConflictReport {
-                resolved_nonce: self.seen()[0].nonce.clone(),
+                resolved_nonce: self.seen()[0].nonce.clone().into(),
                 ..ConflictReport::default()
             }),
             Reported::Units(window, changed) => Some(ConflictReport {
