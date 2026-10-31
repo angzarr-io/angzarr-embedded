@@ -182,7 +182,7 @@ pub(crate) fn domain(name: &str, described: &str, mode: &str) -> ComponentConfig
     ComponentConfig {
         name: name.to_string(),
         language: "python".to_string(),
-        kind: Default::default(),
+        kind: crate::config::ComponentKindConfig::Domain,
         upcasts: None,
         launch: Some(launch()),
         entry: vec!["-m".to_string(), "never.used".to_string()],

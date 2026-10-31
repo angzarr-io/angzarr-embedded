@@ -24,7 +24,7 @@
 //! (`tokio::task::spawn_blocking`): the App has no runtime of its own, and
 //! the caller's runtime is tokio's, with its timer.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::path::Path;
 
@@ -43,8 +43,12 @@ use crate::exposure::{Arrival, NotExposed};
 use crate::host::{ChildExit, Host};
 
 /// Runs the application the config at `config` describes: reads it
-/// (TOML), starts its remote components ([`Host::start`]), registers them by
-/// kind and calls `register` to register the in-process ones, and opens
+/// (TOML, strictly: [`HostConfig::from_toml`]), starts its remote
+/// components ([`Host::start`]), registers them by kind and calls
+/// `register` to register the in-process ones, holding what it registers
+/// to the in-process `[[component]]`s, by name and kind (one listed and
+/// not registered, [`HostError::NotRegistered`]; one registered and not
+/// listed, [`HostError::NotListed`]), and opens
 /// its store (SQLite, `[store]`) on the caller's runtime. The [`App`] is
 /// how the application sends commands and reads its streams; dropping it
 /// stops the children. A component exposed (`expose`) that is registered
@@ -71,7 +75,12 @@ pub async fn run(
     if let Err(error) = registered {
         return Err(stopped(host, error).await);
     }
+    let hosted = Registered::of(&registry);
     register(&mut registry);
+    let local = Registered::of(&registry).since(&hosted);
+    if let Err(error) = listed(&config, &local, &registry) {
+        return Err(stopped(host, error).await);
+    }
     let exposed: BTreeMap<String, Expose> = config
         .components
         .iter()
@@ -128,10 +137,95 @@ fn read(path: &Path) -> Result<HostConfig, HostError> {
         path: path.display().to_string(),
         kind: format!("{:?}", e.kind()),
     })?;
-    toml::from_str(&text).map_err(|e| HostError::ConfigInvalid {
-        path: path.display().to_string(),
-        offset: e.span().map_or(0, |span| span.start as u64),
-    })
+    HostConfig::from_toml(&text, &path.display().to_string())
+}
+
+/// What a registry holds by name: its domains, policies and projectors.
+#[derive(Default)]
+struct Registered {
+    domains: BTreeSet<String>,
+    policies: BTreeSet<String>,
+    projectors: BTreeSet<String>,
+}
+
+impl Registered {
+    /// What `registry` holds now.
+    fn of(registry: &Registry) -> Registered {
+        let names = |names: &mut dyn Iterator<Item = &str>| names.map(str::to_string).collect();
+        Registered {
+            domains: names(&mut registry.domains()),
+            policies: names(&mut registry.policy_names()),
+            projectors: names(&mut registry.projector_names()),
+        }
+    }
+
+    /// What `self` holds that `before` did not.
+    fn since(self, before: &Registered) -> Registered {
+        let new = |now: BTreeSet<String>, then: &BTreeSet<String>| {
+            now.into_iter()
+                .filter(|name| !then.contains(name))
+                .collect()
+        };
+        Registered {
+            domains: new(self.domains, &before.domains),
+            policies: new(self.policies, &before.policies),
+            projectors: new(self.projectors, &before.projectors),
+        }
+    }
+}
+
+/// The config's in-process components held to what `register`
+/// registered in process, `local` (the registry's domains, policies and
+/// projectors the host did not register), each by name and kind: a listed
+/// one registered of no such kind and name is [`HostError::NotRegistered`]
+/// (an upcaster's `upcasts` no domain registered at all), in the config's
+/// order; then one registered that no in-process `[[component]]` of its
+/// kind lists is [`HostError::NotListed`], domains first, then policies,
+/// then projectors.
+fn listed(config: &HostConfig, local: &Registered, registry: &Registry) -> Result<(), HostError> {
+    use crate::config::{ComponentKindConfig as Kind, Placement};
+    let in_process: Vec<_> = config
+        .components
+        .iter()
+        .filter(|c| matches!(c.placement(), Ok(Placement::InProcess)))
+        .collect();
+    for component in &in_process {
+        let registered = match component.kind {
+            Kind::Domain => local.domains.contains(&component.name),
+            Kind::Policy => local.policies.contains(&component.name),
+            Kind::Projector => local.projectors.contains(&component.name),
+            Kind::Upcaster => component
+                .upcasts
+                .as_deref()
+                .is_some_and(|domain| registry.domains().any(|d| d == domain)),
+        };
+        if !registered {
+            return Err(HostError::NotRegistered {
+                domain: component.name.clone(),
+                kind: component.kind.as_str().to_string(),
+            });
+        }
+    }
+    let unlisted = |names: &BTreeSet<String>, kind: Kind| {
+        names
+            .iter()
+            .find(|name| {
+                !in_process
+                    .iter()
+                    .any(|c| c.kind == kind && &c.name == *name)
+            })
+            .map(|name| HostError::NotListed {
+                domain: name.clone(),
+                kind: kind.as_str().to_string(),
+            })
+    };
+    match unlisted(&local.domains, Kind::Domain)
+        .or_else(|| unlisted(&local.policies, Kind::Policy))
+        .or_else(|| unlisted(&local.projectors, Kind::Projector))
+    {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 /// `work`, which blocks (starting or stopping the host's children), run

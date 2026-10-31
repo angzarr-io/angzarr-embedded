@@ -9,10 +9,12 @@
 //! ([`crate::is_retryable`]). An upcaster sidecar is not described: it is
 //! up while its gRPC health reports SERVING, and down while it does not.
 //!
-//! The generated `main.rs` is, in outline:
+//! The generated `main.rs` calls [`crate::run`], which holds the
+//! in-process registrations to the config's listing; by hand, in
+//! outline:
 //!
 //! ```ignore
-//! let config: HostConfig = toml::from_str(include_str!("angzarr.toml"))?;
+//! let config = HostConfig::from_toml(include_str!("angzarr.toml"), "angzarr.toml")?;
 //! let host = Host::start(config)?;
 //! let mut registry = Registry::new();
 //! registry.aggregate::<table::Table>(Default::default)?; // in-process
@@ -134,13 +136,13 @@ impl Host {
                     kind: component.kind.as_str().to_string(),
                 });
             }
+            let upcasts = component.upcasts.clone().unwrap_or_default();
+            if component.kind == ComponentKindConfig::Upcaster && upcasts.is_empty() {
+                return Err(HostError::UpcasterNoDomain {
+                    domain: component.name.clone(),
+                });
+            }
             if let Placement::Remote(launch) = component.placement()? {
-                let upcasts = component.upcasts.clone().unwrap_or_default();
-                if component.kind == ComponentKindConfig::Upcaster && upcasts.is_empty() {
-                    return Err(HostError::UpcasterNoDomain {
-                        domain: component.name.clone(),
-                    });
-                }
                 remote.push((component.name.clone(), component.kind, launch, upcasts));
             }
         }

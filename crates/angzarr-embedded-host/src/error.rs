@@ -119,8 +119,26 @@ pub enum HostError {
     /// `std::io::ErrorKind`, by name.
     ConfigUnreadable { path: String, kind: String },
     /// The config file is not a valid config: malformed TOML, an unknown
-    /// key, a missing one. `offset` is the byte where the problem starts.
-    ConfigInvalid { path: String, offset: u64 },
+    /// key, a missing one, a value outside its closed set or of the wrong
+    /// type. `key` is the TOML key path where it goes wrong
+    /// (`component[1].kind`; a missing key's table; empty for TOML that
+    /// does not parse), `offset` the byte where the problem starts, and
+    /// `ext_err_txt` the TOML reader's text, as it said it.
+    ConfigInvalid {
+        path: String,
+        key: String,
+        offset: u64,
+        ext_err_txt: String,
+    },
+    /// An in-process component its `[[component]]` lists (`kind` its TOML
+    /// kind) that the application's `register` did not register: no
+    /// domain, policy or projector of that name, or, for an upcaster, no
+    /// domain here of its `upcasts`.
+    NotRegistered { domain: String, kind: String },
+    /// A component the application's `register` registered in process
+    /// (`kind` its TOML kind) that no `[[component]]` lists as an
+    /// in-process component of that kind: every component is listed.
+    NotListed { domain: String, kind: String },
     /// The registry refused a domain (the kernel's `Misconfigured`).
     Register { cause: Report },
     /// The store could not be opened (the kernel's store error).
@@ -155,6 +173,8 @@ impl Diagnostic for HostError {
             HostError::SocketDirTooLong { .. } => "angzarr-embedded-host-socket-dir-too-long",
             HostError::ConfigUnreadable { .. } => "angzarr-embedded-host-config-unreadable",
             HostError::ConfigInvalid { .. } => "angzarr-embedded-host-config-invalid",
+            HostError::NotRegistered { .. } => "angzarr-embedded-host-not-registered",
+            HostError::NotListed { .. } => "angzarr-embedded-host-not-listed",
             HostError::Register { .. } => "angzarr-embedded-host-register",
             HostError::Store { .. } => "angzarr-embedded-host-store",
             HostError::Runtime { .. } => "angzarr-embedded-host-runtime",
@@ -186,7 +206,9 @@ impl Diagnostic for HostError {
             HostError::Handshake { domain: d, cause } => {
                 vec![domain(d), ("cause", Arg::nested(cause))]
             }
-            HostError::NotExposable { domain: d, kind } => {
+            HostError::NotExposable { domain: d, kind }
+            | HostError::NotRegistered { domain: d, kind }
+            | HostError::NotListed { domain: d, kind } => {
                 vec![domain(d), ("kind", kind.as_str().into())]
             }
             HostError::Connect { domain: d, socket } => {
@@ -220,9 +242,17 @@ impl Diagnostic for HostError {
                 ("path", path.as_str().into()),
                 ("kind", kind.as_str().into()),
             ],
-            HostError::ConfigInvalid { path, offset } => {
-                vec![("path", path.as_str().into()), ("offset", (*offset).into())]
-            }
+            HostError::ConfigInvalid {
+                path,
+                key,
+                offset,
+                ext_err_txt,
+            } => vec![
+                ("path", path.as_str().into()),
+                ("key", key.as_str().into()),
+                ("offset", (*offset).into()),
+                ("ext_err_txt", ext_err_txt.as_str().into()),
+            ],
             HostError::Register { cause } | HostError::Store { cause } => {
                 vec![("cause", Arg::nested(cause))]
             }
@@ -300,7 +330,17 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn Diagnostic>> {
         }),
         Box::new(HostError::ConfigInvalid {
             path: "angzarr.toml".to_string(),
+            key: "component[1].kind".to_string(),
             offset: 12,
+            ext_err_txt: "unknown variant `saga`".to_string(),
+        }),
+        Box::new(HostError::NotRegistered {
+            domain: d(),
+            kind: "policy".to_string(),
+        }),
+        Box::new(HostError::NotListed {
+            domain: d(),
+            kind: "projector".to_string(),
         }),
         Box::new(HostError::Register {
             cause: Report::new("angzarr-embedded-host-duplicate-domain").arg("domain", "player"),

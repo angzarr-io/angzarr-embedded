@@ -246,19 +246,23 @@ async fn a_missing_config_is_unreadable() {
     );
 }
 
-/// Malformed TOML and an unknown key are both invalid, at the byte the
-/// problem starts.
+/// Malformed TOML and an unknown key are both invalid, at the key path
+/// and the byte the problem starts, with the TOML reader's text.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_invalid_config_is_refused_where_it_goes_wrong() {
     let dir = scratch("invalid");
     let path = dir.join("angzarr.toml");
     std::fs::write(&path, "[store]\nin_memory = true\nlanuch = 1\n").unwrap();
-    assert_eq!(
-        run(&path, nothing).await.err(),
-        Some(HostError::ConfigInvalid {
-            path: path.display().to_string(),
-            offset: 25,
-        })
+    let refused = run(&path, nothing).await.err();
+    assert!(
+        matches!(
+            &refused,
+            Some(HostError::ConfigInvalid { path: at, key, offset: 25, ext_err_txt })
+                if *at == path.display().to_string()
+                    && key == "store.lanuch"
+                    && ext_err_txt.contains("lanuch")
+        ),
+        "{refused:?}"
     );
     std::fs::write(&path, "[[domain]\n").unwrap();
     assert!(matches!(
@@ -464,11 +468,18 @@ mod concurrency {
     use super::fixtures::*;
     use super::*;
 
-    /// A config with no component of its own (every aggregate here is
-    /// in-process) and an in-memory store.
-    fn in_memory(dir: &Path) -> PathBuf {
+    /// A config listing the in-process aggregates `domains`, and an
+    /// in-memory store.
+    fn in_memory(dir: &Path, domains: &[&str]) -> PathBuf {
         let path = dir.join("angzarr.toml");
-        std::fs::write(&path, "[store]\nin_memory = true\n").unwrap();
+        let mut text = String::new();
+        for domain in domains {
+            text.push_str(&format!(
+                "[[component]]\nname = \"{domain}\"\nkind = \"domain\"\nlanguage = \"rust\"\n\n"
+            ));
+        }
+        text.push_str("[store]\nin_memory = true\n");
+        std::fs::write(&path, text).unwrap();
         path
     }
 
@@ -491,13 +502,16 @@ mod concurrency {
         let dir = scratch("concurrent-domains");
         let rendezvous = Arc::new(Rendezvous::of(2));
         let meeting = rendezvous.clone();
-        let app = run(in_memory(&dir), move |registry: &mut Registry| {
-            for domain in ["left", "right"] {
-                registry
-                    .command_handler(domain, Meeting(meeting.clone()), descriptor(domain))
-                    .unwrap();
-            }
-        })
+        let app = run(
+            in_memory(&dir, &["left", "right"]),
+            move |registry: &mut Registry| {
+                for domain in ["left", "right"] {
+                    registry
+                        .command_handler(domain, Meeting(meeting.clone()), descriptor(domain))
+                        .unwrap();
+                }
+            },
+        )
         .await
         .expect("the app runs");
         let app = Arc::new(app);
@@ -528,11 +542,14 @@ mod concurrency {
         let dir = scratch("concurrent-streams");
         let rendezvous = Arc::new(Rendezvous::of(2));
         let meeting = rendezvous.clone();
-        let app = run(in_memory(&dir), move |registry: &mut Registry| {
-            registry
-                .command_handler("left", Meeting(meeting), descriptor("left"))
-                .unwrap();
-        })
+        let app = run(
+            in_memory(&dir, &["left"]),
+            move |registry: &mut Registry| {
+                registry
+                    .command_handler("left", Meeting(meeting), descriptor("left"))
+                    .unwrap();
+            },
+        )
         .await
         .expect("the app runs");
         let app = Arc::new(app);
@@ -573,7 +590,7 @@ mod exposure {
         ComponentConfig {
             name: name.to_string(),
             language: "rust".to_string(),
-            kind: Default::default(),
+            kind: crate::config::ComponentKindConfig::Domain,
             upcasts: None,
             launch: None,
             entry: Vec::new(),
@@ -584,8 +601,7 @@ mod exposure {
     }
 
     /// `hidden` (exposed none), `local` (loopback) and `open` (ip), all
-    /// in-process, and `unlisted`, registered but named by no
-    /// `[[component]]`; each answers a command with one `Gated` event.
+    /// in-process; each answers a command with one `Gated` event.
     async fn app(dir: &Path) -> App {
         let mut config = HostConfig {
             components: vec![
@@ -597,7 +613,7 @@ mod exposure {
         };
         config.store.in_memory = true;
         run(written(dir, &config), |registry: &mut Registry| {
-            for domain in ["hidden", "local", "open", "unlisted"] {
+            for domain in ["hidden", "local", "open"] {
                 registry
                     .command_handler(
                         domain,
@@ -663,8 +679,7 @@ mod exposure {
     /// refused exactly as an unknown domain is: the caller cannot tell a
     /// hidden domain from a missing one (the owner's ruling, 2026-10-30;
     /// the host logs the real reason locally). It reaches no handler:
-    /// nothing is written. A domain the config does not name is exposed
-    /// `"none"`.
+    /// nothing is written.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_domain_not_exposed_to_the_arrival_is_refused_as_unknown() {
         let dir = scratch("not-exposed");
@@ -673,7 +688,6 @@ mod exposure {
             ("hidden", Arrival::Loopback),
             ("hidden", Arrival::Ip),
             ("local", Arrival::Ip),
-            ("unlisted", Arrival::Loopback),
         ] {
             assert_eq!(
                 app.serve(meet(domain), arrived, &sampled(1)).await.err(),
@@ -728,7 +742,7 @@ mod exposure_edges {
         ComponentConfig {
             name: name.to_string(),
             language: "rust".to_string(),
-            kind: Default::default(),
+            kind: crate::config::ComponentKindConfig::Domain,
             upcasts: None,
             launch: None,
             entry: Vec::new(),
@@ -829,6 +843,246 @@ mod exposure_edges {
         assert_eq!(
             response.outcome.map(|o| o.delivery),
             Some(DeliveryOutcome::Applied as i32)
+        );
+    }
+}
+
+/// Every component is listed (owner ruling, 2026-10-31): an in-process
+/// component's `[[component]]` names what the application's `register`
+/// registers, and `run` holds the two to each other, by name and kind. A
+/// listed one nobody registered is refused, and so is one registered and
+/// listed nowhere; the children started are stopped.
+mod listing {
+    use angzarr_embedded::next::angzarr_router::error::CodedError;
+    use angzarr_embedded::next::angzarr_router::policy::PolicyDispatch;
+    use angzarr_embedded::next::angzarr_router::router::ProjectorHandler;
+    use angzarr_embedded::next::v1::{EventBook, Projection};
+
+    use super::fixtures::*;
+    use super::*;
+    use crate::config::{ComponentConfig, ComponentKindConfig, Expose};
+
+    /// An in-process `[[component]]` of `kind`.
+    fn listed(name: &str, kind: ComponentKindConfig) -> ComponentConfig {
+        ComponentConfig {
+            name: name.to_string(),
+            language: "rust".to_string(),
+            kind,
+            upcasts: None,
+            launch: None,
+            entry: Vec::new(),
+            dir: None,
+            env: Default::default(),
+            expose: Expose::None,
+        }
+    }
+
+    /// A projector that projects nothing.
+    struct Still;
+
+    impl ProjectorHandler for Still {
+        fn name(&self) -> &str {
+            "left-view"
+        }
+
+        async fn dispatch(&self, _: &EventBook) -> Result<Projection, CodedError> {
+            Ok(Projection::default())
+        }
+    }
+
+    /// What `register` registers: each of `left` and `right` as a domain,
+    /// `left-right` as a policy, `left-view` as a projector, as `with`
+    /// says.
+    #[derive(Clone, Copy, Default)]
+    struct With {
+        right: bool,
+        policy: bool,
+        projector: bool,
+    }
+
+    /// `components` and an in-memory store, run with `left` registered
+    /// and what `with` adds.
+    async fn ran(
+        dir: &Path,
+        components: Vec<ComponentConfig>,
+        with: With,
+    ) -> Result<App, HostError> {
+        let mut config = HostConfig {
+            components,
+            ..HostConfig::default()
+        };
+        config.store.in_memory = true;
+        run(written(dir, &config), move |registry: &mut Registry| {
+            let rendezvous = || Meeting(std::sync::Arc::new(Rendezvous::of(1)));
+            registry
+                .command_handler("left", rendezvous(), descriptor("left"))
+                .unwrap();
+            if with.right {
+                registry
+                    .command_handler("right", rendezvous(), descriptor("right"))
+                    .unwrap();
+            }
+            if with.policy {
+                registry.policy_dispatch(PolicyDispatch::new("left-right", "left", "right"));
+            }
+            if with.projector {
+                registry.projector_handler("left", Still);
+            }
+        })
+        .await
+    }
+
+    /// Every kind listed and registered in process runs.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn every_listed_in_process_component_registered_runs() {
+        let dir = scratch("listed");
+        let mut upcaster = listed("left-upcaster", ComponentKindConfig::Upcaster);
+        upcaster.upcasts = Some("left".to_string());
+        let app = ran(
+            &dir,
+            vec![
+                listed("left", ComponentKindConfig::Domain),
+                listed("right", ComponentKindConfig::Domain),
+                listed("left-right", ComponentKindConfig::Policy),
+                listed("left-view", ComponentKindConfig::Projector),
+                upcaster,
+            ],
+            With {
+                right: true,
+                policy: true,
+                projector: true,
+            },
+        )
+        .await;
+        assert!(app.is_ok(), "{:?}", app.err());
+    }
+
+    /// A listed in-process component nobody registered, of each kind, is
+    /// refused by its name and kind.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_listed_component_nobody_registered_is_refused() {
+        let dir = scratch("unregistered");
+        let left = || listed("left", ComponentKindConfig::Domain);
+        for (component, kind) in [
+            (listed("right", ComponentKindConfig::Domain), "domain"),
+            (listed("left-right", ComponentKindConfig::Policy), "policy"),
+            (
+                listed("left-view", ComponentKindConfig::Projector),
+                "projector",
+            ),
+        ] {
+            let name = component.name.clone();
+            assert_eq!(
+                ran(&dir, vec![left(), component], With::default())
+                    .await
+                    .err(),
+                Some(HostError::NotRegistered {
+                    domain: name,
+                    kind: kind.to_string(),
+                }),
+                "{kind}"
+            );
+        }
+    }
+
+    /// An in-process upcaster's domain is one registered here; one naming
+    /// a domain nobody registered is refused, and one naming none is
+    /// refused as an upcaster with no domain.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_in_process_upcaster_names_a_registered_domain() {
+        let dir = scratch("upcaster");
+        let left = || listed("left", ComponentKindConfig::Domain);
+        let mut nowhere = listed("upcaster", ComponentKindConfig::Upcaster);
+        nowhere.upcasts = Some("nowhere".to_string());
+        assert_eq!(
+            ran(&dir, vec![left(), nowhere], With::default())
+                .await
+                .err(),
+            Some(HostError::NotRegistered {
+                domain: "upcaster".to_string(),
+                kind: "upcaster".to_string(),
+            })
+        );
+        let none = listed("upcaster", ComponentKindConfig::Upcaster);
+        assert_eq!(
+            ran(&dir, vec![left(), none], With::default()).await.err(),
+            Some(HostError::UpcasterNoDomain {
+                domain: "upcaster".to_string(),
+            })
+        );
+    }
+
+    /// A component registered in process that no `[[component]]` lists,
+    /// of each kind, is refused by its name and kind.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_registered_component_listed_nowhere_is_refused() {
+        let dir = scratch("unlisted");
+        assert_eq!(
+            ran(&dir, Vec::new(), With::default()).await.err(),
+            Some(HostError::NotListed {
+                domain: "left".to_string(),
+                kind: "domain".to_string(),
+            })
+        );
+        let domains = || {
+            vec![
+                listed("left", ComponentKindConfig::Domain),
+                listed("right", ComponentKindConfig::Domain),
+            ]
+        };
+        assert_eq!(
+            ran(
+                &dir,
+                domains(),
+                With {
+                    right: true,
+                    policy: true,
+                    ..With::default()
+                }
+            )
+            .await
+            .err(),
+            Some(HostError::NotListed {
+                domain: "left-right".to_string(),
+                kind: "policy".to_string(),
+            })
+        );
+        assert_eq!(
+            ran(
+                &dir,
+                domains(),
+                With {
+                    right: true,
+                    projector: true,
+                    ..With::default()
+                }
+            )
+            .await
+            .err(),
+            Some(HostError::NotListed {
+                domain: "left-view".to_string(),
+                kind: "projector".to_string(),
+            })
+        );
+    }
+
+    /// A component listed as one kind and registered as another is both:
+    /// refused as the listed kind nobody registered.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_component_registered_as_another_kind_is_refused() {
+        let dir = scratch("other-kind");
+        assert_eq!(
+            ran(
+                &dir,
+                vec![listed("left", ComponentKindConfig::Policy)],
+                With::default()
+            )
+            .await
+            .err(),
+            Some(HostError::NotRegistered {
+                domain: "left".to_string(),
+                kind: "policy".to_string(),
+            })
         );
     }
 }

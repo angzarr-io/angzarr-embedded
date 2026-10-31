@@ -7,7 +7,7 @@ fn domain(name: &str, language: &str) -> ComponentConfig {
     ComponentConfig {
         name: name.to_string(),
         language: language.to_string(),
-        kind: Default::default(),
+        kind: ComponentKindConfig::Domain,
         upcasts: None,
         launch: None,
         entry: Vec::new(),
@@ -23,7 +23,7 @@ fn strings(words: &[&str]) -> Vec<String> {
 
 /// The CLI writes `[[component]]` tables (the `component` key holds the
 /// list);
-/// every key but `name` and `language` may be left out, and
+/// every key but `name`, `language` and `kind` may be left out, and
 /// `[supervision]` keeps the defaults of the keys it leaves out. Read here
 /// through serde_json, the serde format in the graph: the shape is serde's,
 /// whatever the format.
@@ -31,15 +31,16 @@ fn strings(words: &[&str]) -> Vec<String> {
 fn the_component_tables_deserialize() {
     let text = r#"{
         "component": [
-            { "name": "table", "language": "rust" },
+            { "name": "table", "language": "rust", "kind": "domain" },
             {
                 "name": "player",
                 "language": "python",
+                "kind": "domain",
                 "entry": ["-m", "player.serve"],
                 "dir": "domains/player",
                 "env": { "PLAYER_SEATS": "6" }
             },
-            { "name": "dealer", "language": "go", "launch": ["./bin/dealer", "--serve"] }
+            { "name": "dealer", "language": "go", "kind": "domain", "launch": ["./bin/dealer", "--serve"] }
         ],
         "supervision": { "handshake_timeout_ms": 10000 }
     }"#;
@@ -72,10 +73,12 @@ fn the_documented_toml_reads() {
     let text = r#"
         [[component]]
         name = "table"
+        kind = "domain"
         language = "rust"
 
         [[component]]
         name = "player"
+        kind = "domain"
         language = "python"
         entry = ["-m", "player.serve"]
         dir = "domains/player"
@@ -88,6 +91,7 @@ fn the_documented_toml_reads() {
 
         [[component]]
         name = "dealer"
+        kind = "domain"
         language = "go"
         launch = ["./bin/dealer"]
 
@@ -142,7 +146,7 @@ fn the_documented_toml_reads() {
 fn an_unknown_key_is_refused() {
     let text = r#"{
         "component": [
-            { "name": "player", "language": "python", "lanuch": ["python3", "serve.py"] }
+            { "name": "player", "language": "python", "kind": "domain", "lanuch": ["python3", "serve.py"] }
         ]
     }"#;
     assert!(serde_json::from_str::<HostConfig>(text).is_err());
@@ -331,9 +335,9 @@ fn an_empty_launch_is_refused() {
     );
 }
 
-/// A `[[component]]`'s `kind` names the service its child serves:
-/// `"domain"` by default, `"policy"`, `"projector"` or `"upcaster"`;
-/// anything else is refused.
+/// A `[[component]]`'s `kind` names what it is: `"domain"`, `"policy"`,
+/// `"projector"` or `"upcaster"`, with no default; anything else, or none,
+/// is refused.
 #[test]
 fn a_components_kind_is_domain_policy_projector_or_upcaster() {
     let kind = |text: &str| {
@@ -342,7 +346,7 @@ fn a_components_kind_is_domain_policy_projector_or_upcaster() {
         ))
         .map(|c| c.components[0].kind)
     };
-    assert_eq!(kind("").unwrap(), ComponentKindConfig::Domain);
+    assert!(kind("").is_err(), "a component names its kind");
     assert_eq!(
         kind("kind = \"domain\"").unwrap(),
         ComponentKindConfig::Domain
@@ -363,10 +367,9 @@ fn a_components_kind_is_domain_policy_projector_or_upcaster() {
     assert!(kind("kind = \"Policy\"").is_err());
 }
 
-/// A component's kind writes back as it reads: a domain's, the default, is
-/// left out, and every other kind is written.
+/// A component's kind writes back as it reads, every kind written.
 #[test]
-fn a_components_kind_is_written_unless_it_is_the_default() {
+fn a_components_kind_is_always_written() {
     let mut policy = domain("table-player", "python");
     policy.kind = ComponentKindConfig::Policy;
     let config = HostConfig {
@@ -374,7 +377,8 @@ fn a_components_kind_is_written_unless_it_is_the_default() {
         ..HostConfig::default()
     };
     let text = toml::to_string(&config).unwrap();
-    assert_eq!(text.matches("kind = ").count(), 1, "{text}");
+    assert_eq!(text.matches("kind = ").count(), 2, "{text}");
+    assert!(text.contains("kind = \"domain\""), "{text}");
     assert!(text.contains("kind = \"policy\""), "{text}");
     assert_eq!(toml::from_str::<HostConfig>(&text).unwrap(), config);
 }
@@ -386,7 +390,7 @@ fn a_components_kind_is_written_unless_it_is_the_default() {
 fn a_components_expose_is_none_by_default_else_loopback_or_ip() {
     let expose = |text: &str| {
         toml::from_str::<HostConfig>(&format!(
-            "[[component]]\nname = \"x\"\nlanguage = \"rust\"\n{text}"
+            "[[component]]\nname = \"x\"\nkind = \"domain\"\nlanguage = \"rust\"\n{text}"
         ))
         .map(|c| c.components[0].expose)
     };
@@ -459,4 +463,99 @@ fn exposing_anything_but_a_domain_is_refused_at_start() {
         ..HostConfig::default()
     });
     assert!(host.is_ok(), "{:?}", host.err());
+}
+
+/// A config read strictly ([`HostConfig::from_toml`]): a missing key, an
+/// unknown one or an unknown value is refused, the error naming the
+/// config, the TOML key path where it goes wrong, the byte it starts at,
+/// and the TOML reader's own text.
+mod strict {
+    use super::*;
+
+    const PLAYER: &str =
+        "[[component]]\nname = \"player\"\nkind = \"domain\"\nlanguage = \"python\"\n";
+
+    /// The key path and the reader's text of `text`'s refusal.
+    fn refused(text: &str) -> (String, String) {
+        match HostConfig::from_toml(text, "angzarr.toml") {
+            Err(HostError::ConfigInvalid {
+                path,
+                key,
+                ext_err_txt,
+                ..
+            }) => {
+                assert_eq!(path, "angzarr.toml");
+                (key, ext_err_txt)
+            }
+            other => panic!("not refused as invalid: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_valid_config_reads() {
+        let config = HostConfig::from_toml(PLAYER, "angzarr.toml").unwrap();
+        assert_eq!(config.components, [domain("player", "python")]);
+    }
+
+    /// A component with no `kind`: refused at its table, the text naming
+    /// the key.
+    #[test]
+    fn a_component_with_no_kind_is_refused_at_its_table() {
+        let text = format!("{PLAYER}\n[[component]]\nname = \"table\"\nlanguage = \"rust\"\n");
+        let (key, said) = refused(&text);
+        assert_eq!(key, "component[1]");
+        assert!(said.contains("kind"), "{said}");
+    }
+
+    /// An unknown kind, at its key.
+    #[test]
+    fn an_unknown_kind_is_refused_at_its_key() {
+        let text = format!(
+            "{PLAYER}\n[[component]]\nname = \"t\"\nkind = \"saga\"\nlanguage = \"rust\"\n"
+        );
+        let (key, said) = refused(&text);
+        assert_eq!(key, "component[1].kind");
+        assert!(said.contains("saga"), "{said}");
+    }
+
+    /// An unknown exposure, at its key.
+    #[test]
+    fn an_unknown_exposure_is_refused_at_its_key() {
+        let (key, said) = refused(&format!("{PLAYER}expose = \"public\"\n"));
+        assert_eq!(key, "component[0].expose");
+        assert!(said.contains("public"), "{said}");
+    }
+
+    /// An unknown key in a component, in a table and at the top, each at
+    /// its own path.
+    #[test]
+    fn an_unknown_key_is_refused_at_its_path() {
+        let (key, said) = refused(&format!("{PLAYER}lanuch = [\"x\"]\n"));
+        assert_eq!(key, "component[0].lanuch");
+        assert!(said.contains("lanuch"), "{said}");
+        assert_eq!(refused("[retry]\nretries = 5\n").0, "retry.retries");
+        assert_eq!(refused("[[domain]]\nname = \"x\"\n").0, "domain[0]");
+    }
+
+    /// A value of the wrong type, at its key.
+    #[test]
+    fn a_value_of_the_wrong_type_is_refused_at_its_key() {
+        assert_eq!(
+            refused("[supervision]\ncall_timeout_ms = \"soon\"\n").0,
+            "supervision.call_timeout_ms"
+        );
+    }
+
+    /// TOML that does not parse names the byte it goes wrong at; its key
+    /// path is empty.
+    #[test]
+    fn malformed_toml_is_refused_at_its_byte() {
+        match HostConfig::from_toml("[store]\nin_memory = \n", "angzarr.toml") {
+            Err(HostError::ConfigInvalid { key, offset, .. }) => {
+                assert_eq!(key, "");
+                assert!(offset >= 8, "{offset}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
 }

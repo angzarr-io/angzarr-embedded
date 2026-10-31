@@ -856,6 +856,18 @@ impl Registry {
         }
     }
 
+    /// The registered policies' names, in registration order: what a
+    /// host holds its config's in-process policies to.
+    pub fn policy_names(&self) -> impl Iterator<Item = &str> {
+        self.policies.iter().map(PolicyEntry::name)
+    }
+
+    /// The registered projectors' names, in registration order: what a
+    /// host holds its config's in-process projectors to.
+    pub fn projector_names(&self) -> impl Iterator<Item = &str> {
+        self.projectors.iter().map(|entry| entry.name.as_str())
+    }
+
     /// The registered domains, in name order.
     pub fn domains(&self) -> impl Iterator<Item = &str> {
         self.domains.keys().map(String::as_str)

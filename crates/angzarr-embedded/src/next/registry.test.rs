@@ -417,3 +417,43 @@ fn a_command_handler_registers_by_its_descriptor() {
     assert!(!aggregate.is_process_manager("hello"));
     assert_eq!(aggregate.kind("hello"), ComponentKind::Aggregate);
 }
+
+/// A projector, as the router's `ProjectorHandler`, named `name`, that
+/// projects nothing.
+struct Named(&'static str);
+
+impl angzarr_router::router::ProjectorHandler for Named {
+    fn name(&self) -> &str {
+        self.0
+    }
+
+    async fn dispatch(
+        &self,
+        _: &crate::next::v1::EventBook,
+    ) -> Result<crate::next::v1::Projection, angzarr_router::error::CodedError> {
+        Ok(crate::next::v1::Projection::default())
+    }
+}
+
+/// The registry names its policies and its projectors, each in
+/// registration order.
+#[test]
+fn the_registry_names_its_policies_and_projectors_in_order() {
+    use angzarr_router::policy::PolicyDispatch;
+    let mut registry = Registry::new();
+    assert_eq!(registry.policy_names().count(), 0);
+    assert_eq!(registry.projector_names().count(), 0);
+    registry
+        .policy_dispatch(PolicyDispatch::new("b-policy", "x", "y"))
+        .policy_dispatch(PolicyDispatch::new("a-policy", "x", "y"))
+        .projector_handler("x", Named("b-view"))
+        .projector_handler("x", Named("a-view"));
+    assert_eq!(
+        registry.policy_names().collect::<Vec<_>>(),
+        ["b-policy", "a-policy"]
+    );
+    assert_eq!(
+        registry.projector_names().collect::<Vec<_>>(),
+        ["b-view", "a-view"]
+    );
+}

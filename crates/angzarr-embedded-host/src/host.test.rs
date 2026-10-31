@@ -100,7 +100,7 @@ fn in_process_domains_are_left_to_the_caller() {
     let table = ComponentConfig {
         name: "table".to_string(),
         language: "rust".to_string(),
-        kind: Default::default(),
+        kind: crate::config::ComponentKindConfig::Domain,
         upcasts: None,
         launch: None,
         entry: Vec::new(),
@@ -372,7 +372,7 @@ fn the_python_player_comes_up_by_its_default_launch() {
     let player = ComponentConfig {
         name: "player".to_string(),
         language: "python".to_string(),
-        kind: Default::default(),
+        kind: crate::config::ComponentKindConfig::Domain,
         upcasts: None,
         launch: None,
         entry: vec!["angzarr-player".to_string()],

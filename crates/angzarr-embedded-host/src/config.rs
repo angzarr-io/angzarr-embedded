@@ -1,29 +1,38 @@
-//! The host's config: the application's components, the language each is
-//! written in, what kind each is, and how each remote one is launched. The
-//! CLI writes it beside the thin `main.rs` it generates; its TOML form is
+//! The host's config: EVERY component of the application, in-process and
+//! remote, what kind each is, the language each is written in, and how
+//! each remote one is launched. The CLI writes it beside the thin
+//! `main.rs` it generates; its TOML form is
 //!
 //! ```toml
 //! [[component]]
 //! name = "table"
+//! kind = "domain"              # required: domain, policy, projector or upcaster
 //! language = "rust"            # in-process: registered by main.rs, not launched
 //! expose = "loopback"          # reachable through the host's listener from
 //!                              # this machine; "ip" from the network; "none"
 //!                              # (the default) from nowhere
 //!
 //! [[component]]
+//! name = "policy-table-player"
+//! kind = "policy"              # in-process too: main.rs registers it
+//! language = "rust"
+//!
+//! [[component]]
 //! name = "player"
+//! kind = "domain"
 //! language = "python"          # launched as `uv run --locked -m player.serve`
 //! entry = ["-m", "player.serve"]
 //! dir = "domains/player"
 //!
 //! [[component]]
 //! name = "table-player"
-//! kind = "policy"              # a PolicyService child; "domain" by default
+//! kind = "policy"              # a PolicyService child
 //! language = "python"
 //! entry = ["-m", "table_player.serve"]
 //!
 //! [[component]]
 //! name = "dealer"
+//! kind = "domain"
 //! language = "go"              # no default: the launch command is given
 //! launch = ["./bin/dealer"]
 //!
@@ -51,13 +60,26 @@
 //! jitter = 0.2                 # less up to this fraction of it at random
 //! ```
 //!
-//! A component's `kind` is the service its child serves: `"domain"` (the
-//! default: an aggregate or a process manager, `CommandHandlerService`),
-//! `"policy"` (`PolicyService`), `"projector"` (`ProjectorService`) or
-//! `"upcaster"` (an upcaster sidecar, decision 14.39, `UpcasterService`
-//! and gRPC health, naming the domain it `upcasts`). A component's
-//! descriptor must agree with its kind ([`HostError::KindMismatch`]); a
-//! sidecar has none, and is up while its health reports SERVING.
+//! A component's `kind` is required, with no default: `"domain"` (an
+//! aggregate or a process manager; a child serves
+//! `CommandHandlerService`), `"policy"` (`PolicyService`), `"projector"`
+//! (`ProjectorService`) or `"upcaster"` (an upcaster, naming the domain it
+//! `upcasts`; a child is a sidecar, decision 14.39, serving
+//! `UpcasterService` and gRPC health). A child's descriptor must agree
+//! with its kind ([`HostError::KindMismatch`]); a sidecar has none, and is
+//! up while its health reports SERVING. An in-process component (Rust, no
+//! `launch`) is registered by the application's `register`, and
+//! [`run`](crate::run) holds the two to each other: one listed that
+//! `register` did not register ([`HostError::NotRegistered`]), and one
+//! registered that no `[[component]]` lists ([`HostError::NotListed`]),
+//! are refused, by name and kind; an in-process upcaster's `upcasts` is a
+//! domain registered here.
+//!
+//! The config is read strictly ([`HostConfig::from_toml`]): an unknown key
+//! in any table, a missing required key, and a value outside a closed set
+//! (`kind`, `expose`, `[policy] on_bug`) are refused, naming the TOML key
+//! path where it goes wrong ([`HostError::ConfigInvalid`]). `language` is
+//! open: a language with no default launch command needs its `launch`.
 //!
 //! ```toml
 //! [[component]]
@@ -96,7 +118,7 @@ pub fn default_launch(language: &str) -> Option<&'static [&'static str]> {
     }
 }
 
-/// The host's whole config.
+/// The host's whole config. Every table refuses a key it does not know.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostConfig {
@@ -116,6 +138,88 @@ pub struct HostConfig {
     /// How the kernel retries a step's retryable failure.
     #[serde(default)]
     pub retry: RetryConfig,
+}
+
+impl HostConfig {
+    /// `text`, a config's TOML, read strictly: malformed TOML, an unknown
+    /// key in any table, a missing required key (a component's `name`,
+    /// `language` or `kind`), a value outside a closed set (`kind`,
+    /// `expose`, `[policy] on_bug`) or of the wrong type is refused as
+    /// [`HostError::ConfigInvalid`], naming `path`, the TOML key path
+    /// where it goes wrong (`component[1].kind`, `retry.retries`; a
+    /// missing key's table, `component[0]`; empty for TOML that does not
+    /// parse), the byte it starts at, and the TOML reader's text.
+    pub fn from_toml(text: &str, path: &str) -> Result<HostConfig, HostError> {
+        toml::from_str(text).map_err(|error| {
+            let offset = error.span().map_or(0, |span| span.start);
+            HostError::ConfigInvalid {
+                path: path.to_string(),
+                key: key_at(text, offset),
+                offset: offset as u64,
+                ext_err_txt: error.message().to_string(),
+            }
+        })
+    }
+}
+
+/// The TOML key path, in `text`, of the deepest key or value holding byte
+/// `offset`: `table.key`, an array's element by its index (`component[1]`).
+/// A table's span is its header's alone, so every key is searched, not
+/// only those within a table holding `offset`. Empty where `text` does
+/// not parse, or no key holds it.
+fn key_at(text: &str, offset: usize) -> String {
+    let Ok(document) = toml::de::DeTable::parse(text) else {
+        return String::new();
+    };
+    let mut found = (0, String::new());
+    in_table(document.get_ref(), offset, &mut Vec::new(), &mut found);
+    found.1
+}
+
+/// [`key_at`] within `table`, at `path`: the deepest match so far is
+/// `found`, its depth and its path.
+fn in_table(
+    table: &toml::de::DeTable<'_>,
+    offset: usize,
+    path: &mut Vec<String>,
+    found: &mut (usize, String),
+) {
+    for (key, value) in table {
+        let segment = match path.is_empty() {
+            true => key.get_ref().to_string(),
+            false => format!(".{}", key.get_ref()),
+        };
+        path.push(segment);
+        let held = key.span().contains(&offset) || value.span().contains(&offset);
+        in_value_of(value.get_ref(), offset, held, path, found);
+        path.pop();
+    }
+}
+
+/// [`key_at`] at `value`, whose key or span holds `offset` when `held`:
+/// itself, then a table's keys and an array's elements.
+fn in_value_of(
+    value: &toml::de::DeValue<'_>,
+    offset: usize,
+    held: bool,
+    path: &mut Vec<String>,
+    found: &mut (usize, String),
+) {
+    if held && path.len() >= found.0 {
+        *found = (path.len(), path.concat());
+    }
+    match value {
+        toml::de::DeValue::Table(table) => in_table(table, offset, path, found),
+        toml::de::DeValue::Array(array) => {
+            for (index, element) in array.iter().enumerate() {
+                path.push(format!("[{index}]"));
+                let held = element.span().contains(&offset);
+                in_value_of(element.get_ref(), offset, held, path, found);
+                path.pop();
+            }
+        }
+        _ => {}
+    }
 }
 
 /// The `[retry]` table: how the kernel retries a step whose failure is
@@ -235,12 +339,11 @@ pub struct ComponentConfig {
     /// The language it is written in (`"rust"`, `"python"`, `"go"`, ...),
     /// lowercase.
     pub language: String,
-    /// The service its child serves: `"domain"` (the default: an
-    /// aggregate or a process manager, `CommandHandlerService`),
-    /// `"policy"` (`PolicyService`), `"projector"` (`ProjectorService`)
-    /// or `"upcaster"` (an upcaster sidecar, `UpcasterService` and gRPC
-    /// health).
-    #[serde(default, skip_serializing_if = "ComponentKindConfig::is_domain")]
+    /// What it is, required: `"domain"` (an aggregate or a process
+    /// manager; a child serves `CommandHandlerService`), `"policy"`
+    /// (`PolicyService`), `"projector"` (`ProjectorService`) or
+    /// `"upcaster"` (a child is a sidecar, serving `UpcasterService` and
+    /// gRPC health).
     pub kind: ComponentKindConfig,
     /// An upcaster's: the domain whose payloads it upcasts (decision
     /// 14.39); unset for every other kind.
@@ -302,14 +405,14 @@ impl Expose {
     }
 }
 
-/// A `[[component]]` table's `kind`: which of angzarr's component
-/// services its child serves. Its descriptor's kind must agree.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// A `[[component]]` table's `kind`, required: what the component is, and
+/// for a child, which of angzarr's component services it serves. A
+/// child's descriptor's kind must agree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ComponentKindConfig {
     /// An aggregate or a process manager (`CommandHandlerService`); which,
     /// its descriptor says.
-    #[default]
     Domain,
     /// A policy (`PolicyService`).
     Policy,
@@ -322,10 +425,6 @@ pub enum ComponentKindConfig {
 }
 
 impl ComponentKindConfig {
-    fn is_domain(&self) -> bool {
-        *self == ComponentKindConfig::Domain
-    }
-
     /// Its TOML form: `"domain"`, `"policy"`, `"projector"` or
     /// `"upcaster"`.
     pub fn as_str(&self) -> &'static str {
