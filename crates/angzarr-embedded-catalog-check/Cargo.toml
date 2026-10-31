@@ -20,7 +20,7 @@ angzarr-embedded-graph = { path = "../angzarr-embedded-graph" }
 angzarr-embedded-host = { path = "../angzarr-embedded-host" }
 angzarr-store-sqlite = { path = "../angzarr-store-sqlite" }
 # angzarr-ports' Arg, to read the adapter's errors, which are in its style.
-angzarr-ports = { git = "https://github.com/angzarr-io/angzarr-project", rev = "3a7cae99e526338cd9217bce1df4db4aeb51e0ca" }
+angzarr-ports = { git = "https://github.com/angzarr-io/angzarr-project", rev = "ed88df424aef2bb714b165a26f5902c79cd3aa73" }
 angzarr-embedded-yaml = { path = "../angzarr-embedded-yaml" }
 fluent-syntax = "0.12"
 # fluent-bundle (Apache-2.0 OR MIT) renders each sample's message with its
