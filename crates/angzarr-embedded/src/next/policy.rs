@@ -100,14 +100,23 @@ pub fn translated(fact: CommandBook) -> Result<Any, CodedError> {
 /// `trigger_sequence` names giving the correlation), its commands in
 /// reaction order then command order. A reaction naming no page of
 /// `source` is checked against no correlation.
+///
+/// Then each command's **identity**: its own `command_id` and
+/// `causation_id`, where set, are the ones the kernel stamps on it, the id
+/// derived from `trigger`, the policy `component` and the command's index
+/// in the whole answer ([`ids::policy_command_id`](super::ids::policy_command_id)),
+/// and `trigger`; any other is
+/// `COORDINATOR_REASON_POLICY_COMMAND_OTHER_IDENTITY`, naming its domain,
+/// type and the `field` (decision 14.48, amended), INTERNAL.
 pub(crate) fn check_reactions(
     output_domain: &str,
     source: &EventBook,
     reactions: Vec<PolicyReaction>,
-    _component: &str,
-    _trigger: &EventRef,
+    component: &str,
+    trigger: &EventRef,
 ) -> Result<Vec<CommandBook>, CodedError> {
-    let trigger = source.cover.clone().unwrap_or_default();
+    use super::reasons::{args, CoordinatorReason};
+    let stream = source.cover.clone().unwrap_or_default();
     let mut commands = Vec::new();
     for reaction in reactions {
         let correlation = source
@@ -118,16 +127,57 @@ pub(crate) fn check_reactions(
             .and_then(|meta| meta.correlation_id.as_ref());
         commands.extend(check_reaction(
             output_domain,
-            &trigger,
+            &stream,
             correlation,
             reaction.commands,
         )?);
     }
+    for (index, command) in (0..).zip(&commands) {
+        let Some(page) = &command.page else {
+            continue;
+        };
+        let other_id = page.command_id.as_ref().is_some_and(|id| {
+            super::ids::policy_command_id(trigger, component, index).as_ref() != Ok(id)
+        });
+        let other_cause = page.causation_id.as_ref().is_some_and(|c| c != trigger);
+        let field = match (other_id, other_cause) {
+            (true, _) => "command_id",
+            (false, true) => "causation_id",
+            (false, false) => continue,
+        };
+        return Err(super::route::internal(
+            CoordinatorReason::PolicyCommandOtherIdentity.as_str_name(),
+            named(command)
+                .into_iter()
+                .chain([(args::FIELD.to_string(), field.to_string())]),
+        ));
+    }
     Ok(commands)
 }
 
+/// A policy's command as its refusal names it: its domain and its
+/// payload's type.
+fn named(command: &CommandBook) -> [(String, String); 2] {
+    use super::reasons::args;
+    use angzarr_router::error::extras;
+    let domain = command.cover.as_ref().map_or("", |c| c.domain.as_str());
+    let command_type = command
+        .page
+        .as_ref()
+        .and_then(|p| match &p.body {
+            Some(command_page::Body::Command(c)) => c.payload.as_ref(),
+            Some(command_page::Body::Fact(f)) => f.payload.as_ref(),
+            None => None,
+        })
+        .map_or("", |p| type_name(&p.type_url));
+    [
+        (args::DOMAIN.to_string(), domain.to_string()),
+        (extras::COMMAND_TYPE.to_string(), command_type.to_string()),
+    ]
+}
+
 /// One triggering event's commands, as a policy answered them, checked and
-/// stamped by the kernel (decision 14.42), every command against five
+/// stamped by the kernel (decision 14.42), every command against these
 /// rules; one failure refuses the whole answer as the policy's bug,
 /// INTERNAL:
 /// - **destination**: its cover's domain is `output_domain`
@@ -138,8 +188,16 @@ pub(crate) fn check_reactions(
 /// - **handling**: none, an empty one being none: a reaction command's
 ///   target stamps its own head (`COORDINATOR_REASON_POLICY_COMMAND_WITH_HANDLING`,
 ///   naming its domain and type; decision 14.48);
+/// - **a command**: a policy's business code emits Commands only, its
+///   refusal facts coming from OnRefused: not a Fact
+///   (`COORDINATOR_REASON_POLICY_COMMAND_IS_FACT`), and with no
+///   `fact_origin` (`COORDINATOR_REASON_POLICY_COMMAND_FACT_ORIGIN`), each
+///   naming its domain and type (decision 14.48, amended);
 /// - **correlation**: unset, or the trigger's, `correlation`
 ///   (`COORDINATOR_REASON_POLICY_COMMAND_OTHER_CORRELATION`).
+///
+/// Its identity is held to its stamp by [`check_reactions`], which knows
+/// its index in the whole answer.
 pub(crate) fn check_reaction(
     output_domain: &str,
     trigger: &Cover,
@@ -147,7 +205,6 @@ pub(crate) fn check_reaction(
     mut commands: Vec<CommandBook>,
 ) -> Result<Vec<CommandBook>, CodedError> {
     use super::reasons::{args, CoordinatorReason};
-    use angzarr_router::error::extras;
     let domain = |c: &CommandBook| {
         c.cover
             .as_ref()
@@ -165,21 +222,7 @@ pub(crate) fn check_reaction(
     }
     let edition = trigger.edition.clone().filter(|e| !e.is_empty());
     for command in &mut commands {
-        let naming = || {
-            let command_type = command
-                .page
-                .as_ref()
-                .and_then(|p| match &p.body {
-                    Some(command_page::Body::Command(c)) => c.payload.as_ref(),
-                    Some(command_page::Body::Fact(f)) => f.payload.as_ref(),
-                    None => None,
-                })
-                .map_or("", |p| type_name(&p.type_url));
-            [
-                (args::DOMAIN.to_string(), domain(command)),
-                (extras::COMMAND_TYPE.to_string(), command_type.to_string()),
-            ]
-        };
+        let naming = || named(command);
         let named = command
             .cover
             .as_ref()
@@ -200,6 +243,17 @@ pub(crate) fn check_reaction(
                 CoordinatorReason::PolicyCommandWithHandling.as_str_name(),
                 naming(),
             ));
+        }
+        let page = command.page.as_ref();
+        let refused = match page.and_then(|p| p.body.as_ref()) {
+            Some(command_page::Body::Fact(_)) => Some(CoordinatorReason::PolicyCommandIsFact),
+            _ if page.is_some_and(|p| p.fact_origin.is_some()) => {
+                Some(CoordinatorReason::PolicyCommandFactOrigin)
+            }
+            _ => None,
+        };
+        if let Some(reason) = refused {
+            return Err(super::route::internal(reason.as_str_name(), naming()));
         }
         let carried = command
             .page
@@ -573,8 +627,9 @@ pub(crate) fn answered(
 /// every command of its target for a hand-written one) is answered by
 /// [`Policy::on_refused`], with the refused command's context; either's
 /// error is carried as the policy's failure. The kernel holds the answer
-/// to the policy's one destination, the trigger's edition, a named root and
-/// the trigger's correlation ([`check_reaction`]).
+/// to the policy's one destination, the trigger's edition, a named root,
+/// commands only and the trigger's correlation and identity
+/// ([`check_reactions`]).
 pub(crate) fn dispatch<P: Policy>(policy: P) -> PolicyDispatch {
     let policy = Arc::new(policy);
     let target = <P::Target as Domain>::NAME;

@@ -734,8 +734,12 @@ impl Registry {
     /// ([`Registry::remote`]: its descriptor is its coordinator's) or not
     /// registered.
     pub(crate) fn kind(&self, domain: &str) -> angzarr_router::pb::ComponentKind {
-        let _ = domain;
-        angzarr_router::pb::ComponentKind::Unspecified
+        use angzarr_router::pb::ComponentKind;
+        match self.domains.get(domain) {
+            Some(entry) if entry.process_manager => ComponentKind::ProcessManager,
+            Some(_) => ComponentKind::Aggregate,
+            None => ComponentKind::Unspecified,
+        }
     }
 
     /// Every projector, in registration order.

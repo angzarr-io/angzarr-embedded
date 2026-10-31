@@ -401,6 +401,8 @@ fn a_command_handler_registers_by_its_descriptor() {
         )
         .unwrap();
     assert!(registry.is_process_manager("hello"));
+    assert_eq!(registry.kind("hello"), ComponentKind::ProcessManager);
+    assert_eq!(registry.kind("nowhere"), ComponentKind::Unspecified);
     assert_eq!(registry.rules_version("hello"), Some("h1"));
     let mut aggregate = crate::next::Registry::new();
     aggregate
@@ -413,4 +415,5 @@ fn a_command_handler_registers_by_its_descriptor() {
         )
         .unwrap();
     assert!(!aggregate.is_process_manager("hello"));
+    assert_eq!(aggregate.kind("hello"), ComponentKind::Aggregate);
 }

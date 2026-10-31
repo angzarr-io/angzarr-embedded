@@ -151,13 +151,15 @@ impl Rejected {
     }
 
     /// As a refused policy receives it, angzarr's `RefusalResponse`: the
-    /// typed refusal object, or an untyped refusal's code and args.
+    /// typed refusal object, or an untyped refusal as the wire carries it
+    /// ([`Rejected::wire`]): the key it went out under, the handler's own
+    /// or the spec's, never angzarr-embedded's code for it, and its args.
     pub fn response(&self) -> angzarr_proto::v1::RefusalResponse {
         use angzarr_proto::v1::refusal_response::Reason;
         angzarr_proto::v1::RefusalResponse {
             reason: Some(match &self.refusal {
                 Some(object) => Reason::Refusal(object.clone()),
-                None => Reason::Diagnostic(diagnostic(&self.report)),
+                None => Reason::Diagnostic(self.wire()),
             }),
         }
     }

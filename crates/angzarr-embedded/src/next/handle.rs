@@ -1182,7 +1182,9 @@ impl<'k> Run<'k> {
     /// its own, its position written with the last (or alone, when no step
     /// writes it). The kernel's refusal of the answer ([`check_reactions`]:
     /// a command outside the policy's destination or its trigger's edition,
-    /// with no root, with Handling, or in another correlation) is the policy's bug, as is the
+    /// with no root, with Handling, a Fact, carrying `fact_origin`, in
+    /// another correlation, or naming an identity other than its stamp) is
+    /// the policy's bug, as is the
     /// router's own error: dead-lettered, and the position stays. The policy's own error ([`StepError::PolicyFailed`]) and a
     /// handler's bug in one of its steps are dead-lettered by their code
     /// and args, and the position moves past the event (or stays, under

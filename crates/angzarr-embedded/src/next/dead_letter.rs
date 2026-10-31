@@ -26,8 +26,9 @@
 //! - a command or fact given up at a cap, every write lost to another write
 //!   to its stream ([`KernelError::RetryCapExhausted`](super::KernelError::RetryCapExhausted),
 //!   decision 14.46): `COORDINATOR_REASON_RETRY_CAP_EXHAUSTED` with its
-//!   attempts and the cap, `processing_failed`, `retry_count` the attempts,
-//!   transient;
+//!   attempts and the cap, `processing_failed`, `retry_count` the retries
+//!   (the attempts after the first, as `ProcessingFailedDetails.retry_count`
+//!   counts them), transient;
 //! - a fatal bug, `processing_failed`, never retried, not transient: a
 //!   handler's ([`KernelError::Router`](super::KernelError::Router) under
 //!   INTERNAL, UNKNOWN or DATA_LOSS), the router's
@@ -37,13 +38,19 @@
 //!   malformed input; a policy's own error
 //!   ([`StepError::PolicyFailed`](super::StepError::PolicyFailed)), keyed
 //!   as the router keys a handler's bug; the kernel's refusal of a
-//!   policy's answer (`COORDINATOR_REASON_POLICY_COMMAND_*`); a projector's
-//!   failure; a book the kernel built malformed;
+//!   policy's answer (`COORDINATOR_REASON_POLICY_COMMAND_*`, an
+//!   identity other than the stamp, a Fact and a `fact_origin` among
+//!   them); a projector's failure; a book the kernel built malformed;
 //! - a step whose retryable failure outlasted its retries
 //!   ([`OnRetryable`](super::OnRetryable)): the failure's own key as last
 //!   answered (`REMOTE_HANDLER_UNAVAILABLE`, a handler's retryable bug, a
 //!   policy step's ABORTED), `processing_failed`, `retry_count` its
 //!   retries, transient.
+//!
+//! Every letter names the component that could not take its payload and
+//! its kind ([`Component`]: `source_component`, `source_component_kind`):
+//! a policy, a projector, or a domain of the kind the registry holds it as,
+//! UNSPECIFIED for a domain handled by a coordinator elsewhere.
 //!
 //! Every line starts with [`DEAD_LETTER_PREFIX`]: **anything arriving there
 //! almost certainly indicates a problem**, never business as usual, so an
@@ -214,8 +221,8 @@ pub(crate) fn write_at_cap(
 /// chooses (decision 14.48): `sequence_mismatch` for a sequence's key,
 /// `command_refused` for a typed refusal, and otherwise
 /// `processing_failed`, the same Diagnostic as its failure, transient with
-/// the attempts made at the retry cap, else never retried and not
-/// transient.
+/// its retries (the attempts after the first) at the retry cap, else never
+/// retried and not transient. It names `component` and its kind.
 pub(crate) fn letter(payload: Payload, component: Component, cause: Cause) -> AngzarrDeadLetter {
     let reason = reason(&cause, &payload);
     let details = match cause {
@@ -233,8 +240,9 @@ pub(crate) fn letter(payload: Payload, component: Component, cause: Cause) -> An
         Cause::Kernel(KernelError::ExpectedSequenceAhead { expected, head, .. }) => {
             sequence_mismatch(*expected, *head)
         }
+        // The retries: the runs after the first.
         Cause::Kernel(KernelError::RetryCapExhausted { attempts, .. }) => {
-            processing_failed(&reason, *attempts, true)
+            processing_failed(&reason, attempts.saturating_sub(1), true)
         }
         Cause::Refused(rejected) => match rejected.refusal_object() {
             Some(refusal) => RejectionDetails::CommandRefused(CommandRefusedDetails {
@@ -250,6 +258,7 @@ pub(crate) fn letter(payload: Payload, component: Component, cause: Cause) -> An
         reason: Some(reason),
         rejection_details: Some(details),
         source_component: component.name.to_string(),
+        source_component_kind: component.kind as i32,
         ..AngzarrDeadLetter::default()
     }
 }
@@ -258,7 +267,8 @@ pub(crate) fn letter(payload: Payload, component: Component, cause: Cause) -> An
 /// whose step at `component` failed for the retryable `cause` after
 /// `retries` retries: its reason the failure's own key and args as last
 /// answered, never the retry cap's (decision 14.48, as amended), and
-/// `processing_failed`, transient, with its retry count.
+/// `processing_failed`, transient, with its retry count. It names
+/// `component` and its kind.
 pub(crate) fn at_cap(
     payload: Payload,
     component: Component,
@@ -271,6 +281,7 @@ pub(crate) fn at_cap(
         rejection_details: Some(processing_failed(&reason, retries, true)),
         reason: Some(reason),
         source_component: component.name.to_string(),
+        source_component_kind: component.kind as i32,
         ..AngzarrDeadLetter::default()
     }
 }
@@ -331,9 +342,15 @@ pub(crate) fn reason(cause: &Cause, payload: &Payload) -> angzarr_proto::v1::Dia
 /// key where the spec has one, naming the book's domain and its payload's
 /// type: Handling on a policy's command
 /// (`COORDINATOR_REASON_POLICY_COMMAND_WITH_HANDLING`), a policy's command
-/// with no root (`COORDINATOR_REASON_POLICY_COMMAND_NO_ROOT`), a refusal
-/// fact for another stream (`COORDINATOR_REASON_REFUSAL_FACT_WRONG_STREAM`,
-/// its domain); any other under angzarr-embedded's code.
+/// with no root (`COORDINATOR_REASON_POLICY_COMMAND_NO_ROOT`), naming its
+/// own command id or causation (`COORDINATOR_REASON_POLICY_COMMAND_OTHER_IDENTITY`,
+/// and the `field`) or correlation
+/// (`COORDINATOR_REASON_POLICY_COMMAND_OTHER_CORRELATION`), a fact
+/// (`COORDINATOR_REASON_POLICY_COMMAND_IS_FACT`), a command carrying
+/// `fact_origin` (`COORDINATOR_REASON_POLICY_COMMAND_FACT_ORIGIN`), a
+/// refusal fact for another stream
+/// (`COORDINATOR_REASON_REFUSAL_FACT_WRONG_STREAM`, its domain); any other
+/// under angzarr-embedded's code.
 fn malformed_reason(malformed: &Malformed, payload: &Payload) -> angzarr_proto::v1::Diagnostic {
     let book = match payload {
         Payload::RejectedCommand(book) => Some(book),
@@ -352,20 +369,29 @@ fn malformed_reason(malformed: &Malformed, payload: &Payload) -> angzarr_proto::
         })
         .map(|p| type_name(&p.type_url).to_string())
         .unwrap_or_default();
-    let naming = |reason: CoordinatorReason| {
-        coded(&route::internal(
-            reason.as_str_name(),
-            [
-                (args::DOMAIN.to_string(), domain.clone()),
-                (extras::COMMAND_TYPE.to_string(), command_type.clone()),
-            ],
-        ))
+    let named = || {
+        [
+            (args::DOMAIN.to_string(), domain.clone()),
+            (extras::COMMAND_TYPE.to_string(), command_type.clone()),
+        ]
     };
+    let naming = |reason: CoordinatorReason| coded(&route::internal(reason.as_str_name(), named()));
     match malformed {
         Malformed::HandlingOnPolicyCommand => naming(CoordinatorReason::PolicyCommandWithHandling),
         Malformed::NoRoot | Malformed::BadRoot { .. } => {
             naming(CoordinatorReason::PolicyCommandNoRoot)
         }
+        Malformed::IdOnPolicyCommand {
+            field: "correlation_id",
+        } => naming(CoordinatorReason::PolicyCommandOtherCorrelation),
+        Malformed::IdOnPolicyCommand { field } => coded(&route::internal(
+            CoordinatorReason::PolicyCommandOtherIdentity.as_str_name(),
+            named()
+                .into_iter()
+                .chain([(args::FIELD.to_string(), field.to_string())]),
+        )),
+        Malformed::FactFromPolicy => naming(CoordinatorReason::PolicyCommandIsFact),
+        Malformed::CommandWithFactOrigin => naming(CoordinatorReason::PolicyCommandFactOrigin),
         Malformed::RefusalMisaddressed => coded(&route::internal(
             CoordinatorReason::RefusalFactWrongStream.as_str_name(),
             [(args::DOMAIN.to_string(), domain.clone())],

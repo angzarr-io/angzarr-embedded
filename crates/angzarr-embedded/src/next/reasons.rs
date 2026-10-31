@@ -31,6 +31,9 @@ pub const ANSWERED: &[CoordinatorReason] = &[
     CoordinatorReason::PolicyCommandNoRoot,
     CoordinatorReason::PolicyCommandOtherCorrelation,
     CoordinatorReason::PolicyCommandWithHandling,
+    CoordinatorReason::PolicyCommandOtherIdentity,
+    CoordinatorReason::PolicyCommandIsFact,
+    CoordinatorReason::PolicyCommandFactOrigin,
     CoordinatorReason::RefusalFactAddressed,
     CoordinatorReason::RefusalFactNoPage,
     CoordinatorReason::RefusalFactNotAFact,
@@ -68,6 +71,9 @@ pub mod args {
     pub const CAP: &str = "cap";
     /// The domain a refusal fact or a policy's command was addressed to.
     pub const DOMAIN: &str = "domain";
+    /// The `CommandPage` field a policy's command set to a value other
+    /// than its coordinator's stamp: `command_id` or `causation_id`.
+    pub const FIELD: &str = "field";
     /// The window's conflict units, comma-separated.
     pub const WINDOW_UNITS: &str = "window_units";
     /// The command's conflict units, comma-separated.

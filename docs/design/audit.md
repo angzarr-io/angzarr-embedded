@@ -505,13 +505,17 @@ kernel runs a policy through angzarr-router's `PolicyComponent` (a
 `PolicyDispatch`, or one in another process: `Registry::policy_component`,
 given the output domain its descriptor names),
 one triggering event at a time, and holds every command of each reaction
-(`PolicyResponse.reactions`, by triggering page) to five rules
+(`PolicyResponse.reactions`, by triggering page) to these rules
 (`check_reactions`): the policy's one destination
 (`COORDINATOR_REASON_POLICY_COMMAND_OUTSIDE_DESTINATION`), the trigger's edition, an unset one
 stamped with it (`COORDINATOR_REASON_POLICY_COMMAND_OUTSIDE_EDITION`), a named root
 (`COORDINATOR_REASON_POLICY_COMMAND_NO_ROOT`), no Handling, which only the target stamps
-(`COORDINATOR_REASON_POLICY_COMMAND_WITH_HANDLING`), and the trigger's correlation, if any
-(`COORDINATOR_REASON_POLICY_COMMAND_OTHER_CORRELATION`). One failure refuses the whole answer
+(`COORDINATOR_REASON_POLICY_COMMAND_WITH_HANDLING`), a Command, never a Fact
+(`COORDINATOR_REASON_POLICY_COMMAND_IS_FACT`), with no `fact_origin`
+(`COORDINATOR_REASON_POLICY_COMMAND_FACT_ORIGIN`), the trigger's correlation, if any
+(`COORDINATOR_REASON_POLICY_COMMAND_OTHER_CORRELATION`), and no command id or causation
+other than the one the kernel stamps (`COORDINATOR_REASON_POLICY_COMMAND_OTHER_IDENTITY`,
+naming the `field`). One failure refuses the whole answer
 as the policy's bug: nothing is delivered, the trigger is dead-lettered
 and the position stays.
 
@@ -964,7 +968,7 @@ angzarr's `types.proto`:
 - `processing_failed`, its failure the reason: an untyped refusal of
   such a command, under the handler's own key; a command or fact given up
   at a write-race cap, `COORDINATOR_REASON_RETRY_CAP_EXHAUSTED`
-  (`retry_count` its attempts, transient); a fatal bug, never retried and
+  (`retry_count` its retries, the attempts after the first, transient); a fatal bug, never retried and
   not transient (a handler's, `ROUTER_REASON_UNHANDLED_HANDLER_ERROR`
   with its code and args the `cause`, a panic included; whatever key a
   remote handler answered; the router's own error on malformed input; a
@@ -973,6 +977,12 @@ angzarr's `types.proto`:
   failure; a book the kernel built malformed); and a step whose retryable
   failure outlasted its retries, under its own key as last answered, never
   the retry cap's (`retry_count` its retries, transient).
+
+Every letter names the component that could not take its payload and
+its kind (`source_component`, `source_component_kind`): a policy, a
+projector, or a domain of the kind the registry holds it as, UNSPECIFIED
+for a domain handled by a coordinator elsewhere, whose descriptor is not
+here.
 
 **Every line starts with the prefix**: anything arriving there almost
 certainly indicates a problem, so an operator alerts on it. The line is
