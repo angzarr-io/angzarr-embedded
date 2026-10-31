@@ -11,22 +11,29 @@
 //! or its rejection with nothing committed), and a hand-written policy
 //! registered with `Registry::policy` answers its source's event with a
 //! command to the trigger's own root (`PolicyContext::source_root`), which
-//! the kernel runs as the next step.
+//! the kernel runs as the next step. A policy's target known by its name
+//! and commands alone (`CommandTarget`), a domain a coordinator elsewhere
+//! owns (`Registry::remote`), needs no stand-in aggregate: its step goes
+//! to that coordinator.
 
 use std::convert::Infallible;
 use std::fmt;
+use std::sync::{Arc, Mutex};
 
 use ::angzarr_embedded::next::angzarr_router::domain::DomainDispatch;
+use ::angzarr_embedded::next::angzarr_router::pb::CommandResponse;
 use ::angzarr_embedded::next::markup::{
-    self, Commands, Context, Decides, DomainMessage, NoSnapshot, Policy, PolicyContext, Rejection,
-    Routed, TypeName,
+    self, CommandTarget, Commands, Context, Decides, DomainMessage, NoSnapshot, Policy,
+    PolicyContext, Rejection, Routed, TypeName,
 };
 use ::angzarr_embedded::next::v1::{
-    command_page, Command, CommandBook, CommandPage, Cover, StateDescriptor, Uuid,
+    command_page, Command, CommandBook, CommandPage, Cover, DeliveryOutcome, EventBook, EventPage,
+    Outcome, StateDescriptor, Uuid,
 };
 use ::angzarr_embedded::next::{
-    type_name, Any, Domain, Failure, Handled, Kernel, MemoryDeadLetters, OnRetryable, Payload,
-    PayloadError, Registry, Sampled, State, Timestamp, WireError,
+    type_name, Any, Coordinated, CoordinatorPort, Domain, Failure, Handled, Kernel,
+    MemoryDeadLetters, OnRetryable, Payload, PayloadError, Registry, Sampled, State, Timestamp,
+    WireError,
 };
 use angzarr_embedded_diagnostic::{Arg, Diagnostic, Report};
 
@@ -48,6 +55,18 @@ mod wire {
 
     #[derive(Clone, PartialEq, ::prost::Message)]
     pub struct Note {}
+
+    /// A command of the remote bank's, which nothing here decides.
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct Deposit {
+        #[prost(int64, tag = "1")]
+        pub cents: i64,
+    }
+
+    impl ::prost::Name for Deposit {
+        const NAME: &'static str = "Deposit";
+        const PACKAGE: &'static str = "toy.bank.v1";
+    }
 
     #[derive(Clone, PartialEq, ::prost::Message)]
     pub struct Noted {}
@@ -90,6 +109,23 @@ pub struct Note;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Noted;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Deposit {
+    cents: i64,
+}
+
+impl DomainMessage for Deposit {
+    type Wire = wire::Deposit;
+
+    fn to_wire(&self) -> wire::Deposit {
+        wire::Deposit { cents: self.cents }
+    }
+
+    fn from_wire(wire: wire::Deposit) -> Result<Self, WireError> {
+        Ok(Deposit { cents: wire.cents })
+    }
+}
 
 impl DomainMessage for Bump {
     type Wire = wire::Bump;
@@ -362,6 +398,80 @@ impl Policy for NoteBumps {
     }
 }
 
+// ------------------------------------------------- a remote domain's target
+
+/// The bank's commands: a domain a coordinator elsewhere owns, known here
+/// by its name and the commands it decides alone. No aggregate stands in
+/// for it.
+pub struct Bank;
+
+impl CommandTarget for Bank {
+    const DOMAIN: &'static str = "bank";
+
+    fn command_types() -> Vec<String> {
+        vec![TypeName::of::<wire::Deposit>().full_name()]
+    }
+}
+
+impl Decides<Deposit> for Bank {}
+
+/// Banks every bump: a deposit to the bank account of the counter's own
+/// root.
+pub struct BankBumps;
+
+impl Policy for BankBumps {
+    const NAME: &'static str = "counter-bank";
+    type Source = Counter;
+    type Target = Bank;
+    const EVENTS: &'static [TypeName] = &[TypeName::of::<wire::Bumped>()];
+
+    fn on_event(&self, event: &Any, ctx: &PolicyContext) -> Result<Option<Commands<Bank>>, Report> {
+        let Some(bumped) = markup::decode_message::<Bumped>(event).map_err(|e| Report::of(&e))?
+        else {
+            return Ok(None);
+        };
+        markup::policy_answer::<Bank, Infallible>(Ok(Commands::none().to(
+            ctx.source_root().clone(),
+            Deposit {
+                cents: bumped.by * 100,
+            },
+        )))
+    }
+}
+
+/// The bank's coordinator, elsewhere: every book it is handed, each
+/// answered with one `Deposited`.
+#[derive(Clone, Default)]
+struct BankCoordinator {
+    handed: Arc<Mutex<Vec<CommandBook>>>,
+}
+
+impl CoordinatorPort for BankCoordinator {
+    fn handle(&self, book: CommandBook) -> Coordinated<'_> {
+        let cover = book.cover.clone();
+        self.handed.lock().unwrap().push(book);
+        Box::pin(async move {
+            Ok(CommandResponse {
+                events: Some(EventBook {
+                    cover,
+                    pages: vec![EventPage {
+                        payload: Some(Any {
+                            type_url: "/toy.bank.v1.Deposited".to_string(),
+                            value: Vec::new(),
+                        }),
+                        ..EventPage::default()
+                    }],
+                    ..EventBook::default()
+                }),
+                outcome: Some(Outcome {
+                    delivery: DeliveryOutcome::Applied as i32,
+                    ..Outcome::default()
+                }),
+            })
+        })
+    }
+}
+
 // ---------------------------------------------------------------- running
 
 type Mem = ::angzarr_embedded::next::angzarr_ports::memory::MemoryStore;
@@ -476,4 +586,43 @@ fn hand_written_payloads_round_trip() {
         CounterCommand::from_any(&other),
         Err(PayloadError::UnknownType { type_url }) if type_url == "/toy.counter.v1.Noted"
     ));
+}
+
+/// A policy whose target is a remote domain's command set: the counter's
+/// event sets off a step the kernel hands the bank's coordinator, its
+/// command for the bank account of the trigger's root, with no aggregate
+/// of the bank's here.
+#[test]
+fn a_policy_targets_a_remote_domain_by_its_command_set_alone() {
+    let bank = BankCoordinator::default();
+    let mut registry = Registry::new();
+    registry.aggregate::<Counter>(Counter::default);
+    registry.remote(Bank::DOMAIN, bank.clone()).unwrap();
+    registry.policy(BankBumps);
+    // Only the counter's step is committed here: the bank's events are its
+    // coordinator's.
+    assert_eq!(
+        settle(&registry, bump(3)),
+        Ok(vec![(root(), vec!["toy.counter.v1.Bumped".to_string()])])
+    );
+    let handed = bank.handed.lock().unwrap().clone();
+    assert_eq!(handed.len(), 1, "{handed:?}");
+    let cover = handed[0].cover.clone().unwrap_or_default();
+    assert_eq!((cover.domain.as_str(), cover.root), ("bank", Some(root())));
+    let payload = match handed[0].page.as_ref().and_then(|p| p.body.as_ref()) {
+        Some(command_page::Body::Command(command)) => command.payload.clone(),
+        _ => None,
+    };
+    assert_eq!(payload, Some(markup::pack_message(&Deposit { cents: 300 })));
+}
+
+/// A domain's command set, as a policy's target reads it, is the
+/// domain's: its name and the full names of its commands.
+#[test]
+fn a_domain_is_its_own_command_target() {
+    assert_eq!(Counter::DOMAIN, "counter");
+    assert_eq!(
+        <Counter as CommandTarget>::command_types(),
+        ["toy.counter.v1.Bump", "toy.counter.v1.Note"]
+    );
 }

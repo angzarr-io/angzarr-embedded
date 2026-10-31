@@ -487,10 +487,11 @@ pub trait ProcessManager: Domain<State = Self, Rules = ()> {
     const STARTS: &'static [TypeName];
 }
 
-/// That `A` decides command `C`: `#[handles_cmd(C)]` on its impl. What a
-/// policy's [`Commands`] is checked against. Emitted by the macro, one per
-/// command.
-pub trait Decides<C: DomainMessage>: Domain {}
+/// That `A` decides command `C`: `#[handles_cmd(C)]` on its impl, or, for
+/// a remote domain's command set ([`CommandTarget`]), written beside it.
+/// What a policy's [`Commands`] is checked against. Emitted by the macro,
+/// one per command.
+pub trait Decides<C: DomainMessage>: CommandTarget {}
 
 /// That `A` ingests fact `F`: `#[handles_fact(F)]` on its impl. What a
 /// translating policy's callback is checked against: it must return a fact
@@ -901,22 +902,23 @@ impl<C> Refusal<C> {
 /// they react to events the application's own domains created, so an `Err`
 /// is a bug, dead-lettered as
 /// [`StepError::PolicyFailed`](super::StepError::PolicyFailed).
-pub use super::policy::Policy;
+pub use super::policy::{CommandTarget, Policy};
 
 /// What a policy's `#[on_event(E)]` handler returns as its `Ok` (its `Err`
 /// is any [`Diagnostic`](angzarr_embedded_diagnostic::Diagnostic): a bug,
 /// dead-lettered as
 /// [`StepError::PolicyFailed`](super::StepError::PolicyFailed)): commands for its target
-/// `T`, each with the root of the stream it is for. For a process manager
+/// `T` ([`CommandTarget`]: a domain here, or a remote one's command set),
+/// each with the root of the stream it is for. For a process manager
 /// that is the trigger's correlation ([`PolicyContext::correlation_id`]);
 /// any other root is a policy bug. Each command's type must be one
 /// `T` decides ([`Decides`]).
-pub struct Commands<T: Domain> {
+pub struct Commands<T: CommandTarget> {
     orders: Vec<(Uuid, Any)>,
     target: std::marker::PhantomData<fn() -> T>,
 }
 
-impl<T: Domain> Commands<T> {
+impl<T: CommandTarget> Commands<T> {
     /// No commands.
     pub fn none() -> Commands<T> {
         Commands {
@@ -944,20 +946,23 @@ impl<T: Domain> Commands<T> {
         &self.orders
     }
 
+    /// As [`Commands::orders`], owned.
+    pub(crate) fn into_orders(self) -> Vec<(Uuid, Any)> {
+        self.orders
+    }
+}
+
+impl<T: Domain> Commands<T> {
     /// These commands and `command`, one of `T`'s, for the stream of `T` at
-    /// `root`: a hand-written policy's way to send one.
-    pub fn send(self, root: Uuid, command: &T::Command) -> Commands<T> {
+    /// `root`: a hand-written policy's way to send one of a domain's
+    /// command payload.
+    pub fn send(self, root: Uuid, command: &<T as Domain>::Command) -> Commands<T> {
         let mut orders = self.orders;
         orders.push((root, command.to_any()));
         Commands {
             orders,
             target: self.target,
         }
-    }
-
-    /// As [`Commands::orders`], owned.
-    pub(crate) fn into_orders(self) -> Vec<(Uuid, Any)> {
-        self.orders
     }
 }
 
@@ -1541,7 +1546,7 @@ pub fn translated_fact<
 /// [`Policy::on_event`] returns it: its commands
 /// for the target `T`, as handled (`Some`); or its error as a [`Report`],
 /// whose code and args are the dead letter's `cause`.
-pub fn policy_answer<T: Domain, E: angzarr_embedded_diagnostic::Diagnostic>(
+pub fn policy_answer<T: CommandTarget, E: angzarr_embedded_diagnostic::Diagnostic>(
     answer: Result<Commands<T>, E>,
 ) -> Result<Option<Commands<T>>, Report> {
     answer.map(Some).map_err(|error| Report::of(&error))

@@ -288,6 +288,51 @@ pub(crate) fn check_reaction(
     Ok(commands)
 }
 
+/// What a policy sends commands to ([`Policy::Target`]): a domain known by
+/// its name and the commands it decides alone, wherever it is decided.
+/// Every [`Domain`] is one, so a policy targets a domain registered here
+/// by its own type; a domain a coordinator elsewhere owns
+/// ([`Registry::remote`](super::Registry::remote)), or one served by a
+/// child process, is targeted by a command set written for it, with no
+/// stand-in aggregate:
+///
+/// ```ignore
+/// pub struct Bank;
+///
+/// impl CommandTarget for Bank {
+///     const DOMAIN: &'static str = "bank";
+///     fn command_types() -> Vec<String> {
+///         vec![TypeName::of::<wire::Deposit>().full_name()]
+///     }
+/// }
+///
+/// impl Decides<Deposit> for Bank {} // what `Commands<Bank>::to` takes
+/// ```
+pub trait CommandTarget: 'static {
+    /// The domain's name: the `Cover.domain` of the streams its commands
+    /// go to. Not `NAME`, so a domain's own [`Domain::NAME`] is never
+    /// ambiguous where both traits are in scope.
+    const DOMAIN: &'static str;
+
+    /// The full names (`"pkg.v1.Deposit"`) of the commands it decides: the
+    /// refused commands a policy that answers refusals and names no
+    /// [`Policy::TRANSLATES`] answers.
+    fn command_types() -> Vec<String>;
+}
+
+/// A domain is the target of its own commands: its name, and its
+/// [`Domain::Command`]'s types.
+impl<D: Domain> CommandTarget for D {
+    const DOMAIN: &'static str = D::NAME;
+
+    fn command_types() -> Vec<String> {
+        <D::Command as Payload>::type_urls()
+            .iter()
+            .map(|url| type_name(url).to_string())
+            .collect()
+    }
+}
+
 /// Event → commands: one source domain, one target domain, and the
 /// commands each source event is owed, each with the root of the target
 /// stream it is for. Stateless: what it owes is a function of the event.
@@ -321,8 +366,10 @@ pub trait Policy: Send + Sync + 'static {
     /// The one domain whose events it handles, and to which it delivers
     /// its refusal facts.
     type Source: Domain;
-    /// The one domain it sends commands to.
-    type Target: Domain;
+    /// The one domain it sends commands to, known by its name and its
+    /// commands ([`CommandTarget`]): a domain here, by its own type, or a
+    /// remote one's command set.
+    type Target: CommandTarget;
     /// The events it handles, in marker order (a marked-up policy's); empty
     /// for a hand-written one, which reads every event of its source.
     const EVENTS: &'static [TypeName] = &[];
@@ -535,7 +582,7 @@ impl<P: Policy, F: FnMut(Order)> Handler<P::Source> for PolicyHandler<'_, P, F> 
                 return;
             }
         };
-        let target = <P::Target as Domain>::NAME;
+        let target = <P::Target as CommandTarget>::DOMAIN;
         for order in orders(
             P::NAME,
             target,
@@ -557,7 +604,7 @@ impl<D: Domain, P: Projection<D>> Handler<D> for Projector<'_, P> {
 /// The stream a policy's command for `root` goes to, for a source event in
 /// `source`: the target domain's, in the source's edition.
 pub fn target_cover<P: Policy>(source: &Cover, root: &Uuid) -> Cover {
-    cover_in(<P::Target as Domain>::NAME, source, root)
+    cover_in(<P::Target as CommandTarget>::DOMAIN, source, root)
 }
 
 /// `domain`'s stream at `root`, in `source`'s edition.
@@ -632,7 +679,7 @@ pub(crate) fn answered(
 /// ([`check_reactions`]).
 pub(crate) fn dispatch<P: Policy>(policy: P) -> PolicyDispatch {
     let policy = Arc::new(policy);
-    let target = <P::Target as Domain>::NAME;
+    let target = <P::Target as CommandTarget>::DOMAIN;
     let mut table = PolicyDispatch::new(P::NAME, <P::Source as Domain>::NAME, target);
     let events: Vec<String> = match P::EVENTS.is_empty() {
         true => <<P::Source as Domain>::Event as Payload>::type_urls()
@@ -678,10 +725,7 @@ pub(crate) fn dispatch<P: Policy>(policy: P) -> PolicyDispatch {
     }
     if P::ANSWERS_REFUSALS {
         let translated: Vec<String> = match P::TRANSLATES.is_empty() {
-            true => <<P::Target as Domain>::Command as Payload>::type_urls()
-                .iter()
-                .map(|url| type_name(url).to_string())
-                .collect(),
+            true => <P::Target as CommandTarget>::command_types(),
             false => P::TRANSLATES.iter().map(TypeName::full_name).collect(),
         };
         for command_type in translated {

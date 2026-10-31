@@ -2880,7 +2880,9 @@ pub fn state_factory(_attr: TokenStream, _item: TokenStream) -> TokenStream {
 }
 
 /// Marks an inherent impl as a POLICY: `#[policy(name = "..", source = <domain>,
-/// target = <domain>)]` (see the crate docs). Generates `markup::Policy`:
+/// target = <domain>)]` (see the crate docs), its target any
+/// `markup::CommandTarget`: a domain here, by its type, or a remote
+/// domain's command set, with no stand-in aggregate. Generates `markup::Policy`:
 /// its refusal pass-through, and translate for each command its
 /// `#[on_refused]` callbacks name.
 ///
