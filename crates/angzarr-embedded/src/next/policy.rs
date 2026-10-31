@@ -376,7 +376,7 @@ pub trait Policy: Send + Sync + 'static {
         ctx: &CommandContext,
     ) -> Result<Any, Report> {
         let _ = ctx;
-        Ok(markup::__pass_through(refusal))
+        Ok(markup::pass_through(refusal))
     }
 }
 

@@ -104,6 +104,12 @@ pub(crate) mod toys;
 #[path = "decorated.test.rs"]
 mod decorated;
 
+// An aggregate and a policy written by hand, with no macro, through
+// markup's public functions alone, on angzarr-embedded as a dependent sees it.
+#[cfg(test)]
+#[path = "hand_written.test.rs"]
+mod hand_written;
+
 // The kernel over the shared SQLite adapter.
 #[cfg(test)]
 #[path = "sqlite.test.rs"]

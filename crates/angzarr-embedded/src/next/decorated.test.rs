@@ -3744,7 +3744,7 @@ mod typed_refusals {
             event: &Any,
             _ctx: &PolicyContext,
         ) -> Result<Option<Commands<Wallet>>, Report> {
-            let Ok(Some(started)) = markup::__decode::<BuyInStarted>(event) else {
+            let Ok(Some(started)) = markup::decode_message::<BuyInStarted>(event) else {
                 return Ok(None);
             };
             Ok(Some(Commands::none().to(

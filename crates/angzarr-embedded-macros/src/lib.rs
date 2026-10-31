@@ -6,7 +6,11 @@
 //! `<Name>Handler` trait, and its constants. [`policy`] generates a policy's
 //! `angzarr_embedded::next::markup::Policy`, its refusal pass-through included, and
 //! [`projector`] a projector's `AsyncProjector`. Hand-writing `Domain`
-//! stays first-class; this is a way of writing one, not a layer over it.
+//! stays first-class; this is a way of writing one, not a layer over it:
+//! the expansion calls only `angzarr_embedded::next::markup`'s documented,
+//! stable public functions (`run_command`, `decode_message`,
+//! `policy_answer`, ...), so anything it writes can be written by hand
+//! (angzarr-embedded's `next/hand_written.test.rs` does).
 //!
 //! Every component written here assumes nothing about distribution: the
 //! same aggregate, process manager, policy or projector runs in angzarr-embedded's
@@ -442,17 +446,17 @@
 //! // Every marked handler, registered on angzarr-router's table for the
 //! // domain (`DomainDispatch<Wallet>`, which the registry builds, folding
 //! // with `apply`): each command handler by its command's full name, run by
-//! // `markup::__command` (the handler's events, then each continuation on a
+//! // `markup::run_command` (the handler's events, then each continuation on a
 //! // working copy with them applied, up to STEP_LIMIT steps; a refusal as
 //! // the router's business rejection, its typed object packed); each fact
-//! // handler by `markup::__fact`; each `#[on_refused(C)]` by the router's
+//! // handler by `markup::run_fact`; each `#[on_refused(C)]` by the router's
 //! // `on_refused`. (A process manager's `starts` inputs are its
 //! // `markup::ProcessManager::STARTS`, not routes.)
 //! impl markup::Routed for Wallet {
 //!     fn route(table: DomainDispatch<Wallet>) -> DomainDispatch<Wallet> {
 //!         table
 //!             .on_command("toy.wallet.cmd.v1.Deposit", |any, state, cctx| {
-//!                 markup::__command::<Wallet, _, Deposit, _, _>(any, &*state, cctx, Wallet::deposit)
+//!                 markup::run_command::<Wallet, _, Deposit, _, _>(any, &*state, cctx, Wallet::deposit)
 //!             })
 //!             ..
 //!     }
@@ -3069,15 +3073,15 @@ fn flow(attr: Tokens, item: Tokens, flow: Flow) -> syn::Result<Tokens> {
                     ) -> ::core::result::Result<::angzarr_embedded::next::Any, #m::Report> {
                         #(
                             if let ::core::option::Option::Some(refusal) =
-                                #m::__translating::<#commands>(refusal)?
+                                #m::decode_refusal::<#commands>(refusal)?
                             {
-                                return #m::__domestic::<<Self as #m::Policy>::Source, _, _>(
+                                return #m::translated_fact::<<Self as #m::Policy>::Source, _, _>(
                                     <#self_ty>::#callback_methods(self, &refusal, ctx),
                                 );
                             }
                         )*
                         let _ = ctx;
-                        ::core::result::Result::Ok(#m::__pass_through(refusal))
+                        ::core::result::Result::Ok(#m::pass_through(refusal))
                     }
 
                     fn on_event(
@@ -3089,9 +3093,9 @@ fn flow(attr: Tokens, item: Tokens, flow: Flow) -> syn::Result<Tokens> {
                         #m::Report,
                     > {
                         #(
-                            match #m::__decode::<#event_types>(event) {
+                            match #m::decode_message::<#event_types>(event) {
                                 ::core::result::Result::Ok(::core::option::Option::Some(event)) => {
-                                    return #m::__answered::<<Self as #m::Policy>::Target, _>(
+                                    return #m::policy_answer::<<Self as #m::Policy>::Target, _>(
                                         <#self_ty>::#event_methods(self, &event, ctx),
                                     );
                                 }
@@ -3128,14 +3132,14 @@ fn flow(attr: Tokens, item: Tokens, flow: Flow) -> syn::Result<Tokens> {
                         ctx: &'a #m::ProjectionContext,
                     ) -> ::core::option::Option<#m::Projecting<'a>> {
                         #(
-                            match #m::__decode::<#types>(event) {
+                            match #m::decode_message::<#types>(event) {
                                 ::core::result::Result::Ok(::core::option::Option::Some(event)) => {
-                                    return ::core::option::Option::Some(#m::__projecting(
+                                    return ::core::option::Option::Some(#m::projecting(
                                         async move { <#self_ty>::#names(self, &event, ctx).await },
                                     ));
                                 }
                                 ::core::result::Result::Err(error) => {
-                                    return ::core::option::Option::Some(#m::__projecting(
+                                    return ::core::option::Option::Some(#m::projecting(
                                         async move { ::core::result::Result::Err(#m::Report::of(&error)) },
                                     ));
                                 }
@@ -3438,12 +3442,12 @@ fn payload_set(
     } else {
         quote! {
             match self {
-                #(#name::#idents(value) => #m::__pack(value),)*
+                #(#name::#idents(value) => #m::pack_message(value),)*
                 #(#name::#refused_idents(_, any) => ::core::clone::Clone::clone(any),)*
             }
         }
     };
-    let refusal_url = (!refused.is_empty()).then(|| quote!(#m::__command_refused_url(),));
+    let refusal_url = (!refused.is_empty()).then(|| quote!(#m::command_refused_type_url(),));
     quote! {
         #[doc(hidden)]
         #[derive(Clone, Debug)]
@@ -3462,13 +3466,13 @@ fn payload_set(
                 any: &::angzarr_embedded::next::Any,
             ) -> ::core::result::Result<Self, ::angzarr_embedded::next::PayloadError> {
                 #(
-                    if let ::core::option::Option::Some(value) = #m::__decode::<#types>(any)? {
+                    if let ::core::option::Option::Some(value) = #m::decode_message::<#types>(any)? {
                         return ::core::result::Result::Ok(#name::#idents(value));
                     }
                 )*
                 #(
                     if let ::core::option::Option::Some(refused) =
-                        #m::__refused::<#refused_types>(any)?
+                        #m::decode_command_refused::<#refused_types>(any)?
                     {
                         return ::core::result::Result::Ok(
                             #name::#refused_idents(refused, ::core::clone::Clone::clone(any)),
@@ -3476,13 +3480,13 @@ fn payload_set(
                     }
                 )*
                 ::core::result::Result::Err(::angzarr_embedded::next::PayloadError::UnknownType {
-                    type_url: #m::__refused_command_url(any)
+                    type_url: #m::refused_command_type_url(any)
                         .unwrap_or_else(|| ::core::clone::Clone::clone(&any.type_url)),
                 })
             }
 
             fn type_urls() -> ::std::vec::Vec<::std::string::String> {
-                ::std::vec![#(#m::__type_url::<#types>(),)* #refusal_url]
+                ::std::vec![#(#m::type_url_of::<#types>(),)* #refusal_url]
             }
         }
     }
@@ -3605,7 +3609,7 @@ fn domain(attr: Tokens, item: Tokens, kind: Kind) -> syn::Result<Tokens> {
         let name = full_name(ty);
         quote! {
             .on_command(#name, |any, state, cctx| {
-                #m::__command::<#self_ty, _, #ty, _, _>(any, &*state, cctx, <#self_ty>::#method)
+                #m::run_command::<#self_ty, _, #ty, _, _>(any, &*state, cctx, <#self_ty>::#method)
             })
         }
     });
@@ -3614,7 +3618,7 @@ fn domain(attr: Tokens, item: Tokens, kind: Kind) -> syn::Result<Tokens> {
         let name = full_name(ty);
         quote! {
             .on_fact_with_context(#name, |any, state, cctx| {
-                #m::__fact::<#self_ty, #ty, _>(any, state, cctx, <#self_ty>::#method)
+                #m::run_fact::<#self_ty, #ty, _>(any, state, cctx, <#self_ty>::#method)
             })
         }
     });
@@ -3623,7 +3627,7 @@ fn domain(attr: Tokens, item: Tokens, kind: Kind) -> syn::Result<Tokens> {
         let name = full_name(ty);
         quote! {
             .on_refused(#name, |refused, state, cctx| {
-                #m::__on_refused::<#self_ty, #ty, _, _>(refused, state, cctx, <#self_ty>::#method)
+                #m::run_on_refused::<#self_ty, #ty, _, _>(refused, state, cctx, <#self_ty>::#method)
             })
         }
     });
@@ -3754,7 +3758,7 @@ fn domain(attr: Tokens, item: Tokens, kind: Kind) -> syn::Result<Tokens> {
                 }
 
                 fn descriptor() -> ::angzarr_embedded::next::v1::StateDescriptor {
-                    #m::__descriptor::<#snapshot>()
+                    #m::state_descriptor::<#snapshot>()
                 }
             }
         },
@@ -3782,7 +3786,7 @@ fn domain(attr: Tokens, item: Tokens, kind: Kind) -> syn::Result<Tokens> {
                 }
 
                 fn descriptor() -> ::angzarr_embedded::next::v1::StateDescriptor {
-                    #m::__descriptor::<#m::NoSnapshot>()
+                    #m::state_descriptor::<#m::NoSnapshot>()
                 }
             }
         },

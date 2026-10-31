@@ -3,7 +3,8 @@
 //! `#[handles_cmd]`, `#[handles_fact]`, `#[on_refused]`, `#[applies]`),
 //! policy (`#[policy]`, `#[on_event]`) and projector (`#[projector]`,
 //! `#[projects]`); see angzarr-embedded-macros' crate docs. A hand-written
-//! [`Domain`] needs none of it.
+//! [`Domain`] needs none of it; a hand-written component that wants what
+//! the markup does uses the same functions the expansion calls.
 //!
 //! - [`Context`]: a domain handler's third argument, what it may read
 //!   besides itself and its input: one context, an aggregate's and a
@@ -43,6 +44,17 @@
 //! - [`TypeName`]: a message's package and name, as the generated
 //!   constants list them.
 //! - [`NoSnapshot`]: the snapshot form of a domain that has none.
+//! - The functions the expansion calls, each stable and public, so
+//!   anything the markup writes can be written by hand
+//!   (`next/hand_written.test.rs` registers an aggregate and a policy
+//!   with no macro): packing and decoding ([`pack_message`],
+//!   [`type_url_of`], [`decode_message`], [`command_refused_type_url`],
+//!   [`decode_command_refused`], [`refused_command_type_url`]); running a
+//!   domain's handler as one decision ([`run_command`], [`run_fact`],
+//!   [`run_on_refused`]); a policy's answers ([`policy_answer`],
+//!   [`pass_through`], [`decode_refusal`], [`translated_fact`]); a
+//!   projector's run ([`projecting`]); and a state's descriptor
+//!   ([`state_descriptor`]).
 //! - [`v1`]: angzarr's refusal messages, until angzarr-embedded's angzarr-proto has
 //!   them.
 //!
@@ -523,7 +535,7 @@ impl TypedRefusal {
         object: &T,
     ) -> TypedRefusal {
         TypedRefusal {
-            object: __pack(object),
+            object: pack_message(object),
         }
     }
 
@@ -534,7 +546,7 @@ impl TypedRefusal {
 
     /// The object, as `T`, if it is one.
     pub fn object<T: DomainMessage>(&self) -> Option<T> {
-        __decode(&self.object).ok().flatten()
+        decode_message(&self.object).ok().flatten()
     }
 }
 
@@ -817,7 +829,7 @@ impl<C> CommandRefused<C> {
     /// The typed refusal object, as `T`, if the target refused with one
     /// and it is a `T`.
     pub fn refusal<T: DomainMessage>(&self) -> Option<T> {
-        __decode(self.refusal.as_ref()?).ok().flatten()
+        decode_message(self.refusal.as_ref()?).ok().flatten()
     }
 
     /// The policy's triggering event: a page of this stream.
@@ -866,7 +878,7 @@ impl<C> Refusal<C> {
     /// and it is a `T`.
     pub fn refusal<T: DomainMessage>(&self) -> Option<T> {
         match self.response.reason.as_ref()? {
-            v1::refusal_response::Reason::Refusal(object) => __decode(object).ok().flatten(),
+            v1::refusal_response::Reason::Refusal(object) => decode_message(object).ok().flatten(),
             v1::refusal_response::Reason::Diagnostic(_) => None,
         }
     }
@@ -920,7 +932,7 @@ impl<T: Domain> Commands<T> {
         T: Decides<C>,
     {
         let mut orders = self.orders;
-        orders.push((root, __pack(&command)));
+        orders.push((root, pack_message(&command)));
         Commands {
             orders,
             target: self.target,
@@ -1136,26 +1148,31 @@ where
 
 // ---------------------------------------------------------------- the glue
 //
-// What angzarr-embedded-macros' expansion calls: public so the expansion can name
-// them, hidden because nothing else should.
+// What angzarr-embedded-macros' expansion calls, and a hand-written domain,
+// policy or projector calls the same way: stable, public API.
 
-/// `value` packed as its wire message.
-#[doc(hidden)]
-pub fn __pack<T: DomainMessage>(value: &T) -> Any {
+/// `value` packed as its wire message: an `Any` whose type URL is its
+/// wire message's (`/package.Name`). What a hand-written payload enum's
+/// [`Payload::to_any`](super::Payload::to_any) does for a domain type.
+pub fn pack_message<T: DomainMessage>(value: &T) -> Any {
     super::payload::pack(&value.to_wire())
 }
 
-/// `T`'s type URL.
-#[doc(hidden)]
-pub fn __type_url<T: DomainMessage>() -> String {
+/// `T`'s type URL, its wire message's: `/package.Name`. What a
+/// hand-written payload enum's
+/// [`Payload::type_urls`](super::Payload::type_urls) lists.
+pub fn type_url_of<T: DomainMessage>() -> String {
     format!("/{}", <T::Wire as prost::Name>::full_name())
 }
 
-/// `any` as a `T`, if it is one: `None` for another type; a payload of
-/// `T`'s type that does not decode, or that is not a valid `T`, is the
-/// error.
-#[doc(hidden)]
-pub fn __decode<T: DomainMessage>(any: &Any) -> Result<Option<T>, PayloadError> {
+/// `any` as a `T`, if it is one: `Ok(None)` for a payload of another
+/// type, so a caller tries each of its types in turn; a payload of `T`'s
+/// type whose bytes do not decode is [`PayloadError::Decode`], and one
+/// that decodes but is not a valid `T` ([`DomainMessage::from_wire`]
+/// refused it) is [`PayloadError::Invalid`]. What a hand-written payload
+/// enum's [`Payload::from_any`](super::Payload::from_any), a policy's
+/// `on_event` and a projector's `project` decode with.
+pub fn decode_message<T: DomainMessage>(any: &Any) -> Result<Option<T>, PayloadError> {
     if super::payload::type_name(&any.type_url) != <T::Wire as prost::Name>::full_name() {
         return Ok(None);
     }
@@ -1178,17 +1195,21 @@ fn command_refused() -> String {
     <v1::CommandRefused as prost::Name>::full_name()
 }
 
-/// `CommandRefused`'s type URL: a payload set with `#[on_refused]`
-/// handlers decodes it.
-#[doc(hidden)]
-pub fn __command_refused_url() -> String {
+/// The type URL of angzarr's `CommandRefused`, the pass-through refusal
+/// fact: what a hand-written fact payload enum with refusal handlers
+/// lists beside its own types.
+pub fn command_refused_type_url() -> String {
     format!("/{}", command_refused())
 }
 
 /// `any`, angzarr's `CommandRefused`, as the refusal of a `C`, if it is
-/// one: `None` for another payload type, or a refusal of another command.
-#[doc(hidden)]
-pub fn __refused<C: DomainMessage>(any: &Any) -> Result<Option<CommandRefused<C>>, PayloadError> {
+/// one: `Ok(None)` for a payload of another type, or for the refusal of
+/// another command; a `CommandRefused`, or its command of `C`'s type,
+/// that does not decode is the error. What a hand-written fact payload
+/// enum decodes a refusal fact with.
+pub fn decode_command_refused<C: DomainMessage>(
+    any: &Any,
+) -> Result<Option<CommandRefused<C>>, PayloadError> {
     if super::payload::type_name(&any.type_url) != command_refused() {
         return Ok(None);
     }
@@ -1202,7 +1223,7 @@ pub fn __refused<C: DomainMessage>(any: &Any) -> Result<Option<CommandRefused<C>
     let Some(command) = command_payload(&book) else {
         return Ok(None);
     };
-    let Some(command) = __decode::<C>(command)? else {
+    let Some(command) = decode_message::<C>(command)? else {
         return Ok(None);
     };
     Ok(Some(CommandRefused {
@@ -1213,10 +1234,12 @@ pub fn __refused<C: DomainMessage>(any: &Any) -> Result<Option<CommandRefused<C>
     }))
 }
 
-/// The refused command's type URL in `any`, angzarr's `CommandRefused`:
-/// what a payload set names when it has no handler for that refusal.
-#[doc(hidden)]
-pub fn __refused_command_url(any: &Any) -> Option<String> {
+/// The refused command's type URL in `any`, angzarr's `CommandRefused`;
+/// `None` for another payload, or one that does not decode. What a
+/// hand-written fact payload enum names in its
+/// [`PayloadError::UnknownType`] for a refusal it has no handler for, so
+/// the error says which command's refusal it was.
+pub fn refused_command_type_url(any: &Any) -> Option<String> {
     if super::payload::type_name(&any.type_url) != command_refused() {
         return None;
     }
@@ -1256,7 +1279,7 @@ fn context_of(cctx: angzarr_router::domain::CommandContext) -> Context {
 fn input<T: DomainMessage>(any: &Any) -> Result<T, angzarr_router::error::HandlerError> {
     use angzarr_router::error::{extras, CodedError, GrpcCode, HandlerError, RouterReason};
     let message_type = || super::payload::type_name(&any.type_url).to_string();
-    match __decode::<T>(any) {
+    match decode_message::<T>(any) {
         Ok(Some(value)) => Ok(value),
         Err(PayloadError::Decode { error, .. }) => Err(HandlerError::Coded(
             CodedError::undecodable(&message_type(), &error),
@@ -1298,13 +1321,23 @@ fn fact_record<A: Domain>(events: Vec<A::Event>) -> angzarr_router::domain::Fact
     }
 }
 
-/// A command handler's result, run as one decision: its events, then each
-/// continuation step on a working copy of `state` with every event so far
-/// applied, until there is none. A rejection anywhere refuses it all, as
-/// the router carries a business refusal; more than [`STEP_LIMIT`] steps is
-/// the kernel's [`KernelError::TooManySteps`](super::KernelError::TooManySteps).
-#[doc(hidden)]
-pub fn __command<A, R, C, O, E>(
+/// Runs a command handler as ONE decision, for angzarr-router's
+/// `DomainDispatch::on_command` (a [`Routed`] domain's table): decodes
+/// `any` as the command `C` (a payload that is not one is the router's
+/// ROUTER_REASON_ANY_DECODE_FAILED, INTERNAL), calls `handler` with the
+/// instance, the command and the [`Context`] made of `cctx`, then applies
+/// its events, in order, to a working copy of `state` and runs each
+/// continuation step ([`Emit::then`]) on that copy, until none is left.
+/// The answer is every event, as the book the router records. A
+/// rejection, the handler's or any step's, refuses the whole decision as
+/// the router carries a business refusal, under its status; more than
+/// [`STEP_LIMIT`] steps is
+/// [`KernelError::TooManySteps`](super::KernelError::TooManySteps), with
+/// nothing committed.
+///
+/// What `#[handles_cmd]` registers; a hand-written [`Routed`] domain
+/// registers its own handler with it, as `#[aggregate]` would.
+pub fn run_command<A, R, C, O, E>(
     any: &Any,
     state: &A,
     cctx: angzarr_router::domain::CommandContext,
@@ -1347,13 +1380,17 @@ where
     }
 }
 
-/// A fact handler's result, run as one decision on a working copy of
-/// `state`: its events, then each continuation step's on the copy with
-/// them applied. Infallible; more than [`STEP_LIMIT`] steps is a bug,
-/// which panics: the router catches it, a bug, and the kernel dead-letters
-/// it.
-#[doc(hidden)]
-pub fn __fact<A, F, Rr>(
+/// Runs a fact handler as ONE decision, for angzarr-router's
+/// `DomainDispatch::on_fact_with_context`: decodes `any` as the fact `F`
+/// (a payload that is not one is ROUTER_REASON_ANY_DECODE_FAILED,
+/// INTERNAL), calls `handler`, then applies its events and runs its
+/// continuation steps ([`Record::then`]) on a working copy of `state`, as
+/// [`run_command`] does. A fact is never refused, so `handler` returns no
+/// `Result`; more than [`STEP_LIMIT`] steps is a bug, which panics: the
+/// router catches it, and the kernel dead-letters it.
+///
+/// What `#[handles_fact]` registers.
+pub fn run_fact<A, F, Rr>(
     any: &Any,
     state: &A,
     cctx: angzarr_router::domain::CommandContext,
@@ -1373,13 +1410,17 @@ where
     )))
 }
 
-/// A passed-through refusal's handler (`#[on_refused(C)]` on a domain),
-/// for the router's `CommandRefused` of a `C`, with the router's context
-/// of the refusal fact: run as a fact handler's. Its error is a bug, the
-/// policy's failure, as the router carries it
+/// Runs a passed-through refusal's handler, for angzarr-router's
+/// `DomainDispatch::on_refused` of a `C`: `refused` (angzarr's
+/// `CommandRefused`) as a [`CommandRefused<C>`] (its command not a `C`
+/// is ROUTER_REASON_ANY_DECODE_FAILED, INTERNAL), handed to `handler` with
+/// the [`Context`] of the refusal fact, and its record run as
+/// [`run_fact`] runs one. The handler's error is a bug, the policy's
+/// failure, as the router carries it
 /// ([`StepError::PolicyFailed`](super::StepError::PolicyFailed)).
-#[doc(hidden)]
-pub fn __on_refused<A, C, Rr, E>(
+///
+/// What `#[on_refused(C)]` on a domain registers.
+pub fn run_on_refused<A, C, Rr, E>(
     refused: &v1::CommandRefused,
     state: &A,
     cctx: CommandContext,
@@ -1433,11 +1474,13 @@ where
     }
 }
 
-/// angzarr's pass-through refusal fact: `CommandRefused { command,
-/// refusal, trigger }`, the refusal object still packed and the trigger
-/// the triggering event's `EventRef`, packed.
-#[doc(hidden)]
-pub fn __pass_through(refusal: &v1::Refusal) -> Any {
+/// angzarr's pass-through refusal fact for `refusal`, packed:
+/// `CommandRefused { command, refusal, trigger }`, the response's refusal
+/// object still packed (none for a message-only refusal) and the trigger
+/// the triggering event's `EventRef`. What
+/// [`Policy::on_refused`] answers by default,
+/// and what a policy that translates some refusals answers for the rest.
+pub fn pass_through(refusal: &v1::Refusal) -> Any {
     let trigger = refusal.event.as_ref().map(|book| EventRef {
         stream: book.cover.clone(),
         sequence: book.pages.first().map_or(0, |page| page.sequence),
@@ -1455,18 +1498,19 @@ pub fn __pass_through(refusal: &v1::Refusal) -> Any {
     })
 }
 
-/// `refusal` as a translating callback for command `C` reads it: `None` if
-/// the refused command is not a `C`; one of `C`'s type that does not decode
-/// is the error, a bug (the policy's failure), as an `#[on_event]`'s
-/// undecodable event is.
-#[doc(hidden)]
-pub fn __translating<C: DomainMessage>(
+/// `refusal` as a policy's translating callback for command `C` reads it,
+/// a [`Refusal<C>`]: `Ok(None)` if the refused command is not a `C`; one
+/// of `C`'s type that does not decode is the error, a bug (the policy's
+/// failure), as an undecodable event in `on_event` is. What a
+/// [`Policy::on_refused`] that translates
+/// decodes with.
+pub fn decode_refusal<C: DomainMessage>(
     refusal: &v1::Refusal,
 ) -> Result<Option<Refusal<C>>, Report> {
     let Some(payload) = refusal.command.as_ref().and_then(command_payload) else {
         return Ok(None);
     };
-    let Some(command) = __decode::<C>(payload).map_err(|error| Report::of(&error))? else {
+    let Some(command) = decode_message::<C>(payload).map_err(|error| Report::of(&error))? else {
         return Ok(None);
     };
     Ok(Some(Refusal {
@@ -1476,41 +1520,48 @@ pub fn __translating<C: DomainMessage>(
     }))
 }
 
-/// A translating callback's answer, as `Policy::on_refused` gives it: its
-/// fact, one its source `S` ingests, packed; or its error as a report (its
-/// code and args the dead letter's `cause`).
-#[doc(hidden)]
-pub fn __domestic<S: Ingests<F>, F: DomainMessage, E: angzarr_embedded_diagnostic::Diagnostic>(
+/// A translating callback's answer as
+/// [`Policy::on_refused`] returns it: its fact,
+/// one the policy's source `S` ingests ([`Ingests`]), packed; or its
+/// error as a [`Report`], whose code and args are the dead letter's
+/// `cause`.
+pub fn translated_fact<
+    S: Ingests<F>,
+    F: DomainMessage,
+    E: angzarr_embedded_diagnostic::Diagnostic,
+>(
     answer: Result<F, E>,
 ) -> Result<Any, Report> {
     answer
-        .map(|fact| __pack(&fact))
+        .map(|fact| pack_message(&fact))
         .map_err(|error| Report::of(&error))
 }
 
-/// A policy's `#[on_event]` handler's answer, as `Policy::on_event` gives
-/// it: its commands, or its error as a report (its code and args the dead
-/// letter's `cause`).
-#[doc(hidden)]
-pub fn __answered<T: Domain, E: angzarr_embedded_diagnostic::Diagnostic>(
+/// A policy's event handler's answer as
+/// [`Policy::on_event`] returns it: its commands
+/// for the target `T`, as handled (`Some`); or its error as a [`Report`],
+/// whose code and args are the dead letter's `cause`.
+pub fn policy_answer<T: Domain, E: angzarr_embedded_diagnostic::Diagnostic>(
     answer: Result<Commands<T>, E>,
 ) -> Result<Option<Commands<T>>, Report> {
     answer.map(Some).map_err(|error| Report::of(&error))
 }
 
-/// A projector handler's result, as the kernel awaits it.
-#[doc(hidden)]
-pub fn __projecting<'a, F>(run: F) -> Projecting<'a>
+/// A projector handler's run, boxed as [`AsyncProjector::project`]
+/// returns it for the kernel to await.
+pub fn projecting<'a, F>(run: F) -> Projecting<'a>
 where
     F: std::future::Future<Output = Result<(), Report>> + Send + 'a,
 {
     Box::pin(run)
 }
 
-/// The state descriptor of a marked-up domain whose snapshot form is `S`:
-/// its type URL, with STRICT and AGGREGATE_HANDLES.
-#[doc(hidden)]
-pub fn __descriptor<S: prost::Name>() -> angzarr_proto::v1::StateDescriptor {
+/// The state descriptor of a domain whose snapshot form is `S`: `S`'s
+/// type URL, supporting STRICT and AGGREGATE_HANDLES, the implicit base
+/// the registry requires. What a marked-up domain's
+/// [`State::descriptor`](super::State::descriptor) returns, and a
+/// hand-written one with no conflict units may.
+pub fn state_descriptor<S: prost::Name>() -> angzarr_proto::v1::StateDescriptor {
     angzarr_proto::v1::StateDescriptor {
         type_url: format!("/{}", S::full_name()),
         options: Some(angzarr_proto::v1::StateOptions {

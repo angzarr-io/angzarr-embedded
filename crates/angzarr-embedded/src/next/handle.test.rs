@@ -254,7 +254,7 @@ fn a_hand_written_policy_passes_a_refusal_through() {
         ..Default::default()
     };
     let answer = crate::next::Policy::on_refused(&Bookkeeping, &refusal, &Default::default());
-    assert_eq!(answer, Ok(markup::__pass_through(&refusal)));
+    assert_eq!(answer, Ok(markup::pass_through(&refusal)));
 }
 
 #[test]
@@ -1318,7 +1318,7 @@ impl crate::next::Policy for AnsweringBookkeeping {
         ctx: &crate::next::markup::CommandContext,
     ) -> Result<crate::next::Any, crate::next::markup::Report> {
         self.0.lock().unwrap().push((refusal.clone(), ctx.clone()));
-        Ok(crate::next::markup::__pass_through(refusal))
+        Ok(crate::next::markup::pass_through(refusal))
     }
 }
 

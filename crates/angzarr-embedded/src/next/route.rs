@@ -173,7 +173,7 @@ impl Rejected {
     /// The typed refusal object, as `T`, if the handler refused with one
     /// and it is a `T`.
     pub fn refusal<T: super::markup::DomainMessage>(&self) -> Option<T> {
-        super::markup::__decode(self.refusal.as_ref()?)
+        super::markup::decode_message(self.refusal.as_ref()?)
             .ok()
             .flatten()
     }
