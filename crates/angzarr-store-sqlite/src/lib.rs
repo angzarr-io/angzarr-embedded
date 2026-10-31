@@ -12,8 +12,12 @@
 //! [`ReadStore`](angzarr_ports::ReadStore), [`Watch`](angzarr_ports::Watch),
 //! [`ReadUntilTime`](angzarr_ports::ReadUntilTime),
 //! [`ReadByCorrelation`](angzarr_ports::ReadByCorrelation),
-//! [`ListStreams`](angzarr_ports::ListStreams) and
-//! [`Outbox`](angzarr_ports::Outbox). The handle's one connection is held
+//! [`ListStreams`](angzarr_ports::ListStreams),
+//! [`Outbox`](angzarr_ports::Outbox),
+//! [`Migrations`](angzarr_ports::Migrations) (through sqlx's migrator; every
+//! open, to read or to write, runs what is pending) and
+//! [`Backup`](angzarr_ports::Backup) (`VACUUM INTO`, and before every
+//! migration and undo, beside the store). The handle's one connection is held
 //! behind an async lock, so every port takes `&self` and one call at a time
 //! runs on it.
 //!
@@ -40,6 +44,7 @@
 #![allow(clippy::result_large_err)]
 
 mod error;
+mod migrations;
 mod rows;
 mod schema;
 mod statements;

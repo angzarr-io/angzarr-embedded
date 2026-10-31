@@ -16,7 +16,7 @@
 
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use angzarr_ports::angzarr_proto::v1::{Cover, EventBook, EventPage};
@@ -24,15 +24,15 @@ use angzarr_ports::contract::{
     append, at, command, correlated, edition_stream, main_stream, page, snapshot,
 };
 use angzarr_ports::{
-    Arg, EventStore, Outbox, PositionKey, PositionStore, Purge, ReadByCorrelation, ReadStore,
-    ReadUnit, ReadUntilTime, Slice, SnapshotStore, StoreError, StreamRef, Watch,
+    Arg, EventStore, Migrations, Outbox, PositionKey, PositionStore, Purge, ReadByCorrelation,
+    ReadStore, ReadUnit, ReadUntilTime, Slice, SnapshotStore, StoreError, StreamRef, Watch,
 };
 use prost::Message;
 use sqlx::migrate::Migrator;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection};
 use sqlx::{ConnectOptions, Connection};
 
-use super::{into_wal, migrate, pause, read_only, SqliteStore, BUSY_TIMEOUT, MIGRATOR};
+use super::{into_wal, pause, SqliteStore, BUSY_TIMEOUT, MIGRATOR};
 use crate::{Damage, Integrity};
 
 /// A path for a database file of this test run's own, `state.db` in a
@@ -667,10 +667,10 @@ async fn a_read_only_file_in_a_read_only_directory_opens_for_reading() {
     );
 }
 
+/// A database holding something but no ledger is one with every migration
+/// pending: a read migrates it, backing it up first, as a write does.
 #[tokio::test]
-async fn reading_a_database_older_than_the_build_fails_at_once() {
-    // It holds what was committed to it, so it is no file being made: the
-    // read refuses it as it stands, waiting on no writer.
+async fn reading_a_database_with_no_ledger_migrates_it_backing_it_up_first() {
     let path = database();
     let mut conn = SqliteConnectOptions::new()
         .filename(&path)
@@ -683,17 +683,23 @@ async fn reading_a_database_older_than_the_build_fails_at_once() {
         .await
         .unwrap();
     conn.close().await.unwrap();
-    let waits = AtomicUsize::new(0);
-    let opened = read_only(&path, BUSY_TIMEOUT, || {
-        waits.fetch_add(1, Ordering::Relaxed);
-    })
-    .await;
+    let store = SqliteStore::open_existing(&path).await.unwrap().unwrap();
+    assert_eq!(store.covers("tasks").await, Ok(vec![]));
+    assert_eq!(versions(&store.applied().await.unwrap()), build_versions());
+    drop(store);
+    let backups = backups_of(&path);
+    assert_eq!(backups.len(), 1, "{backups:?}");
+    let name = backups[0]
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert!(name.starts_with("state.db.pre-0-"), "{name}");
     assert_eq!(
-        opened.as_ref().err().and_then(code),
-        Some("angzarr-store-sqlite-unmigrated")
+        raw_ledger(&backups[0]).await,
+        vec![],
+        "the backup as it stood"
     );
-    assert_eq!(waits.load(Ordering::Relaxed), 0);
-    assert_eq!(journal_mode(&path).await, "delete");
 }
 
 // --------------------------------------- reading a file a writer is making
@@ -711,52 +717,28 @@ async fn created(path: &Path) -> SqliteConnection {
     conn
 }
 
-/// Read the file at `path` as `open_existing` does, alongside `writer`,
-/// which runs only once the read has found the file being made and begun
-/// to wait for it: the read meets the file mid-creation, every run. A read
-/// that ends without waiting is returned as it is, the writer never run.
-async fn read_while<W: std::future::Future<Output = ()>>(
-    path: &Path,
-    writer: impl FnOnce() -> W,
-) -> Result<Option<SqliteStore>, StoreError> {
-    let waiting = AtomicBool::new(false);
-    let read = AtomicBool::new(false);
-    let (opened, ()) = tokio::join!(
-        async {
-            let opened = read_only(path, BUSY_TIMEOUT, || {
-                waiting.store(true, Ordering::Relaxed)
-            })
-            .await;
-            read.store(true, Ordering::Relaxed);
-            opened
-        },
-        async {
-            while !waiting.load(Ordering::Relaxed) {
-                if read.load(Ordering::Relaxed) {
-                    return;
-                }
-                tokio::task::yield_now().await;
-            }
-            writer().await;
-        }
-    );
-    opened
-}
-
+/// A file its maker has created and gone no further with is one with
+/// every migration pending: a read migrates it, and the maker, going on,
+/// finds nothing to apply. A new store takes no backup.
 #[tokio::test]
-async fn reading_a_file_created_but_not_yet_in_wal_waits_for_its_writer() {
+async fn reading_a_file_created_but_not_yet_migrated_migrates_it() {
     let path = database();
-    let mut writer = created(&path).await;
-    let read = read_while(&path, || async {
-        into_wal(&mut writer).await.unwrap();
-        migrate(&mut writer).await.unwrap();
-    })
-    .await;
-    let store = read.unwrap().expect("the database its writer made");
+    let maker = created(&path).await;
+    let store = SqliteStore::open_existing(&path).await.unwrap().unwrap();
     assert_eq!(store.covers("tasks").await, Ok(vec![]));
+    maker.close().await.unwrap();
+    let writer = SqliteStore::open(&path).await.unwrap();
+    assert_eq!(versions(&writer.applied().await.unwrap()), build_versions());
     drop((store, writer));
+    assert_eq!(
+        backups_of(&path),
+        Vec::<PathBuf>::new(),
+        "a new store has nothing to back up"
+    );
 }
 
+/// A read meeting a file its writer is migrating waits on the writer's
+/// lock, then finds nothing to apply, and opens it current.
 #[tokio::test]
 async fn reading_a_file_its_writer_is_migrating_waits_for_the_commit() {
     let path = database();
@@ -764,32 +746,14 @@ async fn reading_a_file_its_writer_is_migrating_waits_for_the_commit() {
     into_wal(&mut writer).await.unwrap();
     let mut tx = writer.begin_with("BEGIN IMMEDIATE").await.unwrap();
     MIGRATOR.run_direct(&mut *tx).await.unwrap();
-    let read = read_while(&path, || async { tx.commit().await.unwrap() }).await;
+    let (read, ()) = tokio::join!(SqliteStore::open_existing(&path), async {
+        pause(Duration::from_millis(50)).await;
+        tx.commit().await.unwrap();
+    });
     let store = read.unwrap().expect("the database its writer made");
     assert_eq!(store.covers("tasks").await, Ok(vec![]));
+    assert_eq!(versions(&store.applied().await.unwrap()), build_versions());
     drop((store, writer));
-}
-
-#[tokio::test]
-async fn reading_a_file_whose_writer_never_finishes_fails_unmigrated() {
-    // An empty file nobody finishes, as a writer that died making it left
-    // it: the read waits out its patience, then refuses it, changing
-    // nothing. Each wait doubles, from a millisecond, and lasts at least as
-    // long as it says, so 20ms holds five at most however slow the machine:
-    // four take 15ms, and the fifth is cut to what is left.
-    let path = database();
-    std::fs::write(&path, b"").unwrap();
-    let waits = AtomicUsize::new(0);
-    let opened = read_only(&path, Duration::from_millis(20), || {
-        waits.fetch_add(1, Ordering::Relaxed);
-    })
-    .await;
-    assert_eq!(
-        opened.as_ref().err().and_then(code),
-        Some("angzarr-store-sqlite-unmigrated")
-    );
-    assert!((1..=5).contains(&waits.load(Ordering::Relaxed)));
-    assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
 }
 
 #[tokio::test]
@@ -800,34 +764,33 @@ async fn a_pause_lasts_as_long_as_it_says() {
     pause(Duration::ZERO).await;
 }
 
-/// Each way a database's applied migrations can disagree with this build's,
-/// which sqlx's migrator refuses: neither open passes it by. SQLite never
-/// answered, so the failure is the driver's, without an errno.
+/// Each way a database's applied migrations can disagree with this build's
+/// but a newer build's (the ports' suite has that): a migration that
+/// failed, or one changed since it was applied. Neither open passes it by,
+/// each refused under angzarr-ports' code, and the file is left as it was.
 #[tokio::test]
 async fn a_database_whose_migrations_disagree_opens_neither_way() {
-    for tamper in [
-        "UPDATE _sqlx_migrations SET success = FALSE",
-        "UPDATE _sqlx_migrations SET checksum = x'00'",
-        "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time) \
-         VALUES (9999, 'from a newer build', TRUE, x'00', 0)",
+    for (tamper, refusal) in [
+        (
+            "UPDATE _sqlx_migrations SET success = FALSE WHERE version = 1",
+            StoreError::MigrationFailed { version: 1 },
+        ),
+        (
+            "UPDATE _sqlx_migrations SET checksum = x'00' WHERE version = 2",
+            StoreError::MigrationChanged { version: 2 },
+        ),
     ] {
         let path = database();
         drop(SqliteStore::open(&path).await.unwrap());
         let mut conn = raw(&path).await;
         sqlx::query(tamper).execute(&mut conn).await.unwrap();
         conn.close().await.unwrap();
+        let before = raw_ledger(&path).await;
         let written = SqliteStore::open(&path).await.map(drop);
         let read = SqliteStore::open_existing(&path).await.map(drop);
-        assert_eq!(
-            written.map_err(|e| code(&e)),
-            Err(Some("angzarr-store-sqlite-driver-failed")),
-            "{tamper}: the migrator's refusal, no errno of SQLite's"
-        );
-        assert_eq!(
-            read.map_err(|e| code(&e)),
-            Err(Some("angzarr-store-sqlite-driver-failed")),
-            "{tamper}: the migrator's refusal, no errno of SQLite's"
-        );
+        assert_eq!(written, Err(refusal.clone()), "{tamper}: to write");
+        assert_eq!(read, Err(refusal), "{tamper}: to read");
+        assert_eq!(raw_ledger(&path).await, before, "{tamper}: left as it was");
     }
 }
 
@@ -950,8 +913,9 @@ fn every_migration_runs_inside_the_open_transaction() {
 //   migration, decodes each stored page once to fill those two columns
 //   (SQL cannot read protobuf), and records that it ran, so a reopen scans
 //   nothing again.
-// - A store opened read-only never migrates: a released database read that
-//   way is refused as unmigrated until a writer has opened it.
+// - Every open migrates, to read or to write (the owner, 2026-10-31),
+//   backing the store up beside it first: a released database read is
+//   migrated by the read.
 // - A new 0004 drops 0002's store-wide commit position (decision 14.35:
 //   ordering is per stream, there is no global position): the
 //   `commit_position` table and `events.position` (SQLite's DROP COLUMN,
@@ -1151,18 +1115,25 @@ async fn a_database_at_the_released_schema_opens_migrated_and_reads_its_events_b
     drop(store);
 }
 
-/// A released database opened read-only is not migrated by the read: it is
-/// refused as unmigrated, at once, until a writer has opened it. (Red now
-/// for want of 0003: with nothing pending, the read opens it.)
+/// A released database read is migrated by the read (the owner,
+/// 2026-10-31: every open migrates), backed up first at its level.
 #[tokio::test]
-async fn a_database_opened_read_only_at_the_released_schema_is_refused_unmigrated() {
+async fn a_database_read_at_the_released_schema_is_migrated_backed_up_first() {
     let path = database();
-    released_database(&path).await;
-    let opened = SqliteStore::open_existing(&path).await.map(drop);
-    assert_eq!(
-        opened.map_err(|e| code(&e)),
-        Err(Some("angzarr-store-sqlite-unmigrated"))
-    );
+    let written = released_database(&path).await;
+    let store = SqliteStore::open_existing(&path).await.unwrap().unwrap();
+    assert_eq!(pages(&store, stream(1)).await, written);
+    assert_eq!(versions(&store.applied().await.unwrap()), build_versions());
+    drop(store);
+    let backups = backups_of(&path);
+    assert_eq!(backups.len(), 1, "{backups:?}");
+    let name = backups[0]
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert!(name.starts_with("state.db.pre-2-"), "{name}");
+    assert_eq!(versions(&raw_ledger(&backups[0]).await), [1, 2]);
 }
 
 // --------------------------------------------------------------- integrity
@@ -1299,7 +1270,9 @@ async fn a_check_that_cannot_run_is_a_failure_not_damage() {
         .connect()
         .await
         .unwrap();
-    let checked = SqliteStore { conn: conn.into() }.integrity_check().await;
+    let checked = SqliteStore::on(conn, None, &MIGRATOR)
+        .integrity_check()
+        .await;
     assert_eq!(
         checked.as_ref().map_err(code),
         Err(Some("angzarr-store-sqlite-unavailable")),
@@ -1477,7 +1450,7 @@ async fn impatient(path: &Path) -> SqliteStore {
         .connect()
         .await
         .unwrap();
-    SqliteStore { conn: conn.into() }
+    SqliteStore::on(conn, Some(path.to_path_buf()), &MIGRATOR)
 }
 
 #[tokio::test]
@@ -2119,5 +2092,450 @@ async fn a_policy_steps_entries_order_on_its_triggers_stream() {
             step[1].id
         ],
         "on a's sequence: 0, 1, then the step's trigger at 2, in write order"
+    );
+}
+
+// --------------------------------- migrations and backups, through the ports
+//
+// angzarr-ports' `migrations`, `backup`, `migrate_on_open`, `migrate_to`
+// and `migrate_on_open_backup` sections. The last two need a build whose
+// top migrations have downs, above one that has none: this build's have
+// none (no migration here is reversible), so they run on this build's
+// set with two reversible migrations of the tests' own above it. Both
+// opens, to write and to read, run every open section.
+
+/// The ledger's versions, in its order.
+fn versions(ledger: &[angzarr_ports::AppliedMigration]) -> Vec<u64> {
+    ledger.iter().map(|r| r.version).collect()
+}
+
+/// This build's versions.
+fn build_versions() -> Vec<u64> {
+    crate::migrations::build(&MIGRATOR)
+        .iter()
+        .map(|m| m.version)
+        .collect()
+}
+
+/// The ledger at `path`, read on a connection of the test's own.
+async fn raw_ledger(path: &Path) -> Vec<angzarr_ports::AppliedMigration> {
+    let mut conn = crate::migrations::reading(path).await.unwrap();
+    let ledger = crate::migrations::ledger(&mut conn).await.unwrap();
+    conn.close().await.unwrap();
+    ledger
+}
+
+/// The backups beside the store at `path`, oldest first: by when each
+/// was last written (a name's time is to the millisecond, and two can
+/// share one).
+fn backups_of(path: &Path) -> Vec<PathBuf> {
+    let prefix = format!("{}.pre-", path.file_name().unwrap().to_string_lossy());
+    let mut found: Vec<PathBuf> = std::fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with(&prefix))
+        })
+        .collect();
+    found.sort_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
+    found
+}
+
+/// This build's migrations, then two reversible ones of the tests' own.
+fn reversible_build() -> &'static Migrator {
+    use sqlx::migrate::{Migration, MigrationType};
+    static BUILD: std::sync::LazyLock<Migrator> = std::sync::LazyLock::new(|| {
+        let mut set: Vec<Migration> = MIGRATOR.iter().cloned().collect();
+        for (version, table) in [(1006, "tests_six"), (1007, "tests_seven")] {
+            let description: std::borrow::Cow<'static, str> =
+                std::borrow::Cow::Owned(format!("the tests' {table}"));
+            set.push(Migration::new(
+                version,
+                description.clone(),
+                MigrationType::ReversibleUp,
+                format!("CREATE TABLE {table} (x)").into(),
+                false,
+            ));
+            set.push(Migration::new(
+                version,
+                description,
+                MigrationType::ReversibleDown,
+                format!("DROP TABLE {table}").into(),
+                false,
+            ));
+        }
+        Migrator {
+            migrations: std::borrow::Cow::Owned(set),
+            ..Migrator::DEFAULT
+        }
+    });
+    &BUILD
+}
+
+/// Places for stores, each a fresh directory removed with the fixture.
+#[derive(Default)]
+struct Places(std::sync::Mutex<Vec<Database>>);
+
+impl Places {
+    fn next(&self) -> PathBuf {
+        let place = database();
+        let path = place.file.clone();
+        self.0.lock().unwrap().push(place);
+        path
+    }
+}
+
+/// Write the suite's content to the store at `path`, opened under
+/// `migrator`, and close it.
+async fn with_content(path: &Path, migrator: &'static Migrator) {
+    let store = crate::migrations::open_writing(path, migrator, true)
+        .await
+        .unwrap();
+    let (stream, pages) = angzarr_ports::contract::migration_content();
+    append(&store, stream, 0, &pages).await.unwrap();
+    store.into_conn().close().await.unwrap();
+}
+
+/// Run `sql` on the store at `path`, on a connection of the test's own.
+async fn tamper(path: &Path, sql: &str) {
+    let mut conn = raw(path).await;
+    sqlx::query(sql).execute(&mut conn).await.unwrap();
+    conn.close().await.unwrap();
+}
+
+/// The `migrate_on_open` fixture: stores under `migrator`, opened to read
+/// or to write.
+struct Opens {
+    migrator: &'static Migrator,
+    reading: bool,
+    places: Places,
+}
+
+impl Opens {
+    fn new(migrator: &'static Migrator, reading: bool) -> Opens {
+        Opens {
+            migrator,
+            reading,
+            places: Places::default(),
+        }
+    }
+}
+
+impl angzarr_ports::contract::OpenFixture for Opens {
+    type Location = PathBuf;
+    type Store = SqliteStore;
+
+    fn build(&self) -> Vec<angzarr_ports::Migration> {
+        crate::migrations::build(self.migrator)
+    }
+
+    /// At the released schema, 0001 and 0002, holding the content.
+    async fn older(&self) -> PathBuf {
+        let path = self.places.next();
+        let mut conn = SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true)
+            .connect()
+            .await
+            .unwrap();
+        sqlx::query("PRAGMA journal_mode = WAL")
+            .execute(&mut conn)
+            .await
+            .unwrap();
+        released().run(&mut conn).await.unwrap();
+        let (stream, pages) = angzarr_ports::contract::migration_content();
+        for (n, page) in (1u8..).zip(&pages) {
+            sqlx::query(
+                "INSERT INTO events (domain, edition, root, sequence, command_id, page, position) \
+                 VALUES (?, '', ?, ?, ?, ?, 1)",
+            )
+            .bind(stream.domain)
+            .bind(stream.root.as_bytes().to_vec())
+            .bind(i64::try_from(page.sequence).unwrap())
+            .bind(command(n).as_bytes().to_vec())
+            .bind(page.encode_to_vec())
+            .execute(&mut conn)
+            .await
+            .unwrap();
+        }
+        conn.close().await.unwrap();
+        path
+    }
+
+    async fn newer(&self) -> PathBuf {
+        let path = self.places.next();
+        with_content(&path, self.migrator).await;
+        tamper(
+            &path,
+            "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time) \
+             VALUES (9999, 'from a newer build', TRUE, x'00', 0)",
+        )
+        .await;
+        path
+    }
+
+    async fn failed(&self) -> PathBuf {
+        let path = self.places.next();
+        with_content(&path, self.migrator).await;
+        tamper(
+            &path,
+            "UPDATE _sqlx_migrations SET success = FALSE WHERE version = 2",
+        )
+        .await;
+        path
+    }
+
+    async fn changed(&self) -> PathBuf {
+        let path = self.places.next();
+        with_content(&path, self.migrator).await;
+        tamper(
+            &path,
+            "UPDATE _sqlx_migrations SET checksum = x'00' WHERE version = 2",
+        )
+        .await;
+        path
+    }
+
+    async fn open(&self, at: &PathBuf) -> Result<SqliteStore, StoreError> {
+        if self.reading {
+            crate::migrations::open_reading(at, self.migrator)
+                .await
+                .map(|store| store.expect("the store is there"))
+        } else {
+            crate::migrations::open_writing(at, self.migrator, true).await
+        }
+    }
+
+    async fn ledger(&self, at: &PathBuf) -> Vec<angzarr_ports::AppliedMigration> {
+        raw_ledger(at).await
+    }
+}
+
+impl angzarr_ports::contract::OpenBackupFixture for Opens {
+    async fn backups(&self, at: &PathBuf) -> Vec<PathBuf> {
+        backups_of(at)
+    }
+}
+
+/// The `backup` fixture: stores opened to write, backups beside them.
+#[derive(Default)]
+struct Backups {
+    places: Places,
+}
+
+impl angzarr_ports::contract::BackupFixture for Backups {
+    type Store = SqliteStore;
+    type Target = PathBuf;
+
+    async fn store(&self) -> SqliteStore {
+        let path = self.places.next();
+        with_content(&path, &MIGRATOR).await;
+        SqliteStore::open(&path).await.unwrap()
+    }
+
+    fn vacant(&self) -> PathBuf {
+        self.places.next().with_file_name("backup.db")
+    }
+
+    async fn occupied(&self) -> PathBuf {
+        let path = self.places.next().with_file_name("backup.db");
+        std::fs::write(&path, b"keep").unwrap();
+        path
+    }
+
+    async fn occupied_intact(&self, target: &PathBuf) -> bool {
+        std::fs::read(target).is_ok_and(|kept| kept == b"keep")
+    }
+
+    async fn open_backup(&self, target: &PathBuf) -> Result<SqliteStore, StoreError> {
+        SqliteStore::open(target).await
+    }
+}
+
+/// A store at a fresh place, opened to read: made, then read.
+async fn read_fresh(path: &Path) -> SqliteStore {
+    drop(SqliteStore::open(path).await.unwrap());
+    SqliteStore::open_existing(path).await.unwrap().unwrap()
+}
+
+mod migrations_to_write {
+    use super::*;
+    angzarr_ports::store_contract!(
+        migrations,
+        #[tokio::test],
+        SqliteStore::open(&database()).await.unwrap()
+    );
+}
+
+mod migrations_to_read {
+    use super::*;
+    angzarr_ports::store_contract!(migrations, #[tokio::test], read_fresh(&database()).await);
+}
+
+mod migrations_in_memory {
+    use super::*;
+    angzarr_ports::store_contract!(
+        migrations,
+        #[tokio::test],
+        SqliteStore::open_in_memory().await.unwrap()
+    );
+}
+
+mod backup {
+    use super::*;
+    angzarr_ports::store_contract!(backup, #[tokio::test], Backups::default());
+}
+
+mod migrate_on_open_to_write {
+    use super::*;
+    angzarr_ports::store_contract!(migrate_on_open, #[tokio::test], Opens::new(&MIGRATOR, false));
+}
+
+mod migrate_on_open_to_read {
+    use super::*;
+    angzarr_ports::store_contract!(migrate_on_open, #[tokio::test], Opens::new(&MIGRATOR, true));
+}
+
+mod migrate_on_open_reversible_to_write {
+    use super::*;
+    angzarr_ports::store_contract!(
+        migrate_on_open,
+        #[tokio::test],
+        Opens::new(reversible_build(), false)
+    );
+}
+
+mod migrate_to_to_write {
+    use super::*;
+    angzarr_ports::store_contract!(migrate_to, #[tokio::test], Opens::new(reversible_build(), false));
+}
+
+mod migrate_to_to_read {
+    use super::*;
+    angzarr_ports::store_contract!(migrate_to, #[tokio::test], Opens::new(reversible_build(), true));
+}
+
+mod migrate_on_open_backup_to_write {
+    use super::*;
+    angzarr_ports::store_contract!(
+        migrate_on_open_backup,
+        #[tokio::test],
+        Opens::new(reversible_build(), false)
+    );
+}
+
+mod migrate_on_open_backup_to_read {
+    use super::*;
+    angzarr_ports::store_contract!(
+        migrate_on_open_backup,
+        #[tokio::test],
+        Opens::new(reversible_build(), true)
+    );
+}
+
+/// This build's set is the migrator's, none with a down, so no undo past
+/// any of them goes through.
+#[tokio::test]
+async fn the_builds_set_is_the_migrators_and_none_is_reversible() {
+    let store = SqliteStore::open_in_memory().await.unwrap();
+    let set = store.migrations();
+    let expected: Vec<(u64, String, Vec<u8>, bool)> = MIGRATOR
+        .iter()
+        .map(|m| {
+            (
+                m.version as u64,
+                m.description.to_string(),
+                m.checksum.to_vec(),
+                false,
+            )
+        })
+        .collect();
+    let found: Vec<(u64, String, Vec<u8>, bool)> = set
+        .into_iter()
+        .map(|m| (m.version, m.description, m.checksum, m.reversible))
+        .collect();
+    assert_eq!(found, expected);
+    let top = *build_versions().last().unwrap();
+    assert_eq!(
+        store.undo_to(top - 1).await,
+        Err(StoreError::MigrationIrreversible { version: top })
+    );
+}
+
+/// The ledger is sqlx's, read whole: each row a success, installed now,
+/// its run timed.
+#[tokio::test]
+async fn the_ledger_is_sqlxs_record_read_whole() {
+    let path = database();
+    let store = SqliteStore::open(&path).await.unwrap();
+    let ledger = store.applied().await.unwrap();
+    assert_eq!(versions(&ledger), build_versions());
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    for row in &ledger {
+        assert!(row.success, "{row:?}");
+        assert!((row.installed_on.seconds - now).abs() < 120, "{row:?}");
+    }
+    assert!(
+        ledger.iter().any(|r| r.execution_time > Duration::ZERO),
+        "{ledger:?}"
+    );
+    drop(store);
+}
+
+/// A backup runs on a store opened read-only, its file read-only, and is
+/// the store as it stands.
+#[tokio::test]
+async fn a_backup_runs_on_a_read_only_store() {
+    use angzarr_ports::Backup;
+    use std::os::unix::fs::PermissionsExt;
+    let path = database();
+    with_content(&path, &MIGRATOR).await;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+    let store = SqliteStore::open_existing(&path).await.unwrap().unwrap();
+    let dest = path.with_file_name("copy.db");
+    let backed = store.backup(&dest).await;
+    drop(store);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(backed, Ok(()));
+    assert_eq!(versions(&raw_ledger(&dest).await), build_versions());
+}
+
+/// A backup whose destination cannot be made is refused with the system's
+/// words, naming it, and leaves nothing there.
+#[tokio::test]
+async fn a_backup_whose_destination_cannot_be_made_is_refused_with_the_systems_words() {
+    use angzarr_ports::Backup;
+    let store = SqliteStore::open_in_memory().await.unwrap();
+    let dest = database().join("no-such-directory").join("copy.db");
+    let StoreError::Unavailable(cause) = store.backup(&dest).await.unwrap_err() else {
+        panic!("not the store's own failure");
+    };
+    assert_eq!(cause.code, "angzarr-store-sqlite-backup-uncreatable");
+    assert_eq!(
+        cause.args.first(),
+        Some(&("path", Arg::Str(dest.display().to_string())))
+    );
+    assert!(!dest.exists());
+}
+
+/// A store's ledger is read at its path without opening it, so nothing is
+/// migrated; no file is none.
+#[tokio::test]
+async fn a_ledger_is_read_at_a_path_migrating_nothing() {
+    let path = database();
+    assert_eq!(SqliteStore::ledger_at(&path).await, Ok(None));
+    assert!(!path.exists());
+    released_database(&path).await;
+    let ledger = SqliteStore::ledger_at(&path).await.unwrap().unwrap();
+    assert_eq!(versions(&ledger), [1, 2]);
+    assert_eq!(raw_ledger(&path).await, ledger, "migrated by nothing");
+    assert_eq!(
+        backups_of(&path),
+        Vec::<PathBuf>::new(),
+        "and backed up by nothing"
     );
 }

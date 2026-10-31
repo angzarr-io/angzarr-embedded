@@ -8,10 +8,7 @@
 angzarr-store-sqlite-unavailable = the database failed (SQLite code { $errno }): { $ext_err_txt }
 angzarr-store-sqlite-driver-failed = the database driver failed: { $ext_err_txt }
 angzarr-store-sqlite-undecodable = a stored value does not decode: { $ext_err_txt }
-angzarr-store-sqlite-unmigrated = { $pending ->
-    [one] the database, opened to read, has a migration not yet applied
-   *[other] the database, opened to read, has { $pending } migrations not yet applied
-}
+angzarr-store-sqlite-backup-uncreatable = the backup { $path } could not be created: { $ext_err_txt }
 angzarr-store-sqlite-damaged-file = the database file is too damaged to open (SQLite code { $errno }): { $ext_err_txt }
 angzarr-store-sqlite-no-data-version = the database gave no data version
 angzarr-store-sqlite-bad-root = a stored root of { $length } bytes, not a UUID's 16

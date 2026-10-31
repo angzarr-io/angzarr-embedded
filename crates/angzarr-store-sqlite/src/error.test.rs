@@ -11,8 +11,12 @@ use super::{causes, damaged, unavailable, Damage, SqlError};
 #[test]
 fn an_error_displays_its_code_and_args_never_english() {
     assert_eq!(
-        SqlError::Unmigrated { pending: 2 }.to_string(),
-        "angzarr-store-sqlite-unmigrated pending=2"
+        SqlError::BackupUncreatable {
+            path: "/p/x".to_string(),
+            detail: "Permission denied".to_string()
+        }
+        .to_string(),
+        "angzarr-store-sqlite-backup-uncreatable path=/p/x ext_err_txt=\"Permission denied\""
     );
     let unavailable = SqlError::Unavailable {
         errno: None,
@@ -153,15 +157,15 @@ fn every_cause_has_this_crates_code_once() {
             "angzarr-store-sqlite-unavailable",
             "angzarr-store-sqlite-driver-failed",
             "angzarr-store-sqlite-undecodable",
-            "angzarr-store-sqlite-unmigrated",
+            "angzarr-store-sqlite-backup-uncreatable",
             "angzarr-store-sqlite-damaged-file",
             "angzarr-store-sqlite-no-data-version",
             "angzarr-store-sqlite-bad-root",
         ]
     );
     assert_eq!(
-        SqlError::Unmigrated { pending: 2 }.cause().args,
-        [("pending", Arg::Uint(2))],
+        SqlError::BadRoot { length: 3 }.cause().args,
+        [("length", Arg::Uint(3))],
         "a cause carries its args (decision 14.37)"
     );
 }

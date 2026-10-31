@@ -12,32 +12,28 @@
 //! its `total_changes()`. There is no store-wide position (decision 14.35):
 //! ordering is per stream, by sequence.
 
-use std::future::Future;
 use std::ops::DerefMut;
-use std::path::Path;
-use std::pin::Pin;
-use std::str::FromStr;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
-use std::task::{Context, Poll, Waker};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use angzarr_ports::angzarr_proto::v1::meta::EditionCreated;
 use angzarr_ports::angzarr_proto::v1::{Cover, EventBook, EventPage, Snapshot};
 use angzarr_ports::{
-    Append, ChangeToken, EventStore, Head, ListStreams, Outbox, OutboxEntry, PositionKey,
-    PositionStore, Purge, ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, Slice,
-    SnapshotStore, StoreError, StreamRef, Uuid, Watch, Write, Written, EDITION_CREATED_TYPE_URL,
+    Append, AppliedMigration, ChangeToken, EventStore, Head, ListStreams, Outbox, OutboxEntry,
+    PositionKey, PositionStore, Purge, ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime,
+    Slice, SnapshotStore, StoreError, StreamRef, Uuid, Watch, Write, Written,
+    EDITION_CREATED_TYPE_URL,
 };
 use prost::Message;
 use prost_types::Timestamp;
 use sea_query::SqliteQueryBuilder;
 use sea_query_binder::SqlxBinder;
-use sqlx::migrate::{MigrateError, Migration, Migrator};
-use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection, SqliteRow};
-use sqlx::{ConnectOptions, Connection, Database, Row, Sqlite, TransactionManager};
+use sqlx::migrate::Migrator;
+use sqlx::sqlite::{SqliteConnection, SqliteRow};
+use sqlx::{Connection, Database, Row, Sqlite, TransactionManager};
 
-use crate::error::{damaged, no_data_version, unavailable, undecodable, unmigrated, Damage};
+use crate::error::{damaged, no_data_version, unavailable, undecodable, Damage};
 use crate::{rows, statements, Dialect, Integrity};
 
 /// SQLite keeps NULLs distinct in a key, so the main timeline is `''`.
@@ -53,10 +49,10 @@ impl Dialect for SqliteDialect {
     }
 }
 
-/// The schema, `migrations/sqlite/`. `open` runs them inside `BEGIN
+/// The schema, `migrations/sqlite/`. Every open runs them inside `BEGIN
 /// IMMEDIATE`, so none may opt out of a transaction (`-- no-transaction`)
 /// or change `PRAGMA journal_mode`: neither can run inside one.
-static MIGRATOR: Migrator = sqlx::migrate!("./migrations/sqlite");
+pub(crate) static MIGRATOR: Migrator = sqlx::migrate!("./migrations/sqlite");
 
 /// How long a connection waits on another's lock before failing: SQLite's
 /// busy timeout. Readers wait on no one (WAL), so only writers queue, and a
@@ -71,9 +67,13 @@ pub const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 /// instant take more than two.
 const WAL_ATTEMPTS: usize = 20;
 
-/// A store in one SQLite database: one handle, one connection.
+/// A store in one SQLite database: one handle, one connection; the file
+/// it is on (none for one in memory), where a backup before a migration
+/// is written beside it; and the build's migrations.
 pub struct SqliteStore {
     conn: Conn,
+    path: Option<PathBuf>,
+    migrator: &'static Migrator,
 }
 
 /// A handle's one connection, behind an async lock so the ports take
@@ -124,41 +124,82 @@ impl SqliteStore {
         self.conn.sent.load(Ordering::Relaxed)
     }
 
-    /// The database at `path`, created if absent, in WAL mode, and migrated.
+    /// The store on `conn`, at `path` (none in memory), under `migrator`.
+    pub(crate) fn on(
+        conn: SqliteConnection,
+        path: Option<PathBuf>,
+        migrator: &'static Migrator,
+    ) -> SqliteStore {
+        SqliteStore {
+            conn: conn.into(),
+            path,
+            migrator,
+        }
+    }
+
+    /// The file the store is on, none for one in memory.
+    pub(crate) fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
+    /// The build's migrations.
+    pub(crate) fn migrator(&self) -> &'static Migrator {
+        self.migrator
+    }
+
+    /// The connection, once no other call holds it.
+    pub(crate) async fn connection(&self) -> tokio::sync::MutexGuard<'_, SqliteConnection> {
+        self.conn.lock.lock().await
+    }
+
+    /// The connection, the handle given up.
+    pub(crate) fn into_conn(self) -> SqliteConnection {
+        self.conn.lock.into_inner()
+    }
+
+    /// The database at `path`, created if absent, in WAL mode, and migrated
+    /// to the build's latest ([`Migrations`](angzarr_ports::Migrations),
+    /// `crate::migrations`).
     ///
     /// A database whose migrations are all applied is opened without the
     /// write lock, so an open waits on no writer. Otherwise the migrations
     /// run inside `BEGIN IMMEDIATE`: sqlx's migrator takes no lock on
-    /// SQLite and reads which migrations are applied before it begins each
-    /// one, so stores opening a new file at once (one per process) would
+    /// SQLite, so stores opening a new file at once (one per process) would
     /// each apply the first migration. Under the lock they take turns, and
     /// each after the first finds nothing to apply. A migration that opts
     /// out of a transaction (`-- no-transaction`) or changes `PRAGMA
     /// journal_mode` therefore cannot be added.
     ///
-    /// A file too damaged to open, one SQLite finds malformed or no
-    /// database at all, is refused as damage (`angzarr-store-sqlite-damaged-file`),
-    /// its one problem SQLite's message, and is left as it was.
+    /// A store holding anything, with migrations pending, is first backed
+    /// up beside it, under the lock and before anything is applied: for
+    /// `state.db`, to `state.db.pre-<applied level>-<UTC time>` (the
+    /// owner's ruling, 2026-10-31). A store with nothing pending, and a new
+    /// one, take no backup.
+    ///
+    /// Refused, and left as it was: a store a newer build migrated
+    /// (`angzarr-ports-store-newer-than-build`), one a migration failed in
+    /// (`-migration-failed`), changed in (`-migration-changed`) or that has
+    /// a migration this build no longer has (`-migration-missing`); and a
+    /// file too damaged to open, one SQLite finds malformed or no database
+    /// at all (`angzarr-store-sqlite-damaged-file`), its one problem
+    /// SQLite's message.
     pub async fn open(path: &Path) -> Result<SqliteStore, StoreError> {
-        let options = SqliteConnectOptions::new()
-            .filename(path)
-            .busy_timeout(BUSY_TIMEOUT)
-            .create_if_missing(true);
-        let mut conn = options.connect().await.map_err(opening)?;
-        // A read first, so the connection knows a file already in WAL is,
-        // and moving it there is a no-op that waits on no writer.
-        let schema = schema(&mut conn).await?;
-        into_wal(&mut conn).await?;
-        if !matches!(schema, Schema::Current) {
-            migrate(&mut conn).await?;
-        }
-        Ok(SqliteStore { conn: conn.into() })
+        crate::migrations::open_writing(path, &MIGRATOR, true).await
     }
 
     /// The database at `path` opened read-only, or `None` if there is no
-    /// file there: nothing is created, migrated, or moved into WAL, so a
-    /// read-only file opens. Every write to the store fails
+    /// file there. Every write to the store fails
     /// (`angzarr-store-sqlite-unavailable`).
+    ///
+    /// Reading migrates too (the owner, 2026-10-31): a store with
+    /// migrations pending is backed up and migrated first, as
+    /// [`open`](SqliteStore::open) does, on a connection of its own, and
+    /// refused, untouched, as `open` refuses. A store a writer is still
+    /// making is one with every migration pending: the read waits on the
+    /// writer's lock ([`BUSY_TIMEOUT`]), and then finds nothing to apply. A
+    /// store with nothing pending is opened without writing anything, so a
+    /// read-only file opens; one with something pending needs a file this
+    /// process can write.
     ///
     /// A store's file is in WAL, so reading it needs a directory this
     /// process can write, even though nothing is written: SQLite reads a
@@ -172,31 +213,27 @@ impl SqliteStore {
     /// to arrange with its own tooling (copying the file somewhere
     /// writable, say): this store does not read one.
     ///
-    /// A file is opened once it is *usable*: it holds a committed database
-    /// with every one of this build's migrations applied. A file that holds
-    /// nothing committed (no table, index or anything else in its schema)
-    /// is one a writer's [`open`](SqliteStore::open) is still making. From
-    /// creating the file until its migration commits, the writer leaves it
-    /// zero bytes long, then in WAL with only its header, then migrated
-    /// under a lock not yet let go, and a read meets the same empty
-    /// database at each step. Such a file is read again until it is
-    /// usable, waiting up to [`BUSY_TIMEOUT`] as a lock is waited for. A
-    /// file still empty after that has no writer finishing it, and is
-    /// refused as unmigrated (`angzarr-store-sqlite-unmigrated`).
-    ///
-    /// A database that holds something committed but has migrations not
-    /// yet applied is older than this build, and is refused as unmigrated
-    /// at once, with nothing waited for. So is one whose applied migrations
-    /// this build's disagree with (`angzarr-store-sqlite-unavailable`).
-    ///
     /// A file too damaged to open, one SQLite finds malformed
     /// (`SQLITE_CORRUPT`) or no database at all (`SQLITE_NOTADB`), is
-    /// refused as damage (`angzarr-store-sqlite-damaged`, the code
-    /// [`integrity_check`](SqliteStore::integrity_check) reports damage
-    /// under), its one problem SQLite's message. It is not waited on, and
-    /// is told from every other failure to open.
+    /// refused as damage (`angzarr-store-sqlite-damaged-file`), its one
+    /// problem SQLite's message, told from every other failure to open.
     pub async fn open_existing(path: &Path) -> Result<Option<SqliteStore>, StoreError> {
-        read_only(path, BUSY_TIMEOUT, || {}).await
+        crate::migrations::open_reading(path, &MIGRATOR).await
+    }
+
+    /// The ledger of the store at `path`, sqlx's record of the migrations
+    /// applied to it, whole and in version order (empty if it has none),
+    /// or `None` if there is no file there: read on a read-only connection
+    /// of its own, without opening the store, so nothing is migrated. For a
+    /// caller that judges a store before an open migrates it.
+    pub async fn ledger_at(path: &Path) -> Result<Option<Vec<AppliedMigration>>, StoreError> {
+        if matches!(path.try_exists(), Ok(false)) {
+            return Ok(None);
+        }
+        let mut conn = crate::migrations::reading(path).await?;
+        let ledger = crate::migrations::ledger(&mut conn).await?;
+        conn.close().await.map_err(unavailable)?;
+        Ok(Some(ledger))
     }
 
     /// Whether the database file is sound: SQLite's `PRAGMA
@@ -235,193 +272,77 @@ impl SqliteStore {
 
     /// A database held only in memory, migrated.
     pub async fn open_in_memory() -> Result<SqliteStore, StoreError> {
-        let options = SqliteConnectOptions::from_str("sqlite::memory:").map_err(unavailable)?;
-        let mut conn = options.connect().await.map_err(unavailable)?;
-        migrate(&mut conn).await?;
-        Ok(SqliteStore { conn: conn.into() })
+        crate::migrations::open_in_memory(&MIGRATOR).await
     }
 }
 
-/// [`SqliteStore::open_existing`], waiting up to `patience` for a file being
-/// made, and calling `waiting` each time it waits.
-///
-/// Whether the file exists is asked before it is opened, not after an open
-/// fails: a writer may create it between the two, and the failed open
-/// would then be taken for a failure to open a file that is there. A file
-/// found is still there to open, since a database is created at its path
-/// and never moved there.
-async fn read_only(
-    path: &Path,
-    patience: Duration,
-    mut waiting: impl FnMut(),
-) -> Result<Option<SqliteStore>, StoreError> {
-    if matches!(path.try_exists(), Ok(false)) {
-        return Ok(None);
-    }
-    let options = SqliteConnectOptions::new()
-        .filename(path)
-        .busy_timeout(BUSY_TIMEOUT)
-        .read_only(true);
-    let mut conn = options.connect().await.map_err(opening)?;
-    let deadline = Instant::now() + patience;
-    let mut wait = FIRST_WAIT;
-    loop {
-        // Emptiness first: once a file holds something committed it never
-        // holds nothing again, so the schema read after sees a committed
-        // database, not one a commit lands in the middle of.
-        let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() || !empty(&mut conn).await? {
-            return match schema(&mut conn).await? {
-                Schema::Current => Ok(Some(SqliteStore { conn: conn.into() })),
-                Schema::Pending(pending) => Err(unmigrated(pending)),
-                Schema::Refused(error) => Err(unavailable(error)),
-            };
+#[cfg(test)]
+pub(crate) use pausing::pause;
+
+/// A pause, for the tests' racing writers.
+#[cfg(test)]
+mod pausing {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::{Arc, Mutex, PoisonError};
+    use std::task::{Context, Poll, Waker};
+    use std::time::{Duration, Instant};
+
+    /// A future ready once `duration` has passed. The crate drives no
+    /// runtime and so has no timer to ask for: a thread sleeps the time out
+    /// and wakes the task.
+    pub(crate) fn pause(duration: Duration) -> Pause {
+        Pause {
+            until: Instant::now() + duration,
+            waker: None,
         }
-        waiting();
-        pause(wait.min(left)).await;
-        wait = (wait * 2).min(LONGEST_WAIT);
+    }
+
+    /// See [`pause`].
+    pub(crate) struct Pause {
+        until: Instant,
+        /// The task to wake, shared with the sleeping thread once it is
+        /// started.
+        waker: Option<Arc<Mutex<Option<Waker>>>>,
+    }
+
+    impl Future for Pause {
+        type Output = ();
+
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+            if Instant::now() >= self.until {
+                return Poll::Ready(());
+            }
+            let waker = Some(cx.waker().clone());
+            match &self.waker {
+                Some(shared) => *shared.lock().unwrap_or_else(PoisonError::into_inner) = waker,
+                None => {
+                    let shared = Arc::new(Mutex::new(waker));
+                    let woken = Arc::clone(&shared);
+                    let until = self.until;
+                    std::thread::spawn(move || {
+                        std::thread::sleep(until.saturating_duration_since(Instant::now()));
+                        let waker = woken.lock().unwrap_or_else(PoisonError::into_inner).take();
+                        if let Some(waker) = waker {
+                            waker.wake();
+                        }
+                    });
+                    self.waker = Some(shared);
+                }
+            }
+            Poll::Pending
+        }
     }
 }
-
-/// How long a read waits for a file being made before it looks again,
-/// doubling each time it waits, up to [`LONGEST_WAIT`]. A writer makes a
-/// file in milliseconds, so most reads look twice or three times.
-const FIRST_WAIT: Duration = Duration::from_millis(1);
-
-/// The longest a read waits between looks at a file being made.
-const LONGEST_WAIT: Duration = Duration::from_millis(50);
 
 /// Whether the database holds nothing committed: no table, index or
 /// anything else in its schema.
-async fn empty(conn: &mut SqliteConnection) -> Result<bool, StoreError> {
+pub(crate) async fn empty(conn: &mut SqliteConnection) -> Result<bool, StoreError> {
     let entries: i64 = sqlx::query_scalar("SELECT count(*) FROM sqlite_master")
         .fetch_one(&mut *conn)
         .await
         .map_err(opening)?;
     Ok(entries == 0)
-}
-
-/// A future ready once `duration` has passed. The crate drives no runtime
-/// and so has no timer to ask for: a thread sleeps the time out and wakes
-/// the task.
-fn pause(duration: Duration) -> Pause {
-    Pause {
-        until: Instant::now() + duration,
-        waker: None,
-    }
-}
-
-/// See [`pause`].
-struct Pause {
-    until: Instant,
-    /// The task to wake, shared with the sleeping thread once it is started.
-    waker: Option<Arc<Mutex<Option<Waker>>>>,
-}
-
-impl Future for Pause {
-    type Output = ();
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        if Instant::now() >= self.until {
-            return Poll::Ready(());
-        }
-        let waker = Some(cx.waker().clone());
-        match &self.waker {
-            Some(shared) => *shared.lock().unwrap_or_else(PoisonError::into_inner) = waker,
-            None => {
-                let shared = Arc::new(Mutex::new(waker));
-                let woken = Arc::clone(&shared);
-                let until = self.until;
-                std::thread::spawn(move || {
-                    std::thread::sleep(until.saturating_duration_since(Instant::now()));
-                    let waker = woken.lock().unwrap_or_else(PoisonError::into_inner).take();
-                    if let Some(waker) = waker {
-                        waker.wake();
-                    }
-                });
-                self.waker = Some(shared);
-            }
-        }
-        Poll::Pending
-    }
-}
-
-/// How a database's applied migrations stand against [`MIGRATOR`].
-enum Schema {
-    /// Every migration is applied, as this build has it.
-    Current,
-    /// This many migrations are not yet applied; those that are agree.
-    Pending(usize),
-    /// What sqlx's migrator would refuse: a migration that failed, one this
-    /// build does not have, or one changed since it was applied.
-    Refused(MigrateError),
-}
-
-/// Where the database's migrations stand, read without taking a lock.
-///
-/// From sqlx's own record, `_sqlx_migrations`, rather than `PRAGMA
-/// user_version`: it is what the migrator checks, so the two cannot
-/// disagree, and it carries each migration's checksum, so a changed
-/// migration is refused here as the migrator would refuse it.
-async fn schema(conn: &mut SqliteConnection) -> Result<Schema, StoreError> {
-    let recorded: Option<String> = sqlx::query_scalar(
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
-    )
-    .fetch_optional(&mut *conn)
-    .await
-    .map_err(opening)?;
-    let applied: Vec<(i64, Vec<u8>, bool)> = match recorded {
-        Some(_) => sqlx::query_as("SELECT version, checksum, success FROM _sqlx_migrations")
-            .fetch_all(&mut *conn)
-            .await
-            .map_err(opening)?,
-        None => Vec::new(),
-    };
-    let wanted: Vec<&Migration> = MIGRATOR
-        .iter()
-        .filter(|m| !m.migration_type.is_down_migration())
-        .collect();
-    for (version, checksum, success) in &applied {
-        if !success {
-            return Ok(Schema::Refused(MigrateError::Dirty(*version)));
-        }
-        match wanted.iter().find(|m| m.version == *version) {
-            None => return Ok(Schema::Refused(MigrateError::VersionMissing(*version))),
-            Some(m) if *m.checksum != **checksum => {
-                return Ok(Schema::Refused(MigrateError::VersionMismatch(*version)))
-            }
-            Some(_) => {}
-        }
-    }
-    let pending = wanted
-        .iter()
-        .filter(|m| !applied.iter().any(|(version, _, _)| *version == m.version))
-        .count();
-    Ok(match pending {
-        0 => Schema::Current,
-        n => Schema::Pending(n),
-    })
-}
-
-/// Apply what is pending holding the write lock, waiting
-/// [`BUSY_TIMEOUT`] for it. The migrator reads again which migrations are
-/// applied, under the lock, and refuses a database it disagrees with.
-///
-/// Through `Migrator::run_direct`, the connection itself, rather than
-/// `Migrator::run`, which takes any `Acquire<'a>`: the compiler cannot
-/// prove `run`'s future `Send` for every `'a` ("implementation of
-/// `Acquire` is not general enough"), so no open calling it would be
-/// `Send`, and boxing it does not help, the obligation being on `run`'s own
-/// future. `run` acquires the connection and calls `run_direct`, so on a
-/// connection the two do the same.
-async fn migrate(conn: &mut SqliteConnection) -> Result<(), StoreError> {
-    let mut tx = conn
-        .begin_with("BEGIN IMMEDIATE")
-        .await
-        .map_err(unavailable)?;
-    MIGRATOR.run_direct(&mut *tx).await.map_err(unavailable)?;
-    backfill(&mut tx).await?;
-    tx.commit().await.map_err(unavailable)
 }
 
 /// An event row as stored: domain, edition, root, sequence, page.
@@ -431,7 +352,7 @@ type StoredRow = (String, String, Vec<u8>, i64, Vec<u8>);
 /// what migration 0003 added, which SQL cannot fill (it decodes a page).
 /// Run under the migration's lock, the first time a store migrates the
 /// file past 0003, and marked done, so a reopen scans nothing again.
-async fn backfill(conn: &mut SqliteConnection) -> Result<(), StoreError> {
+pub(crate) async fn backfill(conn: &mut SqliteConnection) -> Result<(), StoreError> {
     let done: i64 = sqlx::query_scalar(statements::BACKFILL_DONE)
         .bind(statements::EVENTS_META_BACKFILL)
         .fetch_one(&mut *conn)
@@ -476,7 +397,7 @@ async fn backfill(conn: &mut SqliteConnection) -> Result<(), StoreError> {
 /// before migrating. A file system that cannot hold WAL's shared memory
 /// leaves the file in its rollback journal, where the store still works
 /// and a reader waits only on a writer's commit.
-async fn into_wal(conn: &mut SqliteConnection) -> Result<(), StoreError> {
+pub(crate) async fn into_wal(conn: &mut SqliteConnection) -> Result<(), StoreError> {
     for _ in 1..WAL_ATTEMPTS {
         match sqlx::query("PRAGMA journal_mode = WAL")
             .execute(&mut *conn)
@@ -520,7 +441,7 @@ fn primary_code(error: &sqlx::Error) -> Option<i32> {
 /// (`angzarr-store-sqlite-damaged-file`), its one problem SQLite's message, so a
 /// caller can tell a file to repair or replace from a store that could not
 /// say. Any other failure is `angzarr-store-sqlite-unavailable`.
-fn opening(error: sqlx::Error) -> StoreError {
+pub(crate) fn opening(error: sqlx::Error) -> StoreError {
     match primary_code(&error) {
         Some(code @ (SQLITE_CORRUPT | SQLITE_NOTADB)) => damaged(
             code as u64,

@@ -29,10 +29,10 @@ pub enum SqlError {
     /// A stored value's bytes do not decode as what was written: `detail`
     /// is the decoder's text, verbatim.
     Undecodable { detail: String },
-    /// A database opened read-only has `pending` migrations this build
-    /// would apply: it is older than the build, or empty with no writer
-    /// finishing it, and only a store opened to write migrates it.
-    Unmigrated { pending: usize },
+    /// A backup's destination, `path`, that could not be created: `detail`
+    /// is the operating system's text, verbatim. (Something already there
+    /// is angzarr-ports' `BackupExists`.)
+    BackupUncreatable { path: String, detail: String },
     /// A file too damaged to open: SQLite finds it malformed or no database
     /// at all. `errno` is SQLite's primary result code, `detail` its text.
     DamagedFile { errno: u64, detail: String },
@@ -49,7 +49,7 @@ impl SqlError {
             SqlError::Unavailable { errno: Some(_), .. } => "angzarr-store-sqlite-unavailable",
             SqlError::Unavailable { errno: None, .. } => "angzarr-store-sqlite-driver-failed",
             SqlError::Undecodable { .. } => "angzarr-store-sqlite-undecodable",
-            SqlError::Unmigrated { .. } => "angzarr-store-sqlite-unmigrated",
+            SqlError::BackupUncreatable { .. } => "angzarr-store-sqlite-backup-uncreatable",
             SqlError::DamagedFile { .. } => "angzarr-store-sqlite-damaged-file",
             SqlError::NoDataVersion => "angzarr-store-sqlite-no-data-version",
             SqlError::BadRoot { .. } => "angzarr-store-sqlite-bad-root",
@@ -66,7 +66,9 @@ impl SqlError {
                 .chain([text(detail)])
                 .collect(),
             SqlError::Undecodable { detail } => vec![text(detail)],
-            SqlError::Unmigrated { pending } => vec![("pending", Arg::Uint(*pending as u64))],
+            SqlError::BackupUncreatable { path, detail } => {
+                vec![("path", Arg::Str(path.clone())), text(detail)]
+            }
             SqlError::DamagedFile { errno, detail } => {
                 vec![("errno", Arg::Uint(*errno)), text(detail)]
             }
@@ -200,7 +202,10 @@ pub fn errors() -> Vec<SqlError> {
             detail: detail(),
         },
         SqlError::Undecodable { detail: detail() },
-        SqlError::Unmigrated { pending: 1 },
+        SqlError::BackupUncreatable {
+            path: "/x/state.db.pre-4".to_string(),
+            detail: detail(),
+        },
         SqlError::DamagedFile {
             errno: 26,
             detail: detail(),
@@ -299,10 +304,16 @@ pub(crate) fn no_data_version() -> StoreError {
     StoreError::Unavailable(SqlError::NoDataVersion.cause())
 }
 
-/// A database opened read-only that is not migrated: only a store opened
-/// to write can migrate it.
-pub(crate) fn unmigrated(pending: usize) -> StoreError {
-    StoreError::Unavailable(SqlError::Unmigrated { pending }.cause())
+/// A backup's destination that could not be created, with the operating
+/// system's text.
+pub(crate) fn backup_uncreatable(path: &std::path::Path, error: &std::io::Error) -> StoreError {
+    StoreError::Unavailable(
+        SqlError::BackupUncreatable {
+            path: path.display().to_string(),
+            detail: error.to_string(),
+        }
+        .cause(),
+    )
 }
 
 /// A database file too damaged to open, as the port's failure
