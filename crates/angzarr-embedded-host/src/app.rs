@@ -48,8 +48,10 @@ use crate::host::{ChildExit, Host};
 /// `register` to register the in-process ones, holding what it registers
 /// to the in-process `[[component]]`s, by name and kind (one listed and
 /// not registered, [`HostError::NotRegistered`]; one registered and not
-/// listed, [`HostError::NotListed`]), and opens
-/// its store (SQLite, `[store]`) on the caller's runtime. The [`App`] is
+/// listed, [`HostError::NotListed`]), opens
+/// its store (SQLite, `[store]`) on the caller's runtime, and resumes the
+/// policy work its store still owes ([`Kernel::resume`]: what a crash left
+/// between a commit and its policies' steps) before it returns. The [`App`] is
 /// how the application sends commands and reads its streams; dropping it
 /// stops the children. A component exposed (`expose`) that is registered
 /// as a process manager is refused ([`HostError::NotExposable`]): only an
@@ -123,7 +125,7 @@ pub async fn run_with_languages(
             return Err(stopped(host, error).await);
         }
     };
-    Ok(App {
+    let app = App {
         host,
         registry,
         dead_letters: MemoryDeadLetters::new(),
@@ -131,7 +133,30 @@ pub async fn run_with_languages(
         retry: config.retry.on_retryable(),
         store,
         exposed,
-    })
+    };
+    app.resume().await;
+    Ok(app)
+}
+
+/// What a resume at start is sampled at: the wall clock, and a UUIDv7 of
+/// it (RFC 9562, its random bits zero), which a resume never uses: its
+/// steps' command ids are derived from their triggers.
+fn started_at() -> Sampled {
+    let since = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let ms = since.as_millis() as u64;
+    let mut id = [0u8; 16];
+    id[..6].copy_from_slice(&ms.to_be_bytes()[2..]);
+    id[6] = 0x70;
+    id[8] = 0x80;
+    Sampled {
+        now: angzarr_embedded::next::Timestamp {
+            seconds: since.as_secs() as i64,
+            nanos: since.subsec_nanos() as i32,
+        },
+        command_id: angzarr_embedded::next::v1::Uuid::from_bytes(id),
+    }
 }
 
 /// The `kind` a process manager is refused exposure under: not a
@@ -327,6 +352,22 @@ impl App {
         Kernel::new(&self.registry, &self.dead_letters)
             .on_policy_bug(self.policy_bug)
             .on_retryable(self.retry)
+    }
+
+    /// Runs the policy work the store still owes, by position
+    /// ([`Kernel::resume`]), at [`started_at`]. A step that fails is as it
+    /// is in any chain: dead-lettered, its position where `[policy] on_bug`
+    /// leaves it, and a retryable one's held for the next resume. Its
+    /// failure is logged here and does not stop the application from
+    /// starting: the work stays the store's to owe.
+    async fn resume(&self) {
+        let kernel = self.kernel();
+        let mut projections = ();
+        let sampled = started_at();
+        let resumed = off_worker(kernel.resume(&self.store, &sampled, &mut projections)).await;
+        if let Err(failure) = resumed {
+            eprintln!("{failure}");
+        }
     }
 
     /// The application's store.

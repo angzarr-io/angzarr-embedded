@@ -1275,6 +1275,30 @@ mod resume {
         )
     }
 
+    /// A resume is sampled at the wall clock, its id a UUIDv7 of the same
+    /// instant (version 7, the RFC 9562 variant, the instant's
+    /// milliseconds first).
+    #[test]
+    fn a_resume_is_sampled_at_the_wall_clock() {
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap();
+        let sampled = super::super::started_at();
+        let after = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap();
+        let at = std::time::Duration::new(sampled.now.seconds as u64, sampled.now.nanos as u32);
+        assert!(before <= at && at <= after, "{before:?} {at:?} {after:?}");
+        let id = sampled.command_id.value.to_vec();
+        assert_eq!(id.len(), 16);
+        let mut ms = [0u8; 8];
+        ms[2..].copy_from_slice(&id[..6]);
+        assert_eq!(u64::from_be_bytes(ms), at.as_millis() as u64);
+        assert_eq!(id[6], 0x70, "version 7");
+        assert_eq!(id[8], 0x80, "the RFC 9562 variant");
+        assert!(id[7] == 0 && id[9..].iter().all(|b| *b == 0), "{id:?}");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn policy_work_owed_at_a_crash_is_resumed_at_start() {
         let dir = scratch("resume");

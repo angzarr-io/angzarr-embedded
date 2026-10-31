@@ -791,7 +791,8 @@ kernel.resume(&store, &sampled, &mut projections).await?;                       
   events still owe, so a client's retry after a crash finishes the chain.
   A step run again is deduplicated by its derived command id. So a policy
   new to a domain with history runs over it only through `resume` before
-  the stream's next command.
+  the stream's next command. The host's `run` calls `resume` once at start,
+  before it hands back its `App`, so what a crash left owed is run first.
 - **Depth limit** (`Kernel::limit`, default 8): `KernelError::ChainTooDeep`,
   the cycle check for a chain that may legitimately revisit a stream.
 - **Targeting from the event**: `on_event` receives the event with its
