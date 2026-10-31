@@ -33,14 +33,14 @@ impl fmt::Display for WireError {
 }
 
 impl Diagnostic for WireError {
-    fn code(&self) -> &'static str {
+    fn code(&self) -> &str {
         match self {
             WireError::Missing { .. } => "angzarr-embedded-next-wire-missing",
             WireError::UnknownEnum { .. } => "angzarr-embedded-next-wire-unknown-enum",
         }
     }
 
-    fn args(&self) -> Vec<(&'static str, Arg)> {
+    fn args(&self) -> Vec<(&str, Arg)> {
         match self {
             WireError::Missing { message, field } => {
                 vec![("message", (*message).into()), ("field", (*field).into())]

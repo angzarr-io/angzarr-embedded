@@ -115,11 +115,11 @@ impl fmt::Display for Never {
 }
 
 impl Diagnostic for Never {
-    fn code(&self) -> &'static str {
+    fn code(&self) -> &str {
         "tally-never"
     }
 
-    fn args(&self) -> Vec<(&'static str, Arg)> {
+    fn args(&self) -> Vec<(&str, Arg)> {
         Vec::new()
     }
 }

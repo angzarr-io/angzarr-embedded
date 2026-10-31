@@ -69,7 +69,7 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 
 impl Diagnostic for Error {
-    fn code(&self) -> &'static str {
+    fn code(&self) -> &str {
         match self.problem {
             ParseProblem::LoneCarriageReturn => "angzarr-embedded-yaml-lone-carriage-return",
             ParseProblem::TabIndent => "angzarr-embedded-yaml-tab-indent",
@@ -93,7 +93,7 @@ impl Diagnostic for Error {
         }
     }
 
-    fn args(&self) -> Vec<(&'static str, Arg)> {
+    fn args(&self) -> Vec<(&str, Arg)> {
         let mut args = vec![("line", Arg::from(self.line))];
         match &self.problem {
             ParseProblem::NonAsciiIndent { character } => {

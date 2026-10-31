@@ -64,11 +64,11 @@ impl fmt::Display for NotExposed {
 }
 
 impl Diagnostic for NotExposed {
-    fn code(&self) -> &'static str {
+    fn code(&self) -> &str {
         "angzarr-embedded-host-not-exposed"
     }
 
-    fn args(&self) -> Vec<(&'static str, Arg)> {
+    fn args(&self) -> Vec<(&str, Arg)> {
         vec![
             ("domain", self.domain.as_str().into()),
             ("arrival", self.arrival.as_str().into()),

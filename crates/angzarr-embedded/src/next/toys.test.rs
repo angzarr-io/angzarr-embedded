@@ -615,7 +615,7 @@ impl fmt::Display for Refused {
 }
 
 impl Diagnostic for Refused {
-    fn code(&self) -> &'static str {
+    fn code(&self) -> &str {
         match self {
             Refused::AlreadyOpen => "toy-account-already-open",
             Refused::NotOpen => "toy-account-not-open",
@@ -623,7 +623,7 @@ impl Diagnostic for Refused {
         }
     }
 
-    fn args(&self) -> Vec<(&'static str, Arg)> {
+    fn args(&self) -> Vec<(&str, Arg)> {
         match *self {
             Refused::Overdrawn { short } => vec![("short", short.into())],
             _ => vec![],
@@ -1058,11 +1058,11 @@ impl fmt::Display for NegativeTotal {
 }
 
 impl Diagnostic for NegativeTotal {
-    fn code(&self) -> &'static str {
+    fn code(&self) -> &str {
         "toy-ledger-negative-total"
     }
 
-    fn args(&self) -> Vec<(&'static str, Arg)> {
+    fn args(&self) -> Vec<(&str, Arg)> {
         vec![("total", self.total.into())]
     }
 }
@@ -1118,11 +1118,11 @@ impl fmt::Display for TooLarge {
 }
 
 impl Diagnostic for TooLarge {
-    fn code(&self) -> &'static str {
+    fn code(&self) -> &str {
         "toy-ledger-too-large"
     }
 
-    fn args(&self) -> Vec<(&'static str, Arg)> {
+    fn args(&self) -> Vec<(&str, Arg)> {
         vec![]
     }
 }

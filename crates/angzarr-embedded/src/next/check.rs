@@ -114,7 +114,7 @@ impl fmt::Display for Malformed {
 }
 
 impl Diagnostic for Malformed {
-    fn code(&self) -> &'static str {
+    fn code(&self) -> &str {
         match self {
             Malformed::NoCover => "angzarr-embedded-next-malformed-no-cover",
             Malformed::UnknownDomain { .. } => "angzarr-embedded-next-malformed-unknown-domain",
@@ -160,7 +160,7 @@ impl Diagnostic for Malformed {
         }
     }
 
-    fn args(&self) -> Vec<(&'static str, Arg)> {
+    fn args(&self) -> Vec<(&str, Arg)> {
         match self {
             Malformed::UnknownDomain { domain } => vec![("domain", domain.as_str().into())],
             Malformed::BadRoot { len }

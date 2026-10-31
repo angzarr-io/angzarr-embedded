@@ -99,11 +99,11 @@ impl fmt::Display for Ported {
 }
 
 impl Diagnostic for Ported {
-    fn code(&self) -> &'static str {
+    fn code(&self) -> &str {
         self.code
     }
 
-    fn args(&self) -> Vec<(&'static str, Arg)> {
+    fn args(&self) -> Vec<(&str, Arg)> {
         self.args
             .iter()
             .map(|(name, arg)| {
@@ -687,7 +687,7 @@ fn the_checks_catch_what_they_should() {
 /// error Fluent reported (a variable the message names and `args` lack is
 /// one). The catalog is the code's owner's ([`owner`]), where it ships or
 /// where a crate carries it ([`CARRIED`]).
-fn render(code: &str, args: &[(&'static str, Arg)], locale: &str) -> (String, Vec<String>) {
+fn render(code: &str, args: &[(&str, Arg)], locale: &str) -> (String, Vec<String>) {
     use fluent_bundle::{FluentArgs, FluentBundle, FluentResource, FluentValue};
     let mut ignored = Vec::new();
     let krate = owner(code, catalogs(&mut ignored).keys().map(String::as_str))

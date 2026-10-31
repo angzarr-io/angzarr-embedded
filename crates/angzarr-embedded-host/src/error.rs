@@ -37,7 +37,7 @@ impl fmt::Display for HandshakeError {
 }
 
 impl Diagnostic for HandshakeError {
-    fn code(&self) -> &'static str {
+    fn code(&self) -> &str {
         match self {
             HandshakeError::Malformed { .. } => "angzarr-embedded-host-handshake-malformed",
             HandshakeError::Timeout { .. } => "angzarr-embedded-host-handshake-timeout",
@@ -46,7 +46,7 @@ impl Diagnostic for HandshakeError {
         }
     }
 
-    fn args(&self) -> Vec<(&'static str, Arg)> {
+    fn args(&self) -> Vec<(&str, Arg)> {
         match self {
             HandshakeError::Malformed { line } => vec![("line", line.as_str().into())],
             HandshakeError::Timeout { timeout_ms } => vec![("timeout_ms", (*timeout_ms).into())],
@@ -169,7 +169,7 @@ impl fmt::Display for HostError {
 }
 
 impl Diagnostic for HostError {
-    fn code(&self) -> &'static str {
+    fn code(&self) -> &str {
         match self {
             HostError::DuplicateDomain { .. } => "angzarr-embedded-host-duplicate-domain",
             HostError::NoLaunch { .. } => "angzarr-embedded-host-no-launch",
@@ -197,7 +197,7 @@ impl Diagnostic for HostError {
         }
     }
 
-    fn args(&self) -> Vec<(&'static str, Arg)> {
+    fn args(&self) -> Vec<(&str, Arg)> {
         let domain = |d: &str| ("domain", Arg::from(d));
         match self {
             HostError::DuplicateDomain { domain: d }

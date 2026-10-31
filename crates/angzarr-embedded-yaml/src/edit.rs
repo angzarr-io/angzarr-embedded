@@ -1002,7 +1002,7 @@ impl fmt::Display for EditError {
 impl std::error::Error for EditError {}
 
 impl Diagnostic for EditError {
-    fn code(&self) -> &'static str {
+    fn code(&self) -> &str {
         match self.problem {
             EditProblem::NotFound => "angzarr-embedded-yaml-edit-not-found",
             EditProblem::NotAMapping => "angzarr-embedded-yaml-edit-not-a-mapping",
@@ -1014,7 +1014,7 @@ impl Diagnostic for EditError {
         }
     }
 
-    fn args(&self) -> Vec<(&'static str, Arg)> {
+    fn args(&self) -> Vec<(&str, Arg)> {
         let mut args = vec![("path", Arg::from(path_text(&self.path)))];
         if let EditProblem::NoSuchItem { index, len } = self.problem {
             args.push(("index", Arg::from(index)));

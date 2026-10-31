@@ -159,11 +159,11 @@ impl fmt::Display for TooBig {
 }
 
 impl Diagnostic for TooBig {
-    fn code(&self) -> &'static str {
+    fn code(&self) -> &str {
         "toy-counter-too-big"
     }
 
-    fn args(&self) -> Vec<(&'static str, Arg)> {
+    fn args(&self) -> Vec<(&str, Arg)> {
         vec![("by", self.by.into())]
     }
 }
@@ -325,13 +325,13 @@ impl fmt::Display for Refused {
 }
 
 impl Diagnostic for Refused {
-    fn code(&self) -> &'static str {
+    fn code(&self) -> &str {
         match self {
             Refused::NotPositive { .. } => "toy-counter-not-positive",
         }
     }
 
-    fn args(&self) -> Vec<(&'static str, Arg)> {
+    fn args(&self) -> Vec<(&str, Arg)> {
         match self {
             Refused::NotPositive { by } => vec![("by", (*by).into())],
         }

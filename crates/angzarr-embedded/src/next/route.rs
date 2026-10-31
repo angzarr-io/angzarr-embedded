@@ -13,9 +13,9 @@
 //!   resolving COMMUTATIVE by the state's conflict units; the domain's
 //!   handlers are registered on it.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, OnceLock};
 
 use angzarr_embedded_diagnostic::{Arg, Diagnostic, Report};
 use angzarr_proto::v1::ConflictResolution;
@@ -40,9 +40,11 @@ use super::payload::{type_name, Payload};
 /// neither (a domain's own). The catalog check holds the catalog to the
 /// router's list.
 pub(crate) fn reason_code(reason: &str) -> Option<&'static str> {
-    forwarded()
-        .any(|known| known == reason)
-        .then(|| intern(&kebab(reason)))
+    static CODES: OnceLock<BTreeMap<&'static str, String>> = OnceLock::new();
+    CODES
+        .get_or_init(|| forwarded().map(|known| (known, kebab(known))).collect())
+        .get(reason)
+        .map(String::as_str)
 }
 
 /// Every reason [`reason_code`] forwards, by its full name: the router's,
@@ -66,29 +68,15 @@ fn kebab(reason: &str) -> String {
 }
 
 /// `error`'s metadata as args, by name, each as text: angzarr-router's
-/// keys, a wrapped cause already flattened (`cause`, `cause.<arg>`).
-pub(crate) fn router_args(error: &CodedError) -> Vec<(&'static str, Arg)> {
+/// keys, a wrapped cause already flattened (`cause`, `cause.<arg>`). The
+/// names are the error's own, borrowed: what a handler answers is held
+/// only as long as its error.
+pub(crate) fn router_args(error: &CodedError) -> Vec<(&str, Arg)> {
     error
         .extras
         .iter()
-        .map(|(key, value)| (intern(key), Arg::Str(value.clone())))
+        .map(|(key, value)| (key.as_str(), Arg::Str(value.clone())))
         .collect()
-}
-
-/// The code of a refusal a domain's handler made, kept for the program's
-/// life: each distinct code (and arg name) once. A program refuses with a
-/// fixed set of codes, so the set is bounded.
-pub(crate) fn intern(text: &str) -> &'static str {
-    static HELD: Mutex<BTreeSet<&'static str>> = Mutex::new(BTreeSet::new());
-    let mut held = HELD
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(found) = held.get(text) {
-        return found;
-    }
-    let leaked: &'static str = Box::leak(text.to_string().into_boxed_str());
-    held.insert(leaked);
-    leaked
 }
 
 /// The router's key for a refusal past a decision's step limit
@@ -105,7 +93,7 @@ pub(crate) const TOO_MANY_STEPS: &str = "ROUTER_REASON_TOO_MANY_STEPS";
 #[derive(Clone, PartialEq, Debug)]
 pub struct Rejected {
     report: Report,
-    key: &'static str,
+    key: String,
     refusal: Option<Any>,
     status: BusinessStatus,
 }
@@ -115,15 +103,18 @@ impl Rejected {
     /// reason as angzarr-embedded's code (a typed refusal's
     /// ROUTER_REASON_COMMAND_REFUSED), or the handler's own, its metadata the args.
     pub(crate) fn of(error: &CodedError) -> Rejected {
-        let code = reason_code(&error.code).unwrap_or_else(|| intern(&error.code));
+        let code = match reason_code(&error.code) {
+            Some(code) => std::borrow::Cow::Borrowed(code),
+            None => std::borrow::Cow::Owned(error.code.clone()),
+        };
         let report = router_args(error)
             .into_iter()
             .fold(Report::new(code), |report, (name, arg)| {
-                report.arg(name, arg)
+                report.arg(name.to_string(), arg)
             });
         Rejected {
             report,
-            key: intern(&error.code),
+            key: error.code.clone(),
             refusal: error.refusal.as_deref().cloned(),
             status: BusinessStatus::try_from(error.grpc)
                 .unwrap_or(BusinessStatus::FailedPrecondition),
@@ -140,7 +131,7 @@ impl Rejected {
     /// code for it, and its args.
     pub(crate) fn wire(&self) -> angzarr_proto::v1::Diagnostic {
         angzarr_proto::v1::Diagnostic {
-            code: self.key.to_string(),
+            code: self.key.clone(),
             args: flat_args(&self.report).into_iter().collect(),
         }
     }
@@ -185,11 +176,11 @@ impl fmt::Display for Rejected {
 }
 
 impl Diagnostic for Rejected {
-    fn code(&self) -> &'static str {
+    fn code(&self) -> &str {
         self.report.code()
     }
 
-    fn args(&self) -> Vec<(&'static str, Arg)> {
+    fn args(&self) -> Vec<(&str, Arg)> {
         self.report.args()
     }
 }
@@ -356,8 +347,8 @@ pub(crate) fn policy_failure(error: &CodedError) -> Option<Report> {
             .extras
             .iter()
             .filter(|(name, _)| name.as_str() != POLICY_REASON)
-            .fold(Report::new(intern(&reason)), |report, (name, value)| {
-                report.arg(intern(name), value.as_str())
+            .fold(Report::new(reason), |report, (name, value)| {
+                report.arg(name.clone(), value.as_str())
             }),
     )
 }

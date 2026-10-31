@@ -10,10 +10,10 @@ impl fmt::Display for Inner {
 }
 
 impl Diagnostic for Inner {
-    fn code(&self) -> &'static str {
+    fn code(&self) -> &str {
         "test-inner"
     }
-    fn args(&self) -> Vec<(&'static str, Arg)> {
+    fn args(&self) -> Vec<(&str, Arg)> {
         vec![("n", 3u32.into())]
     }
 }
@@ -54,10 +54,10 @@ impl fmt::Display for Reworded {
 }
 
 impl Diagnostic for Reworded {
-    fn code(&self) -> &'static str {
+    fn code(&self) -> &str {
         "test-inner"
     }
-    fn args(&self) -> Vec<(&'static str, Arg)> {
+    fn args(&self) -> Vec<(&str, Arg)> {
         vec![("n", 3u32.into())]
     }
 }

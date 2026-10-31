@@ -128,7 +128,7 @@ impl fmt::Display for DescriptorRefused {
 }
 
 impl Diagnostic for DescriptorRefused {
-    fn code(&self) -> &'static str {
+    fn code(&self) -> &str {
         match self {
             DescriptorRefused::MissingRulesVersion { .. } => {
                 "angzarr-embedded-host-descriptor-missing-rules-version"
@@ -154,7 +154,7 @@ impl Diagnostic for DescriptorRefused {
         }
     }
 
-    fn args(&self) -> Vec<(&'static str, Arg)> {
+    fn args(&self) -> Vec<(&str, Arg)> {
         let component = |c: &str| ("component", Arg::from(c));
         let kind = |k: &str| ("component_kind", Arg::from(k));
         match self {

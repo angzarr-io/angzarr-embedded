@@ -77,7 +77,7 @@ impl fmt::Display for BadTag {
 impl std::error::Error for BadTag {}
 
 impl Diagnostic for BadTag {
-    fn code(&self) -> &'static str {
+    fn code(&self) -> &str {
         match self.problem {
             TagProblem::BadNamespace => "angzarr-embedded-graph-bad-namespace",
             TagProblem::BadName => "angzarr-embedded-graph-bad-name",
@@ -86,7 +86,7 @@ impl Diagnostic for BadTag {
         }
     }
 
-    fn args(&self) -> Vec<(&'static str, Arg)> {
+    fn args(&self) -> Vec<(&str, Arg)> {
         vec![("text", self.text.as_str().into())]
     }
 }

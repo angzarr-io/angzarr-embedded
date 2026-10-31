@@ -28,9 +28,16 @@
 //! error (a migration step's, a decoder's) it holds it as a [`Report`]: the
 //! code and args captured, so the error stays `Clone` and `Eq`.
 //!
+//! A code and an arg's name are borrowed from the error that holds them,
+//! never `'static`: an error whose codes are known when it is compiled
+//! answers literals (`fn code(&self) -> &str` implements the
+//! trait), and one that carries what another process answered (a
+//! [`Report`] of a child's code) holds the text it answers, freed with it.
+//!
 //! [`code`]: Diagnostic::code
 //! [`args`]: Diagnostic::args
 
+use std::borrow::Cow;
 use std::fmt;
 
 /// An error a player may read: a stable code and its named data. `Display`
@@ -38,21 +45,21 @@ use std::fmt;
 pub trait Diagnostic: fmt::Debug + fmt::Display {
     /// The message id: kebab-case, starting with the crate's name, never
     /// reused.
-    fn code(&self) -> &'static str;
+    fn code(&self) -> &str;
 
     /// The message's arguments, by name. The same names every time for a
     /// given code.
-    fn args(&self) -> Vec<(&'static str, Arg)>;
+    fn args(&self) -> Vec<(&str, Arg)>;
 }
 
 /// What cannot fail has nothing to say: for a domain that never rejects,
 /// say.
 impl Diagnostic for std::convert::Infallible {
-    fn code(&self) -> &'static str {
+    fn code(&self) -> &str {
         match *self {}
     }
 
-    fn args(&self) -> Vec<(&'static str, Arg)> {
+    fn args(&self) -> Vec<(&str, Arg)> {
         match *self {}
     }
 }
@@ -129,8 +136,8 @@ impl From<char> for Arg {
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Report {
-    code: &'static str,
-    args: Vec<(&'static str, Held)>,
+    code: Cow<'static, str>,
+    args: Vec<(Cow<'static, str>, Held)>,
 }
 
 /// An [`Arg`], owned and comparable.
@@ -163,28 +170,29 @@ impl Held {
 }
 
 impl Report {
-    /// A diagnostic with no args yet.
-    pub fn new(code: &'static str) -> Report {
+    /// A diagnostic with no args yet: its code a literal, or text another
+    /// process answered, held as long as the report.
+    pub fn new(code: impl Into<Cow<'static, str>>) -> Report {
         Report {
-            code,
+            code: code.into(),
             args: Vec::new(),
         }
     }
 
-    /// Add an arg.
-    pub fn arg(mut self, name: &'static str, value: impl Into<Arg>) -> Report {
-        self.args.push((name, Held::of(value.into())));
+    /// Add an arg, its name a literal or held text.
+    pub fn arg(mut self, name: impl Into<Cow<'static, str>>, value: impl Into<Arg>) -> Report {
+        self.args.push((name.into(), Held::of(value.into())));
         self
     }
 
     /// Capture any diagnostic, nested causes and all.
     pub fn of(d: &dyn Diagnostic) -> Report {
         Report {
-            code: d.code(),
+            code: Cow::Owned(d.code().to_string()),
             args: d
                 .args()
                 .into_iter()
-                .map(|(name, arg)| (name, Held::of(arg)))
+                .map(|(name, arg)| (Cow::Owned(name.to_string()), Held::of(arg)))
                 .collect(),
         }
     }
@@ -249,14 +257,14 @@ pub fn quote(value: &str) -> std::borrow::Cow<'_, str> {
 impl std::error::Error for Report {}
 
 impl Diagnostic for Report {
-    fn code(&self) -> &'static str {
-        self.code
+    fn code(&self) -> &str {
+        &self.code
     }
 
-    fn args(&self) -> Vec<(&'static str, Arg)> {
+    fn args(&self) -> Vec<(&str, Arg)> {
         self.args
             .iter()
-            .map(|(name, held)| (*name, held.arg()))
+            .map(|(name, held)| (name.as_ref(), held.arg()))
             .collect()
     }
 }

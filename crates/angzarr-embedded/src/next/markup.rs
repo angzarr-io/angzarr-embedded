@@ -599,14 +599,14 @@ impl<R: angzarr_embedded_diagnostic::Diagnostic> fmt::Display for Rejection<R> {
 impl<R: angzarr_embedded_diagnostic::Diagnostic> angzarr_embedded_diagnostic::Diagnostic
     for Rejection<R>
 {
-    fn code(&self) -> &'static str {
+    fn code(&self) -> &str {
         match self {
             Rejection::Message(rejection) => rejection.code(),
             Rejection::Typed(_) => COMMAND_REFUSED,
         }
     }
 
-    fn args(&self) -> Vec<(&'static str, angzarr_embedded_diagnostic::Arg)> {
+    fn args(&self) -> Vec<(&str, angzarr_embedded_diagnostic::Arg)> {
         match self {
             Rejection::Message(rejection) => rejection.args(),
             Rejection::Typed(typed) => vec![("refusal_type", typed.refusal_type().into())],

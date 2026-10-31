@@ -308,7 +308,7 @@ impl fmt::Display for Misconfigured {
 }
 
 impl Diagnostic for Misconfigured {
-    fn code(&self) -> &'static str {
+    fn code(&self) -> &str {
         match self {
             Misconfigured::AlreadyRegistered { .. } => {
                 "angzarr-embedded-next-misconfigured-already-registered"
@@ -335,7 +335,7 @@ impl Diagnostic for Misconfigured {
         }
     }
 
-    fn args(&self) -> Vec<(&'static str, Arg)> {
+    fn args(&self) -> Vec<(&str, Arg)> {
         match self {
             Misconfigured::AlreadyRegistered { domain }
             | Misconfigured::EmptyRulesVersion { domain }

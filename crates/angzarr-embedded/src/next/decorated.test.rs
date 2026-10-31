@@ -504,11 +504,11 @@ impl fmt::Display for InsufficientFunds {
 }
 
 impl Diagnostic for InsufficientFunds {
-    fn code(&self) -> &'static str {
+    fn code(&self) -> &str {
         "toy-wallet-insufficient-funds"
     }
 
-    fn args(&self) -> Vec<(&'static str, Arg)> {
+    fn args(&self) -> Vec<(&str, Arg)> {
         vec![("short", self.short.into())]
     }
 }
@@ -520,11 +520,11 @@ impl fmt::Display for WalletClosed {
 }
 
 impl Diagnostic for WalletClosed {
-    fn code(&self) -> &'static str {
+    fn code(&self) -> &str {
         "toy-wallet-closed"
     }
 
-    fn args(&self) -> Vec<(&'static str, Arg)> {
+    fn args(&self) -> Vec<(&str, Arg)> {
         vec![]
     }
 }
@@ -584,7 +584,7 @@ impl fmt::Display for Refused {
 }
 
 impl Diagnostic for Refused {
-    fn code(&self) -> &'static str {
+    fn code(&self) -> &str {
         match self {
             Refused::NotPositive { .. } => "toy-wallet-not-positive",
             Refused::AlreadyOpen => "toy-wallet-already-open",
@@ -595,7 +595,7 @@ impl Diagnostic for Refused {
         }
     }
 
-    fn args(&self) -> Vec<(&'static str, Arg)> {
+    fn args(&self) -> Vec<(&str, Arg)> {
         match *self {
             Refused::NotPositive { cents } | Refused::NotEmpty { cents } => {
                 vec![("cents", cents.into())]
@@ -990,11 +990,11 @@ impl fmt::Display for MeterSealed {
 }
 
 impl Diagnostic for MeterSealed {
-    fn code(&self) -> &'static str {
+    fn code(&self) -> &str {
         "toy-meter-sealed"
     }
 
-    fn args(&self) -> Vec<(&'static str, Arg)> {
+    fn args(&self) -> Vec<(&str, Arg)> {
         vec![]
     }
 }
@@ -1013,11 +1013,11 @@ impl fmt::Display for MeterBroke {
 }
 
 impl Diagnostic for MeterBroke {
-    fn code(&self) -> &'static str {
+    fn code(&self) -> &str {
         "toy-meter-broke"
     }
 
-    fn args(&self) -> Vec<(&'static str, Arg)> {
+    fn args(&self) -> Vec<(&str, Arg)> {
         vec![("seat", self.seat.into())]
     }
 }
@@ -1036,11 +1036,11 @@ impl fmt::Display for MeterMoved {
 }
 
 impl Diagnostic for MeterMoved {
-    fn code(&self) -> &'static str {
+    fn code(&self) -> &str {
         "toy-meter-moved"
     }
 
-    fn args(&self) -> Vec<(&'static str, Arg)> {
+    fn args(&self) -> Vec<(&str, Arg)> {
         vec![("seat", self.seat.into())]
     }
 }
@@ -1567,7 +1567,7 @@ fn opened(registry: &Registry, bonus: i64) -> Stream<Wallet> {
 
 /// The refusal `failure` is, as its caller receives it: its code and its
 /// English.
-fn rejection(failure: Failure<Rejected>) -> (&'static str, Vec<(&'static str, String)>) {
+fn rejection(failure: Failure<Rejected>) -> (String, Vec<(String, String)>) {
     match failure {
         Failure::Rejected(rejected) => said(&rejected),
         other => panic!("refused by the domain, not {other:?}"),
@@ -1577,7 +1577,7 @@ fn rejection(failure: Failure<Rejected>) -> (&'static str, Vec<(&'static str, St
 /// What `diagnostic` says: its code and its args, each as text, by name
 /// (decision 14.37: a key and a map, never its English). An arg the
 /// router carried is text; the handler's own may be a number.
-fn said(diagnostic: &dyn Diagnostic) -> (&'static str, Vec<(&'static str, String)>) {
+fn said(diagnostic: &dyn Diagnostic) -> (String, Vec<(String, String)>) {
     let args = diagnostic
         .args()
         .into_iter()
@@ -1588,10 +1588,10 @@ fn said(diagnostic: &dyn Diagnostic) -> (&'static str, Vec<(&'static str, String
                 Arg::Str(s) => s,
                 Arg::Nested(cause) => cause.code().to_string(),
             };
-            (name, text)
+            (name.to_string(), text)
         })
         .collect();
-    (diagnostic.code(), args)
+    (diagnostic.code().to_string(), args)
 }
 
 /// The wallet as its fields would be: open, not closed, not rewarded,
@@ -2575,8 +2575,11 @@ mod failed {
         assert_eq!(
             said(rejected),
             (
-                "angzarr-embedded-next-command-refused",
-                vec![("refusal_type", "toy.meter.v1.MeterSealed".to_string())]
+                "angzarr-embedded-next-command-refused".to_string(),
+                vec![(
+                    "refusal_type".to_string(),
+                    "toy.meter.v1.MeterSealed".to_string()
+                )]
             )
         );
         assert_eq!(failure.recovery(), Recovery::Business);
@@ -2838,11 +2841,11 @@ impl fmt::Display for BuyInRefused {
 }
 
 impl Diagnostic for BuyInRefused {
-    fn code(&self) -> &'static str {
+    fn code(&self) -> &str {
         "toy-buyin-already-started"
     }
 
-    fn args(&self) -> Vec<(&'static str, Arg)> {
+    fn args(&self) -> Vec<(&str, Arg)> {
         vec![]
     }
 }
@@ -3534,7 +3537,10 @@ mod policy_errors {
             .expect("the handler failed");
         assert_eq!(
             said(&error),
-            ("toy-buyin-no-stake", vec![("cents", "0".to_string())])
+            (
+                "toy-buyin-no-stake".to_string(),
+                vec![("cents".to_string(), "0".to_string())]
+            )
         );
         assert_eq!(error.to_string(), "toy-buyin-no-stake cents=0");
     }
@@ -4954,7 +4960,8 @@ mod router {
             error.extras.get("actual_domain").map(String::as_str),
             Some("lamp")
         );
-        let args = KernelError::Router(error.clone()).args();
+        let routed = KernelError::Router(error.clone());
+        let args = routed.args();
         assert!(
             args.iter()
                 .any(|(name, arg)| *name == "actual_domain"

@@ -108,7 +108,7 @@ impl fmt::Display for MigrationError {
 impl std::error::Error for MigrationError {}
 
 impl Diagnostic for MigrationError {
-    fn code(&self) -> &'static str {
+    fn code(&self) -> &str {
         match self {
             MigrationError::RenameNotAMapping { .. } => {
                 "angzarr-embedded-yaml-rename-not-a-mapping"
@@ -136,7 +136,7 @@ impl Diagnostic for MigrationError {
         }
     }
 
-    fn args(&self) -> Vec<(&'static str, Arg)> {
+    fn args(&self) -> Vec<(&str, Arg)> {
         let s = |s: &String| Arg::from(s.as_str());
         match self {
             MigrationError::RenameNotAMapping { from } => vec![("from", s(from))],
@@ -206,7 +206,7 @@ impl fmt::Display for ChainError {
 impl std::error::Error for ChainError {}
 
 impl Diagnostic for ChainError {
-    fn code(&self) -> &'static str {
+    fn code(&self) -> &str {
         match self.problem {
             ChainProblem::Duplicate { .. } => "angzarr-embedded-yaml-chain-duplicate",
             ChainProblem::BeyondCurrent { .. } => "angzarr-embedded-yaml-chain-beyond-current",
@@ -214,7 +214,7 @@ impl Diagnostic for ChainError {
         }
     }
 
-    fn args(&self) -> Vec<(&'static str, Arg)> {
+    fn args(&self) -> Vec<(&str, Arg)> {
         let kind = ("kind", Arg::from(self.kind.as_str()));
         match self.problem {
             ChainProblem::Duplicate { from } => vec![kind, ("from", from.into())],
@@ -364,7 +364,7 @@ impl fmt::Display for LoadProblem {
 }
 
 impl Diagnostic for LoadProblem {
-    fn code(&self) -> &'static str {
+    fn code(&self) -> &str {
         match self {
             LoadProblem::Yaml(e) => e.code(),
             LoadProblem::NotAMapping => "angzarr-embedded-yaml-root-not-a-mapping",
@@ -386,7 +386,7 @@ impl Diagnostic for LoadProblem {
         }
     }
 
-    fn args(&self) -> Vec<(&'static str, Arg)> {
+    fn args(&self) -> Vec<(&str, Arg)> {
         match self {
             LoadProblem::Yaml(e) => e.args(),
             LoadProblem::NotAMapping
@@ -432,14 +432,14 @@ impl std::error::Error for LoadError {
 }
 
 impl Diagnostic for LoadError {
-    fn code(&self) -> &'static str {
+    fn code(&self) -> &str {
         match self.source {
             None => "angzarr-embedded-yaml-load-failed",
             Some(_) => "angzarr-embedded-yaml-load-failed-at",
         }
     }
 
-    fn args(&self) -> Vec<(&'static str, Arg)> {
+    fn args(&self) -> Vec<(&str, Arg)> {
         let mut args = vec![("kind", Arg::from(self.kind.as_str()))];
         if let Some(source) = &self.source {
             args.push(("source", source.as_str().into()));

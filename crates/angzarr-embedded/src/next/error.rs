@@ -603,7 +603,7 @@ impl<R: Diagnostic> fmt::Display for Failure<R> {
 }
 
 impl<R: Diagnostic> Diagnostic for Failure<R> {
-    fn code(&self) -> &'static str {
+    fn code(&self) -> &str {
         match self {
             Failure::Rejected(rejection) => rejection.code(),
             Failure::Downstream { .. } => "angzarr-embedded-next-downstream",
@@ -612,7 +612,7 @@ impl<R: Diagnostic> Diagnostic for Failure<R> {
         }
     }
 
-    fn args(&self) -> Vec<(&'static str, Arg)> {
+    fn args(&self) -> Vec<(&str, Arg)> {
         match self {
             Failure::Rejected(rejection) => rejection.args(),
             Failure::Downstream { path, error } => {
@@ -638,14 +638,14 @@ impl fmt::Display for StepError {
 }
 
 impl Diagnostic for StepError {
-    fn code(&self) -> &'static str {
+    fn code(&self) -> &str {
         match self {
             StepError::Rejected(rejection) | StepError::PolicyFailed(rejection) => rejection.code(),
             StepError::Kernel(error) => error.code(),
         }
     }
 
-    fn args(&self) -> Vec<(&'static str, Arg)> {
+    fn args(&self) -> Vec<(&str, Arg)> {
         match self {
             StepError::Rejected(rejection) | StepError::PolicyFailed(rejection) => rejection.args(),
             StepError::Kernel(error) => error.args(),
@@ -662,7 +662,7 @@ impl fmt::Display for KernelError {
 }
 
 impl Diagnostic for KernelError {
-    fn code(&self) -> &'static str {
+    fn code(&self) -> &str {
         match self {
             KernelError::Malformed(m) => m.code(),
             KernelError::Stale { .. } => "angzarr-embedded-next-stale",
@@ -691,7 +691,7 @@ impl Diagnostic for KernelError {
         }
     }
 
-    fn args(&self) -> Vec<(&'static str, Arg)> {
+    fn args(&self) -> Vec<(&str, Arg)> {
         match self {
             KernelError::Malformed(m) => m.args(),
             KernelError::Stale {
@@ -850,19 +850,17 @@ fn router_recovery(error: &angzarr_router::error::CodedError) -> Recovery {
 /// angzarr-embedded's holds, as an unhandled handler error with that reason
 /// its `cause` and its metadata under `cause.<name>`, as the router answers
 /// a handler's bug.
-fn router_diagnostic(
-    error: &angzarr_router::error::CodedError,
-) -> (&'static str, Vec<(&'static str, Arg)>) {
+fn router_diagnostic(error: &angzarr_router::error::CodedError) -> (&str, Vec<(&str, Arg)>) {
     match super::route::reason_code(&error.code) {
         Some(code) => (code, super::route::router_args(error)),
         None => {
-            let mut args = vec![("cause", Arg::Str(error.code.clone()))];
-            args.extend(error.extras.iter().map(|(name, value)| {
-                (
-                    super::route::intern(&format!("cause.{name}")),
-                    Arg::Str(value.clone()),
-                )
-            }));
+            let cause = error
+                .extras
+                .iter()
+                .fold(Report::new(error.code.clone()), |cause, (name, value)| {
+                    cause.arg(name.clone(), value.as_str())
+                });
+            let args = vec![("cause", Arg::Nested(Box::new(cause)))];
             (
                 super::route::reason_code(
                     angzarr_router::error::RouterReason::UnhandledHandlerError.as_str_name(),
@@ -883,7 +881,7 @@ impl fmt::Display for ReplayError {
 }
 
 impl Diagnostic for ReplayError {
-    fn code(&self) -> &'static str {
+    fn code(&self) -> &str {
         match self {
             ReplayError::OutOfSequence { .. } => "angzarr-embedded-next-replay-out-of-sequence",
             ReplayError::RecordedBackwards { .. } => {
@@ -894,7 +892,7 @@ impl Diagnostic for ReplayError {
         }
     }
 
-    fn args(&self) -> Vec<(&'static str, Arg)> {
+    fn args(&self) -> Vec<(&str, Arg)> {
         match self {
             ReplayError::OutOfSequence { index, found } => {
                 vec![("index", (*index).into()), ("found", (*found).into())]
@@ -974,7 +972,7 @@ impl fmt::Display for PayloadError {
 impl std::error::Error for PayloadError {}
 
 impl Diagnostic for PayloadError {
-    fn code(&self) -> &'static str {
+    fn code(&self) -> &str {
         match self {
             PayloadError::UnknownType { .. } => "angzarr-embedded-next-payload-unknown-type",
             PayloadError::Decode { .. } => "angzarr-embedded-next-payload-decode",
@@ -982,7 +980,7 @@ impl Diagnostic for PayloadError {
         }
     }
 
-    fn args(&self) -> Vec<(&'static str, Arg)> {
+    fn args(&self) -> Vec<(&str, Arg)> {
         match self {
             PayloadError::UnknownType { type_url } | PayloadError::Decode { type_url, .. } => {
                 vec![("type_url", type_url.as_str().into())]
@@ -1002,7 +1000,7 @@ impl fmt::Display for UpcastError {
 }
 
 impl Diagnostic for UpcastError {
-    fn code(&self) -> &'static str {
+    fn code(&self) -> &str {
         match self {
             UpcastError::Payload(error) => error.code(),
             UpcastError::Rule { .. } => "angzarr-embedded-next-upcast-rule",
@@ -1010,7 +1008,7 @@ impl Diagnostic for UpcastError {
         }
     }
 
-    fn args(&self) -> Vec<(&'static str, Arg)> {
+    fn args(&self) -> Vec<(&str, Arg)> {
         match self {
             UpcastError::Payload(error) => error.args(),
             UpcastError::Rule { source, error } => vec![
@@ -1029,7 +1027,7 @@ impl fmt::Display for UpcastChainError {
 }
 
 impl Diagnostic for UpcastChainError {
-    fn code(&self) -> &'static str {
+    fn code(&self) -> &str {
         match self.problem {
             ChainProblem::Duplicate { .. } => "angzarr-embedded-next-upcaster-duplicate",
             ChainProblem::OutOfOrder { .. } => "angzarr-embedded-next-upcaster-out-of-order",
@@ -1037,7 +1035,7 @@ impl Diagnostic for UpcastChainError {
         }
     }
 
-    fn args(&self) -> Vec<(&'static str, Arg)> {
+    fn args(&self) -> Vec<(&str, Arg)> {
         let mut args = vec![("domain", self.domain.as_str().into())];
         match &self.problem {
             ChainProblem::Duplicate { source } => args.push(("source", source.as_str().into())),
