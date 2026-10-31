@@ -56,6 +56,18 @@ mod wire {
     #[derive(Clone, PartialEq, ::prost::Message)]
     pub struct Note {}
 
+    /// A typed refusal object: a bump past the counter's limit.
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct TooBig {
+        #[prost(int64, tag = "1")]
+        pub by: i64,
+    }
+
+    impl ::prost::Name for TooBig {
+        const NAME: &'static str = "TooBig";
+        const PACKAGE: &'static str = "toy.counter.v1";
+    }
+
     /// A command of the remote bank's, which nothing here decides.
     #[derive(Clone, PartialEq, ::prost::Message)]
     pub struct Deposit {
@@ -113,6 +125,39 @@ pub struct Noted;
 #[derive(Clone, Debug, PartialEq)]
 pub struct Deposit {
     cents: i64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TooBig {
+    by: i64,
+}
+
+impl DomainMessage for TooBig {
+    type Wire = wire::TooBig;
+
+    fn to_wire(&self) -> wire::TooBig {
+        wire::TooBig { by: self.by }
+    }
+
+    fn from_wire(wire: wire::TooBig) -> Result<Self, WireError> {
+        Ok(TooBig { by: wire.by })
+    }
+}
+
+impl fmt::Display for TooBig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        angzarr_embedded_diagnostic::display(self, f)
+    }
+}
+
+impl Diagnostic for TooBig {
+    fn code(&self) -> &'static str {
+        "toy-counter-too-big"
+    }
+
+    fn args(&self) -> Vec<(&'static str, Arg)> {
+        vec![("by", self.by.into())]
+    }
 }
 
 impl DomainMessage for Deposit {
@@ -625,4 +670,57 @@ fn a_domain_is_its_own_command_target() {
         <Counter as CommandTarget>::command_types(),
         ["toy.counter.v1.Bump", "toy.counter.v1.Note"]
     );
+}
+
+/// A refusal fact (angzarr's `CommandRefused`), as a hand-written fact
+/// payload set reads it: decoded as the refusal of its command's type, and
+/// of no other; its refused command's type URL named; the fact's own type
+/// URL the one the set lists.
+#[test]
+fn a_refusal_fact_decodes_as_its_commands_refusal() {
+    let refused = markup::v1::CommandRefused {
+        command: Some(CommandBook {
+            cover: Some(Cover {
+                domain: Counter::NAME.to_string(),
+                root: Some(root()),
+                edition: None,
+            }),
+            page: Some(CommandPage {
+                body: Some(command_page::Body::Command(Command {
+                    payload: Some(markup::pack_message(&Bump { by: 7 })),
+                })),
+                ..CommandPage::default()
+            }),
+            handling: None,
+        }),
+        refusal: None,
+        trigger: None,
+    };
+    let any = ::angzarr_embedded::next::pack(&refused);
+    assert_eq!(any.type_url, markup::command_refused_type_url());
+    let decoded = markup::decode_command_refused::<Bump>(&any)
+        .unwrap()
+        .expect("a refusal of a bump");
+    assert_eq!(decoded.command(), &Bump { by: 7 });
+    assert_eq!(decoded.target().root, Some(root()));
+    assert!(markup::decode_command_refused::<Note>(&any)
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        markup::refused_command_type_url(&any).as_deref(),
+        Some("/toy.counter.v1.Bump")
+    );
+    let other = markup::pack_message(&Bump { by: 7 });
+    assert!(markup::decode_command_refused::<Bump>(&other)
+        .unwrap()
+        .is_none());
+    assert_eq!(markup::refused_command_type_url(&other), None);
+}
+
+/// A typed refusal object reads back as its own type, and as no other.
+#[test]
+fn a_typed_refusal_reads_back_as_its_type() {
+    let refusal = markup::TypedRefusal::of(&TooBig { by: 9 });
+    assert_eq!(refusal.object::<TooBig>(), Some(TooBig { by: 9 }));
+    assert_eq!(refusal.object::<Bump>(), None);
 }

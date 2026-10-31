@@ -1066,6 +1066,42 @@ mod listing {
         );
     }
 
+    /// A policy whose name a listed domain has is listed nowhere as a
+    /// policy: names are held to their kind.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_listing_of_another_kind_does_not_list_a_component() {
+        let dir = scratch("same-name");
+        let mut config = HostConfig {
+            components: vec![
+                listed("left", ComponentKindConfig::Domain),
+                listed("right", ComponentKindConfig::Domain),
+            ],
+            ..HostConfig::default()
+        };
+        config.store.in_memory = true;
+        let refused = run(written(&dir, &config), |registry: &mut Registry| {
+            for domain in ["left", "right"] {
+                registry
+                    .command_handler(
+                        domain,
+                        Meeting(std::sync::Arc::new(Rendezvous::of(1))),
+                        descriptor(domain),
+                    )
+                    .unwrap();
+            }
+            registry.policy_dispatch(PolicyDispatch::new("right", "left", "right"));
+        })
+        .await
+        .err();
+        assert_eq!(
+            refused,
+            Some(HostError::NotListed {
+                domain: "right".to_string(),
+                kind: "policy".to_string(),
+            })
+        );
+    }
+
     /// A component listed as one kind and registered as another is both:
     /// refused as the listed kind nobody registered.
     #[tokio::test(flavor = "multi_thread")]
