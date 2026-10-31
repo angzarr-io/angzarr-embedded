@@ -594,7 +594,7 @@ fn quick() -> OnRetryable {
 }
 
 /// `kind = "projector"` launches a `ProjectorService` child, handed back as
-/// a projector of its descriptor's one input, never as a domain.
+/// a projector of its descriptor's inputs, never as a domain.
 #[test]
 fn a_projector_child_comes_up_as_a_projector_not_a_domain() {
     let log = log_file("projector-comes-up");
@@ -604,7 +604,7 @@ fn a_projector_child_comes_up_as_a_projector_not_a_domain() {
         .projector("table-view")
         .expect("handed back as a projector");
     assert_eq!(projector.name(), "TableView");
-    assert_eq!(projector.source(), "table");
+    assert_eq!(projector.sources(), ["table"]);
     assert_eq!(projector.configured(), "table-view");
     assert!(
         format!("{projector:?}").contains("table-view"),

@@ -288,8 +288,9 @@
 //! ```
 //!
 //! - [`policy`], on an inherent impl: `name` (the component its commands'
-//!   ids are derived from), `source` and `target` (each a domain:
-//!   one source, one target).
+//!   ids are derived from), `source` (a domain) and `target` (a
+//!   `markup::CommandTarget`: a domain here, by its type, or a remote
+//!   domain's command set): one source, one target.
 //! - [`on_event`]`(Event)`, one per event of the source it handles:
 //!   `fn(&self, event: &Event, ctx: &PolicyContext) -> Result<Commands<Target>, E>`,
 //!   pure, each command one the target decides, with the root of its
@@ -2909,15 +2910,17 @@ pub fn on_event(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Marks an inherent impl as a PROJECTOR, the one impure kind:
 ///
 /// ```text
-/// #[projector(name = "balances", source = Wallet)]
+/// #[projector(name = "balances", sources = [Wallet, "ledger"])]
 /// impl Balances {
 ///     #[projects(Deposited)]
 ///     async fn deposited(&mut self, event: &Deposited, ctx: &ProjectionContext) -> Result<(), Report> { .. }
 /// }
 /// ```
 ///
-/// One source domain. ONE instance per process, registered with its
-/// ports: `registry.projector(Balances::new(port))`. The kernel's async
+/// One or more source domains, `sources = [..]`, each a domain type (its
+/// `Domain::NAME`) or a domain's name as a string (a domain with no Rust
+/// type here, a child's): `AsyncProjector::SOURCES`, in that order. ONE
+/// instance per process, registered with its ports: `registry.projector(Balances::new(port))`. The kernel's async
 /// path runs it AFTER COMMIT, awaited before the call returns, so a
 /// failure reaches the caller as `Failure::Projection`, carrying what was
 /// committed, and does not stop the other projectors on the domain.
@@ -2981,7 +2984,9 @@ fn usage(flow: Flow) -> &'static str {
         Flow::Policy => {
             "#[policy] takes `name = \"..\"`, `source = <domain>` and `target = <domain>`"
         }
-        Flow::Projector => "#[projector] takes `name = \"..\"` and `source = <aggregate>`",
+        Flow::Projector => {
+            "#[projector] takes `name = \"..\"` and `sources = [<domain type or \"name\">, ..]`"
+        }
     }
 }
 
@@ -3029,7 +3034,7 @@ fn flow(attr: Tokens, item: Tokens, flow: Flow) -> syn::Result<Tokens> {
     for FlowArg { key, value } in args {
         match (key.to_string().as_str(), flow) {
             ("name", _) => name = Some(value),
-            ("source", _) => source = Some(value),
+            ("source", Flow::Policy) | ("sources", Flow::Projector) => source = Some(value),
             ("target", Flow::Policy) => target = Some(value),
             _ => return Err(Error::new_spanned(key, usage(flow))),
         }
@@ -3114,6 +3119,7 @@ fn flow(attr: Tokens, item: Tokens, flow: Flow) -> syn::Result<Tokens> {
             }
         }
         Flow::Projector => {
+            let sources = projector_sources(&source)?;
             let methods = marked(&imp, &["projects"])?;
             for x in &methods {
                 refuse_extras(x, false)?;
@@ -3123,7 +3129,7 @@ fn flow(attr: Tokens, item: Tokens, flow: Flow) -> syn::Result<Tokens> {
             quote! {
                 impl #m::AsyncProjector for #self_ty {
                     const NAME: &'static str = #name;
-                    type Source = #source;
+                    const SOURCES: &'static [&'static str] = &[#(#sources,)*];
                     const PROJECTS: &'static [#m::TypeName] = &[
                         #(#m::TypeName::of::<<#types as #m::DomainMessage>::Wire>(),)*
                     ];
@@ -3160,6 +3166,33 @@ fn flow(attr: Tokens, item: Tokens, flow: Flow) -> syn::Result<Tokens> {
 
         #generated
     })
+}
+
+/// A projector's `sources = [..]`, each as the name it is: a string as
+/// written, a domain type as its `Domain::NAME`. Anything else, and an
+/// empty list, is refused.
+fn projector_sources(sources: &Expr) -> syn::Result<Vec<Tokens>> {
+    let Expr::Array(array) = sources else {
+        return Err(Error::new_spanned(sources, usage(Flow::Projector)));
+    };
+    if array.elems.is_empty() {
+        return Err(Error::new_spanned(
+            sources,
+            "#[projector] projects at least one source domain",
+        ));
+    }
+    array
+        .elems
+        .iter()
+        .map(|source| match source {
+            Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Str(name),
+                ..
+            }) => Ok(quote!(#name)),
+            Expr::Path(domain) => Ok(quote!(<#domain as ::angzarr_embedded::next::Domain>::NAME)),
+            other => Err(Error::new_spanned(other, usage(Flow::Projector))),
+        })
+        .collect()
 }
 
 /// Which domain [`domain`] expands.

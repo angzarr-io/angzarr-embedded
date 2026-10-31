@@ -446,8 +446,8 @@ fn the_registry_names_its_policies_and_projectors_in_order() {
     registry
         .policy_dispatch(PolicyDispatch::new("b-policy", "x", "y"))
         .policy_dispatch(PolicyDispatch::new("a-policy", "x", "y"))
-        .projector_handler("x", Named("b-view"))
-        .projector_handler("x", Named("a-view"));
+        .projector_handler(&["x"], Named("b-view"))
+        .projector_handler(&["x", "y"], Named("a-view"));
     assert_eq!(
         registry.policy_names().collect::<Vec<_>>(),
         ["b-policy", "a-policy"]
@@ -456,4 +456,12 @@ fn the_registry_names_its_policies_and_projectors_in_order() {
         registry.projector_names().collect::<Vec<_>>(),
         ["b-view", "a-view"]
     );
+}
+
+/// A projector projects at least one source domain: one naming none is
+/// a composition-root bug, refused at startup by its name.
+#[test]
+#[should_panic(expected = "no-view")]
+fn a_projector_with_no_source_panics() {
+    Registry::new().projector_handler(&[], Named("no-view"));
 }

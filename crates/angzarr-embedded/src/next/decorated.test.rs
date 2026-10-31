@@ -6824,7 +6824,7 @@ pub struct Balances {
     written: u32,
 }
 
-#[projector(name = "balances", source = Wallet)]
+#[projector(name = "balances", sources = [Wallet])]
 impl Balances {
     #[projects(Deposited)]
     async fn deposited(
@@ -6868,7 +6868,7 @@ pub struct Audit {
     port: TrailPort,
 }
 
-#[projector(name = "audit", source = Wallet)]
+#[projector(name = "audit", sources = [Wallet])]
 impl Audit {
     #[projects(Opened)]
     async fn opened(&mut self, _event: &Opened, _ctx: &ProjectionContext) -> Result<(), Report> {
@@ -6890,7 +6890,7 @@ pub struct Trail {
     port: TrailPort,
 }
 
-#[projector(name = "trail", source = Wallet)]
+#[projector(name = "trail", sources = [Wallet])]
 impl Trail {
     #[projects(Opened)]
     async fn opened(&mut self, _event: &Opened, _ctx: &ProjectionContext) -> Result<(), Report> {
@@ -6904,6 +6904,32 @@ impl Trail {
         _ctx: &ProjectionContext,
     ) -> Result<(), Report> {
         self.port.see("Deposited")
+    }
+}
+
+/// ONE projector of TWO source domains: the wallet, named by its type, and
+/// the lamp, by its name, as a domain with no Rust type here (a child's)
+/// is named.
+pub struct Lights {
+    port: TrailPort,
+}
+
+#[projector(name = "lights", sources = [Wallet, "lamp"])]
+impl Lights {
+    #[projects(Opened)]
+    async fn opened(&mut self, _event: &Opened, ctx: &ProjectionContext) -> Result<(), Report> {
+        assert_eq!(ctx.stream().domain, "wallet");
+        self.port.see("Opened")
+    }
+
+    #[projects(SwitchedOn)]
+    async fn switched_on(
+        &mut self,
+        _event: &SwitchedOn,
+        ctx: &ProjectionContext,
+    ) -> Result<(), Report> {
+        assert_eq!(ctx.stream().domain, "lamp");
+        self.port.see("SwitchedOn")
     }
 }
 
@@ -7099,6 +7125,94 @@ mod projector {
             ["balances", "audit"]
         );
         assert_eq!(*trail.seen.lock().unwrap(), ["Opened", "Deposited"]);
+    }
+
+    /// One projector of several source domains: its sources, in marker
+    /// order, by a domain type's name or a name as written; every
+    /// committed event of each it marks reaches its one instance.
+    #[test]
+    fn one_projector_projects_several_source_domains() {
+        assert_eq!(
+            <Lights as ::angzarr_embedded::next::markup::AsyncProjector>::SOURCES,
+            ["wallet", "lamp"]
+        );
+        let trail = TrailPort::default();
+        let mut registry = registry();
+        registry.projector(Lights {
+            port: trail.clone(),
+        });
+        let store = Mem::new();
+        handle_async(&store, &registry, 1, any(Open { bonus: 5 }), root()).unwrap();
+        let log = MemoryDeadLetters::new();
+        let sampled = Sampled {
+            now: at(2),
+            command_id: Uuid::from_bytes([2; 16]),
+        };
+        ready(
+            ::angzarr_embedded::next::Kernel::new(&registry, &log).handle::<Lamp, _, _>(
+                &store,
+                send("lamp", 2, any(SwitchOn {}), None),
+                &sampled,
+                &mut (),
+            ),
+        )
+        .unwrap();
+        assert_eq!(*trail.seen.lock().unwrap(), ["Opened", "SwitchedOn"]);
+    }
+
+    /// A projector written by hand as the router's `ProjectorHandler`:
+    /// the books of each stream it is registered for, by domain.
+    struct Books(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl ::angzarr_embedded::next::angzarr_router::router::ProjectorHandler for Books {
+        fn name(&self) -> &str {
+            "books"
+        }
+
+        async fn dispatch(
+            &self,
+            events: &EventBook,
+        ) -> Result<
+            ::angzarr_embedded::next::v1::Projection,
+            ::angzarr_embedded::next::angzarr_router::error::CodedError,
+        > {
+            let domain = events.cover.clone().unwrap_or_default().domain;
+            self.0.lock().unwrap().push(domain);
+            Ok(::angzarr_embedded::next::v1::Projection::default())
+        }
+    }
+
+    /// A hand-written projector registered for several source domains
+    /// (`Registry::projector_handler`) is handed each committed book of
+    /// every one of them, and of no other.
+    #[test]
+    fn a_hand_written_projector_projects_the_domains_it_is_registered_for() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut registry = registry();
+        registry.projector_handler(&["wallet", "lamp"], Books(seen.clone()));
+        let store = Mem::new();
+        handle_async(&store, &registry, 1, any(Open { bonus: 5 }), root()).unwrap();
+        let log = MemoryDeadLetters::new();
+        let at_ = |n: u8| Sampled {
+            now: at(i64::from(n)),
+            command_id: Uuid::from_bytes([n; 16]),
+        };
+        let kernel = ::angzarr_embedded::next::Kernel::new(&registry, &log);
+        ready(kernel.handle::<Lamp, _, _>(
+            &store,
+            send("lamp", 2, any(SwitchOn {}), None),
+            &at_(2),
+            &mut (),
+        ))
+        .unwrap();
+        ready(kernel.handle::<Meter, _, _>(
+            &store,
+            send("meter", 3, any(Calibrate {}), None),
+            &at_(3),
+            &mut (),
+        ))
+        .unwrap();
+        assert_eq!(*seen.lock().unwrap(), ["wallet", "lamp"]);
     }
 
     #[test]

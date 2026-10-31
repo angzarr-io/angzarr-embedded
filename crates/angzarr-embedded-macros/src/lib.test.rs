@@ -366,3 +366,45 @@ fn an_unknown_flow_argument_names_the_usage() {
         "{projector}"
     );
 }
+
+/// A projector's sources are a list, each a domain type or a name: one
+/// `source`, a bare type, an empty list and anything else in the list are
+/// refused.
+#[test]
+fn a_projectors_sources_are_a_list_of_domains() {
+    let refused = |attr: Tokens| {
+        flow(attr, quote!(impl P {}), Flow::Projector)
+            .expect_err("refused")
+            .to_string()
+    };
+    for attr in [
+        quote!(name = "p", source = A),
+        quote!(name = "p", sources = A),
+        quote!(name = "p", sources = [1]),
+    ] {
+        let error = refused(attr.clone());
+        assert!(
+            error.contains("`sources = [<domain type"),
+            "{attr}: {error}"
+        );
+    }
+    let error = refused(quote!(name = "p", sources = []));
+    assert!(error.contains("at least one source domain"), "{error}");
+}
+
+/// Each source is its name: a string as written, a type as its
+/// `Domain::NAME`, in order.
+#[test]
+fn a_projectors_sources_are_named_in_order() {
+    let expanded = flow(
+        quote!(name = "p", sources = [Wallet, "lamp"]),
+        quote!(impl P {}),
+        Flow::Projector,
+    )
+    .expect("expanded")
+    .to_string();
+    let wallet = quote!(<Wallet as ::angzarr_embedded::next::Domain>::NAME).to_string();
+    let sources =
+        format!("const SOURCES : & 'static [& 'static str] = & [{wallet} , \"lamp\" ,] ;");
+    assert!(expanded.contains(&sources), "{expanded}");
+}

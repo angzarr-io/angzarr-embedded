@@ -926,7 +926,7 @@ mod listing {
                 registry.policy_dispatch(PolicyDispatch::new("left-right", "left", "right"));
             }
             if with.projector {
-                registry.projector_handler("left", Still);
+                registry.projector_handler(&["left"], Still);
             }
         })
         .await

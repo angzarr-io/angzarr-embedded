@@ -140,8 +140,8 @@ impl Remote {
         }
     }
 
-    /// The domain its descriptor names as its one input: a policy's or a
-    /// projector's source. Empty for a domain.
+    /// The domain its descriptor names as its first input: a policy's
+    /// source, its one. Empty for a domain.
     fn input(&self) -> &str {
         self.descriptor
             .inputs
@@ -432,8 +432,8 @@ impl RemoteUpcaster {
 }
 
 /// A remote projector's handler: its child serves `ProjectorService`, and
-/// the kernel runs it after each commit that records events of its
-/// [`Self::source`]. Cloning it is cheap.
+/// the kernel runs it after each commit that records events of any of its
+/// [`Self::sources`]. Cloning it is cheap.
 #[derive(Clone)]
 pub struct RemoteProjectorHandler {
     inner: Arc<Remote>,
@@ -461,9 +461,15 @@ impl RemoteProjectorHandler {
         &self.inner.name
     }
 
-    /// The domain whose events it projects: its descriptor's one input.
-    pub fn source(&self) -> &str {
-        self.inner.input()
+    /// The domains whose events it projects: its descriptor's inputs, in
+    /// order.
+    pub fn sources(&self) -> Vec<&str> {
+        self.inner
+            .descriptor
+            .inputs
+            .iter()
+            .map(|input| input.domain.as_str())
+            .collect()
     }
 }
 

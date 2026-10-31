@@ -103,7 +103,8 @@ type Factory<S> = Arc<dyn Fn() -> S + Send + Sync>;
 /// lock while it runs.
 pub(crate) struct ProjectorEntry {
     pub(crate) name: String,
-    pub(crate) source: String,
+    /// The domains whose committed events it is run for.
+    pub(crate) sources: Vec<String>,
     pub(crate) instance: ProjectorInstance,
 }
 
@@ -662,37 +663,40 @@ impl Registry {
 
     /// Register `projector`, the ONE instance of a marked-up projector
     /// (`#[projector]`) this process runs, holding its ports. The kernel
-    /// ([`Kernel::handle`](super::Kernel::handle)) runs it after each commit that records its source's events, and
+    /// ([`Kernel::handle`](super::Kernel::handle)) runs it after each commit that records events of
+    /// any of its sources ([`AsyncProjector::SOURCES`]), and
     /// awaits it before the call returns: a failure is the caller's error
     /// ([`Failure::Projection`](super::Failure::Projection); the events stay committed), and does not
-    /// stop the other projectors. Registering one twice PANICS at startup.
+    /// stop the other projectors. Registering one twice, or one with no
+    /// source, PANICS at startup.
     pub fn projector<P: AsyncProjector>(&mut self, projector: P) -> &mut Self {
         self.push_projector(
             P::NAME,
-            <P::Source as Domain>::NAME,
+            P::SOURCES,
             ProjectorInstance::Marked(Mutex::new(Some(Box::new(projector)))),
         )
     }
 
     /// Register `projector`, written as angzarr-router's
     /// `ProjectorHandler` (a projector in another process, behind its
-    /// `ProjectorService`: the host's remote projector), projecting
-    /// `source`'s events. The kernel runs it as it runs a marked-up one,
-    /// after each commit that records its source's events, handing it each
-    /// committed book of them; its failures follow their class (decision
+    /// `ProjectorService`: the host's remote projector), or one written by
+    /// hand, projecting the events of every domain of `sources`, at least
+    /// one. The kernel runs it as it runs a marked-up one, after each
+    /// commit that records events of any of them, handing it each
+    /// committed book of them, a stream's book at a time; its failures follow their class (decision
     /// 14.37, 14.41): a retryable one and an ABORTED one are run again
     /// under the kernel's [`OnRetryable`](super::OnRetryable), then
     /// dead-lettered, and any other is dead-lettered at once. Registering
-    /// one twice (by name) PANICS at startup.
+    /// one twice (by name), or one with no source, PANICS at startup.
     pub fn projector_handler(
         &mut self,
-        source: &str,
+        sources: &[&str],
         projector: impl router::ProjectorHandler + 'static,
     ) -> &mut Self {
         let name = projector.name().to_string();
         self.push_projector(
             &name,
-            source,
+            sources,
             ProjectorInstance::Handler(Box::new(projector)),
         )
     }
@@ -700,16 +704,21 @@ impl Registry {
     fn push_projector(
         &mut self,
         name: &str,
-        source: &str,
+        sources: &[&str],
         instance: ProjectorInstance,
     ) -> &mut Self {
-        self.refuse_remote_source(source, name);
+        if sources.is_empty() {
+            panic!("projector \"{name}\" names no source domain");
+        }
+        for source in sources {
+            self.refuse_remote_source(source, name);
+        }
         if self.projectors.iter().any(|entry| entry.name == name) {
             panic!("projector \"{name}\" is registered already");
         }
         self.projectors.push(ProjectorEntry {
             name: name.to_string(),
-            source: source.to_string(),
+            sources: sources.iter().map(|source| source.to_string()).collect(),
             instance,
         });
         self
@@ -891,10 +900,11 @@ impl Registry {
             });
         }
         let policies = self.policies.iter().map(|p| (p.source(), p.name()));
-        let projectors = self
-            .projectors
-            .iter()
-            .map(|p| (p.source.as_str(), p.name.as_str()));
+        let projectors = self.projectors.iter().flat_map(|p| {
+            p.sources
+                .iter()
+                .map(|source| (source.as_str(), p.name.as_str()))
+        });
         if let Some((_, component)) = policies
             .chain(projectors)
             .find(|(source, _)| *source == domain)

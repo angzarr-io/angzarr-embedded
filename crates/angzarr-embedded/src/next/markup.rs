@@ -1026,25 +1026,31 @@ pub mod v1 {
     pub use angzarr_router::pb::{refusal_response, CommandRefused, Refusal, RefusalResponse};
 }
 
-/// A projector written in the markup (`#[projector]`): one source domain,
-/// one instance per process, run after commit and awaited before the call
-/// returns. A failure is the caller's error,
+/// A projector written in the markup (`#[projector]`): one or more source
+/// domains, one instance per process, run after commit and awaited before
+/// the call returns. A failure is the caller's error,
 /// [`Failure::Projection`](super::Failure::Projection), carrying what was
 /// committed: the events stay committed. Projectors run on the async
 /// command path, the only one (async everywhere), so there is no guard
 /// against blocking on a synchronous one. Registered with
 /// [`Registry::projector`](super::Registry::projector). Several
 /// projectors on one domain each receive every committed event of it they
-/// mark; one's failure does not stop the others.
+/// mark; one's failure does not stop the others. The kernel's own
+/// interface to a projector is async too: a hand-written one implements
+/// this trait, or angzarr-router's `ProjectorHandler` for
+/// [`Registry::projector_handler`](super::Registry::projector_handler).
 pub trait AsyncProjector: Send + 'static {
     /// Named in the error a failure raises.
     const NAME: &'static str;
-    /// The one domain whose events it projects.
-    type Source: Domain;
+    /// The domains whose events it projects, by name, in marker order:
+    /// at least one. Its one instance receives the committed events of
+    /// each, every stream's in its order;
+    /// [`ProjectionContext::stream`] says which stream an event is from.
+    const SOURCES: &'static [&'static str];
     /// The projected events, in marker order.
     const PROJECTS: &'static [TypeName];
 
-    /// Project `event` (an event of its source, packed), from its
+    /// Project `event` (an event of one of its sources, packed), from its
     /// `#[projects]` handler for the event's type; `None` for a type it
     /// does not mark. Generated.
     fn project<'a>(

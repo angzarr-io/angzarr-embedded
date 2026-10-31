@@ -453,7 +453,7 @@ fn a_policy_of_a_remote_domains_events_is_refused() {
     registry.policy_dispatch(till_policy("bank-till", "bank"));
 }
 
-/// The same, a projector of a remote domain's events.
+/// The same, a projector of a remote domain's events, among its sources.
 #[test]
 #[should_panic(
     expected = "angzarr-embedded-next-misconfigured-remote-source domain=bank component=quiet"
@@ -461,7 +461,7 @@ fn a_policy_of_a_remote_domains_events_is_refused() {
 fn a_projector_of_a_remote_domains_events_is_refused() {
     let coordinator = FakeCoordinator::answering(Answer::Events(DeliveryOutcome::Applied, vec![]));
     let mut registry = registry_with(&coordinator);
-    registry.projector_handler("bank", Quiet);
+    registry.projector_handler(&["till", "bank"], Quiet);
 }
 
 /// In either order: routing a domain remote once a policy or projector
@@ -472,7 +472,7 @@ fn routing_remote_a_domain_whose_events_a_component_here_handles_is_refused() {
     let coordinator = FakeCoordinator::answering(Answer::Events(DeliveryOutcome::Applied, vec![]));
     let mut registry = Registry::new();
     registry.policy_dispatch(till_policy("bank-till", "bank"));
-    registry.projector_handler("ledger", Quiet);
+    registry.projector_handler(&["till", "ledger"], Quiet);
     registry.policy_dispatch(till_policy("till-till", "till"));
     assert_eq!(
         registry.remote("bank", coordinator.clone()),

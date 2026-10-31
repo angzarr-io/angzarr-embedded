@@ -285,7 +285,7 @@ impl Host {
     /// handler as the domain it is configured for (the kernel then
     /// dispatches that domain's commands, and its policies' steps into it,
     /// through the child: `Kernel::handle_any`); a policy beside every
-    /// other policy of its source; a projector of its source; and, last, an
+    /// other policy of its source; a projector of its sources; and, last, an
     /// upcaster sidecar as the port its domain's inputs are upcast through
     /// (decision 14.39), which domain the caller registers first if it is
     /// in-process (one not registered PANICS). In-process
@@ -308,7 +308,7 @@ impl Host {
                     registry.policy_component(handler.clone(), &handler.descriptor().output_domain);
                 }
                 Hosted::Projector(handler) => {
-                    registry.projector_handler(handler.source(), handler.clone());
+                    registry.projector_handler(&handler.sources(), handler.clone());
                 }
                 Hosted::Upcaster(_) => {}
             }

@@ -644,7 +644,7 @@ impl<'k> Kernel<'k> {
     }
 
     /// Every registered projector over the `committed` events of its
-    /// source, in registration order: a marked-up one each event in stream
+    /// sources, in registration order: a marked-up one each event in stream
     /// order, a `ProjectorHandler` each book whole ([`Self::project_book`]).
     /// A projector stops at its first failure, the others go on. The
     /// failures, by projector.
@@ -656,7 +656,7 @@ impl<'k> Kernel<'k> {
                 .filter(|book| {
                     book.cover
                         .as_ref()
-                        .is_some_and(|c| c.domain == entry.source)
+                        .is_some_and(|c| entry.sources.contains(&c.domain))
                 })
                 .collect();
             if books.iter().all(|book| book.pages.is_empty()) {
