@@ -932,8 +932,10 @@ migration's lock; 0004 drops 0002's store-wide commit position; 0005 keys
 the outbox per stream, by the stream its write appended to and that
 write's first sequence, then each entry's place in the write, with no
 outbox sequence and no order across streams (owner ruling 2026-10-31). A
-write that appends to no stream keeps its entries under none, at 0
-(angzarr-ports leaves that case open, its FLAG(O7)). An edition stream there is forked by a creation event
+write that appends no events (a policy's step) orders its entries on its
+trigger's stream, at the triggering event's sequence (owner ruling
+2026-10-31 on angzarr-ports' FLAG(O7)); one with neither events nor
+positions keeps them under no stream, at 0. An edition stream there is forked by a creation event
 as its first own event and reads main below the fork; the edition
 administration (the `Editions` port) is not implemented.
 

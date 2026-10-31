@@ -832,10 +832,11 @@ impl<C: DerefMut<Target = SqliteConnection>> Exec<'_, C> {
         Ok(next.unsigned_abs())
     }
 
-    /// Keep `entry`, the `place`th of its write, under `at`: the stream
-    /// its write appended to and that write's first sequence, or no stream
-    /// at 0 for a write that appended to none (owner ruling 2026-10-31,
-    /// Q7: the outbox orders per stream, with no sequence of its own).
+    /// Keep `entry`, the `place`th of its write, under `at`: the stream it
+    /// orders on and the sequence there ([`EventStore::write`] says which),
+    /// or no stream at 0 for a write with neither events nor positions
+    /// (owner ruling 2026-10-31, Q7: the outbox orders per stream, with no
+    /// sequence of its own).
     async fn put_outbox(
         &mut self,
         entry: &OutboxEntry,
@@ -915,7 +916,17 @@ impl EventStore for SqliteStore {
         for (key, next) in write.positions {
             ex.put_position(*key, *next).await?;
         }
-        let at = write.events.map(|append| (append.stream, append.expected));
+        // The stream the entries order on: the one the write appends to, at
+        // its first sequence; for a write appending none (a policy's step),
+        // its trigger's, at the triggering event's sequence, the position it
+        // moves to less one (owner ruling 2026-10-31, angzarr-ports' O7).
+        let at = match write.events {
+            Some(append) => Some((append.stream, append.expected)),
+            None => write
+                .positions
+                .first()
+                .map(|(key, next)| (key.stream, next.saturating_sub(1))),
+        };
         for (place, entry) in write.outbox.iter().enumerate() {
             ex.put_outbox(entry, at, place).await?;
         }
