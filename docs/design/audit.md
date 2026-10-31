@@ -1067,7 +1067,8 @@ messages in `locales/en-US/angzarr-embedded.ftl`).
 
 **The one rename of the kernel's codes (2026-10-31).** The kernel's codes
 were `angzarr-embedded-next-*`, after the `next` module the kernel lived in;
-the kernel moved to the crate root and its codes lost `next-`. The rule, for
+the kernel moved to the crate root and its codes lost `next-`. The module
+path went with it: `angzarr_embedded::next` is gone, with no alias. The rule, for
 every one of them: strip `next-` (`angzarr-embedded-next-wire-missing` is
 `angzarr-embedded-wire-missing`). No new code is a code anything else had,
 and none falls under another crate's name (`angzarr-embedded-host-*`); the

@@ -27,7 +27,7 @@ kernel is built on, `angzarr_embedded::angzarr_proto`, `angzarr_ports`,
 `angzarr_diagnostic` and `angzarr_router`, and, with its `sqlite` feature
 (off by default: it brings sqlx and SQLite), `angzarr_store_sqlite`. The
 kernel is the crate root (`angzarr_embedded::Kernel`); until 2026-10-31 it
-was `angzarr_embedded::next`, which stays for now as a deprecated alias.
+was `angzarr_embedded::next`, and that path is gone, with no alias.
 
 | Crate | What it is |
 |---|---|

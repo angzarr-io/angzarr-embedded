@@ -2,7 +2,7 @@
 # variables are its args. Messages are lowercase fragments, like the English
 # Display, so a nested cause reads well inside another message.
 
-## The audited kernel, angzarr_embedded::next. $stream names a stream as domain/root,
+## The audited kernel, angzarr_embedded's crate root. $stream names a stream as domain/root,
 ## with @edition outside the main timeline.
 
 angzarr-embedded-malformed-no-cover = the book has no cover

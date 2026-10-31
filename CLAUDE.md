@@ -148,7 +148,8 @@ angzarr-ports' own catalog, `angzarr_ports::EN_US` (re-exported as
   whose meaning changes gets a new code; a retired code is not given to
   anything else. The one exception was ruled once: the kernel's
   `angzarr-embedded-next-*` codes lost their `next-` (docs/design/audit.md,
-  *The one rename of the kernel's codes*).
+  *The one rename of the kernel's codes*), and the `next` module itself is
+  gone, with no alias.
 - **Args carry data, never pre-formatted English.** Numbers, ids, paths and
   the text that was read are args; any phrase a player reads belongs in the
   catalog. A wrapped cause is `Arg::Nested`. An error does not hold a
