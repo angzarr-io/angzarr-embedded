@@ -4531,11 +4531,13 @@ mod refusal_flow {
         );
         let lines = log.lines();
         assert_eq!(lines.len(), 1, "{lines:?}");
+        // A policy's command for a domain the kernel cannot route is the
+        // spec's key (decision 14.49), naming the domain.
         assert!(
-            lines[0].contains("angzarr-embedded-next-malformed-unknown-domain"),
+            lines[0].contains("COORDINATOR_REASON_POLICY_COMMAND_UNKNOWN_DOMAIN"),
             "{lines:?}"
         );
-        assert!(lines[0].contains("buyin"), "{lines:?}");
+        assert!(lines[0].contains("domain=buyin"), "{lines:?}");
         assert!(!lines[0].contains("is registered"), "{lines:?}");
     }
 
@@ -5122,8 +5124,8 @@ mod router {
     }
 
     /// A remote handler that cannot be reached, until `up`: it answers
-    /// angzarr-embedded-host's `REMOTE_HANDLER_UNAVAILABLE` (ABORTED, its
-    /// cause in its metadata); reached, it answers as [`Remote`].
+    /// angzarr-embedded-host's `COORDINATOR_REASON_HANDLER_UNAVAILABLE`
+    /// (UNAVAILABLE, its cause in its metadata); reached, it answers as [`Remote`].
     struct Flaky {
         up: std::sync::Arc<std::sync::atomic::AtomicBool>,
     }
@@ -5149,13 +5151,13 @@ mod router {
                 return Remote.dispatch(req).await;
             }
             Err(CodedError {
-                code: "REMOTE_HANDLER_UNAVAILABLE".to_string(),
+                code: "COORDINATOR_REASON_HANDLER_UNAVAILABLE".to_string(),
                 extras: [
                     ("domain".to_string(), "remote".to_string()),
                     ("cause".to_string(), "not-running".to_string()),
                 ]
                 .into(),
-                grpc: GrpcCode::Aborted,
+                grpc: GrpcCode::Unavailable,
                 refusal: None,
             })
         }
@@ -5273,7 +5275,7 @@ mod router {
     }
 
     /// A remote handler down for its first `down_for` dispatches
-    /// (REMOTE_HANDLER_UNAVAILABLE, retryable), then up; `calls` counts
+    /// (COORDINATOR_REASON_HANDLER_UNAVAILABLE, retryable), then up; `calls` counts
     /// every dispatch.
     struct Recovering {
         down_for: std::sync::Arc<std::sync::atomic::AtomicUsize>,
@@ -5474,7 +5476,7 @@ mod router {
         // answered, never the retry cap's; processing_failed, its retries,
         // transient (decision 14.48).
         let reason = crate::next::toys::wire(
-            "REMOTE_HANDLER_UNAVAILABLE",
+            "COORDINATOR_REASON_HANDLER_UNAVAILABLE",
             &[("cause", "not-running"), ("domain", "remote")],
         );
         crate::next::toys::assert_letter(
@@ -5560,7 +5562,7 @@ mod router {
             let lines = log.lines();
             assert_eq!(lines.len(), 1, "{policy_bug:?}: {lines:?}");
             assert!(
-                lines[0].contains("remote: REMOTE_HANDLER_UNAVAILABLE cause=not-running domain=remote retry_count=3"),
+                lines[0].contains("remote: COORDINATOR_REASON_HANDLER_UNAVAILABLE cause=not-running domain=remote retry_count=3"),
                 "{lines:?}"
             );
             let _ = ready(kernel.resume(&store, &sampled_at(3), &mut ()));

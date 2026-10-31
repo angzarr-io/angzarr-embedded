@@ -800,7 +800,7 @@ fn a_policy_book_for_an_unregistered_target_is_a_dead_lettered_bug() {
     assert!(lines[0].starts_with(crate::next::DEAD_LETTER_PREFIX));
     assert!(
         lines[0]
-            .contains("bookkeeping: angzarr-embedded-next-malformed-unknown-domain domain=ledger"),
+            .contains("bookkeeping: COORDINATOR_REASON_POLICY_COMMAND_UNKNOWN_DOMAIN command_type=toy.ledger.cmd.v1.Record domain=ledger"),
         "{}",
         lines[0]
     );

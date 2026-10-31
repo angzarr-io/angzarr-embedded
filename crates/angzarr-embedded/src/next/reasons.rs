@@ -69,6 +69,9 @@ pub mod args {
     pub const ATTEMPTS: &str = "attempts";
     /// The cap reached: a count of runs or deliveries.
     pub const CAP: &str = "cap";
+    /// A limit reached: a chain's depth, or a decision's continuation steps
+    /// (decision 14.49).
+    pub const LIMIT: &str = "limit";
     /// The domain a refusal fact or a policy's command was addressed to.
     pub const DOMAIN: &str = "domain";
     /// The `CommandPage` field a policy's command set to a value other

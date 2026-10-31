@@ -626,8 +626,13 @@ angzarr-embedded code of its own (`angzarr-embedded-next-<reason>`, the reason w
 with its own message; a handler's own code that no catalog holds is
 `angzarr-embedded-next-unhandled-handler-error` with that code its
 `cause`. A remote handler that cannot be reached
-(`REMOTE_HANDLER_UNAVAILABLE`) is `KernelError::HandlerUnavailable`, a
-retryable bug.
+(`COORDINATOR_REASON_HANDLER_UNAVAILABLE`, UNAVAILABLE) is
+`KernelError::HandlerUnavailable`, a retryable bug. The kernel's limits
+travel under the spec's keys too (decision 14.49): a chain deeper than its
+limit is `COORDINATOR_REASON_CHAIN_TOO_DEEP`, a decision past its step limit
+`ROUTER_REASON_TOO_MANY_STEPS`, each INTERNAL with its `limit`; a policy's
+command for a domain the kernel cannot route is
+`COORDINATOR_REASON_POLICY_COMMAND_UNKNOWN_DOMAIN`.
 
 **What a handler reads.** The router's `CommandContext`: the stream, the
 input's command id, correlation and fact origin, the conflict under

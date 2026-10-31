@@ -88,5 +88,71 @@ fn the_coordinators_conflicts_are_coded_under_their_keys() {
             GrpcCode::Aborted
         )
     );
-    assert!(KernelError::ChainTooDeep { limit: 8 }.as_coded().is_none());
+    assert!(KernelError::UnregisteredDomain {
+        domain: "shelf".to_string()
+    }
+    .as_coded()
+    .is_none());
+}
+
+/// The limits and an unreachable handler on the wire, under decision
+/// 14.49's keys: the two limits INTERNAL (fatal bugs) with their `limit`,
+/// the unreachable handler UNAVAILABLE (a retryable bug) with its domain
+/// and cause.
+#[test]
+fn the_limits_and_an_unreachable_handler_are_coded_under_their_keys() {
+    use std::collections::BTreeMap;
+
+    use angzarr_router::error::GrpcCode;
+
+    use super::super::reasons::{CoordinatorReason, RouterReason};
+    use super::KernelError;
+    let stream = || angzarr_proto::v1::Cover {
+        domain: "shelf".to_string(),
+        ..Default::default()
+    };
+    let coded = |error: KernelError| {
+        error
+            .as_coded()
+            .map(|c| (c.code, c.extras, c.grpc))
+            .expect("one of the coordinator's answers")
+    };
+    let extras = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    };
+    assert_eq!(
+        coded(KernelError::ChainTooDeep { limit: 8 }),
+        (
+            CoordinatorReason::ChainTooDeep.as_str_name().to_string(),
+            extras(&[("limit", "8")]),
+            GrpcCode::Internal
+        )
+    );
+    assert_eq!(
+        coded(KernelError::TooManySteps {
+            stream: stream(),
+            limit: 16
+        }),
+        (
+            RouterReason::TooManySteps.as_str_name().to_string(),
+            extras(&[("limit", "16")]),
+            GrpcCode::Internal
+        )
+    );
+    assert_eq!(
+        coded(KernelError::HandlerUnavailable {
+            stream: stream(),
+            cause: "timeout".to_string()
+        }),
+        (
+            CoordinatorReason::HandlerUnavailable
+                .as_str_name()
+                .to_string(),
+            extras(&[("domain", "shelf"), ("cause", "timeout")]),
+            GrpcCode::Unavailable
+        )
+    );
 }

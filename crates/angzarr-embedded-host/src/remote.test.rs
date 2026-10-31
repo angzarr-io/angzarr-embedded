@@ -107,11 +107,27 @@ fn a_child_not_running_is_retryable() {
                 (args::DOMAIN.to_string(), "player".to_string()),
                 (CAUSE.to_string(), causes::NOT_RUNNING.to_string()),
             ]),
-            grpc: GrpcCode::Aborted,
+            grpc: GrpcCode::Unavailable,
             refusal: None,
         }
     );
     assert!(is_retryable(&coded));
+}
+
+/// An unreachable remote handler is answered under the spec's key
+/// (decision 14.49): COORDINATOR_REASON_HANDLER_UNAVAILABLE, UNAVAILABLE, a
+/// retryable bug.
+#[test]
+fn unavailability_is_the_specs_key() {
+    use angzarr_embedded::next::reasons::CoordinatorReason;
+    assert_eq!(
+        codes::REMOTE_HANDLER_UNAVAILABLE,
+        CoordinatorReason::HandlerUnavailable.as_str_name()
+    );
+    assert_eq!(
+        unavailable("player", causes::TIMEOUT).grpc,
+        GrpcCode::Unavailable
+    );
 }
 
 /// Another coded failure keeps its code and its gRPC code, and is not

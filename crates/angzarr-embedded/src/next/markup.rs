@@ -1321,7 +1321,10 @@ where
         steps += 1;
         if steps > STEP_LIMIT {
             return Err(angzarr_router::error::HandlerError::Coded(
-                super::route::internal(super::route::TOO_MANY_STEPS, []),
+                super::route::internal(
+                    super::route::TOO_MANY_STEPS,
+                    [("limit".to_string(), STEP_LIMIT.to_string())],
+                ),
             ));
         }
         emit = next(&working, &ctx).map_err(fail)?;

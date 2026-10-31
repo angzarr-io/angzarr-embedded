@@ -390,10 +390,12 @@ fn a_sequence_keys_letter_carries_the_expected_sequence_and_the_head() {
 #[test]
 fn a_kernel_error_with_no_spec_key_keeps_its_own_code() {
     use crate::next::toys::processing_failed;
-    let error = KernelError::ChainTooDeep { limit: 4 };
+    let error = KernelError::UnregisteredDomain {
+        domain: "account".to_string(),
+    };
     let letter = letter_for(Cause::Kernel(&error));
     let reason = crate::next::route::diagnostic(&error);
-    assert_eq!(reason.code, "angzarr-embedded-next-chain-too-deep");
+    assert_eq!(reason.code, "angzarr-embedded-next-unregistered-domain");
     assert_eq!(letter.reason, Some(reason.clone()));
     assert_eq!(
         letter.rejection_details,
@@ -401,8 +403,40 @@ fn a_kernel_error_with_no_spec_key_keeps_its_own_code() {
     );
 }
 
-/// An unreachable remote handler's letter is keyed as it answered:
-/// REMOTE_HANDLER_UNAVAILABLE, its domain and cause.
+/// The two limits are keyed as the spec spells them (decision 14.49): a
+/// chain deeper than the kernel's limit COORDINATOR_REASON_CHAIN_TOO_DEEP,
+/// a decision past its step limit ROUTER_REASON_TOO_MANY_STEPS, each with
+/// its `limit`; fatal bugs, `processing_failed`, never retried, not
+/// transient.
+#[test]
+fn a_limits_letter_carries_its_spec_key_and_limit() {
+    use crate::next::toys::{processing_failed, wire};
+    for (error, reason) in [
+        (
+            KernelError::ChainTooDeep { limit: 4 },
+            wire("COORDINATOR_REASON_CHAIN_TOO_DEEP", &[("limit", "4")]),
+        ),
+        (
+            KernelError::TooManySteps {
+                stream: cover("account", 1),
+                limit: 16,
+            },
+            wire("ROUTER_REASON_TOO_MANY_STEPS", &[("limit", "16")]),
+        ),
+    ] {
+        let letter = letter_for(Cause::Kernel(&error));
+        assert_eq!(letter.reason, Some(reason.clone()), "{error:?}");
+        assert_eq!(
+            letter.rejection_details,
+            Some(processing_failed(&reason, 0, false)),
+            "{error:?}"
+        );
+    }
+}
+
+/// An unreachable remote handler's letter is keyed as the spec spells it
+/// (decision 14.49): COORDINATOR_REASON_HANDLER_UNAVAILABLE, its domain and
+/// cause.
 #[test]
 fn an_unavailable_handlers_letter_names_its_domain_and_cause() {
     use crate::next::toys::{processing_failed, wire};
@@ -412,7 +446,7 @@ fn an_unavailable_handlers_letter_names_its_domain_and_cause() {
     };
     let letter = letter_for(Cause::Kernel(&error));
     let reason = wire(
-        "REMOTE_HANDLER_UNAVAILABLE",
+        "COORDINATOR_REASON_HANDLER_UNAVAILABLE",
         &[("cause", "not-running"), ("domain", "account")],
     );
     assert_eq!(letter.reason, Some(reason.clone()));
@@ -488,6 +522,12 @@ fn a_malformed_kernel_books_letter_is_keyed_where_the_spec_has_a_key() {
                 "COORDINATOR_REASON_POLICY_COMMAND_OTHER_CORRELATION",
                 &naming,
             ),
+        ),
+        (
+            Malformed::UnknownDomain {
+                domain: "account".to_string(),
+            },
+            wire("COORDINATOR_REASON_POLICY_COMMAND_UNKNOWN_DOMAIN", &naming),
         ),
         (
             Malformed::NoBody,

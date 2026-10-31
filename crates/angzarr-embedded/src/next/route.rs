@@ -92,10 +92,11 @@ pub(crate) fn intern(text: &str) -> &'static str {
     leaked
 }
 
-/// The router's code for a refusal past a decision's step limit
-/// ([`STEP_LIMIT`](super::markup::STEP_LIMIT)): the kernel's
-/// [`KernelError::TooManySteps`](super::KernelError::TooManySteps).
-pub(crate) const TOO_MANY_STEPS: &str = "ANGZARR_EMBEDDED_TOO_MANY_STEPS";
+/// The router's key for a refusal past a decision's step limit
+/// ([`STEP_LIMIT`](super::markup::STEP_LIMIT)), the spec's
+/// `ROUTER_REASON_TOO_MANY_STEPS` (decision 14.49), with arg `limit`: the
+/// kernel's [`KernelError::TooManySteps`](super::KernelError::TooManySteps).
+pub(crate) const TOO_MANY_STEPS: &str = "ROUTER_REASON_TOO_MANY_STEPS";
 
 /// A domain's refusal of a command, as its caller receives it (angzarr's
 /// business rejection, [`is_rejection`]): the code and args of the
@@ -374,10 +375,12 @@ pub(crate) fn is_nothing(page: &angzarr_proto::v1::EventPage) -> bool {
 
 // ------------------------------------------------------------- the table
 
-/// The code a remote handler answers with when it cannot be reached
-/// (angzarr-embedded-host's): the kernel's retryable
+/// The key a remote handler is answered with when it cannot be reached
+/// (angzarr-embedded-host's), the spec's
+/// `COORDINATOR_REASON_HANDLER_UNAVAILABLE` (decision 14.49): the kernel's
+/// retryable
 /// [`KernelError::HandlerUnavailable`](super::KernelError::HandlerUnavailable).
-pub(crate) const HANDLER_UNAVAILABLE: &str = "REMOTE_HANDLER_UNAVAILABLE";
+pub(crate) const HANDLER_UNAVAILABLE: &str = "COORDINATOR_REASON_HANDLER_UNAVAILABLE";
 
 /// The router's table for typed domain `D`, before its handlers: named
 /// `D::NAME` (a process manager's if `process_manager`), folding each

@@ -52,8 +52,9 @@ use angzarr_embedded_diagnostic::Report;
 pub mod codes {
     /// The domain's child cannot be reached: not running (exited, being
     /// restarted), the connection failed, or it answered UNAVAILABLE.
-    /// Retryable ([`super::is_retryable`]).
-    pub const REMOTE_HANDLER_UNAVAILABLE: &str = "REMOTE_HANDLER_UNAVAILABLE";
+    /// The spec's `COORDINATOR_REASON_HANDLER_UNAVAILABLE` (decision
+    /// 14.49), UNAVAILABLE: retryable ([`super::is_retryable`]).
+    pub const REMOTE_HANDLER_UNAVAILABLE: &str = "COORDINATOR_REASON_HANDLER_UNAVAILABLE";
 }
 
 /// The extras key naming why a remote handler was unreachable, one of the
@@ -579,7 +580,7 @@ pub(crate) fn unavailable(domain: &str, cause: &str) -> CodedError {
             (CAUSE.to_string(), cause.to_string()),
         ]
         .into(),
-        grpc: GrpcCode::Aborted,
+        grpc: GrpcCode::Unavailable,
         refusal: None,
     }
 }

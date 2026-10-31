@@ -39,11 +39,16 @@
 //!   ([`StepError::PolicyFailed`](super::StepError::PolicyFailed)), keyed
 //!   as the router keys a handler's bug; the kernel's refusal of a
 //!   policy's answer (`COORDINATOR_REASON_POLICY_COMMAND_*`, an
-//!   identity other than the stamp, a Fact and a `fact_origin` among
-//!   them); a projector's failure; a book the kernel built malformed;
+//!   identity other than the stamp, a Fact, a `fact_origin` and a domain
+//!   it cannot route, `COORDINATOR_REASON_POLICY_COMMAND_UNKNOWN_DOMAIN`,
+//!   among them); a chain deeper than its limit
+//!   (`COORDINATOR_REASON_CHAIN_TOO_DEEP`) and a decision past its step
+//!   limit (`ROUTER_REASON_TOO_MANY_STEPS`), each with its `limit`
+//!   (decision 14.49); a projector's failure; a book the kernel built
+//!   malformed;
 //! - a step whose retryable failure outlasted its retries
 //!   ([`OnRetryable`](super::OnRetryable)): the failure's own key as last
-//!   answered (`REMOTE_HANDLER_UNAVAILABLE`, a handler's retryable bug, a
+//!   answered (`COORDINATOR_REASON_HANDLER_UNAVAILABLE`, a handler's retryable bug, a
 //!   policy step's ABORTED), `processing_failed`, `retry_count` its
 //!   retries, transient.
 //!
@@ -319,15 +324,6 @@ pub(crate) fn reason(cause: &Cause, payload: &Payload) -> angzarr_proto::v1::Dia
         Cause::Kernel(KernelError::Malformed(malformed)) => malformed_reason(malformed, payload),
         Cause::Malformed(malformed) => malformed_reason(malformed, payload),
         Cause::Kernel(KernelError::Router(error)) => coded(error),
-        Cause::Kernel(KernelError::HandlerUnavailable { stream, cause }) => {
-            coded(&route::internal(
-                route::HANDLER_UNAVAILABLE,
-                [
-                    (args::DOMAIN.to_string(), stream.domain.clone()),
-                    (extras::CAUSE.to_string(), cause.clone()),
-                ],
-            ))
-        }
         Cause::Kernel(error) => error
             .as_coded()
             .map_or_else(|| diagnostic(*error), |error| coded(&error)),
@@ -392,6 +388,7 @@ fn malformed_reason(malformed: &Malformed, payload: &Payload) -> angzarr_proto::
         )),
         Malformed::FactFromPolicy => naming(CoordinatorReason::PolicyCommandIsFact),
         Malformed::CommandWithFactOrigin => naming(CoordinatorReason::PolicyCommandFactOrigin),
+        Malformed::UnknownDomain { .. } => naming(CoordinatorReason::PolicyCommandUnknownDomain),
         Malformed::RefusalMisaddressed => coded(&route::internal(
             CoordinatorReason::RefusalFactWrongStream.as_str_name(),
             [(args::DOMAIN.to_string(), domain.clone())],

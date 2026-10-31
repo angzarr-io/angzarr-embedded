@@ -218,7 +218,8 @@ pub enum KernelError {
     Router(angzarr_router::error::CodedError),
     /// The domain's handler could not be reached (a remote handler whose
     /// process is not running, or whose transport failed: its
-    /// `REMOTE_HANDLER_UNAVAILABLE`). Nothing ran and nothing was written:
+    /// `COORDINATOR_REASON_HANDLER_UNAVAILABLE`, UNAVAILABLE). Nothing ran
+    /// and nothing was written:
     /// run it again, as [`Kernel::resume`](super::Kernel::resume) does for
     /// a policy's step.
     HandlerUnavailable {
@@ -419,6 +420,33 @@ impl KernelError {
                         (args::CAP.to_string(), cap.to_string()),
                     ],
                 ));
+            }
+            KernelError::ChainTooDeep { limit } => {
+                return Some(super::route::internal(
+                    CoordinatorReason::ChainTooDeep.as_str_name(),
+                    [(args::LIMIT.to_string(), limit.to_string())],
+                ));
+            }
+            KernelError::TooManySteps { limit, .. } => {
+                return Some(super::route::internal(
+                    super::route::TOO_MANY_STEPS,
+                    [(args::LIMIT.to_string(), limit.to_string())],
+                ));
+            }
+            KernelError::HandlerUnavailable { stream, cause } => {
+                return Some(CodedError {
+                    code: super::route::HANDLER_UNAVAILABLE.to_string(),
+                    extras: [
+                        (args::DOMAIN.to_string(), stream.domain.clone()),
+                        (
+                            angzarr_router::error::extras::CAUSE.to_string(),
+                            cause.clone(),
+                        ),
+                    ]
+                    .into(),
+                    grpc: angzarr_router::error::GrpcCode::Unavailable,
+                    refusal: None,
+                });
             }
             _ => return None,
         };
