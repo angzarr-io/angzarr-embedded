@@ -304,7 +304,10 @@ another stream is never a conflict. The loser:
   backoff and jitter between runs, whatever `max_retries` says; its
   handler runs once per run. A race re-run cap of 0 turns this off, for a
   caller that owns its retry loop: the first lost race goes back to the
-  caller as the store's `Conflict` (retryable), not dead-lettered.
+  caller as the store's `Conflict` (retryable), not dead-lettered; a
+  policy's step that loses it holds the policy's position at the
+  trigger (nothing was dead-lettered, so nothing moves past it), and
+  the next catch-up runs the step again.
 - **set one, under STRICT**: it decided against a head that is gone, the
   early check's condition found late: `KernelError::Stale`, `expected`
   its sequence and `actual` the head the store found, ABORTED under

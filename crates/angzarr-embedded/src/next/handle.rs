@@ -127,7 +127,9 @@ pub struct Kernel<'k> {
 /// caller that owns its retry loop: a stamped command's lost race goes
 /// back to the caller at once as the store's conflict
 /// ([`StoreError::Conflict`], [`Recovery::Retry`](super::Recovery::Retry)),
-/// not run again and not dead-lettered.
+/// not run again and not dead-lettered; a policy's step that loses it
+/// holds the policy's position at the trigger, so the next catch-up runs
+/// it again.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct OnRetryable {
     /// Retries after the first attempt; 0 turns retrying off.
@@ -1020,8 +1022,17 @@ impl<'k> Run<'k> {
 
     /// Whether a step's `failure` is run again: retrying is on, and it is a
     /// retryable bug, or, as a `policy_step` (whose caller is the kernel),
-    /// ABORTED.
+    /// ABORTED. A race lost at the write (the store's conflict) is never
+    /// retried here: [`Run::again`] re-runs it to its race cap, dead-lettered
+    /// there and given up ([`given_up`]); handed back at a race re-run cap
+    /// of 0, it is neither, and a policy step's position holds.
     fn retried(&self, failure: &Failure<Rejected>, policy_step: bool) -> bool {
+        if matches!(
+            failure,
+            Failure::Kernel(KernelError::Store(StoreError::Conflict { .. }))
+        ) {
+            return false;
+        }
         self.retry.max_retries > 0
             && match failure_class(failure) {
                 Some(Class::BugRetryable) => true,
