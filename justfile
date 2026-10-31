@@ -71,7 +71,7 @@ licence-check:
     members=$(cargo metadata -q --no-deps --format-version 1 | jq -r '.packages[].name' | sort -u)
     # The workspace's crates that carry it (angzarr-ports, angzarr's own,
     # carries it too, and is no member), through any copy of it in the
-    # graph: each pinned rev of angzarr-project is a crate of its own.
+    # graph: each pinned source (repository and rev) is a crate of its own.
     protos=$(cargo metadata -q --format-version 1 --all-features | jq -r '.packages[] | select(.name == "angzarr-proto") | .id')
     actual=$(comm -12 <(for proto in $protos; do
             cargo tree -q --workspace --all-features -e normal,build -i "$proto" --prefix none --format '{p}'

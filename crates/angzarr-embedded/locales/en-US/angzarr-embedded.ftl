@@ -62,7 +62,7 @@ angzarr-embedded-next-invalid-payload = a { $type_url } for stream { $stream } i
 angzarr-embedded-next-upcast = upcasting a payload for stream { $stream } failed: { $error }
 angzarr-embedded-next-wrong-domain = stream { $stream } was given to the { $expected } domain's code
 angzarr-embedded-next-chain-too-deep = the command chain went deeper than its limit of { $limit }
-angzarr-embedded-next-too-many-steps = the decision on stream { $stream } ran more than its limit of { $limit } continuation steps
+angzarr-embedded-next-step-limit = the decision on stream { $stream } ran more than its limit of { $limit } continuation steps
 angzarr-embedded-next-before-snapshot = stream { $stream } holds its events from { $first } on only, after its snapshot
 angzarr-embedded-next-unregistered-domain = a stored { $domain } stream was read, but no domain "{ $domain }" is registered
 angzarr-embedded-next-handler-unavailable = the handler of stream { $stream } could not be reached ({ $cause }): run it again
@@ -111,6 +111,7 @@ angzarr-embedded-next-unknown-command-type = no handler takes this command's typ
 angzarr-embedded-next-no-refusal-handler = nothing handles the refusal of this command: give its source a refusal handler
 angzarr-embedded-next-no-component-of-kind = the business process hosts no component of the kind dispatched to
 angzarr-embedded-next-duplicate-component = a router hosts one component: register the other in its own
+angzarr-embedded-next-too-many-steps = a decision ran more continuation steps than its limit: a step that always continues, a bug in the domain
 
 # The coordinator's keys (CoordinatorReason, reasons.proto) the kernel
 # answers, each under its own code.

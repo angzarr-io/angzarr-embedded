@@ -554,7 +554,7 @@ impl Diagnostic for KernelError {
             KernelError::Upcast { .. } => "angzarr-embedded-next-upcast",
             KernelError::WrongDomain { .. } => "angzarr-embedded-next-wrong-domain",
             KernelError::ChainTooDeep { .. } => "angzarr-embedded-next-chain-too-deep",
-            KernelError::TooManySteps { .. } => "angzarr-embedded-next-too-many-steps",
+            KernelError::TooManySteps { .. } => "angzarr-embedded-next-step-limit",
             KernelError::BeforeSnapshot { .. } => "angzarr-embedded-next-before-snapshot",
             KernelError::UnregisteredDomain { .. } => "angzarr-embedded-next-unregistered-domain",
             KernelError::Replay(error) => error.code(),

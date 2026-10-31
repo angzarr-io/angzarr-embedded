@@ -68,8 +68,8 @@ unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = [
   # angzarr's wire contract (angzarr-proto) and store contract
-  # (angzarr-ports), pinned by one rev of its spec line.
-  "https://github.com/angzarr-io/angzarr-project",
+  # (angzarr-ports): angzarr core's shared crates, pinned by one rev.
+  "https://github.com/angzarr-io/angzarr",
   # angzarr's shared client router (BSD-3-Clause), which the kernel calls
   # for business dispatch, pinned by rev.
   "https://github.com/angzarr-io/angzarr-router",

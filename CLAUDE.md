@@ -34,7 +34,8 @@ operates on angzarr's wire types directly rather than on parallel angzarr-embedd
 types: angzarr owns that contract, and angzarr-embedded is its in-process runtime.
 Every user of angzarr-embedded therefore builds angzarr-proto; this is accepted.
 angzarr-embedded also depends on `angzarr-ports`, pinned at the same rev of
-angzarr-project's spec line: angzarr's shared store contract (one async
+angzarr core (`crates/angzarr-ports`, moved there from angzarr-project with
+angzarr-proto): angzarr's shared store contract (one async
 trait set, its errors and codes, its conformance suite), which angzarr-embedded's
 kernel runs on and has no store traits of its own beside.
 angzarr-embedded also depends on `angzarr-router`, a git dependency pinned by
