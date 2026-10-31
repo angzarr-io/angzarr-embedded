@@ -5746,17 +5746,18 @@ mod router {
     /// A bug of the fatal kind (INTERNAL, UNKNOWN, DATA_LOSS) is
     /// dead-lettered at once, never retried; any other status that is no
     /// refusal and not ABORTED (UNAVAILABLE, UNIMPLEMENTED and the rest)
-    /// is a retryable bug: retried, then dead-lettered.
+    /// is a retryable bug: retried, then handed back to its waiting
+    /// caller, not dead-lettered.
     #[test]
     fn a_fatal_bug_is_never_retried_and_a_retryable_one_is() {
         use ::angzarr_embedded::next::angzarr_router::error::GrpcCode;
         use std::sync::atomic::Ordering::SeqCst;
-        for (grpc, attempts) in [
-            (GrpcCode::Internal, 1),
-            (GrpcCode::Unknown, 1),
-            (GrpcCode::DataLoss, 1),
-            (GrpcCode::Unavailable, 4),
-            (GrpcCode::Unimplemented, 4),
+        for (grpc, attempts, letters) in [
+            (GrpcCode::Internal, 1, 1),
+            (GrpcCode::Unknown, 1, 1),
+            (GrpcCode::DataLoss, 1, 1),
+            (GrpcCode::Unavailable, 4, 0),
+            (GrpcCode::Unimplemented, 4, 0),
         ] {
             let (registry, calls) = counted("PLAYER_BROKE", grpc);
             let store = Mem::new();
@@ -5773,7 +5774,7 @@ mod router {
             ));
             assert!(failed.is_err(), "{grpc:?}");
             assert_eq!(calls.load(SeqCst), attempts, "{grpc:?}");
-            assert_eq!(log.lines().len(), 1, "dead-lettered once: {grpc:?}");
+            assert_eq!(log.lines().len(), letters, "{grpc:?}: {:?}", log.lines());
         }
     }
 
@@ -5837,11 +5838,11 @@ mod router {
 
         /// A handler's retryable bug is retried up to the cap, each wait
         /// the backoff less its jitter, through the injected `Wait`; then
-        /// it is dead-lettered as ROUTER_REASON_UNHANDLED_HANDLER_ERROR with its cause
-        /// and its retry count, and the caller gets it under its status,
-        /// `Recovery::Retry`. Nothing is written.
+        /// the caller gets it as ROUTER_REASON_UNHANDLED_HANDLER_ERROR with
+        /// its cause, under its status, `Recovery::Retry`. The caller is
+        /// waiting, so nothing is dead-lettered, and nothing is written.
         #[test]
-        fn a_handlers_retryable_bug_is_retried_to_the_cap_then_dead_lettered() {
+        fn a_handlers_retryable_bug_is_retried_to_the_cap_then_handed_back() {
             let registry = registry();
             let store = Mem::new();
             let log = MemoryDeadLetters::new();
@@ -5860,19 +5861,7 @@ mod router {
             assert_eq!(failed.recovery(), Recovery::Retry);
             assert_eq!(probe_attempts(), 4, "the first attempt and 3 retries");
             assert_eq!(waits.micros(), [7_500, 22_500, 37_500]);
-            let lines = log.lines();
-            assert_eq!(lines.len(), 1, "dead-lettered once: {lines:?}");
-            assert!(lines[0].contains("retry_count=3"), "{lines:?}");
-            let reason = crate::next::toys::wire(
-                "ROUTER_REASON_UNHANDLED_HANDLER_ERROR",
-                &[("cause", "toy-meter-broke"), ("cause.seat", "5")],
-            );
-            crate::next::toys::assert_letter(
-                &crate::next::toys::one_letter(log.letters()),
-                ::angzarr_embedded::next::v1::ComponentKind::Aggregate,
-                &reason,
-                crate::next::toys::processing_failed(&reason, 3, true),
-            );
+            assert!(log.lines().is_empty(), "{:?}", log.lines());
             assert_eq!(pages(&store, &meter_cover()), None, "nothing written");
         }
 

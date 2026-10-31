@@ -1015,9 +1015,12 @@ angzarr-embedded never answers PARKED.
 A step's retryable failure (a retryable bug, a handler's
 `Failed::retryable_bug` included; as a policy's step, ABORTED too, a
 handler's `Failed::immediate` included) is run again by the kernel, from its load and deduplication, after a
-backoff, up to a cap; then it is dead-lettered with its retry count, the
-caller still gets it, and a policy's position does what `OnPolicyBug`
-says. `Kernel::on_retryable(OnRetryable { max_retries, initial_backoff,
+backoff, up to a cap; then it is given up. Only work with no caller left
+is dead-lettered (owner ruling, 2026-10-31): a policy's step, with its
+retry count, its position doing what `OnPolicyBug` says, and a fact,
+parked. A command its caller waits for is handed back (as last answered;
+at a race cap, `COORDINATOR_REASON_RETRY_CAP_EXHAUSTED`) and is not
+dead-lettered: the caller holds it. `Kernel::on_retryable(OnRetryable { max_retries, initial_backoff,
 multiplier, max_backoff, jitter })`: retry `n` (from 0) waits
 `initial_backoff * multiplier^n`, at most `max_backoff`, less up to
 `jitter` of it at random. On by default (3 retries, from 100 ms,

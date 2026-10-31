@@ -23,8 +23,9 @@
 //!   OnRefused answers: `ROUTER_REASON_COMMAND_REFUSED` with its
 //!   `refusal_type`, `command_refused` holding the refusal object whole;
 //!   an untyped refusal, under the handler's own key, `processing_failed`;
-//! - a command or fact given up at a cap, every write lost to another write
-//!   to its stream ([`KernelError::RetryCapExhausted`](super::KernelError::RetryCapExhausted),
+//! - a policy's step or a fact given up at a cap (a command its caller
+//!   waits for is the caller's, answered and never dead-lettered: owner
+//!   ruling, 2026-10-31), every write lost to another write to its stream ([`KernelError::RetryCapExhausted`](super::KernelError::RetryCapExhausted),
 //!   decision 14.46): `COORDINATOR_REASON_RETRY_CAP_EXHAUSTED` with its
 //!   attempts and the cap, `processing_failed`, `retry_count` the retries
 //!   (the attempts after the first, as `ProcessingFailedDetails.retry_count`

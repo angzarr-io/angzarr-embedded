@@ -135,10 +135,12 @@ pub enum KernelError {
     /// or an AGGREGATE_HANDLES or COMMUTATIVE one re-delivered its widened
     /// window, at the retry cap (`max_retries + 1` deliveries). `attempts`
     /// is how many times business code ran, `cap` the limit reached.
-    /// Dead-lettered under this error, nothing persisted. angzarr's
-    /// INTERNAL, `COORDINATOR_REASON_RETRY_CAP_EXHAUSTED`: the dead letter
-    /// holds the command, so no caller retries it; a fact is answered
-    /// PARKED instead ([`Handled::Parked`](super::Handled::Parked)).
+    /// Nothing is persisted; a policy's step is dead-lettered under this
+    /// error, and a command its caller waits for is the caller's (owner
+    /// ruling, 2026-10-31). angzarr's INTERNAL,
+    /// `COORDINATOR_REASON_RETRY_CAP_EXHAUSTED`: the retries are spent, so
+    /// no caller retries it; a fact is answered PARKED instead
+    /// ([`Handled::Parked`](super::Handled::Parked)), and dead-lettered.
     RetryCapExhausted {
         stream: Cover,
         attempts: u32,

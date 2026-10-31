@@ -107,8 +107,10 @@ pub struct Kernel<'k> {
 /// a failure that is neither a business refusal nor a bug, the kernel's
 /// [`Recovery::Retry`](super::Recovery::Retry): UNAVAILABLE, ABORTED,
 /// UNIMPLEMENTED, DEADLINE_EXCEEDED, RESOURCE_EXHAUSTED and the like): run
-/// the step again after a backoff, up to `max_retries` times, then
-/// dead-letter it, visibly, under its key. The `n`th retry (from 0) waits
+/// the step again after a backoff, up to `max_retries` times, then give it
+/// up: a policy's step (no caller is left) is dead-lettered, visibly,
+/// under its key; a command its caller waits for is handed back as last
+/// answered, and not dead-lettered (owner ruling, 2026-10-31). The `n`th retry (from 0) waits
 /// `initial_backoff` times `multiplier` to the `n`, at most `max_backoff`,
 /// less a random part of it up to `jitter` (0 to 1): `base * (1 - jitter *
 /// draw)`, `draw` uniform in `[0, 1)` ([`Wait::draw`]). On by default;
@@ -121,9 +123,10 @@ pub struct Kernel<'k> {
 /// included. A command stamped with the head it loaded (no expected
 /// sequence, or a fact) that loses such a race is re-run on the new head
 /// under a cap of its own, `max_race_runs` (decision 14.46), with the same
-/// backoff and jitter between runs. At either cap the command is
-/// dead-lettered, [`KernelError::RetryCapExhausted`] (a fact,
-/// [`Handled::Parked`]). `max_race_runs = 0` turns race re-runs off, for a
+/// backoff and jitter between runs. At either cap the command is given
+/// up, [`KernelError::RetryCapExhausted`] (a fact, [`Handled::Parked`]):
+/// a policy's step and a fact are dead-lettered, a command its caller
+/// waits for is not. `max_race_runs = 0` turns race re-runs off, for a
 /// caller that owns its retry loop: a stamped command's lost race goes
 /// back to the caller at once as the store's conflict
 /// ([`StoreError::Conflict`], [`Recovery::Retry`](super::Recovery::Retry);
@@ -1046,14 +1049,18 @@ impl<'k> Run<'k> {
 
     /// Whether `command`'s step, failed with `failure` after `tries`, runs
     /// again (`Ok(true)`): once its backoff is waited out, `tries` one
-    /// more. A failure that is retried but has had all its retries is
-    /// dead-lettered, with their count, and is not (`Ok(false)`). A race
-    /// lost at the write ([`raced`]) runs again up to its cap: the race
-    /// re-run cap for a stamped command, `max_retries + 1` deliveries for a
-    /// re-delivered window; at the cap it is dead-lettered and given up,
+    /// more. A failure that is retried but has had all its retries is not
+    /// (`Ok(false)`). A race lost at the write ([`raced`]) runs again up to
+    /// its cap: the race re-run cap for a stamped command, `max_retries +
+    /// 1` deliveries for a re-delivered window; at the cap it is given up,
     /// [`KernelError::RetryCapExhausted`] in its place (`Err`). A race
-    /// re-run cap of 0 runs a stamped command's lost race no more and does
-    /// not dead-letter it (`Ok(false)`): its caller is handed the conflict.
+    /// re-run cap of 0 runs a stamped command's lost race no more
+    /// (`Ok(false)`): its caller is handed the conflict.
+    ///
+    /// At either cap, what has no caller left is dead-lettered, with its
+    /// retries: a `policy_step`, and a fact, which is parked. A command its
+    /// caller is waiting for is not: the caller is answered, and holds it
+    /// (owner ruling, 2026-10-31).
     async fn again(
         &mut self,
         failure: &Failure<Rejected>,
@@ -1076,12 +1083,14 @@ impl<'k> Run<'k> {
                     attempts: tries.races,
                     cap,
                 };
-                dead_letter::write(
-                    self.dead_letters,
-                    Payload::RejectedCommand(command.to_book()),
-                    Component::domain(self.registry, command.domain()),
-                    Cause::Kernel(&given_up),
-                );
+                if Self::callerless(policy_step, command) {
+                    dead_letter::write(
+                        self.dead_letters,
+                        Payload::RejectedCommand(command.to_book()),
+                        Component::domain(self.registry, command.domain()),
+                        Cause::Kernel(&given_up),
+                    );
+                }
                 return Err(Failure::Kernel(given_up));
             }
             let backoff = self.retry.backoff(tries.races - 1, self.wait.draw());
@@ -1093,7 +1102,9 @@ impl<'k> Run<'k> {
         }
         if tries.retries >= self.retry.max_retries {
             // Only a kernel error is retried ([`failure_class`]).
-            if let Failure::Kernel(error) = failure {
+            if let (true, Failure::Kernel(error)) =
+                (Self::callerless(policy_step, command), failure)
+            {
                 write_at_cap(
                     self.dead_letters,
                     Payload::RejectedCommand(command.to_book()),
@@ -1108,6 +1119,13 @@ impl<'k> Run<'k> {
         self.wait.wait(backoff).await;
         tries.retries += 1;
         Ok(true)
+    }
+
+    /// Whether `command`, given up on at a cap, has no caller left to hold
+    /// it: a `policy_step`'s (whose caller is the kernel), or a fact's,
+    /// parked. A command its caller waits for is the caller's.
+    fn callerless(policy_step: bool, command: &Identified) -> bool {
+        policy_step || command.body().is_fact()
     }
 
     /// The originating command's step: load then deduplicate, then
