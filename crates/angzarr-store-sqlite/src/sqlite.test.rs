@@ -1962,3 +1962,147 @@ async fn a_handle_counts_the_statements_it_sends() {
     store.read(stream(1), 0, None).await.unwrap();
     assert_eq!(store.round_trips(), 5);
 }
+
+// ---------------------------------------------- the outbox, per stream
+//
+// Owner ruling 2026-10-31 (Q7): the outbox orders by each stream's own event
+// sequence, with no outbox sequence and no order across streams. 0005 drops
+// 0003's `outbox.seq INTEGER PRIMARY KEY AUTOINCREMENT` (0003 stays as
+// released) and keys each entry by the stream its write appends to and
+// that write's first sequence, then its place in the write.
+
+/// The columns of the outbox at `path`, sorted, and whether SQLite keeps
+/// an AUTOINCREMENT counter (`sqlite_sequence`) for any table.
+async fn outbox_schema(path: &Path) -> (Vec<String>, bool) {
+    let mut conn = raw(path).await;
+    let columns = sqlx::query_scalar("SELECT name FROM pragma_table_info('outbox') ORDER BY name")
+        .fetch_all(&mut conn)
+        .await
+        .unwrap();
+    let counted: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'sqlite_sequence'",
+    )
+    .fetch_all(&mut conn)
+    .await
+    .unwrap();
+    conn.close().await.unwrap();
+    (columns, !counted.is_empty())
+}
+
+/// A migrated store's outbox keeps no sequence of its own: no `seq`
+/// column, no AUTOINCREMENT counter; an entry is keyed by its write's
+/// stream and sequence.
+#[tokio::test]
+async fn the_outbox_keeps_no_sequence_of_its_own() {
+    let path = database();
+    drop(SqliteStore::open(&path).await.unwrap());
+    let (columns, counted) = outbox_schema(&path).await;
+    assert!(!columns.iter().any(|c| c == "seq"), "{columns:?}");
+    assert!(!counted, "no AUTOINCREMENT counter");
+    for keyed in ["domain", "stream_edition", "root", "sequence", "place"] {
+        assert!(columns.iter().any(|c| c == keyed), "{keyed}: {columns:?}");
+    }
+}
+
+/// Entries pending in a database at 0004, keyed by 0003's `seq`, stay
+/// pending once 0005 has run, in their order, under no stream (their
+/// writes' streams were never recorded).
+#[tokio::test]
+async fn pending_entries_survive_the_outbox_rekeying() {
+    let path = database();
+    let mut conn = SqliteConnectOptions::new()
+        .filename(&*path)
+        .create_if_missing(true)
+        .connect()
+        .await
+        .unwrap();
+    Migrator {
+        migrations: Cow::Owned(MIGRATOR.iter().take(4).cloned().collect()),
+        ..Migrator::DEFAULT
+    }
+    .run(&mut conn)
+    .await
+    .unwrap();
+    let entries = [
+        angzarr_ports::contract::entry(3, "a", 1),
+        angzarr_ports::contract::entry(1, "b", 2),
+    ];
+    for entry in &entries {
+        sqlx::query("INSERT INTO outbox (id, origin, message, edition) VALUES (?, ?, ?, NULL)")
+            .bind(entry.id.as_bytes().to_vec())
+            .bind(&entry.origin)
+            .bind(entry.message.encode_to_vec())
+            .execute(&mut conn)
+            .await
+            .unwrap();
+    }
+    conn.close().await.unwrap();
+    let store = SqliteStore::open(&path).await.unwrap();
+    assert_eq!(store.pending(10).await, Ok(entries.to_vec()));
+    drop(store);
+    assert!(
+        !outbox_schema(&path).await.0.iter().any(|c| c == "seq"),
+        "rekeyed"
+    );
+}
+
+/// Core's check for the ruled order (angzarr-ports 5d9f885,
+/// `the_outbox_drains_each_stream_in_order_and_clears`), held here until
+/// this workspace's angzarr-ports pin, which still checks one store-wide
+/// write order, moves to it: each stream's entries by its sequence, then
+/// their order in the write, a limit taking each stream's oldest first,
+/// and nothing compared across streams.
+#[tokio::test]
+async fn the_outbox_drains_each_stream_in_order_and_clears() {
+    use angzarr_ports::contract::entry;
+    use angzarr_ports::{OutboxEntry, Write};
+    let store = SqliteStore::open_in_memory().await.unwrap();
+    async fn put_on(store: &SqliteStore, stream: StreamRef<'_>, at: u64, entries: &[OutboxEntry]) {
+        let pages = [page(at, 1)];
+        store
+            .write(Write {
+                outbox: entries,
+                ..Write::append(stream, at, &pages)
+            })
+            .await
+            .unwrap();
+    }
+    let of = |pending: &[OutboxEntry], origin: &str| -> Vec<OutboxEntry> {
+        pending
+            .iter()
+            .filter(|e| e.origin == origin)
+            .cloned()
+            .collect()
+    };
+    let same = |got: &[OutboxEntry], want: &[&OutboxEntry]| {
+        got.len() == want.len() && want.iter().all(|w| got.contains(w))
+    };
+    let (a, b) = (main_stream("a", 1), main_stream("b", 1));
+    let (e3, e1, e5, e2) = (
+        entry(3, "a", 1),
+        entry(1, "a", 1),
+        entry(5, "b", 1),
+        entry(2, "a", 1),
+    );
+    put_on(&store, a, 0, &[e3.clone(), e1.clone()]).await;
+    put_on(&store, b, 0, std::slice::from_ref(&e5)).await;
+    put_on(&store, a, 1, std::slice::from_ref(&e2)).await;
+    let a_order = [e3.clone(), e1.clone(), e2.clone()];
+    let all = store.pending(10).await.unwrap();
+    assert!(same(&all, &[&e3, &e1, &e5, &e2]), "{all:?}");
+    assert_eq!(
+        of(&all, "a"),
+        a_order.to_vec(),
+        "by sequence, then entry order"
+    );
+    let two = store.pending(2).await.unwrap();
+    assert_eq!(two.len(), 2, "{two:?}");
+    let taken = of(&two, "a");
+    assert_eq!(taken, a_order[..taken.len()].to_vec(), "oldest first");
+    assert_eq!(store.clear(&[e3.id, e1.id]).await, Ok(2));
+    let left = store.pending(10).await.unwrap();
+    assert!(same(&left, &[&e5, &e2]), "{left:?}");
+    assert_eq!(store.clear(&[e1.id]).await, Ok(0));
+    assert_eq!(store.clear(&[e2.id, e5.id]).await, Ok(2));
+    assert_eq!(store.pending(10).await, Ok(vec![]));
+}
