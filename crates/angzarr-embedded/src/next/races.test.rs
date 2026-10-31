@@ -900,6 +900,50 @@ fn a_fact_losing_every_race_until_the_cap_is_parked() {
     assert_eq!(stored(&store), notes(3), "nothing persisted");
 }
 
+/// A race re-run cap of 0 turns race re-runs off for a fact too: a fact
+/// that loses the race at its write is not run again, not dead-lettered
+/// and not parked; its sender is handed the store's conflict, retryable,
+/// after one run of business code, with no wait and nothing persisted.
+/// The cap is never reached, so C-0726's parking does not apply, and a
+/// conflict is not a refusal.
+#[test]
+fn with_no_race_reruns_a_fact_that_loses_the_race_goes_back_as_the_stores_conflict() {
+    let store = store_at_three();
+    let orders = Orders::scripted(
+        Some(&store),
+        vec![Delivery::racing(Reported::Nothing), Delivery::plain()],
+    );
+    let registry = registry_of(orders);
+    let log = MemoryDeadLetters::new();
+    let waits = Waits::default();
+    let retry = OnRetryable {
+        max_race_runs: 0,
+        ..OnRetryable::default()
+    };
+    let failure = kernel(&registry, &log, &waits, retry)
+        .handle_any(
+            &store,
+            fact(order(), any(SHIPMENT_DISPATCHED), "shipment-1"),
+            &at(1),
+            &mut (),
+        )
+        .ready()
+        .err()
+        .expect("the race was lost, not parked");
+    assert!(
+        matches!(
+            failure,
+            Failure::Kernel(KernelError::Store(crate::next::StoreError::Conflict { .. }))
+        ),
+        "{failure:?}"
+    );
+    assert_eq!(failure.recovery(), Recovery::Retry);
+    assert_eq!(orders.seen().len(), 1, "run once");
+    assert!(waits.waited().is_empty(), "no wait");
+    assert!(log.lines().is_empty(), "{:?}", log.lines());
+    assert_eq!(stored(&store), notes(1), "nothing of its own persisted");
+}
+
 /// A bell that a policy turns into AddItems.
 struct Bell;
 
