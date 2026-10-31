@@ -456,6 +456,57 @@ fn an_unavailable_handlers_letter_names_its_domain_and_cause() {
     );
 }
 
+/// A store that could not answer, and an upcaster sidecar that could not
+/// be reached, are retryable failures, so each carries the spec's key for
+/// when its retries are spent (decision 14.51):
+/// COORDINATOR_REASON_STORE_UNAVAILABLE with the store's failure as its
+/// `cause`, flattened, and COORDINATOR_REASON_UPCASTER_UNAVAILABLE with
+/// its domain and cause; never angzarr-ports' or angzarr-embedded's code.
+#[test]
+fn a_retryable_store_or_sidecar_failures_letter_is_keyed_as_the_spec_spells_it() {
+    use crate::next::toys::{processing_failed, wire};
+    use angzarr_embedded_diagnostic::Report;
+    let store = KernelError::Store(crate::next::StoreError::Unavailable(
+        angzarr_ports::Cause::new(
+            "angzarr-store-sqlite-unavailable",
+            [("errno", angzarr_ports::Arg::Uint(5))],
+        ),
+    ));
+    let sidecar = KernelError::Upcast {
+        stream: cover("account", 1),
+        error: crate::next::UpcastError::Unavailable {
+            cause: Report::new("x-sidecar-down"),
+        },
+    };
+    for (error, reason) in [
+        (
+            store,
+            wire(
+                "COORDINATOR_REASON_STORE_UNAVAILABLE",
+                &[
+                    ("cause", "angzarr-store-sqlite-unavailable"),
+                    ("cause.errno", "5"),
+                ],
+            ),
+        ),
+        (
+            sidecar,
+            wire(
+                "COORDINATOR_REASON_UPCASTER_UNAVAILABLE",
+                &[("cause", "x-sidecar-down"), ("domain", "account")],
+            ),
+        ),
+    ] {
+        let letter = letter_for(Cause::Kernel(&error));
+        assert_eq!(letter.reason, Some(reason.clone()), "{error:?}");
+        assert_eq!(
+            letter.rejection_details,
+            Some(processing_failed(&reason, 0, false)),
+            "{error:?}"
+        );
+    }
+}
+
 /// A book the kernel built that its check refused is keyed by the
 /// coordinator's key where the spec has one, naming the book's domain and
 /// its payload's type; otherwise by angzarr-embedded's code. Wrapped as a

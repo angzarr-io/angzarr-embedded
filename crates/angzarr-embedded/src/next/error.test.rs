@@ -156,3 +156,102 @@ fn the_limits_and_an_unreachable_handler_are_coded_under_their_keys() {
         )
     );
 }
+
+/// The retryable failures of the store and the upcaster sidecar on the
+/// wire, under decision 14.51's keys, each UNAVAILABLE (a retryable bug):
+/// a race the store lost, handed back at a race re-run cap of 0, with the
+/// head stamped and the head found; a store that could not answer, its
+/// failure the `cause`; a sidecar that could not be reached, its domain and
+/// cause. A store error that is not retryable has no wire answer here.
+#[test]
+fn the_retryable_store_and_sidecar_failures_are_coded_under_their_keys() {
+    use std::collections::BTreeMap;
+
+    use angzarr_embedded_diagnostic::Report;
+    use angzarr_router::error::GrpcCode;
+
+    use super::super::reasons::CoordinatorReason;
+    use super::{KernelError, UpcastError};
+    let stream = || angzarr_proto::v1::Cover {
+        domain: "shelf".to_string(),
+        ..Default::default()
+    };
+    let coded = |error: KernelError| {
+        error
+            .as_coded()
+            .map(|c| (c.code, c.extras, c.grpc))
+            .expect("one of the coordinator's answers")
+    };
+    let extras = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    };
+    assert_eq!(
+        coded(KernelError::Store(angzarr_ports::StoreError::conflict(
+            stream(),
+            3,
+            4
+        ))),
+        (
+            CoordinatorReason::StoreConflict.as_str_name().to_string(),
+            extras(&[("expected", "3"), ("actual", "4")]),
+            GrpcCode::Unavailable
+        )
+    );
+    assert_eq!(
+        coded(KernelError::Store(angzarr_ports::StoreError::Unavailable(
+            angzarr_ports::Cause::new(
+                "x-down",
+                [(
+                    "ext_err_txt",
+                    angzarr_ports::Arg::Str("database is locked".to_string())
+                )]
+            )
+        ))),
+        (
+            CoordinatorReason::StoreUnavailable
+                .as_str_name()
+                .to_string(),
+            extras(&[
+                ("cause", "x-down"),
+                ("cause.ext_err_txt", "database is locked")
+            ]),
+            GrpcCode::Unavailable
+        )
+    );
+    assert_eq!(
+        coded(KernelError::Upcast {
+            stream: stream(),
+            error: UpcastError::Unavailable {
+                cause: Report::new("x-sidecar-down").arg("port", 50051u64),
+            },
+        }),
+        (
+            CoordinatorReason::UpcasterUnavailable
+                .as_str_name()
+                .to_string(),
+            extras(&[
+                ("domain", "shelf"),
+                ("cause", "x-sidecar-down"),
+                ("cause.port", "50051")
+            ]),
+            GrpcCode::Unavailable
+        )
+    );
+    assert!(
+        KernelError::Store(angzarr_ports::StoreError::discontinuous(stream(), 3, 5))
+            .as_coded()
+            .is_none()
+    );
+    assert!(KernelError::Upcast {
+        stream: stream(),
+        error: UpcastError::Rule {
+            source: "a".to_string(),
+            error: Report::new("x-rule"),
+        },
+    }
+    .as_coded()
+    .is_none());
+}

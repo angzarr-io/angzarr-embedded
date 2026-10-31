@@ -800,6 +800,11 @@ fn with_no_race_reruns_a_lost_race_goes_back_as_the_stores_conflict() {
             "max_retries {max_retries}"
         );
         assert_eq!(
+            store_conflict(&failure),
+            Some(conflict_answer()),
+            "max_retries {max_retries}: keyed (14.51)"
+        );
+        assert_eq!(
             orders.seen().len(),
             1,
             "max_retries {max_retries}: run once"
@@ -938,6 +943,11 @@ fn with_no_race_reruns_a_fact_that_loses_the_race_goes_back_as_the_stores_confli
         "{failure:?}"
     );
     assert_eq!(failure.recovery(), Recovery::Retry);
+    assert_eq!(
+        store_conflict(&failure),
+        Some(conflict_answer()),
+        "keyed (14.51)"
+    );
     assert_eq!(orders.seen().len(), 1, "run once");
     assert!(waits.waited().is_empty(), "no wait");
     assert!(log.lines().is_empty(), "{:?}", log.lines());
@@ -1109,6 +1119,11 @@ fn with_no_race_reruns_a_policy_step_that_loses_the_race_goes_back_as_the_stores
         "{failure:?}"
     );
     assert_eq!(failure.recovery(), Recovery::Retry);
+    assert_eq!(
+        store_conflict(&failure),
+        Some(conflict_answer()),
+        "keyed (14.51)"
+    );
     assert_eq!(orders.seen().len(), 1, "run once");
     assert!(waits.waited().is_empty(), "no wait");
     assert!(log.lines().is_empty(), "{:?}", log.lines());
@@ -1118,4 +1133,39 @@ fn with_no_race_reruns_a_policy_step_that_loses_the_race_goes_back_as_the_stores
         0,
         "held at the trigger"
     );
+}
+
+/// A wire answer: its key, its args in name order, its status.
+type Answer = (String, Vec<(String, String)>, GrpcCode);
+
+/// The wire answer of a race lost at a race re-run cap of 0, at the origin
+/// or a step down the chain.
+fn store_conflict(failure: &Failure<Rejected>) -> Option<Answer> {
+    let error = match failure {
+        Failure::Kernel(error) => error,
+        Failure::Downstream {
+            error: StepError::Kernel(error),
+            ..
+        } => error,
+        _ => return None,
+    };
+    error.as_coded().map(|c| {
+        let mut extras: Vec<_> = c.extras.into_iter().collect();
+        extras.sort();
+        (c.code, extras, c.grpc)
+    })
+}
+
+/// C-0740 to C-0742 (decision 14.51): UNAVAILABLE
+/// `COORDINATOR_REASON_STORE_CONFLICT`, the head stamped (3) and the head
+/// the store found (4).
+fn conflict_answer() -> Answer {
+    (
+        CoordinatorReason::StoreConflict.as_str_name().to_string(),
+        vec![
+            ("actual".to_string(), "4".to_string()),
+            ("expected".to_string(), "3".to_string()),
+        ],
+        GrpcCode::Unavailable,
+    )
 }
