@@ -311,8 +311,9 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn angzarr_embedded_diagnostic::D
         },
     ];
     // The store's errors are angzarr-ports': forwarded under their own
-    // codes, every one a step's reads and write can meet (an edition's
-    // creation, deletion and removal are the application's).
+    // codes, every one a step's reads and write, or an open migrating the
+    // store, can meet (an edition's creation, deletion and removal are the
+    // application's).
     let boxed = || Box::new(stream());
     let store = [
         StoreError::Conflict {
@@ -350,6 +351,18 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn angzarr_embedded_diagnostic::D
         StoreError::EditionNotForked { stream: boxed() },
         StoreError::EditionNotFound {
             name: "what-if".to_string(),
+        },
+        StoreError::NewerThanBuild {
+            applied: 6,
+            build: 5,
+        },
+        StoreError::MigrationFailed { version: 3 },
+        StoreError::MigrationChanged { version: 2 },
+        StoreError::MigrationMissing { version: 2 },
+        StoreError::MigrationUnknown { version: 7 },
+        StoreError::MigrationIrreversible { version: 4 },
+        StoreError::BackupExists {
+            target: "/p/state.db.pre-4-20261031T120000.000Z".to_string(),
         },
     ]
     .map(KernelError::Store);

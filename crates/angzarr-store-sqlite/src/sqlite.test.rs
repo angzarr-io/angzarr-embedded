@@ -192,7 +192,7 @@ async fn pair(path: &Path) -> (SqliteStore, SqliteStore) {
 /// store from `$fresh`, a check carrying its own attributes (an edition
 /// check's `#[ignore]`). The base and read sections are stamped here, not
 /// by `store_contract!`, because each holds edition checks this adapter
-/// does not pass yet; their lists are angzarr-ports' at 55eab0f, kept in
+/// does not pass yet; their lists are angzarr-ports' at dd0e553, kept in
 /// step by hand when the suite grows.
 macro_rules! checks {
     ($fresh:expr; $($(#[$a:meta])* $check:ident,)*) => {
@@ -354,19 +354,12 @@ mod list_streams {
     );
 }
 
-/// The outbox checks of this workspace's angzarr-ports pin but its
-/// store-wide `the_outbox_drains_oldest_first_and_clears`, which the owner's
-/// ruling of 2026-10-31 (Q7) replaces with core's per-stream check, held
-/// here as `the_outbox_drains_each_stream_in_order_and_clears` until the
-/// pin moves to it; then this is `store_contract!(outbox, ..)` again.
 mod outbox {
     use super::*;
-    angzarr_ports::store_contract!(@each [#[tokio::test]], SqliteStore::open_in_memory().await.unwrap();
-        an_outbox_entry_lands_with_its_write_or_not_at_all,
-        a_pending_entry_is_redelivered_until_cleared,
-        an_entry_put_again_while_pending_keeps_its_first_message,
-        a_cleared_id_put_again_is_a_new_pending_entry,
-        an_outbox_entry_keeps_its_edition,
+    angzarr_ports::store_contract!(
+        outbox,
+        #[tokio::test],
+        SqliteStore::open_in_memory().await.unwrap()
     );
 }
 
@@ -2060,67 +2053,6 @@ async fn pending_entries_survive_the_outbox_rekeying() {
         !outbox_schema(&path).await.0.iter().any(|c| c == "seq"),
         "rekeyed"
     );
-}
-
-/// Core's check for the ruled order (angzarr-ports 5d9f885,
-/// `the_outbox_drains_each_stream_in_order_and_clears`), held here until
-/// this workspace's angzarr-ports pin, which still checks one store-wide
-/// write order, moves to it: each stream's entries by its sequence, then
-/// their order in the write, a limit taking each stream's oldest first,
-/// and nothing compared across streams.
-#[tokio::test]
-async fn the_outbox_drains_each_stream_in_order_and_clears() {
-    use angzarr_ports::contract::entry;
-    use angzarr_ports::{OutboxEntry, Write};
-    let store = SqliteStore::open_in_memory().await.unwrap();
-    async fn put_on(store: &SqliteStore, stream: StreamRef<'_>, at: u64, entries: &[OutboxEntry]) {
-        let pages = [page(at, 1)];
-        store
-            .write(Write {
-                outbox: entries,
-                ..Write::append(stream, at, &pages)
-            })
-            .await
-            .unwrap();
-    }
-    let of = |pending: &[OutboxEntry], origin: &str| -> Vec<OutboxEntry> {
-        pending
-            .iter()
-            .filter(|e| e.origin == origin)
-            .cloned()
-            .collect()
-    };
-    let same = |got: &[OutboxEntry], want: &[&OutboxEntry]| {
-        got.len() == want.len() && want.iter().all(|w| got.contains(w))
-    };
-    let (a, b) = (main_stream("a", 1), main_stream("b", 1));
-    let (e3, e1, e5, e2) = (
-        entry(3, "a", 1),
-        entry(1, "a", 1),
-        entry(5, "b", 1),
-        entry(2, "a", 1),
-    );
-    put_on(&store, a, 0, &[e3.clone(), e1.clone()]).await;
-    put_on(&store, b, 0, std::slice::from_ref(&e5)).await;
-    put_on(&store, a, 1, std::slice::from_ref(&e2)).await;
-    let a_order = [e3.clone(), e1.clone(), e2.clone()];
-    let all = store.pending(10).await.unwrap();
-    assert!(same(&all, &[&e3, &e1, &e5, &e2]), "{all:?}");
-    assert_eq!(
-        of(&all, "a"),
-        a_order.to_vec(),
-        "by sequence, then entry order"
-    );
-    let two = store.pending(2).await.unwrap();
-    assert_eq!(two.len(), 2, "{two:?}");
-    let taken = of(&two, "a");
-    assert_eq!(taken, a_order[..taken.len()].to_vec(), "oldest first");
-    assert_eq!(store.clear(&[e3.id, e1.id]).await, Ok(2));
-    let left = store.pending(10).await.unwrap();
-    assert!(same(&left, &[&e5, &e2]), "{left:?}");
-    assert_eq!(store.clear(&[e1.id]).await, Ok(0));
-    assert_eq!(store.clear(&[e2.id, e5.id]).await, Ok(2));
-    assert_eq!(store.pending(10).await, Ok(vec![]));
 }
 
 /// Owner ruling 2026-10-31 on angzarr-ports' FLAG(O7): a write that
