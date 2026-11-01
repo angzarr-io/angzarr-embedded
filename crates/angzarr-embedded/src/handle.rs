@@ -925,7 +925,7 @@ fn failure_class(failure: &Failure<Rejected>) -> Option<Class> {
             ..
         }) => Some(Class::BugRetryable),
         Failure::Kernel(KernelError::Store(error))
-            if super::error::store_recovery(error) == super::Recovery::Retry =>
+            if error.recovery() == super::Recovery::Retry =>
         {
             Some(Class::BugRetryable)
         }

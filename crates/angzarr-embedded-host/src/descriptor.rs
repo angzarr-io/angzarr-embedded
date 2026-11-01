@@ -10,7 +10,7 @@
 use std::fmt;
 
 use angzarr_diagnostic::{Arg, Diagnostic};
-use angzarr_embedded::reasons::CoordinatorReason;
+use angzarr_proto::v1::CoordinatorReason;
 use angzarr_proto::v1::{ComponentDescriptor, ComponentKind};
 
 /// Why a descriptor is refused: one variant per reason key, each naming
@@ -32,36 +32,6 @@ pub enum DescriptorRefused {
     PolicyNoOutputDomain { component: String },
     /// `COORDINATOR_REASON_OUTPUT_DOMAIN_ON_NON_POLICY`: an output domain on any other kind.
     OutputDomainOnNonPolicy { component: String, kind: String },
-}
-
-impl DescriptorRefused {
-    /// The reason key: its `CoordinatorReason` value's full name, as it
-    /// travels.
-    pub fn reason(&self) -> &'static str {
-        match self {
-            DescriptorRefused::MissingRulesVersion { .. } => {
-                CoordinatorReason::MissingRulesVersion.as_str_name()
-            }
-            DescriptorRefused::StartingTypesOnNonPm { .. } => {
-                CoordinatorReason::StartingTypesOnNonPm.as_str_name()
-            }
-            DescriptorRefused::MissingStateType { .. } => {
-                CoordinatorReason::MissingStateType.as_str_name()
-            }
-            DescriptorRefused::StateOnStatelessKind { .. } => {
-                CoordinatorReason::StateOnStatelessKind.as_str_name()
-            }
-            DescriptorRefused::PolicyInputCount { .. } => {
-                CoordinatorReason::PolicyInputCount.as_str_name()
-            }
-            DescriptorRefused::PolicyNoOutputDomain { .. } => {
-                CoordinatorReason::PolicyNoOutputDomain.as_str_name()
-            }
-            DescriptorRefused::OutputDomainOnNonPolicy { .. } => {
-                CoordinatorReason::OutputDomainOnNonPolicy.as_str_name()
-            }
-        }
-    }
 }
 
 /// `descriptor`, held to 14.42's rules, in order: a rules version; starting
@@ -127,36 +97,41 @@ impl fmt::Display for DescriptorRefused {
     }
 }
 
+/// Each refusal is coded under its reason key, verbatim, a
+/// `CoordinatorReason`'s full name as it travels (decision 14.60): its args
+/// are the key's, `component` and, where the key names one,
+/// `component_kind` or `input_count`.
 impl Diagnostic for DescriptorRefused {
     fn code(&self) -> &str {
         match self {
             DescriptorRefused::MissingRulesVersion { .. } => {
-                "angzarr-embedded-host-descriptor-missing-rules-version"
+                CoordinatorReason::MissingRulesVersion.as_str_name()
             }
             DescriptorRefused::StartingTypesOnNonPm { .. } => {
-                "angzarr-embedded-host-descriptor-starting-types-on-non-pm"
+                CoordinatorReason::StartingTypesOnNonPm.as_str_name()
             }
             DescriptorRefused::MissingStateType { .. } => {
-                "angzarr-embedded-host-descriptor-missing-state-type"
+                CoordinatorReason::MissingStateType.as_str_name()
             }
             DescriptorRefused::StateOnStatelessKind { .. } => {
-                "angzarr-embedded-host-descriptor-state-on-stateless-kind"
+                CoordinatorReason::StateOnStatelessKind.as_str_name()
             }
             DescriptorRefused::PolicyInputCount { .. } => {
-                "angzarr-embedded-host-descriptor-policy-input-count"
+                CoordinatorReason::PolicyInputCount.as_str_name()
             }
             DescriptorRefused::PolicyNoOutputDomain { .. } => {
-                "angzarr-embedded-host-descriptor-policy-no-output-domain"
+                CoordinatorReason::PolicyNoOutputDomain.as_str_name()
             }
             DescriptorRefused::OutputDomainOnNonPolicy { .. } => {
-                "angzarr-embedded-host-descriptor-output-domain-on-non-policy"
+                CoordinatorReason::OutputDomainOnNonPolicy.as_str_name()
             }
         }
     }
 
     fn args(&self) -> Vec<(&str, Arg)> {
-        let component = |c: &str| ("component", Arg::from(c));
-        let kind = |k: &str| ("component_kind", Arg::from(k));
+        use angzarr_proto::v1::reason_args as args;
+        let component = |c: &str| (args::COMPONENT, Arg::from(c));
+        let kind = |k: &str| (args::COMPONENT_KIND, Arg::from(k));
         match self {
             DescriptorRefused::MissingRulesVersion { component: c }
             | DescriptorRefused::PolicyNoOutputDomain { component: c } => vec![component(c)],
@@ -181,7 +156,7 @@ impl Diagnostic for DescriptorRefused {
             DescriptorRefused::PolicyInputCount {
                 component: c,
                 input_count,
-            } => vec![component(c), ("input_count", (*input_count).into())],
+            } => vec![component(c), (args::INPUT_COUNT, (*input_count).into())],
         }
     }
 }

@@ -66,7 +66,7 @@ use super::registry::Registry;
 /// kernel passes the refusal through. The kernel addresses and identifies
 /// every refusal fact itself.
 pub fn translated(fact: CommandBook) -> Result<Any, CodedError> {
-    use super::reasons::CoordinatorReason;
+    use angzarr_proto::v1::CoordinatorReason;
     let refused = |code: &str| super::route::internal(code, []);
     if fact.cover.is_some() || fact.handling.is_some() {
         return Err(refused(
@@ -115,7 +115,7 @@ pub(crate) fn check_reactions(
     component: &str,
     trigger: &EventRef,
 ) -> Result<Vec<CommandBook>, CodedError> {
-    use super::reasons::{args, CoordinatorReason};
+    use angzarr_proto::v1::{reason_args as args, CoordinatorReason};
     let stream = source.cover.clone().unwrap_or_default();
     let mut commands = Vec::new();
     for reaction in reactions {
@@ -158,8 +158,7 @@ pub(crate) fn check_reactions(
 /// A policy's command as its refusal names it: its domain and its
 /// payload's type.
 fn named(command: &CommandBook) -> [(String, String); 2] {
-    use super::reasons::args;
-    use angzarr_router::error::extras;
+    use angzarr_proto::v1::reason_args as args;
     let domain = command.cover.as_ref().map_or("", |c| c.domain.as_str());
     let command_type = command
         .page
@@ -172,7 +171,7 @@ fn named(command: &CommandBook) -> [(String, String); 2] {
         .map_or("", |p| type_name(&p.type_url));
     [
         (args::DOMAIN.to_string(), domain.to_string()),
-        (extras::COMMAND_TYPE.to_string(), command_type.to_string()),
+        (args::COMMAND_TYPE.to_string(), command_type.to_string()),
     ]
 }
 
@@ -204,7 +203,7 @@ pub(crate) fn check_reaction(
     correlation: Option<&Uuid>,
     mut commands: Vec<CommandBook>,
 ) -> Result<Vec<CommandBook>, CodedError> {
-    use super::reasons::{args, CoordinatorReason};
+    use angzarr_proto::v1::{reason_args as args, CoordinatorReason};
     let domain = |c: &CommandBook| {
         c.cover
             .as_ref()

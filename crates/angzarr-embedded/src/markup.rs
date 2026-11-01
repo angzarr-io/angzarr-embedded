@@ -456,8 +456,8 @@ records_shape! {
 ///   may start an instance. Any other input for a stream with no instance is
 ///   not delivered, decided before the handler by the type after
 ///   upcasting: a FACT is skipped silently (applied, no events, nothing
-///   dead-lettered), and a COMMAND is refused (`COORDINATOR_REASON_PM_NO_INSTANCE`, forwarded
-///   as `angzarr-embedded-pm-no-instance`, a business refusal, so a
+///   dead-lettered), and a COMMAND is refused (`COORDINATOR_REASON_PM_NO_INSTANCE`, a
+///   business refusal, so a
 ///   policy's refused command yields its refusal fact like any other),
 ///   recording nothing.
 ///
@@ -514,9 +514,6 @@ pub type Refuses<A, C> = <A as Refusing<C>>::Refuses;
 pub struct TypedRefusal {
     object: Any,
 }
-
-/// The code a typed refusal is keyed under: angzarr's ROUTER_REASON_COMMAND_REFUSED.
-const COMMAND_REFUSED: &str = "angzarr-embedded-command-refused";
 
 impl TypedRefusal {
     /// `object`, packed.
@@ -598,14 +595,17 @@ impl<R: angzarr_diagnostic::Diagnostic> angzarr_diagnostic::Diagnostic for Rejec
     fn code(&self) -> &str {
         match self {
             Rejection::Message(rejection) => rejection.code(),
-            Rejection::Typed(_) => COMMAND_REFUSED,
+            Rejection::Typed(_) => angzarr_proto::v1::RouterReason::CommandRefused.as_str_name(),
         }
     }
 
     fn args(&self) -> Vec<(&str, angzarr_diagnostic::Arg)> {
         match self {
             Rejection::Message(rejection) => rejection.args(),
-            Rejection::Typed(typed) => vec![("refusal_type", typed.refusal_type().into())],
+            Rejection::Typed(typed) => vec![(
+                angzarr_proto::v1::reason_args::REFUSAL_TYPE,
+                typed.refusal_type().into(),
+            )],
         }
     }
 }
@@ -1268,7 +1268,8 @@ fn context_of(cctx: angzarr_router::domain::CommandContext) -> Context {
 /// as `ext_err_txt`; a payload of another type, or not a valid `T`, its
 /// type alone.
 fn input<T: DomainMessage>(any: &Any) -> Result<T, angzarr_router::error::HandlerError> {
-    use angzarr_router::error::{extras, CodedError, GrpcCode, HandlerError, RouterReason};
+    use angzarr_proto::v1::reason_args;
+    use angzarr_router::error::{CodedError, GrpcCode, HandlerError, RouterReason};
     let message_type = || super::payload::type_name(&any.type_url).to_string();
     match decode_message::<T>(any) {
         Ok(Some(value)) => Ok(value),
@@ -1277,7 +1278,7 @@ fn input<T: DomainMessage>(any: &Any) -> Result<T, angzarr_router::error::Handle
         )),
         Ok(None) | Err(_) => Err(HandlerError::Coded(CodedError {
             code: RouterReason::AnyDecodeFailed.as_str_name().to_string(),
-            extras: [(extras::MESSAGE_TYPE.to_string(), message_type())].into(),
+            extras: [(reason_args::MESSAGE_TYPE.to_string(), message_type())].into(),
             grpc: GrpcCode::Internal,
             refusal: None,
         })),
@@ -1362,8 +1363,11 @@ where
         if steps > STEP_LIMIT {
             return Err(angzarr_router::error::HandlerError::Coded(
                 super::route::internal(
-                    super::route::TOO_MANY_STEPS,
-                    [("limit".to_string(), STEP_LIMIT.to_string())],
+                    angzarr_proto::v1::RouterReason::TooManySteps.as_str_name(),
+                    [(
+                        angzarr_proto::v1::reason_args::LIMIT.to_string(),
+                        STEP_LIMIT.to_string(),
+                    )],
                 ),
             ));
         }

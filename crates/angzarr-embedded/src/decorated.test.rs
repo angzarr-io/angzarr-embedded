@@ -2575,7 +2575,7 @@ mod failed {
         assert_eq!(
             said(rejected),
             (
-                "angzarr-embedded-command-refused".to_string(),
+                "ROUTER_REASON_COMMAND_REFUSED".to_string(),
                 vec![(
                     "refusal_type".to_string(),
                     "toy.meter.v1.MeterSealed".to_string()
@@ -3222,7 +3222,7 @@ mod process_manager {
         let Err(refused) = handle_in::<BuyIn>(&store, &registry, &log, 2, held) else {
             panic!("a command for no instance is refused");
         };
-        assert_eq!(refused.code(), "angzarr-embedded-pm-no-instance");
+        assert_eq!(refused.code(), "COORDINATOR_REASON_PM_NO_INSTANCE");
         assert_eq!(refused.recovery(), Recovery::Business);
         assert_eq!(buy_in_events(&store, &correlation(2)), None);
     }
@@ -3274,7 +3274,7 @@ mod process_manager {
             .execute(held(2), &registry, &sampled, &log, &mut [])
             .ready()
             .expect_err("no instance");
-        assert_eq!(refused.code(), "angzarr-embedded-pm-no-instance");
+        assert_eq!(refused.code(), "COORDINATOR_REASON_PM_NO_INSTANCE");
         buy_in
             .execute(
                 start(&correlation(11), 3, 0),
@@ -3807,7 +3807,7 @@ mod typed_refusals {
     #[test]
     fn a_typed_refusal_is_keyed_command_refused_with_its_type() {
         let typed = Rejection::<Refused>::Typed(markup::TypedRefusal::of(&WalletClosed {}));
-        assert_eq!(typed.code(), "angzarr-embedded-command-refused");
+        assert_eq!(typed.code(), "ROUTER_REASON_COMMAND_REFUSED");
         assert!(
             matches!(&typed.args()[..], [("refusal_type", Arg::Str(t))] if t == "toy.wallet.v1.WalletClosed"),
             "{:?}",
@@ -3815,7 +3815,7 @@ mod typed_refusals {
         );
         assert_eq!(
             typed.to_string(),
-            "angzarr-embedded-command-refused refusal_type=toy.wallet.v1.WalletClosed"
+            "ROUTER_REASON_COMMAND_REFUSED refusal_type=toy.wallet.v1.WalletClosed"
         );
         let message = Rejection::<Refused>::Message(Refused::Overdrawn { short: 20 });
         assert_eq!(message.to_string(), "toy-wallet-overdrawn short=20");
@@ -3920,8 +3920,7 @@ mod typed_refusals {
             (rejection.refusal_object().cloned(), rejection.to_string()),
             (
                 Some(any(WalletClosed {})),
-                "angzarr-embedded-command-refused refusal_type=toy.wallet.v1.WalletClosed"
-                    .to_string()
+                "ROUTER_REASON_COMMAND_REFUSED refusal_type=toy.wallet.v1.WalletClosed".to_string()
             )
         );
     }
@@ -5250,7 +5249,7 @@ mod router {
             "{origin:?}"
         );
         assert_eq!(origin.recovery(), Recovery::Retry);
-        assert_eq!(origin.code(), "angzarr-embedded-handler-unavailable");
+        assert_eq!(origin.code(), "COORDINATOR_REASON_HANDLER_UNAVAILABLE");
 
         handle_in::<Wallet>(
             &store,

@@ -117,7 +117,7 @@ fn a_refusal_goes_out_and_reads_back_under_each_business_status() {
         assert_eq!(typed.code, "ROUTER_REASON_COMMAND_REFUSED", "{status:?}");
         let read = Rejected::of(&typed);
         assert_eq!(read.status(), status);
-        assert_eq!(read.code(), "angzarr-embedded-command-refused");
+        assert_eq!(read.code(), "ROUTER_REASON_COMMAND_REFUSED");
         assert_eq!(read.refusal_object(), Some(&object));
     }
 }

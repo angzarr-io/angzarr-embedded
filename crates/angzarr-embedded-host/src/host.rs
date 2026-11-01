@@ -108,8 +108,9 @@ struct Supervised {
 impl Host {
     /// Starts every remote component of `config` and waits for each to come
     /// up: launched, handshaken, connected, and described, its descriptor of
-    /// the kind its `kind` says ([`HostError::KindMismatch`]; a policy's or
-    /// projector's naming its input, [`HostError::NoInput`]; one that
+    /// the kind its `kind` says ([`HostError::KindMismatch`]; a policy's
+    /// naming its input, [`HostError::NoInput`], a projector's,
+    /// [`HostError::ProjectorNoInputDomain`]; one that
     /// fails validation, [`HostError::Descriptor`]). An upcaster sidecar is
     /// not described: once connected, the host watches its gRPC health
     /// (refused, [`HostError::Health`], when it serves none), and it is up
@@ -401,7 +402,8 @@ impl Drop for Host {
 /// Refuses a child whose descriptor is of another kind than its `kind`
 /// says ([`HostError::KindMismatch`]: a domain is an aggregate or a process
 /// manager), and a policy or projector that names no input domain
-/// ([`HostError::NoInput`]).
+/// ([`HostError::NoInput`], a projector's
+/// [`HostError::ProjectorNoInputDomain`]).
 fn check_kind(
     domain: &str,
     kind: ComponentKindConfig,
@@ -427,21 +429,19 @@ fn check_kind(
                 .to_string(),
         });
     }
-    let stateless = matches!(
-        kind,
-        ComponentKindConfig::Policy | ComponentKindConfig::Projector
-    );
-    if stateless
-        && descriptor
-            .inputs
-            .first()
-            .is_none_or(|t| t.domain.is_empty())
-    {
-        return Err(HostError::NoInput {
+    let no_input = descriptor
+        .inputs
+        .first()
+        .is_none_or(|t| t.domain.is_empty());
+    match kind {
+        ComponentKindConfig::Projector if no_input => Err(HostError::ProjectorNoInputDomain {
+            component: domain.to_string(),
+        }),
+        ComponentKindConfig::Policy if no_input => Err(HostError::NoInput {
             domain: domain.to_string(),
-        });
+        }),
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 /// Whether `described`, a restarted child's descriptor, is of the same

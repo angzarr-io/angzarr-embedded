@@ -72,14 +72,14 @@ use angzarr_proto::v1::{
     command_page, AngzarrDeadLetter, CommandRefusedDetails, ComponentKind, ProcessingFailedDetails,
     SequenceMismatchDetails,
 };
-use angzarr_router::error::{extras, CodedError};
+use angzarr_router::error::CodedError;
 
 use super::check::Malformed;
 use super::error::{cover_text, KernelError};
 use super::payload::type_name;
-use super::reasons::{args, CoordinatorReason};
 use super::registry::Registry;
 use super::route::{self, diagnostic, flat_args, Rejected};
+use angzarr_proto::v1::{reason_args as args, CoordinatorReason};
 
 /// The start of every dead-letter line: a key to alert on.
 pub const DEAD_LETTER_PREFIX: &str = "DEAD_LETTER";
@@ -368,7 +368,7 @@ fn malformed_reason(malformed: &Malformed, payload: &Payload) -> angzarr_proto::
     let named = || {
         [
             (args::DOMAIN.to_string(), domain.clone()),
-            (extras::COMMAND_TYPE.to_string(), command_type.clone()),
+            (args::COMMAND_TYPE.to_string(), command_type.clone()),
         ]
     };
     let naming = |reason: CoordinatorReason| coded(&route::internal(reason.as_str_name(), named()));

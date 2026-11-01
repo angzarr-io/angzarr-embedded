@@ -90,7 +90,6 @@ mod handler;
 pub mod markup;
 mod payload;
 mod policy;
-pub mod reasons;
 mod registry;
 mod route;
 mod store;
@@ -486,8 +485,18 @@ pub fn diagnostic_samples() -> Vec<Box<dyn angzarr_diagnostic::Diagnostic>> {
         committed: Vec::new(),
         failures: vec![("balances".to_string(), report())],
     }));
-    for reason in route::forwarded() {
-        samples.push(Box::new(KernelError::Router(route::internal(reason, []))));
+    // The router's answer under each of its keys, every declared arg given:
+    // forwarded under the key, verbatim (decision 14.60).
+    let router = (1..).map_while(|n| angzarr_proto::v1::RouterReason::try_from(n).ok());
+    for reason in router {
+        let args = reason
+            .args()
+            .iter()
+            .map(|a| (a.to_string(), "1".to_string()));
+        samples.push(Box::new(KernelError::Router(route::internal(
+            reason.as_str_name(),
+            args,
+        ))));
     }
     samples.push(Box::new(missing));
     samples.push(Box::new(WireError::UnknownEnum {

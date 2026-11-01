@@ -19,9 +19,9 @@
 //!   any other status carries no typed refusal;
 //! - a child that is not running, a connection that fails, and an
 //!   UNAVAILABLE status with no details are
-//!   [`codes::REMOTE_HANDLER_UNAVAILABLE`], which [`is_retryable`] says to
+//!   `COORDINATOR_REASON_HANDLER_UNAVAILABLE`, which [`is_retryable`] says to
 //!   retry: the child is being restarted. A transport's failure carries the
-//!   transport's text verbatim as [`EXT_ERR_TXT`], a third party's;
+//!   transport's text verbatim as `ext_err_txt`, a third party's;
 //! - a status angzarr-router's `GrpcCode` has no variant for (CANCELLED,
 //!   UNAUTHENTICATED) arrives UNAVAILABLE: a retryable bug, as the owner
 //!   ruled.
@@ -40,33 +40,16 @@ use tonic::Code;
 
 use crate::rpc::google_rpc::{ErrorInfo, Status as RpcStatus, ERROR_INFO_NAME};
 use angzarr_diagnostic::Report;
-use angzarr_embedded::reasons::args;
 use angzarr_embedded::{Description, KernelError, UpcastError, UpcastPort};
 use angzarr_proto::v1::command_handler_service_client::CommandHandlerServiceClient;
 use angzarr_proto::v1::policy_service_client::PolicyServiceClient;
 use angzarr_proto::v1::projector_service_client::ProjectorServiceClient;
 use angzarr_proto::v1::upcaster_service_client::UpcasterServiceClient;
+use angzarr_proto::v1::{reason_args as args, CoordinatorReason};
 
-/// The router-style codes a remote handler's dispatch adds to the router's
-/// own (`angzarr_router::error::codes`).
-pub mod codes {
-    /// The domain's child cannot be reached: not running (exited, being
-    /// restarted), the connection failed, or it answered UNAVAILABLE.
-    /// The spec's `COORDINATOR_REASON_HANDLER_UNAVAILABLE` (decision
-    /// 14.49), UNAVAILABLE: retryable ([`super::is_retryable`]).
-    pub const REMOTE_HANDLER_UNAVAILABLE: &str = "COORDINATOR_REASON_HANDLER_UNAVAILABLE";
-}
-
-/// The extras key naming why a remote handler was unreachable, one of the
-/// [`causes`]. The domain is under the catalog's `domain`
-/// (`angzarr_embedded::reasons::args::DOMAIN`).
-pub const CAUSE: &str = "cause";
-
-/// The extras key a transport's failure carries its text under, verbatim:
-/// a third party's (tonic's, hyper's) words, never angzarr's.
-pub const EXT_ERR_TXT: &str = "ext_err_txt";
-
-/// The values of [`CAUSE`].
+/// The values of a remote handler's `cause` when it could not be reached
+/// (`COORDINATOR_REASON_HANDLER_UNAVAILABLE`, whose `domain` names the
+/// component's).
 pub mod causes {
     /// No child is up: it exited and is being restarted, or, a sidecar,
     /// its health does not report SERVING.
@@ -81,7 +64,7 @@ pub mod causes {
 /// Whether a remote handler's error is worth retrying: the child was
 /// unreachable, and will be back.
 pub fn is_retryable(error: &CodedError) -> bool {
-    error.code == codes::REMOTE_HANDLER_UNAVAILABLE
+    error.code == CoordinatorReason::HandlerUnavailable.as_str_name()
 }
 
 /// One remote component: its configured name, the descriptor `Describe`
@@ -556,7 +539,7 @@ pub(crate) fn status_to_coded(domain: &str, status: &tonic::Status) -> CodedErro
         let mut error = unavailable(domain, causes::TRANSPORT);
         error
             .extras
-            .insert(EXT_ERR_TXT.to_string(), transport_text(status));
+            .insert(args::EXT_ERR_TXT.to_string(), transport_text(status));
         return error;
     }
     let is_info = |detail: &&prost_types::Any| {
@@ -618,13 +601,15 @@ fn transport_text(status: &tonic::Status) -> String {
     }
 }
 
-/// [`codes::REMOTE_HANDLER_UNAVAILABLE`] for `domain`, for `cause`.
+/// `COORDINATOR_REASON_HANDLER_UNAVAILABLE` for `domain`, for `cause`.
 pub(crate) fn unavailable(domain: &str, cause: &str) -> CodedError {
     CodedError {
-        code: codes::REMOTE_HANDLER_UNAVAILABLE.to_string(),
+        code: CoordinatorReason::HandlerUnavailable
+            .as_str_name()
+            .to_string(),
         extras: [
             (args::DOMAIN.to_string(), domain.to_string()),
-            (CAUSE.to_string(), cause.to_string()),
+            (args::CAUSE.to_string(), cause.to_string()),
         ]
         .into(),
         grpc: GrpcCode::Unavailable,

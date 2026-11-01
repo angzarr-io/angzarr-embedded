@@ -217,7 +217,9 @@ fn a_dead_child_is_retryable_then_restarted() {
     // The call reached the child and the child went away under it: not a
     // call that found no child, which would leave this one alive.
     assert_eq!(
-        died.extras.get(crate::remote::CAUSE).map(String::as_str),
+        died.extras
+            .get(angzarr_proto::v1::reason_args::CAUSE)
+            .map(String::as_str),
         Some(crate::remote::causes::TRANSPORT),
         "{died:?}"
     );
@@ -263,7 +265,9 @@ fn a_hung_child_times_out_retryably() {
     assert!(started.elapsed() >= Duration::from_millis(300));
     assert!(is_retryable(&hung), "{hung:?}");
     assert_eq!(
-        hung.extras.get(crate::remote::CAUSE).map(String::as_str),
+        hung.extras
+            .get(angzarr_proto::v1::reason_args::CAUSE)
+            .map(String::as_str),
         Some(crate::remote::causes::TIMEOUT)
     );
     assert!(handler
@@ -635,19 +639,12 @@ fn a_policy_descriptor_without_an_output_domain_is_refused() {
     assert_eq!(crate::validate(&descriptor), Ok(()));
     descriptor.output_domain = String::new();
     let refused = crate::validate(&descriptor).err().unwrap();
-    assert_eq!(
-        refused.reason(),
-        "COORDINATOR_REASON_POLICY_NO_OUTPUT_DOMAIN"
-    );
+    assert_eq!(refused.code(), "COORDINATOR_REASON_POLICY_NO_OUTPUT_DOMAIN");
     assert_eq!(
         refused,
         crate::DescriptorRefused::PolicyNoOutputDomain {
             component: "order".to_string()
         }
-    );
-    assert_eq!(
-        refused.code(),
-        "angzarr-embedded-host-descriptor-policy-no-output-domain"
     );
 }
 
@@ -662,7 +659,9 @@ fn a_descriptor_that_fails_its_validation_is_refused_for_its_reason() {
     let reason = |kind, fault: Fault| {
         let mut descriptor = described(kind);
         fault(&mut descriptor);
-        crate::validate(&descriptor).err().map(|r| r.reason())
+        crate::validate(&descriptor)
+            .err()
+            .map(|r| angzarr_diagnostic::Diagnostic::code(&r).to_string())
     };
     type Fault = fn(&mut pb::ComponentDescriptor);
     let cases: [(pb::ComponentKind, Fault, &str); 9] = [
@@ -717,7 +716,7 @@ fn a_descriptor_that_fails_its_validation_is_refused_for_its_reason() {
         ),
     ];
     for (kind, fault, expected) in cases {
-        assert_eq!(reason(kind, fault), Some(expected), "{kind:?}");
+        assert_eq!(reason(kind, fault).as_deref(), Some(expected), "{kind:?}");
     }
     let mut none = described(Policy);
     none.inputs.clear();

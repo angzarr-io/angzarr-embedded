@@ -1296,7 +1296,10 @@ mod admission {
         let Failure::Rejected(rejected) = &refused else {
             panic!("a business refusal: {refused:?}");
         };
-        assert_eq!(rejected.report().code(), "angzarr-embedded-pm-no-instance");
+        assert_eq!(
+            rejected.report().code(),
+            "COORDINATOR_REASON_PM_NO_INSTANCE"
+        );
         assert!(pages(&store, &stream).is_empty(), "nothing written");
 
         // A non-starting fact is skipped: applied, with no events.
@@ -1530,10 +1533,10 @@ mod rules_version {
                 panic!("a kernel error: {failure:?}");
             };
             let coded = error.as_coded().expect("a spec key");
-            assert_eq!(coded.code, "HOST_REASON_DESCRIPTOR_RULES_VERSION_MISMATCH");
+            assert_eq!(coded.code, "COORDINATOR_REASON_RULES_VERSION_MISMATCH");
             assert_eq!(coded.grpc, crate::angzarr_router::error::GrpcCode::Internal);
             assert_eq!(
-                coded.extras.get("described").map(String::as_str),
+                coded.extras.get("registered").map(String::as_str),
                 Some("1.4.2+build.7")
             );
             assert_eq!(

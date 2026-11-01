@@ -27,7 +27,7 @@ fn a_dead_letter_line_starts_with_the_warning_and_names_the_command() {
             book.to_book(),
         )),
         reason: Some(Diagnostic {
-            code: "angzarr-embedded-unhandled-handler-error".to_string(),
+            code: "ROUTER_REASON_UNHANDLED_HANDLER_ERROR".to_string(),
             args: [(
                 "cause".to_string(),
                 "ROUTER_REASON_HANDLER_PANICKED".to_string(),
@@ -50,7 +50,7 @@ fn a_dead_letter_line_starts_with_the_warning_and_names_the_command() {
     // (decision 14.37).
     assert!(
         line.contains(
-            "account: angzarr-embedded-unhandled-handler-error cause=ROUTER_REASON_HANDLER_PANICKED"
+            "account: ROUTER_REASON_UNHANDLED_HANDLER_ERROR cause=ROUTER_REASON_HANDLER_PANICKED"
         ),
         "{line}"
     );

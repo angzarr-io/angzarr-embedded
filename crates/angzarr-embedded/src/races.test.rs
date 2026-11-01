@@ -30,7 +30,6 @@ use angzarr_router::error::{CodedError, GrpcCode};
 use angzarr_router::policy::PolicyDispatch;
 use angzarr_router::router::CommandHandler;
 
-use crate::reasons::CoordinatorReason;
 use crate::toys::prelude::*;
 use crate::toys::{at, command, cover, fact, Edit};
 use crate::v1::{
@@ -42,6 +41,7 @@ use crate::{
     class, Any, Class, Failure, Handled, Kernel, KernelError, MemoryDeadLetters, OnRetryable,
     Recovery, Registry, Rejected, StepError, Wait,
 };
+use angzarr_proto::v1::CoordinatorReason;
 
 const RESOLUTIONS: [ConflictResolution; 3] = [
     ConflictResolution::Strict,

@@ -39,8 +39,8 @@ fn the_coordinators_conflicts_are_coded_under_their_keys() {
 
     use angzarr_router::error::GrpcCode;
 
-    use super::super::reasons::CoordinatorReason;
     use super::KernelError;
+    use angzarr_proto::v1::CoordinatorReason;
     let stream = || angzarr_proto::v1::Cover {
         domain: "shelf".to_string(),
         ..Default::default()
@@ -105,8 +105,8 @@ fn the_limits_and_an_unreachable_handler_are_coded_under_their_keys() {
 
     use angzarr_router::error::GrpcCode;
 
-    use super::super::reasons::{CoordinatorReason, RouterReason};
     use super::KernelError;
+    use angzarr_proto::v1::{CoordinatorReason, RouterReason};
     let stream = || angzarr_proto::v1::Cover {
         domain: "shelf".to_string(),
         ..Default::default()
@@ -170,8 +170,8 @@ fn the_retryable_store_and_sidecar_failures_are_coded_under_their_keys() {
     use angzarr_diagnostic::Report;
     use angzarr_router::error::GrpcCode;
 
-    use super::super::reasons::CoordinatorReason;
     use super::{KernelError, UpcastError};
+    use angzarr_proto::v1::CoordinatorReason;
     let stream = || angzarr_proto::v1::Cover {
         domain: "shelf".to_string(),
         ..Default::default()
@@ -254,4 +254,106 @@ fn the_retryable_store_and_sidecar_failures_are_coded_under_their_keys() {
     }
     .as_coded()
     .is_none());
+}
+
+/// A kernel error the spec keys is its key, verbatim, in process and on the
+/// wire alike, with exactly the args the key declares and the status its
+/// key travels with (decision 14.60); every other has no wire answer of the
+/// coordinator's, or answers under the coordinator's key for it.
+#[test]
+fn a_spec_keyed_kernel_error_is_its_key_with_its_declared_args() {
+    use angzarr_diagnostic::Diagnostic;
+    use angzarr_router::error::GrpcCode;
+
+    use super::KernelError;
+    let stream = || angzarr_proto::v1::Cover {
+        domain: "shelf".to_string(),
+        ..Default::default()
+    };
+    let keyed = [
+        (
+            KernelError::Stale {
+                stream: stream(),
+                expected: 1,
+                actual: 2,
+            },
+            GrpcCode::Aborted,
+        ),
+        (
+            KernelError::ExpectedSequenceAhead {
+                stream: stream(),
+                expected: 3,
+                head: 2,
+            },
+            GrpcCode::InvalidArgument,
+        ),
+        (
+            KernelError::Overlap {
+                stream: stream(),
+                expected: 1,
+                actual: 2,
+                window_units: "a".to_string(),
+                command_units: "a".to_string(),
+            },
+            GrpcCode::Aborted,
+        ),
+        (
+            KernelError::Unresolved {
+                stream: stream(),
+                expected: 1,
+                actual: 2,
+            },
+            GrpcCode::Aborted,
+        ),
+        (
+            KernelError::RetryCapExhausted {
+                stream: stream(),
+                attempts: 3,
+                cap: 3,
+            },
+            GrpcCode::Internal,
+        ),
+        (
+            KernelError::RulesVersionMismatch {
+                stream: stream(),
+                registered: "1".to_string(),
+                reported: "2".to_string(),
+            },
+            GrpcCode::Internal,
+        ),
+        (KernelError::ChainTooDeep { limit: 8 }, GrpcCode::Internal),
+        (
+            KernelError::TooManySteps {
+                stream: stream(),
+                limit: 16,
+            },
+            GrpcCode::Internal,
+        ),
+        (
+            KernelError::HandlerUnavailable {
+                stream: stream(),
+                cause: "not-running".to_string(),
+            },
+            GrpcCode::Unavailable,
+        ),
+    ];
+    for (error, status) in keyed {
+        let declared = angzarr_proto::reason_key_args(error.code())
+            .unwrap_or_else(|| panic!("{} is no spec key", error.code()));
+        let given: Vec<&str> = error.args().iter().map(|(n, _)| *n).collect();
+        assert_eq!(given, declared, "{error:?}");
+        let coded = error.as_coded().expect("a coordinator's answer");
+        assert_eq!(coded.code, error.code());
+        assert_eq!(coded.grpc, status, "{error:?}");
+        let names: Vec<&str> = coded.extras.keys().map(String::as_str).collect();
+        let mut sorted = declared.to_vec();
+        sorted.sort_unstable();
+        assert_eq!(names, sorted, "{error:?}");
+    }
+    let unkeyed = KernelError::BeforeSnapshot {
+        stream: stream(),
+        first: 4,
+    };
+    assert_eq!(angzarr_proto::reason_key_args(unkeyed.code()), None);
+    assert!(unkeyed.as_coded().is_none());
 }

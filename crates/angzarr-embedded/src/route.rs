@@ -1,10 +1,11 @@
 //! Where the kernel meets angzarr-router: the router owns business
 //! dispatch (handlers, typed refusals and the refusal path); this module turns what the router answers into the kernel's terms.
 //!
-//! - [`reason_code`]: every reason the router answers with, and every
-//!   coordinator key the kernel answers in the router's shape, each
-//!   forwarded under an angzarr-embedded code of its own with its own
-//!   message ([`KernelError::Router`](super::KernelError::Router)).
+//! - The router's answers keep their codes: a spec key (a `RouterReason`,
+//!   or a coordinator key the kernel answers in the router's shape) is the
+//!   kernel's code too, verbatim, with its args, so
+//!   [`KernelError::Router`](super::KernelError::Router) needs no table
+//!   (decision 14.60).
 //! - [`Rejected`]: a domain's refusal, as the caller receives it: the
 //!   refusing handler's code and args, and its typed refusal object.
 //! - The table a typed [`Domain`] is dispatched by: the router's
@@ -13,9 +14,8 @@
 //!   resolving COMMUTATIVE by the state's conflict units; the domain's
 //!   handlers are registered on it.
 
-use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use angzarr_diagnostic::{Arg, Diagnostic, Report};
 use angzarr_proto::v1::ConflictResolution;
@@ -30,61 +30,6 @@ use super::error::PayloadError;
 use super::markup::Failed;
 use super::payload::{type_name, Payload};
 
-/// The angzarr-embedded code a reason in the router's shape is forwarded
-/// under, for every reason angzarr-router answers with (each `RouterReason`
-/// but `UNSPECIFIED`) and every coordinator key the kernel answers in that
-/// shape ([`reasons::ANSWERED`](super::reasons::ANSWERED)):
-/// `angzarr-embedded-` and the reason, its enum's prefix dropped, in
-/// kebab-case (`COORDINATOR_REASON_PM_NO_INSTANCE` is
-/// `angzarr-embedded-pm-no-instance`); `None` for a reason that is
-/// neither (a domain's own). The catalog check holds the catalog to the
-/// router's list.
-pub(crate) fn reason_code(reason: &str) -> Option<&'static str> {
-    static CODES: OnceLock<BTreeMap<&'static str, String>> = OnceLock::new();
-    CODES
-        .get_or_init(|| forwarded().map(|known| (known, kebab(known))).collect())
-        .get(reason)
-        .map(String::as_str)
-}
-
-/// Every reason [`reason_code`] forwards, by its full name: the router's,
-/// then the coordinator's the kernel answers.
-pub(crate) fn forwarded() -> impl Iterator<Item = &'static str> {
-    (super::reasons::router().map(|reason| reason.as_str_name())).chain(
-        super::reasons::ANSWERED
-            .iter()
-            .map(|reason| reason.as_str_name()),
-    )
-}
-
-/// `PREFIX_REASON` as `angzarr-embedded-reason`.
-fn kebab(reason: &str) -> String {
-    format!(
-        "angzarr-embedded-{}",
-        super::reasons::unprefixed(reason)
-            .to_ascii_lowercase()
-            .replace('_', "-")
-    )
-}
-
-/// `error`'s metadata as args, by name, each as text: angzarr-router's
-/// keys, a wrapped cause already flattened (`cause`, `cause.<arg>`). The
-/// names are the error's own, borrowed: what a handler answers is held
-/// only as long as its error.
-pub(crate) fn router_args(error: &CodedError) -> Vec<(&str, Arg)> {
-    error
-        .extras
-        .iter()
-        .map(|(key, value)| (key.as_str(), Arg::Str(value.clone())))
-        .collect()
-}
-
-/// The router's key for a refusal past a decision's step limit
-/// ([`STEP_LIMIT`](super::markup::STEP_LIMIT)), the spec's
-/// `ROUTER_REASON_TOO_MANY_STEPS` (decision 14.49), with arg `limit`: the
-/// kernel's [`KernelError::TooManySteps`](super::KernelError::TooManySteps).
-pub(crate) const TOO_MANY_STEPS: &str = "ROUTER_REASON_TOO_MANY_STEPS";
-
 /// A domain's refusal of a command, as its caller receives it (angzarr's
 /// business rejection, [`is_rejection`]): the code and args of the
 /// refusal the handler made (or the router's, a process manager's
@@ -93,28 +38,23 @@ pub(crate) const TOO_MANY_STEPS: &str = "ROUTER_REASON_TOO_MANY_STEPS";
 #[derive(Clone, PartialEq, Debug)]
 pub struct Rejected {
     report: Report,
-    key: String,
     refusal: Option<Any>,
     status: BusinessStatus,
 }
 
 impl Rejected {
-    /// The router's rejection, in the kernel's terms: under the router's
-    /// reason as angzarr-embedded's code (a typed refusal's
-    /// ROUTER_REASON_COMMAND_REFUSED), or the handler's own, its metadata the args.
+    /// The router's rejection, in the kernel's terms: under the key it
+    /// went out under, the handler's own or the spec's (a typed refusal's
+    /// ROUTER_REASON_COMMAND_REFUSED), its metadata the args.
     pub(crate) fn of(error: &CodedError) -> Rejected {
-        let code = match reason_code(&error.code) {
-            Some(code) => std::borrow::Cow::Borrowed(code),
-            None => std::borrow::Cow::Owned(error.code.clone()),
-        };
-        let report = router_args(error)
-            .into_iter()
-            .fold(Report::new(code), |report, (name, arg)| {
-                report.arg(name.to_string(), arg)
+        let report = error
+            .extras
+            .iter()
+            .fold(Report::new(error.code.clone()), |report, (name, value)| {
+                report.arg(name.clone(), value.as_str())
             });
         Rejected {
             report,
-            key: error.code.clone(),
             refusal: error.refusal.as_deref().cloned(),
             status: BusinessStatus::try_from(error.grpc)
                 .unwrap_or(BusinessStatus::FailedPrecondition),
@@ -127,11 +67,10 @@ impl Rejected {
     }
 
     /// The refusal as the wire carries it: the refusing handler's key (a
-    /// typed refusal's ROUTER_REASON_COMMAND_REFUSED), not angzarr-embedded's
-    /// code for it, and its args.
+    /// typed refusal's ROUTER_REASON_COMMAND_REFUSED), and its args.
     pub(crate) fn wire(&self) -> angzarr_proto::v1::Diagnostic {
         angzarr_proto::v1::Diagnostic {
-            code: self.key.clone(),
+            code: self.report.code().to_string(),
             args: flat_args(&self.report).into_iter().collect(),
         }
     }
@@ -144,7 +83,7 @@ impl Rejected {
     /// As a refused policy receives it, angzarr's `RefusalResponse`: the
     /// typed refusal object, or an untyped refusal as the wire carries it
     /// ([`Rejected::wire`]): the key it went out under, the handler's own
-    /// or the spec's, never angzarr-embedded's code for it, and its args.
+    /// or the spec's, and its args.
     pub fn response(&self) -> angzarr_proto::v1::RefusalResponse {
         use angzarr_proto::v1::refusal_response::Reason;
         angzarr_proto::v1::RefusalResponse {
@@ -364,13 +303,6 @@ pub(crate) fn is_nothing(page: &angzarr_proto::v1::EventPage) -> bool {
 }
 
 // ------------------------------------------------------------- the table
-
-/// The key a remote handler is answered with when it cannot be reached
-/// (angzarr-embedded-host's), the spec's
-/// `COORDINATOR_REASON_HANDLER_UNAVAILABLE` (decision 14.49): the kernel's
-/// retryable
-/// [`KernelError::HandlerUnavailable`](super::KernelError::HandlerUnavailable).
-pub(crate) const HANDLER_UNAVAILABLE: &str = "COORDINATOR_REASON_HANDLER_UNAVAILABLE";
 
 /// The router's table for typed domain `D`, before its handlers: named
 /// `D::NAME` (a process manager's if `process_manager`), folding each

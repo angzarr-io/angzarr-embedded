@@ -14,6 +14,13 @@
 //! there (`"angzarr-embedded-..."`) must be the code of some sample. Each
 //! crate's en-US catalog is also its exported `EN_US`, which must be that
 //! file.
+//!
+//! A condition the spec keys is coded under its key (decision 14.60), its
+//! English the spec's catalog (`angzarr_proto::REASONS_EN_US`), never a
+//! crate's: each such sample, and each such nested cause, must have its
+//! message there, give only args its key declares, and give every arg its
+//! message names; and every live key's message renders with its declared
+//! args.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -21,6 +28,7 @@ use std::path::{Path, PathBuf};
 
 use angzarr_diagnostic::catalog::{self, Catalog};
 use angzarr_diagnostic::{Arg, Diagnostic};
+use angzarr_embedded::angzarr_proto;
 
 /// The crates whose errors are checked, and their samples.
 fn samples() -> Vec<(&'static str, Vec<Box<dyn Diagnostic>>)> {
@@ -114,6 +122,45 @@ fn own_codes(d: &dyn Diagnostic, krate: &str, out: &mut BTreeSet<String>) {
     }
 }
 
+/// Whether `code` is a live key of the spec's (decision 14.60).
+fn is_spec_key(code: &str) -> bool {
+    angzarr_proto::reason_key_args(code).is_some()
+}
+
+/// `d` and each of its nested causes, where coded under a spec key, held to
+/// the spec: a message in its catalog, only args its key declares (a
+/// flattened `cause.<arg>` counting as `cause`), and every variable its
+/// message names given.
+fn spec_keyed(d: &dyn Diagnostic, problems: &mut Vec<String>) {
+    let catalog =
+        Catalog::parse(angzarr_proto::REASONS_EN_US.1).expect("the spec's catalog parses");
+    let code = d.code();
+    if let Some(declared) = angzarr_proto::reason_key_args(code) {
+        let given: BTreeSet<&str> = d.args().iter().map(|(name, _)| *name).collect();
+        for name in &given {
+            let base = name.split_once('.').map_or(*name, |(base, _)| base);
+            if !declared.contains(&base) {
+                problems.push(format!("{code}: gives {name}, which it does not declare"));
+            }
+        }
+        match catalog.variables(code) {
+            None => problems.push(format!("{code}: no message in the spec's catalog")),
+            Some(vars) => {
+                for var in vars.iter().filter(|v| !given.contains(v.as_str())) {
+                    problems.push(format!(
+                        "{code}: its message names {var}, which it does not give"
+                    ));
+                }
+            }
+        }
+    }
+    for (_, arg) in d.args() {
+        if let Arg::Nested(inner) = arg {
+            spec_keyed(inner.as_ref(), problems);
+        }
+    }
+}
+
 /// Every `"angzarr-embedded-..."` string literal in a crate's library source (not its
 /// `*.test.rs` tests), outside comments: the codes its errors can produce.
 fn code_literals(krate: &str) -> BTreeSet<String> {
@@ -171,11 +218,15 @@ fn every_code_has_a_message_with_exactly_its_args_in_every_locale() {
         if diagnostics.is_empty() {
             problems.push(format!("{krate}: no samples"));
         }
-        // A store error the crate forwards under angzarr-ports' own code is
-        // checked against angzarr-ports' catalog; every other sample, against
-        // the crate's own.
+        // A spec key is checked against the spec's catalog, a store error the
+        // crate forwards under angzarr-ports' own code against angzarr-ports',
+        // every other sample against the crate's own.
+        for d in &diagnostics {
+            spec_keyed(&**d, &mut problems);
+        }
         let (forwarded, own): (Vec<_>, Vec<_>) = diagnostics
             .into_iter()
+            .filter(|d| !is_spec_key(d.code()))
             .partition(|d| d.code().starts_with("angzarr-ports-"));
         for locale in &locales {
             match catalogs.get(krate).and_then(|c| c.get(locale)) {
@@ -277,58 +328,97 @@ fn angzarr_embedded_reexports_the_angzarr_ports_catalog() {
     assert_eq!(text, angzarr_ports::EN_US.1);
 }
 
-/// The reasons angzarr-router refuses with: every `RouterReason` value but
-/// proto3's zero, by its full name, read from the enum angzarr-embedded is
-/// built with, so a reason the router adds is checked here without a list
-/// to keep.
-fn router_reasons() -> Vec<String> {
-    let reasons: Vec<String> = angzarr_embedded::reasons::router()
-        .map(|reason| reason.as_str_name().to_string())
-        .collect();
-    assert!(!reasons.is_empty(), "no reasons read from RouterReason");
-    reasons
+/// Every live key of the spec's three enums, with its declared args.
+fn spec_keys() -> Vec<(&'static str, &'static [&'static str])> {
+    use angzarr_embedded::v1::{CoordinatorReason, HostReason, RouterReason};
+    let router = (1..).map_while(|n| RouterReason::try_from(n).ok());
+    let host = (1..).map_while(|n| HostReason::try_from(n).ok());
+    let coordinator = (1..).map_while(|n| CoordinatorReason::try_from(n).ok());
+    router
+        .map(|r| (r.as_str_name(), r.args()))
+        .chain(host.map(|r| (r.as_str_name(), r.args())))
+        .chain(coordinator.map(|r| (r.as_str_name(), r.args())))
+        .collect()
 }
 
-/// Every reason angzarr-router refuses with is an angzarr-embedded code of
-/// its own, `angzarr-embedded-` and the reason without its
-/// `ROUTER_REASON_` prefix in kebab-case, with a
-/// message in every locale: `KernelError::Router` forwards the router's
-/// `CodedError` under it.
+/// Every reason angzarr-router refuses with is the kernel's code too,
+/// verbatim, with the router's args (decision 14.60): `KernelError::Router`
+/// forwards the router's `CodedError` under it, its message the spec's.
 #[test]
-fn every_router_reason_has_its_own_code_and_message() {
+fn every_router_reason_is_forwarded_under_its_own_key() {
     use angzarr_embedded::angzarr_router::error::CodedError;
     use angzarr_embedded::KernelError;
 
+    let router = (1..).map_while(|n| angzarr_embedded::v1::RouterReason::try_from(n).ok());
     let mut problems = Vec::new();
-    let mine: BTreeMap<String, Catalog> = catalogs(&mut problems)["angzarr-embedded"]
-        .iter()
-        .map(|(locale, ftl)| (locale.clone(), Catalog::parse(ftl).expect("it parses")))
-        .collect();
-    for reason in router_reasons() {
-        let expected = format!(
-            "angzarr-embedded-{}",
-            reason
-                .strip_prefix("ROUTER_REASON_")
-                .expect("a router reason carries its enum's prefix")
-                .to_ascii_lowercase()
-                .replace('_', "-")
-        );
+    for reason in router {
+        let key = reason.as_str_name();
         let error = KernelError::Router(CodedError {
-            code: reason.clone(),
-            extras: Default::default(),
+            code: key.to_string(),
+            extras: [("type_url".to_string(), "/a.B".to_string())].into(),
             grpc: angzarr_embedded::angzarr_router::error::GrpcCode::Internal,
             refusal: None,
         });
-        if error.code() != expected {
-            problems.push(format!("{reason} is {}, not {expected}", error.code()));
+        if error.code() != key {
+            problems.push(format!("{key} is {}", error.code()));
         }
-        for (locale, catalog) in &mine {
-            if catalog.variables(&expected).is_none() {
-                problems.push(format!("{locale}: no message for {expected} ({reason})"));
-            }
+        let args: Vec<String> = error.args().iter().map(|(n, _)| n.to_string()).collect();
+        if args != ["type_url"] {
+            problems.push(format!("{key}: args {args:?}"));
         }
     }
     assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+/// The spec's catalog renders every live key, in en-US, with its declared
+/// args and no error: the parity the crates' own catalogs have, for the
+/// catalog every runtime embeds.
+#[test]
+fn the_spec_catalog_renders_every_key_with_its_declared_args() {
+    let mut problems = Vec::new();
+    for (key, declared) in spec_keys() {
+        let args: Vec<(&str, Arg)> = declared.iter().map(|a| (*a, Arg::Uint(2))).collect();
+        let (text, errors) = render(key, &args, "en-US");
+        problems.extend(errors);
+        if text.is_empty() {
+            problems.push(format!("{key}: renders empty"));
+        }
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+/// A spec-keyed error that gives an arg its key does not declare, or omits
+/// one its message names, is caught.
+#[test]
+fn a_spec_keyed_error_is_held_to_its_keys_args() {
+    use angzarr_diagnostic::Report;
+    let mut problems = Vec::new();
+    spec_keyed(
+        &Report::new("COORDINATOR_REASON_CHAIN_TOO_DEEP").arg("stream", "a/b"),
+        &mut problems,
+    );
+    assert_eq!(
+        problems,
+        [
+            "COORDINATOR_REASON_CHAIN_TOO_DEEP: gives stream, which it does not declare",
+            "COORDINATOR_REASON_CHAIN_TOO_DEEP: its message names limit, which it does not give",
+        ]
+    );
+    let mut nested = Vec::new();
+    spec_keyed(
+        &Report::new("angzarr-embedded-downstream").arg(
+            "error",
+            Arg::nested(&Report::new("COORDINATOR_REASON_STORE_UNAVAILABLE").arg(
+                "cause",
+                Arg::nested(&Report::new("x").arg("ext_err_txt", "e")),
+            )),
+        ),
+        &mut nested,
+    );
+    assert!(nested.is_empty(), "{nested:?}");
+    let mut stray = Vec::new();
+    spec_keyed(&Report::new("COORDINATOR_REASON_UNSPECIFIED"), &mut stray);
+    assert!(stray.is_empty(), "UNSPECIFIED is no live key: {stray:?}");
 }
 
 /// The kernel's codes were `angzarr-embedded-next-*` and are
@@ -349,7 +439,7 @@ fn the_kernels_codes_lost_next_and_collide_with_nothing() {
         let mut codes = BTreeSet::new();
         for d in diagnostics
             .iter()
-            .filter(|d| !d.code().starts_with("angzarr-ports-"))
+            .filter(|d| !d.code().starts_with("angzarr-ports-") && !is_spec_key(d.code()))
         {
             own_codes(&**d, krate, &mut codes);
         }
@@ -415,8 +505,15 @@ fn owner(code: &str) -> Option<&'static str> {
 /// file, or a [`foreign`] crate's own `EN_US`.
 fn render(code: &str, args: &[(&str, Arg)], locale: &str) -> (String, Vec<String>) {
     use fluent_bundle::{FluentArgs, FluentBundle, FluentResource, FluentValue};
-    let krate = owner(code).unwrap_or_else(|| panic!("{code}: no crate owns it"));
-    let exported = foreign().into_iter().find(|(name, _)| *name == krate);
+    let spec = is_spec_key(code).then_some(angzarr_proto::REASONS_EN_US);
+    let krate = spec
+        .map(|(name, _)| name)
+        .or_else(|| owner(code))
+        .unwrap_or_else(|| panic!("{code}: no crate owns it"));
+    let exported = spec
+        .into_iter()
+        .chain(foreign())
+        .find(|(name, _)| *name == krate);
     let (path, text) = match exported {
         Some((name, text)) if locale == "en-US" => {
             (PathBuf::from(format!("{name}::EN_US")), text.to_string())

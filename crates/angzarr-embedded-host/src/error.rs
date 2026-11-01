@@ -39,7 +39,9 @@ impl fmt::Display for HandshakeError {
 impl Diagnostic for HandshakeError {
     fn code(&self) -> &str {
         match self {
-            HandshakeError::Malformed { .. } => "angzarr-embedded-host-handshake-malformed",
+            HandshakeError::Malformed { .. } => {
+                angzarr_proto::v1::HostReason::HandshakeMalformed.as_str_name()
+            }
             HandshakeError::Timeout { .. } => "angzarr-embedded-host-handshake-timeout",
             HandshakeError::Closed => "angzarr-embedded-host-handshake-closed",
             HandshakeError::Unreadable { .. } => "angzarr-embedded-host-handshake-unreadable",
@@ -48,7 +50,9 @@ impl Diagnostic for HandshakeError {
 
     fn args(&self) -> Vec<(&str, Arg)> {
         match self {
-            HandshakeError::Malformed { line } => vec![("line", line.as_str().into())],
+            HandshakeError::Malformed { line } => {
+                vec![(angzarr_proto::v1::reason_args::LINE, line.as_str().into())]
+            }
             HandshakeError::Timeout { timeout_ms } => vec![("timeout_ms", (*timeout_ms).into())],
             HandshakeError::Closed => vec![],
             HandshakeError::Unreadable { kind } => vec![("kind", kind.as_str().into())],
@@ -105,9 +109,13 @@ pub enum HostError {
         configured: String,
         described: String,
     },
-    /// A policy or projector whose descriptor names no input domain: it
-    /// has no source.
+    /// A policy whose descriptor names no input domain: it has no source.
     NoInput { domain: String },
+    /// A projector whose descriptor names no input domain: there is no
+    /// wildcard domain, so it would fold nothing. The spec's
+    /// `HOST_REASON_PROJECTOR_NO_INPUT_DOMAIN` (decision 14.55), its
+    /// `component` the component entry's name.
+    ProjectorNoInputDomain { component: String },
     /// A `kind = "upcaster"` component that names no domain to upcast
     /// (`upcasts`).
     UpcasterNoDomain { domain: String },
@@ -177,6 +185,9 @@ impl Diagnostic for HostError {
             HostError::Health { .. } => "angzarr-embedded-host-health",
             HostError::KindMismatch { .. } => "angzarr-embedded-host-kind-mismatch",
             HostError::NoInput { .. } => "angzarr-embedded-host-no-input",
+            HostError::ProjectorNoInputDomain { .. } => {
+                angzarr_proto::v1::HostReason::ProjectorNoInputDomain.as_str_name()
+            }
             HostError::Descriptor { .. } => "angzarr-embedded-host-descriptor",
             HostError::DescriptorChanged { .. } => "angzarr-embedded-host-descriptor-changed",
             HostError::UpcasterNoDomain { .. } => "angzarr-embedded-host-upcaster-no-domain",
@@ -201,6 +212,12 @@ impl Diagnostic for HostError {
             | HostError::DescriptorChanged { domain: d }
             | HostError::UpcasterNoDomain { domain: d } => {
                 vec![domain(d)]
+            }
+            HostError::ProjectorNoInputDomain { component } => {
+                vec![(
+                    angzarr_proto::v1::reason_args::COMPONENT,
+                    component.as_str().into(),
+                )]
             }
             HostError::NoLaunch {
                 domain: d,
@@ -328,6 +345,7 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn Diagnostic>> {
             described: "AGGREGATE".to_string(),
         }),
         Box::new(HostError::NoInput { domain: d() }),
+        Box::new(HostError::ProjectorNoInputDomain { component: d() }),
         Box::new(HostError::UpcasterNoDomain { domain: d() }),
         Box::new(HostError::NotExposable {
             domain: d(),

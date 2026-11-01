@@ -41,7 +41,7 @@ use crate::fake_child::{
 /// The kernel's key for angzarr's `COORDINATOR_REASON_PM_NO_INSTANCE` (a router code reaches
 /// the caller under the kernel's own key, `angzarr-embedded-` and the
 /// code in kebab case).
-const PM_NO_INSTANCE: &str = "angzarr-embedded-pm-no-instance";
+const PM_NO_INSTANCE: &str = "COORDINATOR_REASON_PM_NO_INSTANCE";
 
 fn root() -> Uuid {
     Uuid::from_bytes([0x0b; 16])
@@ -850,6 +850,28 @@ fn a_policy_child_with_no_input_is_refused() {
     );
 }
 
+/// A projector child that names no input domain is refused at start under
+/// the spec's key (C-0747; decision 14.55): there is no wildcard domain,
+/// so it would fold nothing.
+#[test]
+fn a_projector_child_with_no_input_is_refused_under_its_key() {
+    use angzarr_diagnostic::Diagnostic;
+    let log = log_file("projector-no-input");
+    let mut projector = projector_domain(&log);
+    projector.env.remove(INPUT_ENV);
+    let refused = Host::start(config(vec![projector])).err();
+    assert_eq!(
+        refused,
+        Some(HostError::ProjectorNoInputDomain {
+            component: "table-view".to_string(),
+        })
+    );
+    assert_eq!(
+        refused.map(|e| e.code().to_string()).as_deref(),
+        Some("HOST_REASON_PROJECTOR_NO_INPUT_DOMAIN")
+    );
+}
+
 /// A projector's retryable bug (UNAVAILABLE) and its immediate-return
 /// status (ABORTED, re-read and re-decide, the runtime being the caller)
 /// are both retried under the kernel's backoff: the second call succeeds,
@@ -1010,7 +1032,7 @@ fn a_remote_upcaster_that_is_down_is_retryable() {
         cause
             .args()
             .iter()
-            .any(|(name, arg)| *name == "stream" && format!("{arg:?}").contains("table")),
+            .any(|(name, arg)| *name == "domain" && format!("{arg:?}") == "Str(\"table\")"),
         "the sidecar's domain: {cause:?}"
     );
     assert!(payloads(&store, &cover("table")).is_empty());
@@ -1039,11 +1061,10 @@ fn a_remote_upcasters_failing_rule_is_a_bug() {
         panic!("the rule's failure: {failure:?}");
     };
     assert_eq!(source, "test.table.v0.Bad");
-    assert!(
-        error
-            .args()
-            .iter()
-            .any(|(name, arg)| *name == "cause" && format!("{arg:?}").contains("UPCAST_RULE_BROKE")),
+    // The child's own code, verbatim (decision 14.60), with its args.
+    assert_eq!(
+        error.code(),
+        "UPCAST_RULE_BROKE",
         "the child's reason: {error:?}"
     );
     assert_eq!(failure.recovery(), angzarr_embedded::Recovery::Bug);

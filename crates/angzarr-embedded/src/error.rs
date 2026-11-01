@@ -3,15 +3,20 @@
 //! [`KernelError`] is a fault in delivery, storage or a log, for the
 //! operator.
 //!
-//! Each is a [`Diagnostic`], its codes under `angzarr-embedded-*` and its
-//! messages in `locales/en-US/angzarr-embedded.ftl`; a wrapper of another error
+//! Each is a [`Diagnostic`]. A condition the spec keys is coded under its
+//! key, verbatim (`COORDINATOR_REASON_EXPECTED_SEQUENCE_STALE`), its args
+//! the key's, and its English is the spec's catalog
+//! (`angzarr_proto::REASONS_EN_US`; decision 14.60); every other is coded
+//! under `angzarr-embedded-*`, its messages in
+//! `locales/en-US/angzarr-embedded.ftl`. A wrapper of another error
 //! ([`Failure::Rejected`], [`Failure::Kernel`], [`StepError`],
 //! [`KernelError::Malformed`], [`KernelError::Replay`],
-//! [`KernelError::Store`], [`UpcastError::Payload`]) is that error's
-//! diagnostic. The store's errors are angzarr-ports' `StoreError`, shared
-//! with angzarr: [`KernelError::Store`] forwards its `angzarr-ports-*` code
-//! and args unchanged, and angzarr-embedded's catalog holds their messages. Every error about a payload names its type URL; a stream is
-//! named as `domain/root`, with `@edition` outside the main timeline.
+//! [`KernelError::Store`], [`KernelError::Router`], [`UpcastError::Payload`])
+//! is that error's diagnostic. The store's errors are angzarr-ports'
+//! `StoreError`, shared with angzarr: [`KernelError::Store`] forwards its
+//! `angzarr-ports-*` code and args unchanged, rendered from angzarr-ports'
+//! own catalog. Every error about a payload names its type URL; a stream
+//! is named as `domain/root`, with `@edition` outside the main timeline.
 
 use std::fmt;
 
@@ -150,10 +155,9 @@ pub enum KernelError {
     /// `reported`, not `registered`, the version its domain is registered
     /// at (`CommandHandlerResponse.rules_version`, C-0558): a handler bug,
     /// refused with nothing persisted, and dead-lettered as every handler
-    /// bug is. angzarr's INTERNAL, under the spec's key for a component
-    /// whose answers report another version than its descriptor,
-    /// `HOST_REASON_DESCRIPTOR_RULES_VERSION_MISMATCH` (component,
-    /// described, reported).
+    /// bug is. angzarr's INTERNAL,
+    /// `COORDINATOR_REASON_RULES_VERSION_MISMATCH` (decision 14.56), its
+    /// `component` the stream's domain, with `registered` and `reported`.
     RulesVersionMismatch {
         stream: Cover,
         registered: String,
@@ -318,35 +322,21 @@ pub enum ChainProblem {
     DeadEnd { source: String, ends_at: String },
 }
 
-/// What to do about a failure: retry, fix the request, or give up, and
-/// why. The kernel retries a step's [`Recovery::Retry`] itself, with
-/// backoff, up to a cap, then dead-letters it
-/// ([`OnRetryable`](super::OnRetryable)); the others it never retries.
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub enum Recovery {
-    /// Run the command again, with the same command id, in a fresh unit of
-    /// work: a store conflict, a stale or unresolved command (re-read and
-    /// re-issue against the new head), the store unavailable, a handler
-    /// that could not be reached or answered under a retryable status
-    /// (UNAVAILABLE, ABORTED, UNIMPLEMENTED and the like), a gap (catch the
-    /// target up first). Safe, because a retry starts at the deduplication
-    /// lookup: if the first attempt committed after all, the retry is
-    /// answered DUPLICATE.
-    Retry,
-    /// The domain said no: a rejection, at the origin or downstream. The
-    /// same command will be refused the same way; tell the person.
-    Business,
-    /// The caller's book was malformed, or names a payload type the domain
-    /// does not decode (angzarr's INVALID_ARGUMENT). Fix the request.
-    Invalid,
-    /// A bug or a misconfiguration: a malformed policy book, a handler's
-    /// bug or panic (a status of the bug class: INTERNAL, UNKNOWN,
-    /// DATA_LOSS), the router's own error on malformed input, a
-    /// discontinuous append, a key of the wrong domain, a chain too deep,
-    /// unknown rules, a log that does not replay, an event the store cannot
-    /// read back. Retrying will not help; an operator must.
-    Bug,
-}
+/// What to do about a failure: angzarr's one recovery (angzarr-diagnostic's),
+/// which a store's error shares. The kernel retries a step's
+/// [`Recovery::Retry`] itself, with backoff, up to a cap, then dead-letters
+/// it ([`OnRetryable`](super::OnRetryable)); the others it never retries.
+/// Here, `Retry` is a store conflict, a stale or unresolved command (re-read
+/// and re-issue against the new head), the store unavailable, a handler that
+/// could not be reached or answered under a retryable status, a gap (catch
+/// the target up first); `Business` a rejection, at the origin or
+/// downstream; `Invalid` a malformed book or a payload type the domain does
+/// not decode (angzarr's INVALID_ARGUMENT); `Bug` a malformed policy book, a
+/// handler's bug or panic (a status of the bug class: INTERNAL, UNKNOWN,
+/// DATA_LOSS), the router's own error on malformed input, a discontinuous
+/// append, a key of the wrong domain, a chain too deep, unknown rules, a log
+/// that does not replay, an event the store cannot read back.
+pub use angzarr_diagnostic::Recovery;
 
 impl<R> Failure<R> {
     pub fn recovery(&self) -> Recovery {
@@ -372,160 +362,94 @@ impl StepError {
 
 impl KernelError {
     /// This error as the coordinator answers it on the wire, in the
-    /// router's shape: its reason key (a `CoordinatorReason`'s full name,
-    /// `as_str_name`), its args as metadata, and its status; `None` for an
-    /// error that is not one of the coordinator's answers:
-    ///
-    /// - an expected sequence ahead of the head, under any resolution, is
-    ///   `COORDINATOR_REASON_EXPECTED_SEQUENCE_AHEAD`, INVALID_ARGUMENT
-    ///   (business, fatal; decision 14.47), args `expected` and `head`;
-    ///
-    /// and, each ABORTED (business, immediate return; decision 14.37):
-    ///
-    /// - a stale expected sequence, behind the head, under STRICT (the
-    ///   early check, or a write lost to a racing command; decision 14.45)
-    ///   is `COORDINATOR_REASON_EXPECTED_SEQUENCE_STALE`, args `expected`
-    ///   and `actual`;
-    /// - a COMMUTATIVE overlap is `COORDINATOR_REASON_CONFLICT_OVERLAP`,
-    ///   args `window_units` and `command_units`;
-    /// - an unacknowledged AGGREGATE_HANDLES window is
-    ///   `COORDINATOR_REASON_CONFLICT_UNRESOLVED`, no args;
-    ///
-    /// and a command given up at a cap, every write lost to a racing one,
-    /// is `COORDINATOR_REASON_RETRY_CAP_EXHAUSTED`, INTERNAL (a fatal bug's
-    /// status; decision 14.46), args `attempts` and `cap`;
-    ///
-    /// and, each UNAVAILABLE (bug, retryable), so that when the retries are
-    /// spent the key is what is reported (decision 14.51):
-    ///
-    /// - the store's conflict, a race lost at the write handed back at a
-    ///   race re-run cap of 0, is `COORDINATOR_REASON_STORE_CONFLICT`, args
-    ///   `expected` (the head stamped) and `actual` (the head found);
-    /// - the store failing to answer is
-    ///   `COORDINATOR_REASON_STORE_UNAVAILABLE`, the store's failure its
-    ///   `cause` (and `cause.<arg>`);
-    /// - an upcaster sidecar that could not be reached is
-    ///   `COORDINATOR_REASON_UPCASTER_UNAVAILABLE`, args `domain` and
-    ///   `cause`;
-    /// - a handler that could not be reached is
-    ///   `COORDINATOR_REASON_HANDLER_UNAVAILABLE` (decision 14.49), args
-    ///   `domain` and `cause`.
+    /// router's shape: its reason key, its args as metadata, and its
+    /// status; `None` for an error that is not one of the coordinator's
+    /// answers. A variant whose code is a spec key (decision 14.60) goes out
+    /// as itself, under the status its key's comment in reasons.proto
+    /// gives: an expected sequence ahead of the head INVALID_ARGUMENT
+    /// (business, fatal; decision 14.47); a stale expected sequence (decision
+    /// 14.45), a COMMUTATIVE overlap and an unacknowledged AGGREGATE_HANDLES
+    /// window ABORTED (business, immediate return; decision 14.37); a
+    /// command given up at a cap (decision 14.46), a response of another
+    /// rules version (decision 14.56), a chain too deep and a decision past
+    /// its step limit INTERNAL; a handler that could not be reached
+    /// UNAVAILABLE (decision 14.49). The store's conflict, a race lost at
+    /// the write handed back at a race re-run cap of 0, is
+    /// `COORDINATOR_REASON_STORE_CONFLICT` (`expected`, the head stamped,
+    /// and `actual`, the head found), the store failing to answer
+    /// `COORDINATOR_REASON_STORE_UNAVAILABLE` (the store's failure its
+    /// `cause`), and an upcaster sidecar that could not be reached
+    /// `COORDINATOR_REASON_UPCASTER_UNAVAILABLE` (`domain` and `cause`),
+    /// each UNAVAILABLE, so that when the retries are spent the key is what
+    /// is reported (decision 14.51).
     pub fn as_coded(&self) -> Option<angzarr_router::error::CodedError> {
-        use super::reasons::{args, CoordinatorReason};
-        use angzarr_router::error::{BusinessStatus, CodedError};
+        if let Some(coded) = self.forwarded() {
+            return Some(coded);
+        }
+        Some(angzarr_router::error::CodedError {
+            code: self.code().to_string(),
+            extras: super::route::flat_args(self).into_iter().collect(),
+            grpc: self.spec_status()?,
+            refusal: None,
+        })
+    }
+
+    /// The status a variant whose code is a spec key travels with (each
+    /// key's comment in reasons.proto); `None` for any other variant.
+    fn spec_status(&self) -> Option<angzarr_router::error::GrpcCode> {
+        use angzarr_router::error::GrpcCode;
+        Some(match self {
+            KernelError::ExpectedSequenceAhead { .. } => GrpcCode::InvalidArgument,
+            KernelError::Stale { .. }
+            | KernelError::Overlap { .. }
+            | KernelError::Unresolved { .. } => GrpcCode::Aborted,
+            KernelError::RetryCapExhausted { .. }
+            | KernelError::RulesVersionMismatch { .. }
+            | KernelError::ChainTooDeep { .. }
+            | KernelError::TooManySteps { .. } => GrpcCode::Internal,
+            KernelError::HandlerUnavailable { .. } => GrpcCode::Unavailable,
+            _ => return None,
+        })
+    }
+
+    /// The store's and the upcaster sidecar's failures the coordinator
+    /// answers under its own keys, UNAVAILABLE: their own codes are
+    /// angzarr-ports' and the kernel's, a level below the condition the
+    /// coordinator reports.
+    fn forwarded(&self) -> Option<angzarr_router::error::CodedError> {
+        use angzarr_proto::v1::reason_args as args;
+        use angzarr_proto::v1::CoordinatorReason;
         let (reason, extras) = match self {
-            KernelError::ExpectedSequenceAhead { expected, head, .. } => {
-                return Some(CodedError::rejection(
-                    BusinessStatus::InvalidArgument,
-                    CoordinatorReason::ExpectedSequenceAhead.as_str_name(),
-                    [
-                        (args::EXPECTED.to_string(), expected.to_string()),
-                        (args::HEAD.to_string(), head.to_string()),
-                    ],
-                ));
-            }
-            KernelError::Stale {
+            KernelError::Store(StoreError::Conflict {
                 expected, actual, ..
-            } => (
-                CoordinatorReason::ExpectedSequenceStale,
+            }) => (
+                CoordinatorReason::StoreConflict,
                 vec![
                     (args::EXPECTED.to_string(), expected.to_string()),
                     (args::ACTUAL.to_string(), actual.to_string()),
                 ],
             ),
-            KernelError::Overlap {
-                window_units,
-                command_units,
-                ..
-            } => (
-                CoordinatorReason::ConflictOverlap,
-                vec![
-                    (args::WINDOW_UNITS.to_string(), window_units.clone()),
-                    (args::COMMAND_UNITS.to_string(), command_units.clone()),
-                ],
+            KernelError::Store(error @ StoreError::Unavailable(_)) => (
+                CoordinatorReason::StoreUnavailable,
+                super::route::flat_args(&store_report(error)),
             ),
-            KernelError::Unresolved { .. } => (CoordinatorReason::ConflictUnresolved, Vec::new()),
-            KernelError::RetryCapExhausted { attempts, cap, .. } => {
-                return Some(super::route::internal(
-                    CoordinatorReason::RetryCapExhausted.as_str_name(),
-                    [
-                        (args::ATTEMPTS.to_string(), attempts.to_string()),
-                        (args::CAP.to_string(), cap.to_string()),
-                    ],
-                ));
-            }
-            KernelError::RulesVersionMismatch {
-                stream,
-                registered,
-                reported,
-            } => {
-                return Some(super::route::internal(
-                    angzarr_proto::v1::HostReason::DescriptorRulesVersionMismatch.as_str_name(),
-                    [
-                        ("component".to_string(), stream.domain.clone()),
-                        ("described".to_string(), registered.clone()),
-                        ("reported".to_string(), reported.clone()),
-                    ],
-                ));
-            }
-            KernelError::ChainTooDeep { limit } => {
-                return Some(super::route::internal(
-                    CoordinatorReason::ChainTooDeep.as_str_name(),
-                    [(args::LIMIT.to_string(), limit.to_string())],
-                ));
-            }
-            KernelError::TooManySteps { limit, .. } => {
-                return Some(super::route::internal(
-                    super::route::TOO_MANY_STEPS,
-                    [(args::LIMIT.to_string(), limit.to_string())],
-                ));
-            }
-            KernelError::Store(StoreError::Conflict {
-                expected, actual, ..
-            }) => {
-                return Some(unavailable(
-                    CoordinatorReason::StoreConflict,
-                    vec![
-                        (args::EXPECTED.to_string(), expected.to_string()),
-                        (args::ACTUAL.to_string(), actual.to_string()),
-                    ],
-                ));
-            }
-            KernelError::Store(error @ StoreError::Unavailable(_)) => {
-                return Some(unavailable(
-                    CoordinatorReason::StoreUnavailable,
-                    super::route::flat_args(&store_report(error)),
-                ));
-            }
             KernelError::Upcast {
                 stream,
                 error: error @ UpcastError::Unavailable { .. },
-            } => {
-                let mut extras = vec![(args::DOMAIN.to_string(), stream.domain.clone())];
-                extras.extend(super::route::flat_args(error));
-                return Some(unavailable(CoordinatorReason::UpcasterUnavailable, extras));
-            }
-            KernelError::HandlerUnavailable { stream, cause } => {
-                return Some(CodedError {
-                    code: super::route::HANDLER_UNAVAILABLE.to_string(),
-                    extras: [
-                        (args::DOMAIN.to_string(), stream.domain.clone()),
-                        (
-                            angzarr_router::error::extras::CAUSE.to_string(),
-                            cause.clone(),
-                        ),
-                    ]
-                    .into(),
-                    grpc: angzarr_router::error::GrpcCode::Unavailable,
-                    refusal: None,
-                });
-            }
+            } => (
+                CoordinatorReason::UpcasterUnavailable,
+                std::iter::once((args::DOMAIN.to_string(), stream.domain.clone()))
+                    .chain(super::route::flat_args(error))
+                    .collect(),
+            ),
             _ => return None,
         };
-        Some(angzarr_router::error::CodedError::immediate(
-            reason.as_str_name(),
-            extras,
-        ))
+        Some(angzarr_router::error::CodedError {
+            code: reason.as_str_name().to_string(),
+            extras: extras.into_iter().collect(),
+            grpc: angzarr_router::error::GrpcCode::Unavailable,
+            refusal: None,
+        })
     }
 
     pub fn recovery(&self) -> Recovery {
@@ -537,7 +461,7 @@ impl KernelError {
             KernelError::Stale { .. }
             | KernelError::Overlap { .. }
             | KernelError::Unresolved { .. } => Recovery::Retry,
-            KernelError::Store(error) => store_recovery(error),
+            KernelError::Store(error) => error.recovery(),
             KernelError::Router(error) => router_recovery(error),
             KernelError::HandlerUnavailable { .. }
             | KernelError::Upcast {
@@ -555,20 +479,6 @@ impl KernelError {
             | KernelError::Unreadable { .. }
             | KernelError::Replay(_) => Recovery::Bug,
         }
-    }
-}
-
-/// `reason` under UNAVAILABLE, a retryable bug's status (decision 14.37),
-/// `extras` its metadata.
-fn unavailable(
-    reason: super::reasons::CoordinatorReason,
-    extras: Vec<(String, String)>,
-) -> angzarr_router::error::CodedError {
-    angzarr_router::error::CodedError {
-        code: reason.as_str_name().to_string(),
-        extras: extras.into_iter().collect(),
-        grpc: angzarr_router::error::GrpcCode::Unavailable,
-        refusal: None,
     }
 }
 
@@ -663,88 +573,81 @@ impl fmt::Display for KernelError {
     }
 }
 
+/// A variant the spec keys is coded under its key, verbatim, with exactly
+/// the args its `(io.angzarr.v1.reason)` option declares (decision 14.60);
+/// the router's error under the key it answered, its metadata the args; a
+/// store's error under angzarr-ports' code; every other under
+/// angzarr-embedded's own.
 impl Diagnostic for KernelError {
     fn code(&self) -> &str {
+        use angzarr_proto::v1::{CoordinatorReason, RouterReason};
         match self {
             KernelError::Malformed(m) => m.code(),
-            KernelError::Stale { .. } => "angzarr-embedded-stale",
-            KernelError::ExpectedSequenceAhead { .. } => "angzarr-embedded-expected-sequence-ahead",
-            KernelError::Unresolved { .. } => "angzarr-embedded-unresolved",
-            KernelError::RetryCapExhausted { .. } => "angzarr-embedded-retry-cap-exhausted",
-            KernelError::RulesVersionMismatch { .. } => "angzarr-embedded-rules-version-mismatch",
-            KernelError::Overlap { .. } => "angzarr-embedded-overlap",
+            KernelError::Stale { .. } => CoordinatorReason::ExpectedSequenceStale.as_str_name(),
+            KernelError::ExpectedSequenceAhead { .. } => {
+                CoordinatorReason::ExpectedSequenceAhead.as_str_name()
+            }
+            KernelError::Unresolved { .. } => CoordinatorReason::ConflictUnresolved.as_str_name(),
+            KernelError::RetryCapExhausted { .. } => {
+                CoordinatorReason::RetryCapExhausted.as_str_name()
+            }
+            KernelError::RulesVersionMismatch { .. } => {
+                CoordinatorReason::RulesVersionMismatch.as_str_name()
+            }
+            KernelError::Overlap { .. } => CoordinatorReason::ConflictOverlap.as_str_name(),
             KernelError::UnknownType { .. } => "angzarr-embedded-unknown-type",
             KernelError::InvalidPayload { .. } => "angzarr-embedded-invalid-payload",
             KernelError::Upcast { .. } => "angzarr-embedded-upcast",
             KernelError::WrongDomain { .. } => "angzarr-embedded-wrong-domain",
-            KernelError::ChainTooDeep { .. } => "angzarr-embedded-chain-too-deep",
-            KernelError::TooManySteps { .. } => "angzarr-embedded-step-limit",
+            KernelError::ChainTooDeep { .. } => CoordinatorReason::ChainTooDeep.as_str_name(),
+            KernelError::TooManySteps { .. } => RouterReason::TooManySteps.as_str_name(),
             KernelError::BeforeSnapshot { .. } => "angzarr-embedded-before-snapshot",
             KernelError::UnregisteredDomain { .. } => "angzarr-embedded-unregistered-domain",
             KernelError::Replay(error) => error.code(),
             KernelError::Unreadable { .. } => "angzarr-embedded-unreadable",
             KernelError::Store(error) => error.code(),
-            KernelError::Router(error) => router_diagnostic(error).0,
-            KernelError::HandlerUnavailable { .. } => "angzarr-embedded-handler-unavailable",
+            KernelError::Router(error) => &error.code,
+            KernelError::HandlerUnavailable { .. } => {
+                CoordinatorReason::HandlerUnavailable.as_str_name()
+            }
         }
     }
 
     fn args(&self) -> Vec<(&str, Arg)> {
+        use angzarr_proto::v1::reason_args as args;
         match self {
             KernelError::Malformed(m) => m.args(),
             KernelError::Stale {
-                stream: s,
-                expected,
-                actual,
-            }
-            | KernelError::Unresolved {
-                stream: s,
-                expected,
-                actual,
+                expected, actual, ..
             } => vec![
-                ("stream", stream(s)),
-                ("expected", (*expected).into()),
-                ("actual", (*actual).into()),
+                (args::EXPECTED, (*expected).into()),
+                (args::ACTUAL, (*actual).into()),
             ],
-            KernelError::ExpectedSequenceAhead {
-                stream: s,
-                expected,
-                head,
-            } => vec![
-                ("stream", stream(s)),
-                ("expected", (*expected).into()),
-                ("head", (*head).into()),
+            KernelError::Unresolved { .. } => vec![],
+            KernelError::ExpectedSequenceAhead { expected, head, .. } => vec![
+                (args::EXPECTED, (*expected).into()),
+                (args::HEAD, (*head).into()),
             ],
             KernelError::Overlap {
-                stream: s,
-                expected,
-                actual,
                 window_units,
                 command_units,
+                ..
             } => vec![
-                ("stream", stream(s)),
-                ("expected", (*expected).into()),
-                ("actual", (*actual).into()),
-                ("window_units", window_units.as_str().into()),
-                ("command_units", command_units.as_str().into()),
+                (args::WINDOW_UNITS, window_units.as_str().into()),
+                (args::COMMAND_UNITS, command_units.as_str().into()),
             ],
-            KernelError::RetryCapExhausted {
-                stream: s,
-                attempts,
-                cap,
-            } => vec![
-                ("stream", stream(s)),
-                ("attempts", (*attempts).into()),
-                ("cap", (*cap).into()),
+            KernelError::RetryCapExhausted { attempts, cap, .. } => vec![
+                (args::ATTEMPTS, (*attempts).into()),
+                (args::CAP, (*cap).into()),
             ],
             KernelError::RulesVersionMismatch {
                 stream: s,
                 registered,
                 reported,
             } => vec![
-                ("stream", stream(s)),
-                ("registered", registered.as_str().into()),
-                ("reported", reported.as_str().into()),
+                (args::COMPONENT, s.domain.as_str().into()),
+                (args::REGISTERED, registered.as_str().into()),
+                (args::REPORTED, reported.as_str().into()),
             ],
             KernelError::UnknownType {
                 stream: s,
@@ -771,9 +674,8 @@ impl Diagnostic for KernelError {
             } => {
                 vec![("stream", stream(s)), ("expected", (*expected).into())]
             }
-            KernelError::ChainTooDeep { limit } => vec![("limit", (*limit).into())],
-            KernelError::TooManySteps { stream: s, limit } => {
-                vec![("stream", stream(s)), ("limit", (*limit).into())]
+            KernelError::ChainTooDeep { limit } | KernelError::TooManySteps { limit, .. } => {
+                vec![(args::LIMIT, (*limit).into())]
             }
             KernelError::BeforeSnapshot { stream: s, first } => {
                 vec![("stream", stream(s)), ("first", (*first).into())]
@@ -792,10 +694,15 @@ impl Diagnostic for KernelError {
                 ("reason", Arg::nested(reason)),
             ],
             KernelError::Store(error) => store_args(error),
-            KernelError::Router(error) => router_diagnostic(error).1,
-            KernelError::HandlerUnavailable { stream: s, cause } => {
-                vec![("stream", stream(s)), ("cause", cause.as_str().into())]
-            }
+            KernelError::Router(error) => error
+                .extras
+                .iter()
+                .map(|(name, value)| (name.as_str(), Arg::Str(value.clone())))
+                .collect(),
+            KernelError::HandlerUnavailable { stream: s, cause } => vec![
+                (args::DOMAIN, s.domain.as_str().into()),
+                (args::CAUSE, cause.as_str().into()),
+            ],
         }
     }
 }
@@ -842,34 +749,6 @@ fn router_recovery(error: &angzarr_router::error::CodedError) -> Recovery {
     }
 }
 
-/// A router error's code and args, as the kernel's: the router's reason
-/// under angzarr-embedded's code ([`reason_code`](super::route::reason_code)),
-/// its metadata the args; a handler's own reason, which no catalog of
-/// angzarr-embedded's holds, as an unhandled handler error with that reason
-/// its `cause` and its metadata under `cause.<name>`, as the router answers
-/// a handler's bug.
-fn router_diagnostic(error: &angzarr_router::error::CodedError) -> (&str, Vec<(&str, Arg)>) {
-    match super::route::reason_code(&error.code) {
-        Some(code) => (code, super::route::router_args(error)),
-        None => {
-            let cause = error
-                .extras
-                .iter()
-                .fold(Report::new(error.code.clone()), |cause, (name, value)| {
-                    cause.arg(name.clone(), value.as_str())
-                });
-            let args = vec![("cause", Arg::Nested(Box::new(cause)))];
-            (
-                super::route::reason_code(
-                    angzarr_router::error::RouterReason::UnhandledHandlerError.as_str_name(),
-                )
-                .unwrap_or_default(),
-                args,
-            )
-        }
-    }
-}
-
 // ---------------------------------------------------------------- ReplayError
 
 impl fmt::Display for ReplayError {
@@ -906,16 +785,6 @@ impl Diagnostic for ReplayError {
 }
 
 // ---------------------------------------------------------------- StoreError
-
-/// What to do about a store's error: angzarr-ports' [`Recovery`]
-/// (`angzarr_ports::Recovery`), one to one (`Retry`, `Invalid`, `Bug`).
-pub(crate) fn store_recovery(error: &StoreError) -> Recovery {
-    match error.recovery() {
-        angzarr_ports::Recovery::Retry => Recovery::Retry,
-        angzarr_ports::Recovery::Invalid => Recovery::Invalid,
-        angzarr_ports::Recovery::Bug => Recovery::Bug,
-    }
-}
 
 /// A store error's args as angzarr-embedded's diagnostics carry them: angzarr-ports'
 /// args by name, unchanged (`StoreError::args`), each converted by

@@ -43,7 +43,7 @@ use crate::{
 /// The reason key a stale expected sequence is answered with: the full
 /// name of `CoordinatorReason::ExpectedSequenceStale` (decision 14.45).
 fn expected_sequence_stale() -> &'static str {
-    crate::reasons::CoordinatorReason::ExpectedSequenceStale.as_str_name()
+    angzarr_proto::v1::CoordinatorReason::ExpectedSequenceStale.as_str_name()
 }
 
 /// `failure` is the coordinator's stale expected sequence for stream

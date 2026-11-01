@@ -30,11 +30,11 @@ angzarr-embedded = { path = "../angzarr-embedded" }
 # The config's schema and its versioned loader: angzarr.yaml, which the CLI
 # writes, read strictly.
 angzarr-embedded-host-config = { path = "../angzarr-embedded-host-config" }
-angzarr-diagnostic = { git = "https://github.com/angzarr-io/angzarr", rev = "d5bb6692bd0fbc6ed8450b1db280578de21a48bc" }
+angzarr-diagnostic = { git = "https://github.com/angzarr-io/angzarr", rev = "95215829e4c9b7f5324e70841eaa7888bd0bdd14" }
 # The store `run` opens: SQLite, at the config's [store] path or in memory.
 angzarr-store-sqlite = { path = "../angzarr-store-sqlite" }
-angzarr-proto = { git = "https://github.com/angzarr-io/angzarr", rev = "d5bb6692bd0fbc6ed8450b1db280578de21a48bc", features = ["grpc"] }
-angzarr-router = { git = "https://github.com/angzarr-io/angzarr-router", rev = "c02faddb560323c0eb15150f6285b887fc0f51af" }
+angzarr-proto = { git = "https://github.com/angzarr-io/angzarr", rev = "95215829e4c9b7f5324e70841eaa7888bd0bdd14", features = ["grpc"] }
+angzarr-router = { git = "https://github.com/angzarr-io/angzarr-router", rev = "83d09ac93b4b4f9ef6a4d10c13cc7cc71d9a2fb6" }
 hyper-util = { version = "0.1", features = ["tokio"] }
 # SIGTERM for a child that outlives its stdin at shutdown: tokio's Child
 # sends only SIGKILL. In the graph already, through tokio.
@@ -54,7 +54,7 @@ tower = { version = "0.5", default-features = false, features = ["util"] }
 # The kernel test runs on angzarr-ports' MemoryStore (the kernel's own
 # store contract, at its rev).
 [dev-dependencies]
-angzarr-ports = { git = "https://github.com/angzarr-io/angzarr", rev = "d5bb6692bd0fbc6ed8450b1db280578de21a48bc", features = ["memory"] }
+angzarr-ports = { git = "https://github.com/angzarr-io/angzarr", rev = "95215829e4c9b7f5324e70841eaa7888bd0bdd14", features = ["memory"] }
 tonic = { version = "0.14", default-features = false, features = ["router"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 

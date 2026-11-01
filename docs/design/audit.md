@@ -627,12 +627,10 @@ A handler fails deliberately as a bug with angzarr-router's
 handler's own code and args as its cause (`cause=<code>`,
 `cause.<arg>=<value>`); the router catches a handler's panic, its cause
 ROUTER_REASON_HANDLER_PANICKED, and an error without a code of its own is
-ROUTER_REASON_UNHANDLED_HANDLER_ERROR too. Every router reason is forwarded under an
-angzarr-embedded code of its own (`angzarr-embedded-<reason>`, the reason without its
-`ROUTER_REASON_` or `COORDINATOR_REASON_` prefix), each
-with its own message; a handler's own code that no catalog holds is
-`angzarr-embedded-unhandled-handler-error` with that code its
-`cause`. A remote handler that cannot be reached
+ROUTER_REASON_UNHANDLED_HANDLER_ERROR too. Every router reason is forwarded under
+itself, verbatim, with the router's args (`KernelError::Router`), its English
+the spec's catalog (decision 14.60); a handler's own code is forwarded the
+same way, its English the application's. A remote handler that cannot be reached
 (`COORDINATOR_REASON_HANDLER_UNAVAILABLE`, UNAVAILABLE) is
 `KernelError::HandlerUnavailable`, a retryable bug. The kernel's limits
 travel under the spec's keys too (decision 14.49): a chain deeper than its
@@ -1065,15 +1063,34 @@ A duplicate is not an error: it is `Handled::Duplicate`. Each error becomes
 a `Diagnostic` with the implementation (codes under `angzarr-embedded-*`,
 messages in `locales/en-US/angzarr-embedded.ftl`).
 
-**The one rename of the kernel's codes (2026-10-31).** The kernel's codes
+**The renames of the kernel's codes (2026-10-31).** The kernel's codes
 were `angzarr-embedded-next-*`, after the `next` module the kernel lived in;
 the kernel moved to the crate root and its codes lost `next-`. The module
 path went with it: `angzarr_embedded::next` is gone, with no alias. The rule, for
 every one of them: strip `next-` (`angzarr-embedded-next-wire-missing` is
 `angzarr-embedded-wire-missing`). No new code is a code anything else had,
 and none falls under another crate's name (`angzarr-embedded-host-*`); the
-catalog check holds both. This is the only exception to "codes are stable and
-never reused": no other code was changed, and no old code means anything now.
+catalog check holds both.
+
+Then a condition the spec keys took its key as its code, verbatim (decision
+14.60, architecture-fixes C2): the forwarded router and coordinator codes
+(`angzarr-embedded-pm-no-instance` is `COORDINATOR_REASON_PM_NO_INSTANCE`),
+the kernel's own spec conditions (`angzarr-embedded-stale` is
+`COORDINATOR_REASON_EXPECTED_SEQUENCE_STALE`, `-overlap`
+`COORDINATOR_REASON_CONFLICT_OVERLAP`, `-unresolved`
+`COORDINATOR_REASON_CONFLICT_UNRESOLVED`, `-expected-sequence-ahead`,
+`-retry-cap-exhausted`, `-chain-too-deep` and `-handler-unavailable` their
+keys, `-step-limit` `ROUTER_REASON_TOO_MANY_STEPS`, and
+`-rules-version-mismatch` `COORDINATOR_REASON_RULES_VERSION_MISMATCH`,
+decision 14.56), and the host's (`angzarr-embedded-host-handshake-malformed`
+is `HOST_REASON_HANDSHAKE_MALFORMED`, decision 14.59, the
+`angzarr-embedded-host-descriptor-*` refusals their readiness keys, and a
+projector naming no input domain `HOST_REASON_PROJECTOR_NO_INPUT_DOMAIN`,
+decision 14.55, where a policy's stays `angzarr-embedded-host-no-input`).
+Each carries exactly its key's args, so the `stream` those kernel errors
+named is gone from them (the caller holds its command's cover); their
+English is the spec's. These are the only exceptions to "codes are stable
+and never reused": no old code means anything now.
 
 ## Mapping: identity
 

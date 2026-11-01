@@ -47,10 +47,10 @@ use angzarr_proto::v1::angzarr_dead_letter::Payload;
 use angzarr_proto::v1::{
     command_page, CommandBook, ConflictResolution, Cover, EventBook, EventPage, Handling, Snapshot,
 };
-use angzarr_router::error::{extras, BusinessStatus, CodedError, RouterReason};
+use angzarr_router::error::{BusinessStatus, CodedError, RouterReason};
 
-use super::reasons::{args, CoordinatorReason};
 use angzarr_proto::v1::ContextualCommand;
+use angzarr_proto::v1::{reason_args as args, CoordinatorReason};
 use prost_types::{Any, Timestamp};
 
 use super::check::{Identified, Malformed, Sampled};
@@ -146,16 +146,16 @@ pub(crate) fn unknown_domain(domain: &str) -> KernelError {
 /// [`StepError::PolicyFailed`](super::StepError::PolicyFailed)),
 /// [`KernelError::Router`].
 pub(crate) fn refused(command: &Identified, error: CodedError) -> Failure<Rejected> {
-    if error.code == route::TOO_MANY_STEPS {
+    if error.code == RouterReason::TooManySteps.as_str_name() {
         return Failure::Kernel(KernelError::TooManySteps {
             stream: command.cover().clone(),
             limit: STEP_LIMIT,
         });
     }
-    if error.code == route::HANDLER_UNAVAILABLE {
+    if error.code == CoordinatorReason::HandlerUnavailable.as_str_name() {
         return Failure::Kernel(KernelError::HandlerUnavailable {
             stream: command.cover().clone(),
-            cause: error.extras.get("cause").cloned().unwrap_or_default(),
+            cause: error.extras.get(args::CAUSE).cloned().unwrap_or_default(),
         });
     }
     if route::is_rejection(&error) {
@@ -263,7 +263,7 @@ pub(crate) fn admit(
         BusinessStatus::FailedPrecondition,
         CoordinatorReason::PmNoInstance.as_str_name(),
         [(
-            extras::TYPE_URL.to_string(),
+            args::TYPE_URL.to_string(),
             command.payload().type_url.clone(),
         )],
     ))))
@@ -611,11 +611,10 @@ pub(crate) async fn write_snapshot<P: Port>(
 fn as_sent(mut error: CodedError, sent: &Any, current: &Any) -> CodedError {
     error
         .extras
-        .insert(extras::TYPE_URL.to_string(), sent.type_url.clone());
-    error.extras.insert(
-        extras::UPCAST_TYPE_URL.to_string(),
-        current.type_url.clone(),
-    );
+        .insert(args::TYPE_URL.to_string(), sent.type_url.clone());
+    error
+        .extras
+        .insert(args::UPCAST_TYPE_URL.to_string(), current.type_url.clone());
     error
 }
 

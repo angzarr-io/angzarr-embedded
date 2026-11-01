@@ -531,7 +531,7 @@ fn every_failure_says_how_to_recover() {
         (
             Recovery::Retry,
             KernelError::Router(CodedError::immediate(
-                crate::reasons::CoordinatorReason::ConflictOverlap.as_str_name(),
+                angzarr_proto::v1::CoordinatorReason::ConflictOverlap.as_str_name(),
                 [],
             )),
         ),
@@ -589,24 +589,34 @@ fn every_failure_says_how_to_recover() {
 #[test]
 fn errors_display_their_code_and_args_and_wrappers_their_cause_flattened() {
     use angzarr_diagnostic::Diagnostic;
-    let stale = KernelError::Stale {
+    let stale = KernelError::BeforeSnapshot {
         stream: crate::v1::Cover {
             edition: Some("what-if".to_string()),
             ..cover("account", 1)
         },
-        expected: 1,
-        actual: 2,
+        first: 4,
     };
     let at = "account/0a000000-0000-0000-0000-000000000001@what-if";
     let text = stale.to_string();
     assert_eq!(
         text,
-        format!("angzarr-embedded-stale stream={at} expected=1 actual=2")
+        format!("angzarr-embedded-before-snapshot stream={at} first=4")
     );
     let failure = Failure::<crate::toys::Refused>::Kernel(stale.clone());
     assert_eq!(failure.to_string(), text);
-    assert_eq!(failure.code(), "angzarr-embedded-stale");
-    assert_eq!(failure.args().len(), 3);
+    assert_eq!(failure.code(), "angzarr-embedded-before-snapshot");
+    assert_eq!(failure.args().len(), 2);
+    // A condition the spec keys shows its key and the key's args alone
+    // (decision 14.60).
+    let keyed = KernelError::Stale {
+        stream: cover("account", 1),
+        expected: 1,
+        actual: 2,
+    };
+    assert_eq!(
+        keyed.to_string(),
+        "COORDINATOR_REASON_EXPECTED_SEQUENCE_STALE expected=1 actual=2"
+    );
     let rejected = Failure::Rejected(crate::toys::Refused::Overdrawn { short: 3 });
     assert_eq!(rejected.code(), "toy-account-overdrawn");
     assert_eq!(rejected.to_string(), "toy-account-overdrawn short=3");
@@ -621,8 +631,8 @@ fn errors_display_their_code_and_args_and_wrappers_their_cause_flattened() {
     assert_eq!(
         downstream.to_string(),
         format!(
-            "angzarr-embedded-downstream depth=0 error=angzarr-embedded-stale \
-             error.stream={at} error.expected=1 error.actual=2"
+            "angzarr-embedded-downstream depth=0 error=angzarr-embedded-before-snapshot \
+             error.stream={at} error.first=4"
         )
     );
     let upcast = crate::UpcastError::Payload(crate::PayloadError::UnknownType {
@@ -663,7 +673,7 @@ fn errors_display_their_code_and_args_and_wrappers_their_cause_flattened() {
     ));
     assert_eq!(
         router.to_string(),
-        "angzarr-embedded-unhandled-handler-error cause=PLAYER_BROKE cause.seat=2",
+        "ROUTER_REASON_UNHANDLED_HANDLER_ERROR cause=PLAYER_BROKE cause.seat=2",
         "the kernel's code, never the router's English or its SCREAMING reason"
     );
 }
@@ -678,17 +688,14 @@ fn an_unreachable_handler_carries_its_cause_as_a_key() {
         stream: cover("account", 1),
         cause: "not-running".to_string(),
     };
-    assert_eq!(unreachable.code(), "angzarr-embedded-handler-unavailable");
+    assert_eq!(unreachable.code(), "COORDINATOR_REASON_HANDLER_UNAVAILABLE");
     assert!(unreachable
         .args()
         .iter()
         .any(|arg| matches!(arg, ("cause", Arg::Str(key)) if key == "not-running")));
     assert_eq!(
         unreachable.to_string(),
-        format!(
-            "angzarr-embedded-handler-unavailable stream=account/{} cause=not-running",
-            root(1)
-        )
+        "COORDINATOR_REASON_HANDLER_UNAVAILABLE domain=account cause=not-running"
     );
 }
 

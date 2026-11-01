@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use crate::rpc::google_rpc::{ErrorInfo, Status as RpcStatus, ERROR_INFO_TYPE_URL};
-use angzarr_embedded::reasons::{args, CoordinatorReason};
 use angzarr_embedded::{class, Class};
+use angzarr_proto::v1::{reason_args as args, CoordinatorReason};
 use angzarr_router::error::GrpcCode;
 use prost::Message;
 use prost_types::Any;
@@ -83,14 +83,23 @@ fn the_refusal_is_found_before_the_error_info_too() {
 #[test]
 fn an_unavailable_status_is_retryable() {
     let coded = status_to_coded("player", &tonic::Status::unavailable("connection refused"));
-    assert_eq!(coded.code, codes::REMOTE_HANDLER_UNAVAILABLE);
+    assert_eq!(
+        coded.code,
+        angzarr_proto::v1::CoordinatorReason::HandlerUnavailable.as_str_name()
+    );
     assert_eq!(
         coded.extras,
         BTreeMap::from([
             (args::DOMAIN.to_string(), "player".to_string()),
-            (CAUSE.to_string(), causes::TRANSPORT.to_string()),
+            (
+                angzarr_proto::v1::reason_args::CAUSE.to_string(),
+                causes::TRANSPORT.to_string()
+            ),
             // The transport's own text, verbatim: a third party's.
-            (EXT_ERR_TXT.to_string(), "connection refused".to_string()),
+            (
+                angzarr_proto::v1::reason_args::EXT_ERR_TXT.to_string(),
+                "connection refused".to_string()
+            ),
         ])
     );
     assert!(is_retryable(&coded));
@@ -102,10 +111,15 @@ fn a_child_not_running_is_retryable() {
     assert_eq!(
         coded,
         CodedError {
-            code: codes::REMOTE_HANDLER_UNAVAILABLE.to_string(),
+            code: angzarr_proto::v1::CoordinatorReason::HandlerUnavailable
+                .as_str_name()
+                .to_string(),
             extras: BTreeMap::from([
                 (args::DOMAIN.to_string(), "player".to_string()),
-                (CAUSE.to_string(), causes::NOT_RUNNING.to_string()),
+                (
+                    angzarr_proto::v1::reason_args::CAUSE.to_string(),
+                    causes::NOT_RUNNING.to_string()
+                ),
             ]),
             grpc: GrpcCode::Unavailable,
             refusal: None,
@@ -119,9 +133,9 @@ fn a_child_not_running_is_retryable() {
 /// retryable bug.
 #[test]
 fn unavailability_is_the_specs_key() {
-    use angzarr_embedded::reasons::CoordinatorReason;
+    use angzarr_proto::v1::CoordinatorReason;
     assert_eq!(
-        codes::REMOTE_HANDLER_UNAVAILABLE,
+        angzarr_proto::v1::CoordinatorReason::HandlerUnavailable.as_str_name(),
         CoordinatorReason::HandlerUnavailable.as_str_name()
     );
     assert_eq!(
@@ -302,7 +316,10 @@ fn a_childs_bug_status_is_no_refusal() {
 #[test]
 fn a_childs_retryable_status_keeps_its_class() {
     let bare = status_to_coded("player", &tonic::Status::unavailable("gone"));
-    assert_eq!(bare.code, codes::REMOTE_HANDLER_UNAVAILABLE);
+    assert_eq!(
+        bare.code,
+        angzarr_proto::v1::CoordinatorReason::HandlerUnavailable.as_str_name()
+    );
     assert!(is_retryable(&bare));
     for code in [
         Code::Unavailable,

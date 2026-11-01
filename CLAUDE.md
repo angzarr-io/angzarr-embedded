@@ -145,12 +145,16 @@ angzarr-ports' own catalog, `angzarr_ports::EN_US` (re-exported as
 `angzarr_embedded::angzarr_ports`), checked against its errors in core.
 
 - **Codes are stable and never reused.** Kebab-case, starting with the
-  crate's name (`angzarr-embedded-host-handshake-malformed`), and a valid Fluent message id. A code
+  crate's name (`angzarr-embedded-host-handshake-timeout`), and a valid Fluent message id. A code
   whose meaning changes gets a new code; a retired code is not given to
-  anything else. The one exception was ruled once: the kernel's
-  `angzarr-embedded-next-*` codes lost their `next-` (docs/design/audit.md,
-  *The one rename of the kernel's codes*), and the `next` module itself is
-  gone, with no alias.
+  anything else. A condition the spec keys is the exception: its code is
+  the key, verbatim (`HOST_REASON_HANDSHAKE_MALFORMED`), its args the
+  key's `(io.angzarr.v1.reason)` option's (`angzarr_proto::v1::reason_args`),
+  and its English the spec's catalog (`angzarr_proto::REASONS_EN_US`),
+  never this repository's (decision 14.60). Two renames were ruled: the
+  kernel's `angzarr-embedded-next-*` codes lost their `next-`, and the codes
+  of spec conditions became their keys (docs/design/audit.md, *The renames
+  of the kernel's codes*); the `next` module itself is gone, with no alias.
 - **Args carry data, never pre-formatted English.** Numbers, ids, paths and
   the text that was read are args; any phrase a player reads belongs in the
   catalog. A wrapped cause is `Arg::Nested`. An error does not hold a
