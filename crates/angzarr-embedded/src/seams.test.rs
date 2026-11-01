@@ -7,7 +7,11 @@
 
 use std::cell::Cell;
 
-use crate::recording::Recording;
+use angzarr_ports::faulty::FaultyStore;
+use angzarr_ports::memory::MemoryStore;
+
+/// The in-memory store, failing what a test says.
+type Recording = FaultyStore<MemoryStore>;
 use crate::toys::prelude::*;
 use crate::toys::{
     at, command, cover, ledger_root, no_retries, opened, registry, Account, AccountCmd,
@@ -621,9 +625,9 @@ fn a_shaped_load_that_fails_retryably_is_tried_again() {
     let kernel = Kernel::new(&registry)
         .on_retryable(three_runs())
         .wait_with(&waits);
-    let store = Recording::new();
+    let store = Recording::default();
     opened(&store, &registry, 1, 40);
-    store.fail_read(0);
+    store.fail_read(1);
     let (handled, _) = kernel
         .handle_shaped::<Account, _, _, _>(&store, &cover("account", 1), &at(30), |_| {
             (Some(AccountCmd::Deposit(5)), ())
@@ -642,10 +646,10 @@ fn a_shaped_load_that_keeps_failing_is_handed_back_at_the_retry_cap() {
     let kernel = Kernel::new(&registry)
         .on_retryable(three_runs())
         .wait_with(&waits);
-    let store = Recording::new();
+    let store = Recording::default();
     opened(&store, &registry, 1, 40);
     for n in 0..3 {
-        store.fail_read(n);
+        store.fail_read(n + 1);
     }
     let failure = kernel
         .handle_shaped::<Account, _, _, _>(&store, &cover("account", 1), &at(30), |_| {

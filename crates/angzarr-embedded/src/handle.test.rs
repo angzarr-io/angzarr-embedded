@@ -5,7 +5,11 @@
 //! undone (a crash, a failed store) is resumed by position, deduplicated by
 //! its derived command id. The call waits for the chain to settle.
 
-use crate::recording::Recording;
+use angzarr_ports::faulty::{Fault, FaultyStore};
+use angzarr_ports::memory::MemoryStore;
+
+/// The in-memory store, failing what a test says.
+type Recording = FaultyStore<MemoryStore>;
 use crate::toys::prelude::*;
 use crate::v1::event_meta::Causation;
 use crate::v1::{CommandBook, EventMeta, EventRef};
@@ -812,7 +816,7 @@ fn a_command_owes_policy_steps_for_its_own_events_only() {
     registry.policy(Bookkeeping);
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry).log_with(&log);
-    let store = Recording::new();
+    let store = Recording::default();
     opened(&store, &plain, 1, 0);
     for n in [3, 4] {
         kernel
@@ -958,7 +962,7 @@ fn every_policy_on_a_source_runs_for_each_of_its_events_in_registration_order() 
     registry.policy(Bookkeeping);
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry).log_with(&log);
-    let store = Recording::new();
+    let store = Recording::default();
     let open = command(cover("account", 1), AccountCmd::Open.to_any()).id(1);
     for (book, second) in [(open, 30), (deposit(2, 5), 31)] {
         kernel
@@ -1006,7 +1010,7 @@ fn a_policy_step_commits_its_position_with_its_events() {
     registry.policy(Bookkeeping);
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry).log_with(&log);
-    let store = Recording::new();
+    let store = Recording::default();
     opened(&store, &plain, 1, 0);
     kernel
         .handle::<Account, _>(&store, deposit(3, 5), &at(30))
@@ -1049,7 +1053,7 @@ fn a_step_the_store_failed_is_resumed_by_position() {
     let kernel = Kernel::new(&registry)
         .log_with(&log)
         .on_retryable(crate::toys::no_retries());
-    let store = Recording::new();
+    let store = Recording::default();
     opened(&store, &registry, 1, 0);
     let account = cover("account", 1);
     assert_eq!(
@@ -1058,7 +1062,7 @@ fn a_step_the_store_failed_is_resumed_by_position() {
         "the opening's own ledger steps put it"
     );
     let before = store.writes().len();
-    store.fail_write(1);
+    store.fail(failing(1, Fault::Unavailable));
     let failure = kernel
         .handle::<Account, _>(&store, deposit(3, 25), &at(30))
         .ready()
@@ -1143,7 +1147,7 @@ fn a_policy_step_that_decides_no_event_still_moves_its_position() {
     registry.policy(SweepNine);
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry).log_with(&log);
-    let store = Recording::new();
+    let store = Recording::default();
     let open = command(cover("account", 1), AccountCmd::Open.to_any()).id(1);
     kernel
         .handle::<Account, _>(&store, open, &at(30))
@@ -1158,13 +1162,13 @@ fn a_policy_step_that_decides_no_event_still_moves_its_position() {
     assert_eq!(
         store.writes(),
         [
-            crate::recording::WriteRecord {
+            angzarr_ports::faulty::WriteRecord {
                 wrote: Some((account.clone(), 1)),
                 positions: vec![],
                 letters: vec![],
                 landed: true,
             },
-            crate::recording::WriteRecord {
+            angzarr_ports::faulty::WriteRecord {
                 wrote: None,
                 positions: vec![("sweep-nine".to_string(), account.clone(), 1)],
                 letters: vec![],
@@ -1428,9 +1432,9 @@ fn a_retry_after_a_crash_settles_what_its_stream_still_owes() {
     let kernel = Kernel::new(&registry)
         .log_with(&log)
         .on_retryable(crate::toys::no_retries());
-    let store = Recording::new();
+    let store = Recording::default();
     opened(&store, &plain, 1, 0);
-    store.fail_write(1);
+    store.fail(failing(1, Fault::Unavailable));
     assert!(kernel
         .handle::<Account, _>(&store, deposit(3, 25), &at(30))
         .ready()
@@ -1511,8 +1515,8 @@ fn a_store_that_cannot_write_fails_the_command_with_nothing_written() {
     let kernel = Kernel::new(&registry)
         .log_with(&log)
         .on_retryable(crate::toys::no_retries());
-    let store = Recording::new();
-    store.fail_write(0);
+    let store = Recording::default();
+    store.fail(failing(0, Fault::Unavailable));
     let failure = kernel
         .handle::<Account, _>(
             &store,
@@ -1556,9 +1560,9 @@ fn a_policy_step_failing_once_lands_on_its_retry(error: crate::StoreError) {
     let log = MemoryDeadLetters::new();
     let waits = Waits::default();
     let kernel = Kernel::new(&registry).log_with(&log).wait_with(&waits);
-    let store = Recording::new();
+    let store = Recording::default();
     opened(&store, &registry, 1, 0);
-    store.fail_write_with(1, error);
+    store.fail(failing(1, Fault::Error(error)));
     kernel
         .handle::<Account, _>(&store, deposit(3, 25), &at(30))
         .ready()
@@ -1665,16 +1669,16 @@ fn an_outside_callers_lost_race_without_an_expected_sequence_is_run_again() {
     let log = MemoryDeadLetters::new();
     let waits = Waits::default();
     let kernel = Kernel::new(&registry).log_with(&log).wait_with(&waits);
-    let store = Recording::new();
+    let store = Recording::default();
     opened(&store, &registry, 1, 0);
-    store.fail_write_with(
+    store.fail(failing(
         0,
-        crate::StoreError::Conflict {
+        Fault::Error(crate::StoreError::Conflict {
             stream: Box::new(cover("account", 1)),
             expected: 2,
             actual: 3,
-        },
-    );
+        }),
+    ));
     let handled = kernel
         .handle::<Account, _>(&store, deposit(3, 25), &at(30))
         .ready();
@@ -1703,16 +1707,16 @@ fn an_outside_callers_lost_race_with_an_expected_sequence_is_stale_at_once() {
     let log = MemoryDeadLetters::new();
     let waits = Waits::default();
     let kernel = Kernel::new(&registry).log_with(&log).wait_with(&waits);
-    let store = Recording::new();
+    let store = Recording::default();
     opened(&store, &registry, 1, 0);
-    store.fail_write_with(
+    store.fail(failing(
         0,
-        crate::StoreError::Conflict {
+        Fault::Error(crate::StoreError::Conflict {
             stream: Box::new(cover("account", 1)),
             expected: 2,
             actual: 3,
-        },
-    );
+        }),
+    ));
     let failure = kernel
         .handle::<Account, _>(
             &store,
@@ -2422,4 +2426,12 @@ fn a_step_folds_its_stream_once() {
     // Loaded from the snapshot the last step wrote, the router folds the
     // one event it decides onto it; nothing folds it again.
     assert_eq!((folds(3), folds(4)), (1, 1));
+}
+
+/// The write `n` writes from now (0: the next) failing with `fault`, the
+/// ones before it sound.
+fn failing(n: usize, fault: angzarr_ports::faulty::Fault) -> Vec<angzarr_ports::faulty::Fault> {
+    let mut faults = vec![angzarr_ports::faulty::Fault::Sound; n];
+    faults.push(fault);
+    faults
 }

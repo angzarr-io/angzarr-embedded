@@ -129,11 +129,6 @@ mod sqlite;
 #[path = "reexports.test.rs"]
 mod reexports;
 
-// A store recording each write, and failing what a test says.
-#[cfg(test)]
-#[path = "recording.test.rs"]
-pub(crate) mod recording;
-
 /// angzarr-diagnostic, the crate every error here implements
 /// (`Diagnostic`, `Arg`, `Report`, `display`, and its `catalog` parity
 /// check), re-exported so a dependent names the one this crate is built on.

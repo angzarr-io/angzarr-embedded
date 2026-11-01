@@ -226,7 +226,7 @@ fn aggregate_handles_demands_the_nonce_back() {
 #[test]
 fn outside_strict_a_lost_write_is_never_the_stale_key() {
     let registry = registry();
-    let store = crate::recording::Recording::new();
+    let store = angzarr_ports::faulty::FaultyStore::<angzarr_ports::memory::MemoryStore>::default();
     for (n, item) in [(1u128, "a"), (2, "b")] {
         handle::<Shelf>(
             &store,
@@ -236,14 +236,14 @@ fn outside_strict_a_lost_write_is_never_the_stale_key() {
         )
         .unwrap();
     }
-    store.fail_write_with(
+    store.fail(failing(
         0,
-        crate::StoreError::Conflict {
+        angzarr_ports::faulty::Fault::Error(crate::StoreError::Conflict {
             stream: Box::new(cover("shelf", 3)),
             expected: 2,
             actual: 3,
-        },
-    );
+        }),
+    ));
     let failure = handle::<Shelf>(
         &store,
         &registry,
@@ -755,4 +755,12 @@ mod judged {
             assert_eq!(pages(&store, &cover("shelf", 3)).len(), 3, "disjoint: kept");
         }
     }
+}
+
+/// The write `n` writes from now (0: the next) failing with `fault`, the
+/// ones before it sound.
+fn failing(n: usize, fault: angzarr_ports::faulty::Fault) -> Vec<angzarr_ports::faulty::Fault> {
+    let mut faults = vec![angzarr_ports::faulty::Fault::Sound; n];
+    faults.push(fault);
+    faults
 }

@@ -15,12 +15,12 @@ rust-version = "1.89"
 # Test-only: nothing in angzarr-embedded renders Fluent; the client does.
 [dev-dependencies]
 angzarr-embedded = { path = "../angzarr-embedded" }
-angzarr-diagnostic = { git = "https://github.com/angzarr-io/angzarr", rev = "b0cf1bd3ad725857707a0c414dc269f396763efa" }
+angzarr-diagnostic = { git = "https://github.com/angzarr-io/angzarr", rev = "6d29855fa7b23f3e295d77d9ac9064fffa6f81df" }
 angzarr-embedded-host = { path = "../angzarr-embedded-host" }
 angzarr-store-sqlite = { path = "../angzarr-store-sqlite" }
 # angzarr-ports' own en-US catalog, which renders the store errors
 # angzarr-embedded forwards.
-angzarr-ports = { git = "https://github.com/angzarr-io/angzarr", rev = "b0cf1bd3ad725857707a0c414dc269f396763efa" }
+angzarr-ports = { git = "https://github.com/angzarr-io/angzarr", rev = "6d29855fa7b23f3e295d77d9ac9064fffa6f81df" }
 # fluent-bundle (Apache-2.0 OR MIT) renders each sample's message with its
 # args, so a message naming an arg its error may not give fails here, not in
 # the client.
