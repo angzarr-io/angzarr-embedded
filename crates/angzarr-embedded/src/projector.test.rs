@@ -162,6 +162,8 @@ fn a_stream_purged_and_written_again_is_handed_from_its_start() {
     deposit(&store, &registry, 1, 9, 6);
     step(&mut catch_up, &store, &registry);
     assert_eq!(recorder.take(), [(cover("account", 1), vec![0, 1], 2)]);
+    step(&mut catch_up, &store, &registry);
+    assert_eq!(recorder.take(), [], "the new stream, handed once");
 }
 
 /// A stream handed before and purged since is handed as gone: a book with
