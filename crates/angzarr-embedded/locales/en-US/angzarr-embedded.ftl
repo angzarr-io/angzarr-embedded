@@ -66,6 +66,7 @@ angzarr-embedded-unreadable = event { $sequence } of stream { $stream } cannot b
 
 angzarr-embedded-payload-unknown-type = no decoder for the type { $type_url }
 angzarr-embedded-payload-decode = a payload of type { $type_url } does not decode
+angzarr-embedded-not-its-stream = a command whose { $domain } key is { $key } was sent to another stream: its stream is the one that key names
 angzarr-embedded-payload-invalid = a payload of type { $type_url } is not a valid value: { $reason }
 angzarr-embedded-wire-missing = { $message }.{ $field } is required and absent
 angzarr-embedded-wire-unknown-enum = { $message }.{ $field } holds { $value }, which no variant defines

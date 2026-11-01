@@ -113,7 +113,18 @@
 //!   to it: a `#[handles_cmd]` or `#[on_refused]` without a `Result`, a
 //!   `#[handles_fact]` with one, or either fact handler with an `Emit`,
 //!   whose steps may refuse, does not compile.
-//! - [`applies`]`(Event)`, one per event: `fn(&mut self, event: Event)`.
+//! - [`applies`]`(Event)`, one per event: `fn(&mut self, event: Event)`,
+//!   or `fn(&mut self, event: Event, page: &PageContext)` to read where
+//!   the event sits, as a handler reads its `&Context`: its stream's cover,
+//!   its sequence and its whole `EventMeta` (`recorded_at`, its cause,
+//!   correlation, fact origin and rules version; `None` for an event of
+//!   the decision being made, stamped when it commits).
+//! - `rooted_by = field` on a [`handles_cmd`]: the command's `field` (a
+//!   `String`, or anything `AsRef<str>`) is its natural key, and the
+//!   stream's root must be that key's UUIDv5 under the domain
+//!   (`Context::rooted_by`, as `Cover::natural` addresses it); a command
+//!   sent elsewhere is refused `angzarr-embedded-not-its-stream`,
+//!   INVALID_ARGUMENT, before its handler runs.
 //!
 //! There are no other markers on a domain. Stateless rules are not a
 //! marker: refusing has no side effects, because the application creates
@@ -423,7 +434,7 @@
 //!     pub enum Event { Deposited(Deposited), .. }
 //!     // impl Payload for each: decode by type URL (the type's
 //!     // DomainMessage::Wire), then DomainMessage::from_wire.
-//!     // impl From<Deposited> for Event, and so on.
+//!     // impl From<Deposit> for Command, From<Deposited> for Event, and so on.
 //! }
 //!
 //! // For each command with `refuses`: the choice, `From` each listed
@@ -452,9 +463,9 @@
 //!     // The crate's build version, as angzarr-build's descriptor has it.
 //!     const RULES_VERSION: &'static str = env!("CARGO_PKG_VERSION");
 //!
-//!     fn apply(state: &mut Self, event: &Event) {
+//!     fn apply(state: &mut Self, event: &Event, page: &PageContext<'_>) {
 //!         match event {
-//!             Event::Deposited(event) => state.deposited(event.clone()),
+//!             Event::Deposited(event) => state.deposited(event.clone()), // `, page` for an applier taking it
 //!             ..
 //!         }
 //!     }
@@ -3258,6 +3269,8 @@ struct Marker {
     starts: Option<Ident>,
     refuses: Vec<Type>,
     refuses_key: Option<Ident>,
+    /// `rooted_by = field`: the command's natural key, its stream's root.
+    rooted_by: Option<Ident>,
 }
 
 impl Parse for Marker {
@@ -3268,6 +3281,7 @@ impl Parse for Marker {
             starts: None,
             refuses: Vec::new(),
             refuses_key: None,
+            rooted_by: None,
         };
         while !input.is_empty() {
             input.parse::<Token![,]>()?;
@@ -3285,10 +3299,17 @@ impl Parse for Marker {
                         .extend(Punctuated::<Type, Token![,]>::parse_terminated(&types)?);
                     marker.refuses_key = Some(key);
                 }
-                _ => return Err(Error::new_spanned(
-                    key,
-                    "a handler marker takes its type, then optionally `starts` and `refuses(..)`",
-                )),
+                "rooted_by" => {
+                    input.parse::<Token![=]>()?;
+                    marker.rooted_by = Some(input.parse()?);
+                }
+                _ => {
+                    return Err(Error::new_spanned(
+                        key,
+                        "a handler marker takes its type, then optionally `starts`, `refuses(..)` \
+                     and `rooted_by = <field>`",
+                    ))
+                }
             }
         }
         Ok(marker)
@@ -3309,6 +3330,12 @@ fn refuse_extras(x: &Marked<'_>, starts_allowed: bool) -> syn::Result<()> {
                 }
                 _ => "`starts` marks a process manager's command or fact handler only",
             },
+        ));
+    }
+    if let (Some(field), true) = (&x.args.rooted_by, x.marker != "handles_cmd") {
+        return Err(Error::new_spanned(
+            field,
+            "`rooted_by` names a command's natural key: only a command handler checks it",
         ));
     }
     if let (Some(refuses), true) = (&x.args.refuses_key, x.marker != "handles_cmd") {
@@ -3389,6 +3416,12 @@ fn check_signature(x: &Marked<'_>) -> syn::Result<()> {
         "applies" => {
             if receiver(sig) != Some(true) {
                 return fail("an applier takes `&mut self`: it assigns the event's state");
+            }
+            if !(2..=3).contains(&sig.inputs.len()) {
+                return fail(
+                    "an applier takes `&mut self`, its event and, optionally, the event's \
+                     `&PageContext`",
+                );
             }
             return Ok(());
         }
@@ -3660,6 +3693,7 @@ fn domain(attr: Tokens, item: Tokens, kind: Kind) -> syn::Result<Tokens> {
     // named enum or one written by hand) is the domain's; otherwise the
     // macro writes one no path names.
     let mut sets = vec![payload_set(&fact_set, &facts, &refusals, &vis)];
+    let own_commands = command_enum.is_none();
     let command_ty: Type = match command_enum {
         Some(given) => given,
         None => {
@@ -3682,10 +3716,22 @@ fn domain(attr: Tokens, item: Tokens, kind: Kind) -> syn::Result<Tokens> {
     let command_routes = of("handles_cmd").map(|x| {
         let (ty, method) = (&x.args.ty, call(x));
         let name = full_name(ty);
-        quote! {
-            .on_command(#name, |any, state, cctx| {
+        let run = match &x.args.rooted_by {
+            None => quote! {
                 #m::run_command::<#self_ty, _, #ty, _, _>(any, &*state, cctx, <#self_ty>::#method)
-            })
+            },
+            Some(field) => quote! {
+                #m::run_rooted_command::<#self_ty, _, #ty, _, _>(
+                    any,
+                    &*state,
+                    cctx,
+                    |cmd: &#ty| ::core::convert::AsRef::<str>::as_ref(&cmd.#field),
+                    <#self_ty>::#method,
+                )
+            },
+        };
+        quote! {
+            .on_command(#name, |any, state, cctx| { #run })
         }
     });
     let fact_routes = of("handles_fact").map(|x| {
@@ -3708,8 +3754,9 @@ fn domain(attr: Tokens, item: Tokens, kind: Kind) -> syn::Result<Tokens> {
     });
     let apply_arms = of("applies").map(|x| {
         let (v, method) = (variant(&x.args.ty, "").expect("checked"), call(x));
+        let page = (x.method.sig.inputs.len() == 3).then(|| quote!(, page));
         quote! {
-            #event_ty::#v(event) => <#self_ty>::#method(state, ::core::clone::Clone::clone(event)),
+            #event_ty::#v(event) => <#self_ty>::#method(state, ::core::clone::Clone::clone(event) #page),
         }
     });
     let apply_body = if events.is_empty() {
@@ -3737,6 +3784,15 @@ fn domain(attr: Tokens, item: Tokens, kind: Kind) -> syn::Result<Tokens> {
         }
     };
 
+    let from_commands = commands.iter().filter(|_| own_commands).map(|(v, ty)| {
+        quote! {
+            impl ::core::convert::From<#ty> for #command_set {
+                fn from(command: #ty) -> Self {
+                    #command_set::#v(command)
+                }
+            }
+        }
+    });
     let from_events = events.iter().filter(|_| own_events).map(|(v, ty)| {
         quote! {
             impl ::core::convert::From<#ty> for #event_set {
@@ -3898,6 +3954,7 @@ fn domain(attr: Tokens, item: Tokens, kind: Kind) -> syn::Result<Tokens> {
 
         #state
 
+        #(#from_commands)*
         #(#from_events)*
         #(#decides)*
         #(#ingests)*
@@ -3913,7 +3970,12 @@ fn domain(attr: Tokens, item: Tokens, kind: Kind) -> syn::Result<Tokens> {
             const NAME: &'static str = #domain;
             const RULES_VERSION: &'static str = ::core::env!("CARGO_PKG_VERSION");
 
-            fn apply(state: &mut Self, event: &#event_ty) {
+            fn apply(
+                state: &mut Self,
+                event: &#event_ty,
+                page: &::angzarr_embedded::PageContext<'_>,
+            ) {
+                let _ = page;
                 #apply_body
             }
         }

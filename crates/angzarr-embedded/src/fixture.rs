@@ -10,6 +10,7 @@ use angzarr_proto::v1::{Cover, EventPage};
 use super::domain::Domain;
 use super::registry::Registry;
 use super::stream::Stream;
+use angzarr_router::PageContext;
 
 /// An old log, kept as it was stored, and the states it must still replay
 /// to.
@@ -52,7 +53,13 @@ where
             .events()
             .iter()
             .map(|envelope| {
-                D::apply(&mut state, envelope.event());
+                let meta = envelope.meta();
+                let page = PageContext {
+                    cover: Some(&fixture.stream),
+                    sequence: envelope.sequence(),
+                    meta: Some(&meta),
+                };
+                D::apply(&mut state, envelope.event(), &page);
                 (envelope.sequence(), state.clone())
             })
             .collect();

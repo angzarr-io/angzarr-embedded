@@ -85,7 +85,7 @@ mod empty {
 
         const NAME: &'static str = "ledger";
 
-        fn apply(_: &mut Nothing, event: &Infallible) {
+        fn apply(_: &mut Nothing, event: &Infallible, _: &crate::PageContext<'_>) {
             match *event {}
         }
     }

@@ -397,7 +397,7 @@ impl Domain for Counter {
 
     const NAME: &'static str = "counter";
 
-    fn apply(state: &mut Self, event: &CounterEvent) {
+    fn apply(state: &mut Self, event: &CounterEvent, _: &::angzarr_embedded::PageContext<'_>) {
         if let CounterEvent::Bumped(bumped) = event {
             state.total += bumped.by;
         }

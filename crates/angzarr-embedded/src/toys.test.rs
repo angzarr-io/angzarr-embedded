@@ -641,7 +641,7 @@ impl Domain for Account {
     const NAME: &'static str = "account";
     const RULES_VERSION: &'static str = "v2";
 
-    fn apply(s: &mut AccountState, e: &AccountEvent) {
+    fn apply(s: &mut AccountState, e: &AccountEvent, _: &crate::PageContext<'_>) {
         APPLIED.with(|applied| applied.set(applied.get() + 1));
         match e {
             AccountEvent::Opened => s.open = true,
@@ -959,7 +959,7 @@ impl Domain for Shelf {
     const CONFLICT_RESOLUTION_BY_COMMAND: &'static [(&'static str, ConflictResolution)] =
         &[("toy.shelf.cmd.v1.Note", ConflictResolution::Strict)];
 
-    fn apply(s: &mut ShelfState, e: &ShelfEvent) {
+    fn apply(s: &mut ShelfState, e: &ShelfEvent, _: &crate::PageContext<'_>) {
         match e {
             ShelfEvent::WasSet(set) => {
                 s.items.insert(set.item.clone(), set.count);
@@ -1166,7 +1166,7 @@ impl Domain for Ledger {
     const NAME: &'static str = "ledger";
     const RULES_VERSION: &'static str = "v1";
 
-    fn apply(s: &mut LedgerState, e: &ledger::Recorded) {
+    fn apply(s: &mut LedgerState, e: &ledger::Recorded, _: &crate::PageContext<'_>) {
         s.next_source = e.source_sequence + 1;
         s.total += e.cents;
     }

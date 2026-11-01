@@ -8,7 +8,11 @@
 //!
 //! - [`Context`]: a domain handler's third argument, what it may read
 //!   besides itself and its input: one context, an aggregate's and a
-//!   process manager's alike.
+//!   process manager's alike, its stream's root ([`Context::root`]) and
+//!   whether a natural key is the stream's ([`Context::rooted_by`],
+//!   [`NotItsStream`]: `#[handles_cmd(C, rooted_by = field)]`).
+//! - [`PageContext`]: an applier's optional third argument, where its event
+//!   sits: its stream, its sequence and its whole metadata.
 //! - [`DomainMessage`]: a domain type (angzarr-codegen's domain layer) and
 //!   the prost message it travels as, so the router decodes by type URL
 //!   into domain types and never hands a handler a wire type.
@@ -48,8 +52,8 @@
 //!   with no macro): packing and decoding ([`pack_message`],
 //!   [`type_url_of`], [`decode_message`], [`command_refused_type_url`],
 //!   [`decode_command_refused`], [`refused_command_type_url`]); running a
-//!   domain's handler as one decision ([`run_command`], [`run_fact`],
-//!   [`run_on_refused`]); a policy's answers ([`policy_answer`],
+//!   domain's handler as one decision ([`run_command`],
+//!   [`run_rooted_command`], [`run_fact`], [`run_on_refused`]); a policy's answers ([`policy_answer`],
 //!   [`pass_through`], [`decode_refusal`], [`translated_fact`]); a
 //!   projector's run ([`projecting`]); and a state's descriptor
 //!   ([`state_descriptor`]).
@@ -64,13 +68,18 @@
 
 use std::fmt;
 
-use angzarr_proto::v1::{Cover, EventBook, EventRef, Uuid};
+use angzarr_proto::v1::event_meta::Causation;
+use angzarr_proto::v1::{Cover, EventBook, EventMeta, EventRef, FactOrigin, Uuid};
 use prost_types::{Any, Timestamp};
 
 use super::domain::Domain;
 use super::error::PayloadError;
 use super::payload::Payload as _;
 use super::wire::WireError;
+
+/// Where an applied event sits, angzarr-router's: an `#[applies]`
+/// applier's optional third argument, [`Domain::apply`]'s page.
+pub use angzarr_router::PageContext;
 
 /// The error a generated `State::from_snapshot` returns, re-exported so
 /// the expansion needs no dependency of its user's.
@@ -149,6 +158,63 @@ impl Context {
     /// the router's `recorded_at`.
     pub fn recorded_at(&self) -> Timestamp {
         self.command.recorded_at.unwrap_or_default()
+    }
+
+    /// The root of the stream the input is for, the router's cover's.
+    /// `None` only for a context built by hand without one: the kernel's
+    /// check refuses a command to a stream with no root.
+    pub fn root(&self) -> Option<&Uuid> {
+        self.command
+            .cover
+            .as_ref()
+            .and_then(|cover| cover.root.as_ref())
+    }
+
+    /// Whether the stream is the one `domain`'s natural key `key` names:
+    /// its root is `key`'s UUIDv5 under `domain`
+    /// ([`ids::compute_root`](angzarr_proto::ids::compute_root)), as
+    /// [`Cover::natural`](super::CoverExt::natural) addresses it. What
+    /// `#[handles_cmd(C, rooted_by = field)]` checks before its handler
+    /// runs; [`NotItsStream`] otherwise.
+    pub fn rooted_by(&self, domain: &str, key: &str) -> Result<(), NotItsStream> {
+        let derived = angzarr_proto::ids::compute_root(domain, key).ok();
+        match derived.is_some() && derived.as_ref() == self.root() {
+            true => Ok(()),
+            false => Err(NotItsStream {
+                domain: domain.to_string(),
+                key: key.to_string(),
+            }),
+        }
+    }
+}
+
+/// A command whose natural key is not its stream's: its key's UUIDv5 under
+/// its domain is not the root it was sent to ([`Context::rooted_by`]), so
+/// it would record one entity's events on another's stream. Refused
+/// INVALID_ARGUMENT, before its handler runs, by a `#[handles_cmd(C,
+/// rooted_by = field)]` handler ([`run_rooted_command`]).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct NotItsStream {
+    pub domain: String,
+    pub key: String,
+}
+
+impl fmt::Display for NotItsStream {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        angzarr_diagnostic::display(self, f)
+    }
+}
+
+impl angzarr_diagnostic::Diagnostic for NotItsStream {
+    fn code(&self) -> &str {
+        "angzarr-embedded-not-its-stream"
+    }
+
+    fn args(&self) -> Vec<(&str, angzarr_diagnostic::Arg)> {
+        vec![
+            ("domain", self.domain.as_str().into()),
+            ("key", self.key.as_str().into()),
+        ]
     }
 }
 
@@ -959,21 +1025,35 @@ impl<T: Domain> Commands<T> {
     }
 }
 
-/// What a policy's handler reads besides the event: the triggering event's
-/// `EventRef` (its stream and sequence), the root of that stream, its
-/// correlation and when it was recorded.
+/// What a policy's handler reads besides the event: everything the router
+/// delivers with it, none withheld (decision 14.61): the triggering
+/// event's `EventRef` (its stream and sequence), the root of that stream,
+/// and the event's whole `EventMeta` (its cause, correlation, fact origin,
+/// rules version and `recorded_at`).
 #[derive(Clone, PartialEq, Debug)]
 pub struct PolicyContext {
     trigger: EventRef,
     source_root: Uuid,
     correlation_id: Uuid,
-    recorded_at: Timestamp,
+    meta: EventMeta,
 }
 
 impl PolicyContext {
-    /// A context for a policy's own unit tests; the router builds the real
-    /// one from the committed event.
+    /// A context for a policy's own unit tests, its metadata only a
+    /// correlation and an instant ([`PolicyContext::of`] takes the whole
+    /// of it).
     pub fn new(trigger: EventRef, correlation_id: Uuid, recorded_at: Timestamp) -> Self {
+        let meta = EventMeta {
+            correlation_id: Some(correlation_id),
+            recorded_at: Some(recorded_at),
+            ..EventMeta::default()
+        };
+        PolicyContext::of(trigger, meta)
+    }
+
+    /// The context of the event `trigger` names, delivered with `meta`:
+    /// how the kernel builds it from the committed event.
+    pub fn of(trigger: EventRef, meta: EventMeta) -> Self {
         let source_root = trigger
             .stream
             .as_ref()
@@ -982,8 +1062,8 @@ impl PolicyContext {
         PolicyContext {
             trigger,
             source_root,
-            correlation_id,
-            recorded_at,
+            correlation_id: meta.correlation_id.clone().unwrap_or_default(),
+            meta,
         }
     }
 
@@ -1008,7 +1088,35 @@ impl PolicyContext {
 
     /// When the event was recorded.
     pub fn recorded_at(&self) -> Timestamp {
-        self.recorded_at
+        self.meta.recorded_at.unwrap_or_default()
+    }
+
+    /// The event's whole metadata, as delivered.
+    pub fn meta(&self) -> &EventMeta {
+        &self.meta
+    }
+
+    /// The id of the command (or fact) that produced the event: its cause.
+    pub fn command_id(&self) -> Option<&Uuid> {
+        command_id_of(&self.meta)
+    }
+
+    /// The fact the event records, for a fact's event.
+    pub fn fact_origin(&self) -> Option<&FactOrigin> {
+        self.meta.fact.as_ref()
+    }
+
+    /// The full version of the build that decided the event.
+    pub fn rules_version(&self) -> &str {
+        &self.meta.rules_version
+    }
+}
+
+/// The producing command's id `meta` names as the event's cause.
+fn command_id_of(meta: &EventMeta) -> Option<&Uuid> {
+    match &meta.causation {
+        Some(Causation::CommandId(id)) => Some(id),
+        None => None,
     }
 }
 
@@ -1129,12 +1237,8 @@ async fn project_book<P: AsyncProjector>(
 ) -> Result<(), Report> {
     let cover = book.cover.clone().unwrap_or_default();
     for page in &book.pages {
-        let recorded_at = page
-            .meta
-            .as_ref()
-            .and_then(|m| m.recorded_at)
-            .unwrap_or_default();
-        let ctx = ProjectionContext::new(cover.clone(), page.sequence, recorded_at);
+        let meta = page.meta.clone().unwrap_or_default();
+        let ctx = ProjectionContext::of(cover.clone(), page.sequence, meta);
         let payload = page.payload.clone().unwrap_or_default();
         let run = projector.project(&payload, &ctx);
         if let Some(run) = run {
@@ -1167,23 +1271,35 @@ impl std::future::Future for Yield {
 pub type Projecting<'a> =
     std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Report>> + Send + 'a>>;
 
-/// What a projector's handler reads besides the event: the stream it is
-/// from, its sequence there and when it was recorded.
+/// What a projector's handler reads besides the event: everything the
+/// router delivers with it, none withheld (decision 14.61): the stream it
+/// is from, its sequence there, and its whole `EventMeta` (its cause,
+/// correlation, fact origin, rules version and `recorded_at`).
 #[derive(Clone, PartialEq, Debug)]
 pub struct ProjectionContext {
     stream: Cover,
     sequence: u64,
-    recorded_at: Timestamp,
+    meta: EventMeta,
 }
 
 impl ProjectionContext {
-    /// A context for a projector's own unit tests; the kernel builds the
-    /// real one from the committed event.
+    /// A context for a projector's own unit tests, its metadata only an
+    /// instant ([`ProjectionContext::of`] takes the whole of it).
     pub fn new(stream: Cover, sequence: u64, recorded_at: Timestamp) -> Self {
+        let meta = EventMeta {
+            recorded_at: Some(recorded_at),
+            ..EventMeta::default()
+        };
+        ProjectionContext::of(stream, sequence, meta)
+    }
+
+    /// The context of event `sequence` of `stream`, delivered with `meta`:
+    /// how the kernel builds it from the committed event.
+    pub fn of(stream: Cover, sequence: u64, meta: EventMeta) -> Self {
         ProjectionContext {
             stream,
             sequence,
-            recorded_at,
+            meta,
         }
     }
 
@@ -1199,7 +1315,32 @@ impl ProjectionContext {
 
     /// When the event was recorded.
     pub fn recorded_at(&self) -> Timestamp {
-        self.recorded_at
+        self.meta.recorded_at.unwrap_or_default()
+    }
+
+    /// The event's whole metadata, as delivered.
+    pub fn meta(&self) -> &EventMeta {
+        &self.meta
+    }
+
+    /// The id of the command (or fact) that produced the event: its cause.
+    pub fn command_id(&self) -> Option<&Uuid> {
+        command_id_of(&self.meta)
+    }
+
+    /// The event's correlation.
+    pub fn correlation_id(&self) -> Option<&Uuid> {
+        self.meta.correlation_id.as_ref()
+    }
+
+    /// The fact the event records, for a fact's event.
+    pub fn fact_origin(&self) -> Option<&FactOrigin> {
+        self.meta.fact.as_ref()
+    }
+
+    /// The full version of the build that decided the event.
+    pub fn rules_version(&self) -> &str {
+        &self.meta.rules_version
     }
 }
 
@@ -1230,9 +1371,11 @@ where
         Err(rejection) => panic!("the step refused: {rejection:?}"),
     };
     let mut emit = first;
+    let mut applied = 0;
     for _ in 0..=STEP_LIMIT {
         for event in std::mem::take(&mut emit.events) {
-            A::apply(&mut instance, &event);
+            decided::<A>(&mut instance, &event, ctx, applied);
+            applied += 1;
         }
         let Some(next) = emit.next.take() else {
             break;
@@ -1465,10 +1608,55 @@ where
     O: Emits<A>,
     E: Fails<A>,
 {
-    let fail = super::route::failed::<R>;
     let ctx = context_of(cctx);
     let command = input::<C>(any)?;
-    let mut emit = handler(state, command, &ctx)
+    decide(state, command, &ctx, handler)
+}
+
+/// [`run_command`] for a command whose natural key, `key` of it, names its
+/// stream: refused [`NotItsStream`], INVALID_ARGUMENT, before `handler`
+/// runs, when the stream's root is not the key's
+/// ([`Context::rooted_by`]). What `#[handles_cmd(C, rooted_by = field)]`
+/// registers.
+pub fn run_rooted_command<A, R, C, O, E>(
+    any: &Any,
+    state: &A,
+    cctx: angzarr_router::domain::CommandContext,
+    key: impl FnOnce(&C) -> &str,
+    handler: impl FnOnce(&A, C, &Context) -> Result<O, E>,
+) -> Result<Option<EventBook>, angzarr_router::error::HandlerError>
+where
+    A: Domain<State = A, Rejection = Rejection<R>> + Clone,
+    R: angzarr_diagnostic::Diagnostic + Send + Sync + 'static,
+    C: DomainMessage,
+    O: Emits<A>,
+    E: Fails<A>,
+{
+    let ctx = context_of(cctx);
+    let command = input::<C>(any)?;
+    ctx.rooted_by(A::NAME, key(&command)).map_err(|refusal| {
+        super::route::refused(&refusal, None, BusinessStatus::InvalidArgument)
+    })?;
+    decide(state, command, &ctx, handler)
+}
+
+/// `handler`'s decision on `command`, run as ONE decision: its events
+/// applied, in order, to a working copy of `state`, each continuation step
+/// run on that copy, until none is left (see [`run_command`]).
+fn decide<A, R, C, O, E>(
+    state: &A,
+    command: C,
+    ctx: &Context,
+    handler: impl FnOnce(&A, C, &Context) -> Result<O, E>,
+) -> Result<Option<EventBook>, angzarr_router::error::HandlerError>
+where
+    A: Domain<State = A, Rejection = Rejection<R>> + Clone,
+    R: angzarr_diagnostic::Diagnostic + Send + Sync + 'static,
+    O: Emits<A>,
+    E: Fails<A>,
+{
+    let fail = super::route::failed::<R>;
+    let mut emit = handler(state, command, ctx)
         .map_err(|e| fail(e.into_failed()))?
         .into_emit();
     let mut working = state.clone();
@@ -1476,7 +1664,7 @@ where
     let mut steps = 0;
     loop {
         for event in std::mem::take(&mut emit.events) {
-            A::apply(&mut working, &event);
+            decided::<A>(&mut working, &event, ctx, events.len());
             events.push(event);
         }
         let Some(next) = emit.next.take() else {
@@ -1494,8 +1682,20 @@ where
                 ),
             ));
         }
-        emit = next(&working, &ctx).map_err(fail)?;
+        emit = next(&working, ctx).map_err(fail)?;
     }
+}
+
+/// Fold `event`, the decision's `index`th, into `working`: on the stream
+/// `ctx` is for, at the sequence it will be given, its metadata not
+/// stamped yet.
+fn decided<A: Domain>(working: &mut A::State, event: &A::Event, ctx: &Context, index: usize) {
+    let page = PageContext {
+        cover: ctx.command.cover.as_ref(),
+        sequence: ctx.command.next_sequence + index as u64,
+        meta: None,
+    };
+    A::apply(working, event, &page);
 }
 
 /// Runs a fact handler as ONE decision, for angzarr-router's
@@ -1576,7 +1776,7 @@ where
     let mut steps = 0;
     loop {
         for event in std::mem::take(&mut record.events) {
-            A::apply(&mut working, &event);
+            decided::<A>(&mut working, &event, ctx, events.len());
             events.push(event);
         }
         let Some(next) = record.next.take() else {

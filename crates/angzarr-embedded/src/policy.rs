@@ -607,7 +607,7 @@ pub(crate) fn answered(
 
 /// `policy` as angzarr-router's table: each event type it handles (its
 /// `EVENTS`, or every event of its source for a hand-written one) runs
-/// [`Policy::on_event`] with the trigger's place and metadata, each command
+/// [`Policy::on_event`] with the trigger's place and its whole metadata, each command
 /// for the target's stream at the root it names; and, for a policy that
 /// answers refusals, each command type it translates (its `TRANSLATES`, or
 /// every command of its target for a hand-written one) is answered by
@@ -627,15 +627,11 @@ pub(crate) fn dispatch<P: Policy>(policy: P) -> PolicyDispatch {
     for event_type in events {
         let policy = Arc::clone(&policy);
         table = table.on_event_with_context(&event_type, move |event, page| {
-            let meta = page.meta.cloned().unwrap_or_default();
-            let ctx = PolicyContext::new(
-                EventRef {
-                    stream: page.cover.cloned(),
-                    sequence: page.sequence,
-                },
-                meta.correlation_id.unwrap_or_default(),
-                meta.recorded_at.unwrap_or_default(),
-            );
+            let trigger = EventRef {
+                stream: page.cover.cloned(),
+                sequence: page.sequence,
+            };
+            let ctx = PolicyContext::of(trigger, page.meta.cloned().unwrap_or_default());
             let commands = policy
                 .on_event(event, &ctx)
                 .map_err(|failure| super::route::policy_failed(&failure))?

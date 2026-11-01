@@ -92,7 +92,7 @@ fn misconfiguration_is_refused_at_registration() {
         type Rejection = std::convert::Infallible;
         const RULES_VERSION: &'static str = "";
         const NAME: &'static str = "unversioned";
-        fn apply(_: &mut account::AccountState, _: &Self::Event) {}
+        fn apply(_: &mut account::AccountState, _: &Self::Event, _: &crate::PageContext<'_>) {}
     }
     assert_eq!(
         fresh.register::<Unversioned>(Upcaster::new("u", "unversioned"), |t| t),
@@ -120,7 +120,7 @@ fn a_configured_resolution_the_state_lacks_is_refused() {
         const NAME: &'static str = "eager";
         const CONFLICT_RESOLUTION: Option<ConflictResolution> =
             Some(ConflictResolution::Commutative);
-        fn apply(_: &mut AccountState, _: &Self::Event) {}
+        fn apply(_: &mut AccountState, _: &Self::Event, _: &crate::PageContext<'_>) {}
     }
 
     assert_eq!(
@@ -203,7 +203,7 @@ fn a_state_descriptor_without_the_implicit_base_is_refused() {
 
         const NAME: &'static str = "bad";
 
-        fn apply(_: &mut StrictOnly, event: &std::convert::Infallible) {
+        fn apply(_: &mut StrictOnly, event: &std::convert::Infallible, _: &crate::PageContext<'_>) {
             match *event {}
         }
     }
@@ -270,7 +270,7 @@ fn a_state_descriptor_naming_another_type_than_its_snapshot_is_refused() {
 
         const NAME: &'static str = "bad";
 
-        fn apply(_: &mut Misnamed, event: &std::convert::Infallible) {
+        fn apply(_: &mut Misnamed, event: &std::convert::Infallible, _: &crate::PageContext<'_>) {
             match *event {}
         }
     }

@@ -149,6 +149,9 @@ pub use angzarr_router;
 /// The projector port, angzarr-router's: what [`Registry::projector_handler`]
 /// registers and a [`CatchUp`] catches up.
 pub use angzarr_router::router::ProjectorHandler;
+/// Where a folded event sits, angzarr-router's: its stream's cover, its
+/// sequence and its metadata, what [`Domain::apply`] is given.
+pub use angzarr_router::PageContext;
 /// angzarr-store-sqlite, the shared SQLite store, re-exported so an
 /// application pins it through angzarr-embedded. Behind the `sqlite`
 /// feature, off by default: it brings sqlx and SQLite.
@@ -504,6 +507,10 @@ pub fn diagnostic_samples() -> Vec<Box<dyn angzarr_diagnostic::Diagnostic>> {
             args,
         ))));
     }
+    samples.push(Box::new(markup::NotItsStream {
+        domain: domain(),
+        key: "swift-amber-falcon".to_string(),
+    }));
     samples.push(Box::new(missing));
     samples.push(Box::new(WireError::UnknownEnum {
         message: "toy.v1.Closed",

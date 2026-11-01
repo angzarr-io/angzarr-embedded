@@ -519,7 +519,7 @@ mod tally {
 
         const NAME: &'static str = "tally";
 
-        fn apply(state: &mut Tally, _: &Count) {
+        fn apply(state: &mut Tally, _: &Count, _: &crate::PageContext<'_>) {
             state.count += 1;
         }
     }

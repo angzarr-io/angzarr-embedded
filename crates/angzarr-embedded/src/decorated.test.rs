@@ -40,8 +40,9 @@ use std::fmt;
 use ::angzarr_embedded::markup::v1::{refusal_response, RefusalResponse};
 use ::angzarr_embedded::markup::{
     self, assert_step_idempotent, BusinessStatus, CommandContext, CommandRefused, Commands,
-    Context, DomainMessage, Emit, Failed, Policy, PolicyContext, ProcessManager, ProjectionContext,
-    Record, Refusal, Refuses, Refusing, Rejection, RetryableStatus, TypeName, STEP_LIMIT,
+    Context, DomainMessage, Emit, Failed, PageContext, Policy, PolicyContext, ProcessManager,
+    ProjectionContext, Record, Refusal, Refuses, Refusing, Rejection, RetryableStatus, TypeName,
+    STEP_LIMIT,
 };
 use ::angzarr_embedded::v1::event_meta::Causation;
 use ::angzarr_embedded::v1::{
@@ -256,6 +257,21 @@ mod wire {
     message!("toy.lamp.v1", SwitchedOff {});
 
     message!(
+        "toy.badge.cmd.v1",
+        Issue {
+            #[prost(string, tag = "1")]
+            key: String,
+        }
+    );
+    message!(
+        "toy.badge.v1",
+        Issued {
+            #[prost(string, tag = "1")]
+            key: String,
+        }
+    );
+
+    message!(
         "toy.ladder.cmd.v1",
         Climb {
             #[prost(uint32, tag = "1")]
@@ -453,6 +469,8 @@ domain_type!(SwitchOn {});
 domain_type!(SwitchedOn {});
 domain_type!(SwitchOff {});
 domain_type!(SwitchedOff {});
+domain_type!(Issue { key: String });
+domain_type!(Issued { key: String });
 domain_type!(Hold { cents: i64 });
 domain_type!(Held { cents: i64 });
 domain_type!(InsufficientFunds { short: i64 });
@@ -1102,6 +1120,66 @@ impl Toggle {
     }
 }
 
+// ---------------------------------------------------------------- the badge
+
+/// An aggregate whose stream is rooted by its natural key (`rooted_by`),
+/// and whose applier reads where each event sits (its `&PageContext`).
+#[derive(Clone, Default, PartialEq, Debug)]
+pub struct Badge {
+    /// Each folded event's sequence and recording second (`None` for an
+    /// event of the decision being made, not stamped yet).
+    seen: Vec<(u64, Option<i64>)>,
+}
+
+/// A badge's continuation found its own event folded where it should not
+/// be: a bug.
+#[derive(Clone, PartialEq, Debug)]
+pub struct MisFolded;
+
+impl fmt::Display for MisFolded {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        angzarr_diagnostic::display(self, f)
+    }
+}
+
+impl Diagnostic for MisFolded {
+    fn code(&self) -> &str {
+        "toy-badge-mis-folded"
+    }
+
+    fn args(&self) -> Vec<(&str, Arg)> {
+        vec![]
+    }
+}
+
+#[aggregate(domain = "badge")]
+impl Badge {
+    /// Issue the badge its key names; the decision's own event is folded,
+    /// before the continuation runs, at the stream's next sequence with no
+    /// metadata yet.
+    #[handles_cmd(Issue, rooted_by = key)]
+    fn issue(&self, cmd: Issue, ctx: &Context) -> Result<Emit<Self>, Failed<Infallible>> {
+        let due = (ctx.command.next_sequence, None);
+        Ok(
+            Emit::of(Issued { key: cmd.key }).then(move |badge: &Self, _: &Context| {
+                match badge.seen.last() == Some(&due) {
+                    true => Ok(None::<Issued>),
+                    false => Err(Failed::<Infallible>::bug(&MisFolded)),
+                }
+            }),
+        )
+    }
+
+    #[applies(Issued)]
+    fn issued(&mut self, _event: Issued, page: &PageContext) {
+        let second = page
+            .meta
+            .and_then(|meta| meta.recorded_at)
+            .map(|at| at.seconds);
+        self.seen.push((page.sequence, second));
+    }
+}
+
 // ---------------------------------------------------------------- the meter
 
 domain_type!(Gauge { reading: i64 });
@@ -1556,7 +1634,7 @@ impl Domain for Tally {
 
     const NAME: &'static str = "tally";
 
-    fn apply(state: &mut TallyState, _: &Counted) {
+    fn apply(state: &mut TallyState, _: &Counted, _: &::angzarr_embedded::PageContext<'_>) {
         state.count += 1;
     }
 }
@@ -2942,6 +3020,185 @@ mod named_payloads {
             toggle.when(SwitchOn {}).events(),
             [ToggleEvent::SwitchedOn(SwitchedOn {})]
         );
+    }
+}
+
+mod full_context {
+    use super::*;
+    use ::angzarr_embedded::testing::Harness;
+    use ::angzarr_embedded::CoverExt;
+
+    fn badge(key: &str) -> Harness<Badge> {
+        let mut registry = Registry::new();
+        registry.aggregate::<Badge>(Badge::default);
+        Harness::new(registry, Cover::natural("badge", key))
+    }
+
+    /// An applier taking the event's page reads its sequence and its
+    /// metadata as stored, and, for the decision's own event, its sequence
+    /// to be with no metadata yet (the continuation would fail otherwise).
+    #[test]
+    fn an_applier_reads_where_each_event_sits() {
+        let mut badge = badge("gold");
+        let issued = || {
+            Issued {
+                key: "gold".to_string(),
+            }
+            .into()
+        };
+        badge.given([issued(), issued()]);
+        assert_eq!(badge.state().seen, [(0, Some(1)), (1, Some(1))]);
+        let issued = badge
+            .when(Issue {
+                key: "gold".to_string(),
+            })
+            .events();
+        assert_eq!(issued.len(), 1);
+        assert_eq!(
+            badge.state().seen,
+            [(0, Some(1)), (1, Some(1)), (2, Some(2))]
+        );
+    }
+
+    /// A command whose natural key names another stream is refused
+    /// INVALID_ARGUMENT before its handler runs, and records nothing.
+    #[test]
+    fn a_command_whose_key_names_another_stream_is_refused() {
+        let mut badge = badge("gold");
+        let refused = badge
+            .when(Issue {
+                key: "silver".to_string(),
+            })
+            .refused();
+        assert_eq!(
+            said(&refused),
+            (
+                "angzarr-embedded-not-its-stream".to_string(),
+                vec![
+                    ("domain".to_string(), "badge".to_string()),
+                    ("key".to_string(), "silver".to_string()),
+                ]
+            )
+        );
+        assert_eq!(refused.status(), BusinessStatus::InvalidArgument);
+        assert!(badge.pages().is_empty());
+    }
+
+    /// A handler's context names its stream's root, and says whether a
+    /// natural key is its stream's.
+    #[test]
+    fn a_handlers_context_names_its_root() {
+        let cover = Cover::natural("badge", "gold");
+        let ctx = Context::new(at(1)).with_command(CommandContext {
+            cover: Some(cover.clone()),
+            ..CommandContext::default()
+        });
+        assert_eq!(ctx.root(), cover.root.as_ref());
+        assert_eq!(ctx.rooted_by("badge", "gold"), Ok(()));
+        assert_eq!(
+            ctx.rooted_by("badge", "silver"),
+            Err(markup::NotItsStream {
+                domain: "badge".to_string(),
+                key: "silver".to_string(),
+            })
+        );
+        assert!(
+            ctx.rooted_by("ba:dge", "gold").is_err(),
+            "a domain that derives no root"
+        );
+        let rootless = Context::new(at(1));
+        assert_eq!(rootless.root(), None);
+        assert!(rootless.rooted_by("badge", "gold").is_err());
+    }
+
+    fn full_meta() -> ::angzarr_embedded::v1::EventMeta {
+        ::angzarr_embedded::v1::EventMeta {
+            causation: Some(Causation::CommandId(correlation(7))),
+            fact: Some(FactOrigin {
+                external_id: "pi_1234".to_string(),
+                ..FactOrigin::default()
+            }),
+            correlation_id: Some(correlation(8)),
+            recorded_at: Some(at(1_700_000_000)),
+            rules_version: "1.4.2+build.7".to_string(),
+        }
+    }
+
+    /// A policy's context is its trigger and the trigger's whole metadata.
+    #[test]
+    fn a_policys_context_holds_the_whole_metadata() {
+        let ctx = PolicyContext::of(trigger(&correlation(1)), full_meta());
+        assert_eq!(ctx.meta(), &full_meta());
+        assert_eq!(ctx.command_id(), Some(&correlation(7)));
+        assert_eq!(ctx.correlation_id(), &correlation(8));
+        assert_eq!(
+            ctx.fact_origin().map(|f| f.external_id.as_str()),
+            Some("pi_1234")
+        );
+        assert_eq!(ctx.rules_version(), "1.4.2+build.7");
+        assert_eq!(ctx.recorded_at(), at(1_700_000_000));
+        let small = PolicyContext::new(trigger(&correlation(1)), correlation(2), at(3));
+        assert_eq!(small.command_id(), None);
+        assert_eq!(small.correlation_id(), &correlation(2));
+        assert_eq!(small.recorded_at(), at(3));
+    }
+
+    /// A projector keeping the metadata of each event it is handed.
+    pub struct Seen {
+        port: std::sync::Arc<std::sync::Mutex<Vec<::angzarr_embedded::v1::EventMeta>>>,
+    }
+
+    #[projector(name = "seen", sources = [Badge])]
+    impl Seen {
+        #[projects(Issued)]
+        async fn issued(&mut self, _event: &Issued, ctx: &ProjectionContext) -> Result<(), Report> {
+            self.port.lock().unwrap().push(ctx.meta().clone());
+            Ok(())
+        }
+    }
+
+    /// The kernel hands a marked-up projector each event's whole metadata.
+    #[test]
+    fn a_projector_is_handed_each_events_whole_metadata() {
+        use ::angzarr_embedded::ProjectorHandler as _;
+        let port = std::sync::Arc::default();
+        let seen = markup::Projected::new(Seen {
+            port: std::sync::Arc::clone(&port),
+        });
+        let book = EventBook {
+            cover: Some(Cover::natural("badge", "gold")),
+            pages: vec![EventPage {
+                sequence: 0,
+                payload: Some(any(Issued {
+                    key: "gold".to_string(),
+                })),
+                meta: Some(full_meta()),
+            }],
+            ..EventBook::default()
+        };
+        ready(seen.dispatch(&book)).unwrap();
+        assert_eq!(*port.lock().unwrap(), [full_meta()]);
+    }
+
+    /// A projector's context is its stream, sequence and the event's whole
+    /// metadata.
+    #[test]
+    fn a_projectors_context_holds_the_whole_metadata() {
+        let stream = Cover::natural("badge", "gold");
+        let ctx = ProjectionContext::of(stream.clone(), 4, full_meta());
+        assert_eq!((ctx.stream(), ctx.sequence()), (&stream, 4));
+        assert_eq!(ctx.meta(), &full_meta());
+        assert_eq!(ctx.command_id(), Some(&correlation(7)));
+        assert_eq!(ctx.correlation_id(), Some(&correlation(8)));
+        assert_eq!(
+            ctx.fact_origin().map(|f| f.external_id.as_str()),
+            Some("pi_1234")
+        );
+        assert_eq!(ctx.rules_version(), "1.4.2+build.7");
+        assert_eq!(ctx.recorded_at(), at(1_700_000_000));
+        let small = ProjectionContext::new(stream, 4, at(3));
+        assert_eq!((small.command_id(), small.correlation_id()), (None, None));
+        assert_eq!(small.recorded_at(), at(3));
     }
 }
 

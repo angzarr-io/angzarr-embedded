@@ -13,6 +13,7 @@ use super::error::{unreadable, KernelError, PayloadError, ReplayError};
 use super::payload::{pack, type_name, Payload};
 use super::registry::Registry;
 use super::upcast::Upcaster;
+use angzarr_router::PageContext;
 
 /// One recorded event, checked and decoded: an [`EventPage`] whose
 /// `EventMeta` had every field a recorded event always has (so its
@@ -277,7 +278,13 @@ impl<D: Domain> Stream<D> {
 
     /// Fold one event in and hold it.
     fn push(&mut self, envelope: Envelope<D::Event>) {
-        D::apply(&mut self.state, &envelope.event);
+        let meta = envelope.meta();
+        let page = PageContext {
+            cover: Some(&self.cover),
+            sequence: envelope.sequence,
+            meta: Some(&meta),
+        };
+        D::apply(&mut self.state, &envelope.event, &page);
         self.last_recorded_at = Some(envelope.recorded_at);
         self.events.push(envelope);
     }

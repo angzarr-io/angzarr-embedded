@@ -133,7 +133,7 @@ impl Domain for Tally {
     const RULES_VERSION: &'static str = "v1";
     const NAME: &'static str = "tally";
 
-    fn apply(state: &mut Count, event: &Added) {
+    fn apply(state: &mut Count, event: &Added, _: &crate::PageContext<'_>) {
         state.n += event.n;
     }
 }

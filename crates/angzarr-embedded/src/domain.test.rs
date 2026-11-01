@@ -251,7 +251,7 @@ mod tx {
 
         const NAME: &'static str = "probe";
 
-        fn apply(s: &mut ProbeState, e: &ProbeEvent) {
+        fn apply(s: &mut ProbeState, e: &ProbeEvent, _: &crate::PageContext<'_>) {
             if let ProbeEvent::Bumped = e {
                 s.bumps += 1;
             }

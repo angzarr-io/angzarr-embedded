@@ -380,3 +380,39 @@ fn a_reactions_identity_is_unset_or_the_stamp() {
         "command_id"
     );
 }
+
+/// What [`Witness`] was handed: each trigger's whole metadata.
+static WITNESSED: std::sync::Mutex<Vec<crate::v1::EventMeta>> = std::sync::Mutex::new(Vec::new());
+
+/// A policy that sends nothing and keeps the metadata of each event it is
+/// handed.
+struct Witness;
+
+impl crate::Policy for Witness {
+    const NAME: &'static str = "witness";
+    type Source = crate::toys::Account;
+    type Target = crate::toys::Ledger;
+
+    fn on_event(
+        &self,
+        _event: &crate::Any,
+        ctx: &crate::markup::PolicyContext,
+    ) -> Result<Option<crate::markup::Commands<crate::toys::Ledger>>, crate::markup::Report> {
+        WITNESSED.lock().unwrap().push(ctx.meta().clone());
+        Ok(None)
+    }
+}
+
+#[test]
+fn a_policy_is_handed_its_triggers_whole_metadata() {
+    use crate::testing::Harness;
+    use crate::toys::{cover, Account, AccountCmd, AccountEvent};
+    let mut registry = crate::toys::registry();
+    registry.policy(Witness);
+    let mut account = Harness::<Account>::new(registry, cover("account", 9));
+    account.given([AccountEvent::Opened]);
+    account.when(AccountCmd::Deposit(5)).events();
+    let stored = account.pages()[1].meta.clone().unwrap();
+    assert!(stored.causation.is_some() && !stored.rules_version.is_empty());
+    assert!(WITNESSED.lock().unwrap().contains(&stored), "{stored:?}");
+}

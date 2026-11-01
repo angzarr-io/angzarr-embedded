@@ -6,6 +6,7 @@ use angzarr_proto::v1::{ConflictResolution, StateDescriptor};
 
 use super::conflict::Units;
 use super::payload::Payload;
+use angzarr_router::PageContext;
 
 /// A domain's state: a domain type, with a prost message as its snapshot
 /// form ([`State::Snapshot`]), so it can be snapshotted as `Any`. angzarr's
@@ -122,9 +123,15 @@ pub trait Domain: Sized + 'static {
     /// only current types are named here.
     const CONFLICT_RESOLUTION_BY_COMMAND: &'static [(&'static str, ConflictResolution)] = &[];
 
-    /// Fold one event into the state. Pure: the same state and event
-    /// always give the same result. Never sees the event's metadata.
-    fn apply(state: &mut Self::State, event: &Self::Event);
+    /// Fold one event into the state, given where it sits: `page`, the
+    /// router's page context, its stream's cover, its sequence and its
+    /// whole metadata ([`EventMeta`](angzarr_proto::v1::EventMeta): its
+    /// cause, correlation, fact origin, rules version and `recorded_at`),
+    /// the metadata `None` only for an event of the decision being made,
+    /// which is stamped when it is committed (its instant is the
+    /// handler's `Context::recorded_at`). Pure: the same state, event and
+    /// page always give the same result.
+    fn apply(state: &mut Self::State, event: &Self::Event, page: &PageContext<'_>);
 }
 
 #[cfg(test)]

@@ -24,6 +24,7 @@ use angzarr_proto::v1::ConflictResolution;
 use angzarr_router::domain::DomainDispatch;
 use angzarr_router::error::{BusinessStatus, CodedError, GrpcCode, HandlerError};
 use angzarr_router::rebuild::{FoldFailure, Rebuilder};
+use angzarr_router::PageContext;
 use prost::Message;
 use prost_types::Any;
 
@@ -317,7 +318,7 @@ pub(crate) fn bug(bug: &dyn Diagnostic) -> HandlerError {
 /// `refusal_type` and the object beside; a refusal without one under its
 /// own code, its args flattened as metadata. Either goes out under
 /// `status`.
-fn refused(
+pub(crate) fn refused(
     rejection: &dyn Diagnostic,
     refusal: Option<Any>,
     status: BusinessStatus,
@@ -441,7 +442,7 @@ pub(crate) fn table<D: Domain>(
     let snapshot_form = <<D::State as State>::Snapshot as prost::Name>::full_name();
     let restore_fresh = Arc::clone(&fresh);
     let mut rebuilder = Rebuilder::new(move || fresh())
-        .with_fold(move |state, pages, _cover| {
+        .with_fold(move |state, pages, cover| {
             for (index, page) in pages.iter().enumerate() {
                 if is_nothing(page) {
                     continue;
@@ -452,7 +453,12 @@ pub(crate) fn table<D: Domain>(
                 };
                 let any = page.payload.clone().unwrap_or_default();
                 let event = D::Event::from_any(&any).map_err(|e| failed(&e))?;
-                D::apply(state, &event);
+                let page = PageContext {
+                    cover,
+                    sequence: page.sequence,
+                    meta: page.meta.as_ref(),
+                };
+                D::apply(state, &event, &page);
             }
             Ok(())
         })

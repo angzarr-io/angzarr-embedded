@@ -459,7 +459,9 @@ pub trait Domain: Sized + 'static {
     const RULES_VERSION: &'static str;             // the build's version: env!("CARGO_PKG_VERSION")
     const CONFLICT_RESOLUTION: Option<ConflictResolution> = None;
     const CONFLICT_RESOLUTION_BY_COMMAND: &'static [(&'static str, ConflictResolution)] = &[];
-    fn apply(state: &mut Self::State, event: &Self::Event);
+    // The event, and where it sits: its cover, sequence and whole EventMeta
+    // (None for the decision's own event, not stamped yet).
+    fn apply(state: &mut Self::State, event: &Self::Event, page: &PageContext<'_>);
 }
 
 impl Registry {
@@ -1305,8 +1307,8 @@ no actor), and reactor re-runs deduplicate in both, with no switch.
 - Each domain gains `type Fact` (`Infallible` today) and `ingest`.
 - **`Stamp` goes, and with it every actor.** Who did what is written by the
   server to its security log, keyed by the command id; events record no
-  person. `Stamp.at` becomes `EventMeta.recorded_at`, copied into a payload
-  (`tx.recorded_at()`) only where a fold needs business time.
+  person. `Stamp.at` becomes `EventMeta.recorded_at`, which a fold reads
+  from its event's page (`Domain::apply`'s `PageContext`).
 - **`ListState` becomes a prost message** with `option (io.angzarr.v1.state)
   = { conflict_resolutions: [CONFLICT_RESOLUTION_COMMUTATIVE] }` and
   `(io.angzarr.v1.conflict)` markers on every field (items per key, columns
