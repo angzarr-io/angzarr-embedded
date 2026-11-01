@@ -1307,7 +1307,8 @@ mod resume {
             let mut registry = Registry::new();
             left(&mut registry);
             let log = MemoryDeadLetters::new();
-            Kernel::new(&registry, &log)
+            Kernel::new(&registry)
+                .log_with(&log)
                 .handle_any(
                     &store,
                     book("left", 1, 1, "/test.meet.v1.Meet"),
@@ -1543,7 +1544,8 @@ mod parts {
             let mut registry = Registry::new();
             meeting(&mut registry, "left");
             let log = MemoryDeadLetters::new();
-            Kernel::new(&registry, &log)
+            Kernel::new(&registry)
+                .log_with(&log)
                 .handle_any(
                     &*store,
                     book("left", root, 1, "/test.meet.v1.Meet"),

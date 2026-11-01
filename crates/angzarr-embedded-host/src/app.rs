@@ -53,7 +53,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use angzarr_diagnostic::Report;
-use angzarr_embedded::v1::{AngzarrDeadLetter, CommandBook, Cover, EventBook, EventPage};
+use angzarr_embedded::v1::{CommandBook, Cover, EventBook, EventPage};
 use angzarr_embedded::{
     DeadLetterLog, EventStore, Failure, Handled, Kernel, KernelError, Malformed, OnPolicyBug,
     OnRetryable, Recorded, Registry, Rejected, Sampled, StoreError, StreamRef, Target, Wait,
@@ -359,16 +359,6 @@ async fn stopped(host: Host, error: HostError) -> HostError {
     error
 }
 
-/// A log that keeps nothing: an [`App`]'s when the application supplies
-/// none, its dead letters kept by its store.
-struct Unlogged;
-
-impl DeadLetterLog for Unlogged {
-    fn write(&self, _line: &str) {}
-
-    fn letter(&self, _letter: &AngzarrDeadLetter) {}
-}
-
 /// An [`App`] being built from its parts: its registry, its [`Stores`],
 /// and the kernel's settings, each the kernel's default until set, as
 /// [`Kernel`]'s are. [`AppBuilder::start`] starts it.
@@ -376,7 +366,7 @@ pub struct AppBuilder<R: Stores> {
     host: Host,
     registry: Registry,
     stores: R,
-    log: Arc<dyn DeadLetterLog>,
+    log: Option<Arc<dyn DeadLetterLog>>,
     wait: Option<Arc<dyn Wait>>,
     policy_bug: OnPolicyBug,
     retry: OnRetryable,
@@ -393,7 +383,7 @@ impl<R: Stores> AppBuilder<R> {
     /// Where each dead letter's line goes, beside the store, which keeps
     /// the letters when it can: nowhere until given.
     pub fn dead_letter_log(mut self, log: Arc<dyn DeadLetterLog>) -> AppBuilder<R> {
-        self.log = log;
+        self.log = Some(log);
         self
     }
 
@@ -464,7 +454,7 @@ pub struct App<R: Stores = OneStore<SqliteStore>> {
     // Dropped in this order: the children stopped first.
     host: Host,
     registry: Registry,
-    log: Arc<dyn DeadLetterLog>,
+    log: Option<Arc<dyn DeadLetterLog>>,
     wait: Option<Arc<dyn Wait>>,
     policy_bug: OnPolicyBug,
     retry: OnRetryable,
@@ -486,7 +476,7 @@ impl<R: Stores> App<R> {
             host: Host::none(),
             registry,
             stores,
-            log: Arc::new(Unlogged),
+            log: None,
             wait: None,
             policy_bug: OnPolicyBug::default(),
             retry: OnRetryable::default(),
@@ -497,9 +487,13 @@ impl<R: Stores> App<R> {
     /// The kernel over this application's registry and dead-letter log,
     /// with its settings.
     pub fn kernel(&self) -> Kernel<'_> {
-        let kernel = Kernel::new(&self.registry, &*self.log)
+        let kernel = Kernel::new(&self.registry)
             .on_policy_bug(self.policy_bug)
             .on_retryable(self.retry);
+        let kernel = match &self.log {
+            Some(log) => kernel.log_with(&**log),
+            None => kernel,
+        };
         match &self.wait {
             Some(wait) => kernel.wait_with(&**wait),
             None => kernel,

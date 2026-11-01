@@ -346,6 +346,18 @@ pub enum ChainProblem {
 /// that does not replay, an event the store cannot read back.
 pub use angzarr_diagnostic::Recovery;
 
+impl Failure<super::route::Rejected> {
+    /// The domain's own refusal, typed as `R`, when this is a refusal its
+    /// handler in this process made ([`Rejected::rejection`](super::Rejected::rejection)):
+    /// for a typed domain `D`, `failure.rejection::<D::Rejection>()`.
+    pub fn rejection<R: std::any::Any>(&self) -> Option<&R> {
+        match self {
+            Failure::Rejected(rejected) => rejected.rejection(),
+            _ => None,
+        }
+    }
+}
+
 impl<R> Failure<R> {
     /// The dead letters the call wrote before it failed, whole and keyed
     /// as the store keeps them (owner ruling Q5): what its steps with no

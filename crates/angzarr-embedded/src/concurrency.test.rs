@@ -181,7 +181,7 @@ fn race(
     store: &MemoryStore,
     books: [CommandBook; 2],
 ) -> Vec<Result<Handled, Failure<Rejected>>> {
-    let kernel = Kernel::new(registry, log);
+    let kernel = Kernel::new(registry).log_with(log);
     std::thread::scope(|scope| {
         let racers: Vec<_> = books
             .into_iter()
@@ -288,7 +288,7 @@ fn an_expected_sequence_already_passed_is_a_stale_expected_sequence() {
     let registry = registry_of(racing);
     let log = MemoryDeadLetters::new();
     let store = MemoryStore::new();
-    let kernel = Kernel::new(&registry, &log);
+    let kernel = Kernel::new(&registry).log_with(&log);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();

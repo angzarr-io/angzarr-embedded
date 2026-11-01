@@ -3094,7 +3094,8 @@ fn handle_in<D: Domain>(
         command_id: Uuid::from_bytes([0x70 | n; 16]),
     };
     ready(
-        ::angzarr_embedded::Kernel::new(registry, log)
+        ::angzarr_embedded::Kernel::new(registry)
+            .log_with(log)
             .on_retryable(::angzarr_embedded::OnRetryable {
                 max_retries: 0,
                 ..::angzarr_embedded::OnRetryable::default()
@@ -4240,7 +4241,8 @@ fn settle_in<D: Domain>(
         command_id: Uuid::from_bytes([0x70 | n; 16]),
     };
     let handled = ready(
-        ::angzarr_embedded::Kernel::new(registry, log)
+        ::angzarr_embedded::Kernel::new(registry)
+            .log_with(log)
             .on_retryable(::angzarr_embedded::OnRetryable {
                 max_retries: 0,
                 ..::angzarr_embedded::OnRetryable::default()
@@ -4371,9 +4373,12 @@ mod refusal_flow {
             now: at(9),
             command_id: Uuid::from_bytes([0x79; 16]),
         };
-        let resumed =
-            ready(::angzarr_embedded::Kernel::new(&registry, &log).resume(&store, &sampled))
-                .expect("nothing left owed");
+        let resumed = ready(
+            ::angzarr_embedded::Kernel::new(&registry)
+                .log_with(&log)
+                .resume(&store, &sampled),
+        )
+        .expect("nothing left owed");
         assert!(
             resumed.steps().is_empty(),
             "the position moved past the trigger"
@@ -4390,7 +4395,9 @@ mod refusal_flow {
         use ::angzarr_embedded::{Kernel, OnPolicyBug};
         let (registry, store) = funded(false, 7);
         let log = MemoryDeadLetters::new();
-        let kernel = Kernel::new(&registry, &log).on_policy_bug(OnPolicyBug::Stay);
+        let kernel = Kernel::new(&registry)
+            .log_with(&log)
+            .on_policy_bug(OnPolicyBug::Stay);
         let sampled = Sampled {
             now: at(2),
             command_id: Uuid::from_bytes([0x72; 16]),
@@ -5021,7 +5028,7 @@ mod router {
             .unwrap();
         let store = Mem::new();
         let log = MemoryDeadLetters::new();
-        let kernel = ::angzarr_embedded::Kernel::new(&registry, &log);
+        let kernel = ::angzarr_embedded::Kernel::new(&registry).log_with(&log);
         let note = || send("remote", 4, any(Note {}), Some(correlation(4)));
         let sampled = Sampled {
             now: at(9),
@@ -5105,7 +5112,7 @@ mod router {
             .unwrap();
         let store = Mem::new();
         let log = MemoryDeadLetters::new();
-        let kernel = ::angzarr_embedded::Kernel::new(&registry, &log);
+        let kernel = ::angzarr_embedded::Kernel::new(&registry).log_with(&log);
         let sampled = |now| Sampled {
             now,
             command_id: Uuid::from_bytes([0x74; 16]),
@@ -5206,12 +5213,12 @@ mod router {
         );
         let store = Mem::new();
         let log = MemoryDeadLetters::new();
-        let kernel = ::angzarr_embedded::Kernel::new(&registry, &log).on_retryable(
-            ::angzarr_embedded::OnRetryable {
+        let kernel = ::angzarr_embedded::Kernel::new(&registry)
+            .log_with(&log)
+            .on_retryable(::angzarr_embedded::OnRetryable {
                 max_retries: 0,
                 ..::angzarr_embedded::OnRetryable::default()
-            },
-        );
+            });
         let sampled = Sampled {
             now: at(9),
             command_id: Uuid::from_bytes([0x79; 16]),
@@ -5422,7 +5429,7 @@ mod router {
         use std::time::Duration;
         let registry = registry();
         let log = MemoryDeadLetters::new();
-        let kernel = ::angzarr_embedded::Kernel::new(&registry, &log);
+        let kernel = ::angzarr_embedded::Kernel::new(&registry).log_with(&log);
         assert_eq!(
             kernel.retryable(),
             OnRetryable {
@@ -5450,7 +5457,8 @@ mod router {
         let store = Mem::new();
         let log = MemoryDeadLetters::new();
         let waits = Waits::drawing(0.5);
-        let kernel = ::angzarr_embedded::Kernel::new(&registry, &log)
+        let kernel = ::angzarr_embedded::Kernel::new(&registry)
+            .log_with(&log)
             .on_retryable(capped())
             .wait_with(&waits);
         let failed = ready(kernel.handle_any(
@@ -5482,7 +5490,8 @@ mod router {
         let store = Mem::new();
         let log = MemoryDeadLetters::new();
         let waits = Waits::drawing(0.0);
-        let kernel = ::angzarr_embedded::Kernel::new(&registry, &log)
+        let kernel = ::angzarr_embedded::Kernel::new(&registry)
+            .log_with(&log)
             .on_retryable(::angzarr_embedded::OnRetryable {
                 max_retries: 0,
                 ..capped()
@@ -5512,7 +5521,8 @@ mod router {
             let store = Mem::new();
             let log = MemoryDeadLetters::new();
             let waits = Waits::drawing(0.0);
-            let kernel = ::angzarr_embedded::Kernel::new(&registry, &log)
+            let kernel = ::angzarr_embedded::Kernel::new(&registry)
+                .log_with(&log)
                 .on_retryable(capped())
                 .wait_with(&waits)
                 .on_policy_bug(policy_bug);
@@ -5562,7 +5572,8 @@ mod router {
         let store = Mem::new();
         let log = MemoryDeadLetters::new();
         let waits = Waits::drawing(0.0);
-        let kernel = ::angzarr_embedded::Kernel::new(&registry, &log)
+        let kernel = ::angzarr_embedded::Kernel::new(&registry)
+            .log_with(&log)
             .on_retryable(capped())
             .wait_with(&waits);
         let handled = ready(kernel.handle_any(
@@ -5643,7 +5654,8 @@ mod router {
         let store = Mem::new();
         let log = MemoryDeadLetters::new();
         let waits = Waits::drawing(0.0);
-        let kernel = ::angzarr_embedded::Kernel::new(&registry, &log)
+        let kernel = ::angzarr_embedded::Kernel::new(&registry)
+            .log_with(&log)
             .on_retryable(capped())
             .wait_with(&waits);
         let failed = ready(kernel.handle_any(
@@ -5668,7 +5680,8 @@ mod router {
         let store = Mem::new();
         let log = MemoryDeadLetters::new();
         let waits = Waits::drawing(0.0);
-        let kernel = ::angzarr_embedded::Kernel::new(&registry, &log)
+        let kernel = ::angzarr_embedded::Kernel::new(&registry)
+            .log_with(&log)
             .on_retryable(capped())
             .wait_with(&waits);
         ready(kernel.handle_any(
@@ -5720,7 +5733,8 @@ mod router {
             let store = Mem::new();
             let log = MemoryDeadLetters::new();
             let waits = Waits::drawing(0.0);
-            let kernel = ::angzarr_embedded::Kernel::new(&registry, &log)
+            let kernel = ::angzarr_embedded::Kernel::new(&registry)
+                .log_with(&log)
                 .on_retryable(capped())
                 .wait_with(&waits);
             let failed = ready(kernel.handle_any(
@@ -5781,7 +5795,8 @@ mod router {
             n: u8,
             payload: Any,
         ) -> Result<Handled, Failure<Rejected>> {
-            let kernel = ::angzarr_embedded::Kernel::new(registry, log)
+            let kernel = ::angzarr_embedded::Kernel::new(registry)
+                .log_with(log)
                 .on_retryable(capped())
                 .wait_with(waits);
             ready(kernel.handle_any(store, send("meter", n, payload, None), &sampled_at(n)))
@@ -5932,7 +5947,8 @@ mod router {
                 let store = Mem::new();
                 let log = MemoryDeadLetters::new();
                 let waits = Waits::drawing(0.0);
-                let kernel = ::angzarr_embedded::Kernel::new(&registry, &log)
+                let kernel = ::angzarr_embedded::Kernel::new(&registry)
+                    .log_with(&log)
                     .on_retryable(capped())
                     .wait_with(&waits);
                 ready(kernel.handle_any(
@@ -6025,7 +6041,8 @@ mod router {
         let store = Mem::new();
         let log = MemoryDeadLetters::new();
         let waits = Waits::drawing(0.0);
-        let kernel = ::angzarr_embedded::Kernel::new(&registry, &log)
+        let kernel = ::angzarr_embedded::Kernel::new(&registry)
+            .log_with(&log)
             .on_retryable(capped())
             .wait_with(&waits);
         let mut stale = send("remote", 3, any(Note {}), None);
@@ -6157,7 +6174,7 @@ mod router {
         let registry = faulty(grpc);
         let store = Mem::new();
         let log = MemoryDeadLetters::new();
-        let kernel = ::angzarr_embedded::Kernel::new(&registry, &log);
+        let kernel = ::angzarr_embedded::Kernel::new(&registry).log_with(&log);
         let sampled = Sampled {
             now: at(9),
             command_id: Uuid::from_bytes([0x79; 16]),
@@ -6193,7 +6210,7 @@ mod router {
             let registry = faulty(grpc);
             let store = Mem::new();
             let log = MemoryDeadLetters::new();
-            let kernel = ::angzarr_embedded::Kernel::new(&registry, &log);
+            let kernel = ::angzarr_embedded::Kernel::new(&registry).log_with(&log);
             let sampled = Sampled {
                 now: at(9),
                 command_id: Uuid::from_bytes([0x79; 16]),
@@ -6269,7 +6286,7 @@ mod router {
             dead_lettered(&log.lines());
 
             let log = MemoryDeadLetters::new();
-            let kernel = ::angzarr_embedded::Kernel::new(&registry, &log);
+            let kernel = ::angzarr_embedded::Kernel::new(&registry).log_with(&log);
             let resumed =
                 ready(kernel.resume(&store, &sampled)).expect("{grpc:?}: nothing left owed");
             assert!(
@@ -6290,7 +6307,9 @@ mod router {
         let registry = faulty(GrpcCode::Internal);
         let store = Mem::new();
         let log = MemoryDeadLetters::new();
-        let kernel = Kernel::new(&registry, &log).on_policy_bug(OnPolicyBug::Stay);
+        let kernel = Kernel::new(&registry)
+            .log_with(&log)
+            .on_policy_bug(OnPolicyBug::Stay);
         let run = |n: u8, book| {
             let sampled = Sampled {
                 now: at(i64::from(n)),
@@ -6344,7 +6363,7 @@ mod router {
         ));
         let store = Mem::new();
         let log = MemoryDeadLetters::new();
-        let kernel = ::angzarr_embedded::Kernel::new(&registry, &log);
+        let kernel = ::angzarr_embedded::Kernel::new(&registry).log_with(&log);
         let sampled = Sampled {
             now: at(9),
             command_id: Uuid::from_bytes([0x79; 16]),
@@ -6417,7 +6436,7 @@ mod router {
         dead_lettered(&log.lines());
 
         let log = MemoryDeadLetters::new();
-        let kernel = ::angzarr_embedded::Kernel::new(&registry, &log);
+        let kernel = ::angzarr_embedded::Kernel::new(&registry).log_with(&log);
         let resumed = ready(kernel.resume(&store, &sampled)).expect("nothing left owed");
         assert!(
             resumed.steps().is_empty(),
@@ -6525,7 +6544,7 @@ mod router {
     fn a_refusal_fact_its_source_fails_on_fails_the_step() {
         let (registry, store) = picky();
         let log = MemoryDeadLetters::new();
-        let kernel = ::angzarr_embedded::Kernel::new(&registry, &log);
+        let kernel = ::angzarr_embedded::Kernel::new(&registry).log_with(&log);
         let sampled = Sampled {
             now: at(9),
             command_id: Uuid::from_bytes([0x79; 16]),
@@ -6545,7 +6564,7 @@ mod router {
         );
 
         let log = MemoryDeadLetters::new();
-        let kernel = ::angzarr_embedded::Kernel::new(&registry, &log);
+        let kernel = ::angzarr_embedded::Kernel::new(&registry).log_with(&log);
         let resumed = ready(kernel.resume(&store, &sampled)).expect("nothing left owed");
         assert!(
             resumed.steps().is_empty(),
@@ -6598,7 +6617,8 @@ mod router {
         let (registry, store) = picky_with(Box::new(Unsteady));
         let log = MemoryDeadLetters::new();
         let waits = Waits::drawing(0.0);
-        let kernel = ::angzarr_embedded::Kernel::new(&registry, &log)
+        let kernel = ::angzarr_embedded::Kernel::new(&registry)
+            .log_with(&log)
             .on_retryable(capped())
             .wait_with(&waits);
         let sampled = Sampled {
@@ -6617,12 +6637,12 @@ mod router {
         );
 
         let log = MemoryDeadLetters::new();
-        let kernel = ::angzarr_embedded::Kernel::new(&registry, &log).on_retryable(
-            ::angzarr_embedded::OnRetryable {
+        let kernel = ::angzarr_embedded::Kernel::new(&registry)
+            .log_with(&log)
+            .on_retryable(::angzarr_embedded::OnRetryable {
                 max_retries: 0,
                 ..capped()
-            },
-        );
+            });
         let resumed = ready(kernel.resume(&store, &sampled)).expect("nothing left owed");
         assert!(
             resumed.steps().is_empty(),
@@ -6638,7 +6658,9 @@ mod router {
         use ::angzarr_embedded::{Kernel, OnPolicyBug};
         let (registry, store) = picky();
         let log = MemoryDeadLetters::new();
-        let kernel = Kernel::new(&registry, &log).on_policy_bug(OnPolicyBug::Stay);
+        let kernel = Kernel::new(&registry)
+            .log_with(&log)
+            .on_policy_bug(OnPolicyBug::Stay);
         let sampled = Sampled {
             now: at(9),
             command_id: Uuid::from_bytes([0x79; 16]),
@@ -6876,7 +6898,9 @@ fn handle_async(
     book.cover.as_mut().unwrap().root = Some(root);
     let log = MemoryDeadLetters::new();
     ready(
-        ::angzarr_embedded::Kernel::new(registry, &log).handle::<Wallet, _>(store, book, &sampled),
+        ::angzarr_embedded::Kernel::new(registry)
+            .log_with(&log)
+            .handle::<Wallet, _>(store, book, &sampled),
     )
 }
 
@@ -7048,11 +7072,9 @@ mod projector {
             command_id: Uuid::from_bytes([2; 16]),
         };
         ready(
-            ::angzarr_embedded::Kernel::new(&registry, &log).handle::<Lamp, _>(
-                &store,
-                send("lamp", 2, any(SwitchOn {}), None),
-                &sampled,
-            ),
+            ::angzarr_embedded::Kernel::new(&registry)
+                .log_with(&log)
+                .handle::<Lamp, _>(&store, send("lamp", 2, any(SwitchOn {}), None), &sampled),
         )
         .unwrap();
         assert_eq!(*trail.seen.lock().unwrap(), ["Opened", "SwitchedOn"]);
@@ -7095,7 +7117,7 @@ mod projector {
             now: at(i64::from(n)),
             command_id: Uuid::from_bytes([n; 16]),
         };
-        let kernel = ::angzarr_embedded::Kernel::new(&registry, &log);
+        let kernel = ::angzarr_embedded::Kernel::new(&registry).log_with(&log);
         ready(kernel.handle::<Lamp, _>(&store, send("lamp", 2, any(SwitchOn {}), None), &at_(2)))
             .unwrap();
         ready(kernel.handle::<Meter, _>(

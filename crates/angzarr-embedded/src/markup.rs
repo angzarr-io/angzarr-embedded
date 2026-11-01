@@ -578,8 +578,21 @@ impl<R: angzarr_diagnostic::Diagnostic> Rejection<R> {
 impl<R> Rejection<R> {
     /// The typed refusal object, packed: `None` unless [`Rejection::Typed`].
     pub fn refusal(&self) -> Option<&Any> {
+        self.typed().map(|typed| &typed.object)
+    }
+
+    /// The domain's own rejection: `None` unless [`Rejection::Message`].
+    pub fn message(&self) -> Option<&R> {
         match self {
-            Rejection::Typed(typed) => Some(&typed.object),
+            Rejection::Message(rejection) => Some(rejection),
+            Rejection::Typed(_) => None,
+        }
+    }
+
+    /// The typed refusal object: `None` unless [`Rejection::Typed`].
+    pub fn typed(&self) -> Option<&TypedRefusal> {
+        match self {
+            Rejection::Typed(typed) => Some(typed),
             Rejection::Message(_) => None,
         }
     }
@@ -1447,7 +1460,7 @@ pub fn run_command<A, R, C, O, E>(
 ) -> Result<Option<EventBook>, angzarr_router::error::HandlerError>
 where
     A: Domain<State = A, Rejection = Rejection<R>> + Clone,
-    R: angzarr_diagnostic::Diagnostic,
+    R: angzarr_diagnostic::Diagnostic + Send + Sync + 'static,
     C: DomainMessage,
     O: Emits<A>,
     E: Fails<A>,

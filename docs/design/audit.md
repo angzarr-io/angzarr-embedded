@@ -592,6 +592,13 @@ never classifies):
 
 A handler's refusal carries its code and args (a typed refusal is keyed
 ROUTER_REASON_COMMAND_REFUSED, its object's type as `refusal_type`, the object beside).
+A handler the kernel dispatches in this process also keeps the refusal it
+made, its `Domain::Rejection`, beside them: the caller matches it as a
+value (`Rejected::rejection::<D::Rejection>()`), never by its code, and
+decides nothing twice. The kernel keeps it for the dispatch being polled
+alone, so concurrent dispatches never see each other's. A refusal from
+another process, and the router's on a domain's behalf, is its code and
+args alone.
 A marked-up command handler, typed-refusal handler or continuation step
 fails with `markup::Failed`, one variant per class:
 
@@ -733,7 +740,7 @@ pub trait Policy: Send + Sync + 'static {
         -> Result<Any, Report> { /* CommandRefused, passed through */ }
 }
 registry.policy(ListToDrawSystems);                          // ONE list, in registration order
-let kernel = Kernel::new(&registry, &dead_letters);          // .limit(n), default 8
+let kernel = Kernel::new(&registry);                          // .limit(n), default 8; .log_with(&log)
 kernel.handle::<List, _>(&store, book, &sampled).await?;     // -> Handled
 kernel.resume(&store, &sampled).await?;                      // -> Recorded
 ```
@@ -1179,8 +1186,18 @@ fn load(novel: Novel, nonces: &mut u64) -> Result<Contextual, KernelError>;
 async fn decide(command: &Contextual, sampled, registry, dead_letters) -> Result<Decided, Failure<Rejected>>;
 // the whole loop: one write per step, the chain settled before it returns
 impl Kernel<'_> {
+    pub fn new(registry: &Registry) -> Kernel<'_>;   // no log: the store keeps each dead letter
+    pub fn log_with(self, log: &dyn DeadLetterLog) -> Kernel<'_>;  // each letter's line, too
     pub async fn handle<D: Domain, S: Store>(&self, store: &S, book: CommandBook,
         sampled: &Sampled) -> Result<Handled, Failure<Rejected>>;
+    // a stream as step 3 loads it: the newest usable snapshot, the events after it
+    pub async fn load<D: Domain, S: Store>(&self, store: &S, stream: &Cover)
+        -> Result<(Stream<D>, u64), KernelError>;
+    // shape from the loaded state, send at that head STRICT; a stale send is
+    // loaded and shaped again, under the race re-run cap
+    pub async fn handle_shaped<D: Domain, S: Store, P: Payload, T>(&self, store: &S,
+        stream: &Cover, sampled: &Sampled, shape: impl FnMut(&D::State) -> (Option<P>, T))
+        -> Result<(Option<Handled>, T), Failure<Rejected>>;
     pub async fn handle_any<S: Store>(&self, store: &S, book: CommandBook,
         sampled: &Sampled) -> Result<Handled, Failure<Rejected>>;
     pub async fn resume<S: Store>(&self, store: &S, sampled: &Sampled)
@@ -1190,7 +1207,16 @@ impl Kernel<'_> {
 impl Recorded {
     pub fn events<D: Domain>(&self, stream: &Cover, registry: &Registry)
         -> Result<Vec<Envelope<D::Event>>, KernelError>;
+    // the state the chain left: its last step's load, then what it wrote; never read back
+    pub fn state<D: Domain>(&self, stream: &Cover, registry: &Registry)
+        -> Result<Option<D::State>, KernelError>;   // Handled::state: none for a duplicate
 }
+// a domain's own refusal, from its handler in this process, matched as a value
+impl Rejected { pub fn rejection<R: Any>(&self) -> Option<&R>; }   // D::Rejection
+impl Failure<Rejected> { pub fn rejection<R: Any>(&self) -> Option<&R>; }
+// addressing and wrapping, on the wire types
+Cover::natural(domain, key)                          // CoverExt: root = compute_root(domain, key)
+CommandBook::command(cover, payload).at(head).with_id(id)   // CommandBookExt
 // a stored log, replayed or decoded
 impl<D: Domain> Stream<D> {
     pub fn replay(cover: Cover, pages: &[EventPage], registry: &Registry) -> Result<Stream<D>, KernelError>;

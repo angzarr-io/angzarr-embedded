@@ -38,6 +38,11 @@ struct Log {
     /// The writes (by order made, from 0) that fail, landing nothing, and
     /// with what.
     failing: BTreeMap<usize, StoreError>,
+    /// How many stream reads have been made.
+    reads: usize,
+    /// The stream reads (by order made, from 0) that fail: the store could
+    /// not say.
+    failing_reads: std::collections::BTreeSet<usize>,
 }
 
 /// A `MemoryStore` whose writes are recorded. Clones share one store and
@@ -93,6 +98,14 @@ impl Recording {
         log.failing.insert(at, error);
     }
 
+    /// The `n`th stream read made from now on (from 0) fails: the store
+    /// could not say.
+    pub fn fail_read(&self, n: usize) {
+        let mut log = self.log();
+        let at = log.reads + n;
+        log.failing_reads.insert(at);
+    }
+
     fn log(&self) -> MutexGuard<'_, Log> {
         self.log.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -135,6 +148,15 @@ impl EventStore for Recording {
         from: u64,
         to: Option<u64>,
     ) -> Result<Slice, StoreError> {
+        let failing = {
+            let mut log = self.log();
+            log.reads += 1;
+            let made = log.reads - 1;
+            log.failing_reads.contains(&made)
+        };
+        if failing {
+            return Err(injected());
+        }
         self.inner.read(stream, from, to).await
     }
 

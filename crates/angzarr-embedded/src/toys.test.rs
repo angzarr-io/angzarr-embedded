@@ -267,7 +267,7 @@ pub fn handlers<D: Toy>() -> impl FnOnce(DomainDispatch<D::State>) -> DomainDisp
                             .collect(),
                         ..Default::default()
                     })),
-                    Err(rejection) => Err(crate::rejection(&rejection, None)),
+                    Err(rejection) => Err(crate::rejection(rejection, None)),
                 }
             });
         }
@@ -1233,7 +1233,9 @@ pub fn handle<D: Domain>(
     sampled: &Sampled,
 ) -> Result<crate::Handled, crate::Failure<crate::Rejected>> {
     let log = crate::MemoryDeadLetters::new();
-    let kernel = crate::Kernel::new(registry, &log).on_retryable(no_retries());
+    let kernel = crate::Kernel::new(registry)
+        .log_with(&log)
+        .on_retryable(no_retries());
     kernel.handle::<D, _>(store, book, sampled).ready()
 }
 

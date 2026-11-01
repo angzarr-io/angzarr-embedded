@@ -275,7 +275,7 @@ mod dedup {
         handle::<crate::toys::Account>(&store, &registry, deposit(3, 25), &at(20)).unwrap();
 
         let log = crate::MemoryDeadLetters::new();
-        let kernel = crate::Kernel::new(&registry, &log);
+        let kernel = crate::Kernel::new(&registry).log_with(&log);
         let racing = CommitLandsAfterFirstRead {
             store: store.clone(),
             before,
@@ -942,7 +942,8 @@ mod upcasting {
         seconds: i64,
     ) -> Result<crate::Handled, Failure<crate::Rejected>> {
         let log = crate::MemoryDeadLetters::new();
-        crate::Kernel::new(registry, &log)
+        crate::Kernel::new(registry)
+            .log_with(&log)
             .on_retryable(crate::toys::no_retries())
             .handle_any(store, book, &at(seconds))
             .ready()
@@ -1179,7 +1180,8 @@ mod upcasting {
         let store = MemoryStore::new();
         old_history(&store);
         let log = crate::MemoryDeadLetters::new();
-        crate::Kernel::new(&registry, &log)
+        crate::Kernel::new(&registry)
+            .log_with(&log)
             .on_retryable(no_retries())
             .resume(&store, &at(30))
             .ready()
@@ -1272,7 +1274,8 @@ mod admission {
         seconds: i64,
     ) -> Result<Handled, Failure<crate::Rejected>> {
         let log = crate::MemoryDeadLetters::new();
-        crate::Kernel::new(registry, &log)
+        crate::Kernel::new(registry)
+            .log_with(&log)
             .on_retryable(crate::toys::no_retries())
             .handle_any(store, book, &at(seconds))
             .ready()
@@ -1496,7 +1499,8 @@ mod rules_version {
         let registry = order("1.4.2+build.7");
         let store = MemoryStore::new();
         let log = crate::MemoryDeadLetters::new();
-        crate::Kernel::new(&registry, &log)
+        crate::Kernel::new(&registry)
+            .log_with(&log)
             .handle_any(&store, add_item(), &at(10))
             .ready()
             .expect("applied");
@@ -1516,7 +1520,8 @@ mod rules_version {
             let registry = order(reported);
             let store = MemoryStore::new();
             let log = crate::MemoryDeadLetters::new();
-            let failure = crate::Kernel::new(&registry, &log)
+            let failure = crate::Kernel::new(&registry)
+                .log_with(&log)
                 .handle_any(&store, add_item(), &at(10))
                 .ready()
                 .err()

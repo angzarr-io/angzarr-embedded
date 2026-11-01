@@ -342,7 +342,8 @@ fn kernel<'k>(
     waits: &'k Waits,
     retry: OnRetryable,
 ) -> Kernel<'k> {
-    Kernel::new(registry, log)
+    Kernel::new(registry)
+        .log_with(log)
         .on_retryable(retry)
         .wait_with(waits)
 }
@@ -431,7 +432,8 @@ fn a_command_ahead_of_the_stream_is_malformed_under_every_resolution() {
             let registry = registry_of(orders);
             let log = MemoryDeadLetters::new();
             let store = store_at_three();
-            let failure = Kernel::new(&registry, &log)
+            let failure = Kernel::new(&registry)
+                .log_with(&log)
                 .handle_any(&store, add_item(1).expecting(expected, resolution), &at(1))
                 .ready()
                 .err()

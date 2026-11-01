@@ -214,7 +214,8 @@ fn a_command_for_a_remote_domain_reaches_its_coordinator_and_answers_as_if_local
     let registry = registry_with(&coordinator);
     let log = MemoryDeadLetters::new();
     let store = MemoryStore::new();
-    let handled = Kernel::new(&registry, &log)
+    let handled = Kernel::new(&registry)
+        .log_with(&log)
         .handle_any(&store, deposit(1), &at(1))
         .ready()
         .expect("handled remotely");
@@ -257,7 +258,8 @@ fn a_remote_command_is_sent_with_the_id_sampled_here() {
     let registry = registry_with(&coordinator);
     let log = MemoryDeadLetters::new();
     let sampled = at(7);
-    Kernel::new(&registry, &log)
+    Kernel::new(&registry)
+        .log_with(&log)
         .handle_any(
             &MemoryStore::new(),
             command(cover("bank", 1), any("/toy.bank.v1.Deposit")),
@@ -279,7 +281,8 @@ fn a_remote_duplicate_is_a_duplicate() {
         FakeCoordinator::answering(Answer::Events(DeliveryOutcome::Duplicate, deposited()));
     let registry = registry_with(&coordinator);
     let log = MemoryDeadLetters::new();
-    let handled = Kernel::new(&registry, &log)
+    let handled = Kernel::new(&registry)
+        .log_with(&log)
         .handle_any(&MemoryStore::new(), deposit(1), &at(1))
         .ready()
         .expect("handled remotely");
@@ -293,13 +296,14 @@ fn a_remote_duplicate_is_a_duplicate() {
 /// code, as a local handler's is; nothing dead-lettered.
 #[test]
 fn a_remote_refusal_is_the_callers_rejection() {
-    let HandlerError::Coded(refusal) = rejection(&Report::new("BANK_CLOSED"), None) else {
+    let HandlerError::Coded(refusal) = rejection(Report::new("BANK_CLOSED"), None) else {
         unreachable!("a rejection is coded");
     };
     let coordinator = FakeCoordinator::answering(Answer::Refused(refusal));
     let registry = registry_with(&coordinator);
     let log = MemoryDeadLetters::new();
-    let failed = Kernel::new(&registry, &log)
+    let failed = Kernel::new(&registry)
+        .log_with(&log)
         .handle_any(&MemoryStore::new(), deposit(1), &at(1))
         .ready()
         .err()
@@ -320,7 +324,8 @@ fn a_remote_bug_is_dead_lettered_from_its_domain_of_no_known_kind() {
     let coordinator = FakeCoordinator::answering(Answer::Refused(bug));
     let registry = registry_with(&coordinator);
     let log = MemoryDeadLetters::new();
-    let failed = Kernel::new(&registry, &log)
+    let failed = Kernel::new(&registry)
+        .log_with(&log)
         .handle_any(&MemoryStore::new(), deposit(1), &at(1))
         .ready()
         .err()
@@ -345,7 +350,8 @@ fn a_domain_neither_here_nor_remote_is_unknown() {
     let coordinator = FakeCoordinator::answering(Answer::Events(DeliveryOutcome::Applied, vec![]));
     let registry = registry_with(&coordinator);
     let log = MemoryDeadLetters::new();
-    let failed = Kernel::new(&registry, &log)
+    let failed = Kernel::new(&registry)
+        .log_with(&log)
         .handle_any(
             &MemoryStore::new(),
             command(cover("nowhere", 1), any("/toy.x.v1.X")),
@@ -396,7 +402,8 @@ fn a_policy_step_into_a_remote_domain_goes_to_its_coordinator() {
     let log = MemoryDeadLetters::new();
     let store = MemoryStore::new();
     let ring = command(cover("till", 1), any("/toy.till.v1.Ring"));
-    let handled = Kernel::new(&registry, &log)
+    let handled = Kernel::new(&registry)
+        .log_with(&log)
         .handle_any(&store, ring, &at(1))
         .ready()
         .expect("handled");
@@ -501,7 +508,8 @@ fn a_remote_command_without_a_correlation_is_sent_without_one() {
         FakeCoordinator::answering(Answer::Events(DeliveryOutcome::Applied, deposited()));
     let registry = registry_with(&coordinator);
     let log = MemoryDeadLetters::new();
-    Kernel::new(&registry, &log)
+    Kernel::new(&registry)
+        .log_with(&log)
         .handle_any(&MemoryStore::new(), deposit(1), &at(1))
         .ready()
         .expect("handled remotely");
@@ -517,7 +525,8 @@ fn a_remote_command_keeps_the_correlation_its_caller_set() {
         FakeCoordinator::answering(Answer::Events(DeliveryOutcome::Applied, deposited()));
     let registry = registry_with(&coordinator);
     let log = MemoryDeadLetters::new();
-    Kernel::new(&registry, &log)
+    Kernel::new(&registry)
+        .log_with(&log)
         .handle_any(&MemoryStore::new(), deposit(1).correlated(5), &at(1))
         .ready()
         .expect("handled remotely");
@@ -553,7 +562,8 @@ fn a_remote_policy_step_carries_its_triggers_correlation() {
     ));
     let log = MemoryDeadLetters::new();
     let ring = command(cover("till", 1), any("/toy.till.v1.Ring")).correlated(6);
-    Kernel::new(&registry, &log)
+    Kernel::new(&registry)
+        .log_with(&log)
         .handle_any(&MemoryStore::new(), ring, &at(1))
         .ready()
         .expect("handled");

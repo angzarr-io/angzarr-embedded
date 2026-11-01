@@ -90,9 +90,10 @@ pub trait Domain: Sized + 'static {
     type Event: Payload + Clone + Send + Sync + 'static;
     /// Why its handlers refuse a command, for the person who gave it. The
     /// caller receives it as a [`Rejected`](super::Rejected): its code, args
-    /// and typed refusal object. Kernel faults are never folded into it:
-    /// see [`Failure`](super::Failure).
-    type Rejection: Diagnostic + Send + 'static;
+    /// and typed refusal object, and, from a handler in this process, the
+    /// rejection itself ([`Rejected::rejection`](super::Rejected::rejection)).
+    /// Kernel faults are never folded into it: see [`Failure`](super::Failure).
+    type Rejection: Diagnostic + Send + Sync + 'static;
     /// The domain's name: the `Cover.domain` of every stream of this
     /// domain, and its key in the [`Registry`](super::Registry). Stable
     /// across releases; never contains `':'`.

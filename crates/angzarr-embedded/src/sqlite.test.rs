@@ -194,7 +194,7 @@ async fn handle<D: Domain>(
     book: CommandBook,
 ) -> Result<Handled, Failure<Rejected>> {
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(registry, &log);
+    let kernel = Kernel::new(registry).log_with(&log);
     kernel.handle::<D, _>(store, book, &sampled(10)).await
 }
 
@@ -467,7 +467,7 @@ async fn resume_after_reopening_runs_what_a_crash_left_owed() {
         }
     }
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log);
+    let kernel = Kernel::new(&registry).log_with(&log);
     for (round, expected) in [(0, 2), (1, 0)] {
         let store = SqliteStore::open(&path).await.unwrap();
         let resumed = kernel.resume(&store, &sampled(20 + round)).await.unwrap();

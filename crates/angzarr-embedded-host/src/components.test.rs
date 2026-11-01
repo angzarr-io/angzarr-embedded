@@ -282,7 +282,7 @@ fn a_remote_process_managers_non_starting_command_with_no_instance_is_refused() 
     host.register(&mut registry).unwrap();
     let store = MemoryStore::new();
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log);
+    let kernel = Kernel::new(&registry).log_with(&log);
 
     let refused = block_on(kernel.handle_any(
         &store,
@@ -315,7 +315,7 @@ fn a_remote_process_managers_non_starting_fact_with_no_instance_is_skipped() {
     host.register(&mut registry).unwrap();
     let store = MemoryStore::new();
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log);
+    let kernel = Kernel::new(&registry).log_with(&log);
 
     let handled = block_on(kernel.handle_any(
         &store,
@@ -344,7 +344,7 @@ fn a_remote_process_managers_starting_command_starts_an_instance_that_then_takes
     host.register(&mut registry).unwrap();
     let store = MemoryStore::new();
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log);
+    let kernel = Kernel::new(&registry).log_with(&log);
 
     block_on(kernel.handle_any(
         &store,
@@ -377,7 +377,7 @@ fn a_remote_process_managers_start_rule_matches_by_type_name_whatever_the_prefix
     let mut registry = Registry::new();
     host.register(&mut registry).unwrap();
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log);
+    let kernel = Kernel::new(&registry).log_with(&log);
 
     let closed = MemoryStore::new();
     let refused = block_on(kernel.handle_any(
@@ -464,7 +464,7 @@ fn a_remote_policy_turns_its_sources_events_into_commands_through_the_kernel() {
         .expect("a policy child registers as a policy");
     let store = MemoryStore::new();
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log);
+    let kernel = Kernel::new(&registry).log_with(&log);
 
     block_on(kernel.handle_any(
         &store,
@@ -506,7 +506,7 @@ fn a_refusal_of_a_remote_policys_command_is_answered_by_its_on_refused() {
         .expect("a policy child registers as a policy");
     let store = MemoryStore::new();
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log);
+    let kernel = Kernel::new(&registry).log_with(&log);
 
     let handled = block_on(kernel.handle_any(
         &store,
@@ -611,7 +611,7 @@ fn a_remote_projector_receives_its_sources_committed_events() {
     let (host, registry) = projected(&log_path);
     let store = MemoryStore::new();
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log);
+    let kernel = Kernel::new(&registry).log_with(&log);
 
     block_on(kernel.handle_any(
         &store,
@@ -633,7 +633,7 @@ fn a_remote_projectors_bug_is_fatal_not_retried_and_dead_lettered() {
     let (host, registry) = projected(&log_path);
     let store = MemoryStore::new();
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log).on_retryable(quick());
+    let kernel = Kernel::new(&registry).log_with(&log).on_retryable(quick());
 
     let failed = block_on(kernel.handle_any(
         &store,
@@ -678,7 +678,7 @@ fn a_remote_projectors_business_status_is_its_bug() {
     let (host, registry) = projected(&log_path);
     let store = MemoryStore::new();
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log).on_retryable(quick());
+    let kernel = Kernel::new(&registry).log_with(&log).on_retryable(quick());
 
     let failed = block_on(kernel.handle_any(
         &store,
@@ -714,7 +714,7 @@ fn a_remote_projectors_retryable_failure_is_dead_lettered_at_the_cap() {
     let (host, registry) = projected(&log_path);
     let store = MemoryStore::new();
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log).on_retryable(quick());
+    let kernel = Kernel::new(&registry).log_with(&log).on_retryable(quick());
 
     let failed = block_on(kernel.handle_any(
         &store,
@@ -776,10 +776,12 @@ fn a_remote_projectors_retryable_failure_with_retrying_off_is_returned() {
     let (host, registry) = projected(&log_path);
     let store = MemoryStore::new();
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log).on_retryable(OnRetryable {
-        max_retries: 0,
-        ..quick()
-    });
+    let kernel = Kernel::new(&registry)
+        .log_with(&log)
+        .on_retryable(OnRetryable {
+            max_retries: 0,
+            ..quick()
+        });
 
     let failed = block_on(kernel.handle_any(
         &store,
@@ -867,7 +869,7 @@ fn a_remote_projectors_retryable_and_aborted_statuses_are_retried() {
         let (host, registry) = projected(&log_path);
         let store = MemoryStore::new();
         let log = MemoryDeadLetters::new();
-        let kernel = Kernel::new(&registry, &log).on_retryable(quick());
+        let kernel = Kernel::new(&registry).log_with(&log).on_retryable(quick());
 
         let handled = block_on(kernel.handle_any(
             &store,
@@ -960,7 +962,7 @@ fn a_remote_upcaster_upcasts_its_domains_inputs_before_dispatch() {
     let (_host, registry) = upcast();
     let log = MemoryDeadLetters::new();
     let store = MemoryStore::new();
-    let kernel = Kernel::new(&registry, &log);
+    let kernel = Kernel::new(&registry).log_with(&log);
     block_on(kernel.handle_any(
         &store,
         send("table", 1, any("/test.table.v0.Sit")),
@@ -980,10 +982,12 @@ fn a_remote_upcaster_that_is_down_is_retryable() {
     let (_host, registry) = upcast();
     let log = MemoryDeadLetters::new();
     let store = MemoryStore::new();
-    let kernel = Kernel::new(&registry, &log).on_retryable(OnRetryable {
-        max_retries: 0,
-        ..OnRetryable::default()
-    });
+    let kernel = Kernel::new(&registry)
+        .log_with(&log)
+        .on_retryable(OnRetryable {
+            max_retries: 0,
+            ..OnRetryable::default()
+        });
     let failure = block_on(kernel.handle_any(
         &store,
         send("table", 1, any("/test.table.v0.Die")),
@@ -1026,7 +1030,7 @@ fn a_remote_upcasters_failing_rule_is_a_bug() {
     let (_host, registry) = upcast();
     let log = MemoryDeadLetters::new();
     let store = MemoryStore::new();
-    let failure = block_on(Kernel::new(&registry, &log).handle_any(
+    let failure = block_on(Kernel::new(&registry).log_with(&log).handle_any(
         &store,
         send("table", 1, any("/test.table.v0.Bad")),
         &sampled(1),
@@ -1109,10 +1113,12 @@ fn a_sidecar_is_up_only_while_its_health_reports_serving() {
     let _ = std::fs::remove_file(&socket);
     let log = MemoryDeadLetters::new();
     let store = MemoryStore::new();
-    let kernel = Kernel::new(&registry, &log).on_retryable(OnRetryable {
-        max_retries: 0,
-        ..OnRetryable::default()
-    });
+    let kernel = Kernel::new(&registry)
+        .log_with(&log)
+        .on_retryable(OnRetryable {
+            max_retries: 0,
+            ..OnRetryable::default()
+        });
     // Command `n`, an old `Sit`, to the table: how it failed, if it did.
     let sit = |n| {
         block_on(kernel.handle_any(
@@ -1172,10 +1178,12 @@ fn a_sidecar_whose_health_is_unknown_is_not_up() {
         host.register(&mut registry).unwrap();
         let log = MemoryDeadLetters::new();
         let store = MemoryStore::new();
-        let kernel = Kernel::new(&registry, &log).on_retryable(OnRetryable {
-            max_retries: 0,
-            ..OnRetryable::default()
-        });
+        let kernel = Kernel::new(&registry)
+            .log_with(&log)
+            .on_retryable(OnRetryable {
+                max_retries: 0,
+                ..OnRetryable::default()
+            });
 
         assert_eq!(
             acted.recv_timeout(Duration::from_secs(20)),

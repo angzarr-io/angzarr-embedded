@@ -113,7 +113,7 @@ fn an_edition_removals_line_names_its_stream_and_sequence() {
 fn a_panicking_ingest_aborts_the_chain_and_is_logged() {
     let registry = registry();
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log);
+    let kernel = Kernel::new(&registry).log_with(&log);
     let store = MemoryStore::new();
 
     let bad = fact(
@@ -150,7 +150,7 @@ fn a_panicking_ingest_aborts_the_chain_and_is_logged() {
 fn a_panicking_ingests_dead_letter_carries_its_code_not_english() {
     let registry = registry();
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log);
+    let kernel = Kernel::new(&registry).log_with(&log);
     let store = MemoryStore::new();
     let bad = fact(
         cover("account", 1),

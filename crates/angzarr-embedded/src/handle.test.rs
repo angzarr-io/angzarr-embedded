@@ -37,7 +37,7 @@ fn a_policys_events_carry_the_derived_command_id_as_causation_and_no_trigger() {
     let mut registry = registry();
     registry.policy(Bookkeeping);
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log);
+    let kernel = Kernel::new(&registry).log_with(&log);
     let store = MemoryStore::new();
     opened(&store, &plain, 1, 0);
 
@@ -92,7 +92,7 @@ fn a_rejected_policy_step_keeps_the_commands_commit_and_is_dead_lettered() {
     let mut registry = registry();
     registry.policy(Bookkeeping);
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log);
+    let kernel = Kernel::new(&registry).log_with(&log);
     let store = MemoryStore::new();
     opened(&store, &plain, 1, 0);
     let before = slice(&store, &cover("account", 1)).next_sequence;
@@ -174,7 +174,7 @@ fn a_chain_deeper_than_its_limit_is_refused() {
     let mut registry = registry();
     registry.policy(Bookkeeping);
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log).limit(0);
+    let kernel = Kernel::new(&registry).log_with(&log).limit(0);
     let store = MemoryStore::new();
     opened(&store, &plain, 1, 0);
     let failure = kernel
@@ -206,7 +206,7 @@ fn a_command_to_an_edition_is_refused_and_writes_nothing() {
     let mut registry = registry();
     registry.policy(Bookkeeping);
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log);
+    let kernel = Kernel::new(&registry).log_with(&log);
     let store = MemoryStore::new();
     let stream = cover_in("account", 1, "what-if");
     let open = command(stream.clone(), AccountCmd::Open.to_any());
@@ -256,7 +256,7 @@ fn a_hand_written_policy_passes_a_refusal_through() {
 fn a_book_for_another_domain_is_refused() {
     let registry = registry();
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log);
+    let kernel = Kernel::new(&registry).log_with(&log);
     let store = MemoryStore::new();
     let failure = kernel
         .handle::<Ledger, _>(
@@ -285,7 +285,7 @@ fn each_step_loads_what_the_steps_before_it_committed() {
     let mut registry = registry();
     registry.policy(Bookkeeping);
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log);
+    let kernel = Kernel::new(&registry).log_with(&log);
     let store = MemoryStore::new();
     opened(&store, &plain, 1, 0);
     kernel
@@ -374,7 +374,7 @@ fn projectors_run_after_commit_over_their_sources_streams() {
     let deposits = Deposits::default();
     registry.projector_handler(&["account"], deposits.clone());
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log);
+    let kernel = Kernel::new(&registry).log_with(&log);
     let store = MemoryStore::new();
     opened(&store, &plain, 1, 0);
     let handled = kernel
@@ -418,7 +418,7 @@ fn a_duplicate_runs_no_projector_and_commits_nothing() {
     let deposits = Deposits::default();
     registry.projector_handler(&["account"], deposits.clone());
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log);
+    let kernel = Kernel::new(&registry).log_with(&log);
     let store = MemoryStore::new();
     opened(&store, &crate::toys::registry(), 1, 0);
     let open = command(cover("account", 1), AccountCmd::Open.to_any()).id(1);
@@ -441,7 +441,7 @@ fn handle_is_a_send_future_over_a_send_store() {
     let mut registry = registry();
     registry.policy(Bookkeeping);
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log);
+    let kernel = Kernel::new(&registry).log_with(&log);
     let store = MemoryStore::new();
     opened(&store, &plain, 1, 0);
     let handled = send(kernel.handle::<Account, _>(&store, deposit(3, 25), &at(30)))
@@ -500,7 +500,7 @@ fn a_policys_error_dead_letters_its_step_and_moves_its_position_past_it() {
     let mut registry = registry();
     registry.policy(Unlucky);
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log);
+    let kernel = Kernel::new(&registry).log_with(&log);
     let store = MemoryStore::new();
     opened(&store, &plain, 1, 0);
     let before = slice(&store, &cover("account", 1)).next_sequence;
@@ -603,11 +603,12 @@ fn a_kernel_moves_a_policys_position_past_its_bug_by_default() {
     let log = MemoryDeadLetters::new();
     assert_eq!(OnPolicyBug::default(), OnPolicyBug::MovePast);
     assert_eq!(
-        Kernel::new(&registry, &log).policy_bug(),
+        Kernel::new(&registry).log_with(&log).policy_bug(),
         OnPolicyBug::MovePast
     );
     assert_eq!(
-        Kernel::new(&registry, &log)
+        Kernel::new(&registry)
+            .log_with(&log)
             .on_policy_bug(OnPolicyBug::Stay)
             .policy_bug(),
         OnPolicyBug::Stay
@@ -624,7 +625,9 @@ fn under_stay_a_policys_error_holds_its_position() {
     let mut registry = registry();
     registry.policy(Unlucky);
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log).on_policy_bug(OnPolicyBug::Stay);
+    let kernel = Kernel::new(&registry)
+        .log_with(&log)
+        .on_policy_bug(OnPolicyBug::Stay);
     let store = MemoryStore::new();
     opened(&store, &plain, 1, 0);
     let held = position(&store, "unlucky", &cover("account", 1));
@@ -675,7 +678,9 @@ fn under_stay_a_policys_refusal_answer_error_holds_its_position() {
     let mut registry = registry();
     registry.policy(UnansweringBookkeeping);
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log).on_policy_bug(OnPolicyBug::Stay);
+    let kernel = Kernel::new(&registry)
+        .log_with(&log)
+        .on_policy_bug(OnPolicyBug::Stay);
     let store = MemoryStore::new();
     opened(&store, &plain, 1, 0);
     let held = position(&store, "unanswering-bookkeeping", &cover("account", 1));
@@ -707,7 +712,7 @@ fn a_filtered_policy_reaches_its_target_only_for_the_events_it_targets() {
     let mut registry = registry();
     registry.policy(DepositsOnly);
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log);
+    let kernel = Kernel::new(&registry).log_with(&log);
     let store = MemoryStore::new();
     for book in [
         command(cover("account", 1), AccountCmd::Open.to_any()).id(1),
@@ -750,7 +755,7 @@ fn a_policy_book_for_an_unregistered_target_is_a_dead_lettered_bug() {
         )
         .unwrap();
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log);
+    let kernel = Kernel::new(&registry).log_with(&log);
     let store = MemoryStore::new();
     let failure = kernel
         .handle::<Account, _>(
@@ -806,7 +811,7 @@ fn a_command_owes_policy_steps_for_its_own_events_only() {
     let mut registry = registry();
     registry.policy(Bookkeeping);
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log);
+    let kernel = Kernel::new(&registry).log_with(&log);
     let store = Recording::new();
     opened(&store, &plain, 1, 0);
     for n in [3, 4] {
@@ -848,7 +853,7 @@ fn a_chain_on_a_stream_loaded_from_a_snapshot_records_only_its_events() {
         .projector_handler(&["account"], one.clone())
         .projector_handler(&["account"], two.clone());
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log);
+    let kernel = Kernel::new(&registry).log_with(&log);
     let store = MemoryStore::new();
     opened(&store, &crate::toys::registry(), 1, 7);
     let source = account_stream(&store, &registry);
@@ -910,7 +915,7 @@ fn a_triggers_commands_are_indexed_in_target_order() {
     let mut registry = registry();
     registry.policy(TwoLedgers);
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log);
+    let kernel = Kernel::new(&registry).log_with(&log);
     let store = MemoryStore::new();
     opened(&store, &plain, 1, 0);
     kernel
@@ -952,7 +957,7 @@ fn every_policy_on_a_source_runs_for_each_of_its_events_in_registration_order() 
     registry.policy(TwoLedgers);
     registry.policy(Bookkeeping);
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log);
+    let kernel = Kernel::new(&registry).log_with(&log);
     let store = Recording::new();
     let open = command(cover("account", 1), AccountCmd::Open.to_any()).id(1);
     for (book, second) in [(open, 30), (deposit(2, 5), 31)] {
@@ -1000,7 +1005,7 @@ fn a_policy_step_commits_its_position_with_its_events() {
     registry.policy(TwoLedgers);
     registry.policy(Bookkeeping);
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log);
+    let kernel = Kernel::new(&registry).log_with(&log);
     let store = Recording::new();
     opened(&store, &plain, 1, 0);
     kernel
@@ -1041,7 +1046,9 @@ fn a_step_the_store_failed_is_resumed_by_position() {
     let mut registry = registry();
     registry.policy(Bookkeeping);
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log).on_retryable(crate::toys::no_retries());
+    let kernel = Kernel::new(&registry)
+        .log_with(&log)
+        .on_retryable(crate::toys::no_retries());
     let store = Recording::new();
     opened(&store, &registry, 1, 0);
     let account = cover("account", 1);
@@ -1135,7 +1142,7 @@ fn a_policy_step_that_decides_no_event_still_moves_its_position() {
     let mut registry = registry();
     registry.policy(SweepNine);
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log);
+    let kernel = Kernel::new(&registry).log_with(&log);
     let store = Recording::new();
     let open = command(cover("account", 1), AccountCmd::Open.to_any()).id(1);
     kernel
@@ -1249,7 +1256,7 @@ fn a_policys_refusal_answer_reads_the_refused_commands_context() {
     let refusals = Answered::default();
     registry.policy(AnsweringBookkeeping(std::sync::Arc::clone(&refusals)));
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log);
+    let kernel = Kernel::new(&registry).log_with(&log);
     let store = MemoryStore::new();
     opened(&store, &plain, 1, 0);
     kernel
@@ -1311,7 +1318,7 @@ fn a_policys_refusal_answer_error_dead_letters_as_policy_failed() {
     let mut registry = registry();
     registry.policy(UnansweringBookkeeping);
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log);
+    let kernel = Kernel::new(&registry).log_with(&log);
     let store = MemoryStore::new();
     opened(&store, &plain, 1, 0);
     let before = slice(&store, &cover("account", 1)).next_sequence;
@@ -1386,7 +1393,7 @@ fn a_refusal_carries_its_triggering_event() {
     let refusals = std::sync::Arc::default();
     registry.policy(AnsweringBookkeeping(std::sync::Arc::clone(&refusals)));
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log);
+    let kernel = Kernel::new(&registry).log_with(&log);
     let store = MemoryStore::new();
     opened(&store, &plain, 1, 0);
     kernel
@@ -1418,7 +1425,9 @@ fn a_retry_after_a_crash_settles_what_its_stream_still_owes() {
     let mut registry = registry();
     registry.policy(Bookkeeping);
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log).on_retryable(crate::toys::no_retries());
+    let kernel = Kernel::new(&registry)
+        .log_with(&log)
+        .on_retryable(crate::toys::no_retries());
     let store = Recording::new();
     opened(&store, &plain, 1, 0);
     store.fail_write(1);
@@ -1450,7 +1459,7 @@ fn resume_runs_a_new_policy_over_its_sources_history() {
     let mut registry = registry();
     registry.policy(Bookkeeping);
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log);
+    let kernel = Kernel::new(&registry).log_with(&log);
     let store = MemoryStore::new();
     opened(&store, &plain, 1, 7);
     opened(&store, &plain, 2, 9);
@@ -1477,7 +1486,7 @@ fn a_resumed_step_that_already_landed_is_a_duplicate() {
     let mut registry = registry();
     registry.policy(Bookkeeping);
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log);
+    let kernel = Kernel::new(&registry).log_with(&log);
     let store = MemoryStore::new();
     opened(&store, &plain, 1, 0);
     kernel.resume(&store, &at(30)).ready().unwrap();
@@ -1499,7 +1508,9 @@ fn a_resumed_step_that_already_landed_is_a_duplicate() {
 fn a_store_that_cannot_write_fails_the_command_with_nothing_written() {
     let registry = registry();
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log).on_retryable(crate::toys::no_retries());
+    let kernel = Kernel::new(&registry)
+        .log_with(&log)
+        .on_retryable(crate::toys::no_retries());
     let store = Recording::new();
     store.fail_write(0);
     let failure = kernel
@@ -1544,7 +1555,7 @@ fn a_policy_step_failing_once_lands_on_its_retry(error: crate::StoreError) {
     registry.policy(Bookkeeping);
     let log = MemoryDeadLetters::new();
     let waits = Waits::default();
-    let kernel = Kernel::new(&registry, &log).wait_with(&waits);
+    let kernel = Kernel::new(&registry).log_with(&log).wait_with(&waits);
     let store = Recording::new();
     opened(&store, &registry, 1, 0);
     store.fail_write_with(1, error);
@@ -1653,7 +1664,7 @@ fn an_outside_callers_lost_race_without_an_expected_sequence_is_run_again() {
     let registry = registry();
     let log = MemoryDeadLetters::new();
     let waits = Waits::default();
-    let kernel = Kernel::new(&registry, &log).wait_with(&waits);
+    let kernel = Kernel::new(&registry).log_with(&log).wait_with(&waits);
     let store = Recording::new();
     opened(&store, &registry, 1, 0);
     store.fail_write_with(
@@ -1691,7 +1702,7 @@ fn an_outside_callers_lost_race_with_an_expected_sequence_is_stale_at_once() {
     let registry = registry();
     let log = MemoryDeadLetters::new();
     let waits = Waits::default();
-    let kernel = Kernel::new(&registry, &log).wait_with(&waits);
+    let kernel = Kernel::new(&registry).log_with(&log).wait_with(&waits);
     let store = Recording::new();
     opened(&store, &registry, 1, 0);
     store.fail_write_with(
@@ -1792,7 +1803,8 @@ fn a_policy_command_outside_its_destination_is_refused_by_the_kernel() {
     );
     let log = MemoryDeadLetters::new();
     let store = MemoryStore::new();
-    let failure = Kernel::new(&registry, &log)
+    let failure = Kernel::new(&registry)
+        .log_with(&log)
         .handle::<Account, _>(
             &store,
             command(cover("account", 1), AccountCmd::Open.to_any()),
@@ -1853,7 +1865,8 @@ fn unchecked_refusal(
     registry.policy_component(Unchecked { answer }, "ledger");
     let log = MemoryDeadLetters::new();
     let store = MemoryStore::new();
-    let failure = Kernel::new(&registry, &log)
+    let failure = Kernel::new(&registry)
+        .log_with(&log)
         .handle::<Account, _>(
             &store,
             command(cover("account", 1), AccountCmd::Open.to_any()),
@@ -1940,7 +1953,8 @@ fn a_policys_command_with_handling_is_refused_by_the_kernel() {
     );
     let log = MemoryDeadLetters::new();
     let store = MemoryStore::new();
-    Kernel::new(&registry, &log)
+    Kernel::new(&registry)
+        .log_with(&log)
         .handle::<Account, _>(
             &store,
             command(cover("account", 1), AccountCmd::Open.to_any()),
@@ -2032,7 +2046,8 @@ fn a_policys_commands_in_their_triggers_edition_and_correlation_are_delivered() 
     );
     let log = MemoryDeadLetters::new();
     let store = MemoryStore::new();
-    Kernel::new(&registry, &log)
+    Kernel::new(&registry)
+        .log_with(&log)
         .handle::<Account, _>(
             &store,
             command(cover("account", 1), AccountCmd::Open.to_any()),
@@ -2165,7 +2180,8 @@ fn a_policys_commands_naming_their_stamped_identity_are_delivered() {
     );
     let log = MemoryDeadLetters::new();
     let store = MemoryStore::new();
-    Kernel::new(&registry, &log)
+    Kernel::new(&registry)
+        .log_with(&log)
         .handle::<Account, _>(
             &store,
             command(cover("account", 1), AccountCmd::Open.to_any()),
@@ -2280,7 +2296,9 @@ fn no_translation_makes_the_kernel_build_the_pass_through_fact() {
         "ledger",
     );
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log).on_retryable(crate::toys::no_retries());
+    let kernel = Kernel::new(&registry)
+        .log_with(&log)
+        .on_retryable(crate::toys::no_retries());
     let store = MemoryStore::new();
     let account = cover("account", 1);
     for book in [

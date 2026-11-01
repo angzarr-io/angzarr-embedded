@@ -151,7 +151,7 @@ fn a_remote_command_round_trips_through_the_kernel_into_the_store() {
     host.register(&mut registry).unwrap();
     let store = MemoryStore::new();
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log);
+    let kernel = Kernel::new(&registry).log_with(&log);
     let rules_version = host
         .handler("player")
         .unwrap()
@@ -214,7 +214,7 @@ fn a_policy_step_from_an_in_process_domain_reaches_the_remote_one() {
     );
     let store = MemoryStore::new();
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log);
+    let kernel = Kernel::new(&registry).log_with(&log);
 
     let handled = block_on(kernel.handle_any(
         &store,
@@ -250,7 +250,7 @@ fn a_remote_refusal_is_a_business_rejection() {
     host.register(&mut registry).unwrap();
     let store = MemoryStore::new();
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log);
+    let kernel = Kernel::new(&registry).log_with(&log);
     let refused = block_on(kernel.handle_any(
         &store,
         send("player", 1, any("/test.player.v1.Refuse")),
@@ -282,7 +282,7 @@ fn a_remote_already_exists_is_a_business_rejection() {
     host.register(&mut registry).unwrap();
     let store = MemoryStore::new();
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log);
+    let kernel = Kernel::new(&registry).log_with(&log);
     let refused = block_on(kernel.handle_any(
         &store,
         send("player", 1, any("/test.player.v1.Taken")),
@@ -314,7 +314,7 @@ fn a_remote_internal_failure_under_its_own_code_is_a_dead_lettered_bug() {
     host.register(&mut registry).unwrap();
     let store = MemoryStore::new();
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log);
+    let kernel = Kernel::new(&registry).log_with(&log);
     let failed = block_on(kernel.handle_any(
         &store,
         send("player", 1, any("/test.player.v1.Break")),
@@ -431,7 +431,7 @@ fn a_restarted_child_is_registered_at_its_new_version_before_it_gets_work() {
 
     let store = MemoryStore::new();
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log);
+    let kernel = Kernel::new(&registry).log_with(&log);
     block_on(kernel.handle_any(
         &store,
         send("player", 1, any("/test.player.v1.SitDown")),

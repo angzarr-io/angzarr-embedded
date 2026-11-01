@@ -564,10 +564,12 @@ fn settle(registry: &Registry, book: CommandBook) -> Result<Vec<(Uuid, Vec<Strin
         },
         command_id: Uuid::from_bytes([0x71; 16]),
     };
-    let kernel = Kernel::new(registry, &log).on_retryable(OnRetryable {
-        max_retries: 0,
-        ..OnRetryable::default()
-    });
+    let kernel = Kernel::new(registry)
+        .log_with(&log)
+        .on_retryable(OnRetryable {
+            max_retries: 0,
+            ..OnRetryable::default()
+        });
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .expect("a runtime");
@@ -622,6 +624,41 @@ fn a_hand_written_aggregates_rejection_is_the_callers() {
     assert_eq!(
         settle(&registry(), bump(0)),
         Err("toy-counter-not-positive".to_string())
+    );
+}
+
+/// A marked-up aggregate's refusal comes back typed, as the domain's
+/// rejection: the refusal its handler made, matched as a value, never by
+/// its code.
+#[test]
+fn a_marked_up_aggregates_refusal_comes_back_typed_as_its_rejection() {
+    let registry = registry();
+    let store = Mem::default();
+    let sampled = Sampled {
+        now: Timestamp {
+            seconds: 1,
+            nanos: 0,
+        },
+        command_id: Uuid::from_bytes([0x71; 16]),
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("a runtime");
+    let failure = runtime
+        .block_on(Kernel::new(&registry).handle::<Counter, _>(&store, bump(0), &sampled))
+        .err()
+        .expect("refused");
+    let rejection = failure
+        .rejection::<<Counter as Domain>::Rejection>()
+        .expect("typed");
+    assert_eq!(
+        rejection,
+        &Rejection::Message(Refused::NotPositive { by: 0 })
+    );
+    assert_eq!(
+        rejection.message(),
+        Some(&Refused::NotPositive { by: 0 }),
+        "the domain's own refusal, a message only"
     );
 }
 
@@ -871,7 +908,7 @@ fn a_policy_is_sourced_from_a_child_hosted_domain_by_its_event_set_alone() {
         },
         command_id: Uuid::from_bytes([0x72; 16]),
     };
-    let kernel = Kernel::new(&registry, &log);
+    let kernel = Kernel::new(&registry).log_with(&log);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .expect("a runtime");

@@ -47,7 +47,7 @@ fn a_policys_bug_is_kept_in_the_write_that_moves_its_position_past_it() {
     let mut registry = registry();
     registry.policy(Unlucky);
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log);
+    let kernel = Kernel::new(&registry).log_with(&log);
     let store = Recording::new();
     opened(store.inner(), &plain, 1, 0);
     let account = cover("account", 1);
@@ -111,7 +111,7 @@ fn a_refused_policy_command_is_kept_with_the_position_it_moves_past() {
     let mut registry = registry();
     registry.policy(Bookkeeping);
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log);
+    let kernel = Kernel::new(&registry).log_with(&log);
     let store = Recording::new();
     opened(store.inner(), &plain, 1, 0);
     let account = cover("account", 1);
@@ -161,7 +161,9 @@ fn under_stay_a_policys_bug_is_kept_alone_and_once_across_resumes() {
     let mut registry = registry();
     registry.policy(Unlucky);
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log).on_policy_bug(OnPolicyBug::Stay);
+    let kernel = Kernel::new(&registry)
+        .log_with(&log)
+        .on_policy_bug(OnPolicyBug::Stay);
     let store = Recording::new();
     opened(store.inner(), &plain, 1, 0);
     let account = cover("account", 1);
@@ -201,7 +203,7 @@ fn under_stay_a_policys_bug_is_kept_alone_and_once_across_resumes() {
 fn a_callers_own_bug_is_answered_and_kept_nowhere() {
     let registry = registry();
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log);
+    let kernel = Kernel::new(&registry).log_with(&log);
     let store = Recording::new();
     let bad = fact(
         cover("account", 1),
@@ -245,7 +247,7 @@ fn a_projectors_bug_is_kept_and_answered() {
     let mut registry = registry();
     registry.projector_handler(&["account"], Broken);
     let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log);
+    let kernel = Kernel::new(&registry).log_with(&log);
     let store = Recording::new();
     opened(store.inner(), &plain, 1, 0);
     let account = cover("account", 1);
@@ -279,7 +281,7 @@ fn a_parked_facts_letter_is_kept_and_answered() {
         max_race_runs: 1,
         ..crate::OnRetryable::default()
     };
-    let kernel = Kernel::new(&registry, &log).on_retryable(retry);
+    let kernel = Kernel::new(&registry).log_with(&log).on_retryable(retry);
     let store = Recording::new();
     opened(store.inner(), &registry, 1, 0);
     let account = cover("account", 1);

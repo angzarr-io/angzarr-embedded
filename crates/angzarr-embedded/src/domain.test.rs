@@ -357,7 +357,7 @@ mod tx {
         let mut registry = registry();
         registry.policy(Probing);
         let log = MemoryDeadLetters::new();
-        let kernel = Kernel::new(&registry, &log);
+        let kernel = Kernel::new(&registry).log_with(&log);
         let store = MemoryStore::new();
         opened(&store, &plain, 1, 0);
         let book = command(cover("account", 1), AccountCmd::Deposit(5).to_any())
@@ -453,7 +453,7 @@ mod tx {
         opened(&store, &plain, 1, 0);
         let deposit = || command(cover("account", 1), AccountCmd::Deposit(5).to_any()).id(3);
 
-        let kernel = Kernel::new(&registry, &log).limit(2);
+        let kernel = Kernel::new(&registry).log_with(&log).limit(2);
         kernel
             .handle::<Account, _>(&store, deposit(), &at(50))
             .ready()
@@ -481,7 +481,7 @@ mod tx {
 
         let store = MemoryStore::new();
         opened(&store, &plain, 1, 0);
-        let shallow = Kernel::new(&registry, &log).limit(1);
+        let shallow = Kernel::new(&registry).log_with(&log).limit(1);
         let failure = shallow
             .handle::<Account, _>(&store, deposit(), &at(50))
             .ready()

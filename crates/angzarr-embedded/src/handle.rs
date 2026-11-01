@@ -58,16 +58,18 @@ use std::convert::Infallible;
 
 use angzarr_proto::v1::{
     command_page, refusal_response, CommandBook, CommandPage, CommandRefused, ConflictResolution,
-    Cover, DeliveryOutcome, EventBook, EventPage, EventRef, Fact, FactOrigin, Outcome,
+    Cover, DeliveryOutcome, EventBook, EventPage, EventRef, Fact, FactOrigin, Handling, Outcome,
 };
 use prost_types::Any;
 
 use angzarr_proto::v1::angzarr_dead_letter::Payload;
 use angzarr_router::error::RouterReason;
 
+use super::book::CommandBookExt;
 use super::check::{check, check_refusal, Checked, Identified, Sampled};
 use super::coordinator::{
     contextual_command, decide, deduplicate, load, write_snapshot, Contextual, Deduplicated,
+    History,
 };
 use super::dead_letter::{self, write_at_cap, CallLetters, Cause, Component, DeadLetterLog};
 use super::domain::Domain;
@@ -392,6 +394,21 @@ impl Handled {
         }
     }
 
+    /// The state of the `D` stream `stream` as the call left it
+    /// ([`Recorded::state`]): from the commit itself, never read after it.
+    /// `None` for a duplicate or a parked fact, which recorded nothing (a
+    /// duplicate's stream is the caller's to [`Kernel::load`]).
+    pub fn state<D: Domain>(
+        &self,
+        stream: &Cover,
+        registry: &Registry,
+    ) -> Result<Option<D::State>, KernelError> {
+        match self {
+            Handled::Applied(recorded) => recorded.state::<D>(stream, registry),
+            Handled::Duplicate(..) | Handled::Parked(_) => Ok(None),
+        }
+    }
+
     /// The dead letters the call wrote, whole and keyed as the store keeps
     /// them (owner ruling Q5): what its steps with no caller left gave up
     /// on, and a parked fact's own.
@@ -403,17 +420,37 @@ impl Handled {
     }
 }
 
+/// The kernel's log when it is given none: it keeps nothing, since the
+/// store keeps each dead letter and the call answers it.
+struct Unlogged;
+
+impl DeadLetterLog for Unlogged {
+    fn write(&self, _line: &str) {}
+
+    fn letter(&self, _letter: &angzarr_proto::v1::AngzarrDeadLetter) {}
+}
+
 impl<'k> Kernel<'k> {
-    /// With [`DEFAULT_DEPTH_LIMIT`].
-    pub fn new(registry: &'k Registry, dead_letters: &'k dyn DeadLetterLog) -> Kernel<'k> {
+    /// With [`DEFAULT_DEPTH_LIMIT`], and no dead-letter log: each letter
+    /// is kept by the store and answered by the call that wrote it
+    /// ([`Handled::dead_letters`], [`Failure::dead_letters`]).
+    pub fn new(registry: &'k Registry) -> Kernel<'k> {
         Kernel {
             registry,
-            dead_letters,
+            dead_letters: &Unlogged,
             limit: DEFAULT_DEPTH_LIMIT,
             policy_bug: OnPolicyBug::default(),
             retry: OnRetryable::default(),
             wait: default_wait(THREADS),
         }
+    }
+
+    /// Writes each dead letter's line to `log` as well
+    /// ([`DeadLetterLog`]): an operator's alert, beside the store, which
+    /// keeps the letter, and the call, which answers it.
+    pub fn log_with(mut self, log: &'k dyn DeadLetterLog) -> Kernel<'k> {
+        self.dead_letters = log;
+        self
     }
 
     /// Retries a step's retryable failure as `retry` says, then
@@ -486,6 +523,64 @@ impl<'k> Kernel<'k> {
     {
         let checked = self.check::<D>(book)?;
         self.handle_checked(store, checked, sampled).await
+    }
+
+    /// The `D` stream `stream` as the kernel's step 3 loads it, and its
+    /// head: the newest snapshot the registry takes, then the events after
+    /// it, each checked and upcast as replay checks it; a stream with no
+    /// events is `D`'s fresh state at head 0. A cover of another domain is
+    /// [`KernelError::WrongDomain`]. What a caller decides from before it
+    /// sends, as [`Kernel::handle_shaped`] does.
+    pub async fn load<D, S>(
+        &self,
+        store: &S,
+        stream: &Cover,
+    ) -> Result<(Stream<D>, u64), KernelError>
+    where
+        D: Domain,
+        S: Store,
+    {
+        let _ = (store, stream);
+        todo!("red: load")
+    }
+
+    /// A command shaped from the `D` stream `stream`'s state, sent at the
+    /// head it was shaped from: [`Kernel::load`]s the stream, hands
+    /// `shape` its state, and sends the payload it makes, if any, as
+    /// [`Kernel::handle`] does, its expected sequence the head loaded,
+    /// STRICT, so a write landing between the load and the send is
+    /// [`KernelError::Stale`], never merged. The shape's value comes back
+    /// beside the outcome (`None`: it made no command, and nothing was
+    /// sent). A stale send is loaded and shaped again, so the caller decides
+    /// on the stream as it now is, under the race re-run cap
+    /// ([`OnRetryable::max_race_runs`], the backoff between the runs); at
+    /// the cap the command is given up, [`KernelError::RetryCapExhausted`],
+    /// handed back to its waiting caller and not dead-lettered, and with
+    /// race re-runs off the first stale send is handed back as it is. A
+    /// load that fails retryably is tried again under the retry cap, as a
+    /// step's own load is. One stream only: nothing is ordered across
+    /// streams.
+    pub async fn handle_shaped<D, S, P, T>(
+        &self,
+        store: &S,
+        stream: &Cover,
+        sampled: &Sampled,
+        mut shape: impl FnMut(&D::State) -> (Option<P>, T),
+    ) -> Result<(Option<Handled>, T), Failure<Rejected>>
+    where
+        D: Domain,
+        S: Store,
+        P: super::payload::Payload,
+    {
+        let _ = (
+            store,
+            stream,
+            sampled,
+            &mut shape,
+            Handling::default(),
+            CommandBook::command,
+        );
+        todo!("red: shaped")
     }
 
     /// Handle one book for whatever registered domain's stream it names, as
@@ -1179,6 +1274,7 @@ impl<'k> Run<'k> {
                 .map_err(|e| Failure::Kernel(lost(&contextual, e)))?;
             write_snapshot(port, &cover, decided.snapshot).await;
         }
+        self.recorded.keep(&cover, contextual.into_history(&pages));
         self.record(cover, head, pages);
         Ok(Origin::Wrote(head))
     }
@@ -1626,6 +1722,7 @@ impl<'k> Run<'k> {
             .await
             .map_err(|e| kernel(lost(&contextual, e)))?;
         write_snapshot(port, &cover, snapshot).await;
+        self.recorded.keep(&cover, contextual.into_history(&pages));
         self.record(cover.clone(), head, pages);
         Ok(Stepped::Wrote(cover, head))
     }
@@ -1673,10 +1770,14 @@ impl<'k> Run<'k> {
 
 /// Everything a chain recorded, every stream, after commit: angzarr's
 /// `CommandResponse.events`, one `EventBook` per stream here, since a chain
-/// touches several. It holds the pages as written; their typed events are
-/// decoded only when asked for ([`Recorded::events`]).
+/// touches several. It holds the pages as written, and each stream's
+/// history as its last step loaded it; their typed events and states are
+/// decoded only when asked for ([`Recorded::events`], [`Recorded::state`]).
 #[derive(Default)]
 pub struct Recorded {
+    /// Each stream a step decided on, as that stream's last step left it:
+    /// the history it loaded, then what it wrote.
+    histories: Vec<(Cover, History)>,
     /// One book per stream touched, in the order first touched: the pages
     /// appended, `next_sequence` the new length.
     books: Vec<EventBook>,
@@ -1721,6 +1822,37 @@ impl Recorded {
     pub fn dead_letters(&self) -> &[DeadLetter] {
         &self.dead_letters
     }
+
+    /// The state of the `D` stream `stream` as the chain left it: the
+    /// history its last step in the chain was decided on, then what that
+    /// step wrote, folded as replay folds it ([`Stream::resume`],
+    /// [`Stream::replay`]). From the commit itself: never read after it, so
+    /// a write landing after the commit is not in it. `None` for a stream
+    /// no step of the chain decided on (one of a domain in another
+    /// process included); [`KernelError::Replay`] for a stream that is not
+    /// a `D` stream. The originating command's stream has a state even
+    /// when its decision recorded no event.
+    pub fn state<D: Domain>(
+        &self,
+        stream: &Cover,
+        registry: &Registry,
+    ) -> Result<Option<D::State>, KernelError> {
+        let Some((cover, history)) = self.histories.iter().find(|(cover, _)| cover == stream)
+        else {
+            return Ok(None);
+        };
+        let (_, _, state) = history.stream::<D>(cover.clone(), registry)?.into_parts();
+        Ok(Some(state))
+    }
+
+    /// `history`, the stream `cover` as a step left it, in place of any
+    /// earlier step's.
+    fn keep(&mut self, cover: &Cover, history: History) {
+        match self.histories.iter_mut().find(|(kept, _)| kept == cover) {
+            Some((_, kept)) => *kept = history,
+            None => self.histories.push((cover.clone(), history)),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1736,3 +1868,9 @@ mod concurrency_tests;
 #[cfg(test)]
 #[path = "races.test.rs"]
 mod races_tests;
+
+// What every caller wrote around the kernel: no log, load, the state a
+// commit left, the typed refusal, and a command shaped at the head.
+#[cfg(test)]
+#[path = "seams.test.rs"]
+mod seams_tests;

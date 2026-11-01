@@ -80,6 +80,7 @@
 // matchable by pattern. Revisit (box `Downstream`) if profiling says so.
 #![allow(clippy::result_large_err)]
 
+mod book;
 mod check;
 mod conflict;
 mod coordinator;
@@ -156,6 +157,7 @@ pub use angzarr_router::router::ProjectorHandler;
 /// feature, off by default: it brings sqlx and SQLite.
 #[cfg(feature = "sqlite")]
 pub use angzarr_store_sqlite;
+pub use book::{CommandBookExt, CoverExt};
 pub use check::{check, Body, Checked, Identified, Malformed, Sampled};
 pub use conflict::{Key, UnitPath, Units};
 pub use dead_letter::{dead_letter_line, DeadLetterLog, MemoryDeadLetters, DEAD_LETTER_PREFIX};

@@ -641,7 +641,8 @@ mod judged {
         book: crate::v1::CommandBook,
     ) -> Result<Handled, Failure<crate::Rejected>> {
         let log = crate::MemoryDeadLetters::new();
-        crate::Kernel::new(registry, &log)
+        crate::Kernel::new(registry)
+            .log_with(&log)
             .on_retryable(crate::toys::no_retries())
             .handle_any(store, book, &at(3))
             .ready()

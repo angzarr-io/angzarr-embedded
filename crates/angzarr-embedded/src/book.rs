@@ -1,0 +1,78 @@
+//! Addressing a stream and wrapping a command for it, as every caller of
+//! the kernel does: angzarr's wire types, built in one place.
+//!
+//! - [`CoverExt::natural`]: the stream of the entity a natural key names,
+//!   its root the key's UUIDv5 under its domain ([`ids::compute_root`]),
+//!   in the main edition.
+//! - [`CommandBookExt::command`]: a client's command to a stream, with no
+//!   ids and no handling; [`CommandBookExt::at`] sends it at the head its
+//!   sender read, [`CommandBookExt::with_id`] under the sender's command
+//!   id.
+//!
+//! Both are extension traits on the wire types, so a book is still a
+//! [`CommandBook`]: nothing parallel to angzarr's types.
+
+use angzarr_proto::ids;
+use angzarr_proto::v1::{command_page, Command, CommandBook, CommandPage, Cover, Handling, Uuid};
+use prost_types::Any;
+
+/// A [`Cover`] addressed by a natural key.
+pub trait CoverExt: Sized {
+    /// The main-edition stream of `domain` whose root is `key`'s
+    /// ([`ids::compute_root`]): the stream of the one entity `key` names.
+    /// A domain holding `':'` derives no root, so its cover has none, and
+    /// the kernel's check refuses it ([`Malformed::NoRoot`](super::Malformed::NoRoot)).
+    fn natural(domain: &str, key: &str) -> Self;
+}
+
+impl CoverExt for Cover {
+    fn natural(domain: &str, key: &str) -> Cover {
+        let _ = (domain, key, ids::compute_root);
+        todo!("red: the natural cover")
+    }
+}
+
+/// A [`CommandBook`] built for one command.
+pub trait CommandBookExt: Sized {
+    /// A client's command carrying `payload` (packed: a domain's
+    /// [`Payload::to_any`](super::Payload::to_any), or [`pack`](super::pack)
+    /// of a message) to `cover`: no command id (the kernel takes the
+    /// [`Sampled`](super::Sampled) one), no correlation, no handling (the
+    /// kernel stamps the head it loads).
+    fn command(cover: Cover, payload: Any) -> Self;
+
+    /// The same book, sent at `head`: its expected sequence, the head its
+    /// sender read, its conflict resolution as it was (unset: by
+    /// configuration).
+    fn at(self, head: u64) -> Self;
+
+    /// The same book, under the client's command id `command_id`.
+    fn with_id(self, command_id: Uuid) -> Self;
+}
+
+impl CommandBookExt for CommandBook {
+    fn command(cover: Cover, payload: Any) -> CommandBook {
+        let _ = (
+            cover,
+            payload,
+            command_page::Body::Command(Command::default()),
+            Handling::default(),
+        );
+        let _ = CommandPage::default();
+        todo!("red: the command book")
+    }
+
+    fn at(self, head: u64) -> CommandBook {
+        let _ = head;
+        todo!("red: at")
+    }
+
+    fn with_id(self, command_id: Uuid) -> CommandBook {
+        let _ = command_id;
+        todo!("red: with_id")
+    }
+}
+
+#[cfg(test)]
+#[path = "book.test.rs"]
+mod tests;

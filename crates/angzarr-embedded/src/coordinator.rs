@@ -55,12 +55,14 @@ use prost_types::{Any, Timestamp};
 
 use super::check::{Identified, Malformed, Sampled};
 use super::dead_letter::{self, Cause, Component, DeadLetterLog};
+use super::domain::Domain;
 use super::error::{Failure, KernelError, UpcastError};
 use super::markup::STEP_LIMIT;
 use super::payload::type_name;
 use super::registry::Registry;
 use super::route::{self, Rejected};
 use super::store::Port;
+use super::stream::Stream;
 use super::upcast::{upcast_input, upcast_pages};
 
 /// What step 3 found.
@@ -85,16 +87,46 @@ pub(crate) struct Novel {
     loaded: Loaded,
 }
 
-/// What step 3 read, before its lookup: the resolution, the snapshot, the
-/// events after it, the head and the last instant.
+/// What step 3 read, before its lookup: the resolution, the stream's
+/// history and its head.
 pub(crate) struct Loaded {
     /// The input's payload upcast (decision 14.39), or why it could not be.
     current: Result<Any, UpcastError>,
     resolution: ConflictResolution,
-    snapshot: Option<Snapshot>,
-    pages: Vec<EventPage>,
+    history: History,
     head: u64,
-    last_recorded_at: Option<Timestamp>,
+}
+
+/// A stream as a load reads it, domain-blind: the newest usable snapshot,
+/// the events after it (every event, with none), and the last event's
+/// `recorded_at`, the floor for the next.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct History {
+    pub(crate) snapshot: Option<Snapshot>,
+    pub(crate) pages: Vec<EventPage>,
+    pub(crate) last_recorded_at: Option<Timestamp>,
+}
+
+impl History {
+    /// The stream this history is, folded as `D`'s under `cover`: resumed
+    /// from its snapshot ([`Stream::resume`]), or replayed from its first
+    /// event ([`Stream::replay`]), each event checked and upcast as replay
+    /// checks it.
+    pub(crate) fn stream<D: Domain>(
+        &self,
+        cover: Cover,
+        registry: &Registry,
+    ) -> Result<Stream<D>, KernelError> {
+        match &self.snapshot {
+            Some(snapshot) => {
+                // The last event's instant is the snapshot's own only when
+                // no event follows it.
+                let floor = self.last_recorded_at.filter(|_| self.pages.is_empty());
+                Stream::resume(cover, snapshot, floor, &self.pages, registry)
+            }
+            None => Stream::replay(cover, &self.pages, registry),
+        }
+    }
 }
 
 /// A command with its stream's history and its handling resolved: angzarr's
@@ -125,6 +157,18 @@ impl Contextual {
     /// The stream's next sequence.
     pub fn head(&self) -> u64 {
         self.head
+    }
+
+    /// The stream as this command's step left it: the history it was
+    /// decided on, then `written`, the events it wrote.
+    pub(crate) fn into_history(self, written: &[EventPage]) -> History {
+        let mut pages = self.pages;
+        pages.extend_from_slice(written);
+        History {
+            snapshot: self.snapshot,
+            pages,
+            last_recorded_at: self.last_recorded_at,
+        }
     }
 }
 
@@ -340,9 +384,9 @@ pub(crate) fn expect(
     Ok((expected, nonce))
 }
 
-/// The read half of step 3: the resolution, the newest usable snapshot and
-/// the events after it. A snapshot at or past the head is not usable: the
-/// stream is read from 0.
+/// The read half of step 3: the resolution, then the stream's history
+/// ([`read_history`]), its snapshot usable by the registry's rules and,
+/// under AGGREGATE_HANDLES and COMMUTATIVE, below the expected sequence.
 pub(crate) async fn read<P: Port>(
     port: &mut P,
     registry: &Registry,
@@ -350,19 +394,36 @@ pub(crate) async fn read<P: Port>(
 ) -> Result<Loaded, KernelError> {
     let current = upcast(registry, command).await;
     let resolution = resolution(registry, command, &current)?;
-    let cover = command.cover();
     let windowed = resolution != ConflictResolution::Strict;
+    let usable = |s: &Snapshot| {
+        registry.snapshot_usable(command.domain(), s)
+            && !(windowed && command.expected_sequence().is_some_and(|e| s.sequence >= e))
+    };
+    let (history, head) = read_history(port, command.cover(), usable).await?;
+    Ok(Loaded {
+        current,
+        resolution,
+        history,
+        head,
+    })
+}
+
+/// `stream`'s history and its head, as step 3 loads it: the newest
+/// snapshot `usable` takes, and the events after it. A snapshot at or past
+/// the head is not usable: the stream is read from 0.
+pub(crate) async fn read_history<P: Port>(
+    port: &mut P,
+    stream: &Cover,
+    usable: impl Fn(&Snapshot) -> bool,
+) -> Result<(History, u64), KernelError> {
     let snapshot = port
-        .read_snapshot(cover)
+        .read_snapshot(stream)
         .await
         .map_err(KernelError::Store)?
-        .filter(|s| {
-            registry.snapshot_usable(command.domain(), s)
-                && !(windowed && command.expected_sequence().is_some_and(|e| s.sequence >= e))
-        });
+        .filter(|s| usable(s));
     let from = snapshot.as_ref().map_or(0, |s| s.sequence + 1);
     let mut slice = port
-        .read_from(cover, from)
+        .read_from(stream, from)
         .await
         .map_err(KernelError::Store)?;
     let snapshot = match (snapshot, &slice) {
@@ -371,19 +432,20 @@ pub(crate) async fn read<P: Port>(
         // unusable, like one under other rules, and the stream is read
         // from its events.
         (Some(s), read) if s.sequence >= read.next_sequence => {
-            slice = port.read_from(cover, 0).await.map_err(KernelError::Store)?;
+            slice = port
+                .read_from(stream, 0)
+                .await
+                .map_err(KernelError::Store)?;
             None
         }
         (snapshot, _) => snapshot,
     };
-    Ok(Loaded {
-        current,
-        resolution,
+    let history = History {
         snapshot,
         pages: slice.pages,
-        head: slice.next_sequence,
         last_recorded_at: slice.last_recorded_at,
-    })
+    };
+    Ok((history, slice.next_sequence))
 }
 
 /// Step 4: the expected sequence stamped or checked against the head step 3
@@ -395,15 +457,20 @@ pub(crate) fn load(novel: Novel, nonces: &mut u64) -> Result<Contextual, KernelE
         stream: command.cover().clone(),
         error,
     })?;
+    let History {
+        snapshot,
+        pages,
+        last_recorded_at,
+    } = loaded.history;
     Ok(Contextual {
         command,
         current,
         resolution: loaded.resolution,
         expected,
-        snapshot: loaded.snapshot,
-        pages: loaded.pages,
+        snapshot,
+        pages,
         head: loaded.head,
-        last_recorded_at: loaded.last_recorded_at,
+        last_recorded_at,
         nonce,
     })
 }
@@ -435,10 +502,10 @@ pub(crate) async fn decide(
         .await
         .map_err(kernel)?;
     let recorded_at = contextual.recorded_at.unwrap_or_default();
-    let response = handler
-        .dispatch(&contextual)
-        .await
-        .and_then(|response| judged(&contextual, response));
+    // The handler's own refusal, as it made it, when it is in process:
+    // kept beside the refusal's report for the caller to match.
+    let (response, mut kept) = route::catching(|| handler.dispatch(&contextual)).await;
+    let response = response.and_then(|response| judged(&contextual, response));
     let response = response.map_err(|error| {
         let error = match RouterReason::from_str_name(&error.code) {
             Some(RouterReason::UnknownCommandType | RouterReason::NoFactHandler) => {
@@ -474,7 +541,10 @@ pub(crate) async fn decide(
                 Failure::Kernel(unresolved)
             }
             _ => {
-                let failure = refused(identified, error);
+                let failure = match refused(identified, error) {
+                    Failure::Rejected(rejected) => Failure::Rejected(rejected.kept(kept.take())),
+                    failure => failure,
+                };
                 if let Failure::Kernel(error @ KernelError::Router(coded)) = &failure {
                     if route::is_handler_fault(coded) {
                         dead_letter::write(

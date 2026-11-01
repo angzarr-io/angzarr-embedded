@@ -14,7 +14,9 @@
 //!   resolving COMMUTATIVE by the state's conflict units; the domain's
 //!   handlers are registered on it.
 
+use std::cell::RefCell;
 use std::fmt;
+use std::future::Future;
 use std::sync::Arc;
 
 use angzarr_diagnostic::{Arg, Diagnostic, Report};
@@ -35,11 +37,40 @@ use super::payload::{type_name, Payload};
 /// refusal the handler made (or the router's, a process manager's
 /// `COORDINATOR_REASON_PM_NO_INSTANCE`), and the typed refusal object it carries, if any.
 /// The refusing domain recorded nothing.
-#[derive(Clone, PartialEq, Debug)]
+///
+/// A domain's handler in this process refused with a value, its
+/// `Domain::Rejection` (a marked-up domain's
+/// [`Rejection`](super::markup::Rejection)), which is kept beside the
+/// report, to match as a value ([`Rejected::rejection`]); a refusal from
+/// another process, or the router's on a domain's behalf, is its code and
+/// args alone. Two rejections are equal when their reports, refusal
+/// objects and statuses are.
+#[derive(Clone, Debug)]
 pub struct Rejected {
     report: Report,
     refusal: Option<Any>,
     status: BusinessStatus,
+    kept: Option<Kept>,
+}
+
+impl PartialEq for Rejected {
+    fn eq(&self, other: &Rejected) -> bool {
+        (&self.report, &self.refusal, self.status) == (&other.report, &other.refusal, other.status)
+    }
+}
+
+/// A domain's refusal as its handler made it: any `Domain::Rejection`.
+pub(crate) type Typed = Arc<dyn std::any::Any + Send + Sync>;
+
+/// A [`Typed`] refusal, kept in a [`Rejected`]: shown as `..`, since its
+/// report shows it.
+#[derive(Clone)]
+struct Kept(Typed);
+
+impl fmt::Debug for Kept {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("..")
+    }
 }
 
 impl Rejected {
@@ -58,7 +89,25 @@ impl Rejected {
             refusal: error.refusal.as_deref().cloned(),
             status: BusinessStatus::try_from(error.grpc)
                 .unwrap_or(BusinessStatus::FailedPrecondition),
+            kept: None,
         }
+    }
+
+    /// The same rejection, keeping `typed`, the refusal its handler made.
+    pub(crate) fn kept(self, typed: Option<Typed>) -> Rejected {
+        Rejected {
+            kept: typed.map(Kept),
+            ..self
+        }
+    }
+
+    /// The domain's own refusal, as its handler in this process made it,
+    /// if it is an `R`: its `Domain::Rejection`, matched as a value. `None`
+    /// for a refusal from another process or the router's (code and args
+    /// alone: [`Rejected::report`]), and for any other type.
+    pub fn rejection<R: std::any::Any>(&self) -> Option<&R> {
+        let kept: &(dyn std::any::Any + Send + Sync) = &*self.kept.as_ref()?.0;
+        kept.downcast_ref::<R>().and(None)
     }
 
     /// The refusal as a report: its code and args.
@@ -155,8 +204,78 @@ pub(crate) fn is_handler_fault(error: &CodedError) -> bool {
 /// refusal is keyed ROUTER_REASON_COMMAND_REFUSED, its object's type as `refusal_type`
 /// and the object beside (decision 14.37); a refusal without one under its
 /// own code, its args flattened as metadata.
-pub fn rejection(rejection: &dyn Diagnostic, refusal: Option<Any>) -> HandlerError {
-    refused(rejection, refusal, BusinessStatus::FailedPrecondition)
+///
+/// The rejection itself is kept for the kernel's caller, typed
+/// ([`Rejected::rejection`]), when the kernel dispatched the handler in
+/// this process.
+pub fn rejection<R: Diagnostic + Send + Sync + 'static>(
+    rejection: R,
+    refusal: Option<Any>,
+) -> HandlerError {
+    let refused = refused(&rejection, refusal, BusinessStatus::FailedPrecondition);
+    offer(rejection);
+    refused
+}
+
+thread_local! {
+    /// The refusal kept for the dispatch being polled on this thread
+    /// ([`catching`]): `None` outside one; inside, what its handler
+    /// offered, if anything.
+    static CATCHING: RefCell<Option<Option<Typed>>> = const { RefCell::new(None) };
+}
+
+/// Keep `rejection`, a handler's refusal as it made it, for the dispatch
+/// being polled ([`catching`]); outside one, nothing is kept.
+pub(crate) fn offer<R: std::any::Any + Send + Sync>(rejection: R) {
+    CATCHING.with(|catching| {
+        if let Some(slot) = catching.borrow_mut().as_mut() {
+            *slot = Some(Arc::new(rejection));
+        }
+    });
+}
+
+/// The dispatch to a domain's handlers `dispatch` makes, run, and the
+/// refusal its handler kept ([`offer`]) while it was made (a handler in
+/// process may run as its future is made) or polled: on whatever thread
+/// polls it, each poll sees only this dispatch's slot, so concurrent
+/// dispatches never share one.
+pub(crate) async fn catching<F: Future>(
+    dispatch: impl FnOnce() -> F,
+) -> (F::Output, Option<Typed>) {
+    let mut caught = None;
+    let work = {
+        let _catch = Catch::enter(&mut caught);
+        dispatch()
+    };
+    let mut work = std::pin::pin!(work);
+    let output = std::future::poll_fn(|cx| {
+        let _catch = Catch::enter(&mut caught);
+        work.as_mut().poll(cx)
+    })
+    .await;
+    (output, caught)
+}
+
+/// One poll's [`CATCHING`] slot: entered with what the dispatch caught so
+/// far, and on drop (a panic included) handed back, the slot of whatever
+/// was polling before restored.
+struct Catch<'c> {
+    caught: &'c mut Option<Typed>,
+    outer: Option<Option<Typed>>,
+}
+
+impl<'c> Catch<'c> {
+    fn enter(caught: &'c mut Option<Typed>) -> Catch<'c> {
+        let outer = CATCHING.with(|catching| catching.replace(Some(caught.take())));
+        Catch { caught, outer }
+    }
+}
+
+impl Drop for Catch<'_> {
+    fn drop(&mut self) {
+        let ours = CATCHING.with(|catching| catching.replace(self.outer.take()));
+        *self.caught = ours.flatten();
+    }
 }
 
 /// A marked-up handler's failure, as the router carries it: a refusal
@@ -165,10 +284,14 @@ pub fn rejection(rejection: &dyn Diagnostic, refusal: Option<Any>) -> HandlerErr
 /// ([`bug`]), or a retryable bug under the status it picked
 /// (ROUTER_REASON_UNHANDLED_HANDLER_ERROR, its cause as a fatal bug's,
 /// `CodedError::retryable_bug`).
-pub(crate) fn failed<R: Diagnostic>(failed: Failed<super::markup::Rejection<R>>) -> HandlerError {
+pub(crate) fn failed<R: Diagnostic + Send + Sync + 'static>(
+    failed: Failed<super::markup::Rejection<R>>,
+) -> HandlerError {
     match failed {
         Failed::Rejected { rejection, status } => {
-            refused(&rejection, rejection.refusal().cloned(), status)
+            let refused = refused(&rejection, rejection.refusal().cloned(), status);
+            offer(rejection);
+            refused
         }
         Failed::Immediate(report) => {
             HandlerError::Coded(CodedError::immediate(report.code(), flat_args(&report)))
