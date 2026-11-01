@@ -14,6 +14,8 @@
 //! [`ReadByCorrelation`](angzarr_ports::ReadByCorrelation),
 //! [`ListStreams`](angzarr_ports::ListStreams),
 //! [`Outbox`](angzarr_ports::Outbox),
+//! [`DeadLetterStore`](angzarr_ports::DeadLetterStore) (dead letters,
+//! durable, written in the step's write: migration 0006),
 //! [`Migrations`](angzarr_ports::Migrations) (through sqlx's migrator; every
 //! open, to read or to write, runs what is pending) and
 //! [`Backup`](angzarr_ports::Backup) (`VACUUM INTO`, and before every

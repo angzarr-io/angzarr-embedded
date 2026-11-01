@@ -136,6 +136,38 @@ pub(crate) const PENDING: &str = "SELECT id, origin, message, edition FROM outbo
 /// Clear one pending entry by its id.
 pub(crate) const CLEAR: &str = "DELETE FROM outbox WHERE id = ?1";
 
+/// Keep a dead letter (`?1` to `?3`: domain, edition, root; `?4` its
+/// place's kind, `?5` its place, `?6` its component, `?7` the letter),
+/// replacing the one kept under its key.
+pub(crate) const PUT_DEAD_LETTER: &str =
+    "INSERT INTO dead_letters (domain, edition, root, at_kind, at, component, letter) \
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+     ON CONFLICT (domain, edition, root, at_kind, at, component) DO UPDATE SET letter = excluded.letter";
+
+/// Rows `(at_kind, at, letter)`: a stream's dead letters, in key order
+/// (place, then component).
+pub(crate) const DEAD_LETTERS: &str = "SELECT at_kind, at, letter FROM dead_letters \
+     WHERE domain = ?1 AND edition = ?2 AND root = ?3 ORDER BY at_kind, at, component";
+
+/// Rows `(at_kind, at, letter)`: the dead letter of one key.
+pub(crate) const DEAD_LETTER: &str = "SELECT at_kind, at, letter FROM dead_letters \
+     WHERE domain = ?1 AND edition = ?2 AND root = ?3 AND at_kind = ?4 AND at = ?5 \
+     AND component = ?6";
+
+/// Rows `(edition, root)` of `?1`'s streams a dead letter is about, main
+/// first, then by edition, each by root.
+pub(crate) const DEAD_LETTERED: &str =
+    "SELECT DISTINCT edition, root FROM dead_letters WHERE domain = ?1 ORDER BY edition, root";
+
+/// Delete the dead letter of one key.
+pub(crate) const REMOVE_DEAD_LETTER: &str = "DELETE FROM dead_letters \
+     WHERE domain = ?1 AND edition = ?2 AND root = ?3 AND at_kind = ?4 AND at = ?5 \
+     AND component = ?6";
+
+/// Delete every dead letter about a stream.
+pub(crate) const DELETE_DEAD_LETTERS: &str =
+    "DELETE FROM dead_letters WHERE domain = ?1 AND edition = ?2 AND root = ?3";
+
 /// Row `(data_version, total_changes())`: what a change token is made of.
 pub(crate) const CHANGE_TOKEN: &str =
     "SELECT data_version, total_changes() FROM pragma_data_version";

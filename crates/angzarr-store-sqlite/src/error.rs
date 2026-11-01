@@ -43,6 +43,9 @@ pub enum SqlError {
     NoDataVersion,
     /// A stored root of `length` bytes, not a UUID's 16.
     BadRoot { length: usize },
+    /// A dead letter's stored place, of `kind` and `length` bytes: neither
+    /// a sequence (kind 0, eight bytes) nor a command id (kind 1, sixteen).
+    BadDeadLetterPlace { kind: u64, length: usize },
 }
 
 impl SqlError {
@@ -55,6 +58,7 @@ impl SqlError {
             SqlError::DamagedFile { .. } => "angzarr-store-sqlite-damaged-file",
             SqlError::NoDataVersion => "angzarr-store-sqlite-no-data-version",
             SqlError::BadRoot { .. } => "angzarr-store-sqlite-bad-root",
+            SqlError::BadDeadLetterPlace { .. } => "angzarr-store-sqlite-bad-dead-letter-place",
         }
     }
 
@@ -76,6 +80,10 @@ impl SqlError {
             }
             SqlError::NoDataVersion => Vec::new(),
             SqlError::BadRoot { length } => vec![("length", Arg::Uint(*length as u64))],
+            SqlError::BadDeadLetterPlace { kind, length } => vec![
+                ("kind", Arg::Uint(*kind)),
+                ("length", Arg::Uint(*length as u64)),
+            ],
         }
     }
 
@@ -201,6 +209,7 @@ pub fn errors() -> Vec<SqlError> {
         },
         SqlError::NoDataVersion,
         SqlError::BadRoot { length: 3 },
+        SqlError::BadDeadLetterPlace { kind: 0, length: 2 },
     ])
 }
 

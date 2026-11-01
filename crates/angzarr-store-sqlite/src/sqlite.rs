@@ -489,6 +489,21 @@ fn view_of(stream: StreamRef<'_>) -> [Value; 3] {
     ]
 }
 
+/// A dead letter's key as its statements' parameters: domain, edition
+/// column, root, place kind, place, component.
+fn letter_key(key: DeadLetterKey<'_>) -> [Value; 6] {
+    let [domain, root, edition] = view_of(key.stream);
+    let (kind, at) = rows::place(key.at);
+    [
+        domain,
+        edition,
+        root,
+        Value::Int(kind),
+        Value::Blob(at),
+        Value::Text(key.component.to_string()),
+    ]
+}
+
 /// Statements run on one connection, each counted.
 struct Exec<'a, C> {
     conn: C,
@@ -788,6 +803,55 @@ impl<C: DerefMut<Target = SqliteConnection>> Exec<'_, C> {
         ];
         self.execute(statements::PUT_OUTBOX, values).await.map(drop)
     }
+
+    /// Keep `letter`, replacing the one kept under its key.
+    async fn put_dead_letter(&mut self, letter: &DeadLetter) -> Result<(), StoreError> {
+        let [domain, edition, root, kind, at, component] = letter_key(letter.key()?);
+        let values = [
+            domain,
+            edition,
+            root,
+            kind,
+            at,
+            component,
+            Value::Blob(letter.letter.encode_to_vec()),
+        ];
+        self.execute(statements::PUT_DEAD_LETTER, values)
+            .await
+            .map(drop)
+    }
+
+    /// `(at_kind, at, letter)` rows about `stream`, decoded.
+    async fn dead_letters(
+        &mut self,
+        stream: StreamRef<'_>,
+        sql: &str,
+        values: impl IntoIterator<Item = Value>,
+    ) -> Result<Vec<DeadLetter>, StoreError> {
+        let cover = stream.to_cover();
+        let mut letters = Vec::new();
+        for row in self.rows(sql, values).await? {
+            let kind: i64 = row.try_get(0).map_err(unavailable)?;
+            let at: Vec<u8> = row.try_get(1).map_err(unavailable)?;
+            let letter: Vec<u8> = row.try_get(2).map_err(unavailable)?;
+            letters.push(rows::dead_letter(&cover, kind, &at, &letter)?);
+        }
+        Ok(letters)
+    }
+
+    /// Every letter about `stream`, in key order.
+    async fn letters_of(&mut self, stream: StreamRef<'_>) -> Result<Vec<DeadLetter>, StoreError> {
+        let [domain, root, edition] = view_of(stream);
+        self.dead_letters(stream, statements::DEAD_LETTERS, [domain, edition, root])
+            .await
+    }
+
+    /// Delete every letter about `stream`: how many.
+    async fn delete_letters(&mut self, stream: StreamRef<'_>) -> Result<u64, StoreError> {
+        let [domain, root, edition] = view_of(stream);
+        self.execute(statements::DELETE_DEAD_LETTERS, [domain, edition, root])
+            .await
+    }
 }
 
 /// The head after `last`, a stream's last page: 0 and no instant for none.
@@ -820,7 +884,7 @@ impl EventStore for SqliteStore {
     /// One `BEGIN IMMEDIATE` transaction, begun and committed inside the
     /// call: the stream's length checked against `expected` under the write
     /// lock, its pages inserted, the
-    /// positions upserted and the outbox entries kept. Nothing is held open
+    /// positions upserted, the outbox entries and dead letters kept. Nothing is held open
     /// after it returns; a failure lands nothing.
     async fn write(&self, write: Write<'_>) -> Result<Written, StoreError> {
         let Exec { mut conn, sent } = self.conn.exec().await;
@@ -850,6 +914,9 @@ impl EventStore for SqliteStore {
         };
         for (place, entry) in write.outbox.iter().enumerate() {
             ex.put_outbox(entry, at, place).await?;
+        }
+        for letter in write.dead_letters {
+            ex.put_dead_letter(letter).await?;
         }
         ex.count();
         ex.conn.commit().await.map_err(unavailable)?;
@@ -965,34 +1032,71 @@ impl Purge for SqliteStore {
         let [domain, root, edition] = view_of(stream);
         ex.execute(statements::DELETE_POSITIONS, [domain, edition, root])
             .await?;
+        ex.delete_letters(stream).await?;
         ex.count();
         ex.conn.commit().await.map_err(unavailable)?;
         Ok(deleted)
     }
 }
 
+/// Reads are one statement each; a drain is one `BEGIN IMMEDIATE`
+/// transaction, as a write's, so what it answers is what it removed.
 impl DeadLetterStore for SqliteStore {
-    async fn dead_letters(&self, _stream: StreamRef<'_>) -> Result<Vec<DeadLetter>, StoreError> {
-        todo!()
+    async fn dead_letters(&self, stream: StreamRef<'_>) -> Result<Vec<DeadLetter>, StoreError> {
+        self.conn.exec().await.letters_of(stream).await
     }
 
-    async fn dead_letter(&self, _key: DeadLetterKey<'_>) -> Result<Option<DeadLetter>, StoreError> {
-        todo!()
+    async fn dead_letter(&self, key: DeadLetterKey<'_>) -> Result<Option<DeadLetter>, StoreError> {
+        let mut ex = self.conn.exec().await;
+        let found = ex
+            .dead_letters(key.stream, statements::DEAD_LETTER, letter_key(key))
+            .await?;
+        Ok(found.into_iter().next())
     }
 
-    async fn dead_lettered(&self, _domain: &str) -> Result<Vec<Cover>, StoreError> {
-        todo!()
+    async fn dead_lettered(&self, domain: &str) -> Result<Vec<Cover>, StoreError> {
+        let mut covers = Vec::new();
+        for row in self
+            .conn
+            .exec()
+            .await
+            .rows(statements::DEAD_LETTERED, [Value::Text(domain.to_string())])
+            .await?
+        {
+            let edition: String = row.try_get(0).map_err(unavailable)?;
+            let root: Vec<u8> = row.try_get(1).map_err(unavailable)?;
+            covers.push(rows::cover::<SqliteDialect>(domain, edition, &root)?);
+        }
+        Ok(covers)
     }
 
     async fn drain_dead_letters(
         &self,
-        _stream: StreamRef<'_>,
+        stream: StreamRef<'_>,
     ) -> Result<Vec<DeadLetter>, StoreError> {
-        todo!()
+        let Exec { mut conn, sent } = self.conn.exec().await;
+        sent.fetch_add(1, Ordering::Relaxed);
+        let tx = conn
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(unavailable)?;
+        let mut ex = Exec { conn: tx, sent };
+        let drained = ex.letters_of(stream).await?;
+        ex.delete_letters(stream).await?;
+        ex.count();
+        ex.conn.commit().await.map_err(unavailable)?;
+        Ok(drained)
     }
 
-    async fn remove_dead_letters(&self, _keys: &[DeadLetterKey<'_>]) -> Result<u64, StoreError> {
-        todo!()
+    async fn remove_dead_letters(&self, keys: &[DeadLetterKey<'_>]) -> Result<u64, StoreError> {
+        let mut ex = self.conn.exec().await;
+        let mut removed = 0;
+        for key in keys {
+            removed += ex
+                .execute(statements::REMOVE_DEAD_LETTER, letter_key(*key))
+                .await?;
+        }
+        Ok(removed)
     }
 }
 

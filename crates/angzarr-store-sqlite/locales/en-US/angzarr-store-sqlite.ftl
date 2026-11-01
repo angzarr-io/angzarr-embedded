@@ -12,6 +12,7 @@ angzarr-store-sqlite-backup-uncreatable = the backup { $path } could not be crea
 angzarr-store-sqlite-damaged-file = the database file is too damaged to open (SQLite code { $errno }): { $ext_err_txt }
 angzarr-store-sqlite-no-data-version = the database gave no data version
 angzarr-store-sqlite-bad-root = a stored root of { $length } bytes, not a UUID's 16
+angzarr-store-sqlite-bad-dead-letter-place = a dead letter's stored place of kind { $kind } and { $length } bytes is neither a sequence nor a command id
 angzarr-store-sqlite-damaged =
     the database file is damaged: { $first }{ $more ->
         [0] {""}

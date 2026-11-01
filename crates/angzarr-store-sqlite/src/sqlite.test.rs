@@ -1,7 +1,8 @@
 //! The SQLite store held to angzarr-ports' conformance suite, every section
 //! but editions, the same checks `MemoryStore` passes, so angzarr-embedded and angzarr
 //! behave alike over either; then what is particular to a store on a file:
-//! opening, WAL, migrations (an existing database's included), integrity,
+//! opening, WAL, migrations (an existing database's included), dead
+//! letters on a file, integrity,
 //! damage, purges and reads racing writers, change tokens, and `Send`.
 //! There is no store-wide position (decision 14.35): ordering is per
 //! stream, and a migrated database keeps no trace of the released
@@ -949,6 +950,8 @@ fn every_migration_runs_inside_the_open_transaction() {
 //   3.35 and later). 0002 itself stays, byte for byte.
 // - A new 0005 rekeys 0003's outbox per stream (owner ruling 2026-10-31:
 //   no outbox sequence), carrying what is pending; 0003 stays as released.
+// - A new 0006 adds the `dead_letters` table (owner ruling 2026-10-31, Q5:
+//   dead letters are durable); 0001 to 0005 stay as released.
 
 /// The tables of the database at `path`, and the columns of its `events`,
 /// each sorted.

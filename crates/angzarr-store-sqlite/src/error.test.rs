@@ -161,6 +161,7 @@ fn every_cause_has_this_crates_code_once() {
             "angzarr-store-sqlite-damaged-file",
             "angzarr-store-sqlite-no-data-version",
             "angzarr-store-sqlite-bad-root",
+            "angzarr-store-sqlite-bad-dead-letter-place",
         ]
     );
     assert_eq!(
