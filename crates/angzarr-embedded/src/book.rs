@@ -76,8 +76,7 @@ impl CommandBookExt for CommandBook {
     }
 
     fn command_of(cover: Cover, payload: &impl Payload) -> CommandBook {
-        let _ = (cover, payload);
-        todo!()
+        CommandBook::command(cover, payload.to_any())
     }
 
     fn at(mut self, head: u64) -> CommandBook {
