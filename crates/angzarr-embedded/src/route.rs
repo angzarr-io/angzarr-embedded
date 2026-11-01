@@ -107,7 +107,7 @@ impl Rejected {
     /// alone: [`Rejected::report`]), and for any other type.
     pub fn rejection<R: std::any::Any>(&self) -> Option<&R> {
         let kept: &(dyn std::any::Any + Send + Sync) = &*self.kept.as_ref()?.0;
-        kept.downcast_ref::<R>().and(None)
+        kept.downcast_ref::<R>()
     }
 
     /// The refusal as a report: its code and args.

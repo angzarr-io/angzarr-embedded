@@ -27,8 +27,11 @@ pub trait CoverExt: Sized {
 
 impl CoverExt for Cover {
     fn natural(domain: &str, key: &str) -> Cover {
-        let _ = (domain, key, ids::compute_root);
-        todo!("red: the natural cover")
+        Cover {
+            domain: domain.to_string(),
+            root: ids::compute_root(domain, key).ok(),
+            edition: None,
+        }
     }
 }
 
@@ -52,24 +55,29 @@ pub trait CommandBookExt: Sized {
 
 impl CommandBookExt for CommandBook {
     fn command(cover: Cover, payload: Any) -> CommandBook {
-        let _ = (
-            cover,
-            payload,
-            command_page::Body::Command(Command::default()),
-            Handling::default(),
-        );
-        let _ = CommandPage::default();
-        todo!("red: the command book")
+        CommandBook {
+            cover: Some(cover),
+            page: Some(CommandPage {
+                body: Some(command_page::Body::Command(Command {
+                    payload: Some(payload),
+                })),
+                ..CommandPage::default()
+            }),
+            handling: None,
+        }
     }
 
-    fn at(self, head: u64) -> CommandBook {
-        let _ = head;
-        todo!("red: at")
+    fn at(mut self, head: u64) -> CommandBook {
+        let handling = self.handling.get_or_insert_with(Handling::default);
+        handling.expected_sequence = Some(head);
+        self
     }
 
-    fn with_id(self, command_id: Uuid) -> CommandBook {
-        let _ = command_id;
-        todo!("red: with_id")
+    fn with_id(mut self, command_id: Uuid) -> CommandBook {
+        self.page
+            .get_or_insert_with(CommandPage::default)
+            .command_id = Some(command_id);
+        self
     }
 }
 

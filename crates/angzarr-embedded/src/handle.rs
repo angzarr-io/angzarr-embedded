@@ -68,8 +68,8 @@ use angzarr_router::error::RouterReason;
 use super::book::CommandBookExt;
 use super::check::{check, check_refusal, Checked, Identified, Sampled};
 use super::coordinator::{
-    contextual_command, decide, deduplicate, load, write_snapshot, Contextual, Deduplicated,
-    History,
+    contextual_command, decide, deduplicate, load, read_history, write_snapshot, Contextual,
+    Deduplicated, History,
 };
 use super::dead_letter::{self, write_at_cap, CallLetters, Cause, Component, DeadLetterLog};
 use super::domain::Domain;
@@ -540,8 +540,19 @@ impl<'k> Kernel<'k> {
         D: Domain,
         S: Store,
     {
-        let _ = (store, stream);
-        todo!("red: load")
+        if stream.domain != D::NAME {
+            return Err(KernelError::WrongDomain {
+                stream: stream.clone(),
+                expected: D::NAME,
+            });
+        }
+        let letters = CallLetters::new(self.dead_letters);
+        let mut port = StorePort::new(store, &letters);
+        let registry = self.registry;
+        let usable =
+            |snapshot: &angzarr_proto::v1::Snapshot| registry.snapshot_usable(D::NAME, snapshot);
+        let (history, head) = read_history(&mut port, stream, usable).await?;
+        Ok((history.stream::<D>(stream.clone(), registry)?, head))
     }
 
     /// A command shaped from the `D` stream `stream`'s state, sent at the
@@ -572,15 +583,77 @@ impl<'k> Kernel<'k> {
         S: Store,
         P: super::payload::Payload,
     {
-        let _ = (
-            store,
-            stream,
-            sampled,
-            &mut shape,
-            Handling::default(),
-            CommandBook::command,
-        );
-        todo!("red: shaped")
+        let mut tries = Tries::default();
+        loop {
+            let (loaded, head) = match self.load::<D, S>(store, stream).await {
+                Ok(loaded) => loaded,
+                Err(error) => {
+                    self.reload(Failure::Kernel(error), &mut tries).await?;
+                    continue;
+                }
+            };
+            let (payload, value) = shape(loaded.state());
+            let Some(payload) = payload else {
+                return Ok((None, value));
+            };
+            let book = CommandBook {
+                handling: Some(Handling {
+                    expected_sequence: Some(head),
+                    conflict_resolution: ConflictResolution::Strict as i32,
+                }),
+                ..CommandBook::command(stream.clone(), payload.to_any())
+            };
+            let stale = match self.handle::<D, S>(store, book, sampled).await {
+                Err(stale @ Failure::Kernel(KernelError::Stale { .. })) => stale,
+                handled => return handled.map(|handled| (Some(handled), value)),
+            };
+            self.rerun(stale, stream, &mut tries).await?;
+        }
+    }
+
+    /// After a shape's load failed (`failure`): once its backoff is waited
+    /// out, `Ok`, when it is retryable and retries are left; else the
+    /// failure, handed back.
+    async fn reload(
+        &self,
+        failure: Failure<Rejected>,
+        tries: &mut Tries,
+    ) -> Result<(), Failure<Rejected>> {
+        let retryable = failure_class(&failure) == Some(Class::BugRetryable);
+        if !retryable || tries.retries >= self.retry.max_retries {
+            return Err(failure);
+        }
+        let backoff = self.retry.backoff(tries.retries, self.wait.draw());
+        self.wait.wait(backoff).await;
+        tries.retries += 1;
+        Ok(())
+    }
+
+    /// After a shaped command lost its race to `stream` (`stale`): once
+    /// its backoff is waited out, `Ok`, under the race re-run cap; at the
+    /// cap, [`KernelError::RetryCapExhausted`]; with race re-runs off,
+    /// `stale` itself.
+    async fn rerun(
+        &self,
+        stale: Failure<Rejected>,
+        stream: &Cover,
+        tries: &mut Tries,
+    ) -> Result<(), Failure<Rejected>> {
+        let cap = self.retry.max_race_runs;
+        if cap == 0 {
+            return Err(stale);
+        }
+        tries.races += 1;
+        if tries.races >= cap {
+            return Err(Failure::Kernel(KernelError::RetryCapExhausted {
+                stream: stream.clone(),
+                attempts: tries.races,
+                cap,
+            }));
+        }
+        let backoff = self.retry.backoff(tries.races - 1, self.wait.draw());
+        self.wait.wait(backoff).await;
+        Ok(())
     }
 
     /// Handle one book for whatever registered domain's stream it names, as
