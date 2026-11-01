@@ -252,6 +252,8 @@ mod wire {
 
     message!("toy.lamp.cmd.v1", SwitchOn {});
     message!("toy.lamp.v1", SwitchedOn {});
+    message!("toy.lamp.cmd.v1", SwitchOff {});
+    message!("toy.lamp.v1", SwitchedOff {});
 
     message!(
         "toy.ladder.cmd.v1",
@@ -449,6 +451,8 @@ domain_type!(PayoutRefused {
 });
 domain_type!(SwitchOn {});
 domain_type!(SwitchedOn {});
+domain_type!(SwitchOff {});
+domain_type!(SwitchedOff {});
 domain_type!(Hold { cents: i64 });
 domain_type!(Held { cents: i64 });
 domain_type!(InsufficientFunds { short: i64 });
@@ -963,6 +967,138 @@ impl Lamp {
     #[applies(SwitchedOn)]
     fn switched_on(&mut self, _event: SwitchedOn) {
         self.on = true;
+    }
+}
+
+// ---------------------------------------------------------------- the toggle
+
+/// A lamp whose command and event enums are named (`command = ..`, `event
+/// = ..`), as angzarr-build generates them: ordinary enums, their
+/// `Payload` written here by hand with markup's functions, the way the
+/// generated ones are. The macro writes none of its own.
+#[derive(Clone, Default, PartialEq, Debug)]
+pub struct Toggle {
+    on: bool,
+}
+
+/// The toggle's commands.
+#[derive(Clone, PartialEq, Debug)]
+pub enum ToggleCommand {
+    SwitchOn(SwitchOn),
+    SwitchOff(SwitchOff),
+}
+
+/// The toggle's events.
+#[derive(Clone, PartialEq, Debug)]
+pub enum ToggleEvent {
+    SwitchedOn(SwitchedOn),
+    SwitchedOff(SwitchedOff),
+}
+
+impl From<SwitchOn> for ToggleCommand {
+    fn from(value: SwitchOn) -> Self {
+        ToggleCommand::SwitchOn(value)
+    }
+}
+
+impl From<SwitchOff> for ToggleCommand {
+    fn from(value: SwitchOff) -> Self {
+        ToggleCommand::SwitchOff(value)
+    }
+}
+
+impl From<SwitchedOn> for ToggleEvent {
+    fn from(value: SwitchedOn) -> Self {
+        ToggleEvent::SwitchedOn(value)
+    }
+}
+
+impl From<SwitchedOff> for ToggleEvent {
+    fn from(value: SwitchedOff) -> Self {
+        ToggleEvent::SwitchedOff(value)
+    }
+}
+
+impl Payload for ToggleCommand {
+    fn to_any(&self) -> Any {
+        match self {
+            ToggleCommand::SwitchOn(value) => markup::pack_message(value),
+            ToggleCommand::SwitchOff(value) => markup::pack_message(value),
+        }
+    }
+
+    fn from_any(any: &Any) -> Result<Self, PayloadError> {
+        if let Some(value) = markup::decode_message::<SwitchOn>(any)? {
+            return Ok(ToggleCommand::SwitchOn(value));
+        }
+        if let Some(value) = markup::decode_message::<SwitchOff>(any)? {
+            return Ok(ToggleCommand::SwitchOff(value));
+        }
+        Err(PayloadError::UnknownType {
+            type_url: any.type_url.clone(),
+        })
+    }
+
+    fn type_urls() -> Vec<String> {
+        vec![
+            markup::type_url_of::<SwitchOn>(),
+            markup::type_url_of::<SwitchOff>(),
+        ]
+    }
+}
+
+impl Payload for ToggleEvent {
+    fn to_any(&self) -> Any {
+        match self {
+            ToggleEvent::SwitchedOn(value) => markup::pack_message(value),
+            ToggleEvent::SwitchedOff(value) => markup::pack_message(value),
+        }
+    }
+
+    fn from_any(any: &Any) -> Result<Self, PayloadError> {
+        if let Some(value) = markup::decode_message::<SwitchedOn>(any)? {
+            return Ok(ToggleEvent::SwitchedOn(value));
+        }
+        if let Some(value) = markup::decode_message::<SwitchedOff>(any)? {
+            return Ok(ToggleEvent::SwitchedOff(value));
+        }
+        Err(PayloadError::UnknownType {
+            type_url: any.type_url.clone(),
+        })
+    }
+
+    fn type_urls() -> Vec<String> {
+        vec![
+            markup::type_url_of::<SwitchedOn>(),
+            markup::type_url_of::<SwitchedOff>(),
+        ]
+    }
+}
+
+#[aggregate(domain = "toggle", command = ToggleCommand, event = ToggleEvent)]
+impl Toggle {
+    #[handles_cmd(SwitchOn)]
+    fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<Option<SwitchedOn>, Infallible> {
+        Ok((!self.on).then_some(SwitchedOn {}))
+    }
+
+    #[handles_cmd(SwitchOff)]
+    fn switch_off(
+        &self,
+        _cmd: SwitchOff,
+        _ctx: &Context,
+    ) -> Result<Option<SwitchedOff>, Infallible> {
+        Ok(self.on.then_some(SwitchedOff {}))
+    }
+
+    #[applies(SwitchedOn)]
+    fn switched_on(&mut self, _event: SwitchedOn) {
+        self.on = true;
+    }
+
+    #[applies(SwitchedOff)]
+    fn switched_off(&mut self, _event: SwitchedOff) {
+        self.on = false;
     }
 }
 
@@ -2755,6 +2891,56 @@ mod generated {
                 event("PaidOut"),
                 event("PayoutRefused"),
             ]
+        );
+    }
+}
+
+mod named_payloads {
+    use super::*;
+    use ::angzarr_embedded::testing::Harness;
+
+    fn toggle() -> Harness<Toggle> {
+        let mut registry = Registry::new();
+        registry.aggregate::<Toggle>(Toggle::default);
+        Harness::new(
+            registry,
+            Cover {
+                domain: "toggle".to_string(),
+                root: Some(root()),
+                edition: None,
+            },
+        )
+    }
+
+    /// The domain's payloads are the enums it names, not the macro's.
+    #[test]
+    fn the_named_enums_are_the_domains_payloads() {
+        let command: <Toggle as Domain>::Command = ToggleCommand::SwitchOn(SwitchOn {});
+        let event: <Toggle as Domain>::Event = ToggleEvent::SwitchedOff(SwitchedOff {});
+        assert_eq!(
+            <Toggle as Domain>::Command::type_urls(),
+            ToggleCommand::type_urls()
+        );
+        assert_eq!(command.to_any().type_url, "/toy.lamp.cmd.v1.SwitchOn");
+        assert_eq!(event.to_any().type_url, "/toy.lamp.v1.SwitchedOff");
+    }
+
+    /// Given, when, then, through the named enums: each command decided by
+    /// its handler, each event folded by its applier.
+    #[test]
+    fn a_domain_on_named_enums_decides_and_folds() {
+        let mut toggle = toggle();
+        toggle.given([ToggleEvent::SwitchedOn(SwitchedOn {})]);
+        assert!(toggle.state().on);
+        assert_eq!(
+            toggle.when(ToggleCommand::SwitchOff(SwitchOff {})).events(),
+            [ToggleEvent::SwitchedOff(SwitchedOff {})]
+        );
+        assert!(!toggle.state().on);
+        assert_eq!(toggle.when(SwitchOff {}).events(), []);
+        assert_eq!(
+            toggle.when(SwitchOn {}).events(),
+            [ToggleEvent::SwitchedOn(SwitchedOn {})]
         );
     }
 }
@@ -6854,32 +7040,9 @@ impl Lights {
     }
 }
 
-/// Poll `f` to completion with a waker that does nothing: enough for the
-/// in-memory store, which is ready at once.
-fn ready<F: std::future::Future>(f: F) -> F::Output {
-    use std::task::{Context as Cx, Poll, RawWaker, RawWakerVTable, Waker};
-    fn noop(_: *const ()) {}
-    fn clone(p: *const ()) -> RawWaker {
-        RawWaker::new(p, &VTABLE)
-    }
-    static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, noop, noop, noop);
-    // SAFETY: every vtable function ignores the data pointer.
-    let waker = unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) };
-    let mut f = std::pin::pin!(f);
-    match f.as_mut().poll(&mut Cx::from_waker(&waker)) {
-        Poll::Ready(out) => out,
-        Poll::Pending => panic!("not ready at once"),
-    }
-}
-
-/// [`ready`], as a method: `stream.execute(..).ready()`.
-trait Ready: std::future::Future + Sized {
-    fn ready(self) -> Self::Output {
-        ready(self)
-    }
-}
-
-impl<F: std::future::Future> Ready for F {}
+/// Run a future the in-memory store answers at once, and its method form,
+/// `stream.execute(..).ready()`: the test support's.
+use ::angzarr_embedded::testing::{block_on_ready as ready, Ready};
 
 /// Handle `payload` as command `n` to the wallet at `root`, on the async
 /// path, awaited.

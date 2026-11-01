@@ -73,6 +73,18 @@
 //!   - `vis` (optional, default `pub`): the visibility of the generated
 //!     `<Name>Handler` trait. An impl does not carry its type's
 //!     visibility, so the scaffold writes the struct's here.
+//!   - `command` and `event` (optional): the domain's command and event
+//!     enums, its `Domain::Command` and `Domain::Event`, in place of the
+//!     ones the macro writes into a module no path names: angzarr-build's
+//!     named `<Component>Command` and `<Component>Event`, which carry
+//!     their `Payload` impl, or enums written by hand. Either is an
+//!     ordinary enum, one variant per type, the variant named as its type,
+//!     with a `From` of each type and a `Payload` impl; written by hand,
+//!     that impl packs each variant with `markup::pack_message`, reads
+//!     each type with `markup::decode_message`, and lists them with
+//!     `markup::type_url_of` (`src/decorated.test.rs`'s toggle does). Every
+//!     variant of the event enum has its `#[applies]`, or the fold does
+//!     not compile.
 //! - [`process_manager`], on an inherent impl: the same arguments; see
 //!   *Process managers*.
 //! - [`handles_cmd`]`(Cmd)`, one per command (a request: refusable):
@@ -401,7 +413,9 @@
 //!
 //! ```text
 //! // The command, fact and event sets, by type URL, kept out of user
-//! // code: a module no path names, holding one variant per marked type.
+//! // code: a module no path names, holding one variant per marked type
+//! // (the command and event sets only where `command = ..` and
+//! // `event = ..` name none).
 //! mod __wallet_markup {
 //!     pub enum Command { Deposit(Deposit), .. }
 //!     pub enum Fact { Payout(Payout), .. } // and angzarr's CommandRefused, by
@@ -3212,6 +3226,8 @@ enum Arg {
     Snapshot(Type),
     Rejection(Type),
     Vis(Visibility),
+    Command(Type),
+    Event(Type),
 }
 
 impl Parse for Arg {
@@ -3223,10 +3239,13 @@ impl Parse for Arg {
             "snapshot" => Ok(Arg::Snapshot(input.parse()?)),
             "rejection" => Ok(Arg::Rejection(input.parse()?)),
             "vis" => Ok(Arg::Vis(input.parse()?)),
+            "command" => Ok(Arg::Command(input.parse()?)),
+            "event" => Ok(Arg::Event(input.parse()?)),
             _ => Err(Error::new_spanned(
                 key,
                 "takes `domain = \"..\"`, and optionally `snapshot = <message>`, \
-                 `rejection = <type>` and `vis = <visibility>`",
+                 `rejection = <type>`, `vis = <visibility>`, `command = <enum>` and \
+                 `event = <enum>`",
             )),
         }
     }
@@ -3543,6 +3562,7 @@ fn variant(ty: &Type, prefix: &str) -> syn::Result<Ident> {
 fn domain(attr: Tokens, item: Tokens, kind: Kind) -> syn::Result<Tokens> {
     let args = Punctuated::<Arg, Token![,]>::parse_terminated.parse2(attr)?;
     let (mut domain, mut rejection, mut snapshot) = (None, None, None);
+    let (mut command_enum, mut event_enum): (Option<Type>, Option<Type>) = (None, None);
     let mut vis: Visibility = syn::parse_quote!(pub);
     for arg in args {
         match arg {
@@ -3550,6 +3570,8 @@ fn domain(attr: Tokens, item: Tokens, kind: Kind) -> syn::Result<Tokens> {
             Arg::Rejection(value) => rejection = Some(value),
             Arg::Snapshot(value) => snapshot = Some(value),
             Arg::Vis(value) => vis = value,
+            Arg::Command(value) => command_enum = Some(value),
+            Arg::Event(value) => event_enum = Some(value),
         }
     }
     let domain = domain.ok_or_else(|| Error::new(Span::call_site(), "needs `domain = \"..\"`"))?;
@@ -3634,11 +3656,25 @@ fn domain(attr: Tokens, item: Tokens, kind: Kind) -> syn::Result<Tokens> {
     let facts = typed("handles_fact", "")?;
     let refusals = typed("on_refused", "Refused")?;
     let events = typed("applies", "")?;
-    let sets = [
-        payload_set(&command_set, &commands, &[], &vis),
-        payload_set(&fact_set, &facts, &refusals, &vis),
-        payload_set(&event_set, &events, &[], &vis),
-    ];
+    // A payload enum given (`command = ..`, `event = ..`, angzarr-build's
+    // named enum or one written by hand) is the domain's; otherwise the
+    // macro writes one no path names.
+    let mut sets = vec![payload_set(&fact_set, &facts, &refusals, &vis)];
+    let command_ty: Type = match command_enum {
+        Some(given) => given,
+        None => {
+            sets.push(payload_set(&command_set, &commands, &[], &vis));
+            syn::parse_quote!(#command_set)
+        }
+    };
+    let own_events = event_enum.is_none();
+    let event_ty: Type = match event_enum {
+        Some(given) => given,
+        None => {
+            sets.push(payload_set(&event_set, &events, &[], &vis));
+            syn::parse_quote!(#event_set)
+        }
+    };
 
     let call = |x: &Marked<'_>| x.method.sig.ident.clone();
     let full_name =
@@ -3673,7 +3709,7 @@ fn domain(attr: Tokens, item: Tokens, kind: Kind) -> syn::Result<Tokens> {
     let apply_arms = of("applies").map(|x| {
         let (v, method) = (variant(&x.args.ty, "").expect("checked"), call(x));
         quote! {
-            #event_set::#v(event) => <#self_ty>::#method(state, ::core::clone::Clone::clone(event)),
+            #event_ty::#v(event) => <#self_ty>::#method(state, ::core::clone::Clone::clone(event)),
         }
     });
     let apply_body = if events.is_empty() {
@@ -3701,7 +3737,7 @@ fn domain(attr: Tokens, item: Tokens, kind: Kind) -> syn::Result<Tokens> {
         }
     };
 
-    let from_events = events.iter().map(|(v, ty)| {
+    let from_events = events.iter().filter(|_| own_events).map(|(v, ty)| {
         quote! {
             impl ::core::convert::From<#ty> for #event_set {
                 fn from(event: #ty) -> Self {
@@ -3869,15 +3905,15 @@ fn domain(attr: Tokens, item: Tokens, kind: Kind) -> syn::Result<Tokens> {
 
         impl ::angzarr_embedded::Domain for #self_ty {
             type State = Self;
-            type Command = #command_set;
+            type Command = #command_ty;
             type Fact = #fact_set;
-            type Event = #event_set;
+            type Event = #event_ty;
             type Rejection = #rejection_ty;
 
             const NAME: &'static str = #domain;
             const RULES_VERSION: &'static str = ::core::env!("CARGO_PKG_VERSION");
 
-            fn apply(state: &mut Self, event: &#event_set) {
+            fn apply(state: &mut Self, event: &#event_ty) {
                 #apply_body
             }
         }

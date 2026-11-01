@@ -14,9 +14,6 @@
 
 use std::convert::Infallible;
 use std::fmt;
-use std::future::Future;
-use std::pin::pin;
-use std::task::{Context, Poll, Waker};
 
 pub use angzarr_ports::memory::MemoryStore;
 
@@ -1306,23 +1303,9 @@ pub fn opened(store: &impl Store, registry: &Registry, n: u128, cents: i64) {
     .unwrap();
 }
 
-/// Poll a future to completion with a waker that does nothing: enough for
-/// futures that are ready at once, as `MemoryStore`'s are.
-pub fn ready<F: Future>(f: F) -> F::Output {
-    match pin!(f).poll(&mut Context::from_waker(Waker::noop())) {
-        Poll::Ready(out) => out,
-        Poll::Pending => panic!("not ready at once"),
-    }
-}
-
-/// [`ready`], as a method: `kernel.handle(..).ready()`.
-pub trait Ready: Future + Sized {
-    fn ready(self) -> Self::Output {
-        ready(self)
-    }
-}
-
-impl<F: Future> Ready for F {}
+/// Run a future that is ready at once, as `MemoryStore`'s are, and its
+/// method form: the test support's.
+pub use crate::testing::{block_on_ready as ready, Ready};
 
 // ---------------------------------------------------------------- dead letters
 
