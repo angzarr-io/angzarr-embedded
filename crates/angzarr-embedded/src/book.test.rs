@@ -101,3 +101,12 @@ fn with_id_sets_the_clients_command_id_and_nothing_else() {
     let bare = CommandBook { page: None, ..book }.with_id(command_id(5));
     assert_eq!(bare.page.unwrap().command_id, Some(command_id(5)));
 }
+
+#[test]
+fn a_command_of_a_payload_is_the_command_of_its_packing() {
+    let cover = crate::toys::cover("account", 1);
+    assert_eq!(
+        CommandBook::command_of(cover.clone(), &AccountCmd::Deposit(5)),
+        CommandBook::command(cover, AccountCmd::Deposit(5).to_any())
+    );
+}

@@ -5,7 +5,8 @@
 //!   its root the key's UUIDv5 under its domain ([`ids::compute_root`]),
 //!   in the main edition.
 //! - [`CommandBookExt::command`]: a client's command to a stream, with no
-//!   ids and no handling; [`CommandBookExt::at`] sends it at the head its
+//!   ids and no handling, its payload packed (or
+//!   [`CommandBookExt::command_of`] a domain's payload, packing it); [`CommandBookExt::at`] sends it at the head its
 //!   sender read, [`CommandBookExt::with_id`] under the sender's command
 //!   id.
 //!
@@ -15,6 +16,8 @@
 use angzarr_proto::ids;
 use angzarr_proto::v1::{command_page, Command, CommandBook, CommandPage, Cover, Handling, Uuid};
 use prost_types::Any;
+
+use super::payload::Payload;
 
 /// A [`Cover`] addressed by a natural key.
 pub trait CoverExt: Sized {
@@ -44,6 +47,11 @@ pub trait CommandBookExt: Sized {
     /// kernel stamps the head it loads).
     fn command(cover: Cover, payload: Any) -> Self;
 
+    /// [`CommandBookExt::command`] of a domain's command payload, packed
+    /// by its [`Payload::to_any`](super::Payload::to_any): the generated
+    /// command enum's value, or one of its variants'.
+    fn command_of(cover: Cover, payload: &impl Payload) -> Self;
+
     /// The same book, sent at `head`: its expected sequence, the head its
     /// sender read, its conflict resolution as it was (unset: by
     /// configuration).
@@ -65,6 +73,11 @@ impl CommandBookExt for CommandBook {
             }),
             handling: None,
         }
+    }
+
+    fn command_of(cover: Cover, payload: &impl Payload) -> CommandBook {
+        let _ = (cover, payload);
+        todo!()
     }
 
     fn at(mut self, head: u64) -> CommandBook {

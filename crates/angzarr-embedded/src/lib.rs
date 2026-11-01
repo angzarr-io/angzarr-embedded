@@ -98,6 +98,8 @@ mod route;
 mod store;
 mod stream;
 mod target;
+#[cfg(any(test, feature = "test-support"))]
+pub mod testing;
 mod upcast;
 mod wire;
 
