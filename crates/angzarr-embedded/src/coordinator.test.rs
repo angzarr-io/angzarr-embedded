@@ -28,7 +28,7 @@ mod dedup {
         let retry =
             handle::<crate::toys::Account>(&store, &registry, deposit(3, 25), &at(21)).unwrap();
         assert_eq!(retry.outcome().delivery, DeliveryOutcome::Duplicate as i32);
-        assert!(matches!(retry, Handled::Duplicate(_)));
+        assert!(matches!(retry, Handled::Duplicate(..)));
         assert_eq!(
             retry.books(),
             first.books(),
@@ -286,7 +286,7 @@ mod dedup {
             .ready()
             .unwrap();
         assert!(
-            matches!(retry, Handled::Duplicate(_)),
+            matches!(retry, Handled::Duplicate(..)),
             "found, not re-applied"
         );
         let deposits = pages(&store, &cover("account", 1)).len() as u64;

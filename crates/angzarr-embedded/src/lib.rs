@@ -173,9 +173,10 @@ pub use policy::{
 pub use registry::{Aggregate, Description, Misconfigured, Registry};
 pub use route::{rejection, Rejected};
 pub use store::{
-    Append, ChangeToken, EventStore, Head, ListStreams, Outbox, OutboxEntry, PositionKey,
-    PositionStore, Purge, ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, Slice,
-    SnapshotStore, Store, StoreError, StreamRef, Watch, Write, Written,
+    Append, ChangeToken, DeadLetter, DeadLetterAt, DeadLetterKey, DeadLetterStore, EventStore,
+    Head, ListStreams, Outbox, OutboxEntry, PositionKey, PositionStore, Purge, ReadByCorrelation,
+    ReadStore, ReadUnit, ReadUntilTime, Slice, SnapshotStore, Store, StoreError, StreamRef, Watch,
+    Write, Written,
 };
 pub use stream::{Envelope, Executed, Stream};
 pub use target::{Coordinated, CoordinatorPort, Target};
@@ -480,10 +481,12 @@ pub fn diagnostic_samples() -> Vec<Box<dyn angzarr_diagnostic::Diagnostic>> {
     samples.push(Box::new(Failure::<WireError>::Downstream {
         path: Vec::new(),
         error: StepError::Kernel(KernelError::ChainTooDeep { limit: 8 }),
+        dead_letters: Vec::new(),
     }));
     samples.push(Box::new(Failure::<WireError>::Projection {
         committed: Vec::new(),
         failures: vec![("balances".to_string(), report())],
+        dead_letters: Vec::new(),
     }));
     // The router's answer under each of its keys, every declared arg given:
     // forwarded under the key, verbatim (decision 14.60).

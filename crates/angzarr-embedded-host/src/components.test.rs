@@ -663,6 +663,7 @@ fn a_remote_projectors_bug_is_fatal_not_retried_and_dead_lettered() {
     let Err(Failure::Projection {
         committed,
         failures,
+        ..
     }) = &failed
     else {
         panic!("a projection failure: {:?}", failed.err());

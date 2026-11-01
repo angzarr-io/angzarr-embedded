@@ -557,7 +557,7 @@ async fn the_same_command_through_two_handles_on_one_file_applies_once() {
                 let retried = handle::<Tally>(&two, &registry, add(cover("tally", 1), 1, 5))
                     .await
                     .unwrap();
-                assert!(matches!(retried, Handled::Duplicate(_)));
+                assert!(matches!(retried, Handled::Duplicate(..)));
             }
         }
     }

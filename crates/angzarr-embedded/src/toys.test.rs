@@ -1361,6 +1361,38 @@ pub fn sequence_mismatch(
     )
 }
 
+/// Account deposits → the ledger, but a deposit of 13 cents cannot happen:
+/// the policy answers it with its error, a bug, not a command.
+pub struct Unlucky;
+
+impl crate::Policy for Unlucky {
+    const NAME: &'static str = "unlucky";
+    type Source = Account;
+    type Target = Ledger;
+
+    fn on_event(
+        &self,
+        event: &crate::Any,
+        ctx: &crate::markup::PolicyContext,
+    ) -> Result<Option<crate::markup::Commands<Ledger>>, crate::markup::Report> {
+        let Ok(crate::toys::AccountEvent::Deposited(cents)) =
+            crate::toys::AccountEvent::from_any(event)
+        else {
+            return Ok(None);
+        };
+        if cents == 13 {
+            return Err(crate::markup::Report::new("toy-unlucky-deposit").arg("cents", cents));
+        }
+        let record = ledger::Record {
+            source_sequence: ctx.trigger().sequence,
+            cents,
+        };
+        Ok(Some(
+            crate::markup::Commands::none().send(ledger_root(), &record),
+        ))
+    }
+}
+
 /// The one letter of `letters`.
 pub fn one_letter(letters: Vec<crate::v1::AngzarrDeadLetter>) -> crate::v1::AngzarrDeadLetter {
     assert_eq!(letters.len(), 1, "one dead letter: {letters:?}");

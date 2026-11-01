@@ -494,6 +494,7 @@ mod tx {
                 error: crate::StepError::Kernel(crate::KernelError::ChainTooDeep {
                     limit: 1
                 }),
+                ..
             } if path.len() == 2
                 && path[0].stream.domain == "probe"
                 && path[1].stream.domain == "ledger"

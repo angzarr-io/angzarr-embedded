@@ -897,7 +897,7 @@ fn a_fact_losing_every_race_until_the_cap_is_parked() {
     let heads: Vec<_> = orders.seen().iter().map(|s| s.head).collect();
     assert_eq!(heads, [3, 4, 5], "each run against a newer head");
     let handled = handled.expect("a fact is never refused");
-    assert!(matches!(handled, Handled::Parked));
+    assert!(matches!(handled, Handled::Parked(_)));
     assert_eq!(
         handled.outcome().delivery,
         DeliveryOutcome::Parked as i32,

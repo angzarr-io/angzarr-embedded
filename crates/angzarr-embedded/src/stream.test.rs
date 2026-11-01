@@ -562,6 +562,7 @@ fn every_failure_says_how_to_recover() {
     let downstream = |error| Failure::<Malformed>::Downstream {
         path: Vec::new(),
         error,
+        dead_letters: Vec::new(),
     };
     assert_eq!(
         downstream(StepError::Rejected(Report::new("x-no"))).recovery(),
@@ -627,6 +628,7 @@ fn errors_display_their_code_and_args_and_wrappers_their_cause_flattened() {
     let downstream = Failure::<crate::toys::Refused>::Downstream {
         path: vec![],
         error: step,
+        dead_letters: Vec::new(),
     };
     assert_eq!(
         downstream.to_string(),

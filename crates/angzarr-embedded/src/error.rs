@@ -25,6 +25,7 @@ use angzarr_ports::StoreError;
 use angzarr_proto::v1::{Cover, EventBook, EventRef, Uuid};
 
 use super::check::Malformed;
+use super::store::DeadLetter;
 
 /// Why a command, or a step its chain set off, failed.
 #[derive(Clone, PartialEq, Debug)]
@@ -40,8 +41,13 @@ pub enum Failure<R> {
     /// that failed a step's write. `path` runs from the first policy step to
     /// the one that failed. Every step before it stays committed, the
     /// originating command's included; the failed step wrote nothing but,
-    /// where it was refused, its position past it.
-    Downstream { path: Vec<Step>, error: StepError },
+    /// where it was refused, its position past it. `dead_letters` are the
+    /// letters the chain's steps wrote ([`Failure::dead_letters`]).
+    Downstream {
+        path: Vec<Step>,
+        error: StepError,
+        dead_letters: Vec<DeadLetter>,
+    },
     /// The book was malformed, or the kernel or the store failed at the
     /// originating stream, its write included (a conflict). Nothing was
     /// committed.
@@ -51,10 +57,12 @@ pub enum Failure<R> {
     /// `failures`, in registration order; a failing projector does not
     /// stop the others. `committed` is what the chain appended, every
     /// stream's book: those events stay committed. Its recovery is
-    /// [`Recovery::Retry`]: a retry is answered DUPLICATE.
+    /// [`Recovery::Retry`]: a retry is answered DUPLICATE. `dead_letters`
+    /// are the letters the chain's steps and its projectors wrote.
     Projection {
         committed: Vec<EventBook>,
         failures: Vec<(String, Report)>,
+        dead_letters: Vec<DeadLetter>,
     },
 }
 
@@ -145,7 +153,7 @@ pub enum KernelError {
     /// ruling, 2026-10-31). angzarr's INTERNAL,
     /// `COORDINATOR_REASON_RETRY_CAP_EXHAUSTED`: the retries are spent, so
     /// no caller retries it; a fact is answered PARKED instead
-    /// ([`Handled::Parked`](super::Handled::Parked)), and dead-lettered.
+    /// ([`Handled::Parked(_)`](super::Handled::Parked(_))), and dead-lettered.
     RetryCapExhausted {
         stream: Cover,
         attempts: u32,
@@ -339,6 +347,20 @@ pub enum ChainProblem {
 pub use angzarr_diagnostic::Recovery;
 
 impl<R> Failure<R> {
+    /// The dead letters the call wrote before it failed, whole and keyed
+    /// as the store keeps them (owner ruling Q5): what its steps with no
+    /// caller left gave up on. None for [`Failure::Rejected`] and
+    /// [`Failure::Kernel`]: the command itself failed, and a command its
+    /// caller waits for is answered, never dead-lettered here.
+    pub fn dead_letters(&self) -> &[DeadLetter] {
+        match self {
+            Failure::Downstream { dead_letters, .. } | Failure::Projection { dead_letters, .. } => {
+                dead_letters
+            }
+            Failure::Rejected(_) | Failure::Kernel(_) => &[],
+        }
+    }
+
     pub fn recovery(&self) -> Recovery {
         match self {
             Failure::Rejected(_) => Recovery::Business,
@@ -527,7 +549,7 @@ impl<R: Diagnostic> Diagnostic for Failure<R> {
     fn args(&self) -> Vec<(&str, Arg)> {
         match self {
             Failure::Rejected(rejection) => rejection.args(),
-            Failure::Downstream { path, error } => {
+            Failure::Downstream { path, error, .. } => {
                 vec![("depth", path.len().into()), ("error", Arg::nested(error))]
             }
             Failure::Kernel(error) => error.args(),

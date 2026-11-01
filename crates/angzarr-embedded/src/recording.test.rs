@@ -1,5 +1,6 @@
 //! A store that records every write the kernel makes (the stream it
-//! appended to, the positions it put, whether it landed) and fails what a
+//! appended to, the positions it put, the dead letters it kept, whether it
+//! landed) and fails what a
 //! test tells it to: angzarr-ports' `MemoryStore` underneath. How the
 //! kernel's tests see that each handling step is one write, and what is
 //! left after a step fails.
@@ -24,6 +25,9 @@ pub struct WriteRecord {
     pub wrote: Option<(Cover, usize)>,
     /// Every position it put: (handler, stream, next).
     pub positions: Vec<(String, Cover, u64)>,
+    /// Every dead letter it kept: (the stream it is about, its place, its
+    /// component).
+    pub letters: Vec<(Cover, crate::DeadLetterAt, String)>,
     /// Whether it landed.
     pub landed: bool,
 }
@@ -104,6 +108,11 @@ impl EventStore for Recording {
                 .positions
                 .iter()
                 .map(|(key, next)| (key.handler.to_string(), key.stream.to_cover(), *next))
+                .collect(),
+            letters: write
+                .dead_letters
+                .iter()
+                .map(|l| (l.stream.clone(), l.at, l.letter.source_component.clone()))
                 .collect(),
             landed: false,
         };

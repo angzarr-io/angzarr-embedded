@@ -3371,7 +3371,7 @@ mod process_manager {
         let log = MemoryDeadLetters::new();
         handle_in::<BuyIn>(&store, &registry, &log, 2, start(&correlation(8), 2, 0)).unwrap();
         let again = handle_in::<BuyIn>(&store, &registry, &log, 3, start(&correlation(8), 2, 0));
-        assert!(matches!(again, Ok(Handled::Duplicate(_))));
+        assert!(matches!(again, Ok(Handled::Duplicate(..))));
         assert_eq!(
             buy_in_events(&store, &correlation(8)),
             buy_in(&["BuyInStarted"])
@@ -4258,7 +4258,7 @@ fn settle_in<D: Domain>(
     )?;
     match handled {
         Handled::Applied(recorded) => Ok(recorded),
-        Handled::Duplicate(_) | Handled::Parked => Ok(::angzarr_embedded::Recorded::default()),
+        Handled::Duplicate(..) | Handled::Parked(_) => Ok(::angzarr_embedded::Recorded::default()),
     }
 }
 
@@ -5069,7 +5069,7 @@ mod router {
         assert_eq!(meta.correlation_id, Some(correlation(4)));
         let again = ready(kernel.handle_any(&store, note(), &sampled, &mut ())).unwrap();
         assert!(
-            matches!(again, Handled::Duplicate(_)),
+            matches!(again, Handled::Duplicate(..)),
             "a retry is a duplicate"
         );
         assert_eq!(
@@ -7006,6 +7006,7 @@ mod projector {
         let Err(Failure::Projection {
             committed,
             failures,
+            ..
         }) = failed
         else {
             panic!("a failing projection is the caller's Failure::Projection");
@@ -7027,6 +7028,7 @@ mod projector {
             Failure::<Rejection<Refused>>::Projection {
                 committed,
                 failures,
+                dead_letters: Vec::new(),
             }
             .recovery(),
             Recovery::Retry

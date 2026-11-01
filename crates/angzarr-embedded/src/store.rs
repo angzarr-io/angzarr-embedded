@@ -35,9 +35,10 @@ use std::future::Future;
 use angzarr_proto::v1::{Cover, EventPage, Snapshot, Uuid};
 
 pub use angzarr_ports::{
-    Append, ChangeToken, EventStore, Head, ListStreams, Outbox, OutboxEntry, PositionKey,
-    PositionStore, Purge, ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, Slice,
-    SnapshotStore, Store, StoreError, StreamRef, Watch, Write, Written,
+    Append, ChangeToken, DeadLetter, DeadLetterAt, DeadLetterKey, DeadLetterStore, EventStore,
+    Head, ListStreams, Outbox, OutboxEntry, PositionKey, PositionStore, Purge, ReadByCorrelation,
+    ReadStore, ReadUnit, ReadUntilTime, Slice, SnapshotStore, Store, StoreError, StreamRef, Watch,
+    Write, Written,
 };
 
 /// The store operations a step makes, keyed by the wire `Cover` the kernel

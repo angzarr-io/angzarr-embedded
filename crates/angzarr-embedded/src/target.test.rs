@@ -284,7 +284,7 @@ fn a_remote_duplicate_is_a_duplicate() {
         .handle_any(&MemoryStore::new(), deposit(1), &at(1), &mut ())
         .ready()
         .expect("handled remotely");
-    let Handled::Duplicate(book) = handled else {
+    let Handled::Duplicate(book, _) = handled else {
         panic!("a duplicate, as a local stream's is");
     };
     assert_eq!(book.pages.len(), 1);

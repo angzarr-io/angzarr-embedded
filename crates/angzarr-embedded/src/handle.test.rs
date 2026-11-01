@@ -16,7 +16,7 @@ use crate::{
 
 use crate::toys::{
     at, command, cover, cover_in, ledger, ledger_root, opened, payloads, registry, Account,
-    AccountCmd, Bookkeeping, Edit, Ledger, LEDGER_LIMIT,
+    AccountCmd, Bookkeeping, Edit, Ledger, Unlucky, LEDGER_LIMIT,
 };
 
 fn deposit(n: u128, cents: i64) -> CommandBook {
@@ -102,7 +102,7 @@ fn a_rejected_policy_step_keeps_the_commands_commit_and_is_dead_lettered() {
         .ready()
         .err()
         .unwrap();
-    let Failure::Downstream { path, error } = &failure else {
+    let Failure::Downstream { path, error, .. } = &failure else {
         panic!("a downstream failure: {failure:?}");
     };
     assert_eq!(
@@ -163,7 +163,7 @@ fn a_rejected_policy_step_keeps_the_commands_commit_and_is_dead_lettered() {
         .handle::<Account, _, _>(&store, deposit(3, LEDGER_LIMIT + 1), &at(31), &mut ())
         .ready()
         .unwrap();
-    assert!(matches!(retried, crate::Handled::Duplicate(_)));
+    assert!(matches!(retried, crate::Handled::Duplicate(..)));
     assert_eq!(pages(&store, &ledger_cover()), [], "nothing run again");
     assert_eq!(log.lines().len(), 1);
 }
@@ -395,7 +395,7 @@ fn a_duplicate_runs_no_projection_and_commits_nothing() {
         .handle::<Account, _, _>(&store, open, &at(30), &mut route)
         .ready()
         .unwrap();
-    assert!(matches!(handled, crate::Handled::Duplicate(_)));
+    assert!(matches!(handled, crate::Handled::Duplicate(..)));
     assert_eq!(handled.outcome().projector_failures, []);
     assert!(deposits.0.is_empty());
 }
@@ -449,38 +449,6 @@ impl crate::Policy for DepositsOnly {
         else {
             return Ok(None);
         };
-        let record = ledger::Record {
-            source_sequence: ctx.trigger().sequence,
-            cents,
-        };
-        Ok(Some(
-            crate::markup::Commands::none().send(ledger_root(), &record),
-        ))
-    }
-}
-
-/// Account deposits → the ledger, but a deposit of 13 cents cannot happen:
-/// the policy answers it with its error, a bug, not a command.
-struct Unlucky;
-
-impl crate::Policy for Unlucky {
-    const NAME: &'static str = "unlucky";
-    type Source = Account;
-    type Target = Ledger;
-
-    fn on_event(
-        &self,
-        event: &crate::Any,
-        ctx: &crate::markup::PolicyContext,
-    ) -> Result<Option<crate::markup::Commands<Ledger>>, crate::markup::Report> {
-        let Ok(crate::toys::AccountEvent::Deposited(cents)) =
-            crate::toys::AccountEvent::from_any(event)
-        else {
-            return Ok(None);
-        };
-        if cents == 13 {
-            return Err(crate::markup::Report::new("toy-unlucky-deposit").arg("cents", cents));
-        }
         let record = ledger::Record {
             source_sequence: ctx.trigger().sequence,
             cents,
@@ -766,7 +734,7 @@ fn a_policy_book_for_an_unregistered_target_is_a_dead_lettered_bug() {
         .ready()
         .err()
         .unwrap();
-    let Failure::Downstream { path, error } = &failure else {
+    let Failure::Downstream { path, error, .. } = &failure else {
         panic!("downstream: {failure:?}");
     };
     assert_eq!(path.len(), 1);
@@ -1251,11 +1219,13 @@ fn a_policy_step_that_decides_no_event_still_moves_its_position() {
             crate::recording::WriteRecord {
                 wrote: Some((account.clone(), 1)),
                 positions: vec![],
+                letters: vec![],
                 landed: true,
             },
             crate::recording::WriteRecord {
                 wrote: None,
                 positions: vec![("sweep-nine".to_string(), account.clone(), 1)],
+                letters: vec![],
                 landed: true,
             },
         ],
@@ -1525,7 +1495,7 @@ fn a_retry_after_a_crash_settles_what_its_stream_still_owes() {
         .handle::<Account, _, _>(&store, deposit(3, 25), &at(31), &mut ())
         .ready()
         .unwrap();
-    assert!(matches!(retried, crate::Handled::Duplicate(_)));
+    assert!(matches!(retried, crate::Handled::Duplicate(..)));
     assert_eq!(
         pages(store.inner(), &ledger_cover()).len(),
         1,

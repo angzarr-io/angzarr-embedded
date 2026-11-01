@@ -74,7 +74,7 @@ use super::payload::type_name;
 use super::policy::{answered, check_reactions, projection, Projection};
 use super::registry::{PolicyEntry, ProjectorInstance, Registry};
 use super::route::Rejected;
-use super::store::{Port, Store, StoreError, StorePort};
+use super::store::{DeadLetter, Port, Store, StoreError, StorePort};
 use super::stream::{Envelope, Stream};
 use super::target::{forward, Forwarded, Target};
 use super::upcast::upcast_pages;
@@ -124,7 +124,7 @@ pub struct Kernel<'k> {
 /// sequence, or a fact) that loses such a race is re-run on the new head
 /// under a cap of its own, `max_race_runs` (decision 14.46), with the same
 /// backoff and jitter between runs. At either cap the command is given
-/// up, [`KernelError::RetryCapExhausted`] (a fact, [`Handled::Parked`]):
+/// up, [`KernelError::RetryCapExhausted`] (a fact, [`Handled::Parked(_)`]):
 /// a policy's step and a fact are dead-lettered, a command its caller
 /// waits for is not. `max_race_runs = 0` turns race re-runs off, for a
 /// caller that owns its retry loop: a stamped command's lost race goes
@@ -346,13 +346,15 @@ pub enum Handled {
     /// (possibly nothing: a decision with no events).
     Applied(Recorded),
     /// Step 3 found the command's events already on its stream: these, in
-    /// sequence order. Nothing ran and nothing was written.
-    Duplicate(EventBook),
+    /// sequence order. No business code of it ran and none of its events
+    /// was written; the policy steps its stream still owed ran, and these
+    /// are the dead letters they wrote.
+    Duplicate(EventBook, Vec<DeadLetter>),
     /// A fact the kernel gave up on, its write lost to another write to its
-    /// stream until the race re-run cap: dead-lettered, nothing written
+    /// stream until the race re-run cap: dead-lettered, no event written
     /// (decision 14.46). A fact is never refused, so its sender is answered
-    /// accepted and parked, with no events.
-    Parked,
+    /// accepted and parked, with no events, and with its dead letter.
+    Parked(Vec<DeadLetter>),
 }
 
 impl Handled {
@@ -375,11 +377,11 @@ impl Handled {
                     })
                     .collect(),
             },
-            Handled::Duplicate(_) => Outcome {
+            Handled::Duplicate(..) => Outcome {
                 delivery: DeliveryOutcome::Duplicate as i32,
                 ..Outcome::default()
             },
-            Handled::Parked => Outcome {
+            Handled::Parked(_) => Outcome {
                 delivery: DeliveryOutcome::Parked as i32,
                 ..Outcome::default()
             },
@@ -391,8 +393,18 @@ impl Handled {
     pub fn books(&self) -> Vec<EventBook> {
         match self {
             Handled::Applied(recorded) => recorded.books.clone(),
-            Handled::Duplicate(book) => vec![book.clone()],
-            Handled::Parked => Vec::new(),
+            Handled::Duplicate(book, _) => vec![book.clone()],
+            Handled::Parked(_) => Vec::new(),
+        }
+    }
+
+    /// The dead letters the call wrote, whole and keyed as the store keeps
+    /// them (owner ruling Q5): what its steps with no caller left gave up
+    /// on, and a parked fact's own.
+    pub fn dead_letters(&self) -> &[DeadLetter] {
+        match self {
+            Handled::Applied(recorded) => recorded.dead_letters(),
+            Handled::Duplicate(_, letters) | Handled::Parked(letters) => letters,
         }
     }
 }
@@ -463,7 +475,7 @@ impl<'k> Kernel<'k> {
     /// and COMMUTATIVE, a sender's expected sequence is re-delivered the
     /// widened window, under the retry cap; under STRICT, it is
     /// [`KernelError::Stale`]. At either cap the command is dead-lettered,
-    /// [`KernelError::RetryCapExhausted`], and a fact [`Handled::Parked`]. A cover of another
+    /// [`KernelError::RetryCapExhausted`], and a fact [`Handled::Parked(_)`]. A cover of another
     /// domain than `D` is [`KernelError::WrongDomain`]; a remote domain's
     /// command goes to its coordinator ([`Registry::remote`]). Business
     /// code stays synchronous and pure, each dispatch awaited; the future
@@ -539,7 +551,7 @@ impl<'k> Kernel<'k> {
             Err(Failure::Kernel(KernelError::RetryCapExhausted { .. }))
                 if identified.body().is_fact() =>
             {
-                return Ok(Handled::Parked)
+                return Ok(Handled::Parked(Vec::new()))
             }
             origin => origin?,
         };
@@ -557,15 +569,18 @@ impl<'k> Kernel<'k> {
                     return Err(Failure::Projection {
                         committed: run.recorded.books,
                         failures,
+                        dead_letters: Vec::new(),
                     });
                 }
-                Ok(Handled::Duplicate(events))
+                Ok(Handled::Duplicate(events, Vec::new()))
             }
             Origin::Skipped => {
                 self.finish(Handled::Applied(Recorded::default()), projections)
                     .await
             }
-            Origin::Forwarded(Forwarded::Duplicate(events)) => Ok(Handled::Duplicate(events)),
+            Origin::Forwarded(Forwarded::Duplicate(events)) => {
+                Ok(Handled::Duplicate(events, Vec::new()))
+            }
             Origin::Forwarded(Forwarded::Applied(events)) => {
                 run.answered(events);
                 self.finish(Handled::Applied(run.recorded), projections)
@@ -621,7 +636,7 @@ impl<'k> Kernel<'k> {
         settled?;
         match self.finish(Handled::Applied(recorded), projections).await? {
             Handled::Applied(recorded) => Ok(recorded),
-            Handled::Duplicate(_) | Handled::Parked => {
+            Handled::Duplicate(..) | Handled::Parked(_) => {
                 unreachable!("a resume answers what it recorded")
             }
         }
@@ -637,13 +652,14 @@ impl<'k> Kernel<'k> {
         let handled = self.project(handled, projections);
         let (steps, books) = match &handled {
             Handled::Applied(recorded) => (recorded.steps.clone(), recorded.books.clone()),
-            Handled::Duplicate(_) | Handled::Parked => return Ok(handled),
+            Handled::Duplicate(..) | Handled::Parked(_) => return Ok(handled),
         };
         let failures = self.run_projectors(&steps).await;
         if !failures.is_empty() {
             return Err(Failure::Projection {
                 committed: books,
                 failures,
+                dead_letters: Vec::new(),
             });
         }
         Ok(handled)
@@ -835,7 +851,11 @@ fn typed(
 /// A chain's failure, as the caller's: the path to the failing step, and
 /// why.
 fn downstream<R>((path, error): (Vec<Step>, StepError)) -> Failure<R> {
-    Failure::Downstream { path, error }
+    Failure::Downstream {
+        path,
+        error,
+        dead_letters: Vec::new(),
+    }
 }
 
 /// The path to a failing step, and why it failed.
@@ -1663,6 +1683,8 @@ pub struct Recorded {
     /// Each step's events, one book per step that wrote any, in the order
     /// written.
     steps: Vec<EventBook>,
+    /// The dead letters the chain's steps and its projectors wrote.
+    dead_letters: Vec<DeadLetter>,
 }
 
 impl Recorded {
@@ -1713,6 +1735,12 @@ impl Recorded {
     /// `Outcome.projector_failures`). The commit stands regardless.
     pub fn projector_failures(&self) -> &[ProjectorFailure] {
         &self.projector_failures
+    }
+
+    /// The dead letters the chain's steps and its projectors wrote, whole
+    /// and keyed as the store keeps them (owner ruling Q5).
+    pub fn dead_letters(&self) -> &[DeadLetter] {
+        &self.dead_letters
     }
 }
 

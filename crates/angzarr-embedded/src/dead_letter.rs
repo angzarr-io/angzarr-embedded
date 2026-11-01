@@ -431,6 +431,12 @@ impl MemoryDeadLetters {
     pub fn letters(&self) -> Vec<AngzarrDeadLetter> {
         self.letters.lock().map(|l| l.clone()).unwrap_or_default()
     }
+
+    /// Every letter written since the last drain, taken, with every line:
+    /// a test's per-call read.
+    pub fn drain(&self) -> Vec<AngzarrDeadLetter> {
+        todo!()
+    }
 }
 
 impl DeadLetterLog for MemoryDeadLetters {
@@ -451,3 +457,8 @@ impl DeadLetterLog for MemoryDeadLetters {
 #[cfg(test)]
 #[path = "dead_letter.test.rs"]
 mod tests;
+
+// Dead letters kept in the store, and answered by every call (Q5).
+#[cfg(test)]
+#[path = "durable.test.rs"]
+mod durable_tests;
