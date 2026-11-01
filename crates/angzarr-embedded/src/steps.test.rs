@@ -15,7 +15,7 @@ use crate::store::{Store, StorePort};
 use crate::stream::Stream;
 use crate::toys::ready;
 
-use super::{deduplicate, dispatch, load, Contextual, Deduplicated, Novel};
+use super::{decide, deduplicate, load, Contextual, Deduplicated, Novel};
 
 /// Steps 3 and 4 over a store.
 pub struct Coordinator<'s, S> {
@@ -136,7 +136,8 @@ impl<D: Domain> Prepared<D> {
         registry: &Registry,
         dead_letters: &dyn DeadLetterLog,
     ) -> Result<Vec<angzarr_proto::v1::EventPage>, Failure<Rejected>> {
-        crate::toys::ready(dispatch(&self.contextual, sampled, registry, dead_letters))
+        crate::toys::ready(decide(&self.contextual, sampled, registry, dead_letters))
+            .map(|decided| decided.pages)
     }
 
     pub fn into_stream(self) -> Stream<D> {

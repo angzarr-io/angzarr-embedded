@@ -1234,9 +1234,7 @@ pub fn handle<D: Domain>(
 ) -> Result<crate::Handled, crate::Failure<crate::Rejected>> {
     let log = crate::MemoryDeadLetters::new();
     let kernel = crate::Kernel::new(registry, &log).on_retryable(no_retries());
-    kernel
-        .handle::<D, _, _>(store, book, sampled, &mut ())
-        .ready()
+    kernel.handle::<D, _>(store, book, sampled).ready()
 }
 
 /// Retrying turned off: what a test that is not about retrying runs with,

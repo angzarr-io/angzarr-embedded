@@ -1007,18 +1007,18 @@ pub mod v1 {
 }
 
 /// A projector written in the markup (`#[projector]`): one or more source
-/// domains, one instance per process, run after commit and awaited before
-/// the call returns. A failure is the caller's error,
+/// domains, one instance per process, each event it marks handed to its
+/// handler for the event's type. It reaches the kernel as any projector
+/// does, on the projector port ([`Projected`]): registered with
+/// [`Registry::projector`](super::Registry::projector), run after commit
+/// and awaited before the call returns, a failure the caller's error,
 /// [`Failure::Projection`](super::Failure::Projection), carrying what was
-/// committed: the events stay committed. Projectors run on the async
+/// committed (the events stay committed), and a bug, dead-lettered; or
+/// caught up from the store by a [`CatchUp`](super::CatchUp). Projectors run on the async
 /// command path, the only one (async everywhere), so there is no guard
-/// against blocking on a synchronous one. Registered with
-/// [`Registry::projector`](super::Registry::projector). Several
+/// against blocking on a synchronous one. Several
 /// projectors on one domain each receive every committed event of it they
-/// mark; one's failure does not stop the others. The kernel's own
-/// interface to a projector is async too: a hand-written one implements
-/// this trait, or angzarr-router's `ProjectorHandler` for
-/// [`Registry::projector_handler`](super::Registry::projector_handler).
+/// mark; one's failure does not stop the others.
 pub trait AsyncProjector: Send + 'static {
     /// Named in the error a failure raises.
     const NAME: &'static str;
@@ -1069,8 +1069,84 @@ impl<P: AsyncProjector> angzarr_router::router::ProjectorHandler for Projected<P
         &self,
         events: &EventBook,
     ) -> Result<angzarr_proto::v1::Projection, angzarr_router::error::CodedError> {
-        let _ = (events, &self.instance);
-        todo!()
+        let mut instance = self.take().await;
+        let ran = project_book(&mut instance, events).await;
+        *self
+            .instance
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(instance);
+        ran.map_err(|report| {
+            angzarr_router::error::CodedError::bug(
+                angzarr_diagnostic::Diagnostic::code(&report),
+                super::route::flat_args(&report),
+            )
+        })?;
+        Ok(angzarr_proto::v1::Projection {
+            cover: events.cover.clone(),
+            projector: P::NAME.to_string(),
+            next_sequence: events.next_sequence,
+            projection: None,
+        })
+    }
+}
+
+impl<P> Projected<P> {
+    /// The one instance, out of the lock while it runs: a concurrent
+    /// dispatch waits for it, a turn at a time.
+    async fn take(&self) -> P {
+        loop {
+            let taken = self
+                .instance
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            match taken {
+                Some(instance) => return instance,
+                None => Yield(false).await,
+            }
+        }
+    }
+}
+
+/// Every page of `book` through `projector`'s handler for its type, in
+/// order, each with its context; the first failure ends it.
+async fn project_book<P: AsyncProjector>(
+    projector: &mut P,
+    book: &EventBook,
+) -> Result<(), Report> {
+    let cover = book.cover.clone().unwrap_or_default();
+    for page in &book.pages {
+        let recorded_at = page
+            .meta
+            .as_ref()
+            .and_then(|m| m.recorded_at)
+            .unwrap_or_default();
+        let ctx = ProjectionContext::new(cover.clone(), page.sequence, recorded_at);
+        let payload = page.payload.clone().unwrap_or_default();
+        let run = projector.project(&payload, &ctx);
+        if let Some(run) = run {
+            run.await?;
+        }
+    }
+    Ok(())
+}
+
+/// A future that is pending once, waking itself: a turn for another task.
+struct Yield(bool);
+
+impl std::future::Future for Yield {
+    type Output = ();
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
+        if self.0 {
+            return std::task::Poll::Ready(());
+        }
+        self.0 = true;
+        cx.waker().wake_by_ref();
+        std::task::Poll::Pending
     }
 }
 

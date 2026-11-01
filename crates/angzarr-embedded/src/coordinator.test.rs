@@ -282,7 +282,7 @@ mod dedup {
             seen: std::sync::atomic::AtomicBool::new(false),
         };
         let retry = kernel
-            .handle::<crate::toys::Account, _, _>(&racing, deposit(3, 25), &at(21), &mut ())
+            .handle::<crate::toys::Account, _>(&racing, deposit(3, 25), &at(21))
             .ready()
             .unwrap();
         assert!(
@@ -522,7 +522,7 @@ mod pipeline {
         assert_eq!(pages.len(), 1);
         assert_eq!(pages[0].sequence, 2, "at the head");
         let mut stream = prepared.into_stream();
-        assert_eq!(stream.commit(&pages, &registry, &mut []), Ok(3));
+        assert_eq!(stream.commit(&pages, &registry), Ok(3));
         assert_eq!(stream.state().cents, 105);
 
         opened(&store, &registry, 2, 0);
@@ -774,7 +774,6 @@ mod snapshot {
                 &registry,
                 &at(1),
                 &log,
-                &mut [],
             )
             .ready()
             .unwrap();
@@ -806,13 +805,7 @@ mod snapshot {
             .to_any(),
         );
         stream
-            .execute(
-                book,
-                &registry,
-                &at(10),
-                &MemoryDeadLetters::default(),
-                &mut [],
-            )
+            .execute(book, &registry, &at(10), &MemoryDeadLetters::default())
             .ready()
             .unwrap();
         stream
@@ -951,7 +944,7 @@ mod upcasting {
         let log = crate::MemoryDeadLetters::new();
         crate::Kernel::new(registry, &log)
             .on_retryable(crate::toys::no_retries())
-            .handle_any(store, book, &at(seconds), &mut ())
+            .handle_any(store, book, &at(seconds))
             .ready()
     }
 
@@ -1188,7 +1181,7 @@ mod upcasting {
         let log = crate::MemoryDeadLetters::new();
         crate::Kernel::new(&registry, &log)
             .on_retryable(no_retries())
-            .resume(&store, &at(30), &mut ())
+            .resume(&store, &at(30))
             .ready()
             .unwrap();
         let ledger = crate::v1::Cover {
@@ -1281,7 +1274,7 @@ mod admission {
         let log = crate::MemoryDeadLetters::new();
         crate::Kernel::new(registry, &log)
             .on_retryable(crate::toys::no_retries())
-            .handle_any(store, book, &at(seconds), &mut ())
+            .handle_any(store, book, &at(seconds))
             .ready()
     }
 
@@ -1504,7 +1497,7 @@ mod rules_version {
         let store = MemoryStore::new();
         let log = crate::MemoryDeadLetters::new();
         crate::Kernel::new(&registry, &log)
-            .handle_any(&store, add_item(), &at(10), &mut ())
+            .handle_any(&store, add_item(), &at(10))
             .ready()
             .expect("applied");
         let written = pages(&store, &cover("order", 1));
@@ -1524,7 +1517,7 @@ mod rules_version {
             let store = MemoryStore::new();
             let log = crate::MemoryDeadLetters::new();
             let failure = crate::Kernel::new(&registry, &log)
-                .handle_any(&store, add_item(), &at(10), &mut ())
+                .handle_any(&store, add_item(), &at(10))
                 .ready()
                 .err()
                 .unwrap_or_else(|| panic!("{reported:?} is refused"));

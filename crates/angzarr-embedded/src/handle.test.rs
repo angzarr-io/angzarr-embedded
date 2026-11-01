@@ -42,7 +42,7 @@ fn a_policys_events_carry_the_derived_command_id_as_causation_and_no_trigger() {
     opened(&store, &plain, 1, 0);
 
     let handled = kernel
-        .handle::<Account, _, _>(&store, deposit(3, 25).correlated(8), &at(30), &mut ())
+        .handle::<Account, _>(&store, deposit(3, 25).correlated(8), &at(30))
         .ready()
         .unwrap();
     let books = handled.books();
@@ -98,7 +98,7 @@ fn a_rejected_policy_step_keeps_the_commands_commit_and_is_dead_lettered() {
     let before = slice(&store, &cover("account", 1)).next_sequence;
 
     let failure = kernel
-        .handle::<Account, _, _>(&store, deposit(3, LEDGER_LIMIT + 1), &at(30), &mut ())
+        .handle::<Account, _>(&store, deposit(3, LEDGER_LIMIT + 1), &at(30))
         .ready()
         .err()
         .unwrap();
@@ -160,7 +160,7 @@ fn a_rejected_policy_step_keeps_the_commands_commit_and_is_dead_lettered() {
     );
 
     let retried = kernel
-        .handle::<Account, _, _>(&store, deposit(3, LEDGER_LIMIT + 1), &at(31), &mut ())
+        .handle::<Account, _>(&store, deposit(3, LEDGER_LIMIT + 1), &at(31))
         .ready()
         .unwrap();
     assert!(matches!(retried, crate::Handled::Duplicate(..)));
@@ -178,7 +178,7 @@ fn a_chain_deeper_than_its_limit_is_refused() {
     let store = MemoryStore::new();
     opened(&store, &plain, 1, 0);
     let failure = kernel
-        .handle::<Account, _, _>(&store, deposit(3, 1), &at(30), &mut ())
+        .handle::<Account, _>(&store, deposit(3, 1), &at(30))
         .ready()
         .err()
         .unwrap();
@@ -211,7 +211,7 @@ fn a_command_to_an_edition_is_refused_and_writes_nothing() {
     let stream = cover_in("account", 1, "what-if");
     let open = command(stream.clone(), AccountCmd::Open.to_any());
     let failure = kernel
-        .handle::<Account, _, _>(&store, open, &at(30), &mut ())
+        .handle::<Account, _>(&store, open, &at(30))
         .ready()
         .err()
         .unwrap();
@@ -259,11 +259,10 @@ fn a_book_for_another_domain_is_refused() {
     let kernel = Kernel::new(&registry, &log);
     let store = MemoryStore::new();
     let failure = kernel
-        .handle::<Ledger, _, _>(
+        .handle::<Ledger, _>(
             &store,
             command(cover("account", 1), AccountCmd::Open.to_any()),
             &at(30),
-            &mut (),
         )
         .ready()
         .err()
@@ -290,11 +289,11 @@ fn each_step_loads_what_the_steps_before_it_committed() {
     let store = MemoryStore::new();
     opened(&store, &plain, 1, 0);
     kernel
-        .handle::<Account, _, _>(&store, deposit(3, 25), &at(30), &mut ())
+        .handle::<Account, _>(&store, deposit(3, 25), &at(30))
         .ready()
         .unwrap();
     let handled = kernel
-        .handle::<Account, _, _>(&store, deposit(4, 5), &at(31), &mut ())
+        .handle::<Account, _>(&store, deposit(4, 5), &at(31))
         .ready()
         .unwrap();
     let crate::Handled::Applied(recorded) = handled else {
@@ -309,95 +308,126 @@ fn each_step_loads_what_the_steps_before_it_committed() {
         [(cover("account", 1), 1, 4), (ledger_cover(), 1, 2)],
         "each stream once, in the order first touched"
     );
-    let ledger = recorded.events::<Ledger>(&ledger_cover()).unwrap();
+    let ledger = recorded
+        .events::<Ledger>(&ledger_cover(), &registry)
+        .unwrap();
     assert_eq!(ledger[0].sequence(), 1, "after the first deposit's record");
-    assert!(recorded.events::<Ledger>(&cover("account", 1)).is_none());
-    assert!(recorded.events::<Account>(&cover("account", 9)).is_none());
+    assert!(recorded
+        .events::<Ledger>(&cover("account", 1), &registry)
+        .is_err());
+    assert!(recorded
+        .events::<Account>(&cover("account", 9), &registry)
+        .unwrap()
+        .is_empty());
 }
 
-/// Every deposit's amount, projected after commit.
-#[derive(Default)]
-struct Deposits(Vec<i64>);
+/// Every deposit's amount, projected after commit: the projector port,
+/// each book's account events decoded by type.
+#[derive(Clone)]
+struct Deposits(std::sync::Arc<std::sync::Mutex<Vec<i64>>>, &'static str);
 
-impl crate::Projection<Account> for Deposits {
-    fn project(&mut self, c: &crate::Committed<'_, Account>) {
-        if let crate::toys::AccountEvent::Deposited(cents) = c.event() {
-            self.0.push(*cents);
-        }
+impl Default for Deposits {
+    fn default() -> Self {
+        Deposits::named("deposits")
     }
 }
 
-/// Projections run on what each step committed: the command's events and
-/// every policy step's.
+impl Deposits {
+    fn named(name: &'static str) -> Self {
+        Deposits(std::sync::Arc::default(), name)
+    }
+
+    fn seen(&self) -> Vec<i64> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+impl angzarr_router::router::ProjectorHandler for Deposits {
+    fn name(&self) -> &str {
+        self.1
+    }
+
+    async fn dispatch(
+        &self,
+        events: &crate::v1::EventBook,
+    ) -> Result<crate::v1::Projection, angzarr_router::error::CodedError> {
+        for page in &events.pages {
+            let any = page.payload.clone().unwrap_or_default();
+            if let Ok(crate::toys::AccountEvent::Deposited(cents)) =
+                crate::toys::AccountEvent::from_any(&any)
+            {
+                self.0.lock().unwrap().push(cents);
+            }
+        }
+        Ok(crate::v1::Projection::default())
+    }
+}
+
+/// Projectors run inline on what each step committed, of their sources'
+/// streams only: the command's events, not the ledger's the policy wrote.
+/// What the chain recorded is typed only when asked, from its pages.
 #[test]
-fn projections_run_after_commit_over_their_domains_streams() {
+fn projectors_run_after_commit_over_their_sources_streams() {
     let plain = registry();
     let mut registry = registry();
     registry.policy(Bookkeeping);
+    let deposits = Deposits::default();
+    registry.projector_handler(&["account"], deposits.clone());
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry, &log);
     let store = MemoryStore::new();
     opened(&store, &plain, 1, 0);
-    let mut deposits = Deposits::default();
-    let mut ledger_seen = 0;
-    let mut route = crate::ProjectionRoute {
-        name: "deposits",
-        projection: &mut deposits,
-        domain: std::marker::PhantomData,
-    };
     let handled = kernel
-        .handle::<Account, _, _>(&store, deposit(3, 25), &at(30), &mut route)
+        .handle::<Account, _>(&store, deposit(3, 25), &at(30))
         .ready()
         .unwrap();
-    assert!(handled.outcome().projector_failures.is_empty());
-    assert_eq!(deposits.0, [25], "only the new events, only the account's");
+    assert_eq!(
+        deposits.seen(),
+        [25],
+        "only the new events, only the account's"
+    );
 
     let crate::Handled::Applied(recorded) = handled else {
         panic!("applied");
     };
-    recorded
-        .dispatch::<Ledger>(
-            &ledger_cover(),
-            &registry,
-            &mut [&mut |_: &crate::Committed<'_, Ledger>| ledger_seen += 1],
-        )
+    let ledger = recorded
+        .events::<Ledger>(&ledger_cover(), &registry)
         .unwrap();
-    assert_eq!(ledger_seen, 1);
+    assert_eq!(ledger.len(), 1);
     assert_eq!(
-        recorded.dispatch::<Ledger>(&cover("account", 1), &registry, &mut []),
-        Err(KernelError::WrongDomain {
-            stream: cover("account", 1),
+        recorded
+            .events::<Ledger>(&cover("account", 1), &registry)
+            .err(),
+        Some(KernelError::Replay(crate::ReplayError::WrongDomain {
+            found: "account".to_string(),
             expected: "ledger"
-        })
+        }))
     );
     assert_eq!(
-        recorded.dispatch::<Ledger>(&cover("ledger", 9), &registry, &mut []),
-        Ok(()),
+        recorded
+            .events::<Ledger>(&cover("ledger", 9), &registry)
+            .unwrap(),
+        [],
         "a stream the chain did not touch: nothing recorded"
     );
 }
 
 #[test]
-fn a_duplicate_runs_no_projection_and_commits_nothing() {
-    let registry = registry();
+fn a_duplicate_runs_no_projector_and_commits_nothing() {
+    let mut registry = registry();
+    let deposits = Deposits::default();
+    registry.projector_handler(&["account"], deposits.clone());
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry, &log);
     let store = MemoryStore::new();
-    opened(&store, &registry, 1, 0);
-    let mut deposits = Deposits::default();
-    let mut route = crate::ProjectionRoute {
-        name: "deposits",
-        projection: &mut deposits,
-        domain: std::marker::PhantomData,
-    };
+    opened(&store, &crate::toys::registry(), 1, 0);
     let open = command(cover("account", 1), AccountCmd::Open.to_any()).id(1);
     let handled = kernel
-        .handle::<Account, _, _>(&store, open, &at(30), &mut route)
+        .handle::<Account, _>(&store, open, &at(30))
         .ready()
         .unwrap();
     assert!(matches!(handled, crate::Handled::Duplicate(..)));
-    assert_eq!(handled.outcome().projector_failures, []);
-    assert!(deposits.0.is_empty());
+    assert!(deposits.seen().is_empty());
 }
 
 /// The handler's future is `Send` over a store whose futures are, so a
@@ -414,13 +444,11 @@ fn handle_is_a_send_future_over_a_send_store() {
     let kernel = Kernel::new(&registry, &log);
     let store = MemoryStore::new();
     opened(&store, &plain, 1, 0);
-    let handled = send(kernel.handle::<Account, _, _>(&store, deposit(3, 25), &at(30), &mut ()))
+    let handled = send(kernel.handle::<Account, _>(&store, deposit(3, 25), &at(30)))
         .ready()
         .unwrap();
     assert_eq!(handled.books().len(), 2);
-    let resumed = send(kernel.resume(&store, &at(31), &mut ()))
-        .ready()
-        .unwrap();
+    let resumed = send(kernel.resume(&store, &at(31))).ready().unwrap();
     assert!(resumed.books().is_empty(), "nothing owed");
 }
 
@@ -478,7 +506,7 @@ fn a_policys_error_dead_letters_its_step_and_moves_its_position_past_it() {
     let before = slice(&store, &cover("account", 1)).next_sequence;
 
     let failure = kernel
-        .handle::<Account, _, _>(&store, deposit(3, 13), &at(30), &mut ())
+        .handle::<Account, _>(&store, deposit(3, 13), &at(30))
         .ready()
         .err()
         .expect("the policy's error fails the call");
@@ -545,7 +573,7 @@ fn a_policys_error_dead_letters_its_step_and_moves_its_position_past_it() {
     );
 
     kernel
-        .handle::<Account, _, _>(&store, deposit(4, 5), &at(31), &mut ())
+        .handle::<Account, _>(&store, deposit(4, 5), &at(31))
         .ready()
         .expect("the next event is handled as usual");
     let book = crate::v1::EventBook {
@@ -602,7 +630,7 @@ fn under_stay_a_policys_error_holds_its_position() {
     let held = position(&store, "unlucky", &cover("account", 1));
 
     let failure = kernel
-        .handle::<Account, _, _>(&store, deposit(3, 13), &at(30), &mut ())
+        .handle::<Account, _>(&store, deposit(3, 13), &at(30))
         .ready()
         .err()
         .expect("the policy's error fails the call");
@@ -623,7 +651,7 @@ fn under_stay_a_policys_error_holds_its_position() {
         "the position stays"
     );
 
-    let resumed = kernel.resume(&store, &at(31), &mut ()).ready();
+    let resumed = kernel.resume(&store, &at(31)).ready();
     assert!(
         matches!(
             &resumed,
@@ -652,7 +680,7 @@ fn under_stay_a_policys_refusal_answer_error_holds_its_position() {
     opened(&store, &plain, 1, 0);
     let held = position(&store, "unanswering-bookkeeping", &cover("account", 1));
     let failure = kernel
-        .handle::<Account, _, _>(&store, deposit(3, LEDGER_LIMIT + 1), &at(30), &mut ())
+        .handle::<Account, _>(&store, deposit(3, LEDGER_LIMIT + 1), &at(30))
         .ready()
         .err()
         .expect("the answer's error fails the call");
@@ -688,7 +716,7 @@ fn a_filtered_policy_reaches_its_target_only_for_the_events_it_targets() {
         deposit(4, 7),
     ] {
         kernel
-            .handle::<Account, _, _>(&store, book, &at(30), &mut ())
+            .handle::<Account, _>(&store, book, &at(30))
             .ready()
             .unwrap();
     }
@@ -725,11 +753,10 @@ fn a_policy_book_for_an_unregistered_target_is_a_dead_lettered_bug() {
     let kernel = Kernel::new(&registry, &log);
     let store = MemoryStore::new();
     let failure = kernel
-        .handle::<Account, _, _>(
+        .handle::<Account, _>(
             &store,
             command(cover("account", 1), AccountCmd::Open.to_any()),
             &at(30),
-            &mut (),
         )
         .ready()
         .err()
@@ -784,7 +811,7 @@ fn a_command_owes_policy_steps_for_its_own_events_only() {
     opened(&store, &plain, 1, 0);
     for n in [3, 4] {
         kernel
-            .handle::<Account, _, _>(&store, deposit(n, 1), &at(30), &mut ())
+            .handle::<Account, _>(&store, deposit(n, 1), &at(30))
             .ready()
             .unwrap();
     }
@@ -815,11 +842,15 @@ fn a_command_owes_policy_steps_for_its_own_events_only() {
 
 #[test]
 fn a_chain_on_a_stream_loaded_from_a_snapshot_records_only_its_events() {
-    let registry = registry();
+    let mut registry = registry();
+    let (one, two) = (Deposits::named("first"), Deposits::named("second"));
+    registry
+        .projector_handler(&["account"], one.clone())
+        .projector_handler(&["account"], two.clone());
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry, &log);
     let store = MemoryStore::new();
-    opened(&store, &registry, 1, 7);
+    opened(&store, &crate::toys::registry(), 1, 7);
     let source = account_stream(&store, &registry);
     store
         .write_snapshot(
@@ -828,116 +859,20 @@ fn a_chain_on_a_stream_loaded_from_a_snapshot_records_only_its_events() {
         )
         .ready()
         .unwrap();
-    let (mut one, mut two) = (Deposits::default(), Deposits::default());
-    let first = crate::ProjectionRoute {
-        name: "first",
-        projection: &mut one,
-        domain: std::marker::PhantomData,
-    };
-    let second = crate::ProjectionRoute {
-        name: "second",
-        projection: &mut two,
-        domain: std::marker::PhantomData,
-    };
     let handled = kernel
-        .handle::<Account, _, _>(&store, deposit(3, 25), &at(30), &mut (first, second))
+        .handle::<Account, _>(&store, deposit(3, 25), &at(30))
         .ready()
         .unwrap();
     let crate::Handled::Applied(recorded) = handled else {
         panic!("applied");
     };
-    assert!(recorded.projector_failures().is_empty());
-    let events = recorded.events::<Account>(&cover("account", 1)).unwrap();
+    let events = recorded
+        .events::<Account>(&cover("account", 1), &registry)
+        .unwrap();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].sequence(), 2);
-    let seen = [one.0, two.0];
-    assert_eq!(seen, [vec![25], vec![25]], "both projections ran");
-}
-
-#[test]
-fn a_committed_event_names_its_stream() {
-    let registry = registry();
-    let store = MemoryStore::new();
-    opened(&store, &registry, 1, 7);
-    let source = account_stream(&store, &registry);
-    let mut covers = Vec::new();
-    let mut handler = |c: &crate::Committed<'_, Account>| {
-        covers.push((c.cover().clone(), c.envelope().sequence()))
-    };
-    source.dispatch(1, &registry, &mut [&mut handler]).unwrap();
-    assert_eq!(covers, [(cover("account", 1), 1)]);
-}
-
-/// A policy as a handler of its source hands over one order per target,
-/// in target order: each indexed by its place, keeping the trigger's
-/// correlation.
-#[test]
-fn a_policys_orders_are_indexed_and_keep_the_triggers_correlation() {
-    let registry = registry();
-    let store = MemoryStore::new();
-    opened(&store, &registry, 1, 0);
-    let source = account_stream(&store, &registry);
-    let mut orders = Vec::new();
-    let log = MemoryDeadLetters::new();
-    let mut handler = crate::policy(&TwoLedgers, &log, |order| orders.push(order));
-    source.dispatch(1, &registry, &mut [&mut handler]).unwrap();
-    assert_eq!(
-        orders
-            .iter()
-            .map(|o| (o.index(), o.cover().clone(), o.trigger().sequence))
-            .collect::<Vec<_>>(),
-        [(0, two_ledgers(0), 1), (1, two_ledgers(1), 1)]
-    );
-    let correlation = source.events()[1].correlation_id().clone();
-    assert!(orders.iter().all(|o| *o.correlation_id() == correlation));
-    assert_ne!(correlation, crate::v1::Uuid::default());
-}
-
-/// A policy's error, on the handler path, hands over no order: the step
-/// is dead-lettered as the kernel's is, the policy named, its error's code
-/// as the reason and its args, never its English.
-#[test]
-fn a_policys_error_as_a_handler_of_its_source_is_dead_lettered() {
-    let registry = registry();
-    let unused = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &unused);
-    let store = MemoryStore::new();
-    opened(&store, &registry, 1, 0);
-    let deposited = slice(&store, &cover("account", 1)).next_sequence;
-    kernel
-        .handle::<Account, _, _>(&store, deposit(3, 13), &at(30), &mut ())
-        .ready()
-        .expect("deposited, with no policy registered");
-    let source = account_stream(&store, &registry);
-    let log = MemoryDeadLetters::new();
-    let mut orders = Vec::new();
-    let mut handler = crate::policy(&Unlucky, &log, |order| orders.push(order));
-    source
-        .dispatch(deposited, &registry, &mut [&mut handler])
-        .unwrap();
-    assert!(orders.is_empty(), "no order for the event it failed on");
-    let lines = log.lines();
-    assert_eq!(lines.len(), 1, "{lines:?}");
-    assert!(lines[0].starts_with(crate::DEAD_LETTER_PREFIX));
-    assert!(
-        lines[0].contains(&format!(
-            "unlucky: ROUTER_REASON_UNHANDLED_HANDLER_ERROR cause=toy-unlucky-deposit cause.cents=13 sequence={deposited} stream=account/{}",
-            cover("account", 1).root.unwrap()
-        )),
-        "the policy, its bug's key, its error's code and args, and the trigger: {}",
-        lines[0]
-    );
-    let reason = crate::toys::wire(
-        "ROUTER_REASON_UNHANDLED_HANDLER_ERROR",
-        &[("cause", "toy-unlucky-deposit"), ("cause.cents", "13")],
-    );
-    crate::toys::assert_letter(
-        &crate::toys::one_letter(log.letters()),
-        crate::v1::ComponentKind::Policy,
-        &reason,
-        crate::toys::processing_failed(&reason, 0, false),
-    );
-    assert!(!lines[0].contains("cannot happen"), "{}", lines[0]);
+    let seen = [one.seen(), two.seen()];
+    assert_eq!(seen, [vec![25], vec![25]], "both projectors ran");
 }
 
 /// Two ledgers per account event: orders are indexed in target order.
@@ -979,7 +914,7 @@ fn a_triggers_commands_are_indexed_in_target_order() {
     let store = MemoryStore::new();
     opened(&store, &plain, 1, 0);
     kernel
-        .handle::<Account, _, _>(&store, deposit(3, 5), &at(30), &mut ())
+        .handle::<Account, _>(&store, deposit(3, 5), &at(30))
         .ready()
         .unwrap();
     let trigger = EventRef {
@@ -1022,7 +957,7 @@ fn every_policy_on_a_source_runs_for_each_of_its_events_in_registration_order() 
     let open = command(cover("account", 1), AccountCmd::Open.to_any()).id(1);
     for (book, second) in [(open, 30), (deposit(2, 5), 31)] {
         kernel
-            .handle::<Account, _, _>(&store, book, &at(second), &mut ())
+            .handle::<Account, _>(&store, book, &at(second))
             .ready()
             .unwrap();
     }
@@ -1069,7 +1004,7 @@ fn a_policy_step_commits_its_position_with_its_events() {
     let store = Recording::new();
     opened(&store, &plain, 1, 0);
     kernel
-        .handle::<Account, _, _>(&store, deposit(3, 5), &at(30), &mut ())
+        .handle::<Account, _>(&store, deposit(3, 5), &at(30))
         .ready()
         .unwrap();
     let writes = store.writes();
@@ -1118,7 +1053,7 @@ fn a_step_the_store_failed_is_resumed_by_position() {
     let before = store.writes().len();
     store.fail_write(1);
     let failure = kernel
-        .handle::<Account, _, _>(&store, deposit(3, 25), &at(30), &mut ())
+        .handle::<Account, _>(&store, deposit(3, 25), &at(30))
         .ready()
         .err()
         .unwrap();
@@ -1157,7 +1092,7 @@ fn a_step_the_store_failed_is_resumed_by_position() {
     );
     assert_eq!(position(store.inner(), "bookkeeping", &account), 2);
 
-    let resumed = kernel.resume(&store, &at(31), &mut ()).ready().unwrap();
+    let resumed = kernel.resume(&store, &at(31)).ready().unwrap();
     assert_eq!(
         payloads::<ledger::Recorded>(resumed.books()),
         [ledger::Recorded {
@@ -1166,7 +1101,7 @@ fn a_step_the_store_failed_is_resumed_by_position() {
         }]
     );
     assert_eq!(position(store.inner(), "bookkeeping", &account), 3);
-    let again = kernel.resume(&store, &at(32), &mut ()).ready().unwrap();
+    let again = kernel.resume(&store, &at(32)).ready().unwrap();
     assert!(again.books().is_empty(), "nothing more owed");
     assert_eq!(pages(store.inner(), &ledger_cover()).len(), 3);
 }
@@ -1204,7 +1139,7 @@ fn a_policy_step_that_decides_no_event_still_moves_its_position() {
     let store = Recording::new();
     let open = command(cover("account", 1), AccountCmd::Open.to_any()).id(1);
     kernel
-        .handle::<Account, _, _>(&store, open, &at(30), &mut ())
+        .handle::<Account, _>(&store, open, &at(30))
         .ready()
         .unwrap();
     let account = cover("account", 1);
@@ -1232,7 +1167,7 @@ fn a_policy_step_that_decides_no_event_still_moves_its_position() {
         "the command's write, then the step's position alone"
     );
     assert_eq!(position(store.inner(), "sweep-nine", &account), 1);
-    let resumed = kernel.resume(&store, &at(31), &mut ()).ready().unwrap();
+    let resumed = kernel.resume(&store, &at(31)).ready().unwrap();
     assert!(resumed.books().is_empty(), "nothing owed");
     assert_eq!(store.writes().len(), 2, "and nothing run again");
 }
@@ -1318,11 +1253,11 @@ fn a_policys_refusal_answer_reads_the_refused_commands_context() {
     let store = MemoryStore::new();
     opened(&store, &plain, 1, 0);
     kernel
-        .handle::<Account, _, _>(&store, deposit(3, 5), &at(30), &mut ())
+        .handle::<Account, _>(&store, deposit(3, 5), &at(30))
         .ready()
         .unwrap();
     kernel
-        .handle::<Account, _, _>(&store, deposit(4, LEDGER_LIMIT + 1), &at(31), &mut ())
+        .handle::<Account, _>(&store, deposit(4, LEDGER_LIMIT + 1), &at(31))
         .ready()
         .unwrap();
     let refusals = refusals.lock().unwrap();
@@ -1381,7 +1316,7 @@ fn a_policys_refusal_answer_error_dead_letters_as_policy_failed() {
     opened(&store, &plain, 1, 0);
     let before = slice(&store, &cover("account", 1)).next_sequence;
     let failure = kernel
-        .handle::<Account, _, _>(&store, deposit(3, LEDGER_LIMIT + 1), &at(30), &mut ())
+        .handle::<Account, _>(&store, deposit(3, LEDGER_LIMIT + 1), &at(30))
         .ready()
         .err()
         .expect("the answer's error fails the call");
@@ -1431,7 +1366,7 @@ fn a_policys_refusal_answer_error_dead_letters_as_policy_failed() {
     );
 
     kernel
-        .handle::<Account, _, _>(&store, deposit(4, 5), &at(31), &mut ())
+        .handle::<Account, _>(&store, deposit(4, 5), &at(31))
         .ready()
         .expect("the next event is handled as usual");
     assert_eq!(
@@ -1455,7 +1390,7 @@ fn a_refusal_carries_its_triggering_event() {
     let store = MemoryStore::new();
     opened(&store, &plain, 1, 0);
     kernel
-        .handle::<Account, _, _>(&store, deposit(3, LEDGER_LIMIT + 1), &at(30), &mut ())
+        .handle::<Account, _>(&store, deposit(3, LEDGER_LIMIT + 1), &at(30))
         .ready()
         .unwrap();
     let account = cover("account", 1);
@@ -1488,11 +1423,11 @@ fn a_retry_after_a_crash_settles_what_its_stream_still_owes() {
     opened(&store, &plain, 1, 0);
     store.fail_write(1);
     assert!(kernel
-        .handle::<Account, _, _>(&store, deposit(3, 25), &at(30), &mut ())
+        .handle::<Account, _>(&store, deposit(3, 25), &at(30))
         .ready()
         .is_err());
     let retried = kernel
-        .handle::<Account, _, _>(&store, deposit(3, 25), &at(31), &mut ())
+        .handle::<Account, _>(&store, deposit(3, 25), &at(31))
         .ready()
         .unwrap();
     assert!(matches!(retried, crate::Handled::Duplicate(..)));
@@ -1519,7 +1454,7 @@ fn resume_runs_a_new_policy_over_its_sources_history() {
     let store = MemoryStore::new();
     opened(&store, &plain, 1, 7);
     opened(&store, &plain, 2, 9);
-    let resumed = kernel.resume(&store, &at(40), &mut ()).ready().unwrap();
+    let resumed = kernel.resume(&store, &at(40)).ready().unwrap();
     assert_eq!(
         payloads::<ledger::Recorded>(resumed.books())
             .iter()
@@ -1545,14 +1480,14 @@ fn a_resumed_step_that_already_landed_is_a_duplicate() {
     let kernel = Kernel::new(&registry, &log);
     let store = MemoryStore::new();
     opened(&store, &plain, 1, 0);
-    kernel.resume(&store, &at(30), &mut ()).ready().unwrap();
+    kernel.resume(&store, &at(30)).ready().unwrap();
     let account = cover("account", 1);
     let key = crate::PositionKey {
         handler: "bookkeeping",
         stream: sref(&account),
     };
     store.write(Write::positions(&[(key, 0)])).ready().unwrap();
-    let resumed = kernel.resume(&store, &at(31), &mut ()).ready().unwrap();
+    let resumed = kernel.resume(&store, &at(31)).ready().unwrap();
     assert!(resumed.books().iter().all(|b| b.pages.is_empty()));
     assert_eq!(pages(&store, &ledger_cover()).len(), 2, "nothing twice");
     assert_eq!(position(&store, "bookkeeping", &account), 2);
@@ -1568,11 +1503,10 @@ fn a_store_that_cannot_write_fails_the_command_with_nothing_written() {
     let store = Recording::new();
     store.fail_write(0);
     let failure = kernel
-        .handle::<Account, _, _>(
+        .handle::<Account, _>(
             &store,
             command(cover("account", 1), AccountCmd::Open.to_any()),
             &at(30),
-            &mut (),
         )
         .ready()
         .err()
@@ -1583,75 +1517,6 @@ fn a_store_that_cannot_write_fails_the_command_with_nothing_written() {
     ));
     assert_eq!(failure.recovery(), Recovery::Retry);
     assert_eq!(streams(store.inner()), []);
-}
-
-/// A domain named "account" that is not the account: a projection routed
-/// through it finds the chain's account stream of another type.
-struct Impostor;
-
-impl crate::Domain for Impostor {
-    type State = crate::toys::LedgerState;
-    type Command = std::convert::Infallible;
-    type Fact = std::convert::Infallible;
-    type Event = std::convert::Infallible;
-    type Rejection = std::convert::Infallible;
-    const RULES_VERSION: &'static str = "v1";
-
-    const NAME: &'static str = "account";
-
-    fn apply(_: &mut crate::toys::LedgerState, event: &std::convert::Infallible) {
-        match *event {}
-    }
-}
-
-struct Unseen;
-
-impl crate::Projection<Impostor> for Unseen {
-    fn project(&mut self, _: &crate::Committed<'_, Impostor>) {}
-}
-
-#[test]
-fn a_projection_that_fails_is_reported_and_the_commit_stands() {
-    let registry = registry();
-    let log = MemoryDeadLetters::new();
-    let kernel = Kernel::new(&registry, &log);
-    let store = MemoryStore::new();
-    opened(&store, &registry, 1, 0);
-    let mut deposits = Deposits::default();
-    let mut routes = (
-        crate::ProjectionRoute {
-            name: "impostor",
-            projection: &mut Unseen,
-            domain: std::marker::PhantomData::<fn() -> Impostor>,
-        },
-        crate::ProjectionRoute {
-            name: "deposits",
-            projection: &mut deposits,
-            domain: std::marker::PhantomData,
-        },
-    );
-    let handled = kernel
-        .handle::<Account, _, _>(&store, deposit(3, 25), &at(30), &mut routes)
-        .ready()
-        .unwrap();
-    let failure = crate::ProjectorFailure {
-        projector: "impostor",
-        error: KernelError::WrongDomain {
-            stream: cover("account", 1),
-            expected: "account",
-        },
-    };
-    assert_eq!(handled.outcome().projector_failures.len(), 1);
-    let crate::Handled::Applied(recorded) = handled else {
-        panic!("applied");
-    };
-    assert_eq!(recorded.projector_failures(), [failure]);
-    assert_eq!(deposits.0, [25], "the other projection still ran");
-    assert_eq!(
-        slice(&store, &cover("account", 1)).next_sequence,
-        3,
-        "the commit stands"
-    );
 }
 
 /// Waits that complete at once, kept; every jitter draw 0.
@@ -1684,7 +1549,7 @@ fn a_policy_step_failing_once_lands_on_its_retry(error: crate::StoreError) {
     opened(&store, &registry, 1, 0);
     store.fail_write_with(1, error);
     kernel
-        .handle::<Account, _, _>(&store, deposit(3, 25), &at(30), &mut ())
+        .handle::<Account, _>(&store, deposit(3, 25), &at(30))
         .ready()
         .unwrap();
     assert_eq!(
@@ -1800,7 +1665,7 @@ fn an_outside_callers_lost_race_without_an_expected_sequence_is_run_again() {
         },
     );
     let handled = kernel
-        .handle::<Account, _, _>(&store, deposit(3, 25), &at(30), &mut ())
+        .handle::<Account, _>(&store, deposit(3, 25), &at(30))
         .ready();
     assert!(
         matches!(handled, Ok(crate::Handled::Applied(_))),
@@ -1838,11 +1703,10 @@ fn an_outside_callers_lost_race_with_an_expected_sequence_is_stale_at_once() {
         },
     );
     let failure = kernel
-        .handle::<Account, _, _>(
+        .handle::<Account, _>(
             &store,
             deposit(3, 25).expecting(2, crate::v1::ConflictResolution::Strict),
             &at(30),
-            &mut (),
         )
         .ready()
         .err()
@@ -1929,11 +1793,10 @@ fn a_policy_command_outside_its_destination_is_refused_by_the_kernel() {
     let log = MemoryDeadLetters::new();
     let store = MemoryStore::new();
     let failure = Kernel::new(&registry, &log)
-        .handle::<Account, _, _>(
+        .handle::<Account, _>(
             &store,
             command(cover("account", 1), AccountCmd::Open.to_any()),
             &at(30),
-            &mut (),
         )
         .ready()
         .err()
@@ -1991,11 +1854,10 @@ fn unchecked_refusal(
     let log = MemoryDeadLetters::new();
     let store = MemoryStore::new();
     let failure = Kernel::new(&registry, &log)
-        .handle::<Account, _, _>(
+        .handle::<Account, _>(
             &store,
             command(cover("account", 1), AccountCmd::Open.to_any()),
             &at(30),
-            &mut (),
         )
         .ready()
         .err()
@@ -2079,11 +1941,10 @@ fn a_policys_command_with_handling_is_refused_by_the_kernel() {
     let log = MemoryDeadLetters::new();
     let store = MemoryStore::new();
     Kernel::new(&registry, &log)
-        .handle::<Account, _, _>(
+        .handle::<Account, _>(
             &store,
             command(cover("account", 1), AccountCmd::Open.to_any()),
             &at(30),
-            &mut (),
         )
         .ready()
         .expect("delivered");
@@ -2172,11 +2033,10 @@ fn a_policys_commands_in_their_triggers_edition_and_correlation_are_delivered() 
     let log = MemoryDeadLetters::new();
     let store = MemoryStore::new();
     Kernel::new(&registry, &log)
-        .handle::<Account, _, _>(
+        .handle::<Account, _>(
             &store,
             command(cover("account", 1), AccountCmd::Open.to_any()),
             &at(30),
-            &mut (),
         )
         .ready()
         .unwrap();
@@ -2306,11 +2166,10 @@ fn a_policys_commands_naming_their_stamped_identity_are_delivered() {
     let log = MemoryDeadLetters::new();
     let store = MemoryStore::new();
     Kernel::new(&registry, &log)
-        .handle::<Account, _, _>(
+        .handle::<Account, _>(
             &store,
             command(cover("account", 1), AccountCmd::Open.to_any()),
             &at(30),
-            &mut (),
         )
         .ready()
         .expect("delivered");
@@ -2428,7 +2287,7 @@ fn no_translation_makes_the_kernel_build_the_pass_through_fact() {
         command(account.clone(), AccountCmd::Open.to_any()).id(1),
         deposit(2, 5),
     ] {
-        let _ = kernel.handle_any(&store, book, &at(30), &mut ()).ready();
+        let _ = kernel.handle_any(&store, book, &at(30)).ready();
     }
 
     let books = books.lock().unwrap();

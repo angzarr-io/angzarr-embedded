@@ -40,13 +40,18 @@ angzarr-store-sqlite = { path = "../angzarr-store-sqlite", optional = true }
 [features]
 # Re-export angzarr-store-sqlite.
 sqlite = ["dep:angzarr-store-sqlite"]
+# The kernel's test fixtures: the pipeline on one stream in memory, with no
+# store (`Stream::execute`), for tests of the pipeline's steps. Tests only;
+# an application runs `Kernel::handle`.
+test-support = []
 
 # The kernel's tests run on angzarr-ports' MemoryStore and, on a tokio
 # runtime, on the shared SQLite adapter (sqlite.test.rs); and a decorated
 # aggregate (`src/decorated.test.rs`) through angzarr-embedded-macros, whose expansion
-# names `::angzarr-embedded`; with `sqlite` on, so the re-export is tested.
+# names `::angzarr-embedded`; with `sqlite` on, so the re-export is tested,
+# and `test-support`, its fixtures.
 [dev-dependencies]
-angzarr-embedded = { path = ".", features = ["sqlite"] }
+angzarr-embedded = { path = ".", features = ["sqlite", "test-support"] }
 angzarr-ports = { git = "https://github.com/angzarr-io/angzarr", rev = "ab7ae03ac548d19f435f532661284a0820e9f654", features = ["memory"] }
 angzarr-embedded-macros = { path = "../angzarr-embedded-macros" }
 angzarr-store-sqlite = { path = "../angzarr-store-sqlite" }

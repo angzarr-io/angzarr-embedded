@@ -364,7 +364,7 @@ mod tx {
             .id(3)
             .correlated(6);
         let handled = kernel
-            .handle::<Account, _, _>(&store, book, &at(50), &mut ())
+            .handle::<Account, _>(&store, book, &at(50))
             .ready()
             .unwrap();
         let trigger = crate::v1::EventRef {
@@ -396,7 +396,7 @@ mod tx {
         // Again: the probe stream is at 2 now, and decide sees its state.
         let book = command(cover("account", 1), AccountCmd::Deposit(5).to_any()).id(4);
         let handled = kernel
-            .handle::<Account, _, _>(&store, book, &at(51), &mut ())
+            .handle::<Account, _>(&store, book, &at(51))
             .ready()
             .unwrap();
         let probed = &probes(&handled.books())[0];
@@ -455,7 +455,7 @@ mod tx {
 
         let kernel = Kernel::new(&registry, &log).limit(2);
         kernel
-            .handle::<Account, _, _>(&store, deposit(), &at(50), &mut ())
+            .handle::<Account, _>(&store, deposit(), &at(50))
             .ready()
             .unwrap();
         let probe = crate::v1::Cover {
@@ -483,7 +483,7 @@ mod tx {
         opened(&store, &plain, 1, 0);
         let shallow = Kernel::new(&registry, &log).limit(1);
         let failure = shallow
-            .handle::<Account, _, _>(&store, deposit(), &at(50), &mut ())
+            .handle::<Account, _>(&store, deposit(), &at(50))
             .ready()
             .err()
             .unwrap();

@@ -8,7 +8,6 @@ use std::fmt::Debug;
 use angzarr_proto::v1::{Cover, EventPage};
 
 use super::domain::Domain;
-use super::handler::Committed;
 use super::registry::Registry;
 use super::stream::Stream;
 
@@ -46,12 +45,17 @@ where
                 continue;
             }
         };
-        let mut states = Vec::new();
-        let mut collect = |c: &Committed<'_, D>| states.push((c.sequence(), c.state.clone()));
-        if let Err(error) = stream.dispatch(0, registry, &mut [&mut collect]) {
-            failures.push(format!("{name}: {error}"));
-            continue;
-        }
+        // The state just after each event: the replayed events folded
+        // again, one at a time, from a fresh state.
+        let mut state = registry.fresh::<D>();
+        let states: Vec<(u64, D::State)> = stream
+            .events()
+            .iter()
+            .map(|envelope| {
+                D::apply(&mut state, envelope.event());
+                (envelope.sequence(), state.clone())
+            })
+            .collect();
         for (sequence, expected) in &fixture.states {
             match states.iter().find(|(s, _)| s == sequence) {
                 None => failures.push(format!("{name}: no event {sequence}")),

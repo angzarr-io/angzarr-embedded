@@ -50,14 +50,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 use std::future::Future;
 use std::path::Path;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 
 use angzarr_diagnostic::Report;
 use angzarr_embedded::v1::{AngzarrDeadLetter, CommandBook, Cover, EventBook, EventPage};
 use angzarr_embedded::{
     DeadLetterLog, EventStore, Failure, Handled, Kernel, KernelError, Malformed, OnPolicyBug,
-    OnRetryable, Project, ProjectorFailure, Recorded, Registry, Rejected, Sampled, StoreError,
-    StreamRef, Target, Wait,
+    OnRetryable, Recorded, Registry, Rejected, Sampled, StoreError, StreamRef, Target, Wait,
 };
 use angzarr_proto::v1::{CommandResponse, ComponentKind};
 use angzarr_store_sqlite::SqliteStore;
@@ -370,20 +369,6 @@ impl DeadLetterLog for Unlogged {
     fn letter(&self, _letter: &AngzarrDeadLetter) {}
 }
 
-/// The application's projections, shared by every call: each call's
-/// recorded chain is projected under the lock, which is held for the
-/// projection alone.
-struct Shared<'a>(&'a Mutex<Box<dyn Project + Send>>);
-
-impl Project for Shared<'_> {
-    fn project(&mut self, recorded: &Recorded, registry: &Registry) -> Vec<ProjectorFailure> {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .project(recorded, registry)
-    }
-}
-
 /// An [`App`] being built from its parts: its registry, its [`Stores`],
 /// and the kernel's settings, each the kernel's default until set, as
 /// [`Kernel`]'s are. [`AppBuilder::start`] starts it.
@@ -392,7 +377,6 @@ pub struct AppBuilder<R: Stores> {
     registry: Registry,
     stores: R,
     log: Arc<dyn DeadLetterLog>,
-    projections: Box<dyn Project + Send>,
     wait: Option<Arc<dyn Wait>>,
     policy_bug: OnPolicyBug,
     retry: OnRetryable,
@@ -410,13 +394,6 @@ impl<R: Stores> AppBuilder<R> {
     /// the letters when it can: nowhere until given.
     pub fn dead_letter_log(mut self, log: Arc<dyn DeadLetterLog>) -> AppBuilder<R> {
         self.log = log;
-        self
-    }
-
-    /// The projections every call runs over what its chain recorded
-    /// ([`Project`]): none (`()`) until given.
-    pub fn projections(mut self, projections: Box<dyn Project + Send>) -> AppBuilder<R> {
-        self.projections = projections;
         self
     }
 
@@ -460,7 +437,6 @@ impl<R: Stores> AppBuilder<R> {
             host: self.host,
             registry: self.registry,
             log: self.log,
-            projections: Mutex::new(self.projections),
             wait: self.wait,
             policy_bug: self.policy_bug,
             retry: self.retry,
@@ -489,7 +465,6 @@ pub struct App<R: Stores = OneStore<SqliteStore>> {
     host: Host,
     registry: Registry,
     log: Arc<dyn DeadLetterLog>,
-    projections: Mutex<Box<dyn Project + Send>>,
     wait: Option<Arc<dyn Wait>>,
     policy_bug: OnPolicyBug,
     retry: OnRetryable,
@@ -503,7 +478,7 @@ pub struct App<R: Stores = OneStore<SqliteStore>> {
 
 impl<R: Stores> App<R> {
     /// An application from its parts: `registry` and `stores`, the kernel's
-    /// settings its defaults, no remote components, no projections, no
+    /// settings its defaults, no remote components, no
     /// dead-letter log (the store keeps the letters), until the builder is
     /// told otherwise.
     pub fn builder(stores: R, registry: Registry) -> AppBuilder<R> {
@@ -512,7 +487,6 @@ impl<R: Stores> App<R> {
             registry,
             stores,
             log: Arc::new(Unlogged),
-            projections: Box::new(()),
             wait: None,
             policy_bug: OnPolicyBug::default(),
             retry: OnRetryable::default(),
@@ -549,8 +523,7 @@ impl<R: Stores> App<R> {
     ) -> Result<Recorded, Failure<Infallible>> {
         let store = self.store_of(key).await.map_err(Failure::Kernel)?;
         let kernel = self.kernel();
-        let mut projections = Shared(&self.projections);
-        off_worker(kernel.resume(&store, sampled, &mut projections)).await
+        off_worker(kernel.resume(&store, sampled)).await
     }
 
     /// The resumes at start that failed, by the key of their store
@@ -574,9 +547,8 @@ impl<R: Stores> App<R> {
     }
 
     /// Handles one command book in the store of `key`, for any domain,
-    /// and every policy step it sets off ([`Kernel::handle_any`]), once the
-    /// chain settles, the application's projections run over what it
-    /// recorded. Calls run concurrently; two on one stream race
+    /// and every policy step it sets off ([`Kernel::handle_any`]), then the
+    /// registry's projectors over what it recorded. Calls run concurrently; two on one stream race
     /// optimistically, as the kernel's do.
     pub async fn handle_in(
         &self,
@@ -586,8 +558,7 @@ impl<R: Stores> App<R> {
     ) -> Result<Handled, Failure<Rejected>> {
         let store = self.store_of(key).await.map_err(Failure::Kernel)?;
         let kernel = self.kernel();
-        let mut projections = Shared(&self.projections);
-        off_worker(kernel.handle_any(&store, book, sampled, &mut projections)).await
+        off_worker(kernel.handle_any(&store, book, sampled)).await
     }
 
     /// Every event of the stream `cover` names in the store of `key`, in

@@ -15,9 +15,9 @@
 use std::any::Any as AnyType;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
+use std::sync::{Arc, RwLock, RwLockReadGuard};
 
-use angzarr_proto::v1::{ConflictResolution, EventPage, Snapshot, StateDescriptor};
+use angzarr_proto::v1::{ConflictResolution, Snapshot, StateDescriptor};
 use angzarr_router::domain::DomainDispatch;
 use angzarr_router::policy::PolicyDispatch;
 use angzarr_router::router::{
@@ -26,13 +26,11 @@ use angzarr_router::router::{
 
 use angzarr_diagnostic::{Arg, Diagnostic};
 
-use super::coordinator::Contextual;
 use super::domain::{Domain, State};
-use super::error::{KernelError, UpcastChainError};
-use super::markup::{self, AsyncProjector, Projecting, ProjectionContext};
+use super::error::UpcastChainError;
+use super::markup::{self, AsyncProjector};
 use super::payload::{type_name, Payload};
 use super::route;
-use super::stream::Stream;
 use super::upcast::{UpcastPort, Upcaster};
 
 /// What a domain's descriptor tells the kernel: replaced whole, under
@@ -61,8 +59,8 @@ struct Entry {
     by_command: BTreeMap<String, ConflictResolution>,
     /// What dispatches the domain's inputs: angzarr-router's.
     handler: Box<dyn DynCommandHandler>,
-    /// What only a typed domain has: its upcaster, payload types, factory
-    /// and typed replay.
+    /// What only a typed domain has: its upcaster, payload types and
+    /// factory.
     typed: Option<Typed>,
     /// Whether it is a process manager: an absent correlation is its root.
     process_manager: bool,
@@ -173,30 +171,18 @@ struct Typed {
     current: fn() -> Vec<String>,
     /// Every fresh `D::State`: a `Factory<D::State>`, boxed.
     fresh: Box<dyn AnyType + Send + Sync>,
-    /// The chain's `Stream<D>` after a step: [`replay::<D>`].
-    replay: TypedReplay,
 }
 
 /// A factory of `S`.
 type Factory<S> = Arc<dyn Fn() -> S + Send + Sync>;
 
-/// A marked-up projector, erased, its one instance held here: out of the
-/// lock while it runs.
+/// A registered projector: the projector port, angzarr-router's
+/// `ProjectorHandler` (a marked-up one through [`markup::Projected`]),
+/// with the domains whose committed events it is run for.
 pub(crate) struct ProjectorEntry {
     pub(crate) name: String,
-    /// The domains whose committed events it is run for.
     pub(crate) sources: Vec<String>,
-    pub(crate) instance: ProjectorInstance,
-}
-
-/// What a registered projector runs.
-pub(crate) enum ProjectorInstance {
-    /// A marked-up projector's ONE instance, out of the lock while it runs.
-    Marked(Mutex<Option<Box<dyn ErasedProjector>>>),
-    /// A projector written as angzarr-router's `ProjectorHandler` (one in
-    /// another process, behind its `ProjectorService`), handed each
-    /// committed book of its source whole.
-    Handler(Box<dyn DynProjectorHandler>),
+    pub(crate) handler: Box<dyn DynProjectorHandler>,
 }
 
 /// A registered policy, as angzarr-router dispatches it, held in the
@@ -222,52 +208,6 @@ impl PolicyEntry {
     pub(crate) fn source(&self) -> &str {
         self.dispatch.input_domain()
     }
-}
-
-/// [`AsyncProjector`] with its constant and type erased.
-pub(crate) trait ErasedProjector: Send {
-    fn project<'a>(
-        &'a mut self,
-        event: &'a prost_types::Any,
-        ctx: &'a ProjectionContext,
-    ) -> Option<Projecting<'a>>;
-}
-
-impl<P: AsyncProjector> ErasedProjector for P {
-    fn project<'a>(
-        &'a mut self,
-        event: &'a prost_types::Any,
-        ctx: &'a ProjectionContext,
-    ) -> Option<Projecting<'a>> {
-        AsyncProjector::project(self, event, ctx)
-    }
-}
-
-/// A typed domain's stream after a step, its type erased so a chain can
-/// hold it for a domain it knows only by name: the stream as the step
-/// loaded it ([`Contextual`]) with the step's `pages` folded on, a
-/// `Stream<D>`, boxed.
-pub(crate) type TypedReplay =
-    fn(&Contextual, &[EventPage], &Registry) -> Result<Box<dyn AnyType + Send>, KernelError>;
-
-/// [`TypedReplay`] for `D`.
-fn replay<D: Domain>(
-    loaded: &Contextual,
-    pages: &[EventPage],
-    registry: &Registry,
-) -> Result<Box<dyn AnyType + Send>, KernelError> {
-    let cover = loaded.command.cover().clone();
-    let mut stream = match &loaded.snapshot {
-        Some(snapshot) => {
-            // The stream's last instant is the floor only if no event
-            // follows the snapshot; otherwise the events carry their own.
-            let floor = loaded.last_recorded_at.filter(|_| loaded.pages.is_empty());
-            Stream::<D>::resume(cover, snapshot, floor, &loaded.pages, registry)?
-        }
-        None => Stream::<D>::replay(cover, &loaded.pages, registry)?,
-    };
-    stream.extend(pages, registry)?;
-    Ok(Box::new(stream))
 }
 
 /// Why a domain could not be registered: angzarr refuses the same
@@ -556,7 +496,6 @@ impl Registry {
                     urls
                 },
                 fresh: Box::new(fresh),
-                replay: replay::<D>,
             }),
             process_manager,
             upcast: Some(port),
@@ -574,9 +513,9 @@ impl Registry {
     /// descriptor, its rules version, which its events are stamped with,
     /// and a process manager's starting types. Refused without a rules
     /// version or a state type. Its streams are dispatched like any
-    /// domain's; with no typed [`Domain`] behind it, a chain holds no typed
-    /// stream of it ([`Recorded::events`](super::Recorded::events) is
-    /// `None`).
+    /// domain's; with no typed [`Domain`] behind it, what a chain recorded
+    /// of it is its pages alone ([`Recorded::events`](super::Recorded::events)
+    /// decodes a typed domain's).
     pub fn command_handler(
         &mut self,
         domain: &str,
@@ -790,70 +729,50 @@ impl Registry {
         self.domains.get(domain).map(|e| &*e.handler)
     }
 
-    /// `domain`'s typed replay, for a typed domain.
-    pub(crate) fn typed_replay(&self, domain: &str) -> Option<TypedReplay> {
-        self.domains.get(domain)?.typed.as_ref().map(|t| t.replay)
-    }
-
     /// Register `projector`, the ONE instance of a marked-up projector
-    /// (`#[projector]`) this process runs, holding its ports. The kernel
-    /// ([`Kernel::handle`](super::Kernel::handle)) runs it after each commit that records events of
-    /// any of its sources ([`AsyncProjector::SOURCES`]), and
-    /// awaits it before the call returns: a failure is the caller's error
-    /// ([`Failure::Projection`](super::Failure::Projection); the events stay committed), and does not
-    /// stop the other projectors. Registering one twice, or one with no
-    /// source, PANICS at startup.
+    /// (`#[projector]`) this process runs, holding its ports, on the
+    /// projector port ([`markup::Projected`]), for its sources
+    /// ([`AsyncProjector::SOURCES`]): as [`Registry::projector_handler`]
+    /// registers any projector.
     pub fn projector<P: AsyncProjector>(&mut self, projector: P) -> &mut Self {
-        self.push_projector(
-            P::NAME,
-            P::SOURCES,
-            ProjectorInstance::Marked(Mutex::new(Some(Box::new(projector)))),
-        )
+        self.projector_handler(P::SOURCES, markup::Projected::new(projector))
     }
 
-    /// Register `projector`, written as angzarr-router's
-    /// `ProjectorHandler` (a projector in another process, behind its
-    /// `ProjectorService`: the host's remote projector), or one written by
-    /// hand, projecting the events of every domain of `sources`, at least
-    /// one. The kernel runs it as it runs a marked-up one, after each
-    /// commit that records events of any of them, handing it each
-    /// committed book of them, a stream's book at a time; its failures follow their class (decision
-    /// 14.37, 14.41): a retryable one and an ABORTED one are run again
-    /// under the kernel's [`OnRetryable`](super::OnRetryable), then
-    /// dead-lettered, and any other is dead-lettered at once. Registering
-    /// one twice (by name), or one with no source, PANICS at startup.
+    /// Register `projector`, on the projector port, angzarr-router's
+    /// `ProjectorHandler` (one in another process, behind its
+    /// `ProjectorService`: the host's remote projector; one written by
+    /// hand; a marked-up one, [`Registry::projector`]), projecting the
+    /// events of every domain of `sources`, at least one. The kernel runs
+    /// it inline: after each commit that records events of any of them, it
+    /// hands it each committed book of them, a stream's book at a time, and
+    /// awaits it before the call returns. A failure does not stop the other
+    /// projectors, and is the caller's error
+    /// ([`Failure::Projection`](super::Failure::Projection); the events
+    /// stay committed), each by its class (decision 14.37, 14.41): a
+    /// retryable one and an ABORTED one are run again under the kernel's
+    /// [`OnRetryable`](super::OnRetryable), then dead-lettered, and any
+    /// other (a bug) is dead-lettered at once. To run one caught up from
+    /// the store instead, see [`CatchUp`](super::CatchUp). Registering one
+    /// twice (by name), or one with no source, PANICS at startup.
     pub fn projector_handler(
         &mut self,
         sources: &[&str],
         projector: impl router::ProjectorHandler + 'static,
     ) -> &mut Self {
         let name = projector.name().to_string();
-        self.push_projector(
-            &name,
-            sources,
-            ProjectorInstance::Handler(Box::new(projector)),
-        )
-    }
-
-    fn push_projector(
-        &mut self,
-        name: &str,
-        sources: &[&str],
-        instance: ProjectorInstance,
-    ) -> &mut Self {
         if sources.is_empty() {
             panic!("projector \"{name}\" names no source domain");
         }
         for source in sources {
-            self.refuse_remote_source(source, name);
+            self.refuse_remote_source(source, &name);
         }
         if self.projectors.iter().any(|entry| entry.name == name) {
             panic!("projector \"{name}\" is registered already");
         }
         self.projectors.push(ProjectorEntry {
-            name: name.to_string(),
+            name,
             sources: sources.iter().map(|source| source.to_string()).collect(),
-            instance,
+            handler: Box::new(projector),
         });
         self
     }

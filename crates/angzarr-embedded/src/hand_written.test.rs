@@ -571,7 +571,7 @@ fn settle(registry: &Registry, book: CommandBook) -> Result<Vec<(Uuid, Vec<Strin
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .expect("a runtime");
-    let handled = runtime.block_on(kernel.handle::<Counter, _, _>(&store, book, &sampled, &mut ()));
+    let handled = runtime.block_on(kernel.handle::<Counter, _>(&store, book, &sampled));
     match handled {
         Ok(Handled::Applied(recorded)) => Ok(recorded
             .steps()
@@ -875,7 +875,7 @@ fn a_policy_is_sourced_from_a_child_hosted_domain_by_its_event_set_alone() {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .expect("a runtime");
-    let handled = runtime.block_on(kernel.handle_any(&store, decide(), &sampled, &mut ()));
+    let handled = runtime.block_on(kernel.handle_any(&store, decide(), &sampled));
     let recorded = match handled {
         Ok(Handled::Applied(recorded)) => recorded,
         Ok(_) => panic!("not applied"),

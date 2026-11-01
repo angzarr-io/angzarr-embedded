@@ -579,18 +579,6 @@ pub(crate) struct Decided {
     pub(crate) snapshot: Option<Snapshot>,
 }
 
-/// Step 5's events alone ([`decide`]): what a stream run in memory keeps.
-pub(crate) async fn dispatch(
-    command: &Contextual,
-    sampled: &Sampled,
-    registry: &Registry,
-    dead_letters: &dyn DeadLetterLog,
-) -> Result<Vec<EventPage>, Failure<Rejected>> {
-    decide(command, sampled, registry, dead_letters)
-        .await
-        .map(|decided| decided.pages)
-}
-
 /// Write `snapshot` of `stream` over the one it has (the default policy,
 /// the newest only; decision 14.40). A snapshot is a cache: the events are
 /// committed already, so a failed write fails nothing, and the next load

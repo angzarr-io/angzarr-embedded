@@ -26,7 +26,10 @@ itself.
 - A stream is angzarr's: a `Cover` (domain, edition, root), its events
   `EventPage`s with angzarr's `EventMeta`, which the kernel stamps.
 - A **policy** carries one domain's events into another's commands.
-- A **projection** is a read model: a fold over committed events.
+- A **projector** builds a read model from committed events, one stream's
+  book at a time: ONE port (angzarr-router's `ProjectorHandler`), run
+  inline on each commit or caught up from the store (`CatchUp`), its
+  positions per stream, held in memory or stored.
 - Markup (angzarr-embedded-macros) generates a domain's, policy's or projector's glue
   from a hand-written impl.
 

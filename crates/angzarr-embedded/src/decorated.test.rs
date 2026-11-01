@@ -1512,10 +1512,7 @@ fn execute<D: Domain>(
         command_id: Uuid::from_bytes([0x07; 16]),
     };
     let log = MemoryDeadLetters::new();
-    match stream
-        .execute(book, registry, &sampled, &log, &mut [])
-        .ready()?
-    {
+    match stream.execute(book, registry, &sampled, &log).ready()? {
         Executed::Applied(events) => Ok(events.iter().map(|e| e.event().to_any()).collect()),
         Executed::Duplicate(_) => panic!("command {n} is new"),
     }
@@ -3102,7 +3099,7 @@ fn handle_in<D: Domain>(
                 max_retries: 0,
                 ..::angzarr_embedded::OnRetryable::default()
             })
-            .handle::<D, _, _>(store, book, &sampled, &mut ()),
+            .handle::<D, _>(store, book, &sampled),
     )
 }
 
@@ -3271,22 +3268,16 @@ mod process_manager {
             )
         };
         let refused = buy_in
-            .execute(held(2), &registry, &sampled, &log, &mut [])
+            .execute(held(2), &registry, &sampled, &log)
             .ready()
             .expect_err("no instance");
         assert_eq!(refused.code(), "COORDINATOR_REASON_PM_NO_INSTANCE");
         buy_in
-            .execute(
-                start(&correlation(11), 3, 0),
-                &registry,
-                &sampled,
-                &log,
-                &mut [],
-            )
+            .execute(start(&correlation(11), 3, 0), &registry, &sampled, &log)
             .ready()
             .unwrap();
         assert!(buy_in
-            .execute(held(4), &registry, &sampled, &log, &mut [])
+            .execute(held(4), &registry, &sampled, &log)
             .ready()
             .is_ok());
         assert_eq!(buy_in.len(), 2);
@@ -3662,7 +3653,7 @@ mod handler_context {
             command_id: Uuid::from_bytes([0x08; 16]),
         };
         let Err(failure) = pot
-            .execute(staking(2, 5, false, 0), &registry, &sampled, &log, &mut [])
+            .execute(staking(2, 5, false, 0), &registry, &sampled, &log)
             .ready()
         else {
             panic!("unresolved");
@@ -4254,7 +4245,7 @@ fn settle_in<D: Domain>(
                 max_retries: 0,
                 ..::angzarr_embedded::OnRetryable::default()
             })
-            .handle::<D, _, _>(store, book, &sampled, &mut ()),
+            .handle::<D, _>(store, book, &sampled),
     )?;
     match handled {
         Handled::Applied(recorded) => Ok(recorded),
@@ -4380,12 +4371,9 @@ mod refusal_flow {
             now: at(9),
             command_id: Uuid::from_bytes([0x79; 16]),
         };
-        let resumed = ready(::angzarr_embedded::Kernel::new(&registry, &log).resume(
-            &store,
-            &sampled,
-            &mut (),
-        ))
-        .expect("nothing left owed");
+        let resumed =
+            ready(::angzarr_embedded::Kernel::new(&registry, &log).resume(&store, &sampled))
+                .expect("nothing left owed");
         assert!(
             resumed.steps().is_empty(),
             "the position moved past the trigger"
@@ -4407,14 +4395,10 @@ mod refusal_flow {
             now: at(2),
             command_id: Uuid::from_bytes([0x72; 16]),
         };
-        let failure = ready(kernel.handle::<BuyIn, _, _>(
-            &store,
-            start(&correlation(9), 2, 30),
-            &sampled,
-            &mut (),
-        ))
-        .err()
-        .expect("the refusal handler's error fails the call");
+        let failure =
+            ready(kernel.handle::<BuyIn, _>(&store, start(&correlation(9), 2, 30), &sampled))
+                .err()
+                .expect("the refusal handler's error fails the call");
         assert!(
             matches!(
                 &failure,
@@ -4426,7 +4410,7 @@ mod refusal_flow {
             "{failure:?}"
         );
         assert_eq!(log.lines().len(), 1, "{:?}", log.lines());
-        let resumed = ready(kernel.resume(&store, &sampled, &mut ()))
+        let resumed = ready(kernel.resume(&store, &sampled))
             .err()
             .expect("the position stayed, so the step runs again");
         assert!(
@@ -5043,7 +5027,7 @@ mod router {
             now: at(9),
             command_id: Uuid::from_bytes([0x74; 16]),
         };
-        let handled = ready(kernel.handle_any(&store, note(), &sampled, &mut ())).unwrap();
+        let handled = ready(kernel.handle_any(&store, note(), &sampled)).unwrap();
         assert!(matches!(handled, Handled::Applied(_)));
         let remote_cover = Cover {
             domain: "remote".to_string(),
@@ -5067,7 +5051,7 @@ mod router {
             Some(Causation::CommandId(Uuid::from_bytes([4; 16])))
         );
         assert_eq!(meta.correlation_id, Some(correlation(4)));
-        let again = ready(kernel.handle_any(&store, note(), &sampled, &mut ())).unwrap();
+        let again = ready(kernel.handle_any(&store, note(), &sampled)).unwrap();
         assert!(
             matches!(again, Handled::Duplicate(..)),
             "a retry is a duplicate"
@@ -5127,8 +5111,8 @@ mod router {
             command_id: Uuid::from_bytes([0x74; 16]),
         };
         let note = |id| send("remote", id, any(Note {}), Some(correlation(4)));
-        ready(kernel.handle_any(&store, note(4), &sampled(at(9)), &mut ())).unwrap();
-        ready(kernel.handle_any(&store, note(5), &sampled(at(5)), &mut ())).unwrap();
+        ready(kernel.handle_any(&store, note(4), &sampled(at(9)))).unwrap();
+        ready(kernel.handle_any(&store, note(5), &sampled(at(5)))).unwrap();
         assert_eq!(
             *seen.lock().unwrap(),
             [Some(at(9)), Some(at(9))],
@@ -5233,14 +5217,10 @@ mod router {
             command_id: Uuid::from_bytes([0x79; 16]),
         };
 
-        let origin = ready(kernel.handle_any(
-            &store,
-            send("remote", 3, any(Note {}), None),
-            &sampled,
-            &mut (),
-        ))
-        .err()
-        .expect("unreachable");
+        let origin =
+            ready(kernel.handle_any(&store, send("remote", 3, any(Note {}), None), &sampled))
+                .err()
+                .expect("unreachable");
         assert!(
             matches!(
                 &origin,
@@ -5288,7 +5268,7 @@ mod router {
         assert_eq!(pages(&store, &remote_cover), None);
 
         up.store(true, std::sync::atomic::Ordering::SeqCst);
-        ready(kernel.resume(&store, &sampled, &mut ())).unwrap();
+        ready(kernel.resume(&store, &sampled)).unwrap();
         assert_eq!(
             pages(&store, &remote_cover).map(|p| p.len()),
             Some(1),
@@ -5477,7 +5457,6 @@ mod router {
             &store,
             send("remote", 3, any(Note {}), None),
             &sampled_at(9),
-            &mut (),
         ))
         .err()
         .expect("still unreachable after the cap");
@@ -5513,7 +5492,6 @@ mod router {
             &store,
             send("remote", 3, any(Note {}), None),
             &sampled_at(9),
-            &mut (),
         ));
         assert!(failed.is_err());
         assert_eq!(calls.load(SeqCst), 1);
@@ -5542,14 +5520,12 @@ mod router {
                 &store,
                 send("wallet", 1, any(Open { bonus: 50 }), None),
                 &sampled_at(1),
-                &mut (),
             ))
             .unwrap();
             let held = ready(kernel.handle_any(
                 &store,
                 send("wallet", 2, any(Hold { cents: 5 }), None),
                 &sampled_at(2),
-                &mut (),
             ))
             .err()
             .expect("the policy's step is unreachable");
@@ -5571,7 +5547,7 @@ mod router {
                 lines[0].contains("remote: COORDINATOR_REASON_HANDLER_UNAVAILABLE cause=not-running domain=remote retry_count=3"),
                 "{lines:?}"
             );
-            let _ = ready(kernel.resume(&store, &sampled_at(3), &mut ()));
+            let _ = ready(kernel.resume(&store, &sampled_at(3)));
             assert_eq!(calls.load(SeqCst), resumed_calls, "{policy_bug:?}");
         }
     }
@@ -5593,7 +5569,6 @@ mod router {
             &store,
             send("remote", 3, any(Note {}), None),
             &sampled_at(9),
-            &mut (),
         ));
         assert!(
             matches!(handled, Ok(Handled::Applied(_))),
@@ -5675,7 +5650,6 @@ mod router {
             &store,
             send("remote", 3, any(Note {}), None),
             &sampled_at(9),
-            &mut (),
         ));
         assert!(failed.is_err());
         assert_eq!(calls.load(SeqCst), 1, "not retried");
@@ -5701,14 +5675,12 @@ mod router {
             &store,
             send("wallet", 1, any(Open { bonus: 50 }), None),
             &sampled_at(1),
-            &mut (),
         ))
         .unwrap();
         let held = ready(kernel.handle_any(
             &store,
             send("wallet", 2, any(Hold { cents: 5 }), None),
             &sampled_at(2),
-            &mut (),
         ));
         assert!(held.is_err());
         assert_eq!(calls.load(SeqCst), 4, "the first attempt and 3 retries");
@@ -5755,7 +5727,6 @@ mod router {
                 &store,
                 send("remote", 3, any(Note {}), None),
                 &sampled_at(9),
-                &mut (),
             ));
             assert!(failed.is_err(), "{grpc:?}");
             assert_eq!(calls.load(SeqCst), attempts, "{grpc:?}");
@@ -5813,12 +5784,7 @@ mod router {
             let kernel = ::angzarr_embedded::Kernel::new(registry, log)
                 .on_retryable(capped())
                 .wait_with(waits);
-            ready(kernel.handle_any(
-                store,
-                send("meter", n, payload, None),
-                &sampled_at(n),
-                &mut (),
-            ))
+            ready(kernel.handle_any(store, send("meter", n, payload, None), &sampled_at(n)))
         }
 
         /// A handler's retryable bug is retried up to the cap, each wait
@@ -5973,7 +5939,6 @@ mod router {
                     &store,
                     send("wallet", 1, any(Open { bonus: 50 }), None),
                     &sampled_at(1),
-                    &mut (),
                 ))
                 .unwrap();
 
@@ -5981,7 +5946,6 @@ mod router {
                     &store,
                     send("wallet", 2, any(Hold { cents: 5 }), None),
                     &sampled_at(2),
-                    &mut (),
                 ))
                 .err()
                 .expect("the policy's step failed");
@@ -6069,7 +6033,7 @@ mod router {
             expected_sequence: Some(5),
             conflict_resolution: ConflictResolution::Strict as i32,
         });
-        let failed = ready(kernel.handle_any(&store, stale, &sampled_at(9), &mut ()))
+        let failed = ready(kernel.handle_any(&store, stale, &sampled_at(9)))
             .err()
             .expect("ahead");
         assert!(
@@ -6198,14 +6162,10 @@ mod router {
             now: at(9),
             command_id: Uuid::from_bytes([0x79; 16]),
         };
-        let refused = ready(kernel.handle_any(
-            &store,
-            send("remote", 3, any(Note {}), None),
-            &sampled,
-            &mut (),
-        ))
-        .err()
-        .expect("refused");
+        let refused =
+            ready(kernel.handle_any(&store, send("remote", 3, any(Note {}), None), &sampled))
+                .err()
+                .expect("refused");
         let Failure::Rejected(rejected) = &refused else {
             panic!("{grpc:?}, a business rejection: {refused:?}");
         };
@@ -6258,14 +6218,10 @@ mod router {
                 );
             };
 
-            let origin = ready(kernel.handle_any(
-                &store,
-                send("remote", 3, any(Note {}), None),
-                &sampled,
-                &mut (),
-            ))
-            .err()
-            .expect("failed");
+            let origin =
+                ready(kernel.handle_any(&store, send("remote", 3, any(Note {}), None), &sampled))
+                    .err()
+                    .expect("failed");
             assert!(
                 matches!(
                     &origin,
@@ -6314,8 +6270,8 @@ mod router {
 
             let log = MemoryDeadLetters::new();
             let kernel = ::angzarr_embedded::Kernel::new(&registry, &log);
-            let resumed = ready(kernel.resume(&store, &sampled, &mut ()))
-                .expect("{grpc:?}: nothing left owed");
+            let resumed =
+                ready(kernel.resume(&store, &sampled)).expect("{grpc:?}: nothing left owed");
             assert!(
                 resumed.steps().is_empty(),
                 "{grpc:?}: the position moved past the trigger"
@@ -6340,7 +6296,7 @@ mod router {
                 now: at(i64::from(n)),
                 command_id: Uuid::from_bytes([0x70 | n; 16]),
             };
-            ready(kernel.handle::<Wallet, _, _>(&store, book, &sampled, &mut ()))
+            ready(kernel.handle::<Wallet, _>(&store, book, &sampled))
         };
         run(1, send("wallet", 1, any(Open { bonus: 50 }), None)).unwrap();
         let held = run(2, send("wallet", 2, any(Hold { cents: 5 }), None))
@@ -6362,7 +6318,7 @@ mod router {
             command_id: Uuid::from_bytes([0x79; 16]),
         };
         assert!(
-            ready(kernel.resume(&store, &sampled, &mut ())).is_err(),
+            ready(kernel.resume(&store, &sampled)).is_err(),
             "the position stayed, so the step runs again"
         );
         assert_eq!(
@@ -6415,14 +6371,10 @@ mod router {
             );
         };
 
-        let origin = ready(kernel.handle_any(
-            &store,
-            send("remote", 3, any(Note {}), None),
-            &sampled,
-            &mut (),
-        ))
-        .err()
-        .expect("failed");
+        let origin =
+            ready(kernel.handle_any(&store, send("remote", 3, any(Note {}), None), &sampled))
+                .err()
+                .expect("failed");
         assert!(
             matches!(
                 &origin,
@@ -6466,7 +6418,7 @@ mod router {
 
         let log = MemoryDeadLetters::new();
         let kernel = ::angzarr_embedded::Kernel::new(&registry, &log);
-        let resumed = ready(kernel.resume(&store, &sampled, &mut ())).expect("nothing left owed");
+        let resumed = ready(kernel.resume(&store, &sampled)).expect("nothing left owed");
         assert!(
             resumed.steps().is_empty(),
             "the position moved past the trigger"
@@ -6578,14 +6530,10 @@ mod router {
             now: at(9),
             command_id: Uuid::from_bytes([0x79; 16]),
         };
-        let failed = ready(kernel.handle_any(
-            &store,
-            send("picky", 2, any(Note {}), None),
-            &sampled,
-            &mut (),
-        ))
-        .err()
-        .expect("the refusal fact's step fails");
+        let failed =
+            ready(kernel.handle_any(&store, send("picky", 2, any(Note {}), None), &sampled))
+                .err()
+                .expect("the refusal fact's step fails");
         assert_the_fact_step_failed(&failed);
         let lines = log.lines();
         assert_eq!(lines.len(), 1, "{lines:?}");
@@ -6598,7 +6546,7 @@ mod router {
 
         let log = MemoryDeadLetters::new();
         let kernel = ::angzarr_embedded::Kernel::new(&registry, &log);
-        let resumed = ready(kernel.resume(&store, &sampled, &mut ())).expect("nothing left owed");
+        let resumed = ready(kernel.resume(&store, &sampled)).expect("nothing left owed");
         assert!(
             resumed.steps().is_empty(),
             "the position moved past the trigger"
@@ -6657,12 +6605,8 @@ mod router {
             now: at(9),
             command_id: Uuid::from_bytes([0x79; 16]),
         };
-        let failed = ready(kernel.handle_any(
-            &store,
-            send("picky", 2, any(Note {}), None),
-            &sampled,
-            &mut (),
-        ));
+        let failed =
+            ready(kernel.handle_any(&store, send("picky", 2, any(Note {}), None), &sampled));
         assert!(failed.is_err());
         assert_eq!(waits.micros(), [10_000, 30_000, 50_000]);
         let lines = log.lines();
@@ -6679,7 +6623,7 @@ mod router {
                 ..capped()
             },
         );
-        let resumed = ready(kernel.resume(&store, &sampled, &mut ())).expect("nothing left owed");
+        let resumed = ready(kernel.resume(&store, &sampled)).expect("nothing left owed");
         assert!(
             resumed.steps().is_empty(),
             "the position moved past the trigger"
@@ -6699,17 +6643,13 @@ mod router {
             now: at(9),
             command_id: Uuid::from_bytes([0x79; 16]),
         };
-        let failed = ready(kernel.handle_any(
-            &store,
-            send("picky", 2, any(Note {}), None),
-            &sampled,
-            &mut (),
-        ))
-        .err()
-        .expect("the refusal fact's step fails");
+        let failed =
+            ready(kernel.handle_any(&store, send("picky", 2, any(Note {}), None), &sampled))
+                .err()
+                .expect("the refusal fact's step fails");
         assert_the_fact_step_failed(&failed);
         assert_eq!(log.lines().len(), 1, "{:?}", log.lines());
-        let resumed = ready(kernel.resume(&store, &sampled, &mut ()))
+        let resumed = ready(kernel.resume(&store, &sampled))
             .err()
             .expect("the position stayed, so the step runs again");
         assert_the_fact_step_failed(&resumed);
@@ -6936,12 +6876,7 @@ fn handle_async(
     book.cover.as_mut().unwrap().root = Some(root);
     let log = MemoryDeadLetters::new();
     ready(
-        ::angzarr_embedded::Kernel::new(registry, &log).handle::<Wallet, _, _>(
-            store,
-            book,
-            &sampled,
-            &mut (),
-        ),
+        ::angzarr_embedded::Kernel::new(registry, &log).handle::<Wallet, _>(store, book, &sampled),
     )
 }
 
@@ -7013,7 +6948,10 @@ mod projector {
         };
         assert_eq!(failures.len(), 1);
         assert_eq!(failures[0].0, "balances");
-        assert_eq!(failures[0].1.code(), "toy-wallet-not-open");
+        assert_eq!(
+            failures[0].1.code(),
+            "ROUTER_REASON_UNHANDLED_HANDLER_ERROR"
+        );
         assert_eq!(
             committed
                 .iter()
@@ -7110,11 +7048,10 @@ mod projector {
             command_id: Uuid::from_bytes([2; 16]),
         };
         ready(
-            ::angzarr_embedded::Kernel::new(&registry, &log).handle::<Lamp, _, _>(
+            ::angzarr_embedded::Kernel::new(&registry, &log).handle::<Lamp, _>(
                 &store,
                 send("lamp", 2, any(SwitchOn {}), None),
                 &sampled,
-                &mut (),
             ),
         )
         .unwrap();
@@ -7159,18 +7096,12 @@ mod projector {
             command_id: Uuid::from_bytes([n; 16]),
         };
         let kernel = ::angzarr_embedded::Kernel::new(&registry, &log);
-        ready(kernel.handle::<Lamp, _, _>(
-            &store,
-            send("lamp", 2, any(SwitchOn {}), None),
-            &at_(2),
-            &mut (),
-        ))
-        .unwrap();
-        ready(kernel.handle::<Meter, _, _>(
+        ready(kernel.handle::<Lamp, _>(&store, send("lamp", 2, any(SwitchOn {}), None), &at_(2)))
+            .unwrap();
+        ready(kernel.handle::<Meter, _>(
             &store,
             send("meter", 3, any(Calibrate {}), None),
             &at_(3),
-            &mut (),
         ))
         .unwrap();
         assert_eq!(*seen.lock().unwrap(), ["wallet", "lamp"]);

@@ -5,8 +5,8 @@ use crate::toys::prelude::*;
 use crate::v1::event_meta::Causation;
 use crate::v1::{EventMeta, EventPage, Snapshot};
 use crate::{
-    assert_replay_fixtures, check_replay_fixtures, pack, Committed, Failure, KernelError,
-    Malformed, Recovery, ReplayError, ReplayFixture, StepError, StoreError, Stream,
+    assert_replay_fixtures, check_replay_fixtures, pack, Failure, KernelError, Malformed, Recovery,
+    ReplayError, ReplayFixture, StepError, StoreError, Stream,
 };
 use angzarr_diagnostic::Report;
 use angzarr_ports::Cause;
@@ -142,7 +142,7 @@ fn replay_refuses_a_log_that_does_not_hold_together() {
 }
 
 #[test]
-fn a_stream_resumes_from_a_snapshot_and_dispatches_only_after_it() {
+fn a_stream_resumes_from_a_snapshot_and_holds_only_what_follows_it() {
     let registry = registry();
     let full = replay(&log()).unwrap();
     let pages = log();
@@ -163,16 +163,11 @@ fn a_stream_resumes_from_a_snapshot_and_dispatches_only_after_it() {
     assert_eq!(resumed.events().len(), 1);
     assert_eq!(resumed.state(), full.state());
 
-    let mut seen = Vec::new();
-    let mut handler = |c: &Committed<'_, Account>| seen.push((c.sequence(), c.state.cents));
-    resumed.dispatch(2, &registry, &mut [&mut handler]).unwrap();
-    assert_eq!(seen, [(2, 89)], "the snapshot's state, then the event");
+    assert_eq!(resumed.events()[0].sequence(), 2, "the event after it");
     assert_eq!(
-        resumed.dispatch(1, &registry, &mut []),
-        Err(KernelError::BeforeSnapshot {
-            stream: cover("account", 1),
-            first: 2
-        })
+        resumed.state().cents,
+        89,
+        "the snapshot's state, then the event"
     );
 
     // The floor for the next instant is the one given.
@@ -216,18 +211,32 @@ fn a_stream_resumes_from_a_snapshot_and_dispatches_only_after_it() {
     ));
 }
 
+/// A book of a stream's pages (a projector's, or what a chain recorded)
+/// decodes as replay decodes it, each page upcast and checked, folding
+/// nothing; a book of another domain's stream is refused.
 #[test]
-fn dispatch_hands_out_the_state_just_after_each_event_from_a_sequence() {
-    let registry = registry();
-    let stream = replay(&log()).unwrap();
-    let mut seen = Vec::new();
-    for from in [1, 3] {
-        let mut handler = |c: &Committed<'_, Account>| seen.push((c.sequence(), c.state.cents));
-        stream
-            .dispatch(from, &registry, &mut [&mut handler])
-            .unwrap();
-    }
-    assert_eq!(seen, [(1, 100), (2, 89)], "nothing at or past the end");
+fn a_book_decodes_as_its_domains_events() {
+    let registry = registry_with_upcasters();
+    let pages = log();
+    let book = crate::v1::EventBook {
+        cover: Some(cover("account", 1)),
+        pages: pages[1..].to_vec(),
+        ..crate::v1::EventBook::default()
+    };
+    let events = Stream::<Account>::decode_book(&book, &registry).unwrap();
+    let replayed = replay(&pages).unwrap();
+    assert_eq!(events, replayed.events()[1..]);
+    let shelf = crate::v1::EventBook {
+        cover: Some(cover("shelf", 1)),
+        ..book
+    };
+    assert_eq!(
+        Stream::<Account>::decode_book(&shelf, &registry).err(),
+        Some(KernelError::Replay(ReplayError::WrongDomain {
+            found: "shelf".to_string(),
+            expected: "account",
+        }))
+    );
 }
 
 #[test]
@@ -237,15 +246,13 @@ fn a_decision_commits_only_to_the_stream_and_head_it_was_made_against() {
     let mut a = Stream::<Account>::new(root(1), None).unwrap();
     let mut b = Stream::<Account>::new(root(2), None).unwrap();
     let open = |n| command(cover("account", n), AccountCmd::Open.to_any());
-    a.execute(open(1), &registry, &at(1), &log, &mut [])
-        .ready()
-        .unwrap();
+    a.execute(open(1), &registry, &at(1), &log).ready().unwrap();
     assert!(matches!(
-        a.execute(open(2), &registry, &at(2), &log, &mut []).ready(),
+        a.execute(open(2), &registry, &at(2), &log).ready(),
         Err(Failure::Kernel(KernelError::Stale { .. }))
     ));
     assert!(matches!(
-        b.execute(open(1), &registry, &at(2), &log, &mut []).ready(),
+        b.execute(open(1), &registry, &at(2), &log).ready(),
         Err(Failure::Kernel(KernelError::Stale { .. }))
     ));
     assert_eq!(
@@ -253,8 +260,7 @@ fn a_decision_commits_only_to_the_stream_and_head_it_was_made_against() {
             command(cover("ledger", 1), AccountCmd::Open.to_any()),
             &registry,
             &at(2),
-            &log,
-            &mut []
+            &log
         )
         .ready()
         .err(),
@@ -279,12 +285,12 @@ fn a_decision_commits_only_to_the_stream_and_head_it_was_made_against() {
     );
     let deposit = || command(cover("account", 1), AccountCmd::Deposit(4).to_any()).id(9);
     let applied = a
-        .execute(deposit(), &registry, &at(3), &log, &mut [])
+        .execute(deposit(), &registry, &at(3), &log)
         .ready()
         .unwrap();
     assert!(matches!(applied, crate::Executed::Applied(e) if e.len() == 1));
     let duplicate = a
-        .execute(deposit(), &registry, &at(4), &log, &mut [])
+        .execute(deposit(), &registry, &at(4), &log)
         .ready()
         .unwrap();
     assert!(matches!(duplicate, crate::Executed::Duplicate(e)
@@ -786,8 +792,13 @@ fn a_domain_the_registry_lacks_cannot_be_replayed_or_snapshotted() {
         Stream::<Account>::replay(cover("account", 1), &log(), &empty).err(),
         unknown
     );
+    let book = crate::v1::EventBook {
+        cover: Some(cover("account", 1)),
+        pages: log(),
+        ..crate::v1::EventBook::default()
+    };
+    assert_eq!(Stream::<Account>::decode_book(&book, &empty).err(), unknown);
     let stream = replay(&log()).unwrap();
-    assert_eq!(stream.dispatch(0, &empty, &mut []).err(), unknown);
     assert_eq!(stream.snapshot(&empty), None);
     assert_eq!(
         KernelError::UnregisteredDomain {
@@ -868,7 +879,7 @@ fn commutative_cannot_compare_a_window_hidden_in_a_snapshot() {
     };
     assert_eq!(
         stream
-            .execute(behind(11, 1), &registry, &at(9), &log, &mut [])
+            .execute(behind(11, 1), &registry, &at(9), &log)
             .ready()
             .err(),
         Some(Failure::Kernel(KernelError::BeforeSnapshot {
@@ -877,7 +888,7 @@ fn commutative_cannot_compare_a_window_hidden_in_a_snapshot() {
         }))
     );
     let applied = stream
-        .execute(behind(12, 2), &registry, &at(9), &log, &mut [])
+        .execute(behind(12, 2), &registry, &at(9), &log)
         .ready()
         .unwrap();
     assert!(
@@ -912,9 +923,7 @@ fn a_resumed_stream_decides_against_its_snapshot_and_the_events_after_it() {
     )
     .unwrap();
     let withdraw = command(cover("account", 1), AccountCmd::Withdraw(149).to_any()).id(9);
-    let executed = stream
-        .execute(withdraw, &registry, &at(9), &log, &mut [])
-        .ready();
+    let executed = stream.execute(withdraw, &registry, &at(9), &log).ready();
     assert!(executed.is_ok(), "{:?}", executed.err());
     assert_eq!(stream.state().cents, 0, "150, less 149 and the fee");
 }

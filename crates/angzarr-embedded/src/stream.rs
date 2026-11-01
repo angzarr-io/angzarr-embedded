@@ -3,21 +3,15 @@
 
 use angzarr_diagnostic::Report;
 use angzarr_proto::v1::event_meta::Causation;
-use angzarr_proto::v1::{CommandBook, Cover, EventMeta, EventPage, FactOrigin, Snapshot, Uuid};
+use angzarr_proto::v1::{Cover, EventBook, EventMeta, EventPage, FactOrigin, Snapshot, Uuid};
 use prost::{Message, Name};
 use prost_types::Timestamp;
 
-use super::check::{check, Malformed, Sampled};
-use super::coordinator::{
-    admit, dispatch, expect, resolution, unknown_domain, upcast, Admitted, Contextual,
-};
-use super::dead_letter::DeadLetterLog;
+use super::check::Malformed;
 use super::domain::{Domain, State};
-use super::error::{unreadable, Failure, KernelError, PayloadError, ReplayError};
-use super::handler::{Committed, Handler};
+use super::error::{unreadable, KernelError, PayloadError, ReplayError};
 use super::payload::{pack, type_name, Payload};
 use super::registry::Registry;
-use super::route::Rejected;
 use super::upcast::Upcaster;
 
 /// One recorded event, checked and decoded: an [`EventPage`] whose
@@ -177,19 +171,9 @@ impl<E> Envelope<E> {
     }
 }
 
-/// What [`Stream::execute`] did.
-#[derive(Debug, PartialEq)]
-pub enum Executed<'a, E> {
-    /// Business code ran; these are the events it committed (possibly
-    /// none).
-    Applied(&'a [Envelope<E>]),
-    /// The stream already held this command's events: these. Nothing ran.
-    Duplicate(&'a [Envelope<E>]),
-}
-
 /// A domain's event log and the state folded from it, under one cover
-/// whose domain is `D::NAME`. Its state changes only as events are committed
-/// to it ([`Stream::execute`]).
+/// whose domain is `D::NAME`: a stored log replayed ([`Stream::replay`],
+/// [`Stream::resume`]).
 ///
 /// A stream resumed from a snapshot ([`Stream::resume`]) holds only the
 /// events after it: [`Stream::events`] starts at [`Stream::first`], and
@@ -199,7 +183,8 @@ pub struct Stream<D: Domain> {
     /// The sequence of the first held event: 0, or the snapshot's + 1.
     first: u64,
     /// The state before the first held event: the default, or the
-    /// snapshot's.
+    /// snapshot's: what the in-memory fixture's snapshot holds.
+    #[cfg(any(test, feature = "test-support"))]
     base: D::State,
     events: Vec<Envelope<D::Event>>,
     state: D::State,
@@ -236,6 +221,7 @@ impl<D: Domain> Stream<D> {
         Stream {
             cover,
             first: 0,
+            #[cfg(any(test, feature = "test-support"))]
             base: state.clone(),
             events: Vec::new(),
             state,
@@ -296,124 +282,6 @@ impl<D: Domain> Stream<D> {
         self.events.push(envelope);
     }
 
-    /// The whole pipeline on this stream, in memory, with no store: for
-    /// tests and in-memory use ([`Kernel::handle`](super::Kernel::handle)
-    /// is the full loop, with a store and a chain). [`check`](super::check),
-    /// identify, admit it against this stream's own events (deduplication,
-    /// a process manager's start rule), resolve the
-    /// handling, dispatch it through the router (awaited), commit, then
-    /// hand each new event to `handlers`. A book for another stream is
-    /// [`KernelError::WrongDomain`] or [`KernelError::Stale`].
-    pub async fn execute(
-        &mut self,
-        book: CommandBook,
-        registry: &Registry,
-        sampled: &Sampled,
-        dead_letters: &dyn DeadLetterLog,
-        handlers: &mut [&mut dyn Handler<D>],
-    ) -> Result<Executed<'_, D::Event>, Failure<Rejected>> {
-        let kernel = Failure::Kernel;
-        let checked =
-            check(book, registry).map_err(|m| Failure::Kernel(KernelError::Malformed(m)))?;
-        if checked.domain() != D::NAME {
-            return Err(kernel(KernelError::WrongDomain {
-                stream: checked.cover().clone(),
-                expected: D::NAME,
-            }));
-        }
-        let command = checked.identify(sampled);
-        let head = self.len();
-        if command.cover() != &self.cover {
-            return Err(kernel(KernelError::Stale {
-                stream: command.cover().clone(),
-                expected: command.expected_sequence().unwrap_or(head),
-                actual: head,
-            }));
-        }
-        registry
-            .handler(D::NAME)
-            .ok_or_else(|| kernel(unknown_domain(D::NAME)))?;
-        let found = self.command_run(command.command_id());
-        let recorded: Vec<EventPage> = self.events[found.clone()]
-            .iter()
-            .map(Envelope::page)
-            .collect();
-        let current = upcast(registry, &command).await;
-        match admit(registry, &command, &current, recorded, head > 0)? {
-            Admitted::Duplicate(_) => return Ok(Executed::Duplicate(&self.events[found])),
-            Admitted::Skip => return Ok(Executed::Applied(&[])),
-            Admitted::Dispatch => {}
-        }
-        let resolution = resolution(registry, &command, &current).map_err(kernel)?;
-        let mut nonces = head;
-        let (expected, nonce) = expect(&command, resolution, head, &mut nonces).map_err(kernel)?;
-        if nonce.is_some() && expected < self.first {
-            // The window starts inside the snapshot: its events are not held.
-            return Err(kernel(KernelError::BeforeSnapshot {
-                stream: self.cover.clone(),
-                first: self.first,
-            }));
-        }
-        let snapshot = (self.first > 0).then(|| Snapshot {
-            sequence: self.first - 1,
-            state: Some(pack(&self.base.to_snapshot())),
-            rules_version: registry.rules_version(D::NAME).unwrap_or_default(),
-        });
-        let current = current.map_err(|error| {
-            kernel(KernelError::Upcast {
-                stream: command.cover().clone(),
-                error,
-            })
-        })?;
-        let contextual = Contextual {
-            command,
-            current,
-            resolution,
-            expected,
-            snapshot,
-            pages: self.events.iter().map(Envelope::page).collect(),
-            head,
-            last_recorded_at: self.last_recorded_at,
-            nonce,
-        };
-        let pages = dispatch(&contextual, sampled, registry, dead_letters).await?;
-        let from = self.events.len();
-        self.commit(&pages, registry, handlers).map_err(kernel)?;
-        Ok(Executed::Applied(&self.events[from..]))
-    }
-
-    /// Fold `pages`, stamped events continuing the stream, into it, then
-    /// hand each to every handler in order, with the state just after it.
-    /// Returns the new length.
-    pub(crate) fn commit(
-        &mut self,
-        pages: &[EventPage],
-        registry: &Registry,
-        handlers: &mut [&mut dyn Handler<D>],
-    ) -> Result<u64, KernelError> {
-        for page in pages {
-            self.fold(std::slice::from_ref(page), registry)?;
-            let committed = Committed {
-                cover: &self.cover,
-                envelope: &self.events[self.events.len() - 1],
-                state: &self.state,
-            };
-            for handler in handlers.iter_mut() {
-                handler.handle(&committed);
-            }
-        }
-        Ok(self.len())
-    }
-
-    /// Fold `pages` onto the end of the stream: a chain's step.
-    pub(crate) fn extend(
-        &mut self,
-        pages: &[EventPage],
-        registry: &Registry,
-    ) -> Result<(), KernelError> {
-        self.fold(pages, registry)
-    }
-
     /// Rebuild a stream from its whole stored log, from a fresh state (the
     /// registry's factory for `D`, if it holds one, else the default), each
     /// page decoded
@@ -430,6 +298,23 @@ impl<D: Domain> Stream<D> {
         let mut stream = Stream::from_state(cover, registry.fresh::<D>());
         stream.fold(pages, registry)?;
         Ok(stream)
+    }
+
+    /// The events of `book`, a `D` stream's (a projector's, or what a chain
+    /// recorded), each decoded as replay decodes it ([`Envelope::decode`],
+    /// upcast), in order. Nothing is folded. Refuses a book of another
+    /// domain.
+    pub fn decode_book(
+        book: &EventBook,
+        registry: &Registry,
+    ) -> Result<Vec<Envelope<D::Event>>, KernelError> {
+        let cover = book.cover.clone().unwrap_or_default();
+        Self::check_domain(&cover)?;
+        let upcaster = Self::typed(registry)?;
+        book.pages
+            .iter()
+            .map(|page| Envelope::decode(&cover, page, upcaster))
+            .collect()
     }
 
     /// Rebuild a stream from a snapshot and the pages after it, checked as
@@ -472,6 +357,7 @@ impl<D: Domain> Stream<D> {
         let mut stream = Stream {
             cover,
             first: snapshot.sequence + 1,
+            #[cfg(any(test, feature = "test-support"))]
             base: state.clone(),
             events: Vec::new(),
             state,
@@ -495,44 +381,6 @@ impl<D: Domain> Stream<D> {
             state: Some(pack(&self.state.to_snapshot())),
             rules_version: registry.rules_version(D::NAME)?,
         })
-    }
-
-    /// Hand every held event from sequence `from` on to the handlers, with
-    /// the state just after it: rebuilding a projection (read models are
-    /// replayed on read), or a reaction's catch-up. One pass, however many
-    /// handlers. A stream resumed from a snapshot cannot hand out events
-    /// before [`Stream::first`] ([`KernelError::BeforeSnapshot`]).
-    pub fn dispatch(
-        &self,
-        from: u64,
-        registry: &Registry,
-        handlers: &mut [&mut dyn Handler<D>],
-    ) -> Result<(), KernelError> {
-        if from < self.first {
-            return Err(KernelError::BeforeSnapshot {
-                stream: self.cover.clone(),
-                first: self.first,
-            });
-        }
-        if from >= self.len() {
-            return Ok(());
-        }
-        Self::typed(registry)?;
-        let mut state = self.base.clone();
-        for envelope in &self.events {
-            D::apply(&mut state, &envelope.event);
-            if envelope.sequence >= from {
-                let committed = Committed {
-                    cover: &self.cover,
-                    envelope,
-                    state: &state,
-                };
-                for handler in handlers.iter_mut() {
-                    handler.handle(&committed);
-                }
-            }
-        }
-        Ok(())
     }
 
     /// The held events command `command_id` produced: what deduplication
@@ -598,3 +446,9 @@ impl<D: Domain> Stream<D> {
 #[cfg(test)]
 #[path = "stream.test.rs"]
 mod tests;
+
+// The whole pipeline on one stream in memory, with no store: the kernel's
+// tests' fixture (feature `test-support`).
+#[cfg(any(test, feature = "test-support"))]
+#[path = "execute.test.rs"]
+pub(crate) mod execute;

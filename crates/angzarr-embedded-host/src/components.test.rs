@@ -288,7 +288,6 @@ fn a_remote_process_managers_non_starting_command_with_no_instance_is_refused() 
         &store,
         send("audit", 1, any("/test.pm.v1.Close")),
         &sampled(1),
-        &mut (),
     ));
 
     let written = payloads(&store, &cover("audit"));
@@ -322,7 +321,6 @@ fn a_remote_process_managers_non_starting_fact_with_no_instance_is_skipped() {
         &store,
         tell("audit", 1, any("/test.pm.v1.Closed")),
         &sampled(1),
-        &mut (),
     ))
     .map_err(|e| format!("{e:?}"))
     .expect("a skipped fact is applied");
@@ -352,14 +350,12 @@ fn a_remote_process_managers_starting_command_starts_an_instance_that_then_takes
         &store,
         send("audit", 1, any("/test.pm.v1.Open")),
         &sampled(1),
-        &mut (),
     ))
     .expect("a starting command is delivered");
     block_on(kernel.handle_any(
         &store,
         send("audit", 2, any("/test.pm.v1.Close")),
         &sampled(2),
-        &mut (),
     ))
     .expect("the instance exists: any command is delivered");
 
@@ -388,7 +384,6 @@ fn a_remote_process_managers_start_rule_matches_by_type_name_whatever_the_prefix
         &closed,
         send("audit", 1, any("/test.pm.v1.Close")),
         &sampled(1),
-        &mut (),
     ));
     assert!(
         matches!(&refused, Err(Failure::Rejected(r)) if r.code() == PM_NO_INSTANCE),
@@ -398,13 +393,8 @@ fn a_remote_process_managers_start_rule_matches_by_type_name_whatever_the_prefix
 
     for (n, starting) in [(2, "/test.pm.v1.Open"), (3, "/test.pm.v1.Reopen")] {
         let store = MemoryStore::new();
-        block_on(kernel.handle_any(
-            &store,
-            send("audit", n, any(starting)),
-            &sampled(n),
-            &mut (),
-        ))
-        .unwrap_or_else(|e| panic!("{starting} starts an instance: {e:?}"));
+        block_on(kernel.handle_any(&store, send("audit", n, any(starting)), &sampled(n)))
+            .unwrap_or_else(|e| panic!("{starting} starts an instance: {e:?}"));
         assert_eq!(payloads(&store, &cover("audit")), [Some(noted(0))]);
     }
     host.shutdown();
@@ -480,7 +470,6 @@ fn a_remote_policy_turns_its_sources_events_into_commands_through_the_kernel() {
         &store,
         send("table", 1, any("/test.table.v1.Seat")),
         &sampled(1),
-        &mut (),
     ))
     .expect("handled");
 
@@ -523,7 +512,6 @@ fn a_refusal_of_a_remote_policys_command_is_answered_by_its_on_refused() {
         &store,
         send("table", 1, any("/test.table.v1.SeatBig")),
         &sampled(1),
-        &mut (),
     ));
 
     assert!(
@@ -629,7 +617,6 @@ fn a_remote_projector_receives_its_sources_committed_events() {
         &store,
         send("table", 1, any("/test.table.v1.Seat")),
         &sampled(1),
-        &mut (),
     ))
     .expect("handled");
 
@@ -652,7 +639,6 @@ fn a_remote_projectors_bug_is_fatal_not_retried_and_dead_lettered() {
         &store,
         send("table", 1, any("/test.table.v1.SeatBreak")),
         &sampled(1),
-        &mut (),
     ));
 
     assert_eq!(
@@ -698,7 +684,6 @@ fn a_remote_projectors_business_status_is_its_bug() {
         &store,
         send("table", 1, any("/test.table.v1.SeatRefuse")),
         &sampled(1),
-        &mut (),
     ));
 
     assert_eq!(
@@ -735,7 +720,6 @@ fn a_remote_projectors_retryable_failure_is_dead_lettered_at_the_cap() {
         &store,
         send("table", 1, any("/test.table.v1.SeatDown")),
         &sampled(1),
-        &mut (),
     ));
 
     assert_eq!(
@@ -801,7 +785,6 @@ fn a_remote_projectors_retryable_failure_with_retrying_off_is_returned() {
         &store,
         send("table", 1, any("/test.table.v1.SeatFlaky")),
         &sampled(1),
-        &mut (),
     ));
 
     assert_eq!(log_lines(&log_path).len(), 1, "called once");
@@ -890,7 +873,6 @@ fn a_remote_projectors_retryable_and_aborted_statuses_are_retried() {
             &store,
             send("table", n, any(&format!("/test.table.v1.Seat{event}"))),
             &sampled(n),
-            &mut (),
         ));
 
         let line = format!("handle /test.table.v1.Seated{event}");
@@ -983,7 +965,6 @@ fn a_remote_upcaster_upcasts_its_domains_inputs_before_dispatch() {
         &store,
         send("table", 1, any("/test.table.v0.Sit")),
         &sampled(1),
-        &mut (),
     ))
     .expect("handled");
     assert_eq!(
@@ -1007,7 +988,6 @@ fn a_remote_upcaster_that_is_down_is_retryable() {
         &store,
         send("table", 1, any("/test.table.v0.Die")),
         &sampled(1),
-        &mut (),
     ))
     .err()
     .expect("not delivered");
@@ -1050,7 +1030,6 @@ fn a_remote_upcasters_failing_rule_is_a_bug() {
         &store,
         send("table", 1, any("/test.table.v0.Bad")),
         &sampled(1),
-        &mut (),
     ))
     .err()
     .expect("not delivered");
@@ -1140,7 +1119,6 @@ fn a_sidecar_is_up_only_while_its_health_reports_serving() {
             &store,
             send("table", n, any("/test.table.v0.Sit")),
             &sampled(n),
-            &mut (),
         ))
         .err()
     };
@@ -1208,7 +1186,6 @@ fn a_sidecar_whose_health_is_unknown_is_not_up() {
             &store,
             send("table", 1, any("/test.table.v0.Sit")),
             &sampled(1),
-            &mut (),
         ))
         .err()
         .expect("not delivered");

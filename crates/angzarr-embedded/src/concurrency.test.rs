@@ -192,7 +192,7 @@ fn race(
                     tokio::runtime::Builder::new_current_thread()
                         .build()
                         .unwrap()
-                        .block_on(kernel.handle_any(store, book, &at(k as i64 + 1), &mut ()))
+                        .block_on(kernel.handle_any(store, book, &at(k as i64 + 1)))
                 })
             })
             .collect();
@@ -292,7 +292,7 @@ fn an_expected_sequence_already_passed_is_a_stale_expected_sequence() {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();
-    let first = runtime.block_on(kernel.handle_any(&store, ring(1, None), &at(1), &mut ()));
+    let first = runtime.block_on(kernel.handle_any(&store, ring(1, None), &at(1)));
     assert!(
         matches!(first, Ok(Handled::Applied(_))),
         "{:?}",
@@ -300,7 +300,7 @@ fn an_expected_sequence_already_passed_is_a_stale_expected_sequence() {
     );
 
     let late = runtime
-        .block_on(kernel.handle_any(&store, ring(2, Some(0)), &at(2), &mut ()))
+        .block_on(kernel.handle_any(&store, ring(2, Some(0)), &at(2)))
         .err()
         .expect("stale");
     assert_stale(&late, 0, 1);

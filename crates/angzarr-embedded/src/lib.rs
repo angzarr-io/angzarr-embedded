@@ -70,7 +70,9 @@
 //! depth first, with the policy's position written with it; a step that
 //! fails keeps every write before it ([`Failure`], with the path to the
 //! failing [`Step`]), and what is owed is resumed by position
-//! ([`Kernel::resume`]). [`Projection`]s run on written events only. A policy command's trigger edge, which no event records, is the
+//! ([`Kernel::resume`]). Projectors run on written events only, inline
+//! ([`Registry::projector_handler`]) or caught up from the store
+//! ([`CatchUp`]). A policy command's trigger edge, which no event records, is the
 //! command's own causation, for tracing.
 
 // A failure names the path to the step that failed and carries reports, so
@@ -86,7 +88,6 @@ mod domain;
 mod error;
 mod fixture;
 mod handle;
-mod handler;
 pub mod markup;
 mod payload;
 mod policy;
@@ -147,6 +148,9 @@ pub use angzarr_ports;
 pub use angzarr_proto;
 /// angzarr's shared client router, which the kernel dispatches through.
 pub use angzarr_router;
+/// The projector port, angzarr-router's: what [`Registry::projector_handler`]
+/// registers and a [`CatchUp`] catches up.
+pub use angzarr_router::router::ProjectorHandler;
 /// angzarr-store-sqlite, the shared SQLite store, re-exported so an
 /// application pins it through angzarr-embedded. Behind the `sqlite`
 /// feature, off by default: it brings sqlx and SQLite.
@@ -162,15 +166,11 @@ pub use error::{
 };
 pub use fixture::{assert_replay_fixtures, check_replay_fixtures, ReplayFixture};
 pub use handle::{
-    Handled, Kernel, OnPolicyBug, OnRetryable, Project, ProjectionRoute, ProjectorFailure,
-    Recorded, Wait, DEFAULT_DEPTH_LIMIT, DEFAULT_RACE_RUNS,
+    Handled, Kernel, OnPolicyBug, OnRetryable, Recorded, Wait, DEFAULT_DEPTH_LIMIT,
+    DEFAULT_RACE_RUNS,
 };
-pub use handler::{Committed, Handler};
 pub use payload::{decode_as, pack, type_name, Decoder, Payload};
-pub use policy::{
-    policy, projection, target_cover, translated, CommandTarget, EventSource, Order, Policy,
-    PolicyHandler, Projection, Projector,
-};
+pub use policy::{target_cover, translated, CommandTarget, EventSource, Order, Policy};
 pub use projector::{CatchUp, Caught};
 pub use registry::{Aggregate, Description, Misconfigured, Registry};
 pub use route::{rejection, Rejected};
@@ -180,7 +180,9 @@ pub use store::{
     ReadStore, ReadUnit, ReadUntilTime, Slice, SnapshotStore, Store, StoreError, StreamRef, Watch,
     Write, Written,
 };
-pub use stream::{Envelope, Executed, Stream};
+#[cfg(any(test, feature = "test-support"))]
+pub use stream::execute::Executed;
+pub use stream::{Envelope, Stream};
 pub use target::{Coordinated, CoordinatorPort, Target};
 pub use upcast::{UpcastFn, UpcastPort, Upcaster};
 pub use wire::WireError;

@@ -643,7 +643,7 @@ mod judged {
         let log = crate::MemoryDeadLetters::new();
         crate::Kernel::new(registry, &log)
             .on_retryable(crate::toys::no_retries())
-            .handle_any(store, book, &at(3), &mut ())
+            .handle_any(store, book, &at(3))
             .ready()
     }
 

@@ -42,7 +42,7 @@ places:
 | A5 | `Header.schema` is unused; there is no upcasting. | A payload's type URL is its version. Old types are upcast by type URL, strictly, events at read and (discouraged) commands before decode. [Dispatch](#step-5-dispatch-through-angzarr-router) |
 | A6 | Events emitted before a rejection stay in the `Stream`. | Decide is pure and stages its events; a rejection leaves nothing. |
 | B1 | The old kernel's policy was a stateless saga with an undocumented target-contiguity invariant, its backlog replaying the source once per target. | One `Policy` trait and one registration list; every step committed on its own, with the policy's position on its source, and resumed by position. [Policies](#policies-and-the-chain) |
-| B2 | `Projection::on` gets no stream identity or position. | Every handler gets a `Committed`: the cover, the sequence, the metadata, the event, the state just after. |
+| B2 | `Projection::on` gets no stream identity or position. | A projector is handed one stream's book at a time: the cover, each page with its sequence and metadata, the stream's length. [Projectors](#projectors) |
 | B6 | The store port is synchronous, whole-stream, `u64`-keyed; `read -> Option` hides I/O failure. | angzarr-ports' async ports over opaque pages keyed by stream, one atomic `write` per step with its positions, `read`, `find_command`, continuity checks; `StoreError` separates conflict, caller bug, unreadable and unavailable. [The store port](#the-store-port) |
 | B8 | Kernel faults are folded into business rejections. | `Failure` keeps the rejection apart from malformed input, kernel faults and failures down the chain, each classified for recovery. [Errors](#errors-and-recovery) |
 
@@ -732,12 +732,10 @@ pub trait Policy: Send + Sync + 'static {
     fn on_refused(&self, refusal: &Refusal, ctx: &CommandContext)    // the refused command's, whole
         -> Result<Any, Report> { /* CommandRefused, passed through */ }
 }
-pub trait Projection<D: Domain> { fn project(&mut self, c: &Committed<'_, D>); }
-
 registry.policy(ListToDrawSystems);                          // ONE list, in registration order
 let kernel = Kernel::new(&registry, &dead_letters);          // .limit(n), default 8
-kernel.handle::<List, _, _>(&store, book, &sampled, &mut projections).await?;   // -> Handled
-kernel.resume(&store, &sampled, &mut projections).await?;                       // -> Recorded
+kernel.handle::<List, _>(&store, book, &sampled).await?;     // -> Handled
+kernel.resume(&store, &sampled).await?;                      // -> Recorded
 ```
 
 - **One policy trait, one list.** A hand-written policy implements
@@ -823,10 +821,45 @@ kernel.resume(&store, &sampled, &mut projections).await?;                       
   systems) is a policy whose target records the change in its own events.
   A command to a retired or never-created target is a policy bug: decide
   refuses it, and the step fails loudly.
-- **Projections** run on each step's events once written: a `Project`ion
-  route's failure is reported (`Recorded::projector_failures`); a
-  marked-up projector's is the caller's `Failure::Projection`. Read models
-  are replayed on read (`Stream::dispatch` from 0); none is persisted.
+- **Projectors** run on each step's events once written, or catch up
+  from the store (see [Projectors](#projectors)).
+
+### Projectors
+
+A projector is ONE port, angzarr-router's `ProjectorHandler`: handed a
+book of one stream's events, it answers a `Projection`. A hand-written
+one, a marked-up one (`#[projector]`, through `markup::Projected`, its one
+instance handed each page it marks) and a remote one (a child's
+`ProjectorService`) are the same port, with one rule for failures
+(decision 14.41: a bug dead-lettered at once; a retryable failure or an
+ABORTED retried under `OnRetryable`, then dead-lettered). It runs two
+ways:
+
+- **Inline**, registered (`Registry::projector_handler`, or
+  `Registry::projector` for a marked-up one): after each step, it is handed
+  the step's committed book of each of its sources, and awaited before the
+  call returns; a failure is the caller's `Failure::Projection`, and the
+  commit stands.
+- **Caught up**, a `CatchUp` the application runs, a step at a time
+  (`step`, `step_if_changed`, which reads nothing while the store's
+  change token is unchanged) or as a loop (`follow`, on the caller's
+  timer), on the caller's runtime and no thread of its own. Each step
+  reads one moment of the store (a read unit) and hands every
+  main-timeline stream of the sources what it is owed, from where the
+  projector is on that stream. Where it is is kept per stream, never
+  across streams: **held** in memory (`CatchUp::new`, for a read model
+  held in memory, rebuilt by its first step), or **stored** in the
+  store's positions under the projector's name (`CatchUp::stored`, so a
+  durable read model resumes, as a policy does). A book the projector
+  fails keeps its stream where it was, for the next step; the other
+  streams go on.
+
+What a projector is handed, either way: a stream's events after the last
+it was handed of it; a book from sequence 0 starts the stream afresh (one
+purged and written again; held positions tell it by its first event's
+cause and instant, since each stream starts at 0, and a purge removes the
+stored ones); and, caught up, a book with no page at 0 says the stream is
+gone.
 
 ### Re-runs
 
@@ -1125,7 +1158,7 @@ type itself:
 | every id | `v1::Uuid` (16 bytes); text through `ids` at the boundary |
 | derived ids | `ids::{compute_root, policy_command_id, fact_command_id, fact_correlation}` |
 | a snapshot | `v1::Snapshot { sequence, state: Any, rules_version }` |
-| the answer | `Handled::outcome() -> v1::Outcome { delivery: APPLIED \| DUPLICATE, projector_failures }`; `Handled::books() -> Vec<EventBook>` |
+| the answer | `Handled::outcome() -> v1::Outcome { delivery: APPLIED \| DUPLICATE \| PARKED }`; `Handled::books() -> Vec<EventBook>` |
 | a dead letter | `v1::AngzarrDeadLetter`, as a log line |
 | a payload's version | its type URL (`pkg.v1.Foo` then `pkg.v2.Foo`) |
 
@@ -1143,22 +1176,37 @@ impl Checked { pub fn identify(self, sampled: &Sampled) -> Identified; }
 // step 3-5: the chain's own, pub(crate)
 async fn deduplicate<P: Port>(port: &mut P, registry, command: Identified) -> Result<Deduplicated, Failure<Rejected>>;
 fn load(novel: Novel, nonces: &mut u64) -> Result<Contextual, KernelError>;
-fn dispatch(command: &Contextual, sampled, registry, dead_letters) -> Result<Vec<EventPage>, Failure<Rejected>>;
+async fn decide(command: &Contextual, sampled, registry, dead_letters) -> Result<Decided, Failure<Rejected>>;
 // the whole loop: one write per step, the chain settled before it returns
 impl Kernel<'_> {
-    pub async fn handle<D: Domain, S: Store, Ps: Project>(&self, store: &S, book: CommandBook,
-        sampled: &Sampled, projections: &mut Ps) -> Result<Handled, Failure<Rejected>>;
-    pub async fn handle_any<S: Store, Ps: Project>(&self, store: &S, book: CommandBook,
-        sampled: &Sampled, projections: &mut Ps) -> Result<Handled, Failure<Rejected>>;
-    pub async fn resume<S: Store, Ps: Project>(&self, store: &S, sampled: &Sampled,
-        projections: &mut Ps) -> Result<Recorded, Failure<Infallible>>;
+    pub async fn handle<D: Domain, S: Store>(&self, store: &S, book: CommandBook,
+        sampled: &Sampled) -> Result<Handled, Failure<Rejected>>;
+    pub async fn handle_any<S: Store>(&self, store: &S, book: CommandBook,
+        sampled: &Sampled) -> Result<Handled, Failure<Rejected>>;
+    pub async fn resume<S: Store>(&self, store: &S, sampled: &Sampled)
+        -> Result<Recorded, Failure<Infallible>>;
 }
-// in memory, no store
+// what a chain recorded, typed only when asked
+impl Recorded {
+    pub fn events<D: Domain>(&self, stream: &Cover, registry: &Registry)
+        -> Result<Vec<Envelope<D::Event>>, KernelError>;
+}
+// a stored log, replayed or decoded
 impl<D: Domain> Stream<D> {
-    pub fn execute(&mut self, book: CommandBook, registry: &Registry, sampled: &Sampled,
-        dead_letters: &dyn DeadLetterLog, handlers: &mut [&mut dyn Handler<D>])
-        -> Result<Executed<'_, D::Event>, Failure<Rejected>>;
     pub fn replay(cover: Cover, pages: &[EventPage], registry: &Registry) -> Result<Stream<D>, KernelError>;
+    pub fn decode_book(book: &EventBook, registry: &Registry) -> Result<Vec<Envelope<D::Event>>, KernelError>;
+}
+// a projector caught up from the store
+impl<P: ProjectorHandler> CatchUp<P> {
+    pub fn new(sources: &[&str], projector: P) -> CatchUp<P>;      // positions held in memory
+    pub fn stored(sources: &[&str], projector: P) -> CatchUp<P>;   // positions in the store
+    pub async fn step<S: ReadStore + Store>(&mut self, store: &S, registry: &Registry)
+        -> Result<Caught, KernelError>;
+    pub async fn step_if_changed<S: ReadStore + Store + Watch>(&mut self, store: &S,
+        registry: &Registry) -> Result<Option<Caught>, KernelError>;
+    pub async fn follow<S: ReadStore + Store + Watch>(&mut self, store: &S, registry: &Registry,
+        wait: &dyn Wait, every: Duration, more: impl FnMut(Option<&Caught>) -> bool)
+        -> Result<(), KernelError>;
 }
 // registration
 impl Registry {
@@ -1305,8 +1353,9 @@ no actor), and reactor re-runs deduplicate in both, with no switch.
 7. **`Recovery::Invalid`** is new: a malformed book or an unknown command
    type is the caller's to fix, not a bug. I recommend keeping it distinct
    from `Bug` so the server can answer 400 without alerting.
-8. **`Stream::execute`** runs the whole pipeline in memory with no store.
-   I recommend keeping it, for tests and in-browser use.
+8. **`Stream::execute`** runs the whole pipeline in memory with no store:
+   a test fixture, behind the `test-support` feature. An application runs
+   `Kernel::handle`, so the pipeline is assembled once.
 9. **The upcaster is the kernel's.** The router has none (decision
     14.39); the kernel's `Upcaster` is the in-process `UpcastPort`.
 10. **Old `annals.log.v1` logs.** I recommend leaving them: hatpick stores

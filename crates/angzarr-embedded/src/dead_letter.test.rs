@@ -122,7 +122,7 @@ fn a_panicking_ingest_aborts_the_chain_and_is_logged() {
         "pi_bad",
     );
     let failure = kernel
-        .handle::<Account, _, _>(&store, bad, &at(30), &mut ())
+        .handle::<Account, _>(&store, bad, &at(30))
         .ready()
         .err()
         .expect("a bug, never a business rejection");
@@ -157,9 +157,7 @@ fn a_panicking_ingests_dead_letter_carries_its_code_not_english() {
         pack(&account::fact::PaymentReceived { cents: -1 }),
         "pi_bad",
     );
-    let _ = kernel
-        .handle::<Account, _, _>(&store, bad, &at(30), &mut ())
-        .ready();
+    let _ = kernel.handle::<Account, _>(&store, bad, &at(30)).ready();
     let lines = log.lines();
     assert_eq!(lines.len(), 1);
     assert!(

@@ -39,13 +39,13 @@
 //!   stream of the triggering event as a step of its own, with the refused
 //!   command's id; a refusal its source has no handler for is
 //!   dead-lettered.
-//! - **Projections run** on what each step wrote: a [`Project`]ion route's
-//!   failure is reported in [`Recorded::projector_failures`]; a marked-up
-//!   projector's ([`Registry::projector`]) and a `ProjectorHandler`'s
-//!   ([`Registry::projector_handler`], a projector in another process,
-//!   its failures by their class: retried, then dead-lettered, or
-//!   dead-lettered at once) are the caller's [`Failure::Projection`]. A
-//!   failing projection never undoes a write.
+//! - **Projectors run inline** on what each step wrote, each the
+//!   projector port ([`Registry::projector_handler`]; a marked-up one,
+//!   [`Registry::projector`]; one in another process): its failures, by
+//!   their class (retried, then dead-lettered, or dead-lettered at once),
+//!   are the caller's [`Failure::Projection`]. A failing projection never
+//!   undoes a write. A projector caught up from the store instead is a
+//!   [`CatchUp`](super::CatchUp)'s.
 //!
 //! Which policies run is the registry's one list
 //! ([`Registry::policy`]), in registration order, so a chain can come back
@@ -53,14 +53,12 @@
 //! chain's limit is a [`KernelError::ChainTooDeep`], which is how a cycle
 //! that never settles ends.
 
-use std::any::Any as AnyType;
 use std::collections::VecDeque;
 use std::convert::Infallible;
 
 use angzarr_proto::v1::{
-    self as v1, command_page, refusal_response, CommandBook, CommandPage, CommandRefused,
-    ConflictResolution, Cover, DeliveryOutcome, EventBook, EventPage, EventRef, Fact, FactOrigin,
-    Outcome,
+    command_page, refusal_response, CommandBook, CommandPage, CommandRefused, ConflictResolution,
+    Cover, DeliveryOutcome, EventBook, EventPage, EventRef, Fact, FactOrigin, Outcome,
 };
 use prost_types::Any;
 
@@ -75,11 +73,10 @@ use super::dead_letter::{self, write_at_cap, CallLetters, Cause, Component, Dead
 use super::domain::Domain;
 use super::error::{class, Class};
 use super::error::{Failure, KernelError, Step, StepError};
-use super::handler::Handler;
-use super::markup::{self, ProjectionContext};
+use super::markup;
 use super::payload::type_name;
-use super::policy::{answered, check_reactions, projection, Projection};
-use super::registry::{PolicyEntry, ProjectorInstance, Registry};
+use super::policy::{answered, check_reactions};
+use super::registry::{PolicyEntry, Registry};
 use super::route::Rejected;
 use super::store::{DeadLetter, Port, Store, StoreError, StorePort};
 use super::stream::{Envelope, Stream};
@@ -346,9 +343,6 @@ pub enum OnPolicyBug {
     Stay,
 }
 
-/// angzarr's code for a projector failure: google.rpc.Code INTERNAL.
-const INTERNAL: i32 = 13;
-
 /// What a handled command came to (angzarr's `Outcome.delivery`).
 pub enum Handled {
     /// Business code ran, and the chain committed: everything it recorded
@@ -367,24 +361,15 @@ pub enum Handled {
 }
 
 impl Handled {
-    /// As angzarr's `Outcome`: APPLIED, with each projector failure as a
-    /// `ProjectorFailure` (code INTERNAL), DUPLICATE, or PARKED for a fact
-    /// given up at the race re-run cap. In process, a panicking ingest
-    /// fails the call: it is never parked.
+    /// As angzarr's `Outcome`: APPLIED, DUPLICATE, or PARKED for a fact
+    /// given up at the race re-run cap. A projector's failure is the call's
+    /// [`Failure::Projection`], never an applied outcome's. In process, a
+    /// panicking ingest fails the call: it is never parked.
     pub fn outcome(&self) -> Outcome {
         match self {
-            Handled::Applied(recorded) => Outcome {
+            Handled::Applied(_) => Outcome {
                 delivery: DeliveryOutcome::Applied as i32,
-                projections: Vec::new(),
-                projector_failures: recorded
-                    .projector_failures
-                    .iter()
-                    .map(|f| v1::ProjectorFailure {
-                        projector: f.projector.to_string(),
-                        code: INTERNAL,
-                        diagnostic: None,
-                    })
-                    .collect(),
+                ..Outcome::default()
             },
             Handled::Duplicate(..) => Outcome {
                 delivery: DeliveryOutcome::Duplicate as i32,
@@ -489,78 +474,57 @@ impl<'k> Kernel<'k> {
     /// command goes to its coordinator ([`Registry::remote`]). Business
     /// code stays synchronous and pure, each dispatch awaited; the future
     /// is `Send` whenever the store's are.
-    pub async fn handle<D, S, Ps>(
+    pub async fn handle<D, S>(
         &self,
         store: &S,
         book: CommandBook,
         sampled: &Sampled,
-        projections: &mut Ps,
     ) -> Result<Handled, Failure<Rejected>>
     where
         D: Domain,
         S: Store,
-        Ps: Project,
     {
         let checked = self.check::<D>(book)?;
-        self.handle_checked(store, checked, sampled, projections)
-            .await
+        self.handle_checked(store, checked, sampled).await
     }
 
     /// Handle one book for whatever registered domain's stream it names, as
     /// [`Kernel::handle`] does: for a domain registered as a bare
     /// `CommandHandler` ([`Registry::command_handler`]), which has no
     /// typed [`Domain`].
-    pub async fn handle_any<S, Ps>(
+    pub async fn handle_any<S: Store>(
         &self,
         store: &S,
         book: CommandBook,
         sampled: &Sampled,
-        projections: &mut Ps,
-    ) -> Result<Handled, Failure<Rejected>>
-    where
-        S: Store,
-        Ps: Project,
-    {
+    ) -> Result<Handled, Failure<Rejected>> {
         let checked =
             check(book, self.registry).map_err(|m| Failure::Kernel(KernelError::Malformed(m)))?;
-        self.handle_checked(store, checked, sampled, projections)
-            .await
+        self.handle_checked(store, checked, sampled).await
     }
 
     /// [`Kernel::handle`] from step 2 on, answering the dead letters the
     /// call wrote ([`lettered`]).
-    async fn handle_checked<S, Ps>(
+    async fn handle_checked<S: Store>(
         &self,
         store: &S,
         checked: Checked,
         sampled: &Sampled,
-        projections: &mut Ps,
-    ) -> Result<Handled, Failure<Rejected>>
-    where
-        S: Store,
-        Ps: Project,
-    {
+    ) -> Result<Handled, Failure<Rejected>> {
         let letters = CallLetters::new(self.dead_letters);
         let mut port = StorePort::new(store, &letters);
-        let handled = self
-            .chain(&mut port, &letters, checked, sampled, projections)
-            .await;
+        let handled = self.chain(&mut port, &letters, checked, sampled).await;
         lettered(handled, letters.take())
     }
 
-    /// The command's step, then the chain it sets off and the projections.
-    async fn chain<P, Ps>(
+    /// The command's step, then the chain it sets off and the projectors.
+    async fn chain<P: Port>(
         &self,
         port: &mut P,
         letters: &CallLetters<'_>,
         checked: Checked,
         sampled: &Sampled,
-        projections: &mut Ps,
-    ) -> Result<Handled, Failure<Rejected>>
-    where
-        P: Port,
-        Ps: Project,
-    {
+    ) -> Result<Handled, Failure<Rejected>> {
         let mut run = Run::new(self, sampled, letters);
         let identified = checked.identify(sampled);
         let cover = identified.cover().clone();
@@ -610,20 +574,15 @@ impl<'k> Kernel<'k> {
                 Ok(Handled::Duplicate(events, Vec::new()))
             }
             Origin::Skipped => {
-                self.finish(
-                    Handled::Applied(Recorded::default()),
-                    projections,
-                    port,
-                    letters,
-                )
-                .await
+                self.finish(Handled::Applied(Recorded::default()), port, letters)
+                    .await
             }
             Origin::Forwarded(Forwarded::Duplicate(events)) => {
                 Ok(Handled::Duplicate(events, Vec::new()))
             }
             Origin::Forwarded(Forwarded::Applied(events)) => {
                 run.answered(events);
-                self.finish(Handled::Applied(run.recorded), projections, port, letters)
+                self.finish(Handled::Applied(run.recorded), port, letters)
                     .await
             }
             Origin::Wrote(head) => {
@@ -631,8 +590,7 @@ impl<'k> Kernel<'k> {
                 let settled = run.settle(port).await.map_err(downstream);
                 let recorded = run.recorded;
                 settled?;
-                self.finish(Handled::Applied(recorded), projections, port, letters)
-                    .await
+                self.finish(Handled::Applied(recorded), port, letters).await
             }
         }
     }
@@ -645,21 +603,14 @@ impl<'k> Kernel<'k> {
     /// its position written with it). What an application runs at start,
     /// after a crash, or after adding a policy to a domain with history.
     /// Returns what the steps recorded, and the dead letters they wrote.
-    pub async fn resume<S, Ps>(
+    pub async fn resume<S: Store>(
         &self,
         store: &S,
         sampled: &Sampled,
-        projections: &mut Ps,
-    ) -> Result<Recorded, Failure<Infallible>>
-    where
-        S: Store,
-        Ps: Project,
-    {
+    ) -> Result<Recorded, Failure<Infallible>> {
         let letters = CallLetters::new(self.dead_letters);
         let mut port = StorePort::new(store, &letters);
-        let resumed = self
-            .resume_on(&mut port, &letters, sampled, projections)
-            .await;
+        let resumed = self.resume_on(&mut port, &letters, sampled).await;
         match lettered(resumed.map(Handled::Applied), letters.take())? {
             Handled::Applied(recorded) => Ok(recorded),
             Handled::Duplicate(..) | Handled::Parked(_) => {
@@ -669,17 +620,12 @@ impl<'k> Kernel<'k> {
     }
 
     /// [`Kernel::resume`] on `port`.
-    async fn resume_on<P, Ps>(
+    async fn resume_on<P: Port>(
         &self,
         port: &mut P,
         letters: &CallLetters<'_>,
         sampled: &Sampled,
-        projections: &mut Ps,
-    ) -> Result<Recorded, Failure<Infallible>>
-    where
-        P: Port,
-        Ps: Project,
-    {
+    ) -> Result<Recorded, Failure<Infallible>> {
         let mut run = Run::new(self, sampled, letters);
         let mut sources: Vec<&str> = Vec::new();
         for policy in self.registry.all_policies() {
@@ -700,7 +646,7 @@ impl<'k> Kernel<'k> {
         let recorded = run.recorded;
         settled?;
         match self
-            .finish(Handled::Applied(recorded), projections, port, letters)
+            .finish(Handled::Applied(recorded), port, letters)
             .await?
         {
             Handled::Applied(recorded) => Ok(recorded),
@@ -710,16 +656,13 @@ impl<'k> Kernel<'k> {
         }
     }
 
-    /// Run `projections`, then every marked-up projector, over what was
-    /// written.
-    async fn finish<R, P: Port, Ps: Project>(
+    /// Run every registered projector over what was written.
+    async fn finish<R, P: Port>(
         &self,
         handled: Handled,
-        projections: &mut Ps,
         port: &mut P,
         letters: &CallLetters<'_>,
     ) -> Result<Handled, Failure<R>> {
-        let handled = self.project(handled, projections);
         let (steps, books) = match &handled {
             Handled::Applied(recorded) => (recorded.steps.clone(), recorded.books.clone()),
             Handled::Duplicate(..) | Handled::Parked(_) => return Ok(handled),
@@ -735,14 +678,13 @@ impl<'k> Kernel<'k> {
     }
 
     /// Every registered projector over the `committed` events of its
-    /// sources, in registration order: a marked-up one each event in stream
-    /// order, a `ProjectorHandler` each book whole ([`Self::project_book`]).
-    /// A projector stops at its first failure, the others go on. The
-    /// failures, by projector, once the dead letters they raised are kept
-    /// in a write of their own (a projector's step has no caller left). A
-    /// failure to keep them leaves them the call's answer alone: the
-    /// failed call is retried, a duplicate, which runs the projectors
-    /// again.
+    /// sources, in registration order, each handed each committed book
+    /// whole ([`Self::project_book`]). A projector stops at its first
+    /// failure, the others go on. The failures, by projector, once the
+    /// dead letters they raised are kept in a write of their own (a
+    /// projector's step has no caller left). A failure to keep them leaves
+    /// them the call's answer alone: the failed call is retried, a
+    /// duplicate, which runs the projectors again.
     async fn run_projectors<P: Port>(
         &self,
         committed: &[EventBook],
@@ -765,67 +707,22 @@ impl<'k> Kernel<'k> {
     ) -> Vec<(String, Report)> {
         let mut failures = Vec::new();
         for entry in self.registry.projectors() {
-            let books: Vec<&EventBook> = committed
-                .iter()
-                .filter(|book| {
-                    book.cover
+            let books = committed.iter().filter(|book| {
+                !book.pages.is_empty()
+                    && book
+                        .cover
                         .as_ref()
                         .is_some_and(|c| entry.sources.contains(&c.domain))
-                })
-                .collect();
-            if books.iter().all(|book| book.pages.is_empty()) {
-                continue;
-            }
-            let instance = match &entry.instance {
-                ProjectorInstance::Marked(instance) => instance,
-                ProjectorInstance::Handler(handler) => {
-                    for book in books.into_iter().filter(|book| !book.pages.is_empty()) {
-                        if let Err(error) = self
-                            .project_book(&entry.name, &**handler, book, letters)
-                            .await
-                        {
-                            failures.push((entry.name.clone(), error));
-                            break;
-                        }
-                    }
-                    continue;
-                }
-            };
-            // The one instance is out of the lock while it runs; a
-            // concurrent command waits for it.
-            let mut taken_instance = loop {
-                let taken = instance
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .take();
-                match taken {
-                    Some(instance) => break instance,
-                    None => Yield(false).await,
-                }
-            };
-            'books: for book in books {
-                let cover = book.cover.clone().unwrap_or_default();
-                for page in &book.pages {
-                    let recorded_at = page
-                        .meta
-                        .as_ref()
-                        .and_then(|m| m.recorded_at)
-                        .unwrap_or_default();
-                    let ctx = ProjectionContext::new(cover.clone(), page.sequence, recorded_at);
-                    let payload = page.payload.clone().unwrap_or_default();
-                    let run = taken_instance.project(&payload, &ctx);
-                    if let Some(Err(error)) = match run {
-                        Some(run) => Some(run.await),
-                        None => None,
-                    } {
-                        failures.push((entry.name.clone(), error));
-                        break 'books;
-                    }
+            });
+            for book in books {
+                if let Err(error) = self
+                    .project_book(&entry.name, &*entry.handler, book, letters)
+                    .await
+                {
+                    failures.push((entry.name.clone(), error));
+                    break;
                 }
             }
-            *instance
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(taken_instance);
         }
         failures
     }
@@ -895,17 +792,6 @@ impl<'k> Kernel<'k> {
         }
         Ok(checked)
     }
-
-    /// Run `projections` over what a committed chain recorded.
-    fn project<Ps: Project>(&self, handled: Handled, projections: &mut Ps) -> Handled {
-        match handled {
-            Handled::Applied(mut recorded) => {
-                recorded.projector_failures = projections.project(&recorded, self.registry);
-                Handled::Applied(recorded)
-            }
-            unapplied => unapplied,
-        }
-    }
 }
 
 /// A step's failure, as the chain carries it: a rejection as its report.
@@ -929,19 +815,6 @@ async fn past_bug<P: Port>(
         OnPolicyBug::MovePast => port.write_positions(positions).await,
         OnPolicyBug::Stay => Ok(()),
     }
-}
-
-/// The typed stream a step leaves, for a typed domain: the stream as
-/// loaded with `pages` folded on.
-fn typed(
-    loaded: &super::coordinator::Contextual,
-    pages: &[EventPage],
-    registry: &Registry,
-) -> Result<Option<Box<dyn AnyType + Send>>, KernelError> {
-    registry
-        .typed_replay(loaded.command.domain())
-        .map(|replay| replay(loaded, pages, registry))
-        .transpose()
 }
 
 /// A chain's failure, as the caller's: the path to the failing step, and
@@ -1300,14 +1173,13 @@ impl<'k> Run<'k> {
         let head = contextual.head();
         let decided = decide(&contextual, self.sampled, self.registry, self.letters).await?;
         let pages = decided.pages;
-        let stream = typed(&contextual, &pages, self.registry).map_err(Failure::Kernel)?;
         if !pages.is_empty() {
             port.write(&cover, head, &pages, &[])
                 .await
                 .map_err(|e| Failure::Kernel(lost(&contextual, e)))?;
             write_snapshot(port, &cover, decided.snapshot).await;
         }
-        self.record(cover, head, stream, pages);
+        self.record(cover, head, pages);
         Ok(Origin::Wrote(head))
     }
 
@@ -1750,12 +1622,11 @@ impl<'k> Run<'k> {
             }
             return Ok(Stepped::Nothing);
         }
-        let stream = typed(&contextual, &pages, self.registry).map_err(kernel)?;
         port.write(&cover, head, &pages, positions)
             .await
             .map_err(|e| kernel(lost(&contextual, e)))?;
         write_snapshot(port, &cover, snapshot).await;
-        self.record(cover.clone(), head, stream, pages);
+        self.record(cover.clone(), head, pages);
         Ok(Stepped::Wrote(cover, head))
     }
 
@@ -1769,13 +1640,7 @@ impl<'k> Run<'k> {
     }
 
     /// A step's write: its events, as the chain's answer.
-    fn record(
-        &mut self,
-        cover: Cover,
-        head: u64,
-        stream: Option<Box<dyn AnyType + Send>>,
-        pages: Vec<EventPage>,
-    ) {
+    fn record(&mut self, cover: Cover, head: u64, pages: Vec<EventPage>) {
         if pages.is_empty() {
             return;
         }
@@ -1797,35 +1662,24 @@ impl<'k> Run<'k> {
                 book.next_sequence = next_sequence;
             }
             None => self.recorded.books.push(EventBook {
-                cover: Some(cover.clone()),
+                cover: Some(cover),
                 snapshot: None,
                 next_sequence,
                 pages,
             }),
-        }
-        let Some(stream) = stream else {
-            return;
-        };
-        match self.recorded.streams.iter_mut().find(|(c, ..)| *c == cover) {
-            Some((_, _, held)) => *held = stream,
-            None => self.recorded.streams.push((cover, head, stream)),
         }
     }
 }
 
 /// Everything a chain recorded, every stream, after commit: angzarr's
 /// `CommandResponse.events`, one `EventBook` per stream here, since a chain
-/// touches several.
+/// touches several. It holds the pages as written; their typed events are
+/// decoded only when asked for ([`Recorded::events`]).
 #[derive(Default)]
 pub struct Recorded {
     /// One book per stream touched, in the order first touched: the pages
     /// appended, `next_sequence` the new length.
     books: Vec<EventBook>,
-    /// The streams after the chain (each a `Stream<D>`, boxed), with the
-    /// length each was loaded at.
-    streams: Vec<(Cover, u64, Box<dyn AnyType + Send>)>,
-    /// Projections that failed after the commit.
-    projector_failures: Vec<ProjectorFailure>,
     /// Each step's events, one book per step that wrote any, in the order
     /// written.
     steps: Vec<EventBook>,
@@ -1847,103 +1701,25 @@ impl Recorded {
         &self.books
     }
 
-    /// The events the chain recorded in `stream`, if it is a `D` stream the
-    /// chain touched.
-    pub fn events<D: Domain>(&self, stream: &Cover) -> Option<&[Envelope<D::Event>]> {
-        let (_, loaded_at, boxed) = self.streams.iter().find(|(c, ..)| c == stream)?;
-        let stream = boxed.downcast_ref::<Stream<D>>()?;
-        Some(&stream.events()[(loaded_at - stream.first()) as usize..])
-    }
-
-    /// Hand the chain's events in `stream` to `handlers`, each with the
-    /// state just after it. Nothing, for a stream the chain did not touch;
-    /// [`KernelError::WrongDomain`] for one that is not a `D` stream.
-    pub fn dispatch<D: Domain>(
+    /// The events the chain recorded in `stream`, decoded as `D`'s
+    /// ([`Stream::decode_book`]), when asked: none for a stream the chain
+    /// did not touch; [`KernelError::Replay`] for one that is not a `D`
+    /// stream.
+    pub fn events<D: Domain>(
         &self,
         stream: &Cover,
         registry: &Registry,
-        handlers: &mut [&mut dyn Handler<D>],
-    ) -> Result<(), KernelError> {
-        let Some((_, loaded_at, boxed)) = self.streams.iter().find(|(c, ..)| c == stream) else {
-            return Ok(());
-        };
-        let recorded =
-            boxed
-                .downcast_ref::<Stream<D>>()
-                .ok_or_else(|| KernelError::WrongDomain {
-                    stream: stream.clone(),
-                    expected: D::NAME,
-                })?;
-        recorded.dispatch(*loaded_at, registry, handlers)
-    }
-
-    /// The projections that failed on the chain's events (angzarr's
-    /// `Outcome.projector_failures`). The commit stands regardless.
-    pub fn projector_failures(&self) -> &[ProjectorFailure] {
-        &self.projector_failures
+    ) -> Result<Vec<Envelope<D::Event>>, KernelError> {
+        match self.books.iter().find(|b| b.cover.as_ref() == Some(stream)) {
+            Some(book) => Stream::<D>::decode_book(book, registry),
+            None => Ok(Vec::new()),
+        }
     }
 
     /// The dead letters the chain's steps and its projectors wrote, whole
     /// and keyed as the store keeps them (owner ruling Q5).
     pub fn dead_letters(&self) -> &[DeadLetter] {
         &self.dead_letters
-    }
-}
-
-/// One projection that failed after the commit.
-#[derive(Clone, PartialEq, Debug)]
-pub struct ProjectorFailure {
-    /// The [`ProjectionRoute::name`].
-    pub projector: &'static str,
-    pub error: KernelError,
-}
-
-/// Projections the command handler runs after commit, over what the chain
-/// recorded: [`ProjectionRoute`]s; `()` is none, a pair is both. Each
-/// returns the projections that failed; a failure never stops the others.
-pub trait Project {
-    fn project(&mut self, recorded: &Recorded, registry: &Registry) -> Vec<ProjectorFailure>;
-}
-
-/// A projection of one domain's streams, run after commit over every
-/// stream of that domain the chain recorded in.
-pub struct ProjectionRoute<'p, D: Domain, P: Projection<D>> {
-    /// Named in a [`ProjectorFailure`].
-    pub name: &'static str,
-    pub projection: &'p mut P,
-    pub domain: std::marker::PhantomData<fn() -> D>,
-}
-
-impl Project for () {
-    fn project(&mut self, _recorded: &Recorded, _registry: &Registry) -> Vec<ProjectorFailure> {
-        Vec::new()
-    }
-}
-
-impl<A: Project, B: Project> Project for (A, B) {
-    fn project(&mut self, recorded: &Recorded, registry: &Registry) -> Vec<ProjectorFailure> {
-        let mut failures = self.0.project(recorded, registry);
-        failures.extend(self.1.project(recorded, registry));
-        failures
-    }
-}
-
-impl<D: Domain, P: Projection<D>> Project for ProjectionRoute<'_, D, P> {
-    fn project(&mut self, recorded: &Recorded, registry: &Registry) -> Vec<ProjectorFailure> {
-        let mut failures = Vec::new();
-        for (cover, ..) in &recorded.streams {
-            if cover.domain != D::NAME {
-                continue;
-            }
-            let mut handler = projection(&mut *self.projection);
-            if let Err(error) = recorded.dispatch::<D>(cover, registry, &mut [&mut handler]) {
-                failures.push(ProjectorFailure {
-                    projector: self.name,
-                    error,
-                });
-            }
-        }
-        failures
     }
 }
 
@@ -1960,22 +1736,3 @@ mod concurrency_tests;
 #[cfg(test)]
 #[path = "races.test.rs"]
 mod races_tests;
-
-/// A future that is pending once, waking itself: a turn for another task.
-struct Yield(bool);
-
-impl std::future::Future for Yield {
-    type Output = ();
-
-    fn poll(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<()> {
-        if self.0 {
-            return std::task::Poll::Ready(());
-        }
-        self.0 = true;
-        cx.waker().wake_by_ref();
-        std::task::Poll::Pending
-    }
-}

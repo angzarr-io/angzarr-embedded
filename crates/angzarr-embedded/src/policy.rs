@@ -1,4 +1,4 @@
-//! Handlers of committed events: policies and projections.
+//! Policies: committed events → commands.
 //!
 //! - [`Policy`] (Event Storming's term; an *automation* in Event
 //!   Modeling): event → **commands** to target streams. ONE trait, whether
@@ -10,8 +10,6 @@
 //!   Propagating one aggregate's changes into another (hatpick's list into
 //!   its draw systems) is a policy whose target records the change in its
 //!   own events.
-//! - [`Projection`]: event → a read model's fold. It produces nothing. Read
-//!   models are replayed from the stream on every read.
 //!
 //! A policy's command is a `CommandBook` the kernel builds: the target's
 //! cover, a `Command` page whose payload is the policy's command packed as
@@ -39,8 +37,7 @@ use angzarr_diagnostic::Report;
 use angzarr_proto::v1::angzarr_dead_letter::Payload as Letter;
 use angzarr_proto::v1::PolicyReaction;
 use angzarr_proto::v1::{
-    command_page, Command, CommandBook, CommandPage, Cover, EventBook, EventPage, EventRef,
-    Handling, Uuid,
+    command_page, Command, CommandBook, CommandPage, Cover, EventBook, EventRef, Handling, Uuid,
 };
 use angzarr_router::error::CodedError;
 use angzarr_router::policy::PolicyDispatch;
@@ -49,7 +46,6 @@ use prost_types::Any;
 use super::check::{check_policy_command, Checked, Malformed};
 use super::dead_letter::{self, Cause, Component, DeadLetterLog};
 use super::domain::Domain;
-use super::handler::{Committed, Handler};
 use super::markup::{self, CommandContext, Commands, PolicyContext, TypeName};
 use super::payload::{type_name, Payload};
 use super::registry::Registry;
@@ -480,12 +476,6 @@ pub trait Policy: Send + Sync + 'static {
     }
 }
 
-/// Event → read model. Produces nothing. Read models are replayed from the
-/// stream on every read ([`Stream::dispatch`](super::Stream::dispatch) from 0).
-pub trait Projection<D: Domain> {
-    fn project(&mut self, committed: &Committed<'_, D>);
-}
-
 // ---------------------------------------------------------------- dispatch
 
 /// One command a policy owes one target, before the kernel books it.
@@ -573,90 +563,6 @@ impl Order {
     }
 }
 
-/// A policy as a [`Handler`] of its source: each committed event becomes
-/// one [`Order`] per command, handed to `sink` in order. An event the policy
-/// fails on hands over nothing, and is dead-lettered to `dead_letters` as
-/// the kernel dead-letters a policy's failed step: a handler's bug, its
-/// error's code and args the `cause`.
-pub fn policy<'p, P: Policy, F: FnMut(Order)>(
-    policy: &'p P,
-    dead_letters: &'p dyn DeadLetterLog,
-    sink: F,
-) -> PolicyHandler<'p, P, F> {
-    PolicyHandler {
-        policy,
-        dead_letters,
-        sink,
-    }
-}
-
-/// A projection as a [`Handler`].
-pub fn projection<P>(projection: &mut P) -> Projector<'_, P> {
-    Projector(projection)
-}
-
-/// See [`policy`].
-pub struct PolicyHandler<'p, P, F> {
-    policy: &'p P,
-    dead_letters: &'p dyn DeadLetterLog,
-    sink: F,
-}
-
-/// See [`projection`].
-pub struct Projector<'p, P>(&'p mut P);
-
-impl<P: Policy, F: FnMut(Order)> Handler<P::Source> for PolicyHandler<'_, P, F>
-where
-    P::Source: Domain,
-{
-    fn handle(&mut self, committed: &Committed<'_, P::Source>) {
-        let ctx = PolicyContext::new(
-            committed.event_ref(),
-            committed.envelope.correlation_id().clone(),
-            committed.envelope.recorded_at(),
-        );
-        let event = committed.event().to_any();
-        let commands = match self.policy.on_event(&event, &ctx) {
-            Ok(Some(commands)) => commands,
-            Ok(None) => return,
-            Err(failure) => {
-                let trigger = EventBook {
-                    cover: Some(committed.cover.clone()),
-                    pages: vec![EventPage {
-                        sequence: committed.sequence(),
-                        payload: Some(event),
-                        ..EventPage::default()
-                    }],
-                    ..EventBook::default()
-                };
-                dead_letter::write(
-                    self.dead_letters,
-                    Letter::RejectedEvents(trigger),
-                    Component::policy(P::NAME),
-                    Cause::PolicyFailed(&failure),
-                );
-                return;
-            }
-        };
-        let target = <P::Target as CommandTarget>::DOMAIN;
-        for order in orders(
-            P::NAME,
-            target,
-            committed.cover,
-            &ctx,
-            commands.into_orders(),
-        ) {
-            (self.sink)(order);
-        }
-    }
-}
-
-impl<D: Domain, P: Projection<D>> Handler<D> for Projector<'_, P> {
-    fn handle(&mut self, committed: &Committed<'_, D>) {
-        self.0.project(committed)
-    }
-}
-
 /// The stream a policy's command for `root` goes to, for a source event in
 /// `source`: the target domain's, in the source's edition.
 pub fn target_cover<P: Policy>(source: &Cover, root: &Uuid) -> Cover {
@@ -670,29 +576,6 @@ pub(crate) fn cover_in(domain: &str, source: &Cover, root: &Uuid) -> Cover {
         root: Some(root.clone()),
         edition: source.edition.clone(),
     }
-}
-
-/// The orders a policy named `policy` owes for the event `ctx` names in
-/// `source`, its `commands` to `target`'s streams in order, the `index`th
-/// command's index `index`.
-pub(crate) fn orders(
-    policy: &str,
-    target: &str,
-    source: &Cover,
-    ctx: &PolicyContext,
-    commands: Vec<(Uuid, Any)>,
-) -> Vec<Order> {
-    (0..)
-        .zip(commands)
-        .map(|(index, (root, command))| Order {
-            policy: policy.to_string(),
-            cover: cover_in(target, source, &root),
-            command,
-            trigger: ctx.trigger().clone(),
-            index,
-            correlation_id: ctx.correlation_id().clone(),
-        })
-        .collect()
 }
 
 /// The orders policy `policy` owes for `trigger` (in `correlation_id`):

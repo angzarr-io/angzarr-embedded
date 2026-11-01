@@ -432,12 +432,7 @@ fn a_command_ahead_of_the_stream_is_malformed_under_every_resolution() {
             let log = MemoryDeadLetters::new();
             let store = store_at_three();
             let failure = Kernel::new(&registry, &log)
-                .handle_any(
-                    &store,
-                    add_item(1).expecting(expected, resolution),
-                    &at(1),
-                    &mut (),
-                )
+                .handle_any(&store, add_item(1).expecting(expected, resolution), &at(1))
                 .ready()
                 .err()
                 .expect("refused");
@@ -493,7 +488,6 @@ fn under_strict_a_race_lost_at_the_write_is_stale_and_not_run_again() {
             &store,
             add_item(1).expecting(3, ConflictResolution::Strict),
             &at(1),
-            &mut (),
         )
         .ready()
         .err()
@@ -543,7 +537,6 @@ fn under_aggregate_handles_a_race_lost_at_the_write_redelivers_the_widened_windo
                 &store,
                 add_item(1).expecting(1, ConflictResolution::AggregateHandles),
                 &at(1),
-                &mut (),
             )
             .ready();
 
@@ -616,7 +609,6 @@ fn under_commutative_a_race_lost_at_the_write_redelivers_the_widened_window() {
                 &store,
                 add_item(1).expecting(1, ConflictResolution::Commutative),
                 &at(1),
-                &mut (),
             )
             .ready();
 
@@ -684,12 +676,7 @@ fn a_window_lost_at_every_write_until_the_retry_cap_is_answered_given_up() {
             ..OnRetryable::default()
         };
         let failure = kernel(&registry, &log, &waits, retry)
-            .handle_any(
-                &store,
-                add_item(1).expecting(1, resolution),
-                &at(1),
-                &mut (),
-            )
+            .handle_any(&store, add_item(1).expecting(1, resolution), &at(1))
             .ready()
             .err()
             .expect("given up at the cap");
@@ -719,7 +706,7 @@ fn a_stamped_command_that_loses_the_race_runs_again_on_the_new_head() {
     let log = MemoryDeadLetters::new();
     let waits = Waits::default();
     let handled = kernel(&registry, &log, &waits, OnRetryable::default())
-        .handle_any(&store, add_item(1), &at(1), &mut ())
+        .handle_any(&store, add_item(1), &at(1))
         .ready();
     assert!(
         matches!(handled, Ok(Handled::Applied(_))),
@@ -753,7 +740,7 @@ fn a_stamped_command_runs_again_with_retrying_off() {
         ..OnRetryable::default()
     };
     let handled = kernel(&registry, &log, &waits, retry)
-        .handle_any(&store, add_item(1), &at(1), &mut ())
+        .handle_any(&store, add_item(1), &at(1))
         .ready();
     assert!(
         matches!(handled, Ok(Handled::Applied(_))),
@@ -785,7 +772,7 @@ fn with_no_race_reruns_a_lost_race_goes_back_as_the_stores_conflict() {
             ..OnRetryable::default()
         };
         let failure = kernel(&registry, &log, &waits, retry)
-            .handle_any(&store, add_item(1), &at(1), &mut ())
+            .handle_any(&store, add_item(1), &at(1))
             .ready()
             .err()
             .expect("the race was lost");
@@ -840,7 +827,7 @@ fn a_stamped_command_losing_every_race_stops_at_the_race_rerun_cap() {
         ..OnRetryable::default()
     };
     let failure = kernel(&registry, &log, &waits, retry)
-        .handle_any(&store, add_item(1), &at(1), &mut ())
+        .handle_any(&store, add_item(1), &at(1))
         .ready()
         .err()
         .expect("given up at the cap");
@@ -862,7 +849,7 @@ fn the_race_rerun_cap_is_ten_runs_by_default() {
     let log = MemoryDeadLetters::new();
     let waits = Waits::default();
     let failure = kernel(&registry, &log, &waits, OnRetryable::default())
-        .handle_any(&store, add_item(1), &at(1), &mut ())
+        .handle_any(&store, add_item(1), &at(1))
         .ready()
         .err()
         .expect("given up at the cap");
@@ -891,7 +878,6 @@ fn a_fact_losing_every_race_until_the_cap_is_parked() {
             &store,
             fact(order(), any(SHIPMENT_DISPATCHED), "shipment-1"),
             &at(1),
-            &mut (),
         )
         .ready();
     let heads: Vec<_> = orders.seen().iter().map(|s| s.head).collect();
@@ -933,7 +919,6 @@ fn with_no_race_reruns_a_fact_that_loses_the_race_goes_back_as_the_stores_confli
             &store,
             fact(order(), any(SHIPMENT_DISPATCHED), "shipment-1"),
             &at(1),
-            &mut (),
         )
         .ready()
         .err()
@@ -1032,7 +1017,6 @@ fn a_policy_step_losing_every_race_is_dead_lettered_at_the_cap() {
             &store,
             command(cover("bell", 1), any("/toy.bell.v1.Ring")),
             &at(1),
-            &mut (),
         )
         .ready()
         .err()
@@ -1104,7 +1088,6 @@ fn with_no_race_reruns_a_policy_step_that_loses_the_race_goes_back_as_the_stores
             &store,
             command(cover("bell", 1), any("/toy.bell.v1.Ring")),
             &at(1),
-            &mut (),
         )
         .ready()
         .err()

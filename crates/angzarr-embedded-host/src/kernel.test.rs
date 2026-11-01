@@ -163,7 +163,6 @@ fn a_remote_command_round_trips_through_the_kernel_into_the_store() {
         &store,
         send("player", 1, any("/test.player.v1.SitDown")),
         &sampled(1),
-        &mut (),
     ))
     .expect("handled");
     assert!(matches!(handled, Handled::Applied(_)));
@@ -171,7 +170,6 @@ fn a_remote_command_round_trips_through_the_kernel_into_the_store() {
         &store,
         send("player", 2, any("/test.player.v1.Bet")),
         &sampled(2),
-        &mut (),
     ))
     .expect("handled");
 
@@ -222,7 +220,6 @@ fn a_policy_step_from_an_in_process_domain_reaches_the_remote_one() {
         &store,
         send("table", 1, any("/test.table.v1.Seat")),
         &sampled(1),
-        &mut (),
     ))
     .expect("handled");
     assert_eq!(
@@ -258,7 +255,6 @@ fn a_remote_refusal_is_a_business_rejection() {
         &store,
         send("player", 1, any("/test.player.v1.Refuse")),
         &sampled(1),
-        &mut (),
     ))
     .err()
     .expect("refused");
@@ -291,7 +287,6 @@ fn a_remote_already_exists_is_a_business_rejection() {
         &store,
         send("player", 1, any("/test.player.v1.Taken")),
         &sampled(1),
-        &mut (),
     ))
     .err()
     .expect("refused");
@@ -324,7 +319,6 @@ fn a_remote_internal_failure_under_its_own_code_is_a_dead_lettered_bug() {
         &store,
         send("player", 1, any("/test.player.v1.Break")),
         &sampled(1),
-        &mut (),
     ))
     .err()
     .expect("failed");
@@ -442,7 +436,6 @@ fn a_restarted_child_is_registered_at_its_new_version_before_it_gets_work() {
         &store,
         send("player", 1, any("/test.player.v1.SitDown")),
         &sampled(1),
-        &mut (),
     ))
     .expect("handled");
     let written = pages(&store, &cover("player"));

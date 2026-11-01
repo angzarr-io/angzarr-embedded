@@ -24,7 +24,7 @@
 //! registry.aggregate::<table::Table>(Default::default)?; // in-process
 //! host.register(&mut registry)?; // every remote component, by its kind
 //! let kernel = Kernel::new(&registry, &dead_letters);
-//! // ... kernel.handle_any(&store, book, &sampled, &mut ()) for any domain;
+//! // ... kernel.handle_any(&store, book, &sampled) for any domain;
 //! // dropping `host` stops the children.
 //! ```
 //!

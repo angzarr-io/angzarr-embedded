@@ -1312,7 +1312,6 @@ mod resume {
                     &store,
                     book("left", 1, 1, "/test.meet.v1.Meet"),
                     &sampled(1),
-                    &mut (),
                 )
                 .await
                 .expect("left's event committed");
@@ -1360,7 +1359,7 @@ mod resume {
 
 /// D1 (owner Q5, review K6): an [`App`] from its parts, on any store or a
 /// store per key, its dead letters kept by the store and answered, its
-/// projections run on every call, and its stores resumed at start.
+/// projectors run on every call, and its stores resumed at start.
 mod parts {
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
@@ -1368,9 +1367,7 @@ mod parts {
     use angzarr_embedded::angzarr_ports::memory::MemoryStore;
     use angzarr_embedded::angzarr_router::error::CodedError;
     use angzarr_embedded::angzarr_router::policy::PolicyDispatch;
-    use angzarr_embedded::{
-        DeadLetterStore, MemoryDeadLetters, Project, ProjectorFailure, Recorded, StreamRef,
-    };
+    use angzarr_embedded::{DeadLetterStore, MemoryDeadLetters, ProjectorHandler, StreamRef};
 
     use super::fixtures::*;
     use super::*;
@@ -1500,25 +1497,32 @@ mod parts {
         assert_eq!(log.lines().len(), 1, "and logged");
     }
 
-    /// Counts the chains it projects.
+    /// Counts the books it is handed.
     #[derive(Clone, Default)]
     struct Counted(Arc<Mutex<usize>>);
 
-    impl Project for Counted {
-        fn project(&mut self, recorded: &Recorded, _: &Registry) -> Vec<ProjectorFailure> {
-            *self.0.lock().unwrap() += recorded.steps().len();
-            Vec::new()
+    impl ProjectorHandler for Counted {
+        fn name(&self) -> &str {
+            "counted"
+        }
+
+        async fn dispatch(
+            &self,
+            _: &EventBook,
+        ) -> Result<angzarr_embedded::v1::Projection, CodedError> {
+            *self.0.lock().unwrap() += 1;
+            Ok(angzarr_embedded::v1::Projection::default())
         }
     }
 
-    /// The application's projections run on every call's recorded chain.
+    /// The registry's projectors run on every call's recorded chain.
     #[tokio::test(flavor = "multi_thread")]
-    async fn the_projections_run_on_every_call() {
+    async fn the_projectors_run_on_every_call() {
         let mut registry = Registry::new();
         meeting(&mut registry, "left");
         let counted = Counted::default();
+        registry.projector_handler(&["left"], counted.clone());
         let app = App::builder(OneStore::new(MemoryStore::new()), registry)
-            .projections(Box::new(counted.clone()))
             .start()
             .await;
         for n in 1..=2 {
@@ -1544,7 +1548,6 @@ mod parts {
                     &*store,
                     book("left", root, 1, "/test.meet.v1.Meet"),
                     &sampled(1),
-                    &mut (),
                 )
                 .await
                 .expect("left's event committed, its step owed");

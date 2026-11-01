@@ -25,15 +25,20 @@
 //! - in catch-up, a book with no page and `next_sequence` 0: the stream is
 //!   gone (purged), and the projector forgets it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use angzarr_proto::v1::Cover;
+use angzarr_proto::v1::event_meta::Causation;
+use angzarr_proto::v1::{Cover, EventBook, EventPage};
 use angzarr_router::router::ProjectorHandler;
+use prost_types::Timestamp;
 
 use super::error::KernelError;
 use super::handle::Wait;
 use super::registry::Registry;
-use super::store::{ChangeToken, ReadStore, Store, Watch};
+use super::store::{
+    ChangeToken, PositionKey, ReadStore, ReadUnit, Store, StoreError, StreamRef, Watch, Write,
+};
+use super::upcast::upcast_pages;
 
 /// A projector caught up from a store: every main-timeline stream of its
 /// sources (an edition is a what-if fork, not the application's timeline)
@@ -54,15 +59,21 @@ use super::store::{ChangeToken, ReadStore, Store, Watch};
 ///
 /// A step reads in one read-only unit ([`ReadStore`]): what it hands is
 /// one moment of the store, and a write landing meanwhile is the next
-/// step's. A book the projector fails (or that does not upcast) keeps the
-/// stream where it was, so the next step hands it again; the other
-/// streams go on. Delivery is at least once: a stored position is written
-/// after its book is handed.
+/// step's. Each page is upcast as a policy's trigger is, through its
+/// domain's upcast port. A book the projector fails (or that does not
+/// upcast) keeps the stream where it was, so the next step hands it again;
+/// the other streams go on. Delivery is at least once: a stored position
+/// is written after its book is handed.
 pub struct CatchUp<P> {
     projector: P,
     sources: Vec<String>,
     kept: Kept,
-    seen: BTreeMap<Vec<u8>, ()>,
+    /// Every stream handed a book and still held when last read, by
+    /// [`key`]: how far it is (where positions are held), and what tells
+    /// it from a stream written again on its cover.
+    seen: BTreeMap<(String, Vec<u8>), Seen>,
+    /// The store's change token when a step last handed everything it
+    /// owed ([`CatchUp::step_if_changed`]).
     token: Option<ChangeToken>,
 }
 
@@ -71,6 +82,42 @@ pub struct CatchUp<P> {
 enum Kept {
     Held,
     Stored,
+}
+
+/// One stream a catch-up has handed a book.
+struct Seen {
+    cover: Cover,
+    /// Its first event's fingerprint.
+    first: Fingerprint,
+    /// The next sequence it is owed.
+    next: u64,
+}
+
+/// What tells one stream on a cover from another: its first event's cause
+/// (the command that wrote it) and when it was recorded. The sequence
+/// cannot tell them apart (each starts at 0), nor the payload (a stream
+/// written again may hold the same).
+#[derive(Clone, PartialEq, Debug)]
+struct Fingerprint {
+    cause: Option<Causation>,
+    recorded_at: Option<Timestamp>,
+}
+
+impl Fingerprint {
+    fn of(page: Option<&EventPage>) -> Fingerprint {
+        let meta = page.and_then(|page| page.meta.as_ref());
+        Fingerprint {
+            cause: meta.and_then(|meta| meta.causation.clone()),
+            recorded_at: meta.and_then(|meta| meta.recorded_at),
+        }
+    }
+}
+
+/// A stream as a catch-up tells streams apart: its domain and root (it
+/// reads main only).
+fn key(cover: &Cover) -> (String, Vec<u8>) {
+    let root = cover.root.as_ref().map(|r| r.value.to_vec());
+    (cover.domain.clone(), root.unwrap_or_default())
 }
 
 /// What one catch-up step did.
@@ -109,9 +156,16 @@ impl<P: ProjectorHandler> CatchUp<P> {
     }
 
     fn kept(sources: &[&str], projector: P, kept: Kept) -> CatchUp<P> {
-        let _ = (sources, kept);
-        let _ = projector;
-        todo!()
+        if sources.is_empty() {
+            panic!("projector \"{}\" names no source domain", projector.name());
+        }
+        CatchUp {
+            projector,
+            sources: sources.iter().map(|source| source.to_string()).collect(),
+            kept,
+            seen: BTreeMap::new(),
+            token: None,
+        }
     }
 
     /// The projector.
@@ -128,8 +182,19 @@ impl<P: ProjectorHandler> CatchUp<P> {
         store: &S,
         registry: &Registry,
     ) -> Result<Caught, KernelError> {
-        let _ = (store, registry, &self.sources, &self.kept, &self.seen);
-        todo!()
+        let mut caught = Caught::default();
+        let mut reads = store.begin_read().await.map_err(KernelError::Store)?;
+        let mut held = BTreeSet::new();
+        for source in self.sources.clone() {
+            let covers = reads.covers(&source).await.map_err(KernelError::Store)?;
+            for cover in covers.into_iter().filter(|c| c.edition.is_none()) {
+                held.insert(key(&cover));
+                self.catch_stream(store, &mut reads, registry, cover, &mut caught)
+                    .await?;
+            }
+        }
+        self.hand_gone(&held, &mut caught).await;
+        Ok(caught)
     }
 
     /// [`CatchUp::step`], unless nothing was committed since the last step
@@ -141,8 +206,13 @@ impl<P: ProjectorHandler> CatchUp<P> {
         store: &S,
         registry: &Registry,
     ) -> Result<Option<Caught>, KernelError> {
-        let _ = (store, registry, &self.token);
-        todo!()
+        let token = store.change_token().await.map_err(KernelError::Store)?;
+        if self.token == Some(token) {
+            return Ok(None);
+        }
+        let caught = self.step(store, registry).await?;
+        self.token = caught.failures.is_empty().then_some(token);
+        Ok(Some(caught))
     }
 
     /// Follow the store: [`CatchUp::step_if_changed`], then wait `every`
@@ -155,10 +225,146 @@ impl<P: ProjectorHandler> CatchUp<P> {
         registry: &Registry,
         wait: &dyn Wait,
         every: std::time::Duration,
-        more: impl FnMut(Option<&Caught>) -> bool,
+        mut more: impl FnMut(Option<&Caught>) -> bool,
     ) -> Result<(), KernelError> {
-        let _ = (store, registry, wait, every, more);
-        todo!()
+        loop {
+            let caught = self.step_if_changed(store, registry).await?;
+            if !more(caught.as_ref()) {
+                return Ok(());
+            }
+            wait.wait(every).await;
+        }
+    }
+
+    /// Hand `cover`'s stream what it is owed, read through `reads`: its
+    /// pages from where the projector is on it, upcast, as one book.
+    async fn catch_stream<S: Store, U: ReadUnit>(
+        &mut self,
+        store: &S,
+        reads: &mut U,
+        registry: &Registry,
+        cover: Cover,
+        caught: &mut Caught,
+    ) -> Result<(), KernelError> {
+        let stream = StreamRef::try_from(&cover).map_err(KernelError::Store)?;
+        let (from, first) = self
+            .owed(store, reads, &cover)
+            .await
+            .map_err(KernelError::Store)?;
+        let slice = reads
+            .read(stream, from, None)
+            .await
+            .map_err(KernelError::Store)?;
+        if slice.pages.is_empty() {
+            return Ok(());
+        }
+        let first = first.unwrap_or_else(|| Fingerprint::of(slice.pages.first()));
+        let pages = match registry.upcast_port(&cover.domain) {
+            None => slice.pages,
+            Some(port) => match upcast_pages(port, &cover.domain, &slice.pages).await {
+                Ok(pages) => pages,
+                Err(error) => {
+                    let stream = cover.clone();
+                    caught
+                        .failures
+                        .push((cover, KernelError::Upcast { stream, error }));
+                    return Ok(());
+                }
+            },
+        };
+        let book = EventBook {
+            cover: Some(cover.clone()),
+            pages,
+            next_sequence: slice.next_sequence,
+            snapshot: None,
+        };
+        if let Err(error) = self.projector.dispatch(&book).await {
+            caught.failures.push((cover, KernelError::Router(error)));
+            return Ok(());
+        }
+        self.handed(store, &cover, first, slice.next_sequence)
+            .await
+            .map_err(KernelError::Store)?;
+        caught.handed.push(cover);
+        Ok(())
+    }
+
+    /// Where the projector is on `cover`'s stream: the next sequence it is
+    /// owed, and, past its start, the fingerprint of the stream it was
+    /// handed. Held, a stream seen before is owed from where it was
+    /// handed to, unless its first event is not the one seen first: then
+    /// it is a stream written again, owed from its start. Stored, the
+    /// store's position.
+    async fn owed<S: Store, U: ReadUnit>(
+        &self,
+        store: &S,
+        reads: &mut U,
+        cover: &Cover,
+    ) -> Result<(u64, Option<Fingerprint>), StoreError> {
+        let stream = StreamRef::try_from(cover)?;
+        let seen = self.seen.get(&key(cover));
+        let from = match (self.kept, seen) {
+            (Kept::Stored, _) => {
+                let handler = self.projector.name();
+                store.position(PositionKey { handler, stream }).await?
+            }
+            (Kept::Held, None) => 0,
+            (Kept::Held, Some(seen)) => {
+                let start = reads.read(stream, 0, Some(1)).await?;
+                match Fingerprint::of(start.pages.first()) == seen.first {
+                    true => seen.next,
+                    false => 0,
+                }
+            }
+        };
+        let first = seen.filter(|_| from > 0).map(|seen| seen.first.clone());
+        Ok((from, first))
+    }
+
+    /// Keep that `cover`'s stream, whose first event is `first`, was
+    /// handed up to `next`: in memory, and, stored, in the store.
+    async fn handed<S: Store>(
+        &mut self,
+        store: &S,
+        cover: &Cover,
+        first: Fingerprint,
+        next: u64,
+    ) -> Result<(), StoreError> {
+        if self.kept == Kept::Stored {
+            let handler = self.projector.name();
+            let stream = StreamRef::try_from(cover)?;
+            store
+                .write(Write::positions(&[(PositionKey { handler, stream }, next)]))
+                .await?;
+        }
+        let cover = cover.clone();
+        self.seen.insert(key(&cover), Seen { cover, first, next });
+        Ok(())
+    }
+
+    /// Hand every stream seen before and not `held` now its gone book: no
+    /// page, at 0. One the projector fails stays seen, to be handed again.
+    async fn hand_gone(&mut self, held: &BTreeSet<(String, Vec<u8>)>, caught: &mut Caught) {
+        let gone: Vec<_> = self
+            .seen
+            .keys()
+            .filter(|key| !held.contains(*key))
+            .cloned()
+            .collect();
+        for key in gone {
+            let cover = self.seen[&key].cover.clone();
+            let book = EventBook {
+                cover: Some(cover.clone()),
+                ..EventBook::default()
+            };
+            match self.projector.dispatch(&book).await {
+                Ok(_) => {
+                    self.seen.remove(&key);
+                    caught.handed.push(cover);
+                }
+                Err(error) => caught.failures.push((cover, KernelError::Router(error))),
+            }
+        }
     }
 }
 

@@ -195,9 +195,7 @@ async fn handle<D: Domain>(
 ) -> Result<Handled, Failure<Rejected>> {
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(registry, &log);
-    kernel
-        .handle::<D, _, _>(store, book, &sampled(10), &mut ())
-        .await
+    kernel.handle::<D, _>(store, book, &sampled(10)).await
 }
 
 /// `stream`'s pages as stored.
@@ -472,10 +470,7 @@ async fn resume_after_reopening_runs_what_a_crash_left_owed() {
     let kernel = Kernel::new(&registry, &log);
     for (round, expected) in [(0, 2), (1, 0)] {
         let store = SqliteStore::open(&path).await.unwrap();
-        let resumed = kernel
-            .resume(&store, &sampled(20 + round), &mut ())
-            .await
-            .unwrap();
+        let resumed = kernel.resume(&store, &sampled(20 + round)).await.unwrap();
         let landed: usize = resumed.books().iter().map(|b| b.pages.len()).sum();
         assert_eq!(landed, expected, "round {round}");
     }
