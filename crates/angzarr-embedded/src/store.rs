@@ -131,6 +131,7 @@ impl<S: Store> Port for StorePort<'_, S> {
             }),
             positions: &positions,
             outbox: &[],
+            dead_letters: &[],
         };
         let written = self.0.write(write).await?;
         Ok(written.next_sequence.unwrap_or(expected))

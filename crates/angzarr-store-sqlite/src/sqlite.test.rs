@@ -372,6 +372,33 @@ mod outbox_watch {
     );
 }
 
+mod dead_letters {
+    use super::*;
+    angzarr_ports::store_contract!(
+        dead_letters,
+        #[tokio::test],
+        SqliteStore::open_in_memory().await.unwrap()
+    );
+}
+
+mod dead_letters_watch {
+    use super::*;
+    angzarr_ports::store_contract!(
+        dead_letters_watch,
+        #[tokio::test],
+        SqliteStore::open_in_memory().await.unwrap()
+    );
+}
+
+mod dead_letters_purge {
+    use super::*;
+    angzarr_ports::store_contract!(
+        dead_letters_purge,
+        #[tokio::test],
+        SqliteStore::open_in_memory().await.unwrap()
+    );
+}
+
 // ------------------------------------------------------------ on a file
 
 #[tokio::test]
@@ -2092,6 +2119,134 @@ async fn a_policy_steps_entries_order_on_its_triggers_stream() {
             step[1].id
         ],
         "on a's sequence: 0, 1, then the step's trigger at 2, in write order"
+    );
+}
+
+// ------------------------------------------------- dead letters, durable
+//
+// Owner ruling 2026-10-31 (Q5): dead letters are durable. 0006 adds the
+// `dead_letters` table, keyed by the stream a letter is about, its place
+// there (a sequence or a command id) and its component; 0001 to 0005 stay
+// as released.
+
+/// A database at 0005, holding events, opens migrated (backed up first),
+/// and keeps a dead letter written to it across a reopen.
+#[tokio::test]
+async fn a_database_before_dead_letters_opens_migrated_and_keeps_them() {
+    use angzarr_ports::contract::dead_letter;
+    use angzarr_ports::{DeadLetterAt, DeadLetterStore, Write};
+    let path = database();
+    let mut conn = SqliteConnectOptions::new()
+        .filename(&*path)
+        .create_if_missing(true)
+        .connect()
+        .await
+        .unwrap();
+    into_wal(&mut conn).await.unwrap();
+    Migrator {
+        migrations: Cow::Owned(MIGRATOR.iter().take(5).cloned().collect()),
+        ..Migrator::DEFAULT
+    }
+    .run(&mut conn)
+    .await
+    .unwrap();
+    conn.close().await.unwrap();
+    let s = stream(1);
+    {
+        let store = SqliteStore::open(&path).await.unwrap();
+        append(&store, s, 0, &[page(0, 1)]).await.unwrap();
+    }
+    let store = SqliteStore::open(&path).await.unwrap();
+    assert_eq!(versions(&store.applied().await.unwrap()), build_versions());
+    let letter = dead_letter(s, DeadLetterAt::Command(command(9)), "wallet", 3);
+    let key = PositionKey {
+        handler: "wallet",
+        stream: s,
+    };
+    store
+        .write(Write {
+            positions: &[(key, 1)],
+            dead_letters: std::slice::from_ref(&letter),
+            ..Write::default()
+        })
+        .await
+        .unwrap();
+    drop(store);
+    let store = SqliteStore::open(&path).await.unwrap();
+    assert_eq!(
+        store.dead_letters(s).await,
+        Ok(vec![letter]),
+        "kept on the file"
+    );
+    assert_eq!(store.position(key).await, Ok(1));
+}
+
+/// A stored letter that does not decode is the port's
+/// `DeadLetterUnreadable`, naming its stream: never an empty answer.
+#[tokio::test]
+async fn an_undecodable_dead_letter_is_unreadable() {
+    use angzarr_ports::contract::dead_letter;
+    use angzarr_ports::{DeadLetterAt, DeadLetterStore, Write};
+    let path = database();
+    let s = stream(1);
+    {
+        let store = SqliteStore::open(&path).await.unwrap();
+        let letter = dead_letter(s, DeadLetterAt::Sequence(0), "wallet", 1);
+        store
+            .write(Write {
+                dead_letters: &[letter],
+                ..Write::default()
+            })
+            .await
+            .unwrap();
+    }
+    let mut conn = raw(&path).await;
+    sqlx::query("UPDATE dead_letters SET letter = x'ff'")
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    conn.close().await.unwrap();
+    let store = SqliteStore::open(&path).await.unwrap();
+    let refused = store.dead_letters(s).await.unwrap_err();
+    assert_eq!(refused.code(), "angzarr-ports-store-dead-letter-unreadable");
+    assert_eq!(refused.stream(), Some(&s.to_cover()));
+}
+
+/// A stored place that is neither a sequence's eight bytes nor a command
+/// id's sixteen is the port's `DeadLetterUnreadable`, its cause this
+/// adapter's `angzarr-store-sqlite-bad-dead-letter-place`.
+#[tokio::test]
+async fn a_bad_dead_letter_place_is_unreadable() {
+    use angzarr_ports::contract::dead_letter;
+    use angzarr_ports::{DeadLetterAt, DeadLetterStore, Write};
+    let path = database();
+    let s = stream(1);
+    {
+        let store = SqliteStore::open(&path).await.unwrap();
+        let letter = dead_letter(s, DeadLetterAt::Sequence(0), "wallet", 1);
+        store
+            .write(Write {
+                dead_letters: &[letter],
+                ..Write::default()
+            })
+            .await
+            .unwrap();
+    }
+    let mut conn = raw(&path).await;
+    sqlx::query("UPDATE dead_letters SET at = x'0102'")
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    conn.close().await.unwrap();
+    let store = SqliteStore::open(&path).await.unwrap();
+    let StoreError::DeadLetterUnreadable { reason, .. } = store.dead_letters(s).await.unwrap_err()
+    else {
+        panic!("not unreadable");
+    };
+    assert_eq!(reason.code, "angzarr-store-sqlite-bad-dead-letter-place");
+    assert_eq!(
+        reason.args,
+        [("kind", Arg::Uint(0)), ("length", Arg::Uint(2))]
     );
 }
 

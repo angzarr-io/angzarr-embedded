@@ -20,10 +20,10 @@ use std::time::Duration;
 use angzarr_ports::angzarr_proto::v1::meta::EditionCreated;
 use angzarr_ports::angzarr_proto::v1::{Cover, EventBook, EventPage, Snapshot};
 use angzarr_ports::{
-    Append, AppliedMigration, ChangeToken, EventStore, Head, ListStreams, Outbox, OutboxEntry,
-    PositionKey, PositionStore, Purge, ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime,
-    Slice, SnapshotStore, StoreError, StreamRef, Uuid, Watch, Write, Written,
-    EDITION_CREATED_TYPE_URL,
+    Append, AppliedMigration, ChangeToken, DeadLetter, DeadLetterKey, DeadLetterStore, EventStore,
+    Head, ListStreams, Outbox, OutboxEntry, PositionKey, PositionStore, Purge, ReadByCorrelation,
+    ReadStore, ReadUnit, ReadUntilTime, Slice, SnapshotStore, StoreError, StreamRef, Uuid, Watch,
+    Write, Written, EDITION_CREATED_TYPE_URL,
 };
 use prost::Message;
 use prost_types::Timestamp;
@@ -968,6 +968,31 @@ impl Purge for SqliteStore {
         ex.count();
         ex.conn.commit().await.map_err(unavailable)?;
         Ok(deleted)
+    }
+}
+
+impl DeadLetterStore for SqliteStore {
+    async fn dead_letters(&self, _stream: StreamRef<'_>) -> Result<Vec<DeadLetter>, StoreError> {
+        todo!()
+    }
+
+    async fn dead_letter(&self, _key: DeadLetterKey<'_>) -> Result<Option<DeadLetter>, StoreError> {
+        todo!()
+    }
+
+    async fn dead_lettered(&self, _domain: &str) -> Result<Vec<Cover>, StoreError> {
+        todo!()
+    }
+
+    async fn drain_dead_letters(
+        &self,
+        _stream: StreamRef<'_>,
+    ) -> Result<Vec<DeadLetter>, StoreError> {
+        todo!()
+    }
+
+    async fn remove_dead_letters(&self, _keys: &[DeadLetterKey<'_>]) -> Result<u64, StoreError> {
+        todo!()
     }
 }
 
