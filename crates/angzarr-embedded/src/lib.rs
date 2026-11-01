@@ -90,6 +90,7 @@ mod handler;
 pub mod markup;
 mod payload;
 mod policy;
+mod projector;
 mod registry;
 mod route;
 mod store;
@@ -170,6 +171,7 @@ pub use policy::{
     policy, projection, target_cover, translated, CommandTarget, EventSource, Order, Policy,
     PolicyHandler, Projection, Projector,
 };
+pub use projector::{CatchUp, Caught};
 pub use registry::{Aggregate, Description, Misconfigured, Registry};
 pub use route::{rejection, Rejected};
 pub use store::{

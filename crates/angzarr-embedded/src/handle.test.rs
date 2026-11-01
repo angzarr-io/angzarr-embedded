@@ -2526,3 +2526,23 @@ fn a_refusal_passes_through_as_command_refused() {
     let decoded = CommandRefused::decode(untyped.value.as_slice()).unwrap();
     assert_eq!(decoded.refusal, None, "an untyped rejection packs none");
 }
+
+/// A step folds its stream once, the router's fold that decides it: the
+/// kernel decodes and folds nothing again to type what it recorded. That
+/// is done when a caller asks (`Recorded::events`), and only for what
+/// the chain recorded.
+#[test]
+fn a_step_folds_its_stream_once() {
+    use crate::toys::APPLIED;
+    let registry = registry();
+    let store = MemoryStore::new();
+    opened(&store, &registry, 1, 5);
+    let folds = |n: u128| {
+        APPLIED.with(|applied| applied.set(0));
+        crate::toys::handle::<Account>(&store, &registry, deposit(n, 1), &at(20)).unwrap();
+        APPLIED.with(std::cell::Cell::get)
+    };
+    // Loaded from the snapshot the last step wrote, the router folds the
+    // one event it decides onto it; nothing folds it again.
+    assert_eq!((folds(3), folds(4)), (1, 1));
+}

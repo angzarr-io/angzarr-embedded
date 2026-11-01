@@ -1040,6 +1040,40 @@ pub trait AsyncProjector: Send + 'static {
     ) -> Option<Projecting<'a>>;
 }
 
+/// A marked-up projector ([`AsyncProjector`]) on the projector port,
+/// angzarr-router's `ProjectorHandler`: its ONE instance, handed a book,
+/// runs its `#[projects]` handler for each page it marks, in order, with
+/// the page's [`ProjectionContext`]. A failure is a bug (INTERNAL, its
+/// code and args the handler's report's, as the cause), as a remote
+/// projector's is: [`Registry::projector`](super::Registry::projector)
+/// registers one, and [`CatchUp`](super::CatchUp) catches one up.
+pub struct Projected<P> {
+    instance: std::sync::Mutex<Option<P>>,
+}
+
+impl<P: AsyncProjector> Projected<P> {
+    /// `projector` on the port.
+    pub fn new(projector: P) -> Projected<P> {
+        Projected {
+            instance: std::sync::Mutex::new(Some(projector)),
+        }
+    }
+}
+
+impl<P: AsyncProjector> angzarr_router::router::ProjectorHandler for Projected<P> {
+    fn name(&self) -> &str {
+        P::NAME
+    }
+
+    async fn dispatch(
+        &self,
+        events: &EventBook,
+    ) -> Result<angzarr_proto::v1::Projection, angzarr_router::error::CodedError> {
+        let _ = (events, &self.instance);
+        todo!()
+    }
+}
+
 /// A projector handler's run: awaited by the kernel after the commit.
 pub type Projecting<'a> =
     std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Report>> + Send + 'a>>;

@@ -7176,6 +7176,61 @@ mod projector {
         assert_eq!(*seen.lock().unwrap(), ["wallet", "lamp"]);
     }
 
+    /// A marked-up projector's failure is a bug, as a remote projector's
+    /// is (one port, one rule, decision 14.41): dead-lettered at once,
+    /// keyed by the events' stream and first sequence, and answered with
+    /// the caller's `Failure::Projection`, its report the bug's, the
+    /// handler's own code its cause.
+    #[test]
+    fn a_marked_up_projectors_failure_is_dead_lettered_as_a_bug() {
+        let port = BalancePort::default();
+        port.fail.store(true, std::sync::atomic::Ordering::SeqCst);
+        let registry = projected(&port);
+        let store = Mem::new();
+        let failed = handle_async(&store, &registry, 1, any(Open { bonus: 5 }), root());
+        let Err(failure @ Failure::Projection { .. }) = failed else {
+            panic!("a failing projection is the caller's Failure::Projection");
+        };
+        let letters = failure.dead_letters();
+        assert_eq!(letters.len(), 1, "{letters:?}");
+        assert_eq!(letters[0].letter.source_component, "balances");
+        assert_eq!(letters[0].stream, wallet().cover().clone());
+        let Failure::Projection { failures, .. } = &failure else {
+            unreachable!()
+        };
+        assert_eq!(
+            failures[0].1.code(),
+            "ROUTER_REASON_UNHANDLED_HANDLER_ERROR"
+        );
+        let report = failures[0].1.to_string();
+        assert!(report.contains("cause=toy-wallet-not-open"), "{report}");
+    }
+
+    /// A marked-up projector is the port, so it is caught up as any
+    /// projector is: its one instance handed each stream's events from the
+    /// store, as it would have been on each commit.
+    #[test]
+    fn a_marked_up_projector_is_caught_up_from_the_store() {
+        let registry = registry();
+        let store = Mem::new();
+        handle_async(&store, &registry, 1, any(Open { bonus: 5 }), root()).unwrap();
+        let other = Uuid::from_bytes([0x0b; 16]);
+        handle_async(&store, &registry, 2, any(Open { bonus: 7 }), other).unwrap();
+        let port = BalancePort::default();
+        let mut catch_up = ::angzarr_embedded::CatchUp::new(
+            <Balances as ::angzarr_embedded::markup::AsyncProjector>::SOURCES,
+            ::angzarr_embedded::markup::Projected::new(Balances {
+                port: port.clone(),
+                written: 0,
+            }),
+        );
+        let caught = ready(catch_up.step(&store, &registry)).unwrap();
+        assert!(caught.failures().is_empty(), "{:?}", caught.failures());
+        let mut lines = port.lines.lock().unwrap().clone();
+        lines.sort_by_key(|(_, cents)| *cents);
+        assert_eq!(lines.iter().map(|(_, c)| *c).collect::<Vec<_>>(), [5, 7]);
+    }
+
     #[test]
     #[should_panic(expected = "balances")]
     fn registering_a_projector_twice_panics() {

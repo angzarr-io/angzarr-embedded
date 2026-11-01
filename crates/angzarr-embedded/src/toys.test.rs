@@ -628,6 +628,12 @@ impl Diagnostic for Refused {
     }
 }
 
+thread_local! {
+    /// How many account events this thread has folded ([`Account`]'s
+    /// `apply`): what a test of how often a step folds counts.
+    pub static APPLIED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl Domain for Account {
     type State = AccountState;
     type Command = AccountCmd;
@@ -639,6 +645,7 @@ impl Domain for Account {
     const RULES_VERSION: &'static str = "v2";
 
     fn apply(s: &mut AccountState, e: &AccountEvent) {
+        APPLIED.with(|applied| applied.set(applied.get() + 1));
         match e {
             AccountEvent::Opened => s.open = true,
             AccountEvent::Deposited(cents) => s.cents += cents,
