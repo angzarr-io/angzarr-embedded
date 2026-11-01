@@ -651,7 +651,7 @@ marked-up handler's `Context` reads it there.
 A panicking fact handler is a bug: the router catches it
 (ROUTER_REASON_UNHANDLED_HANDLER_ERROR, cause ROUTER_REASON_HANDLER_PANICKED), the chain fails
 (`KernelError::Router`, `Recovery::Bug`), nothing is written, and the
-kernel logs a [dead letter](#dead-letters-a-logger).
+kernel logs a [dead letter](#dead-letters-durable-logged-and-answered).
 
 **Business output is payloads only.** The kernel builds the pages: their
 sequences and their `EventMeta` (`Identified::meta`).
@@ -960,14 +960,28 @@ expected−1. Otherwise it is discarded and the stream replayed from 0. The
 floor for the next `recorded_at` comes from the store
 (`Slice::last_recorded_at`), not the snapshot.
 
-## Dead letters: a logger
+## Dead letters: durable, logged and answered
 
 angzarr dead-letters what it cannot deliver and cannot refuse to a caller.
-angzarr-embedded is in process and atomic: there is no queue, no store and no replay.
-Whatever angzarr would dead-letter fails the chain back to its caller with
-nothing written, and the kernel hands the letter, angzarr's
-`AngzarrDeadLetter`, to the application's `DeadLetterLog`, which writes it
-as one line:
+angzarr-embedded is in process: there is no queue and no relay. Each letter,
+angzarr's `AngzarrDeadLetter`, goes three ways (owner ruling Q5,
+2026-10-31):
+
+- to the application's `DeadLetterLog`, at once, as one line;
+- into the store, durably, when the step that raised it has no caller
+  left (a policy's step, a projector's, a parked fact's): in the SAME
+  atomic write as the position the step moves past, or in a write of its
+  own when the position stays. A store keeps them when it is an
+  angzarr-ports `DeadLetterStore` (SQLite's is, migration 0006), keyed by
+  the stream the letter is about, its place there (its events' first
+  sequence, its command's id, or else its step's trigger) and its
+  component, so a step given up on again replaces its letter; it reads
+  and drains them per stream or by key, with no order across streams;
+- back to the caller: every call answers the letters it kept
+  (`Handled::dead_letters`, `Failure::dead_letters`).
+
+A command its caller waits for is the caller's: its own failure is
+answered and its line logged, never kept. The line:
 
 ```rust
 pub const DEAD_LETTER_PREFIX: &str = "DEAD_LETTER";

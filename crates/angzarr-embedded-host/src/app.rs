@@ -1,5 +1,7 @@
-//! [`run`]: the whole application from its config, what the CLI's
-//! generated `main.rs` calls.
+//! The application: an [`App`] built from its parts ([`App::builder`]: a
+//! registry, where its streams are kept ([`Stores`]), and the kernel's
+//! settings), or [`run`] from its config, what the CLI's generated
+//! `main.rs` calls.
 //!
 //! ```ignore
 //! #[tokio::main]
@@ -10,6 +12,14 @@
 //!     app.shutdown().await; // or drop it: the children stop
 //!     Ok(())
 //! }
+//!
+//! // From its parts: a store per project, a log of the dead letters' lines.
+//! let app = App::builder(projects, registry)   // projects: impl Stores<Key = Project>
+//!     .dead_letter_log(log)
+//!     .on_retryable(retry)
+//!     .start()
+//!     .await;                                   // each store at_start names, resumed
+//! app.handle_in(&project, book, &sampled).await;
 //! ```
 //!
 //! The [`App`] is `Send + Sync` and its methods are async, on the caller's
@@ -17,30 +27,46 @@
 //! each other (ordering is per stream only). Two commands to one stream
 //! race optimistically: both decide, the store takes one write, and the
 //! loser is decided again on the new head, unless it set an expected
-//! sequence, which makes the loss its business failure. Its store is ONE
-//! SQLite connection, which serializes the I/O and nothing else.
+//! sequence, which makes the loss its business failure. [`run`]'s store is
+//! ONE SQLite connection, which serializes the I/O and nothing else.
+//!
+//! Dead letters are durable (owner ruling Q5, 2026-10-31): a store that
+//! keeps them (an angzarr-ports `DeadLetterStore`, as SQLite's is) holds
+//! every letter a step with no caller left wrote, in that step's write;
+//! every call answers the letters it wrote; and a log the application
+//! supplies ([`AppBuilder::dead_letter_log`]) also gets each as its line.
+//! The host writes to no terminal: what it would say goes back to its
+//! caller ([`App::resumed`], [`Unserved`]).
 //!
 //! The host's children are started and stopped off the caller's workers
 //! (`tokio::task::spawn_blocking`): the App has no runtime of its own, and
 //! the caller's runtime is tokio's, with its timer.
 
+// The kernel's own Failure, as Kernel::handle_any returns it, is what
+// every call of the App answers.
+#![allow(clippy::result_large_err)]
+
 use std::collections::{BTreeMap, BTreeSet};
+use std::convert::Infallible;
 use std::future::Future;
 use std::path::Path;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use angzarr_diagnostic::Report;
-use angzarr_embedded::v1::{CommandBook, Cover, EventBook, EventPage};
+use angzarr_embedded::v1::{AngzarrDeadLetter, CommandBook, Cover, EventBook, EventPage};
 use angzarr_embedded::{
-    EventStore, Failure, Handled, Kernel, KernelError, Malformed, MemoryDeadLetters, OnPolicyBug,
-    OnRetryable, Registry, Rejected, Sampled, StoreError, StreamRef, Target,
+    DeadLetterLog, EventStore, Failure, Handled, Kernel, KernelError, Malformed, OnPolicyBug,
+    OnRetryable, Project, ProjectorFailure, Recorded, Registry, Rejected, Sampled, StoreError,
+    StreamRef, Target, Wait,
 };
 use angzarr_proto::v1::{CommandResponse, ComponentKind};
 use angzarr_store_sqlite::SqliteStore;
 
 use crate::config::{on_policy_bug, on_retryable, Expose, HostConfig, Languages};
 use crate::error::HostError;
-use crate::exposure::{Arrival, NotExposed};
+use crate::exposure::{Arrival, NotExposed, Unserved};
 use crate::host::{ChildExit, Host};
+use crate::stores::{OneStore, Stores};
 
 /// Runs the application the config at `config` describes: reads it
 /// (`angzarr.yaml`, strictly: [`crate::config::parse`]), starts its remote
@@ -49,9 +75,9 @@ use crate::host::{ChildExit, Host};
 /// to the in-process `component` entries, by name and kind (one listed and
 /// not registered, [`HostError::NotRegistered`]; one registered and not
 /// listed, [`HostError::NotListed`]), opens
-/// its store (SQLite, `store`) on the caller's runtime, and resumes the
-/// policy work its store still owes ([`Kernel::resume`]: what a crash left
-/// between a commit and its policies' steps) before it returns. The [`App`] is
+/// its store (SQLite, `store`) on the caller's runtime, and starts the
+/// [`App`] on it ([`AppBuilder::start`]: resuming the policy work the store
+/// still owes) before it returns. The [`App`] is
 /// how the application sends commands and reads its streams; dropping it
 /// stops the children. A component exposed (`expose`) that is registered
 /// as a process manager is refused ([`HostError::NotExposable`]): only an
@@ -136,16 +162,13 @@ pub async fn run_with(
             return Err(stopped(host, error).await);
         }
     };
-    let app = App {
-        host,
-        registry,
-        dead_letters: MemoryDeadLetters::new(),
-        policy_bug: on_policy_bug(config.policy.on_bug),
-        retry: on_retryable(&config.retry),
-        store,
-        exposed,
-    };
-    app.resume().await;
+    let app = App::builder(OneStore::new(store), registry)
+        .host(host)
+        .exposed(exposed)
+        .on_policy_bug(on_policy_bug(config.policy.on_bug))
+        .on_retryable(on_retryable(&config.retry))
+        .start()
+        .await;
     Ok(app)
 }
 
@@ -337,53 +360,208 @@ async fn stopped(host: Host, error: HostError) -> HostError {
     error
 }
 
-/// A running application: its registry, store, kernel and remote
-/// components. `Send + Sync`: shared (an `Arc`) by every task that sends
-/// it commands, and by the host's listener.
-pub struct App {
-    // Dropped in this order: the children stopped first.
+/// A log that keeps nothing: an [`App`]'s when the application supplies
+/// none, its dead letters kept by its store.
+struct Unlogged;
+
+impl DeadLetterLog for Unlogged {
+    fn write(&self, _line: &str) {}
+
+    fn letter(&self, _letter: &AngzarrDeadLetter) {}
+}
+
+/// The application's projections, shared by every call: each call's
+/// recorded chain is projected under the lock, which is held for the
+/// projection alone.
+struct Shared<'a>(&'a Mutex<Box<dyn Project + Send>>);
+
+impl Project for Shared<'_> {
+    fn project(&mut self, recorded: &Recorded, registry: &Registry) -> Vec<ProjectorFailure> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .project(recorded, registry)
+    }
+}
+
+/// An [`App`] being built from its parts: its registry, its [`Stores`],
+/// and the kernel's settings, each the kernel's default until set, as
+/// [`Kernel`]'s are. [`AppBuilder::start`] starts it.
+pub struct AppBuilder<R: Stores> {
     host: Host,
     registry: Registry,
-    dead_letters: MemoryDeadLetters,
-    /// The config's `policy.on_bug`.
+    stores: R,
+    log: Arc<dyn DeadLetterLog>,
+    projections: Box<dyn Project + Send>,
+    wait: Option<Arc<dyn Wait>>,
     policy_bug: OnPolicyBug,
-    /// The config's `retry`.
     retry: OnRetryable,
-    store: SqliteStore,
-    /// Each `component` entry exposed to the host's listener, by name: one
-    /// not here is exposed `"none"`.
     exposed: BTreeMap<String, Expose>,
 }
 
-impl App {
-    /// The kernel over this application's registry and dead letters,
-    /// doing with a policy's bug what the config's `policy.on_bug` says,
-    /// and retrying a step's retryable failure as its `retry` does.
-    pub fn kernel(&self) -> Kernel<'_> {
-        Kernel::new(&self.registry, &self.dead_letters)
-            .on_policy_bug(self.policy_bug)
-            .on_retryable(self.retry)
+impl<R: Stores> AppBuilder<R> {
+    /// The remote components' host: none until given ([`Host::none`]).
+    pub fn host(mut self, host: Host) -> AppBuilder<R> {
+        self.host = host;
+        self
     }
 
-    /// Runs the policy work the store still owes, by position
-    /// ([`Kernel::resume`]), at [`started_at`]. A step that fails is as it
-    /// is in any chain: dead-lettered, its position where `policy.on_bug`
-    /// leaves it, and a retryable one's held for the next resume. Its
-    /// failure is logged here and does not stop the application from
-    /// starting: the work stays the store's to owe.
-    async fn resume(&self) {
-        let kernel = self.kernel();
-        let mut projections = ();
+    /// Where each dead letter's line goes, beside the store, which keeps
+    /// the letters when it can: nowhere until given.
+    pub fn dead_letter_log(mut self, log: Arc<dyn DeadLetterLog>) -> AppBuilder<R> {
+        self.log = log;
+        self
+    }
+
+    /// The projections every call runs over what its chain recorded
+    /// ([`Project`]): none (`()`) until given.
+    pub fn projections(mut self, projections: Box<dyn Project + Send>) -> AppBuilder<R> {
+        self.projections = projections;
+        self
+    }
+
+    /// How the kernel waits out a backoff and draws its jitter
+    /// ([`Kernel::wait_with`]): the kernel's own until given.
+    pub fn wait_with(mut self, wait: Arc<dyn Wait>) -> AppBuilder<R> {
+        self.wait = Some(wait);
+        self
+    }
+
+    /// What a policy step's bug does with the policy's position
+    /// ([`Kernel::on_policy_bug`]).
+    pub fn on_policy_bug(mut self, policy_bug: OnPolicyBug) -> AppBuilder<R> {
+        self.policy_bug = policy_bug;
+        self
+    }
+
+    /// How a step's retryable failure is retried ([`Kernel::on_retryable`]).
+    pub fn on_retryable(mut self, retry: OnRetryable) -> AppBuilder<R> {
+        self.retry = retry;
+        self
+    }
+
+    /// The domains served to the host's listener, by `component` name,
+    /// each as exposed ([`App::serve_in`]); one not here is exposed
+    /// `"none"`.
+    pub fn exposed(mut self, exposed: BTreeMap<String, Expose>) -> AppBuilder<R> {
+        self.exposed = exposed;
+        self
+    }
+
+    /// The application, started: the policy work each store
+    /// [`Stores::at_start`] names still owes is resumed
+    /// ([`Kernel::resume`]: what a crash left between a commit and its
+    /// policies' steps) at [`started_at`]. A resume that fails does not
+    /// stop the start: the work stays the store's to owe, its step
+    /// dead-lettered and its position where `on_policy_bug` leaves it, and
+    /// the failure is the application's to read ([`App::resumed`]).
+    pub async fn start(self) -> App<R> {
+        let mut app = App {
+            host: self.host,
+            registry: self.registry,
+            log: self.log,
+            projections: Mutex::new(self.projections),
+            wait: self.wait,
+            policy_bug: self.policy_bug,
+            retry: self.retry,
+            stores: self.stores,
+            exposed: self.exposed,
+            resumed: Vec::new(),
+        };
         let sampled = started_at();
-        let resumed = off_worker(kernel.resume(&self.store, &sampled, &mut projections)).await;
-        if let Err(failure) = resumed {
-            eprintln!("{failure}");
+        let mut failed = Vec::new();
+        for key in app.stores.at_start() {
+            if let Err(failure) = app.resume_in(&key, &sampled).await {
+                failed.push((key, failure));
+            }
+        }
+        app.resumed = failed;
+        app
+    }
+}
+
+/// A running application: its registry, its stores, its kernel's settings
+/// and its remote components. `Send + Sync`: shared (an `Arc`) by every
+/// task that sends it commands, and by the host's listener. `App` alone
+/// is [`run`]'s: one SQLite store.
+pub struct App<R: Stores = OneStore<SqliteStore>> {
+    // Dropped in this order: the children stopped first.
+    host: Host,
+    registry: Registry,
+    log: Arc<dyn DeadLetterLog>,
+    projections: Mutex<Box<dyn Project + Send>>,
+    wait: Option<Arc<dyn Wait>>,
+    policy_bug: OnPolicyBug,
+    retry: OnRetryable,
+    stores: R,
+    /// Each `component` entry exposed to the host's listener, by name: one
+    /// not here is exposed `"none"`.
+    exposed: BTreeMap<String, Expose>,
+    /// The resumes at start that failed, by store.
+    resumed: Vec<(R::Key, Failure<Infallible>)>,
+}
+
+impl<R: Stores> App<R> {
+    /// An application from its parts: `registry` and `stores`, the kernel's
+    /// settings its defaults, no remote components, no projections, no
+    /// dead-letter log (the store keeps the letters), until the builder is
+    /// told otherwise.
+    pub fn builder(stores: R, registry: Registry) -> AppBuilder<R> {
+        AppBuilder {
+            host: Host::none(),
+            registry,
+            stores,
+            log: Arc::new(Unlogged),
+            projections: Box::new(()),
+            wait: None,
+            policy_bug: OnPolicyBug::default(),
+            retry: OnRetryable::default(),
+            exposed: BTreeMap::new(),
         }
     }
 
-    /// The application's store.
-    pub fn store(&self) -> &SqliteStore {
-        &self.store
+    /// The kernel over this application's registry and dead-letter log,
+    /// with its settings.
+    pub fn kernel(&self) -> Kernel<'_> {
+        let kernel = Kernel::new(&self.registry, &*self.log)
+            .on_policy_bug(self.policy_bug)
+            .on_retryable(self.retry);
+        match &self.wait {
+            Some(wait) => kernel.wait_with(&**wait),
+            None => kernel,
+        }
+    }
+
+    /// The store of `key`, as [`Stores::store`] opens it; refused, the
+    /// kernel's store failure.
+    async fn store_of(&self, key: &R::Key) -> Result<R::Store, KernelError> {
+        self.stores.store(key).await.map_err(KernelError::Store)
+    }
+
+    /// Runs the policy work the store of `key` still owes, by position
+    /// ([`Kernel::resume`]), at `sampled`: what the application runs for
+    /// a store it opens after start. What the steps recorded, and the dead
+    /// letters they wrote.
+    pub async fn resume_in(
+        &self,
+        key: &R::Key,
+        sampled: &Sampled,
+    ) -> Result<Recorded, Failure<Infallible>> {
+        let store = self.store_of(key).await.map_err(Failure::Kernel)?;
+        let kernel = self.kernel();
+        let mut projections = Shared(&self.projections);
+        off_worker(kernel.resume(&store, sampled, &mut projections)).await
+    }
+
+    /// The resumes at start that failed, by the key of their store
+    /// ([`AppBuilder::start`]).
+    pub fn resumed(&self) -> &[(R::Key, Failure<Infallible>)] {
+        &self.resumed
+    }
+
+    /// Where the application's streams are kept.
+    pub fn stores(&self) -> &R {
+        &self.stores
     }
 
     pub fn registry(&self) -> &Registry {
@@ -395,62 +573,71 @@ impl App {
         &self.host
     }
 
-    /// Handles one command book, for any domain, and every policy step it
-    /// sets off ([`Kernel::handle_any`]), once the chain settles. Calls run
-    /// concurrently; two on one stream race optimistically, as the kernel's
-    /// do.
-    // The kernel's own Failure, as Kernel::handle_any returns it.
-    #[allow(clippy::result_large_err)]
-    pub async fn handle(
+    /// Handles one command book in the store of `key`, for any domain,
+    /// and every policy step it sets off ([`Kernel::handle_any`]), once the
+    /// chain settles, the application's projections run over what it
+    /// recorded. Calls run concurrently; two on one stream race
+    /// optimistically, as the kernel's do.
+    pub async fn handle_in(
         &self,
+        key: &R::Key,
         book: CommandBook,
         sampled: &Sampled,
     ) -> Result<Handled, Failure<Rejected>> {
+        let store = self.store_of(key).await.map_err(Failure::Kernel)?;
         let kernel = self.kernel();
-        let mut projections = ();
-        off_worker(kernel.handle_any(&self.store, book, sampled, &mut projections)).await
+        let mut projections = Shared(&self.projections);
+        off_worker(kernel.handle_any(&store, book, sampled, &mut projections)).await
     }
 
-    /// Every event of the stream `cover` names, in sequence order.
-    pub async fn events(&self, cover: &Cover) -> Result<Vec<EventPage>, StoreError> {
+    /// Every event of the stream `cover` names in the store of `key`, in
+    /// sequence order.
+    pub async fn events_in(
+        &self,
+        key: &R::Key,
+        cover: &Cover,
+    ) -> Result<Vec<EventPage>, StoreError> {
         let stream = StreamRef::try_from(cover)?;
-        Ok(self.store.read(stream, 0, None).await?.pages)
+        let store = self.stores.store(key).await?;
+        Ok(store.read(stream, 0, None).await?.pages)
     }
 
     /// The exposure seam ([`crate::exposure`]): one request to the host's
-    /// listener, which arrived from `arrived`. Handled as [`App::handle`]
-    /// handles a book when its domain's `component` entry is exposed to the
-    /// arrival, and answered as `CommandHandlerCoordinatorService.Handle`
-    /// answers: the addressed stream's events and the delivery outcome.
-    /// A domain not exposed to the arrival is refused as an unknown domain
-    /// is (`Malformed::UnknownDomain`), the real reason logged locally
-    /// only.
-    // The kernel's own Failure, as Kernel::handle_any returns it.
-    #[allow(clippy::result_large_err)]
-    pub async fn serve(
+    /// listener, which arrived from `arrived`, for the store of `key`.
+    /// Handled as [`App::handle_in`] handles a book when its domain's
+    /// `component` entry is exposed to the arrival, and answered as
+    /// `CommandHandlerCoordinatorService.Handle` answers: the addressed
+    /// stream's events and the delivery outcome. A domain not exposed to
+    /// the arrival is refused as an unknown domain is
+    /// (`Malformed::UnknownDomain`), the real reason beside it for the
+    /// listener's own log ([`Unserved::Hidden`]).
+    pub async fn serve_in(
         &self,
+        key: &R::Key,
         book: CommandBook,
         arrived: Arrival,
         sampled: &Sampled,
-    ) -> Result<CommandResponse, Failure<Rejected>> {
+    ) -> Result<CommandResponse, Unserved> {
         let cover = book.cover.clone();
         if let Some(cover) = &cover {
             let expose = self.exposed.get(&cover.domain).copied().unwrap_or_default();
             if !arrived.admitted_by(expose) {
-                let hidden = NotExposed {
-                    domain: cover.domain.clone(),
-                    arrival: arrived,
-                    expose,
-                };
-                eprintln!("{hidden}");
-                return Err(Failure::Kernel(KernelError::Malformed(
-                    Malformed::UnknownDomain {
+                return Err(Unserved::Hidden {
+                    answer: Failure::Kernel(KernelError::Malformed(Malformed::UnknownDomain {
                         domain: cover.domain.clone(),
+                    })),
+                    hidden: NotExposed {
+                        domain: cover.domain.clone(),
+                        arrival: arrived,
+                        expose,
                     },
-                )));
+                });
             }
         }
-        let handled = self.handle(book, sampled).await?;
+        let handled = self
+            .handle_in(key, book, sampled)
+            .await
+            .map_err(Unserved::Failed)?;
         let events = handled
             .books()
             .into_iter()
@@ -466,12 +653,46 @@ impl App {
     }
 
     /// Stops the remote components' children ([`Host::shutdown`], off the
-    /// caller's workers) and closes the store.
+    /// caller's workers) and closes the stores.
     pub async fn shutdown(self) -> Vec<(String, ChildExit)> {
-        let App { host, store, .. } = self;
+        let App { host, stores, .. } = self;
         let exits = blocking(move || host.shutdown()).await;
-        drop(store);
+        drop(stores);
         exits
+    }
+}
+
+/// An application of one store: every call is the store's, by key `()`.
+impl<R: Stores<Key = ()>> App<R> {
+    /// [`App::handle_in`] the one store.
+    pub async fn handle(
+        &self,
+        book: CommandBook,
+        sampled: &Sampled,
+    ) -> Result<Handled, Failure<Rejected>> {
+        self.handle_in(&(), book, sampled).await
+    }
+
+    /// [`App::events_in`] the one store.
+    pub async fn events(&self, cover: &Cover) -> Result<Vec<EventPage>, StoreError> {
+        self.events_in(&(), cover).await
+    }
+
+    /// [`App::serve_in`] the one store.
+    pub async fn serve(
+        &self,
+        book: CommandBook,
+        arrived: Arrival,
+        sampled: &Sampled,
+    ) -> Result<CommandResponse, Unserved> {
+        self.serve_in(&(), book, arrived, sampled).await
+    }
+}
+
+impl<S: angzarr_embedded::Store + Send + Sync> App<OneStore<S>> {
+    /// The application's one store.
+    pub fn store(&self) -> &S {
+        self.stores.get()
     }
 }
 

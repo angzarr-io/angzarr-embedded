@@ -29,3 +29,14 @@ fn not_exposed_is_its_code_and_args() {
         "angzarr-embedded-host-not-exposed domain=table arrival=ip expose=none"
     );
 }
+
+/// The kernel's own failure, unserved, is answered as it is, and has no
+/// hidden reason.
+#[test]
+fn a_kernel_failure_unserved_is_its_own_answer() {
+    use angzarr_embedded::{Failure, KernelError};
+    let failure = Failure::Kernel(KernelError::ChainTooDeep { limit: 8 });
+    let unserved = Unserved::Failed(failure.clone());
+    assert_eq!(unserved.answer(), &failure);
+    assert_eq!(unserved.hidden(), None);
+}

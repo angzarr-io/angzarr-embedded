@@ -9,12 +9,14 @@
 //! component exposed `"ip"`. A domain not exposed to the arrival is
 //! answered exactly as an unknown domain is (the kernel's
 //! `Malformed::UnknownDomain`), so a caller cannot tell a hidden domain
-//! from a missing one; the host logs the real reason locally
-//! ([`NotExposed`], on its stderr).
+//! from a missing one; the real reason ([`NotExposed`]) goes back to the
+//! listener beside that answer ([`Unserved::Hidden`]), for it to log
+//! locally: the host writes to no terminal of its own.
 
 use std::fmt;
 
 use angzarr_diagnostic::{Arg, Diagnostic};
+use angzarr_embedded::{Failure, Rejected};
 
 use crate::config::Expose;
 
@@ -74,6 +76,40 @@ impl Diagnostic for NotExposed {
             ("arrival", self.arrival.as_str().into()),
             ("expose", self.expose.as_str().into()),
         ]
+    }
+}
+
+/// Why a request to the host's listener was not served
+/// ([`App::serve_in`](crate::App::serve_in)): what its caller is answered,
+/// and, for a hidden domain, why, which only the host's own log may say.
+#[derive(Clone, PartialEq, Debug)]
+pub enum Unserved {
+    /// Its domain is not exposed to where it arrived from: answered
+    /// `answer`, exactly as an unknown domain is; `hidden` is the real
+    /// reason, the listener's to log locally, never the caller's.
+    Hidden {
+        answer: Failure<Rejected>,
+        hidden: NotExposed,
+    },
+    /// The kernel's own failure, answered as it is.
+    Failed(Failure<Rejected>),
+}
+
+impl Unserved {
+    /// What the caller is answered.
+    pub fn answer(&self) -> &Failure<Rejected> {
+        match self {
+            Unserved::Hidden { answer, .. } | Unserved::Failed(answer) => answer,
+        }
+    }
+
+    /// Why the domain was hidden, for the host's own log: `None` for the
+    /// kernel's own failure.
+    pub fn hidden(&self) -> Option<&NotExposed> {
+        match self {
+            Unserved::Hidden { hidden, .. } => Some(hidden),
+            Unserved::Failed(_) => None,
+        }
     }
 }
 

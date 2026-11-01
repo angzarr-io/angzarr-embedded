@@ -730,20 +730,28 @@ mod exposure {
 
     /// A request for a domain not exposed to where it arrived from is
     /// refused exactly as an unknown domain is: the caller cannot tell a
-    /// hidden domain from a missing one (the owner's ruling, 2026-10-30;
-    /// the host logs the real reason locally). It reaches no handler:
-    /// nothing is written.
+    /// hidden domain from a missing one (the owner's ruling, 2026-10-30).
+    /// The real reason goes back beside the answer, for the listener's own
+    /// log: the host writes to no terminal. It reaches no handler: nothing
+    /// is written.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_domain_not_exposed_to_the_arrival_is_refused_as_unknown() {
         let app = app().await;
-        for (domain, arrived) in [
-            ("hidden", Arrival::Loopback),
-            ("hidden", Arrival::Ip),
-            ("local", Arrival::Ip),
+        for (domain, arrived, expose) in [
+            ("hidden", Arrival::Loopback, Expose::None),
+            ("hidden", Arrival::Ip, Expose::None),
+            ("local", Arrival::Ip, Expose::Loopback),
         ] {
             assert_eq!(
                 app.serve(meet(domain), arrived, &sampled(1)).await.err(),
-                Some(unknown(domain)),
+                Some(Unserved::Hidden {
+                    answer: unknown(domain),
+                    hidden: NotExposed {
+                        domain: domain.to_string(),
+                        arrival: arrived,
+                        expose,
+                    },
+                }),
                 "{domain} from {arrived:?}"
             );
             assert!(
@@ -763,10 +771,20 @@ mod exposure {
     async fn an_unknown_domain_is_the_kernels_unknown_domain() {
         let app = app().await;
         for arrived in [Arrival::Loopback, Arrival::Ip] {
+            let unserved = app.serve(meet("nowhere"), arrived, &sampled(1)).await.err();
             assert_eq!(
-                app.serve(meet("nowhere"), arrived, &sampled(1)).await.err(),
-                Some(unknown("nowhere")),
+                unserved.as_ref().map(Unserved::answer),
+                Some(&unknown("nowhere")),
                 "from {arrived:?}"
+            );
+            assert_eq!(
+                unserved.as_ref().and_then(Unserved::hidden),
+                Some(&NotExposed {
+                    domain: "nowhere".to_string(),
+                    arrival: arrived,
+                    expose: Expose::None,
+                }),
+                "the reason, for the listener's own log"
             );
         }
     }
@@ -1337,5 +1355,227 @@ mod resume {
             .collect();
         assert_eq!(right, [Some(any(MET))], "resumed before any command");
         drop(app);
+    }
+}
+
+/// D1 (owner Q5, review K6): an [`App`] from its parts, on any store or a
+/// store per key, its dead letters kept by the store and answered, its
+/// projections run on every call, and its stores resumed at start.
+mod parts {
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
+
+    use angzarr_embedded::angzarr_ports::memory::MemoryStore;
+    use angzarr_embedded::angzarr_router::error::CodedError;
+    use angzarr_embedded::angzarr_router::policy::PolicyDispatch;
+    use angzarr_embedded::{
+        DeadLetterStore, MemoryDeadLetters, Project, ProjectorFailure, Recorded, StreamRef,
+    };
+
+    use super::fixtures::*;
+    use super::*;
+    use crate::stores::{OneStore, Stores};
+
+    /// `name` as a domain whose every command decides [`MET`].
+    fn meeting(registry: &mut Registry, name: &str) {
+        registry
+            .command_handler(name, Meeting(Arc::new(Rendezvous::of(1))), descriptor(name))
+            .unwrap();
+    }
+
+    fn meet(domain: &str, n: u8) -> CommandBook {
+        book(domain, 1, n, "/test.meet.v1.Meet")
+    }
+
+    /// The payloads of `cover`'s stream in `store`.
+    async fn payloads(store: &MemoryStore, cover: &Cover) -> Vec<String> {
+        let stream = StreamRef::try_from(cover).unwrap();
+        store
+            .read(stream, 0, None)
+            .await
+            .unwrap()
+            .pages
+            .into_iter()
+            .map(|p| p.payload.map(|a| a.type_url).unwrap_or_default())
+            .collect()
+    }
+
+    /// An app from its parts runs on the store it is given, a MemoryStore
+    /// here: no SQLite, no config.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_app_from_parts_runs_on_the_store_it_is_given() {
+        let mut registry = Registry::new();
+        meeting(&mut registry, "left");
+        let app = App::builder(OneStore::new(MemoryStore::new()), registry)
+            .start()
+            .await;
+        let handled = app.handle(meet("left", 1), &sampled(1)).await;
+        assert!(
+            matches!(handled, Ok(Handled::Applied(_))),
+            "{:?}",
+            handled.err()
+        );
+        assert_eq!(payloads(app.store(), &cover("left", 1)).await, [MET]);
+        assert!(app.resumed().is_empty());
+    }
+
+    /// One MemoryStore per project, opened by name.
+    #[derive(Default)]
+    struct Projects(Mutex<BTreeMap<String, Arc<MemoryStore>>>);
+
+    impl Stores for Projects {
+        type Key = String;
+        type Store = Arc<MemoryStore>;
+
+        async fn store(&self, key: &String) -> Result<Arc<MemoryStore>, StoreError> {
+            let mut held = self.0.lock().unwrap();
+            Ok(Arc::clone(held.entry(key.clone()).or_default()))
+        }
+
+        fn at_start(&self) -> Vec<String> {
+            self.0.lock().unwrap().keys().cloned().collect()
+        }
+    }
+
+    /// An app over a store per project handles each call in the store its
+    /// key names, and no other.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_app_keyed_by_project_handles_each_call_in_its_projects_store() {
+        let mut registry = Registry::new();
+        meeting(&mut registry, "left");
+        let app = App::builder(Projects::default(), registry).start().await;
+        let (a, b) = ("a".to_string(), "b".to_string());
+        app.handle_in(&a, meet("left", 1), &sampled(1))
+            .await
+            .expect("a's command");
+        let in_a = app.stores().store(&a).await.unwrap();
+        let in_b = app.stores().store(&b).await.unwrap();
+        assert_eq!(payloads(&in_a, &cover("left", 1)).await, [MET]);
+        assert!(
+            payloads(&in_b, &cover("left", 1)).await.is_empty(),
+            "b's untouched"
+        );
+        assert_eq!(app.events_in(&a, &cover("left", 1)).await.unwrap().len(), 1);
+        assert!(app
+            .events_in(&b, &cover("left", 1))
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    /// `left-right`, a policy of `left` whose every answer is a bug.
+    fn buggy() -> PolicyDispatch {
+        PolicyDispatch::new("left-right", "left", "right")
+            .on_event(MET.trim_start_matches('/'), |_, _| {
+                Err(CodedError::bug("toy-left-right-broken", []).into())
+            })
+    }
+
+    /// The store keeps a policy's dead letter (it is a DeadLetterStore),
+    /// the call answers it, and the log the application supplied gets its
+    /// line.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_store_keeps_a_policys_dead_letter_and_the_call_answers_it() {
+        let mut registry = Registry::new();
+        meeting(&mut registry, "left");
+        registry.policy_dispatch(buggy());
+        let log = Arc::new(MemoryDeadLetters::new());
+        let app = App::builder(OneStore::new(MemoryStore::new()), registry)
+            .dead_letter_log(log.clone())
+            .start()
+            .await;
+        let failure = app
+            .handle(meet("left", 1), &sampled(1))
+            .await
+            .err()
+            .expect("the policy's bug fails the call");
+        assert_eq!(failure.dead_letters().len(), 1, "{failure:?}");
+        let left = cover("left", 1);
+        let kept = app
+            .store()
+            .dead_letters(StreamRef::try_from(&left).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(kept, failure.dead_letters(), "kept as answered");
+        assert_eq!(log.lines().len(), 1, "and logged");
+    }
+
+    /// Counts the chains it projects.
+    #[derive(Clone, Default)]
+    struct Counted(Arc<Mutex<usize>>);
+
+    impl Project for Counted {
+        fn project(&mut self, recorded: &Recorded, _: &Registry) -> Vec<ProjectorFailure> {
+            *self.0.lock().unwrap() += recorded.steps().len();
+            Vec::new()
+        }
+    }
+
+    /// The application's projections run on every call's recorded chain.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_projections_run_on_every_call() {
+        let mut registry = Registry::new();
+        meeting(&mut registry, "left");
+        let counted = Counted::default();
+        let app = App::builder(OneStore::new(MemoryStore::new()), registry)
+            .projections(Box::new(counted.clone()))
+            .start()
+            .await;
+        for n in 1..=2 {
+            app.handle(meet("left", n), &sampled(n)).await.unwrap();
+        }
+        assert_eq!(*counted.0.lock().unwrap(), 2, "each call's step");
+    }
+
+    /// At start, each store the resolver names is resumed: the policy work
+    /// it owes is run, and a resume that fails is the application's to
+    /// read, by its store's key, the start going on. The crash is forced:
+    /// each store's `left` event is committed by a kernel with no policy.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn each_store_named_at_start_is_resumed_and_its_failure_kept() {
+        let projects = Projects::default();
+        for (key, root) in [("ok", 1), ("broken", 2)] {
+            let store = projects.store(&key.to_string()).await.unwrap();
+            let mut registry = Registry::new();
+            meeting(&mut registry, "left");
+            let log = MemoryDeadLetters::new();
+            Kernel::new(&registry, &log)
+                .handle_any(
+                    &*store,
+                    book("left", root, 1, "/test.meet.v1.Meet"),
+                    &sampled(1),
+                    &mut (),
+                )
+                .await
+                .expect("left's event committed, its step owed");
+        }
+        let mut registry = Registry::new();
+        meeting(&mut registry, "left");
+        meeting(&mut registry, "right");
+        // Root 2's step is a bug; root 1's sends right a Meet.
+        registry.policy_dispatch(PolicyDispatch::new("left-right", "left", "right").on_event(
+            MET.trim_start_matches('/'),
+            |_, source| {
+                let root = source.and_then(|c| c.root.clone());
+                if root == cover("left", 2).root {
+                    return Err(CodedError::bug("toy-left-right-broken", []).into());
+                }
+                let mut meet = book("right", 1, 9, "/test.meet.v1.Meet");
+                if let Some(page) = meet.page.as_mut() {
+                    page.command_id = None;
+                }
+                Ok(vec![meet])
+            },
+        ));
+        let app = App::builder(projects, registry).start().await;
+        let ok = app.events_in(&"ok".to_string(), &cover("right", 1)).await;
+        assert_eq!(ok.unwrap().len(), 1, "resumed before any command");
+        let resumed: Vec<&String> = app.resumed().iter().map(|(key, _)| key).collect();
+        assert_eq!(resumed, ["broken"], "{:?}", app.resumed());
+        assert_eq!(
+            app.resumed()[0].1.dead_letters().len(),
+            1,
+            "its letter answered"
+        );
     }
 }

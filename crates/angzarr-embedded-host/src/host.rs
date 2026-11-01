@@ -127,6 +127,15 @@ impl Host {
         Host::start_with_languages(config, &Languages::builtin())
     }
 
+    /// A host of no remote components: an application whose components are
+    /// all in process.
+    pub fn none() -> Host {
+        Host {
+            runtime: None,
+            domains: Vec::new(),
+        }
+    }
+
     /// [`Host::start`] knowing `languages`: the built-in ones and those
     /// the application loads. A component in a language not among them is
     /// refused before any child starts ([`HostError::UnknownLanguage`]).

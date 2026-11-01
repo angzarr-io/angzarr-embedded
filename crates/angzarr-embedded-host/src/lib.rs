@@ -46,21 +46,23 @@ pub mod handshake;
 pub mod host;
 pub mod remote;
 pub mod rpc;
+pub mod stores;
 
 /// The host config's schema crate, whose types [`config`] re-exports.
 pub use angzarr_embedded_host_config;
-pub use app::{run, run_with, run_with_languages, App};
+pub use app::{run, run_with, run_with_languages, App, AppBuilder};
 pub use config::{
     ComponentConfig, ComponentKindConfig, Expose, HostConfig, Language, Languages, Launch,
     Placement, StoreConfig, Supervision,
 };
 pub use descriptor::{validate, DescriptorRefused};
 pub use error::{HandshakeError, HostError};
-pub use exposure::{Arrival, NotExposed};
+pub use exposure::{Arrival, NotExposed, Unserved};
 pub use host::{ChildExit, Host};
 pub use remote::{
     is_retryable, RemoteCommandHandler, RemotePolicyHandler, RemoteProjectorHandler, RemoteUpcaster,
 };
+pub use stores::{OneStore, Stores};
 
 /// This crate's en-US Fluent catalog, its name first: what a dependent
 /// embeds to render this crate's diagnostics. The text of
