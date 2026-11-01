@@ -27,6 +27,13 @@
 //!   depth limit) or a store failure holds the position, so
 //!   [`Kernel::resume`] runs the step again, deduplicated by its derived
 //!   command id.
+//! - **Dead letters are durable** (owner ruling Q5): a step with no caller
+//!   left keeps each letter it raises in the store, in the same write as
+//!   the position it moves past (or alone, when the position stays), and
+//!   every call answers the letters it kept ([`Handled::dead_letters`],
+//!   [`Failure::dead_letters`]). The
+//!   originating command's own failure is its caller's: answered, its line
+//!   logged, never kept.
 //! - **A refused command of a policy that answers refusals** (every
 //!   marked-up one) is no failure: the policy's refusal fact goes to the
 //!   stream of the triggering event as a step of its own, with the refused
@@ -64,7 +71,7 @@ use super::check::{check, check_refusal, Checked, Identified, Sampled};
 use super::coordinator::{
     contextual_command, decide, deduplicate, load, write_snapshot, Contextual, Deduplicated,
 };
-use super::dead_letter::{self, write_at_cap, Cause, Component, DeadLetterLog};
+use super::dead_letter::{self, write_at_cap, CallLetters, Cause, Component, DeadLetterLog};
 use super::domain::Domain;
 use super::error::{class, Class};
 use super::error::{Failure, KernelError, Step, StepError};
@@ -124,7 +131,7 @@ pub struct Kernel<'k> {
 /// sequence, or a fact) that loses such a race is re-run on the new head
 /// under a cap of its own, `max_race_runs` (decision 14.46), with the same
 /// backoff and jitter between runs. At either cap the command is given
-/// up, [`KernelError::RetryCapExhausted`] (a fact, [`Handled::Parked(_)`]):
+/// up, [`KernelError::RetryCapExhausted`] (a fact, [`Handled::Parked`]):
 /// a policy's step and a fact are dead-lettered, a command its caller
 /// waits for is not. `max_race_runs = 0` turns race re-runs off, for a
 /// caller that owns its retry loop: a stamped command's lost race goes
@@ -328,12 +335,14 @@ impl std::future::Future for Sleep {
 /// [`KernelError::Router`] the kernel dead-letters) alike.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum OnPolicyBug {
-    /// Move the position past the trigger: the dead letter is the record
-    /// to replay, and [`Kernel::resume`] does not run the step again.
+    /// Move the position past the trigger: the dead letter, kept in the
+    /// same write, is the record to replay, and [`Kernel::resume`] does not
+    /// run the step again.
     #[default]
     MovePast,
     /// Keep the position at the trigger, so [`Kernel::resume`] runs the
-    /// step again (and dead-letters it again while the bug stands).
+    /// step again (and dead-letters it again while the bug stands, the
+    /// letter kept once, under its key).
     Stay,
 }
 
@@ -475,7 +484,7 @@ impl<'k> Kernel<'k> {
     /// and COMMUTATIVE, a sender's expected sequence is re-delivered the
     /// widened window, under the retry cap; under STRICT, it is
     /// [`KernelError::Stale`]. At either cap the command is dead-lettered,
-    /// [`KernelError::RetryCapExhausted`], and a fact [`Handled::Parked(_)`]. A cover of another
+    /// [`KernelError::RetryCapExhausted`], and a fact [`Handled::Parked`]. A cover of another
     /// domain than `D` is [`KernelError::WrongDomain`]; a remote domain's
     /// command goes to its coordinator ([`Registry::remote`]). Business
     /// code stays synchronous and pure, each dispatch awaited; the future
@@ -518,7 +527,8 @@ impl<'k> Kernel<'k> {
             .await
     }
 
-    /// [`Kernel::handle`] from step 2 on.
+    /// [`Kernel::handle`] from step 2 on, answering the dead letters the
+    /// call wrote ([`lettered`]).
     async fn handle_checked<S, Ps>(
         &self,
         store: &S,
@@ -530,13 +540,33 @@ impl<'k> Kernel<'k> {
         S: Store,
         Ps: Project,
     {
-        let mut port = StorePort(store);
-        let mut run = Run::new(self, sampled);
+        let letters = CallLetters::new(self.dead_letters);
+        let mut port = StorePort::new(store, &letters);
+        let handled = self
+            .chain(&mut port, &letters, checked, sampled, projections)
+            .await;
+        lettered(handled, letters.take())
+    }
+
+    /// The command's step, then the chain it sets off and the projections.
+    async fn chain<P, Ps>(
+        &self,
+        port: &mut P,
+        letters: &CallLetters<'_>,
+        checked: Checked,
+        sampled: &Sampled,
+        projections: &mut Ps,
+    ) -> Result<Handled, Failure<Rejected>>
+    where
+        P: Port,
+        Ps: Project,
+    {
+        let mut run = Run::new(self, sampled, letters);
         let identified = checked.identify(sampled);
         let cover = identified.cover().clone();
         let mut tries = Tries::default();
         let origin = loop {
-            let failure = match run.origin(&mut port, identified.clone()).await {
+            let failure = match run.origin(port, identified.clone()).await {
                 Err(failure) => failure,
                 answer => break answer,
             };
@@ -547,12 +577,18 @@ impl<'k> Kernel<'k> {
             }
         };
         let origin = match origin {
-            // A fact is never refused: given up at the cap, it is parked.
+            // A fact is never refused: given up at the cap, it is parked,
+            // its letter kept, for no caller holds it.
             Err(Failure::Kernel(KernelError::RetryCapExhausted { .. }))
                 if identified.body().is_fact() =>
             {
-                return Ok(Handled::Parked(Vec::new()))
+                port.write_letters(None)
+                    .await
+                    .map_err(|e| Failure::Kernel(KernelError::Store(e)))?;
+                return Ok(Handled::Parked(Vec::new()));
             }
+            // The command's own failure is its caller's: answered, its
+            // line logged, its letter never placed.
             origin => origin?,
         };
         match origin {
@@ -562,36 +598,41 @@ impl<'k> Kernel<'k> {
                 if let Some(first) = events.pages.first() {
                     run.queue
                         .push_back((cover, Vec::new(), Some(first.sequence)));
-                    run.settle(&mut port).await.map_err(downstream)?;
+                    run.settle(port).await.map_err(downstream)?;
                 }
-                let failures = self.run_projectors(&run.recorded.steps).await;
-                if !failures.is_empty() {
-                    return Err(Failure::Projection {
+                self.run_projectors(&run.recorded.steps, port, letters)
+                    .await
+                    .map_err(|failures| Failure::Projection {
                         committed: run.recorded.books,
                         failures,
                         dead_letters: Vec::new(),
-                    });
-                }
+                    })?;
                 Ok(Handled::Duplicate(events, Vec::new()))
             }
             Origin::Skipped => {
-                self.finish(Handled::Applied(Recorded::default()), projections)
-                    .await
+                self.finish(
+                    Handled::Applied(Recorded::default()),
+                    projections,
+                    port,
+                    letters,
+                )
+                .await
             }
             Origin::Forwarded(Forwarded::Duplicate(events)) => {
                 Ok(Handled::Duplicate(events, Vec::new()))
             }
             Origin::Forwarded(Forwarded::Applied(events)) => {
                 run.answered(events);
-                self.finish(Handled::Applied(run.recorded), projections)
+                self.finish(Handled::Applied(run.recorded), projections, port, letters)
                     .await
             }
             Origin::Wrote(head) => {
                 run.queue.push_back((cover, Vec::new(), Some(head)));
-                let settled = run.settle(&mut port).await.map_err(downstream);
+                let settled = run.settle(port).await.map_err(downstream);
                 let recorded = run.recorded;
                 settled?;
-                self.finish(Handled::Applied(recorded), projections).await
+                self.finish(Handled::Applied(recorded), projections, port, letters)
+                    .await
             }
         }
     }
@@ -603,7 +644,7 @@ impl<'k> Kernel<'k> {
     /// a step that landed before a crash is not repeated; one write each,
     /// its position written with it). What an application runs at start,
     /// after a crash, or after adding a policy to a domain with history.
-    /// Returns what the steps recorded.
+    /// Returns what the steps recorded, and the dead letters they wrote.
     pub async fn resume<S, Ps>(
         &self,
         store: &S,
@@ -614,8 +655,32 @@ impl<'k> Kernel<'k> {
         S: Store,
         Ps: Project,
     {
-        let mut port = StorePort(store);
-        let mut run = Run::new(self, sampled);
+        let letters = CallLetters::new(self.dead_letters);
+        let mut port = StorePort::new(store, &letters);
+        let resumed = self
+            .resume_on(&mut port, &letters, sampled, projections)
+            .await;
+        match lettered(resumed.map(Handled::Applied), letters.take())? {
+            Handled::Applied(recorded) => Ok(recorded),
+            Handled::Duplicate(..) | Handled::Parked(_) => {
+                unreachable!("a resume answers what it recorded")
+            }
+        }
+    }
+
+    /// [`Kernel::resume`] on `port`.
+    async fn resume_on<P, Ps>(
+        &self,
+        port: &mut P,
+        letters: &CallLetters<'_>,
+        sampled: &Sampled,
+        projections: &mut Ps,
+    ) -> Result<Recorded, Failure<Infallible>>
+    where
+        P: Port,
+        Ps: Project,
+    {
+        let mut run = Run::new(self, sampled, letters);
         let mut sources: Vec<&str> = Vec::new();
         for policy in self.registry.all_policies() {
             if !sources.contains(&policy.source()) {
@@ -631,10 +696,13 @@ impl<'k> Kernel<'k> {
                 run.queue.push_back((cover, Vec::new(), None));
             }
         }
-        let settled = run.settle(&mut port).await.map_err(downstream);
+        let settled = run.settle(port).await.map_err(downstream);
         let recorded = run.recorded;
         settled?;
-        match self.finish(Handled::Applied(recorded), projections).await? {
+        match self
+            .finish(Handled::Applied(recorded), projections, port, letters)
+            .await?
+        {
             Handled::Applied(recorded) => Ok(recorded),
             Handled::Duplicate(..) | Handled::Parked(_) => {
                 unreachable!("a resume answers what it recorded")
@@ -644,24 +712,25 @@ impl<'k> Kernel<'k> {
 
     /// Run `projections`, then every marked-up projector, over what was
     /// written.
-    async fn finish<R, Ps: Project>(
+    async fn finish<R, P: Port, Ps: Project>(
         &self,
         handled: Handled,
         projections: &mut Ps,
+        port: &mut P,
+        letters: &CallLetters<'_>,
     ) -> Result<Handled, Failure<R>> {
         let handled = self.project(handled, projections);
         let (steps, books) = match &handled {
             Handled::Applied(recorded) => (recorded.steps.clone(), recorded.books.clone()),
             Handled::Duplicate(..) | Handled::Parked(_) => return Ok(handled),
         };
-        let failures = self.run_projectors(&steps).await;
-        if !failures.is_empty() {
-            return Err(Failure::Projection {
+        self.run_projectors(&steps, port, letters)
+            .await
+            .map_err(|failures| Failure::Projection {
                 committed: books,
                 failures,
                 dead_letters: Vec::new(),
-            });
-        }
+            })?;
         Ok(handled)
     }
 
@@ -669,8 +738,31 @@ impl<'k> Kernel<'k> {
     /// sources, in registration order: a marked-up one each event in stream
     /// order, a `ProjectorHandler` each book whole ([`Self::project_book`]).
     /// A projector stops at its first failure, the others go on. The
-    /// failures, by projector.
-    async fn run_projectors(&self, committed: &[EventBook]) -> Vec<(String, Report)> {
+    /// failures, by projector, once the dead letters they raised are kept
+    /// in a write of their own (a projector's step has no caller left). A
+    /// failure to keep them leaves them the call's answer alone: the
+    /// failed call is retried, a duplicate, which runs the projectors
+    /// again.
+    async fn run_projectors<P: Port>(
+        &self,
+        committed: &[EventBook],
+        port: &mut P,
+        letters: &CallLetters<'_>,
+    ) -> Result<(), Vec<(String, Report)>> {
+        let failures = self.project_all(committed, letters).await;
+        if failures.is_empty() {
+            return Ok(());
+        }
+        let _unkept = port.write_letters(None).await;
+        Err(failures)
+    }
+
+    /// Every projector over `committed`: the failures, by projector.
+    async fn project_all(
+        &self,
+        committed: &[EventBook],
+        letters: &CallLetters<'_>,
+    ) -> Vec<(String, Report)> {
         let mut failures = Vec::new();
         for entry in self.registry.projectors() {
             let books: Vec<&EventBook> = committed
@@ -688,7 +780,10 @@ impl<'k> Kernel<'k> {
                 ProjectorInstance::Marked(instance) => instance,
                 ProjectorInstance::Handler(handler) => {
                     for book in books.into_iter().filter(|book| !book.pages.is_empty()) {
-                        if let Err(error) = self.project_book(&entry.name, &**handler, book).await {
+                        if let Err(error) = self
+                            .project_book(&entry.name, &**handler, book, letters)
+                            .await
+                        {
                             failures.push((entry.name.clone(), error));
                             break;
                         }
@@ -747,6 +842,7 @@ impl<'k> Kernel<'k> {
         name: &str,
         handler: &dyn DynProjectorHandler,
         book: &EventBook,
+        letters: &CallLetters<'_>,
     ) -> Result<(), Report> {
         let mut retries = 0;
         loop {
@@ -761,7 +857,7 @@ impl<'k> Kernel<'k> {
             let error = KernelError::Router(error);
             if !retryable {
                 dead_letter::write(
-                    self.dead_letters,
+                    letters,
                     Payload::RejectedEvents(book.clone()),
                     Component::projector(name),
                     Cause::Kernel(&error),
@@ -773,7 +869,7 @@ impl<'k> Kernel<'k> {
             }
             if retries >= self.retry.max_retries {
                 write_at_cap(
-                    self.dead_letters,
+                    letters,
                     Payload::RejectedEvents(book.clone()),
                     Component::projector(name),
                     Cause::Kernel(&error),
@@ -858,6 +954,40 @@ fn downstream<R>((path, error): (Vec<Step>, StepError)) -> Failure<R> {
     }
 }
 
+/// `handled`, answering `letters`, the dead letters the call wrote: in
+/// what it recorded, its duplicate or its parked fact, or its failure
+/// further down the chain or at a projector. A command that failed itself
+/// ([`Failure::Rejected`], [`Failure::Kernel`]) wrote none: its own are its
+/// caller's, never kept.
+fn lettered<R>(
+    handled: Result<Handled, Failure<R>>,
+    letters: Vec<DeadLetter>,
+) -> Result<Handled, Failure<R>> {
+    match handled {
+        Ok(Handled::Applied(mut recorded)) => {
+            recorded.dead_letters = letters;
+            Ok(Handled::Applied(recorded))
+        }
+        Ok(Handled::Duplicate(events, _)) => Ok(Handled::Duplicate(events, letters)),
+        Ok(Handled::Parked(_)) => Ok(Handled::Parked(letters)),
+        Err(Failure::Downstream { path, error, .. }) => Err(Failure::Downstream {
+            path,
+            error,
+            dead_letters: letters,
+        }),
+        Err(Failure::Projection {
+            committed,
+            failures,
+            ..
+        }) => Err(Failure::Projection {
+            committed,
+            failures,
+            dead_letters: letters,
+        }),
+        failed @ Err(Failure::Rejected(_) | Failure::Kernel(_)) => failed,
+    }
+}
+
 /// The path to a failing step, and why it failed.
 type Failed = (Vec<Step>, StepError);
 
@@ -868,7 +998,8 @@ type Failed = (Vec<Step>, StepError);
 struct Run<'k> {
     registry: &'k Registry,
     sampled: &'k Sampled,
-    dead_letters: &'k dyn DeadLetterLog,
+    /// The call's dead letters, the log's lines among them.
+    letters: &'k CallLetters<'k>,
     limit: usize,
     policy_bug: OnPolicyBug,
     /// Mints each delivery's conflict nonce.
@@ -1030,11 +1161,11 @@ enum Stepped {
 }
 
 impl<'k> Run<'k> {
-    fn new(kernel: &Kernel<'k>, sampled: &'k Sampled) -> Run<'k> {
+    fn new(kernel: &Kernel<'k>, sampled: &'k Sampled, letters: &'k CallLetters<'k>) -> Run<'k> {
         Run {
             registry: kernel.registry,
             sampled,
-            dead_letters: kernel.dead_letters,
+            letters,
             limit: kernel.limit,
             policy_bug: kernel.policy_bug,
             nonces: 0,
@@ -1105,7 +1236,7 @@ impl<'k> Run<'k> {
                 };
                 if Self::callerless(policy_step, command) {
                     dead_letter::write(
-                        self.dead_letters,
+                        self.letters,
                         Payload::RejectedCommand(command.to_book()),
                         Component::domain(self.registry, command.domain()),
                         Cause::Kernel(&given_up),
@@ -1126,7 +1257,7 @@ impl<'k> Run<'k> {
                 (Self::callerless(policy_step, command), failure)
             {
                 write_at_cap(
-                    self.dead_letters,
+                    self.letters,
                     Payload::RejectedCommand(command.to_book()),
                     Component::domain(self.registry, command.domain()),
                     Cause::Kernel(error),
@@ -1156,7 +1287,7 @@ impl<'k> Run<'k> {
         identified: Identified,
     ) -> Result<Origin, Failure<Rejected>> {
         if let Some(Target::Remote(remote)) = self.registry.target(identified.domain()) {
-            let forwarded = forward(remote, &identified, self.dead_letters).await?;
+            let forwarded = forward(remote, &identified, self.letters).await?;
             return Ok(Origin::Forwarded(forwarded));
         }
         let cover = identified.cover().clone();
@@ -1167,7 +1298,7 @@ impl<'k> Run<'k> {
         };
         let contextual = load(*novel, &mut self.nonces).map_err(Failure::Kernel)?;
         let head = contextual.head();
-        let decided = decide(&contextual, self.sampled, self.registry, self.dead_letters).await?;
+        let decided = decide(&contextual, self.sampled, self.registry, self.letters).await?;
         let pages = decided.pages;
         let stream = typed(&contextual, &pages, self.registry).map_err(Failure::Kernel)?;
         if !pages.is_empty() {
@@ -1260,6 +1391,23 @@ impl<'k> Run<'k> {
         page: &EventPage,
         path: &[Step],
     ) -> Result<(), Failed> {
+        let ran = self.react(port, policy, source, page, path).await;
+        let kept = port.write_letters(Some((source, page.sequence))).await;
+        match (ran, kept) {
+            (Ok(()), Err(e)) => Err((path.to_vec(), StepError::Kernel(KernelError::Store(e)))),
+            (ran, _) => ran,
+        }
+    }
+
+    /// [`Run::run_policy`]'s step itself.
+    async fn react<P: Port>(
+        &mut self,
+        port: &mut P,
+        policy: &PolicyEntry,
+        source: &Cover,
+        page: &EventPage,
+        path: &[Step],
+    ) -> Result<(), Failed> {
         let next = page.sequence + 1;
         let position = [(policy.name(), source, next)];
         let trigger = EventRef {
@@ -1289,7 +1437,7 @@ impl<'k> Run<'k> {
             Err(error) => {
                 if let Some(failure) = super::route::policy_failure(&error) {
                     dead_letter::write(
-                        self.dead_letters,
+                        self.letters,
                         Payload::RejectedEvents(event),
                         Component::policy(policy.name()),
                         Cause::PolicyFailed(&failure),
@@ -1301,7 +1449,7 @@ impl<'k> Run<'k> {
                 }
                 let error = KernelError::Router(error);
                 dead_letter::write(
-                    self.dead_letters,
+                    self.letters,
                     Payload::RejectedEvents(event),
                     Component::policy(policy.name()),
                     Cause::Kernel(&error),
@@ -1333,7 +1481,7 @@ impl<'k> Run<'k> {
                 let limit = self.limit;
                 return Err((path, StepError::Kernel(KernelError::ChainTooDeep { limit })));
             }
-            let checked = match order.check_logged(self.registry, self.dead_letters) {
+            let checked = match order.check_logged(self.registry, self.letters) {
                 Ok(checked) => checked,
                 Err(m) => return Err((path, StepError::Kernel(KernelError::Malformed(m)))),
             };
@@ -1348,7 +1496,7 @@ impl<'k> Run<'k> {
                 Err(Failure::Rejected(rejected)) => {
                     if !policy.answers_refusals {
                         dead_letter::write(
-                            self.dead_letters,
+                            self.letters,
                             Payload::RejectedCommand(delivered.to_book()),
                             Component::policy(policy.name()),
                             Cause::Refused(&rejected),
@@ -1427,7 +1575,7 @@ impl<'k> Run<'k> {
                     return Err(kernel(error));
                 };
                 dead_letter::write(
-                    self.dead_letters,
+                    self.letters,
                     Payload::RejectedCommand(delivered.to_book()),
                     Component::policy(policy.name()),
                     Cause::PolicyFailed(&failure),
@@ -1468,7 +1616,7 @@ impl<'k> Run<'k> {
         )
         .map_err(|m| {
             dead_letter::write(
-                self.dead_letters,
+                self.letters,
                 Payload::RejectedCommand(book),
                 Component::policy(policy.name()),
                 Cause::Malformed(&m),
@@ -1497,7 +1645,7 @@ impl<'k> Run<'k> {
         };
         if let Some(failure) = super::route::policy_failure(&error) {
             dead_letter::write(
-                self.dead_letters,
+                self.letters,
                 Payload::RejectedCommand(fact.to_book()),
                 Component::domain(self.registry, fact.domain()),
                 Cause::PolicyFailed(&failure),
@@ -1561,7 +1709,7 @@ impl<'k> Run<'k> {
         let store = |e| kernel(KernelError::Store(e));
         if let Some(Target::Remote(remote)) = self.registry.target(command.domain()) {
             self.refused = None;
-            let forwarded = forward(remote, &command, self.dead_letters).await?;
+            let forwarded = forward(remote, &command, self.letters).await?;
             if !positions.is_empty() {
                 port.write_positions(positions).await.map_err(store)?;
             }
@@ -1582,22 +1730,20 @@ impl<'k> Run<'k> {
         };
         let contextual = load(*novel, &mut self.nonces).map_err(kernel)?;
         let head = contextual.head();
-        let (pages, snapshot) =
-            match decide(&contextual, self.sampled, self.registry, self.dead_letters).await {
-                Ok(decided) => (decided.pages, decided.snapshot),
-                Err(failure) => {
-                    if let Failure::Rejected(_) = failure {
-                        self.refused =
-                            contextual_command(&contextual, self.registry, self.sampled.now)
-                                .await
-                                .ok()
-                                .map(|delivered| {
-                                    angzarr_router::context::command_context(&delivered)
-                                });
-                    }
-                    return Err(failure);
+        let (pages, snapshot) = match decide(&contextual, self.sampled, self.registry, self.letters)
+            .await
+        {
+            Ok(decided) => (decided.pages, decided.snapshot),
+            Err(failure) => {
+                if let Failure::Rejected(_) = failure {
+                    self.refused = contextual_command(&contextual, self.registry, self.sampled.now)
+                        .await
+                        .ok()
+                        .map(|delivered| angzarr_router::context::command_context(&delivered));
                 }
-            };
+                return Err(failure);
+            }
+        };
         if pages.is_empty() {
             if !positions.is_empty() {
                 port.write_positions(positions).await.map_err(store)?;

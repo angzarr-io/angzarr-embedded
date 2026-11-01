@@ -12,7 +12,9 @@
 //! comes before its write; a snapshot is its own call.
 //!
 //! **What the kernel needs of a store** is the base ports, [`Store`]: it
-//! reads snapshots, streams and positions, looks commands up, and writes.
+//! reads snapshots, streams and positions, looks commands up, and writes,
+//! a step's dead letters in its write (kept by a store that is a
+//! [`DeadLetterStore`], dropped by one that is not).
 //! The rest (purge, read units, watch, the outbox, editions) is the
 //! application's, through the store directly.
 //!
@@ -34,6 +36,8 @@ use std::future::Future;
 
 use angzarr_proto::v1::{Cover, EventPage, Snapshot, Uuid};
 
+use super::dead_letter::CallLetters;
+
 pub use angzarr_ports::{
     Append, ChangeToken, DeadLetter, DeadLetterAt, DeadLetterKey, DeadLetterStore, EventStore,
     Head, ListStreams, Outbox, OutboxEntry, PositionKey, PositionStore, Purge, ReadByCorrelation,
@@ -42,11 +46,16 @@ pub use angzarr_ports::{
 };
 
 /// The store operations a step makes, keyed by the wire `Cover` the kernel
-/// carries. A stream with no events reads as an empty slice at 0.
+/// carries. A stream with no events reads as an empty slice at 0. A write
+/// that moves a position is a policy step's last, so it keeps the dead
+/// letters the step raised, placed at that step's trigger (the position
+/// less one, on the stream it is on); a step that moves none keeps them in
+/// a write of their own ([`Port::write_letters`]).
 pub(crate) trait Port {
     /// One step's write: `pages` to `stream` at `expected`, with the step's
-    /// `positions` ((handler, the stream it consumes, its next sequence)),
-    /// all of it or none. Answers the stream's new length.
+    /// `positions` ((handler, the stream it consumes, its next sequence))
+    /// and, when it has any, the step's dead letters, all of it or none.
+    /// Answers the stream's new length.
     fn write(
         &mut self,
         stream: &Cover,
@@ -86,10 +95,20 @@ pub(crate) trait Port {
         stream: &Cover,
     ) -> impl Future<Output = Result<u64, StoreError>>;
 
-    /// A step's write of positions alone: a step that wrote no event.
+    /// A step's write of positions alone (with its dead letters): a step
+    /// that wrote no event.
     fn write_positions(
         &mut self,
         positions: &[(&str, &Cover, u64)],
+    ) -> impl Future<Output = Result<(), StoreError>>;
+
+    /// The dead letters raised since the last write that kept any, in a
+    /// write of their own, placed at `trigger` where a letter names no
+    /// place of its own: a step that moves no position, a projector's, a
+    /// parked fact's. Nothing is written when none was raised.
+    fn write_letters(
+        &mut self,
+        trigger: Option<(&Cover, u64)>,
     ) -> impl Future<Output = Result<(), StoreError>>;
 
     /// Every stream of `domain` holding an event.
@@ -112,8 +131,28 @@ fn keyed<'a>(
 /// An angzarr-ports store as the kernel's [`Port`]: each `Cover` as a
 /// [`StreamRef`] (a malformed one is the store's
 /// [`StoreError::MalformedStream`]), a read of a stream with no events as
-/// `None`, a step's write as one [`Write`].
-pub(crate) struct StorePort<'s, S>(pub(crate) &'s S);
+/// `None`, a step's write as one [`Write`], with the call's dead letters
+/// ([`CallLetters`]). A store that keeps no dead letters drops them
+/// ([`Write::dead_letters`]); the call answers them still.
+pub(crate) struct StorePort<'s, S> {
+    store: &'s S,
+    letters: &'s CallLetters<'s>,
+}
+
+impl<'s, S> StorePort<'s, S> {
+    pub(crate) fn new(store: &'s S, letters: &'s CallLetters<'s>) -> StorePort<'s, S> {
+        StorePort { store, letters }
+    }
+
+    /// The letters a write of `positions` keeps: the step's, placed at
+    /// its trigger, when it moves a position; none otherwise.
+    fn placed(&self, positions: &[(&str, &Cover, u64)]) -> Vec<DeadLetter> {
+        match positions.first() {
+            Some((_, source, next)) => self.letters.place(Some((source, next.saturating_sub(1)))),
+            None => Vec::new(),
+        }
+    }
+}
 
 impl<S: Store> Port for StorePort<'_, S> {
     async fn write(
@@ -123,6 +162,7 @@ impl<S: Store> Port for StorePort<'_, S> {
         pages: &[EventPage],
         positions: &[(&str, &Cover, u64)],
     ) -> Result<u64, StoreError> {
+        let letters = self.placed(positions);
         let positions = keyed(positions)?;
         let write = Write {
             events: Some(Append {
@@ -132,14 +172,16 @@ impl<S: Store> Port for StorePort<'_, S> {
             }),
             positions: &positions,
             outbox: &[],
-            dead_letters: &[],
+            dead_letters: &letters,
         };
-        let written = self.0.write(write).await?;
+        let written = self.store.write(write).await?;
         Ok(written.next_sequence.unwrap_or(expected))
     }
 
     async fn read_from(&mut self, stream: &Cover, from: u64) -> Result<Slice, StoreError> {
-        self.0.read(StreamRef::try_from(stream)?, from, None).await
+        self.store
+            .read(StreamRef::try_from(stream)?, from, None)
+            .await
     }
 
     async fn find_command(
@@ -151,13 +193,13 @@ impl<S: Store> Port for StorePort<'_, S> {
             angzarr_ports::Uuid::try_from(command_id).map_err(|_| StoreError::MalformedStream {
                 stream: Box::new(stream.clone()),
             })?;
-        self.0
+        self.store
             .find_command(StreamRef::try_from(stream)?, command_id)
             .await
     }
 
     async fn read_snapshot(&mut self, stream: &Cover) -> Result<Option<Snapshot>, StoreError> {
-        self.0.read_snapshot(StreamRef::try_from(stream)?).await
+        self.store.read_snapshot(StreamRef::try_from(stream)?).await
     }
 
     async fn write_snapshot(
@@ -165,25 +207,42 @@ impl<S: Store> Port for StorePort<'_, S> {
         stream: &Cover,
         snapshot: &Snapshot,
     ) -> Result<(), StoreError> {
-        self.0
+        self.store
             .write_snapshot(StreamRef::try_from(stream)?, snapshot)
             .await
     }
 
     async fn position(&mut self, handler: &str, stream: &Cover) -> Result<u64, StoreError> {
         let stream = StreamRef::try_from(stream)?;
-        self.0.position(PositionKey { handler, stream }).await
+        self.store.position(PositionKey { handler, stream }).await
     }
 
     async fn write_positions(
         &mut self,
         positions: &[(&str, &Cover, u64)],
     ) -> Result<(), StoreError> {
+        let letters = self.placed(positions);
         let positions = keyed(positions)?;
-        self.0.write(Write::positions(&positions)).await.map(drop)
+        let write = Write {
+            dead_letters: &letters,
+            ..Write::positions(&positions)
+        };
+        self.store.write(write).await.map(drop)
+    }
+
+    async fn write_letters(&mut self, trigger: Option<(&Cover, u64)>) -> Result<(), StoreError> {
+        let letters = self.letters.place(trigger);
+        if letters.is_empty() {
+            return Ok(());
+        }
+        let write = Write {
+            dead_letters: &letters,
+            ..Write::default()
+        };
+        self.store.write(write).await.map(drop)
     }
 
     async fn covers(&mut self, domain: &str) -> Result<Vec<Cover>, StoreError> {
-        self.0.covers(domain).await
+        self.store.covers(domain).await
     }
 }

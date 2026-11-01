@@ -153,7 +153,7 @@ pub enum KernelError {
     /// ruling, 2026-10-31). angzarr's INTERNAL,
     /// `COORDINATOR_REASON_RETRY_CAP_EXHAUSTED`: the retries are spent, so
     /// no caller retries it; a fact is answered PARKED instead
-    /// ([`Handled::Parked(_)`](super::Handled::Parked(_))), and dead-lettered.
+    /// ([`Handled::Parked`](super::Handled::Parked)), and dead-lettered.
     RetryCapExhausted {
         stream: Cover,
         attempts: u32,

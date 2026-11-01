@@ -312,6 +312,21 @@ fn a_parked_facts_letter_is_kept_and_answered() {
     assert_eq!(kept(&store, &account), letters);
 }
 
+/// A call's letters reach the kernel's log as they are raised, a bare
+/// line as a whole letter's.
+#[test]
+fn a_calls_letters_reach_the_kernels_log() {
+    use crate::DeadLetterLog;
+    let log = MemoryDeadLetters::new();
+    let letters = crate::dead_letter::CallLetters::new(&log);
+    letters.write("DEAD_LETTER x: a line");
+    assert_eq!(log.lines(), ["DEAD_LETTER x: a line"]);
+    assert!(
+        letters.take().is_empty(),
+        "a bare line is no letter of the call's"
+    );
+}
+
 /// [`MemoryDeadLetters::drain`] takes what was written, once.
 #[test]
 fn memory_dead_letters_drain_takes_what_was_written_once() {

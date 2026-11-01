@@ -1,12 +1,29 @@
-//! angzarr-embedded's "dead-letter queue" is a **logger**.
+//! Dead letters: what the kernel gives up on, as angzarr's
+//! `AngzarrDeadLetter`.
 //!
 //! angzarr dead-letters what it cannot deliver and cannot refuse to a
 //! caller: a fact whose ingest failed (answered PARKED), a reactor's
-//! malformed command. angzarr-embedded is in process and atomic, so there is no
-//! queue, no store and no replay: whatever angzarr would dead-letter fails
-//! the chain back to its caller, nothing is written, and the kernel hands
-//! the letter, angzarr's `AngzarrDeadLetter`, to the application's
-//! [`DeadLetterLog`], which writes it as one line.
+//! malformed command. angzarr-embedded is in process, so there is no queue
+//! and no relay. Every letter goes three ways:
+//!
+//! - **to the application's [`DeadLetterLog`]**, at once, as one line;
+//! - **into the store, durably** (owner ruling Q5, 2026-10-31), when the
+//!   step that raised it has no caller left: a policy's step, kept in the
+//!   SAME write as the position it moves past (or in a write of its own
+//!   when the position stays), a projector's, a parked fact's. A store
+//!   that keeps them is an angzarr-ports
+//!   [`DeadLetterStore`](super::DeadLetterStore); one that does not drops
+//!   them. A letter is keyed by the stream it is about and its place there
+//!   (its events' first sequence, its command's id, or else its step's
+//!   trigger) and its component, so a step given up on again replaces it;
+//! - **back to the caller**, in the call's answer
+//!   ([`Handled::dead_letters`](super::Handled::dead_letters),
+//!   [`Failure::dead_letters`](super::Failure::dead_letters)): every letter
+//!   it kept.
+//!
+//! A command its caller waits for is the caller's (owner ruling,
+//! 2026-10-31): its own failure is answered and its line logged, never
+//! kept nor answered as a letter.
 //!
 //! A letter's reason is the key the spec spells and its args, as they were
 //! answered (decision 14.48, as amended), never angzarr-embedded's own
@@ -69,8 +86,8 @@ use std::sync::Mutex;
 use angzarr_diagnostic::Diagnostic;
 use angzarr_proto::v1::angzarr_dead_letter::{Payload, RejectionDetails};
 use angzarr_proto::v1::{
-    command_page, AngzarrDeadLetter, CommandRefusedDetails, ComponentKind, ProcessingFailedDetails,
-    SequenceMismatchDetails,
+    command_page, AngzarrDeadLetter, CommandRefusedDetails, ComponentKind, Cover,
+    ProcessingFailedDetails, SequenceMismatchDetails,
 };
 use angzarr_router::error::CodedError;
 
@@ -79,6 +96,7 @@ use super::error::{cover_text, KernelError};
 use super::payload::type_name;
 use super::registry::Registry;
 use super::route::{self, diagnostic, flat_args, Rejected};
+use super::store::{DeadLetter, DeadLetterAt, StreamRef};
 use angzarr_proto::v1::{reason_args as args, CoordinatorReason};
 
 /// The start of every dead-letter line: a key to alert on.
@@ -435,7 +453,13 @@ impl MemoryDeadLetters {
     /// Every letter written since the last drain, taken, with every line:
     /// a test's per-call read.
     pub fn drain(&self) -> Vec<AngzarrDeadLetter> {
-        todo!()
+        if let Ok(mut lines) = self.lines.lock() {
+            lines.clear();
+        }
+        self.letters
+            .lock()
+            .map(|mut l| std::mem::take(&mut *l))
+            .unwrap_or_default()
     }
 }
 
@@ -452,6 +476,106 @@ impl DeadLetterLog for MemoryDeadLetters {
         }
         self.write(&dead_letter_line(letter));
     }
+}
+
+/// One call's dead letters (owner ruling Q5, 2026-10-31: durable, and
+/// answered by the call). Each letter raised goes to the kernel's log at
+/// once, as its line, and is held until it is placed: with the position
+/// the step that raised it moves (a policy's step, written in that one
+/// write), or in a write of its own at the step's end. The originating
+/// command's own letters are never placed: they come only with its
+/// failure, which ends the call (answered to its caller, never kept),
+/// and a parked fact's is placed before it is answered. Every letter
+/// placed is the call's, whether its write lands or not (a step whose
+/// write fails holds its position, so it runs again and raises the letter
+/// again).
+pub(crate) struct CallLetters<'k> {
+    log: &'k dyn DeadLetterLog,
+    held: Mutex<Held>,
+}
+
+#[derive(Default)]
+struct Held {
+    /// Raised since the last placement.
+    raised: Vec<AngzarrDeadLetter>,
+    /// Placed: the call's.
+    placed: Vec<DeadLetter>,
+}
+
+impl<'k> CallLetters<'k> {
+    pub(crate) fn new(log: &'k dyn DeadLetterLog) -> CallLetters<'k> {
+        CallLetters {
+            log,
+            held: Mutex::default(),
+        }
+    }
+
+    fn held(&self) -> std::sync::MutexGuard<'_, Held> {
+        self.held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The letters raised since the last placement, each keyed
+    /// ([`keyed`], `trigger` the step's trigger event), now the call's:
+    /// what the step's write keeps.
+    pub(crate) fn place(&self, trigger: Option<(&Cover, u64)>) -> Vec<DeadLetter> {
+        let mut held = self.held();
+        let placed: Vec<DeadLetter> = std::mem::take(&mut held.raised)
+            .into_iter()
+            .filter_map(|letter| keyed(letter, trigger))
+            .collect();
+        held.placed.extend(placed.iter().cloned());
+        placed
+    }
+
+    /// Every letter placed so far, taken: what the call answers.
+    pub(crate) fn take(&self) -> Vec<DeadLetter> {
+        std::mem::take(&mut self.held().placed)
+    }
+}
+
+impl DeadLetterLog for CallLetters<'_> {
+    fn write(&self, line: &str) {
+        self.log.write(line);
+    }
+
+    fn letter(&self, letter: &AngzarrDeadLetter) {
+        self.held().raised.push(letter.clone());
+        self.log.letter(letter);
+    }
+}
+
+/// `letter`, keyed as the store keeps it: about the stream and place its
+/// payload names (events: their stream and first sequence; a command: its
+/// stream and id), or else `trigger`'s, the event its step ran on (a
+/// policy's command the kernel booked malformed has neither stream nor
+/// id). `None` for one about nothing it can name, which only the log
+/// keeps.
+fn keyed(letter: AngzarrDeadLetter, trigger: Option<(&Cover, u64)>) -> Option<DeadLetter> {
+    let named = match &letter.payload {
+        Some(Payload::RejectedEvents(book) | Payload::FailedEditionRemoval(book)) => {
+            book.cover.clone().zip(
+                book.pages
+                    .first()
+                    .map(|p| DeadLetterAt::Sequence(p.sequence)),
+            )
+        }
+        Some(Payload::RejectedCommand(book)) => book.cover.clone().zip(
+            book.page
+                .as_ref()
+                .and_then(|p| p.command_id.as_ref())
+                .and_then(|id| angzarr_ports::Uuid::try_from(id).ok())
+                .map(DeadLetterAt::Command),
+        ),
+        None => None,
+    };
+    let (stream, at) = named
+        .filter(|(cover, _)| StreamRef::try_from(cover).is_ok())
+        .or_else(|| {
+            trigger.map(|(cover, sequence)| (cover.clone(), DeadLetterAt::Sequence(sequence)))
+        })?;
+    Some(DeadLetter { stream, at, letter })
 }
 
 #[cfg(test)]

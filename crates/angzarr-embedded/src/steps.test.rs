@@ -35,8 +35,10 @@ impl<'s, S: Store> Coordinator<'s, S> {
 
     /// Step 3: load, then look the command id up.
     pub fn deduplicate(&mut self, command: Identified) -> Result<Deduplicated, Failure<Rejected>> {
+        let log = crate::MemoryDeadLetters::new();
+        let letters = crate::dead_letter::CallLetters::new(&log);
         ready(deduplicate(
-            &mut StorePort(self.store),
+            &mut StorePort::new(self.store, &letters),
             self.registry,
             command,
         ))
