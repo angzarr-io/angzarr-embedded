@@ -309,3 +309,32 @@ fn a_stream_of_distinct_child_codes_leaks_nothing() {
         "{held} bytes still held after 2000 distinct codes were answered and dropped"
     );
 }
+
+/// A kept refusal is the handler's value beside the report: two
+/// rejections are equal by their reports, refusal objects and statuses
+/// alone, kept or not, and a kept one shows only that it is kept.
+#[test]
+fn a_rejection_is_compared_and_shown_by_its_report_not_its_kept_value() {
+    use angzarr_router::error::{BusinessStatus, CodedError};
+    use std::sync::Arc;
+
+    let coded = |code: &str| {
+        CodedError::rejection(
+            BusinessStatus::FailedPrecondition,
+            code,
+            [("short".to_string(), "8".to_string())],
+        )
+    };
+    let bare = super::Rejected::of(&coded("toy-account-overdrawn"));
+    let kept = super::Rejected::of(&coded("toy-account-overdrawn"))
+        .kept(Some(Arc::new(crate::toys::Refused::Overdrawn { short: 8 })));
+    assert_eq!(bare, kept, "kept or not, the same refusal");
+    assert_ne!(bare, super::Rejected::of(&coded("toy-account-not-open")));
+    assert_eq!(bare.rejection::<crate::toys::Refused>(), None);
+    assert_eq!(
+        kept.rejection::<crate::toys::Refused>(),
+        Some(&crate::toys::Refused::Overdrawn { short: 8 })
+    );
+    let shown = format!("{kept:?}");
+    assert!(shown.contains("kept: Some(..)"), "{shown}");
+}
