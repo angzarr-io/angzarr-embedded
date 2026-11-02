@@ -329,6 +329,91 @@ fn a_stored_catch_up_hands_a_stream_written_again_from_its_start() {
     assert_eq!(recorder.take(), [(cover("account", 1), vec![0], 1)]);
 }
 
+/// A stored catch-up started anew (a new process) knows, before its first
+/// step hands anything, every stream it holds a position on: one of them
+/// purged once it has started, with nothing new before, is handed gone.
+#[test]
+fn a_new_stored_catch_up_hands_gone_a_stream_it_was_handed_before() {
+    let registry = registry();
+    let store = MemoryStore::new();
+    opened(&store, &registry, 1, 5);
+    let recorder = Recorder::default();
+    step(
+        &mut CatchUp::stored(&["account"], recorder.clone()),
+        &store,
+        &registry,
+    );
+    recorder.take();
+    let mut again = CatchUp::stored(&["account"], recorder.clone());
+    step(&mut again, &store, &registry);
+    assert_eq!(recorder.take(), [], "nothing new");
+    purge(&store, 1);
+    step(&mut again, &store, &registry);
+    assert_eq!(recorder.take(), [(cover("account", 1), vec![], 0)]);
+}
+
+/// A purge landing between a step's read and its position's write (forced
+/// here, from the projector's book) leaves that position on a stream that
+/// is gone. The next catch-up, in a new process, hands the stream gone at
+/// its first step and puts the position back to 0, so the stream written
+/// again is handed from its start.
+#[test]
+fn a_position_left_by_a_racing_purge_is_handed_gone_and_cleared() {
+    let registry = Arc::new(registry());
+    let store = Arc::new(MemoryStore::new());
+    opened(&*store, &registry, 1, 5);
+    let recorder = Recorder::default();
+    let racing = Arc::clone(&store);
+    *recorder.meanwhile.lock().unwrap() = Some(Box::new(move || purge(&racing, 1)));
+    step(
+        &mut CatchUp::stored(&["account"], recorder.clone()),
+        &store,
+        &registry,
+    );
+    assert_eq!(recorder.take(), [(cover("account", 1), vec![0, 1], 2)]);
+    assert_eq!(
+        position(&store, "recorder", &cover("account", 1)),
+        2,
+        "written past the purge"
+    );
+
+    let mut again = CatchUp::stored(&["account"], recorder.clone());
+    step(&mut again, &store, &registry);
+    assert_eq!(recorder.take(), [(cover("account", 1), vec![], 0)]);
+    assert_eq!(position(&store, "recorder", &cover("account", 1)), 0);
+    crate::toys::handle::<Account>(
+        &*store,
+        &registry,
+        command(cover("account", 1), AccountCmd::Open.to_any()).id(8),
+        &at(40),
+    )
+    .unwrap();
+    step(&mut again, &store, &registry);
+    assert_eq!(recorder.take(), [(cover("account", 1), vec![0], 1)]);
+}
+
+/// A position the projector's name holds outside its sources (another
+/// domain's stream) is not its catch-up's: nothing is handed for it.
+#[test]
+fn a_stored_position_outside_the_sources_is_not_handed() {
+    let registry = registry();
+    let store = MemoryStore::new();
+    let elsewhere = cover("ledger", 1);
+    let key = crate::PositionKey {
+        handler: "recorder",
+        stream: sref(&elsewhere),
+    };
+    store.write(Write::positions(&[(key, 3)])).ready().unwrap();
+    let recorder = Recorder::default();
+    step(
+        &mut CatchUp::stored(&["account"], recorder.clone()),
+        &store,
+        &registry,
+    );
+    assert_eq!(recorder.take(), []);
+    assert_eq!(position(&store, "recorder", &elsewhere), 3, "left alone");
+}
+
 /// A failed book's stored position stays: the next step hands it again.
 #[test]
 fn a_failed_books_stored_position_stays() {

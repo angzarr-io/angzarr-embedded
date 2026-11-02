@@ -13,6 +13,7 @@
 //! [`ReadUntilTime`](angzarr_ports::ReadUntilTime),
 //! [`ReadByCorrelation`](angzarr_ports::ReadByCorrelation),
 //! [`ListStreams`](angzarr_ports::ListStreams),
+//! [`ListPositions`](angzarr_ports::ListPositions),
 //! [`Outbox`](angzarr_ports::Outbox),
 //! [`DeadLetterStore`](angzarr_ports::DeadLetterStore) (dead letters,
 //! durable, written in the step's write: migration 0006),

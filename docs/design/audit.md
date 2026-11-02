@@ -956,7 +956,9 @@ position on it, in one call), `ReadStore` (a read-only unit whose reads
 all see the moment it began, so a reader listing `covers` and reading each
 stream never mixes two moments), `Watch` (a change token: equal tokens
 from one handle mean nothing was committed between), `ReadUntilTime`,
-`ReadByCorrelation`, `ListStreams` and the `Outbox`.
+`ReadByCorrelation`, `ListStreams`, `ListPositions` (one handler's
+positions, per stream: what a stored catch-up reads when it starts) and
+the `Outbox`.
 
 **Editions** are per-stream forks (14.32), their lifecycle angzarr's. A
 command to an edition stream never forked is refused by the store at the

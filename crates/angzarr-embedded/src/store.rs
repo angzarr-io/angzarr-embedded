@@ -40,9 +40,9 @@ use super::dead_letter::CallLetters;
 
 pub use angzarr_ports::{
     Append, ChangeToken, DeadLetter, DeadLetterAt, DeadLetterKey, DeadLetterStore, EventStore,
-    Head, ListStreams, Outbox, OutboxEntry, PositionKey, PositionStore, Purge, ReadByCorrelation,
-    ReadStore, ReadUnit, ReadUntilTime, Slice, SnapshotStore, Store, StoreError, StreamRef, Watch,
-    Write, Written,
+    Head, ListPositions, ListStreams, Outbox, OutboxEntry, PositionKey, PositionStore, Purge,
+    ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, Slice, SnapshotStore, Store, StoreError,
+    StreamRef, Watch, Write, Written,
 };
 
 /// The store operations a step makes, keyed by the wire `Cover` the kernel

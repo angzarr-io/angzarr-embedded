@@ -109,6 +109,11 @@ pub(crate) const CORRELATED_STREAMS: &str =
 pub(crate) const POSITION: &str = "SELECT next FROM positions \
      WHERE domain = ?1 AND edition = ?2 AND root = ?3 AND handler = ?4";
 
+/// Rows `(domain, edition, root, next)` of handler `?1`'s positions above
+/// 0, in stream order.
+pub(crate) const HANDLER_POSITIONS: &str = "SELECT domain, edition, root, next FROM positions \
+     WHERE handler = ?1 AND next > 0 ORDER BY domain, edition, root";
+
 /// Put a handler's position on a stream: a plain upsert.
 pub(crate) const PUT_POSITION: &str =
     "INSERT INTO positions (domain, edition, root, handler, next) VALUES (?1, ?2, ?3, ?4, ?5) \

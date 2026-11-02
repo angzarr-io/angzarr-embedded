@@ -21,9 +21,9 @@ use angzarr_ports::angzarr_proto::v1::meta::EditionCreated;
 use angzarr_ports::angzarr_proto::v1::{Cover, EventBook, EventPage, Snapshot};
 use angzarr_ports::{
     Append, AppliedMigration, ChangeToken, DeadLetter, DeadLetterKey, DeadLetterStore, EventStore,
-    Head, ListStreams, Outbox, OutboxEntry, PositionKey, PositionStore, Purge, ReadByCorrelation,
-    ReadStore, ReadUnit, ReadUntilTime, Slice, SnapshotStore, StoreError, StreamRef, Uuid, Watch,
-    Write, Written, EDITION_CREATED_TYPE_URL,
+    Head, ListPositions, ListStreams, Outbox, OutboxEntry, PositionKey, PositionStore, Purge,
+    ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, Slice, SnapshotStore, StoreError,
+    StreamRef, Uuid, Watch, Write, Written, EDITION_CREATED_TYPE_URL,
 };
 use prost::Message;
 use prost_types::Timestamp;
@@ -1320,6 +1320,30 @@ impl ListStreams for SqliteStore {
             covers.push(rows::cover::<SqliteDialect>(&domain, edition, &root)?);
         }
         Ok(covers)
+    }
+}
+
+impl ListPositions for SqliteStore {
+    async fn list_positions(&self, handler: &str) -> Result<Vec<(Cover, u64)>, StoreError> {
+        let rows = self
+            .conn
+            .exec()
+            .await
+            .rows(
+                statements::HANDLER_POSITIONS,
+                [Value::Text(handler.to_string())],
+            )
+            .await?;
+        let mut positions = Vec::new();
+        for row in rows {
+            let domain: String = row.try_get(0).map_err(unavailable)?;
+            let edition: String = row.try_get(1).map_err(unavailable)?;
+            let root: Vec<u8> = row.try_get(2).map_err(unavailable)?;
+            let next: i64 = row.try_get(3).map_err(unavailable)?;
+            let cover = rows::cover::<SqliteDialect>(&domain, edition, &root)?;
+            positions.push((cover, next.unsigned_abs()));
+        }
+        Ok(positions)
     }
 }
 

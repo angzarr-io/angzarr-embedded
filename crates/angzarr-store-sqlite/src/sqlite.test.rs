@@ -355,6 +355,15 @@ mod list_streams {
     );
 }
 
+mod list_positions {
+    use super::*;
+    angzarr_ports::store_contract!(
+        list_positions,
+        #[tokio::test],
+        SqliteStore::open_in_memory().await.unwrap()
+    );
+}
+
 mod outbox {
     use super::*;
     angzarr_ports::store_contract!(
