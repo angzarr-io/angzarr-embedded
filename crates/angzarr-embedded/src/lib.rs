@@ -522,7 +522,7 @@ fn chain_samples() -> Vec<UpcastChainError> {
 
 /// Each [`Misconfigured`] variant, `UnsupportedResolution` for a domain and
 /// for one command type.
-fn misconfigured_samples() -> Vec<Misconfigured> {
+pub(crate) fn misconfigured_samples() -> Vec<Misconfigured> {
     use v1::ConflictResolution;
     vec![
         Misconfigured::AlreadyRegistered {

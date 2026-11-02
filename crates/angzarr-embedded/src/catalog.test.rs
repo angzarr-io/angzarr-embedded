@@ -165,3 +165,19 @@ fn a_remote_domain_is_listed_apart_and_keeps_its_readers_out() {
         })
     );
 }
+
+/// Decision 14.65 (the owner's ruling on decision 21 of the 2026-10-31
+/// run): every misconfiguration, a Rust registration's or a child's
+/// descriptor's, is refused under a spec key, its args exactly the key's.
+#[test]
+fn every_misconfiguration_is_a_spec_key_with_its_declared_args() {
+    use angzarr_diagnostic::Diagnostic as _;
+    for misconfigured in crate::misconfigured_samples() {
+        let declared = angzarr_proto::reason_key_args(misconfigured.code())
+            .unwrap_or_else(|| panic!("{} is no spec key", misconfigured.code()));
+        let given: Vec<&str> = misconfigured.args().iter().map(|(n, _)| *n).collect();
+        for name in &given {
+            assert!(declared.contains(name), "{misconfigured:?}: {name}");
+        }
+    }
+}
