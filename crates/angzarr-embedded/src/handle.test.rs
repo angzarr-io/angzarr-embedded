@@ -2408,6 +2408,96 @@ fn a_clients_fact_answered_with_a_rejection_is_dead_lettered_and_parked() {
     assert!(streams(&store).is_empty(), "nothing written");
 }
 
+/// An account whose business process records an `Opened` for every
+/// command, and answers every fact, a refusal fact included, with a
+/// business rejection.
+struct RejectsFacts;
+
+impl crate::angzarr_router::router::CommandHandler for RejectsFacts {
+    fn name(&self) -> &str {
+        "account"
+    }
+    fn command_types(&self) -> Vec<String> {
+        Vec::new()
+    }
+    async fn dispatch(
+        &self,
+        delivered: &angzarr_proto::v1::ContextualCommand,
+    ) -> Result<angzarr_proto::v1::CommandHandlerResponse, crate::angzarr_router::error::CodedError>
+    {
+        use crate::v1::command_page::Body;
+        let page = delivered.command.as_ref().and_then(|b| b.page.as_ref());
+        if let Some(Body::Fact(_)) = page.and_then(|p| p.body.as_ref()) {
+            return RefusesAll.dispatch(delivered).await;
+        }
+        Ok(angzarr_proto::v1::CommandHandlerResponse {
+            events: Some(crate::v1::EventBook {
+                pages: vec![crate::v1::EventPage {
+                    payload: Some(crate::toys::AccountEvent::Opened.to_any()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            rules_version: "v2".to_string(),
+            ..Default::default()
+        })
+    }
+}
+
+/// A refusal fact its source's business process answers with a business
+/// rejection (decision 14.72): a bug of that process, as a failing handler
+/// is, dead-lettered at the source, and the policy's position moves past
+/// the trigger, as for any bug of its step.
+#[test]
+fn a_refusal_fact_answered_with_a_rejection_is_its_sources_bug() {
+    let mut registry = crate::Registry::new();
+    registry
+        .command_handler(
+            "account",
+            RejectsFacts,
+            crate::toys::descriptor_of::<Account>(crate::v1::ComponentKind::Aggregate, "v2", &[]),
+        )
+        .unwrap();
+    crate::toys::register::<Ledger>(
+        &mut registry,
+        crate::Upcaster::new("ledger-upcaster", "ledger"),
+    )
+    .unwrap();
+    registry
+        .policy_component(
+            Unchecked {
+                answer: |_| {
+                    vec![command(
+                        ledger_cover(),
+                        crate::pack(&ledger::Record {
+                            source_sequence: 0,
+                            cents: LEDGER_LIMIT + 1,
+                        }),
+                    )]
+                },
+            },
+            "ledger",
+        )
+        .unwrap();
+    let log = MemoryDeadLetters::new();
+    let store = MemoryStore::new();
+    let _ = Kernel::new(&registry)
+        .log_with(&log)
+        .on_retryable(crate::toys::no_retries())
+        .handle::<Account, _>(
+            &store,
+            command(cover("account", 1), AccountCmd::Open.to_any()),
+            &at(30),
+        )
+        .ready();
+    rejected_fact(&log);
+    assert_eq!(
+        position(&store, "unchecked", &cover("account", 1)),
+        1,
+        "past the trigger, as for a bug"
+    );
+}
+
 /// A policy's commands naming exactly the command id and causation their
 /// coordinator stamps (decision 14.48, amended: no id that DIFFERS from
 /// the stamp) are delivered, each by its own index in the answer.
