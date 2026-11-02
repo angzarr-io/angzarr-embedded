@@ -105,7 +105,7 @@ pub async fn run_with_languages(
     register: impl FnOnce(&mut Registry) -> Result<(), Misconfigured>,
 ) -> Result<App, HostError> {
     let path = config.as_ref().to_path_buf();
-    let config = blocking(move || read(&path)).await?;
+    let config = blocking(move || crate::config::read(&path)).await?;
     run_with(config, languages, register).await
 }
 
@@ -211,15 +211,6 @@ fn process_manager(catalog: &Catalog, name: &str) -> bool {
         || catalog
             .domains()
             .any(|domain| catalog.component_name(domain).as_deref() == Some(name) && is(domain))
-}
-
-/// The config at `path`, read strictly.
-fn read(path: &Path) -> Result<HostConfig, HostError> {
-    let text = std::fs::read_to_string(path).map_err(|e| HostError::ConfigUnreadable {
-        path: path.display().to_string(),
-        kind: format!("{:?}", e.kind()),
-    })?;
-    crate::config::parse(&text, &path.display().to_string())
 }
 
 /// What a registry holds by name: its domains (by component name,

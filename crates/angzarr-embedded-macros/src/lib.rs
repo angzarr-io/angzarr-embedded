@@ -117,8 +117,9 @@
 //!   or `fn(&mut self, event: Event, page: &PageContext)` to read where
 //!   the event sits, as a handler reads its `&Context`: its stream's cover,
 //!   its sequence and its whole `EventMeta` (`recorded_at`, its cause,
-//!   correlation, fact origin and rules version; `None` for an event of
-//!   the decision being made, stamped when it commits).
+//!   correlation, fact origin and rules version; for an event of the
+//!   decision being made, the metadata it is stamped with when it
+//!   commits, so the state decided is the state replayed).
 //! - `rooted_by = field` on a [`handles_cmd`]: the command's `field` (a
 //!   `String`, or anything `AsRef<str>`) is its natural key, and the
 //!   stream's root must be that key's UUIDv5 under the domain

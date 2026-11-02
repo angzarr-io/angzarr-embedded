@@ -22,43 +22,14 @@ fn any(type_url: &str) -> Any {
     }
 }
 
-fn cover(domain: &str) -> pb::Cover {
-    pb::Cover {
-        domain: domain.to_string(),
-        root: Some(pb::Uuid::from_bytes([7; 16])),
-        ..pb::Cover::default()
-    }
-}
-
 /// A command to `domain`, its payload `payload`.
 fn command(domain: &str, payload: Any) -> Input {
-    Input::Command(Box::new(pb::ContextualCommand {
-        command: Some(pb::CommandBook {
-            cover: Some(cover(domain)),
-            page: Some(pb::CommandPage {
-                body: Some(pb::command_page::Body::Command(pb::Command {
-                    payload: Some(payload),
-                })),
-                ..pb::CommandPage::default()
-            }),
-            ..pb::CommandBook::default()
-        }),
-        ..pb::ContextualCommand::default()
-    }))
+    Input::command(domain, &payload.type_url, payload.value)
 }
 
 /// One event of `domain`, its payload `payload`.
 fn events(domain: &str, payload: Any) -> Input {
-    Input::Events(pb::EventBook {
-        cover: Some(cover(domain)),
-        pages: vec![pb::EventPage {
-            sequence: 0,
-            payload: Some(payload),
-            ..pb::EventPage::default()
-        }],
-        next_sequence: 1,
-        snapshot: None,
-    })
+    Input::event(domain, &payload.type_url, payload.value)
 }
 
 fn with(mut component: ComponentConfig, env: &[(&str, &str)]) -> ComponentConfig {
@@ -220,7 +191,7 @@ fn a_child_not_serving_fails_the_health_step() {
     );
     assert_eq!(
         outcomes(&not_serving),
-        expect(2, Some("angzarr-embedded-host-not-serving"))
+        expect(2, Some("HOST_REASON_CHILD_NOT_SERVING"))
     );
     let no_health = probed(
         with(
@@ -278,7 +249,7 @@ fn an_input_not_answered_fails_the_handle_step() {
     );
     assert_eq!(
         outcomes(&other_kind),
-        expect(4, Some("angzarr-embedded-host-probe-input"))
+        expect(4, Some("HOST_REASON_PROBE_INPUT"))
     );
 }
 
@@ -292,14 +263,14 @@ fn a_child_ignoring_its_stdins_end_fails_the_shutdown_step() {
     );
     assert_eq!(
         outcomes(&probed),
-        expect(5, Some("angzarr-embedded-host-not-exited"))
+        expect(5, Some("HOST_REASON_CHILD_NOT_EXITED"))
     );
     let Outcome::Failed(report) = &probed.steps[5].1 else {
         panic!("{probed:?}");
     };
     assert_eq!(
         report.to_string(),
-        "angzarr-embedded-host-not-exited domain=player ended=terminated"
+        "HOST_REASON_CHILD_NOT_EXITED component=player ended=terminated"
     );
 }
 
@@ -363,4 +334,65 @@ fn client_pythons_child_shim_passes_every_step() {
         ),
     );
     assert_eq!(outcomes(&probed), expect(6, None), "{probed:?}");
+}
+
+/// The probe's shutdown and input failures are the spec's keys (decision
+/// 14.62), naming the child as `component`.
+#[test]
+fn the_probes_failures_are_spec_keys() {
+    let exit_status = HostError::ExitStatus {
+        component: "player".to_string(),
+        exit_code: 3,
+    };
+    assert_eq!(
+        exit_status.to_string(),
+        "HOST_REASON_CHILD_EXIT_STATUS component=player exit_code=3"
+    );
+    let probe_input = HostError::ProbeInput {
+        component: "player".to_string(),
+        kind: "policy".to_string(),
+    };
+    assert_eq!(
+        probe_input.to_string(),
+        "HOST_REASON_PROBE_INPUT component=player kind=policy"
+    );
+}
+
+/// A probe's command and event are on the probe's root, their payload
+/// of the type and bytes given.
+#[test]
+fn a_probes_input_is_on_its_root_of_the_type_given() {
+    let root = Some(pb::Uuid::from_bytes(PROBE_ROOT));
+    let Input::Command(command) = Input::command("player", "/x.SitDown", vec![8, 1]) else {
+        panic!("a command");
+    };
+    let book = command.command.unwrap();
+    let cover = book.cover.unwrap();
+    assert_eq!(
+        (cover.domain.as_str(), cover.root),
+        ("player", root.clone())
+    );
+    let Some(pb::command_page::Body::Command(pb::Command {
+        payload: Some(payload),
+    })) = book.page.unwrap().body
+    else {
+        panic!("a command page");
+    };
+    assert_eq!(
+        (payload.type_url.as_str(), payload.value),
+        ("/x.SitDown", vec![8, 1])
+    );
+    let Input::Events(book) = Input::event("table", "/x.Seated", vec![2]) else {
+        panic!("events");
+    };
+    let cover = book.cover.unwrap();
+    assert_eq!((cover.domain.as_str(), cover.root), ("table", root));
+    assert_eq!(book.next_sequence, 1);
+    let page = &book.pages[0];
+    assert_eq!(page.sequence, 0);
+    let payload = page.payload.as_ref().unwrap();
+    assert_eq!(
+        (payload.type_url.as_str(), payload.value.as_slice()),
+        ("/x.Seated", &[2u8][..])
+    );
 }

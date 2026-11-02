@@ -266,7 +266,7 @@ async fn an_invalid_config_is_refused_where_it_goes_wrong() {
         ),
         "{refused:?}"
     );
-    for text in ["[[domain]\n", "schema_version: 2\n"] {
+    for text in ["[[domain]\n", "schema_version: 3\n"] {
         std::fs::write(&path, text).unwrap();
         assert!(
             matches!(

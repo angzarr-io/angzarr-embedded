@@ -27,8 +27,8 @@ use std::fmt;
 use angzarr_diagnostic::{Arg, Diagnostic};
 use angzarr_proto::ids::{self, UuidError};
 use angzarr_proto::v1::{
-    command_page, event_meta, CommandBook, CommandPage, ConflictResolution, Cover, EventMeta,
-    EventRef, FactOrigin, Handling, Uuid,
+    command_page, CommandBook, CommandPage, ConflictResolution, Cover, EventRef, FactOrigin,
+    Handling, Uuid,
 };
 use prost_types::{Any, Timestamp};
 
@@ -625,7 +625,7 @@ impl Checked {
 
 /// A [`Checked`] book with its ids assigned: what deduplication looks up
 /// and what every event it produces is stamped with
-/// ([`Identified::meta`]).
+/// ([`event_meta`](crate::event_meta) of its book's context).
 #[derive(Clone, PartialEq, Debug)]
 pub struct Identified {
     cover: Cover,
@@ -679,7 +679,7 @@ impl Identified {
     /// The command's own causation (`CommandPage.causation_id`): the
     /// trigger, for a reaction; `None` otherwise. Transport and trace
     /// metadata, and the input its derived command id hashes. It is **not**
-    /// stamped on the command's events ([`Identified::meta`]), whose
+    /// stamped on the command's events ([`event_meta`](crate::event_meta)), whose
     /// causation is the command itself (angzarr decision 13.3): the
     /// trigger-to-command edge belongs in tracing and logs.
     pub fn causation_id(&self) -> Option<&EventRef> {
@@ -692,23 +692,6 @@ impl Identified {
 
     pub fn conflict_resolution(&self) -> Option<ConflictResolution> {
         self.conflict_resolution
-    }
-
-    /// The metadata every event this command produces carries (angzarr's
-    /// `EventMeta`): its causation (this command's id, the deduplication
-    /// key), fact source and correlation, the instant it is recorded at and
-    /// the rules version it is decided under. No actor: who did it belongs
-    /// in a security log. No trigger: a policy command's events name their
-    /// command, not the event that set it off; that edge is the command's
-    /// own causation (`causation_id`), for tracing.
-    pub fn meta(&self, recorded_at: Timestamp, rules_version: &str) -> EventMeta {
-        EventMeta {
-            causation: Some(event_meta::Causation::CommandId(self.command_id.clone())),
-            fact: self.body.source().cloned(),
-            correlation_id: Some(self.correlation_id.clone()),
-            recorded_at: Some(recorded_at),
-            rules_version: rules_version.to_string(),
-        }
     }
 
     /// The book with its ids filled in, handling as sent: what a dead

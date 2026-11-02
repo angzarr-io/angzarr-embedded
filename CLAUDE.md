@@ -106,7 +106,7 @@ which `Host::register` fills), `angzarr-router` and `angzarr-proto`
 (pinned at the revs the router names, so its graph holds one angzarr-proto),
 `tonic` and `tonic-prost` (its gRPC client, and in its tests the fake
 child's server), `tonic-health` (`grpc.health.v1`, which the child
-protocol has every child serve: the host watches each child's, and the
+protocol has every child serve: the host watches and checks each child's, and the
 fake child serves it), `tokio`,
 `tower` and `hyper-util` (the runtime and the Unix-socket connector),
 `libc` (SIGTERM to a child at shutdown, which tokio cannot send),
@@ -154,7 +154,7 @@ angzarr-ports' own catalog, `angzarr_ports::EN_US` (re-exported as
 `angzarr_embedded::angzarr_ports`), checked against its errors in core.
 
 - **Codes are stable and never reused.** Kebab-case, starting with the
-  crate's name (`angzarr-embedded-host-handshake-timeout`), and a valid Fluent message id. A code
+  crate's name (`angzarr-embedded-host-spawn`), and a valid Fluent message id. A code
   whose meaning changes gets a new code; a retired code is not given to
   anything else. A condition the spec keys is the exception: its code is
   the key, verbatim (`HOST_REASON_HANDSHAKE_MALFORMED`), its args the

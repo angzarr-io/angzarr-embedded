@@ -66,6 +66,61 @@ pub enum Input {
     Events(pb::EventBook),
 }
 
+/// The root of the stream a probe's [`Input::command`] and
+/// [`Input::event`] are on.
+pub const PROBE_ROOT: [u8; 16] = [7; 16];
+
+impl Input {
+    /// A command to `domain`, on [`PROBE_ROOT`]: one page, its payload of
+    /// `type_url`, `payload` its encoded message (empty: every field its
+    /// default).
+    pub fn command(domain: &str, type_url: &str, payload: Vec<u8>) -> Input {
+        Input::Command(Box::new(pb::ContextualCommand {
+            command: Some(pb::CommandBook {
+                cover: Some(probe_cover(domain)),
+                page: Some(pb::CommandPage {
+                    body: Some(pb::command_page::Body::Command(pb::Command {
+                        payload: Some(packed(type_url, payload)),
+                    })),
+                    ..pb::CommandPage::default()
+                }),
+                ..pb::CommandBook::default()
+            }),
+            ..pb::ContextualCommand::default()
+        }))
+    }
+
+    /// One event of `domain`, on [`PROBE_ROOT`], at sequence 0: its payload
+    /// of `type_url`, `payload` its encoded message.
+    pub fn event(domain: &str, type_url: &str, payload: Vec<u8>) -> Input {
+        Input::Events(pb::EventBook {
+            cover: Some(probe_cover(domain)),
+            pages: vec![pb::EventPage {
+                sequence: 0,
+                payload: Some(packed(type_url, payload)),
+                ..pb::EventPage::default()
+            }],
+            next_sequence: 1,
+            snapshot: None,
+        })
+    }
+}
+
+fn probe_cover(domain: &str) -> pb::Cover {
+    pb::Cover {
+        domain: domain.to_string(),
+        root: Some(pb::Uuid::from_bytes(PROBE_ROOT)),
+        ..pb::Cover::default()
+    }
+}
+
+fn packed(type_url: &str, value: Vec<u8>) -> prost_types::Any {
+    prost_types::Any {
+        type_url: type_url.to_string(),
+        value,
+    }
+}
+
 /// What the probe found: every step, in order, with how it went.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Probed {
@@ -166,11 +221,11 @@ pub fn probe(
             match exit {
                 ChildExit::Exited(Some(0)) => Ok(()),
                 ChildExit::Exited(Some(exit_code)) => Err(Report::of(&HostError::ExitStatus {
-                    domain: component.name.clone(),
+                    component: component.name.clone(),
                     exit_code,
                 })),
                 exit => Err(Report::of(&HostError::NotExited {
-                    domain: component.name.clone(),
+                    component: component.name.clone(),
                     ended: exit.ended().to_string(),
                 })),
             },
@@ -276,7 +331,7 @@ async fn handle(
         }
         (kind, _) => {
             return Err(Report::of(&HostError::ProbeInput {
-                domain: name,
+                component: name,
                 kind: kind.as_str().to_string(),
             }))
         }

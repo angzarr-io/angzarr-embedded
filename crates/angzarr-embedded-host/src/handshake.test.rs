@@ -163,11 +163,11 @@ async fn stdout_closing_first_is_closed() {
     );
 }
 
-/// A v1 handshake whose path is not UTF-8 is refused under its own key,
-/// the path given back without loss (its bytes escaped): it is never
-/// decoded into another path.
+/// A v1 handshake whose path is not UTF-8 is malformed (C-0760; decision
+/// 14.62), the line given back without loss (its bytes escaped): it is
+/// never decoded into another path.
 #[tokio::test]
-async fn a_handshake_naming_a_path_that_is_not_utf8_is_refused() {
+async fn a_handshake_naming_a_path_that_is_not_utf8_is_malformed() {
     let (mut child, host) = tokio::io::duplex(1024);
     child
         .write_all(b"angzarr-handshake v1 unix:/tmp/caf\xe9.sock\n")
@@ -176,9 +176,85 @@ async fn a_handshake_naming_a_path_that_is_not_utf8_is_refused() {
     let mut host = BufReader::new(host);
     assert_eq!(
         read_handshake(&mut host, Duration::from_secs(5)).await,
-        Err(HandshakeError::PathNotUtf8 {
-            path: "/tmp/caf\\xe9.sock".to_string(),
-        })
+        Err(malformed("angzarr-handshake v1 unix:/tmp/caf\\xe9.sock"))
+    );
+}
+
+/// A path of any UTF-8 characters is named as it is (C-0759).
+#[test]
+fn a_path_of_any_utf8_characters_is_named() {
+    assert_eq!(
+        parse_line(b"angzarr-handshake v1 unix:/run/caf\xc3\xa9/order.sock"),
+        Ok(socket("/run/caf\u{e9}/order.sock"))
+    );
+    assert_eq!(
+        parse_line(b"angzarr-handshake v1 unix:/run/\xe2\x82\xac/order.sock"),
+        Ok(socket("/run/\u{20ac}/order.sock"))
+    );
+}
+
+/// A path that is not UTF-8, a truncated sequence or an encoded surrogate
+/// included, is malformed, the line escaped: each byte outside printable
+/// ASCII, and each backslash, written `\xhh` (C-0760). A line that is
+/// UTF-8 is given as it is, its backslashes too.
+#[test]
+fn a_line_that_is_not_utf8_is_given_back_escaped() {
+    for (bytes, line) in [
+        (
+            &b"angzarr-handshake v1 unix:/run/\xc3/order.sock"[..],
+            "angzarr-handshake v1 unix:/run/\\xc3/order.sock",
+        ),
+        (
+            b"angzarr-handshake v1 unix:/run/\xed\xa0\x80.sock",
+            "angzarr-handshake v1 unix:/run/\\xed\\xa0\\x80.sock",
+        ),
+        (
+            b"angzarr-handshake v1 unix:/run/a\\b\t\xff.sock",
+            "angzarr-handshake v1 unix:/run/a\\x5cb\\x09\\xff.sock",
+        ),
+        (
+            b"angzarr-handshake v1 unix:/run/~ \x7f\xff",
+            "angzarr-handshake v1 unix:/run/~ \\x7f\\xff",
+        ),
+    ] {
+        assert_eq!(parse_line(bytes), Err(malformed(line)), "{line}");
+    }
+    assert_eq!(
+        parse_line(b"angzarr-handshake v2 unix:/run/a\\b\t.sock"),
+        Err(malformed("angzarr-handshake v2 unix:/run/a\\b\t.sock"))
+    );
+}
+
+/// A line that is not UTF-8 whose first word is not `angzarr-handshake`
+/// is not a handshake, a longer first word included (C-0761).
+#[test]
+fn a_line_that_is_not_utf8_and_not_a_handshake_is_skipped() {
+    for bytes in [
+        &b"listening on /run/caf\xe9/order.sock"[..],
+        b"angzarr-handshake\xe9 v1 unix:/run/order.sock",
+        b"\xff",
+    ] {
+        assert_eq!(parse_line(bytes), Ok(None), "{bytes:?}");
+    }
+}
+
+/// The handshake's failures are the spec's keys (decision 14.62).
+#[test]
+fn the_handshakes_failures_are_spec_keys() {
+    use angzarr_diagnostic::Diagnostic;
+    let timeout = HandshakeError::Timeout { timeout_ms: 200 };
+    assert_eq!(timeout.code(), "HOST_REASON_HANDSHAKE_TIMEOUT");
+    assert_eq!(
+        timeout.to_string(),
+        "HOST_REASON_HANDSHAKE_TIMEOUT timeout_ms=200"
+    );
+    assert_eq!(
+        HandshakeError::Closed.code(),
+        "HOST_REASON_HANDSHAKE_CLOSED"
+    );
+    assert_eq!(
+        malformed("angzarr-handshake v2").code(),
+        "HOST_REASON_HANDSHAKE_MALFORMED"
     );
 }
 

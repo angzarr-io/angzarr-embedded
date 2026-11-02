@@ -953,7 +953,7 @@ fn a_described_child_is_checked_serving_before_it_is_described() {
         )]))
         .err(),
         Some(HostError::NotServing {
-            domain: "player".to_string(),
+            component: "player".to_string(),
             status: "NOT_SERVING".to_string(),
         })
     );
@@ -1040,4 +1040,302 @@ fn a_graceful_child_is_not_held_up_by_the_hosts_health_watch() {
         host.shutdown(),
         [("player".to_string(), ChildExit::Exited(Some(0)))]
     );
+}
+
+// ---------------------------------------------------------------------
+// Supervision: the periodic health check, the grace and the restart limit
+// (the child protocol's section 8, decision 14.63;
+// parity/host/supervision.feature). The supervisor's clock is the test's:
+// each check is the test moving it on by the interval (and, for a child
+// that answers no check, by the deadline), never a wait.
+
+const INTERVAL: Duration = Duration::from_millis(1_000);
+const DEADLINE: Duration = Duration::from_millis(100);
+const GRACE_MS: u64 = 1_500;
+
+/// A host of `player` whose supervisor runs on a clock the test moves,
+/// its check interval [`INTERVAL`], its deadline [`DEADLINE`], its grace
+/// [`GRACE_MS`] and its restart limit `limit`, telling the test each
+/// verdict it reaches.
+struct OnTheClock {
+    host: Host,
+    clock: Arc<crate::clock::ManualClock>,
+    judged: mpsc::Receiver<crate::vitals::Verdict>,
+}
+
+impl OnTheClock {
+    fn start(player: ComponentConfig, limit: u32) -> OnTheClock {
+        let mut config = config(vec![player]);
+        config.supervision.health_check_interval_ms = INTERVAL.as_millis() as u64;
+        config.supervision.health_check_deadline_ms = DEADLINE.as_millis() as u64;
+        config.supervision.unhealthy_grace_ms = GRACE_MS;
+        config.supervision.unhealthy_restart_limit = limit;
+        let clock = crate::clock::ManualClock::new();
+        let (judge, judged) = mpsc::channel();
+        let hooks = Hooks {
+            clock: Some(clock.clone()),
+            judged: Some(judge),
+            ..Hooks::default()
+        };
+        let host = Host::start_with(config, hooks).expect("the host starts");
+        OnTheClock {
+            host,
+            clock,
+            judged,
+        }
+    }
+
+    /// One check: the interval passes, and, for a child that does not
+    /// `answer`, the check's deadline; the verdict on what it found.
+    fn check(&self, answer: bool) -> crate::vitals::Verdict {
+        self.clock.advance(INTERVAL);
+        if !answer {
+            self.clock.advance(DEADLINE);
+        }
+        self.verdict()
+    }
+
+    /// The next verdict the supervisor reaches.
+    fn verdict(&self) -> crate::vitals::Verdict {
+        self.judged
+            .recv_timeout(Duration::from_secs(20))
+            .expect("the supervisor judged the child's health")
+    }
+
+    fn handler(&self) -> RemoteCommandHandler {
+        self.host.handler("player").unwrap()
+    }
+
+    /// Awaits the `n`th child coming up.
+    fn came_up(&self, n: u64) {
+        let mut generations = self.handler().generations();
+        let up = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap()
+            .block_on(async {
+                tokio::time::timeout(Duration::from_secs(20), generations.wait_for(|g| *g >= n))
+                    .await
+                    .map(|seen| seen.is_ok())
+            });
+        assert_eq!(up, Ok(true), "child {n} came up");
+    }
+
+    fn sit(&self) -> Result<pb::CommandHandlerResponse, angzarr_router::error::CodedError> {
+        self.handler()
+            .dispatch(&command("player", "/examples.blackjack.SitDown"))
+            .awaited()
+    }
+}
+
+/// A path for a test's file, unique to this process and `tag`.
+fn scratch(tag: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("angzarr-{tag}-{}", std::process::id()))
+}
+
+/// `error`'s `cause`.
+fn cause(error: &angzarr_router::error::CodedError) -> Option<&str> {
+    (error.extras)
+        .get(angzarr_proto::v1::reason_args::CAUSE)
+        .map(String::as_str)
+}
+
+/// A healthy child is checked every interval, and answers; it is the same
+/// child throughout (C-0763).
+#[test]
+fn a_healthy_child_is_checked_every_interval() {
+    use crate::vitals::Verdict;
+    let supervised = OnTheClock::start(player(mode::SERVE), 3);
+    let pid = pid_of(&supervised.handler());
+    for _ in 0..3 {
+        assert_eq!(supervised.check(true), Verdict::Up);
+    }
+    let answered = supervised.sit().expect("the child answers");
+    assert_eq!(answered.rules_version, pid, "the same child");
+    supervised.host.shutdown();
+}
+
+/// A child that answers no check, its health watch still SERVING, is down
+/// from its first unanswered check, its calls failing retryably without
+/// reaching it, and restarted at the first check past its grace; the new
+/// child answers (C-0764).
+#[test]
+fn a_wedged_child_is_restarted_once_its_grace_has_passed() {
+    use crate::vitals::Verdict;
+    let wedge = scratch("wedge");
+    std::fs::write(&wedge, "").unwrap();
+    let supervised = OnTheClock::start(
+        with(
+            player(mode::SERVE),
+            &[(fake_child::CHECK_HANG_ENV, wedge.to_str().unwrap())],
+        ),
+        3,
+    );
+    let first = pid_of(&supervised.handler());
+    assert_eq!(supervised.check(false), Verdict::Down, "1100 ms");
+    let down = supervised.sit().expect_err("not sent");
+    assert!(is_retryable(&down), "{down:?}");
+    assert_eq!(cause(&down), Some(crate::remote::causes::NOT_SERVING));
+    assert_eq!(supervised.check(false), Verdict::Down, "2200 ms");
+    assert_eq!(supervised.check(false), Verdict::Restart, "3300 ms");
+    std::fs::remove_file(&wedge).unwrap();
+    supervised.came_up(2);
+    let answered = supervised.sit().expect("the new child answers");
+    assert_ne!(answered.rules_version, first, "a new child answered");
+    assert!(!alive(&first));
+    supervised.host.shutdown();
+}
+
+/// A child whose health reports NOT_SERVING past its grace is restarted,
+/// its grace from when its watch first said so (C-0765).
+#[test]
+fn a_child_not_serving_past_its_grace_is_restarted() {
+    use crate::vitals::Verdict;
+    use fake_child::CONTROL_ENV;
+    let socket = scratch("nsctl.sock");
+    let _ = std::fs::remove_file(&socket);
+    let control = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let supervised = OnTheClock::start(
+        with(
+            player(mode::SERVE),
+            &[(CONTROL_ENV, socket.to_str().unwrap())],
+        ),
+        3,
+    );
+    let (mut fake, _) = control.accept().unwrap();
+    let first = pid_of(&supervised.handler());
+    std::io::Write::write_all(&mut fake, b"0").unwrap();
+    assert_eq!(supervised.verdict(), Verdict::Down, "its watch, at 0 ms");
+    assert_eq!(supervised.check(true), Verdict::Down, "1000 ms");
+    assert_eq!(supervised.check(true), Verdict::Restart, "2000 ms");
+    supervised.came_up(2);
+    let _ = std::fs::remove_file(&socket);
+    assert_ne!(pid_of(&supervised.handler()), first);
+    assert!(!alive(&first));
+    supervised.host.shutdown();
+}
+
+/// A child that answers its checks again within its grace is up again,
+/// and not restarted however long it then stays healthy (C-0766).
+#[test]
+fn a_child_healthy_again_within_its_grace_is_not_restarted() {
+    use crate::vitals::Verdict;
+    let wedge = scratch("recover");
+    std::fs::write(&wedge, "").unwrap();
+    let supervised = OnTheClock::start(
+        with(
+            player(mode::SERVE),
+            &[(fake_child::CHECK_HANG_ENV, wedge.to_str().unwrap())],
+        ),
+        3,
+    );
+    let pid = pid_of(&supervised.handler());
+    assert_eq!(supervised.check(false), Verdict::Down, "1100 ms");
+    std::fs::remove_file(&wedge).unwrap();
+    for _ in 0..3 {
+        assert_eq!(supervised.check(true), Verdict::Up);
+    }
+    let answered = supervised.sit().expect("the child answers again");
+    assert_eq!(answered.rules_version, pid, "the same child");
+    supervised.host.shutdown();
+}
+
+/// A component restarted for its health as often as its limit stays down
+/// the next time: its child stopped and none launched, its calls failing
+/// retryably as a child not running does, until the host ends (C-0767).
+#[test]
+fn past_its_restart_limit_a_child_stays_down() {
+    use crate::vitals::Verdict;
+    let wedge = scratch("limit");
+    std::fs::write(&wedge, "").unwrap();
+    let supervised = OnTheClock::start(
+        with(
+            player(mode::SERVE),
+            &[(fake_child::CHECK_HANG_ENV, wedge.to_str().unwrap())],
+        ),
+        1,
+    );
+    let first = pid_of(&supervised.handler());
+    assert_eq!(supervised.check(false), Verdict::Down);
+    assert_eq!(supervised.check(false), Verdict::Down);
+    assert_eq!(supervised.check(false), Verdict::Restart);
+    supervised.came_up(2);
+    let second = pid_of(&supervised.handler());
+    assert_ne!(second, first);
+    assert_eq!(supervised.check(false), Verdict::Down);
+    assert_eq!(supervised.check(false), Verdict::Down);
+    assert_eq!(supervised.check(false), Verdict::GiveUp);
+    let down = supervised.sit().expect_err("given up");
+    assert!(is_retryable(&down), "{down:?}");
+    assert_eq!(cause(&down), Some(crate::remote::causes::NOT_RUNNING));
+    std::fs::remove_file(&wedge).unwrap();
+    assert!(!alive(&first) && !alive(&second));
+    assert_eq!(
+        supervised.host.shutdown(),
+        [("player".to_string(), ChildExit::NotRunning)]
+    );
+}
+
+/// A command in flight on a child that is restarted fails retryably, and
+/// is never sent again: not to the new child, nor to the old one twice
+/// (C-0768). The fake says on its control socket when the command has
+/// reached it.
+#[test]
+fn a_command_in_flight_on_a_restarted_child_fails_retryably_once() {
+    use crate::vitals::Verdict;
+    use fake_child::{CONTROL_ENV, LOG_ENV};
+    let socket = scratch("ifctl.sock");
+    let log = scratch("inflight.log");
+    let wedge = scratch("inflight");
+    let _ = std::fs::remove_file(&socket);
+    let _ = std::fs::remove_file(&log);
+    let control = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let supervised = OnTheClock::start(
+        with(
+            player(mode::SERVE),
+            &[
+                (CONTROL_ENV, socket.to_str().unwrap()),
+                (LOG_ENV, log.to_str().unwrap()),
+                (fake_child::CHECK_HANG_ENV, wedge.to_str().unwrap()),
+            ],
+        ),
+        3,
+    );
+    let (mut fake, _) = control.accept().unwrap();
+    let first = pid_of(&supervised.handler());
+    let handler = supervised.handler();
+    let in_flight = std::thread::spawn(move || {
+        handler
+            .dispatch(&command("player", "/examples.blackjack.Hang"))
+            .awaited()
+    });
+    fake.set_read_timeout(Some(Duration::from_secs(20)))
+        .unwrap();
+    let mut reached = [0u8];
+    std::io::Read::read_exact(&mut fake, &mut reached).unwrap();
+    assert_eq!(reached[0], fake_child::HUNG, "the command is in flight");
+    std::fs::write(&wedge, "").unwrap();
+    assert_eq!(supervised.check(false), Verdict::Down);
+    assert_eq!(supervised.check(false), Verdict::Down);
+    assert_eq!(supervised.check(false), Verdict::Restart);
+    let failed = in_flight
+        .join()
+        .unwrap()
+        .expect_err("its child was stopped");
+    assert!(is_retryable(&failed), "{failed:?}");
+    std::fs::remove_file(&wedge).unwrap();
+    supervised.came_up(2);
+    let second = pid_of(&supervised.handler());
+    assert!(supervised.sit().is_ok());
+    let _ = std::fs::remove_file(&socket);
+    let logged = std::fs::read_to_string(&log).unwrap();
+    let hung: Vec<&str> = logged.lines().filter(|l| l.contains("Hang")).collect();
+    assert_eq!(
+        hung,
+        [format!("handle /examples.blackjack.Hang {first}")],
+        "sent once, to the first child: {logged}"
+    );
+    assert!(logged.contains(&format!("handle /examples.blackjack.SitDown {second}")));
+    let _ = std::fs::remove_file(&log);
+    supervised.host.shutdown();
 }

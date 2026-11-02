@@ -39,9 +39,10 @@
 //!    events, upcast; the book with its ids and its handling resolved, its
 //!    payload upcast through the domain's port before step 3 decided
 //!    anything by its type, decision 14.39; the nonce) through the router, whose handler decides or records; the
-//!    kernel stamps every event it answers with the input's
-//!    [`Identified::meta`] and the rules version the answer reports, which
-//!    must be the registered one. The router catches a panicking handler, a bug.
+//!    kernel stamps every event it answers with
+//!    [`event_meta`](crate::event_meta) of the context it handed the
+//!    handler and the rules version the answer reports, which must be the
+//!    registered one. The router catches a panicking handler, a bug.
 
 use angzarr_proto::v1::angzarr_dead_letter::Payload;
 use angzarr_proto::v1::{
@@ -529,7 +530,6 @@ pub(crate) async fn decide(
     let contextual = contextual_command(command, registry, sampled.now)
         .await
         .map_err(kernel)?;
-    let recorded_at = contextual.recorded_at.unwrap_or_default();
     // The handler's own refusal, as it made it, when it is in process:
     // kept beside the refusal's report for the caller to match.
     let (response, mut kept) = route::catching(|| handler.dispatch(&contextual)).await;
@@ -605,7 +605,10 @@ pub(crate) async fn decide(
         return Err(Failure::Kernel(mismatch));
     }
     let rules_version = response.rules_version;
-    let meta = identified.meta(recorded_at, &rules_version);
+    let meta = crate::event_meta(
+        &angzarr_router::domain::command_context(&contextual),
+        &rules_version,
+    );
     let events = response.events.unwrap_or_default();
     let pages: Vec<EventPage> = (command.head..)
         .zip(

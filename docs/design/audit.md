@@ -238,7 +238,7 @@ impl Identified {
 
 `component` is `Policy::NAME`; `index` is the order's place among those
 the trigger set off for that policy. The `causation_id` column is the
-command's own (`CommandPage.causation_id`); `Identified::meta` stamps the
+command's own (`CommandPage.causation_id`); `event_meta` stamps the
 events with `causation.command_id` only. Identification is infallible: the
 check refused everything that could make it fail. Text forms of ids exist
 only at display and input (`Display`/`FromStr` on `v1::Uuid`).
@@ -464,7 +464,7 @@ pub trait Domain: Sized + 'static {
     const CONFLICT_RESOLUTION: Option<ConflictResolution> = None;
     const CONFLICT_RESOLUTION_BY_COMMAND: &'static [(&'static str, ConflictResolution)] = &[];
     // The event, and where it sits: its cover, sequence and whole EventMeta
-    // (None for the decision's own event, not stamped yet).
+    // (for the decision's own event, the event_meta it will be stamped with).
     fn apply(state: &mut Self::State, event: &Self::Event, page: &PageContext<'_>);
 }
 
@@ -684,7 +684,10 @@ A panicking fact handler is a bug: the router catches it
 kernel logs a [dead letter](#dead-letters-durable-logged-and-answered).
 
 **Business output is payloads only.** The kernel builds the pages: their
-sequences and their `EventMeta` (`Identified::meta`).
+sequences and their `EventMeta` (`event_meta`, of the router's context of
+the `ContextualCommand` it handed the handler: the one builder, which the
+markup also folds a decision's own events with, so an applier reads at
+decide time the metadata replay hands it).
 
 ## Metadata
 
@@ -708,8 +711,9 @@ security log, written by the application with the command id, so erasing
 or rotating personal data never touches an event. **No base sequence**: the
 events of one command are grouped by `command_id`, and the version decided
 against is the first one's sequence. Business time (a deadline, a draw's
-instant) belongs in the payload, where `apply` sees it; a handler copies
-its context's `recorded_at` there when the domain needs it.
+instant) belongs in the payload, where `apply` sees it. The instant an
+event is recorded at needs no copy there: `apply` reads it in its page's
+metadata, for the decision's own events as at replay.
 
 A decoded event is an `Envelope<E>`: a checked `EventPage`, its metadata's
 required fields outside their `Option`s (`causation()`, the generated
