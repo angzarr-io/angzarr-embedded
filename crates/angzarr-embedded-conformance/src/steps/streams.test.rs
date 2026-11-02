@@ -208,7 +208,7 @@ fn names(value: &str, wanted: &str) -> bool {
 }
 
 #[then(
-    regex = r#"^the (?:\w+ command|policy's answer) is refused INTERNAL with reason (\w+)(.*)$"#
+    regex = r#"^the (?:\w+ command|policy's answer) is refused INTERNAL with reason (\w+)((?:,.*)?)$"#
 )]
 fn policy_bug(w: &mut Coordinator, reason: String, naming: String) {
     let letters = letters_of(w, &reason);

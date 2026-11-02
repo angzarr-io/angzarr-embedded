@@ -67,7 +67,7 @@
 //! stream's events at the length it was loaded at, with the step's
 //! positions. Then every [`Policy`] for the source's domain runs, through
 //! angzarr-router's `PolicyComponent` (a `PolicyDispatch`, or a policy in
-//! another process), on the written events, each of its commands a step of its own in its target,
+//! another process), on the written events, each of its commands and facts a step of its own in its target,
 //! depth first, with the policy's position written with it; a step that
 //! fails keeps every write before it ([`Failure`], with the path to the
 //! failing [`Step`]), and what is owed is resumed by position

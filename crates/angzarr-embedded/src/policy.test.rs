@@ -311,6 +311,45 @@ fn as_fact(mut book: CommandBook) -> CommandBook {
     book
 }
 
+/// A policy's answer, ordered (decision 14.69): each output keeps its arm,
+/// commands and facts in one index space, and a fact's book carries the
+/// origin the kernel stamps, its external id the reaction id's canonical
+/// text and its description naming its type and the policy.
+#[test]
+fn a_policys_facts_are_ordered_with_its_commands_and_stamped_their_origin() {
+    use crate::v1::{command_page::Body, EventRef, Uuid};
+    let trigger = EventRef {
+        stream: Some(cover_in("account", 1, "what-if")),
+        sequence: 4,
+    };
+    let correlation = Uuid::from_bytes([7; 16]);
+    let orders = super::answered(
+        "bookkeeping",
+        &trigger,
+        &correlation,
+        vec![record(None), as_fact(record(None))],
+    );
+    assert_eq!(orders.len(), 2);
+    assert!(!orders[0].is_fact());
+    assert!(orders[1].is_fact());
+    assert_eq!(orders[1].index(), 1, "one index space");
+    let command = orders[0].book();
+    let page = command.page.unwrap();
+    assert!(matches!(page.body, Some(Body::Command(_))));
+    assert_eq!(page.fact_origin, None, "a command carries none");
+    let fact = orders[1].book();
+    let page = fact.page.unwrap();
+    assert!(matches!(page.body, Some(Body::Fact(_))));
+    let derived = crate::ids::policy_command_id(&trigger, "bookkeeping", 1).unwrap();
+    let origin = page.fact_origin.expect("the kernel's origin");
+    assert_eq!(origin.external_id, derived.to_string());
+    assert_eq!(
+        origin.description,
+        "toy.ledger.cmd.v1.Record from bookkeeping"
+    );
+    assert_eq!(page.command_id, None, "the check derives its id");
+}
+
 /// A reaction's own command id and causation, where set, are the ones its
 /// coordinator stamps: the id derived from the trigger, the policy and
 /// the command's index in the whole answer, and the trigger. Any other is

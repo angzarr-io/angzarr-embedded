@@ -1691,6 +1691,13 @@ fn root() -> Uuid {
 }
 
 /// A domain value as the `Any` it travels as.
+/// `payload` as a policy's command output (`Commands::orders`).
+fn command_of(payload: Any) -> command_page::Body {
+    command_page::Body::Command(Command {
+        payload: Some(payload),
+    })
+}
+
 fn any<M: DomainMessage>(message: M) -> Any {
     pack(&message.to_wire())
 }
@@ -3341,8 +3348,8 @@ impl BuyIn {
         Ok(BuyInHeld { cents: cmd.cents })
     }
 
-    /// A timeout, a fact, not a starting one: skipped for a correlation
-    /// with no buy-in. Records the fact's origin, from the one context.
+    /// A timeout, a fact, not a starting one: dead-lettered for a
+    /// correlation with no buy-in. Records the fact's origin, from the one context.
     #[handles_fact(BuyInExpired)]
     fn expired(&self, _fact: BuyInExpired, ctx: &Context) -> Record<Self> {
         Record::of(Expired {
@@ -3701,10 +3708,10 @@ mod process_manager {
     }
 
     /// A fact that is not a starting one, for a correlation with no
-    /// instance, is skipped silently: applied, nothing recorded, nothing
-    /// dead-lettered.
+    /// instance, is dead-lettered (decision 14.69): never refused, so
+    /// parked, nothing recorded, its letter told.
     #[test]
-    fn a_non_starting_fact_for_no_instance_is_skipped() {
+    fn a_non_starting_fact_for_no_instance_is_dead_lettered() {
         let registry = buy_ins();
         let store = Mem::new();
         let log = MemoryDeadLetters::new();
@@ -3713,14 +3720,19 @@ mod process_manager {
             any(BuyInExpired {}),
             "timeout-3",
         );
-        let skipped = handle_in::<BuyIn>(&store, &registry, &log, 2, expired);
+        let parked = handle_in::<BuyIn>(&store, &registry, &log, 2, expired);
         assert!(
-            matches!(skipped, Ok(Handled::Applied(_))),
+            matches!(parked, Ok(Handled::Parked(_))),
             "{:?}",
-            skipped.err().map(|e| e.to_string())
+            parked.err().map(|e| e.to_string())
         );
         assert_eq!(buy_in_events(&store, &correlation(3)), None);
-        assert!(log.lines().is_empty());
+        let reasons: Vec<_> = log
+            .letters()
+            .into_iter()
+            .filter_map(|l| l.reason.map(|r| r.code))
+            .collect();
+        assert_eq!(reasons, ["COORDINATOR_REASON_PM_NO_INSTANCE"]);
     }
 
     /// In memory, the kernel's start rule reads whether the stream holds
@@ -3909,6 +3921,28 @@ mod policy_events {
         PolicyContext::new(trigger(c), c.clone(), at(1))
     }
 
+    /// A policy's outputs keep their order and their arm (decision 14.69):
+    /// a command its target decides (`to`, `Decides`) and a fact its
+    /// target declares (`fact`, `Ingests`), each with its stream's root.
+    #[test]
+    fn a_policys_commands_and_facts_keep_their_order_and_arm() {
+        let outputs = Commands::<BuyIn>::none()
+            .to(correlation(2), RecordHeld { cents: 5 })
+            .fact(correlation(3), BuyInExpired {});
+        assert_eq!(
+            outputs.orders(),
+            [
+                (correlation(2), command_of(any(RecordHeld { cents: 5 }))),
+                (
+                    correlation(3),
+                    command_page::Body::Fact(Fact {
+                        payload: Some(any(BuyInExpired {})),
+                    })
+                ),
+            ]
+        );
+    }
+
     /// A policy answers an event of its source with its `#[on_event]`
     /// handler's commands, each with the root of its stream.
     #[test]
@@ -3921,7 +3955,10 @@ mod policy_events {
             .on_event(&started, &ctx(&correlation(1)))
             .unwrap()
             .expect("the policy handles BuyInStarted");
-        assert_eq!(commands.orders(), [(root(), any(Hold { cents: 30 }))]);
+        assert_eq!(
+            commands.orders(),
+            [(root(), command_of(any(Hold { cents: 30 })))]
+        );
     }
 
     /// A policy addressing a process manager names the instance by the
@@ -3934,7 +3971,7 @@ mod policy_events {
             .expect("the policy handles Held");
         assert_eq!(
             commands.orders(),
-            [(correlation(7), any(RecordHeld { cents: 5 }))]
+            [(correlation(7), command_of(any(RecordHeld { cents: 5 })))]
         );
     }
 
@@ -4058,7 +4095,10 @@ mod policy_errors {
             .on_event(&started, &ctx)
             .unwrap()
             .expect("the policy handles BuyInStarted");
-        assert_eq!(commands.orders(), [(root(), any(Hold { cents: 30 }))]);
+        assert_eq!(
+            commands.orders(),
+            [(root(), command_of(any(Hold { cents: 30 })))]
+        );
     }
 }
 

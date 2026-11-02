@@ -2201,6 +2201,75 @@ fn a_policys_reaction_that_sets_its_own_stamp_is_refused_by_the_kernel() {
     assert_eq!(field(&origin), None);
 }
 
+/// A policy's fact (decision 14.69) whose handler fails, a bug, is
+/// dead-lettered at its destination and parked, never refused: the
+/// policy's step is done, its position past the trigger, and the chain
+/// goes on (C-0778). Here the fact is the answer's last output, so its
+/// step writes the position.
+#[test]
+fn a_policys_fact_whose_handler_fails_is_parked_and_its_step_done() {
+    use crate::v1::angzarr_dead_letter::Payload;
+    use crate::v1::{command_page::Body, Fact};
+    let mut registry = registry();
+    registry
+        .policy_component(
+            Unchecked {
+                answer: |source| {
+                    let from_one = source.cover.as_ref() == Some(&cover("account", 1));
+                    // A negative payment: the toy's ingest panics, a bug.
+                    let mut fact = command(
+                        cover("account", 2),
+                        crate::toys::AccountFact::PaymentReceived(-1).to_any(),
+                    );
+                    let page = fact.page.as_mut().unwrap();
+                    let Some(Body::Command(paid)) = page.body.take() else {
+                        unreachable!()
+                    };
+                    page.body = Some(Body::Fact(Fact {
+                        payload: paid.payload,
+                    }));
+                    match from_one {
+                        true => vec![fact],
+                        false => Vec::new(),
+                    }
+                },
+            },
+            "account",
+        )
+        .unwrap();
+    let log = MemoryDeadLetters::new();
+    let store = MemoryStore::new();
+    let handled = Kernel::new(&registry)
+        .log_with(&log)
+        .on_retryable(crate::toys::no_retries())
+        .handle::<Account, _>(
+            &store,
+            command(cover("account", 1), AccountCmd::Open.to_any()),
+            &at(30),
+        )
+        .ready()
+        .expect("a parked fact fails no step");
+    assert_eq!(handled.books().len(), 1, "the account's own events alone");
+    assert_eq!(
+        streams(&store),
+        [cover("account", 1)],
+        "nothing recorded for it"
+    );
+    let parked: Vec<_> = log
+        .letters()
+        .into_iter()
+        .filter_map(|l| match l.payload {
+            Some(Payload::RejectedCommand(book)) => book.page.and_then(|p| p.body),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        matches!(&parked[..], [Body::Fact(_)]),
+        "the fact dead-lettered as rejected_command: {parked:?}"
+    );
+    assert_eq!(position(&store, "unchecked", &cover("account", 1)), 1);
+}
+
 /// A policy's commands naming exactly the command id and causation their
 /// coordinator stamps (decision 14.48, amended: no id that DIFFERS from
 /// the stamp) are delivered, each by its own index in the answer.

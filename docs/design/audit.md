@@ -200,7 +200,7 @@ no cover; an unregistered domain; no root; a root that is not 16 bytes; a
 set empty edition; no page; no body; no payload; a set command or
 correlation id that is not 16 bytes; a causation from a client
 (`CausationFromOutside`); for a policy's book, ids of its own
-(`IdOnPolicyCommand`), a fact (`FactFromPolicy`) or handling
+(`IdOnPolicyCommand`) or handling
 (`HandlingOnPolicyCommand`), or a trigger that cannot name an id (`BadTrigger`);
 a fact without `fact_origin`; an empty `external_id`; a command with a
 `fact_origin`; a fact whose `command_id` is not its derivation; a fact with
@@ -542,14 +542,14 @@ refusal.
 kernel runs a policy through angzarr-router's `PolicyComponent` (a
 `PolicyDispatch`, or one in another process: `Registry::policy_component`,
 given the output domain its descriptor names),
-one triggering event at a time, and holds every command of each reaction
+one triggering event at a time, and holds every command and fact of each reaction
 (`PolicyResponse.reactions`, by triggering page) to these rules
 (`check_reactions`): the policy's one destination
 (`COORDINATOR_REASON_POLICY_COMMAND_OUTSIDE_DESTINATION`), the trigger's edition, an unset one
 stamped with it (`COORDINATOR_REASON_POLICY_COMMAND_OUTSIDE_EDITION`), a named root
 (`COORDINATOR_REASON_POLICY_COMMAND_NO_ROOT`), no Handling, which only the target stamps
-(`COORDINATOR_REASON_POLICY_COMMAND_WITH_HANDLING`), a Command, never a Fact
-(`COORDINATOR_REASON_POLICY_COMMAND_IS_FACT`), with no `fact_origin`
+(`COORDINATOR_REASON_POLICY_COMMAND_WITH_HANDLING`), no `fact_origin` of its own on
+either arm, the kernel stamping a fact's
 (`COORDINATOR_REASON_POLICY_COMMAND_FACT_ORIGIN`), the trigger's correlation, if any
 (`COORDINATOR_REASON_POLICY_COMMAND_OTHER_CORRELATION`), and no command id or causation
 other than the one the kernel stamps (`COORDINATOR_REASON_POLICY_COMMAND_OTHER_IDENTITY`,
@@ -789,11 +789,16 @@ kernel.resume(&store, &sampled).await?;                      // -> Recorded
   `Policy`; `#[policy]` generates the same impl (answering refusals). Every
   policy is registered in the registry's one list, and for each event of a
   source, every policy of that source runs in the order registered.
-- **Policies emit commands only.** Facts come from outside the system, so
-  there is no policy-injected fact. A policy's command is a `CommandBook`
-  the kernel builds (the target's cover, the command packed as `Any`, no
-  ids, no handling), checked and identified from its trigger, then taken
-  through steps 3 to 5 in its target.
+- **A policy emits what its target declares** (angzarr decision 14.69): a
+  command for a type its target decides, which it may refuse, and a fact
+  for a type it ingests, which it records and never refuses
+  (`Commands::to`, `Commands::fact`). Either is a `CommandBook` the kernel
+  builds (the target's cover, the payload packed as `Any`, no ids, no
+  handling; a fact with the origin the kernel stamps), checked and
+  identified from its trigger (the reaction id, commands and facts in one
+  index space), then taken through steps 3 to 5 in its target. A fact
+  whose handler fails is dead-lettered there and parked, and its step is
+  done.
 - **Every step is committed on its own.** Atomicity covers ONE handling
   step, never a chain: a step is one atomic write to the store (see *The
   store port*), one stream's events at the length the step loaded, with

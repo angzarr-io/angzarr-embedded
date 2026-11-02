@@ -17,9 +17,9 @@
 //!    registered one, [`Catalog::snapshot_usable`](super::Catalog::snapshot_usable), and below the head) and the events
 //!    after it), **then** look the command id up (the store's
 //!    `find_command`), and [`admit`] the input, the kernel's own
-//!    (decision 14.42): what an input meets before its handler runs (a
-//!    refusal fact's address, deduplication by the events found, a
-//!    process manager's start rule). Events found are answered [`Deduplicated::Duplicate`],
+//!    (decision 14.42): what an input meets before its handler runs
+//!    (deduplication by the events found, a process manager's start
+//!    rule). Events found are answered [`Deduplicated::Duplicate`],
 //!    and nothing below runs. The load comes first so that a concurrent
 //!    commit of the same command (a retry racing its original) can never
 //!    slip between the two reads unseen: if it lands after the load, either
@@ -75,9 +75,6 @@ pub(crate) enum Deduplicated {
     /// answer (angzarr's DUPLICATE), in sequence order, in an `EventBook`
     /// for the addressed stream.
     Duplicate { events: EventBook },
-    /// A process manager's fact for a stream with no instance, of a type
-    /// that does not start one: skipped, answered applied with no events.
-    Skipped,
     /// Nothing found: the command goes on to [`load`]. A command whose
     /// earlier decision emitted nothing lands here again (an accepted cost:
     /// it is decided again, against the stream as it is now).
@@ -229,11 +226,13 @@ pub(crate) fn refused(command: &Identified, error: CodedError) -> Failure<Reject
 
 /// Step 3 over `port`: load the stream, refuse an outside input to an
 /// edition stream not forked there ([`not_forked`]), look the command up,
-/// and [`admit`] it.
+/// and [`admit`] it, a fact it does not admit dead-lettered to
+/// `dead_letters`.
 pub(crate) async fn deduplicate<P: Port>(
     port: &mut P,
     registry: &Registry,
     command: Identified,
+    dead_letters: &dyn DeadLetterLog,
 ) -> Result<Deduplicated, Failure<Rejected>> {
     let loaded = read(port, registry, &command)
         .await
@@ -251,6 +250,7 @@ pub(crate) async fn deduplicate<P: Port>(
         &loaded.current,
         recorded,
         loaded.head > 0,
+        dead_letters,
     )? {
         Admitted::Duplicate(pages) => Ok(Deduplicated::Duplicate {
             events: EventBook {
@@ -260,7 +260,6 @@ pub(crate) async fn deduplicate<P: Port>(
                 pages,
             },
         }),
-        Admitted::Skip => Ok(Deduplicated::Skipped),
         Admitted::Dispatch => Ok(Deduplicated::Novel(Box::new(Novel { command, loaded }))),
     }
 }
@@ -292,9 +291,6 @@ fn not_forked(command: &Identified) -> Failure<Rejected> {
 pub(crate) enum Admitted {
     /// The stream holds the input's events already: these.
     Duplicate(Vec<EventPage>),
-    /// A process manager's fact for a stream with no instance, of a type
-    /// that does not start one: skipped.
-    Skip,
     /// On to its handler.
     Dispatch,
 }
@@ -303,30 +299,25 @@ pub(crate) enum Admitted {
 /// nothing): what an input meets before its handler runs, from what
 /// step 3 read (`recorded`, the events found under its id; whether its
 /// stream `exists`), in order:
-/// 1. a refusal fact (a fact with a causation) is admitted only by the
-///    exact stream its causation names (`COORDINATOR_REASON_REFUSAL_FACT_WRONG_STREAM`, a bug);
-/// 2. events found under its id are [`Admitted::Duplicate`];
-/// 3. a process manager's start rule: with no instance, an input whose type
-///    after upcasting (`current`) is not one of its starting types is
-///    refused `COORDINATOR_REASON_PM_NO_INSTANCE` (a business refusal) if a command, and
-///    [`Admitted::Skip`]ped if a fact. Its upcast's failure is
+/// 1. events found under its id are [`Admitted::Duplicate`];
+/// 2. a process manager's start rule: with no instance, an input whose type
+///    after upcasting (`current`) is not one of its starting types is not
+///    delivered, `COORDINATOR_REASON_PM_NO_INSTANCE`: a command is refused
+///    (a business refusal), and a fact, which is never refused, is
+///    dead-lettered to `dead_letters` (decision 14.69) and fails as the
+///    kernel's, so its caller parks it. Its upcast's failure is
 ///    [`KernelError::Upcast`].
+///
+/// A fact's causation is not read here: only a `CommandRefused` is held to
+/// its trigger's stream, by its payload, at the check (decision 14.69).
 pub(crate) fn admit(
     registry: &Registry,
     command: &Identified,
     current: &Result<Any, UpcastError>,
     recorded: Vec<EventPage>,
     exists: bool,
+    dead_letters: &dyn DeadLetterLog,
 ) -> Result<Admitted, Failure<Rejected>> {
-    let is_fact = command.body().is_fact();
-    if let (true, Some(cause)) = (is_fact, command.causation_id()) {
-        if cause.stream.as_ref() != Some(command.cover()) {
-            return Err(Failure::Kernel(KernelError::Router(route::spec_coded(
-                CoordinatorReason::RefusalFactWrongStream,
-                [(args::DOMAIN.to_string(), command.domain().to_string())],
-            ))));
-        }
-    }
     if !recorded.is_empty() {
         return Ok(Admitted::Duplicate(recorded));
     }
@@ -345,10 +336,7 @@ pub(crate) fn admit(
     if starting.contains(type_name(&current.type_url)) {
         return Ok(Admitted::Dispatch);
     }
-    if is_fact {
-        return Ok(Admitted::Skip);
-    }
-    Err(Failure::Rejected(Rejected::of(&route::spec_coded(
+    let no_instance = route::spec_coded(
         CoordinatorReason::PmNoInstance,
         [
             (args::STREAM.to_string(), cover_text(command.cover())),
@@ -357,7 +345,13 @@ pub(crate) fn admit(
                 command.payload().type_url.clone(),
             ),
         ],
-    ))))
+    );
+    if !command.body().is_fact() {
+        return Err(Failure::Rejected(Rejected::of(&no_instance)));
+    }
+    let unstarted = KernelError::Router(no_instance);
+    dead_letter::write_command(dead_letters, registry.catalog(), command, &unstarted);
+    Err(Failure::Kernel(unstarted))
 }
 
 /// `command`'s payload upcast through its domain's port (decision 14.39),

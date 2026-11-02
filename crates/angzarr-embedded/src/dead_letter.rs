@@ -386,8 +386,7 @@ pub(crate) fn reason(cause: &Cause, payload: &Payload) -> angzarr_proto::v1::Dia
 /// with no root (`COORDINATOR_REASON_POLICY_COMMAND_NO_ROOT`), naming its
 /// own command id or causation (`COORDINATOR_REASON_POLICY_COMMAND_OTHER_IDENTITY`,
 /// and the `field`) or correlation
-/// (`COORDINATOR_REASON_POLICY_COMMAND_OTHER_CORRELATION`), a fact
-/// (`COORDINATOR_REASON_POLICY_COMMAND_IS_FACT`), a command carrying
+/// (`COORDINATOR_REASON_POLICY_COMMAND_OTHER_CORRELATION`), a command carrying
 /// `fact_origin` (`COORDINATOR_REASON_POLICY_COMMAND_FACT_ORIGIN`), a
 /// refusal fact for another stream
 /// (`COORDINATOR_REASON_REFUSAL_FACT_WRONG_STREAM`, its domain); any other
@@ -537,6 +536,8 @@ struct Held {
     raised: Vec<AngzarrDeadLetter>,
     /// Placed: the call's.
     placed: Vec<DeadLetter>,
+    /// Every letter raised in the call, placed or not.
+    count: usize,
 }
 
 impl<'k> CallLetters<'k> {
@@ -576,6 +577,12 @@ impl<'k> CallLetters<'k> {
         !self.held().raised.is_empty()
     }
 
+    /// How many letters the call has raised so far, placed or not: a step
+    /// raised one when the count has grown past what it read before.
+    pub(crate) fn count(&self) -> usize {
+        self.held().count
+    }
+
     /// Every letter placed so far, taken: what the call answers.
     pub(crate) fn take(&self) -> Vec<DeadLetter> {
         std::mem::take(&mut self.held().placed)
@@ -592,7 +599,10 @@ impl DeadLetterLog for CallLetters<'_> {
             occurred_at: self.occurred_at.or(letter.occurred_at),
             ..letter.clone()
         };
-        self.held().raised.push(letter.clone());
+        let mut held = self.held();
+        held.raised.push(letter.clone());
+        held.count += 1;
+        drop(held);
         self.log.letter(&letter);
     }
 }

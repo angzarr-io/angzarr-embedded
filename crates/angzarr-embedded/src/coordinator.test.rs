@@ -1307,15 +1307,23 @@ mod admission {
         );
         assert!(pages(&store, &stream).is_empty(), "nothing written");
 
-        // A non-starting fact is skipped: applied, with no events.
+        // A non-starting fact is dead-lettered (decision 14.69), never
+        // refused: parked, with no events, its letter keyed.
         let paid = fact(
             stream.clone(),
             AccountFact::PaymentReceived(5).to_any(),
             "pi_1",
         );
-        let skipped = any(&store, &registry, paid, 11).unwrap();
-        assert_eq!(skipped.outcome().delivery, DeliveryOutcome::Applied as i32);
-        assert!(skipped.books().is_empty());
+        let parked = any(&store, &registry, paid, 11).unwrap();
+        assert_eq!(parked.outcome().delivery, DeliveryOutcome::Parked as i32);
+        assert!(parked.books().is_empty());
+        let reasons: Vec<_> = parked
+            .dead_letters()
+            .iter()
+            .filter_map(|l| l.letter.reason.as_ref().map(|r| r.code.clone()))
+            .collect();
+        assert_eq!(reasons, ["COORDINATOR_REASON_PM_NO_INSTANCE"]);
+        assert!(pages(&store, &stream).is_empty(), "nothing written");
 
         // A starting type starts it; then any input is dispatched.
         let open = || command(stream.clone(), AccountCmd::Open.to_any()).id(1);
@@ -1361,29 +1369,24 @@ mod admission {
         .identify(&at(1))
     }
 
+    /// A fact's causation is not admission's to read (decision 14.69):
+    /// a policy's fact names its trigger in another stream, and a
+    /// refusal fact is held to its trigger's stream by its payload, at the
+    /// check (`Malformed::RefusalMisaddressed`).
     #[test]
-    fn a_refusal_fact_is_admitted_only_by_the_stream_its_causation_names() {
+    fn a_fact_is_admitted_whatever_stream_its_causation_names() {
         use super::super::{admit, Admitted};
         let registry = registry();
-        let addressed = refusal_fact(&registry, 1);
-        let current = Ok(addressed.payload().clone());
-        assert_eq!(
-            admit(&registry, &addressed, &current, Vec::new(), true).unwrap(),
-            Admitted::Dispatch
-        );
-        let misaddressed = refusal_fact(&registry, 2);
-        let refused = admit(&registry, &misaddressed, &current, Vec::new(), true)
-            .err()
-            .unwrap();
-        assert!(
-            matches!(
-                &refused,
-                Failure::Kernel(crate::KernelError::Router(e))
-                    if e.code == "COORDINATOR_REASON_REFUSAL_FACT_WRONG_STREAM"
-                        && e.extras.get("domain").map(String::as_str) == Some("account")
-            ),
-            "{refused:?}"
-        );
+        for trigger in [1, 2] {
+            let fact = refusal_fact(&registry, trigger);
+            let current = Ok(fact.payload().clone());
+            let log = crate::MemoryDeadLetters::new();
+            assert_eq!(
+                admit(&registry, &fact, &current, Vec::new(), true, &log).unwrap(),
+                Admitted::Dispatch
+            );
+            assert!(log.letters().is_empty());
+        }
     }
 
     #[test]
@@ -1397,16 +1400,31 @@ mod admission {
             source: "toy.account.cmd.v1.Deposit".to_string(),
             error: angzarr_diagnostic::Report::new("toy-broken"),
         });
-        let refused = admit(&registry, &identified, &failed, Vec::new(), false)
-            .err()
-            .unwrap();
+        let refused = admit(
+            &registry,
+            &identified,
+            &failed,
+            Vec::new(),
+            false,
+            &crate::MemoryDeadLetters::new(),
+        )
+        .err()
+        .unwrap();
         assert!(
             matches!(refused, Failure::Kernel(KernelError::Upcast { .. })),
             "{refused:?}"
         );
         // An instance exists: no start rule, so the type is not read here.
         assert_eq!(
-            admit(&registry, &identified, &failed, Vec::new(), true).unwrap(),
+            admit(
+                &registry,
+                &identified,
+                &failed,
+                Vec::new(),
+                true,
+                &crate::MemoryDeadLetters::new()
+            )
+            .unwrap(),
             Admitted::Dispatch
         );
         // An aggregate has no start rule.
@@ -1418,7 +1436,15 @@ mod admission {
         .unwrap()
         .identify(&at(1));
         assert_eq!(
-            admit(&aggregate, &identified, &failed, Vec::new(), false).unwrap(),
+            admit(
+                &aggregate,
+                &identified,
+                &failed,
+                Vec::new(),
+                false,
+                &crate::MemoryDeadLetters::new()
+            )
+            .unwrap(),
             Admitted::Dispatch
         );
     }

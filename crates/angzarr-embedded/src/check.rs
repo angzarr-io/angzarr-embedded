@@ -275,10 +275,11 @@ pub fn check(book: CommandBook, catalog: &Catalog) -> Result<Checked, Malformed>
 }
 
 /// Validate a policy's `book`, built by the kernel for the `index`-th
-/// command `component` issued reacting to `trigger` (whose correlation is
-/// `correlation_id`): the same checks as [`check`], except that the book
-/// must name no ids of its own, no handling and no fact, and its command id
-/// is derived here ([`ids::policy_command_id`]).
+/// command or fact `component` issued reacting to `trigger` (whose
+/// correlation is `correlation_id`): the same checks as [`check`], except
+/// that the book must name no ids of its own and no handling, and its
+/// command id, either arm's, is derived here ([`ids::policy_command_id`]),
+/// a fact's never from its external id (angzarr decision 14.69).
 ///
 /// The id never names the reactor's rules version or code, so a re-run over
 /// a handled trigger (catch-up, redelivery) re-derives the same id and

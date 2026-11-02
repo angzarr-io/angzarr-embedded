@@ -306,10 +306,11 @@ fn a_remote_process_managers_non_starting_command_with_no_instance_is_refused() 
     host.shutdown();
 }
 
-/// A non-starting FACT for a root with no instance is skipped silently:
-/// APPLIED, no events, nothing dead-lettered.
+/// A non-starting FACT for a root with no instance is dead-lettered
+/// (decision 14.69): never refused, so PARKED, no events, its letter
+/// keyed COORDINATOR_REASON_PM_NO_INSTANCE.
 #[test]
-fn a_remote_process_managers_non_starting_fact_with_no_instance_is_skipped() {
+fn a_remote_process_managers_non_starting_fact_with_no_instance_is_dead_lettered() {
     let host = process_manager("test.pm.v1.Open");
     let mut registry = Registry::new();
     host.register(&mut registry).unwrap();
@@ -323,15 +324,20 @@ fn a_remote_process_managers_non_starting_fact_with_no_instance_is_skipped() {
         &sampled(1),
     ))
     .map_err(|e| format!("{e:?}"))
-    .expect("a skipped fact is applied");
+    .expect("a dead-lettered fact is parked");
 
     let written = payloads(&store, &cover("audit"));
     assert!(
         written.is_empty(),
         "a non-starting fact starts no instance: {written:?}"
     );
-    assert!(matches!(handled, Handled::Applied(_)), "applied");
-    assert!(log.lines().is_empty(), "{:?}", log.lines());
+    assert!(matches!(handled, Handled::Parked(_)), "parked");
+    let reasons: Vec<_> = log
+        .letters()
+        .into_iter()
+        .filter_map(|l| l.reason.map(|r| r.code))
+        .collect();
+    assert_eq!(reasons, [PM_NO_INSTANCE]);
     host.shutdown();
 }
 

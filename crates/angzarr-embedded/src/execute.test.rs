@@ -66,9 +66,15 @@ impl<D: Domain> Stream<D> {
             .map(Envelope::page)
             .collect();
         let current = upcast(registry, &command).await;
-        match admit(registry, &command, &current, recorded, head > 0)? {
+        match admit(
+            registry,
+            &command,
+            &current,
+            recorded,
+            head > 0,
+            dead_letters,
+        )? {
             Admitted::Duplicate(_) => return Ok(Executed::Duplicate(&self.events[found])),
-            Admitted::Skip => return Ok(Executed::Applied(&[])),
             Admitted::Dispatch => {}
         }
         let resolution = resolution(registry.catalog(), &command, &current).map_err(kernel)?;

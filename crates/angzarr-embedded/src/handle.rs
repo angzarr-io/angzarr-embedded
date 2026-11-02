@@ -713,14 +713,7 @@ impl<'k> Kernel<'k> {
             }
         };
         let origin = match origin {
-            // A fact is never refused: one whose handler ran and the kernel
-            // dead-lettered (the handler's bug, a retryable failure at its
-            // retries, a race given up at its cap) is parked, its letter
-            // kept, for no caller holds it, and answered OK, PARKED
-            // (C-0599). One of a type no handler takes is its sender's.
-            Err(failure)
-                if identified.body().is_fact() && letters.raised() && !unhandled_type(&failure) =>
-            {
+            Err(failure) if parks(&identified, &failure, letters.raised()) => {
                 port.write_letters(None)
                     .await
                     .map_err(|e| Failure::Kernel(KernelError::Store(e)))?;
@@ -747,10 +740,6 @@ impl<'k> Kernel<'k> {
                         dead_letters: Vec::new(),
                     })?;
                 Ok(Handled::Duplicate(events, Vec::new()))
-            }
-            Origin::Skipped => {
-                self.finish(Handled::Applied(Recorded::default()), port, letters)
-                    .await
             }
             Origin::Forwarded(Forwarded::Duplicate(events)) => {
                 Ok(Handled::Duplicate(events, Vec::new()))
@@ -1150,8 +1139,6 @@ fn passed_through(refusal: &markup::v1::Refusal) -> Any {
 enum Origin {
     /// Step 3 found its events already: these.
     Duplicate(EventBook),
-    /// A process manager's fact for a stream with no instance, skipped.
-    Skipped,
     /// It was decided, and wrote its events (perhaps none) from this
     /// sequence on.
     Wrote(u64),
@@ -1260,6 +1247,17 @@ fn given_up(failure: &Failure<Rejected>) -> bool {
 /// Whether `failure` is the router's for an input of a type no handler of
 /// its domain takes (a fact's, a refusal's, a command's): its sender's
 /// mistake, answered to it, never a handler that ran and failed.
+/// Whether `command`'s `failure` parks it: it is a fact, and the kernel
+/// dead-lettered it (`dead_lettered`): its handler's bug, a retryable
+/// failure at its retries, a race given up at its cap, or a process
+/// manager with no instance for it. A fact is never refused, so no caller
+/// holds it: it is answered OK, PARKED (C-0599, C-0593), and a policy's
+/// fact is its step done (C-0778; decision 14.69). One of a type no
+/// handler takes is its sender's: a bug, never parked.
+fn parks(command: &Identified, failure: &Failure<Rejected>, dead_lettered: bool) -> bool {
+    command.body().is_fact() && dead_lettered && !unhandled_type(failure)
+}
+
 fn unhandled_type(failure: &Failure<Rejected>) -> bool {
     let Failure::Kernel(KernelError::Router(error)) = failure else {
         return false;
@@ -1413,9 +1411,8 @@ impl<'k> Run<'k> {
             return Ok(Origin::Forwarded(forwarded));
         }
         let cover = identified.cover().clone();
-        let novel = match deduplicate(port, self.registry, identified).await? {
+        let novel = match deduplicate(port, self.registry, identified, self.letters).await? {
             Deduplicated::Duplicate { events } => return Ok(Origin::Duplicate(events)),
-            Deduplicated::Skipped => return Ok(Origin::Skipped),
             Deduplicated::Novel(novel) => novel,
         };
         let contextual = load(*novel, &mut self.nonces).map_err(Failure::Kernel)?;
@@ -1494,17 +1491,19 @@ impl<'k> Run<'k> {
     }
 
     /// One policy on one event of `source` (`page`, upcast), through its
-    /// angzarr-router's `PolicyComponent`: each command it answers a step of
-    /// its own, its position written with the last (or alone, when no step
-    /// writes it). The kernel's refusal of the answer ([`check_reactions`]:
-    /// a command outside the policy's destination or its trigger's edition,
-    /// with no root, with Handling, a Fact, carrying `fact_origin`, in
-    /// another correlation, or naming an identity other than its stamp) is
-    /// the policy's bug, as is the
-    /// router's own error: dead-lettered, and the position stays. The policy's own error ([`StepError::PolicyFailed`]) and a
-    /// handler's bug in one of its steps are dead-lettered by their code
-    /// and args, and the position moves past the event (or stays, under
-    /// [`OnPolicyBug::Stay`]).
+    /// angzarr-router's `PolicyComponent`: each command or fact it answers a
+    /// step of its own, its position written with the last (or alone, when
+    /// no step writes it). The kernel's refusal of the answer
+    /// ([`check_reactions`]: an output outside the policy's destination or
+    /// its trigger's edition, with no root, with Handling, carrying
+    /// `fact_origin`, in another correlation, or naming an identity other
+    /// than its stamp) is the policy's bug, as is the router's own error:
+    /// dead-lettered, and the position stays. The policy's own error
+    /// ([`StepError::PolicyFailed`]) and a handler's bug in one of its
+    /// command steps are dead-lettered by their code and args, and the
+    /// position moves past the event (or stays, under
+    /// [`OnPolicyBug::Stay`]); a fact its destination dead-lettered is
+    /// parked, and its step is done ([`parks`]).
     async fn run_policy<P: Port>(
         &mut self,
         port: &mut P,
@@ -1572,9 +1571,18 @@ impl<'k> Run<'k> {
                 true => &position,
                 false => &[],
             };
+            let raised = self.letters.count();
             match self.step(port, delivered.clone(), positions).await {
                 Ok(stepped) => self.enqueue(stepped, path),
-                Err(Failure::Rejected(rejected)) => {
+                Err(failure) if parks(&delivered, &failure, self.letters.count() > raised) => {
+                    // Dead-lettered at its destination: the step is done.
+                    if !positions.is_empty() {
+                        port.write_positions(positions)
+                            .await
+                            .map_err(|e| store(path.clone(), e))?;
+                    }
+                }
+                Err(Failure::Rejected(rejected)) if !delivered.body().is_fact() => {
                     if !policy.answers_refusals {
                         dead_letter::write(
                             self.letters,
@@ -1901,8 +1909,8 @@ impl<'k> Run<'k> {
             return Ok(Stepped::Nothing);
         }
         let cover = command.cover().clone();
-        let novel = match deduplicate(port, self.registry, command).await? {
-            Deduplicated::Duplicate { .. } | Deduplicated::Skipped => {
+        let novel = match deduplicate(port, self.registry, command, self.letters).await? {
+            Deduplicated::Duplicate { .. } => {
                 if !positions.is_empty() {
                     port.write_positions(positions).await.map_err(store)?;
                 }

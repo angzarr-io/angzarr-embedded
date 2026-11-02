@@ -41,6 +41,7 @@ impl<'s, S: Store> Coordinator<'s, S> {
             &mut StorePort::new(self.store, &letters),
             self.registry,
             command,
+            &letters,
         ))
     }
 

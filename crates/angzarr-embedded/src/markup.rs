@@ -70,7 +70,7 @@ use std::fmt;
 
 use angzarr_diagnostic::code;
 use angzarr_proto::v1::event_meta::Causation;
-use angzarr_proto::v1::{Cover, EventBook, EventMeta, EventRef, FactOrigin, Uuid};
+use angzarr_proto::v1::{command_page, Cover, EventBook, EventMeta, EventRef, FactOrigin, Uuid};
 use prost_types::{Any, Timestamp};
 
 use super::domain::Domain;
@@ -522,8 +522,8 @@ records_shape! {
 ///   as starting (`#[handles_cmd(C, starts)]`, `#[handles_fact(F, starts)]`)
 ///   may start an instance. Any other input for a stream with no instance is
 ///   not delivered, decided before the handler by the type after
-///   upcasting: a FACT is skipped silently (applied, no events, nothing
-///   dead-lettered), and a COMMAND is refused (`COORDINATOR_REASON_PM_NO_INSTANCE`, a
+///   upcasting: a FACT is dead-lettered (`COORDINATOR_REASON_PM_NO_INSTANCE`;
+///   never refused, so parked, angzarr decision 14.69), and a COMMAND is refused (`COORDINATOR_REASON_PM_NO_INSTANCE`, a
 ///   business refusal, so a
 ///   policy's refused command yields its refusal fact like any other),
 ///   recording nothing.
@@ -550,7 +550,8 @@ pub trait Decides<C: DomainMessage>: CommandTarget {}
 /// That `A` ingests fact `F`: `#[handles_fact(F)]` on its impl, or, for
 /// a child-hosted domain's event set ([`EventSource`]), written beside it.
 /// What a translating policy's callback is checked against: it must return
-/// a fact its source ingests. Emitted by the macro, one per fact.
+/// a fact its source ingests; and what a policy's fact for its target is
+/// ([`Commands::fact`]). Emitted by the macro, one per fact.
 pub trait Ingests<F: DomainMessage>: EventSource {}
 
 // ---------------------------------------------------------------- refusals
@@ -967,14 +968,16 @@ pub use super::policy::{CommandTarget, EventSource, Policy};
 /// What a policy's `#[on_event(E)]` handler returns as its `Ok` (its `Err`
 /// is any [`Diagnostic`](angzarr_diagnostic::Diagnostic): a bug,
 /// dead-lettered as
-/// [`StepError::PolicyFailed`](super::StepError::PolicyFailed)): commands for its target
-/// `T` ([`CommandTarget`]: a domain here, or a remote one's command set),
-/// each with the root of the stream it is for. For a process manager
-/// that is the trigger's correlation ([`PolicyContext::correlation_id`]);
-/// any other root is a policy bug. Each command's type must be one
-/// `T` decides ([`Decides`]).
+/// [`StepError::PolicyFailed`](super::StepError::PolicyFailed)): what it
+/// sends its target `T` ([`CommandTarget`]: a domain here, or a remote
+/// one's command set), each with the root of the stream it is for, in
+/// order: commands of types `T` decides ([`Decides`],
+/// [`Commands::to`]), and facts of types it ingests ([`Ingests`],
+/// [`Commands::fact`]), which it records and never refuses (angzarr
+/// decision 14.69). For a process manager the root is the trigger's
+/// correlation ([`PolicyContext::correlation_id`]) by convention.
 pub struct Commands<T: CommandTarget> {
-    orders: Vec<(Uuid, Any)>,
+    orders: Vec<(Uuid, command_page::Body)>,
     target: std::marker::PhantomData<fn() -> T>,
 }
 
@@ -987,28 +990,59 @@ impl<T: CommandTarget> Commands<T> {
         }
     }
 
-    /// These commands and `command`, for the stream of `T` at `root`.
+    /// These outputs and `command`, for the stream of `T` at `root`.
     pub fn to<C>(self, root: Uuid, command: C) -> Commands<T>
     where
         C: DomainMessage,
         T: Decides<C>,
     {
+        self.then(
+            root,
+            command_page::Body::Command(command_of(pack_message(&command))),
+        )
+    }
+
+    /// These outputs and `fact`, a fact of a type `T` declares one, for
+    /// the stream of `T` at `root`: recorded there and never refused.
+    pub fn fact<F>(self, root: Uuid, fact: F) -> Commands<T>
+    where
+        F: DomainMessage,
+        T: Ingests<F>,
+    {
+        self.then(
+            root,
+            command_page::Body::Fact(angzarr_proto::v1::Fact {
+                payload: Some(pack_message(&fact)),
+            }),
+        )
+    }
+
+    /// These outputs and `body` for `root`.
+    fn then(self, root: Uuid, body: command_page::Body) -> Commands<T> {
         let mut orders = self.orders;
-        orders.push((root, pack_message(&command)));
+        orders.push((root, body));
         Commands {
             orders,
             target: self.target,
         }
     }
 
-    /// Each command, packed, with the root of its stream, in order.
-    pub fn orders(&self) -> &[(Uuid, Any)] {
+    /// Each output, a command or a fact, its payload packed, with the root
+    /// of its stream, in order.
+    pub fn orders(&self) -> &[(Uuid, command_page::Body)] {
         &self.orders
     }
 
     /// As [`Commands::orders`], owned.
-    pub(crate) fn into_orders(self) -> Vec<(Uuid, Any)> {
+    pub(crate) fn into_orders(self) -> Vec<(Uuid, command_page::Body)> {
         self.orders
+    }
+}
+
+/// `payload` as a command's body.
+fn command_of(payload: Any) -> angzarr_proto::v1::Command {
+    angzarr_proto::v1::Command {
+        payload: Some(payload),
     }
 }
 
@@ -1017,12 +1051,10 @@ impl<T: Domain> Commands<T> {
     /// `root`: a hand-written policy's way to send one of a domain's
     /// command payload.
     pub fn send(self, root: Uuid, command: &<T as Domain>::Command) -> Commands<T> {
-        let mut orders = self.orders;
-        orders.push((root, command.to_any()));
-        Commands {
-            orders,
-            target: self.target,
-        }
+        self.then(
+            root,
+            command_page::Body::Command(command_of(command.to_any())),
+        )
     }
 }
 
