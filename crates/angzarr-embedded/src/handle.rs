@@ -69,7 +69,7 @@ use super::book::CommandBookExt;
 use super::check::{check, check_refusal, Checked, Identified, Sampled};
 use super::coordinator::{
     contextual_command, decide, deduplicate, load, read_history, write_snapshot, Contextual,
-    Deduplicated, History,
+    Deduplicated, History, Nonces,
 };
 use super::coordinator::{forward, Forwarded};
 use super::dead_letter::{self, write_at_cap, CallLetters, Cause, Component, DeadLetterLog};
@@ -1046,7 +1046,7 @@ struct Run<'k> {
     limit: usize,
     policy_bug: OnPolicyBug,
     /// Mints each delivery's conflict nonce.
-    nonces: u64,
+    nonces: Nonces,
     /// The streams to settle, the path to each, and which of its events:
     /// those a step just wrote (`Some(from)`, from that sequence on), or
     /// every one its policies still owe by their positions (`None`).
@@ -1211,7 +1211,7 @@ impl<'k> Run<'k> {
             letters,
             limit: kernel.limit,
             policy_bug: kernel.policy_bug,
-            nonces: 0,
+            nonces: Nonces::of(sampled),
             queue: VecDeque::new(),
             recorded: Recorded::default(),
             refused: None,

@@ -15,13 +15,13 @@ use crate::store::{Store, StorePort};
 use crate::stream::Stream;
 use crate::toys::ready;
 
-use super::{decide, deduplicate, load, Contextual, Deduplicated, Novel};
+use super::{decide, deduplicate, load, Contextual, Deduplicated, Nonces, Novel};
 
 /// Steps 3 and 4 over a store.
 pub struct Coordinator<'s, S> {
     store: &'s S,
     registry: &'s Registry,
-    nonces: u64,
+    nonces: Nonces,
 }
 
 impl<'s, S: Store> Coordinator<'s, S> {
@@ -29,7 +29,7 @@ impl<'s, S: Store> Coordinator<'s, S> {
         Coordinator {
             store,
             registry,
-            nonces: 0,
+            nonces: Nonces::of(&crate::toys::at(0)),
         }
     }
 

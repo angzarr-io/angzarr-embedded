@@ -5,7 +5,7 @@
 
 use crate::check::{check, Sampled};
 use crate::coordinator::{
-    admit, decide, expect, resolution, unknown_domain, upcast, Admitted, Contextual,
+    admit, decide, expect, resolution, unknown_domain, upcast, Admitted, Contextual, Nonces,
 };
 use crate::dead_letter::DeadLetterLog;
 use crate::domain::{Domain, State};
@@ -72,7 +72,7 @@ impl<D: Domain> Stream<D> {
             Admitted::Dispatch => {}
         }
         let resolution = resolution(registry.catalog(), &command, &current).map_err(kernel)?;
-        let mut nonces = head;
+        let mut nonces = Nonces::of(sampled);
         let (expected, nonce) = expect(&command, resolution, head, &mut nonces).map_err(kernel)?;
         if nonce.is_some() && expected < self.first {
             // The window starts inside the snapshot: its events are not held.

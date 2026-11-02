@@ -65,6 +65,7 @@ fn sqlite_samples() -> Vec<Box<dyn Diagnostic>> {
 /// Crates that define no codes of their own.
 const NO_CODES: &[&str] = &[
     "angzarr-embedded-catalog-check",
+    "angzarr-embedded-conformance",
     "angzarr-embedded-host-config",
     "angzarr-embedded-macros",
 ];

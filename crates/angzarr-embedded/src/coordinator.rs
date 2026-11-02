@@ -363,7 +363,7 @@ pub(crate) fn expect(
     command: &Identified,
     resolution: ConflictResolution,
     head: u64,
-    nonces: &mut u64,
+    nonces: &mut Nonces,
 ) -> Result<(u64, Option<Vec<u8>>), KernelError> {
     let expected = command.expected_sequence().unwrap_or(head);
     if expected > head {
@@ -380,11 +380,36 @@ pub(crate) fn expect(
             actual: head,
         });
     }
-    let nonce = (resolution != ConflictResolution::Strict).then(|| {
-        *nonces += 1;
-        nonces.to_be_bytes().to_vec()
-    });
+    let nonce = (resolution != ConflictResolution::Strict).then(|| nonces.mint());
     Ok((expected, nonce))
+}
+
+/// Where a call's conflict nonces come from: the call's sampled command
+/// id, a fresh UUIDv7, then a count of the nonces minted, so every
+/// delivery's nonce is fresh, across calls as within one
+/// (`ContextualCommand.conflict_nonce`, C-0551): one delivery's nonce never
+/// answers for another's.
+pub(crate) struct Nonces {
+    seed: Vec<u8>,
+    minted: u64,
+}
+
+impl Nonces {
+    /// The nonces of the call sampled as `sampled`.
+    pub(crate) fn of(sampled: &Sampled) -> Nonces {
+        Nonces {
+            seed: sampled.command_id.value.to_vec(),
+            minted: 0,
+        }
+    }
+
+    /// The next delivery's nonce.
+    fn mint(&mut self) -> Vec<u8> {
+        self.minted += 1;
+        let mut nonce = self.seed.clone();
+        nonce.extend_from_slice(&self.minted.to_be_bytes());
+        nonce
+    }
 }
 
 /// The read half of step 3: the resolution, then the stream's history
@@ -453,7 +478,7 @@ pub(crate) async fn read_history<P: Port>(
 
 /// Step 4: the expected sequence stamped or checked against the head step 3
 /// loaded.
-pub(crate) fn load(novel: Novel, nonces: &mut u64) -> Result<Contextual, KernelError> {
+pub(crate) fn load(novel: Novel, nonces: &mut Nonces) -> Result<Contextual, KernelError> {
     let Novel { command, loaded } = novel;
     let (expected, nonce) = expect(&command, loaded.resolution, loaded.head, nonces)?;
     let current = loaded.current.map_err(|error| KernelError::Upcast {
