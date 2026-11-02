@@ -63,31 +63,25 @@ use super::payload::{type_name, Payload};
 /// every refusal fact itself.
 pub fn translated(fact: CommandBook) -> Result<Any, CodedError> {
     use angzarr_proto::v1::CoordinatorReason;
-    let refused = |code: &str| super::route::internal(code, []);
+    let refused = |key: CoordinatorReason| super::route::spec_coded(key, []);
     if fact.cover.is_some() || fact.handling.is_some() {
-        return Err(refused(
-            CoordinatorReason::RefusalFactAddressed.as_str_name(),
-        ));
+        return Err(refused(CoordinatorReason::RefusalFactAddressed));
     }
     let page = fact
         .page
-        .ok_or_else(|| refused(CoordinatorReason::RefusalFactNoPage.as_str_name()))?;
+        .ok_or_else(|| refused(CoordinatorReason::RefusalFactNoPage))?;
     if page.command_id.is_some()
         || page.correlation_id.is_some()
         || page.causation_id.is_some()
         || page.fact_origin.is_some()
     {
-        return Err(refused(
-            CoordinatorReason::RefusalFactIdentified.as_str_name(),
-        ));
+        return Err(refused(CoordinatorReason::RefusalFactIdentified));
     }
     match page.body {
         Some(command_page::Body::Fact(angzarr_proto::v1::Fact {
             payload: Some(payload),
         })) => Ok(payload),
-        _ => Err(refused(
-            CoordinatorReason::RefusalFactNotAFact.as_str_name(),
-        )),
+        _ => Err(refused(CoordinatorReason::RefusalFactNotAFact)),
     }
 }
 
@@ -141,8 +135,8 @@ pub(crate) fn check_reactions(
             (false, true) => "causation_id",
             (false, false) => continue,
         };
-        return Err(super::route::internal(
-            CoordinatorReason::PolicyCommandOtherIdentity.as_str_name(),
+        return Err(super::route::spec_coded(
+            CoordinatorReason::PolicyCommandOtherIdentity,
             named(command)
                 .into_iter()
                 .chain([(args::FIELD.to_string(), field.to_string())]),
@@ -207,8 +201,8 @@ pub(crate) fn check_reaction(
             .to_string()
     };
     if let Some(stray) = commands.iter().find(|c| domain(c) != output_domain) {
-        return Err(super::route::internal(
-            CoordinatorReason::PolicyCommandOutsideDestination.as_str_name(),
+        return Err(super::route::spec_coded(
+            CoordinatorReason::PolicyCommandOutsideDestination,
             [
                 (args::EXPECTED_DOMAIN.to_string(), output_domain.to_string()),
                 (args::ACTUAL_DOMAIN.to_string(), domain(stray)),
@@ -224,8 +218,8 @@ pub(crate) fn check_reaction(
             .and_then(|c| c.root.as_ref())
             .is_some_and(|r| !r.value.is_empty());
         if !named {
-            return Err(super::route::internal(
-                CoordinatorReason::PolicyCommandNoRoot.as_str_name(),
+            return Err(super::route::spec_coded(
+                CoordinatorReason::PolicyCommandNoRoot,
                 naming(),
             ));
         }
@@ -234,8 +228,8 @@ pub(crate) fn check_reaction(
             .as_ref()
             .is_some_and(|h| *h != Handling::default())
         {
-            return Err(super::route::internal(
-                CoordinatorReason::PolicyCommandWithHandling.as_str_name(),
+            return Err(super::route::spec_coded(
+                CoordinatorReason::PolicyCommandWithHandling,
                 naming(),
             ));
         }
@@ -248,7 +242,7 @@ pub(crate) fn check_reaction(
             _ => None,
         };
         if let Some(reason) = refused {
-            return Err(super::route::internal(reason.as_str_name(), naming()));
+            return Err(super::route::spec_coded(reason, naming()));
         }
         let carried = command
             .page
@@ -256,8 +250,8 @@ pub(crate) fn check_reaction(
             .and_then(|p| p.correlation_id.as_ref());
         if let (Some(carried), Some(trigger)) = (carried, correlation) {
             if carried != trigger {
-                return Err(super::route::internal(
-                    CoordinatorReason::PolicyCommandOtherCorrelation.as_str_name(),
+                return Err(super::route::spec_coded(
+                    CoordinatorReason::PolicyCommandOtherCorrelation,
                     naming(),
                 ));
             }
@@ -266,8 +260,8 @@ pub(crate) fn check_reaction(
         match cover.edition.as_deref().filter(|e| !e.is_empty()) {
             None => cover.edition = edition.clone(),
             Some(named) if Some(named) != edition.as_deref() => {
-                return Err(super::route::internal(
-                    CoordinatorReason::PolicyCommandOutsideEdition.as_str_name(),
+                return Err(super::route::spec_coded(
+                    CoordinatorReason::PolicyCommandOutsideEdition,
                     [
                         (
                             args::EXPECTED_EDITION.to_string(),

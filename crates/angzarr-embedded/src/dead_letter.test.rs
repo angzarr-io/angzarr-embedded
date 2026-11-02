@@ -345,7 +345,11 @@ fn a_sequence_keys_letter_carries_the_expected_sequence_and_the_head() {
         letter.reason,
         Some(wire(
             "COORDINATOR_REASON_EXPECTED_SEQUENCE_STALE",
-            &[("actual", "5"), ("expected", "2")]
+            &[
+                ("actual", "5"),
+                ("expected", "2"),
+                ("stream", "account/0a000000-0000-0000-0000-000000000001")
+            ]
         ))
     );
     assert_eq!(letter.rejection_details, Some(sequence_mismatch(2, 5)));
@@ -360,7 +364,11 @@ fn a_sequence_keys_letter_carries_the_expected_sequence_and_the_head() {
         letter.reason,
         Some(wire(
             "COORDINATOR_REASON_EXPECTED_SEQUENCE_AHEAD",
-            &[("expected", "7"), ("head", "3")]
+            &[
+                ("expected", "7"),
+                ("head", "3"),
+                ("stream", "account/0a000000-0000-0000-0000-000000000001")
+            ]
         ))
     );
     assert_eq!(letter.rejection_details, Some(sequence_mismatch(7, 3)));
@@ -377,7 +385,11 @@ fn a_sequence_keys_letter_carries_the_expected_sequence_and_the_head() {
         letter.reason,
         Some(wire(
             "COORDINATOR_REASON_CONFLICT_OVERLAP",
-            &[("command_units", "a,b"), ("window_units", "a")]
+            &[
+                ("command_units", "a,b"),
+                ("stream", "account/0a000000-0000-0000-0000-000000000001"),
+                ("window_units", "a")
+            ]
         ))
     );
     assert_eq!(letter.rejection_details, Some(sequence_mismatch(1, 4)));
@@ -445,7 +457,11 @@ fn an_unavailable_handlers_letter_names_its_domain_and_cause() {
     let letter = letter_for(Cause::Kernel(&error));
     let reason = wire(
         "COORDINATOR_REASON_HANDLER_UNAVAILABLE",
-        &[("cause", "not-running"), ("domain", "account")],
+        &[
+            ("cause", "not-running"),
+            ("domain", "account"),
+            ("stream", "account/0a000000-0000-0000-0000-000000000001"),
+        ],
     );
     assert_eq!(letter.reason, Some(reason.clone()));
     assert_eq!(

@@ -659,7 +659,7 @@ fn errors_display_their_code_and_args_and_wrappers_their_cause_flattened() {
     };
     assert_eq!(
         keyed.to_string(),
-        "COORDINATOR_REASON_EXPECTED_SEQUENCE_STALE expected=1 actual=2"
+        "COORDINATOR_REASON_EXPECTED_SEQUENCE_STALE stream=account/0a000000-0000-0000-0000-000000000001 expected=1 actual=2"
     );
     let rejected = Failure::Rejected(crate::toys::Refused::Overdrawn { short: 3 });
     assert_eq!(rejected.code(), "toy-account-overdrawn");
@@ -740,7 +740,7 @@ fn an_unreachable_handler_carries_its_cause_as_a_key() {
         .any(|arg| matches!(arg, ("cause", Arg::Str(key)) if key == "not-running")));
     assert_eq!(
         unreachable.to_string(),
-        "COORDINATOR_REASON_HANDLER_UNAVAILABLE domain=account cause=not-running"
+        "COORDINATOR_REASON_HANDLER_UNAVAILABLE stream=account/0a000000-0000-0000-0000-000000000001 domain=account cause=not-running"
     );
 }
 

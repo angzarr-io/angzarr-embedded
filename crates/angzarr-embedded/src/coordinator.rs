@@ -49,7 +49,7 @@ use angzarr_proto::v1::{
     command_page, CommandBook, ComponentKind, ConflictResolution, Cover, DeliveryOutcome,
     EventBook, EventMeta, EventPage, Handling, Snapshot,
 };
-use angzarr_router::error::{BusinessStatus, CodedError, RouterReason};
+use angzarr_router::error::{CodedError, RouterReason};
 
 use angzarr_proto::v1::ContextualCommand;
 use angzarr_proto::v1::{reason_args as args, CoordinatorReason};
@@ -59,7 +59,7 @@ use super::catalog::Catalog;
 use super::check::{Identified, Malformed, Sampled};
 use super::dead_letter::{self, Cause, Component, DeadLetterLog};
 use super::domain::Domain;
-use super::error::{Failure, KernelError, UpcastError};
+use super::error::{cover_text, Failure, KernelError, UpcastError};
 use super::markup::STEP_LIMIT;
 use super::payload::type_name;
 use super::registry::Registry;
@@ -280,8 +280,8 @@ pub(crate) fn admit(
     let is_fact = command.body().is_fact();
     if let (true, Some(cause)) = (is_fact, command.causation_id()) {
         if cause.stream.as_ref() != Some(command.cover()) {
-            return Err(Failure::Kernel(KernelError::Router(route::internal(
-                CoordinatorReason::RefusalFactWrongStream.as_str_name(),
+            return Err(Failure::Kernel(KernelError::Router(route::spec_coded(
+                CoordinatorReason::RefusalFactWrongStream,
                 [(args::DOMAIN.to_string(), command.domain().to_string())],
             ))));
         }
@@ -307,13 +307,15 @@ pub(crate) fn admit(
     if is_fact {
         return Ok(Admitted::Skip);
     }
-    Err(Failure::Rejected(Rejected::of(&CodedError::rejection(
-        BusinessStatus::FailedPrecondition,
-        CoordinatorReason::PmNoInstance.as_str_name(),
-        [(
-            args::TYPE_URL.to_string(),
-            command.payload().type_url.clone(),
-        )],
+    Err(Failure::Rejected(Rejected::of(&route::spec_coded(
+        CoordinatorReason::PmNoInstance,
+        [
+            (args::STREAM.to_string(), cover_text(command.cover())),
+            (
+                args::TYPE_URL.to_string(),
+                command.payload().type_url.clone(),
+            ),
+        ],
     ))))
 }
 

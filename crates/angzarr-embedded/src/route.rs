@@ -332,8 +332,60 @@ pub(crate) fn refused(
     })
 }
 
+/// A spec key the kernel raises (decision 14.65): its full name, the code
+/// it travels as, and the status its `(io.angzarr.v1.reason)` option
+/// declares, generated into angzarr-proto. Core's three key enums are
+/// keys; a key travels under its declared status and no other.
+pub trait SpecKey: Copy {
+    /// The key: its value's full name, prefix included.
+    fn key(self) -> &'static str;
+    /// The status its option declares.
+    fn status(self) -> angzarr_proto::v1::ReasonStatus;
+    /// The gRPC code it travels with: its declared status's
+    /// ([`GrpcCode::of_status`]). A readiness key never travels as a
+    /// status, so it has none.
+    fn grpc(self) -> Option<GrpcCode> {
+        GrpcCode::of_status(self.status())
+    }
+}
+
+macro_rules! spec_key {
+    ($($enum:ty),*) => {$(
+        impl SpecKey for $enum {
+            fn key(self) -> &'static str {
+                self.as_str_name()
+            }
+            fn status(self) -> angzarr_proto::v1::ReasonStatus {
+                <$enum>::status(self)
+            }
+        }
+    )*};
+}
+spec_key!(
+    angzarr_proto::v1::RouterReason,
+    angzarr_proto::v1::HostReason,
+    angzarr_proto::v1::CoordinatorReason
+);
+
+/// The spec key `key` with its args `extras`, in the router's shape, under
+/// the status its option declares (decision 14.65). A readiness key is
+/// never answered so; it is INTERNAL here, the status of the bug answering
+/// it would be.
+pub fn spec_coded(
+    key: impl SpecKey,
+    extras: impl IntoIterator<Item = (String, String)>,
+) -> CodedError {
+    CodedError {
+        code: key.key().to_string(),
+        extras: extras.into_iter().collect(),
+        grpc: key.grpc().unwrap_or(GrpcCode::Internal),
+        refusal: None,
+    }
+}
+
 /// One of angzarr-embedded's own failures, INTERNAL under its own `code`
-/// ([`POLICY_FAILED`], [`TOO_MANY_STEPS`], an upcast's failure): never a
+/// ([`POLICY_FAILED`], an upcast's failure): a spec key is
+/// [`spec_coded`]'s instead. Never a
 /// handler's bug, which angzarr-router's `CodedError::bug` answers as
 /// ROUTER_REASON_UNHANDLED_HANDLER_ERROR with the handler's code as its cause.
 pub(crate) fn internal(

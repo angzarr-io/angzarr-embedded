@@ -4154,7 +4154,10 @@ mod handler_context {
         assert_letter(
             &letter,
             ::angzarr_embedded::v1::ComponentKind::Aggregate,
-            &wire("COORDINATOR_REASON_CONFLICT_UNRESOLVED", &[]),
+            &wire(
+                "COORDINATOR_REASON_CONFLICT_UNRESOLVED",
+                &[("stream", "pot/0a0a0a0a-0a0a-0a0a-0a0a-0a0a0a0a0a0a")],
+            ),
             sequence_mismatch(0, 1),
         );
         assert_eq!(pot.len(), 1, "nothing recorded past the first stake");
@@ -6043,7 +6046,7 @@ mod router {
             let lines = log.lines();
             assert_eq!(lines.len(), 1, "{policy_bug:?}: {lines:?}");
             assert!(
-                lines[0].contains("remote: COORDINATOR_REASON_HANDLER_UNAVAILABLE cause=not-running domain=remote retry_count=3"),
+                lines[0].contains("remote: COORDINATOR_REASON_HANDLER_UNAVAILABLE cause=not-running domain=remote stream=remote/0a0a0a0a-0a0a-0a0a-0a0a-0a0a0a0a0a0a retry_count=3"),
                 "{lines:?}"
             );
             let _ = ready(kernel.resume(&store, &sampled_at(3)));

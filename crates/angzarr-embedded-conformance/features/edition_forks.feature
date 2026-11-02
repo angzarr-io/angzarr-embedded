@@ -69,7 +69,8 @@ Feature: Editions are per-stream forks, and the fork travels with the data
     Given "player" "p-1" is forked into edition "what-if"
     And "table" "t-9" with 4 events on the main timeline has no fork in edition "what-if"
     When a client sends <input> to "table" "t-9" in edition "what-if"
-    Then the client is answered FAILED_PRECONDITION with reason EDITION_NOT_FORKED
+    Then the client is answered FAILED_PRECONDITION with reason COORDINATOR_REASON_EDITION_NOT_FORKED, naming the stream and edition "what-if"
+    And the router is never called
     And "table" "t-9" holds no event in edition "what-if"
 
     Examples:
@@ -251,7 +252,7 @@ Feature: Editions are per-stream forks, and the fork travels with the data
 
     Examples:
       | input                                                                                               | status              | reason                  |
-      | a client sends a command to "table" "t-9" in edition "what-if", which has no row there               | FAILED_PRECONDITION | EDITION_NOT_FORKED      |
+      | a client sends a command to "table" "t-9" in edition "what-if", which has no row there               | FAILED_PRECONDITION | COORDINATOR_REASON_EDITION_NOT_FORKED |
       | a policy's command arrives at "table" "t-1" in edition "gone", which has been deleted               | NOT_FOUND           | EDITION_NOT_FOUND       |
       | a client sends a command whose payload is an io.angzarr.v1.meta.EditionDeleted to "player" "p-1"     | INVALID_ARGUMENT    | META_EVENT_FROM_OUTSIDE |
       | a client sends a command whose payload is an io.angzarr.v1.meta.EditionCreated to "player" "p-1"     | INVALID_ARGUMENT    | META_EVENT_FROM_OUTSIDE |

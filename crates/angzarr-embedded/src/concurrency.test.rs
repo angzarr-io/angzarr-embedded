@@ -72,6 +72,10 @@ fn assert_stale(failure: &Failure<Rejected>, expected: u64, actual: u64) {
         BTreeMap::from([
             ("actual".to_string(), actual.to_string()),
             ("expected".to_string(), expected.to_string()),
+            (
+                "stream".to_string(),
+                "till/0a000000-0000-0000-0000-000000000001".to_string(),
+            ),
         ])
     );
     assert_eq!(failure.recovery(), Recovery::Retry);

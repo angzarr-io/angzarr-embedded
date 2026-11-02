@@ -376,6 +376,7 @@ fn assert_cap_exhausted(failure: &Failure<Rejected>, attempts: u32, cap: u32) {
         BTreeMap::from([
             ("attempts".to_string(), attempts.to_string()),
             ("cap".to_string(), cap.to_string()),
+            ("stream".to_string(), ORDER_1.to_string()),
         ])
     );
     assert_eq!(failure.recovery(), Recovery::Bug);
@@ -396,6 +397,7 @@ fn assert_dead_lettered_at_cap(log: &MemoryDeadLetters, attempts: u32, cap: u32)
     let reason = wire(
         "COORDINATOR_REASON_RETRY_CAP_EXHAUSTED",
         &[
+            ("stream", ORDER_1),
             ("attempts", &attempts.to_string()),
             ("cap", &cap.to_string()),
         ],
@@ -464,6 +466,7 @@ fn a_command_ahead_of_the_stream_is_malformed_under_every_resolution() {
                 BTreeMap::from([
                     ("expected".to_string(), expected.to_string()),
                     ("head".to_string(), "3".to_string()),
+                    ("stream".to_string(), ORDER_1.to_string()),
                 ]),
                 "{case}"
             );
@@ -1149,12 +1152,16 @@ fn store_conflict(failure: &Failure<Rejected>) -> Option<Answer> {
 /// C-0740 to C-0742 (decision 14.51): UNAVAILABLE
 /// `COORDINATOR_REASON_STORE_CONFLICT`, the head stamped (3) and the head
 /// the store found (4).
+/// The stream these races are run on, as an error names it.
+const ORDER_1: &str = "order/0a000000-0000-0000-0000-000000000001";
+
 fn conflict_answer() -> Answer {
     (
         CoordinatorReason::StoreConflict.as_str_name().to_string(),
         vec![
             ("actual".to_string(), "4".to_string()),
             ("expected".to_string(), "3".to_string()),
+            ("stream".to_string(), ORDER_1.to_string()),
         ],
         GrpcCode::Unavailable,
     )

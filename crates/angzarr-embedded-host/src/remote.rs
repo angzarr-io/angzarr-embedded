@@ -604,18 +604,13 @@ fn transport_text(status: &tonic::Status) -> String {
 
 /// `COORDINATOR_REASON_HANDLER_UNAVAILABLE` for `domain`, for `cause`.
 pub(crate) fn unavailable(domain: &str, cause: &str) -> CodedError {
-    CodedError {
-        code: CoordinatorReason::HandlerUnavailable
-            .as_str_name()
-            .to_string(),
-        extras: [
+    angzarr_embedded::spec_coded(
+        CoordinatorReason::HandlerUnavailable,
+        [
             (args::DOMAIN.to_string(), domain.to_string()),
             (args::CAUSE.to_string(), cause.to_string()),
-        ]
-        .into(),
-        grpc: GrpcCode::Unavailable,
-        refusal: None,
-    }
+        ],
+    )
 }
 
 #[cfg(test)]

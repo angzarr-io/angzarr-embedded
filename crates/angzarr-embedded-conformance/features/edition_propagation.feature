@@ -83,7 +83,8 @@ Feature: Edition propagation across cross-domain emissions
     And the PM handler sets the edition "beta" on its answer's events book
     When a StartFulfillment command is delivered to the PM
     Then no event is persisted
-    And the command is refused INTERNAL
+    And the command is refused INTERNAL with reason COORDINATOR_REASON_EVENTS_NOT_ITS_STREAM, naming the stream and the event stream in edition "beta"
+    And the command is dead-lettered and an alert is raised
 
   @C-0608
   Scenario: A policy's refusal fact carries its trigger's edition

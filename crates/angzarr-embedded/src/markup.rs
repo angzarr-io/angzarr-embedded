@@ -1535,19 +1535,17 @@ fn context_of(cctx: angzarr_router::domain::CommandContext) -> Context {
 /// type alone.
 fn input<T: DomainMessage>(any: &Any) -> Result<T, angzarr_router::error::HandlerError> {
     use angzarr_proto::v1::reason_args;
-    use angzarr_router::error::{CodedError, GrpcCode, HandlerError, RouterReason};
+    use angzarr_router::error::{CodedError, HandlerError, RouterReason};
     let message_type = || super::payload::type_name(&any.type_url).to_string();
     match decode_message::<T>(any) {
         Ok(Some(value)) => Ok(value),
         Err(PayloadError::Decode { error, .. }) => Err(HandlerError::Coded(
             CodedError::undecodable(&message_type(), &error),
         )),
-        Ok(None) | Err(_) => Err(HandlerError::Coded(CodedError {
-            code: RouterReason::AnyDecodeFailed.as_str_name().to_string(),
-            extras: [(reason_args::MESSAGE_TYPE.to_string(), message_type())].into(),
-            grpc: GrpcCode::Internal,
-            refusal: None,
-        })),
+        Ok(None) | Err(_) => Err(HandlerError::Coded(super::route::spec_coded(
+            RouterReason::AnyDecodeFailed,
+            [(reason_args::MESSAGE_TYPE.to_string(), message_type())],
+        ))),
     }
 }
 
@@ -1673,8 +1671,8 @@ where
         steps += 1;
         if steps > STEP_LIMIT {
             return Err(angzarr_router::error::HandlerError::Coded(
-                super::route::internal(
-                    angzarr_proto::v1::RouterReason::TooManySteps.as_str_name(),
+                super::route::spec_coded(
+                    angzarr_proto::v1::RouterReason::TooManySteps,
                     [(
                         angzarr_proto::v1::reason_args::LIMIT.to_string(),
                         STEP_LIMIT.to_string(),

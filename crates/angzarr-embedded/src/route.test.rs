@@ -338,3 +338,57 @@ fn a_rejection_is_compared_and_shown_by_its_report_not_its_kept_value() {
     let shown = format!("{kept:?}");
     assert!(shown.contains("kept: Some(..)"), "{shown}");
 }
+
+// Decision 14.65: a spec key travels under the status its option
+// declares, read off the generated table; a readiness key, never answered
+// as a status, is INTERNAL where the kernel would answer it.
+#[test]
+fn a_spec_key_is_coded_under_its_declared_status() {
+    use angzarr_proto::v1::{CoordinatorReason, HostReason, RouterReason};
+    use angzarr_router::error::GrpcCode;
+    let coded = super::spec_coded(
+        CoordinatorReason::PmNoInstance,
+        [("type_url".to_string(), "/a.B".to_string())],
+    );
+    assert_eq!(coded.code, "COORDINATOR_REASON_PM_NO_INSTANCE");
+    assert_eq!(coded.grpc, GrpcCode::FailedPrecondition);
+    assert_eq!(
+        coded.extras.get("type_url").map(String::as_str),
+        Some("/a.B")
+    );
+    assert_eq!(coded.refusal, None);
+    for (grpc, expected) in [
+        (
+            super::spec_coded(CoordinatorReason::ConflictOverlap, []).grpc,
+            GrpcCode::Aborted,
+        ),
+        (
+            super::spec_coded(CoordinatorReason::HandlerUnavailable, []).grpc,
+            GrpcCode::Unavailable,
+        ),
+        (
+            super::spec_coded(RouterReason::PersistedEventCorrupt, []).grpc,
+            GrpcCode::DataLoss,
+        ),
+        (
+            super::spec_coded(HostReason::NoComponentsRegistered, []).grpc,
+            GrpcCode::Internal,
+        ),
+        (
+            super::spec_coded(CoordinatorReason::MissingRulesVersion, []).grpc,
+            GrpcCode::Internal,
+        ),
+    ] {
+        assert_eq!(grpc, expected);
+    }
+    use super::SpecKey;
+    assert_eq!(CoordinatorReason::MissingRulesVersion.grpc(), None);
+    assert_eq!(
+        CoordinatorReason::EditionNotForked.grpc(),
+        Some(GrpcCode::FailedPrecondition)
+    );
+    assert_eq!(
+        RouterReason::TooManySteps.key(),
+        "ROUTER_REASON_TOO_MANY_STEPS"
+    );
+}

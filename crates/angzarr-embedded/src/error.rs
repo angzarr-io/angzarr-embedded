@@ -25,6 +25,7 @@ use angzarr_ports::StoreError;
 use angzarr_proto::v1::{Cover, EventBook, EventRef, Uuid};
 
 use super::check::Malformed;
+use super::route::SpecKey;
 use super::store::DeadLetter;
 
 /// Why a command, or a step its chain set off, failed.
@@ -420,29 +421,12 @@ impl KernelError {
         if let Some(coded) = self.forwarded() {
             return Some(coded);
         }
+        let CodedAs::Spec(key) = self.coded_as() else {
+            return None;
+        };
         Some(angzarr_router::error::CodedError {
-            code: self.code().to_string(),
-            extras: super::route::flat_args(self).into_iter().collect(),
-            grpc: self.spec_status()?,
-            refusal: None,
-        })
-    }
-
-    /// The status a variant whose code is a spec key travels with (each
-    /// key's comment in reasons.proto); `None` for any other variant.
-    fn spec_status(&self) -> Option<angzarr_router::error::GrpcCode> {
-        use angzarr_router::error::GrpcCode;
-        Some(match self {
-            KernelError::ExpectedSequenceAhead { .. } => GrpcCode::InvalidArgument,
-            KernelError::Stale { .. }
-            | KernelError::Overlap { .. }
-            | KernelError::Unresolved { .. } => GrpcCode::Aborted,
-            KernelError::RetryCapExhausted { .. }
-            | KernelError::RulesVersionMismatch { .. }
-            | KernelError::ChainTooDeep { .. }
-            | KernelError::TooManySteps { .. } => GrpcCode::Internal,
-            KernelError::HandlerUnavailable { .. } => GrpcCode::Unavailable,
-            _ => return None,
+            grpc: key.grpc()?,
+            ..super::route::spec_coded(key, super::route::flat_args(self))
         })
     }
 
@@ -455,10 +439,13 @@ impl KernelError {
         use angzarr_proto::v1::CoordinatorReason;
         let (reason, extras) = match self {
             KernelError::Store(StoreError::Conflict {
-                expected, actual, ..
+                stream,
+                expected,
+                actual,
             }) => (
                 CoordinatorReason::StoreConflict,
                 vec![
+                    (args::STREAM.to_string(), cover_text(stream)),
                     (args::EXPECTED.to_string(), expected.to_string()),
                     (args::ACTUAL.to_string(), actual.to_string()),
                 ],
@@ -478,12 +465,46 @@ impl KernelError {
             ),
             _ => return None,
         };
-        Some(angzarr_router::error::CodedError {
-            code: reason.as_str_name().to_string(),
-            extras: extras.into_iter().collect(),
-            grpc: angzarr_router::error::GrpcCode::Unavailable,
-            refusal: None,
-        })
+        Some(super::route::spec_coded(reason, extras))
+    }
+
+    /// What this error is coded under: the spec key a condition the spec
+    /// keys travels as (decision 14.60), whose status its option declares
+    /// (decision 14.65); angzarr-embedded's own code; or the code of the
+    /// error it wraps.
+    fn coded_as(&self) -> CodedAs<'_> {
+        use angzarr_proto::v1::CoordinatorReason as C;
+        use CodedAs::{Own, Spec, Wrapped};
+        match self {
+            KernelError::Stale { .. } => Spec(Keyed::Coordinator(C::ExpectedSequenceStale)),
+            KernelError::ExpectedSequenceAhead { .. } => {
+                Spec(Keyed::Coordinator(C::ExpectedSequenceAhead))
+            }
+            KernelError::Unresolved { .. } => Spec(Keyed::Coordinator(C::ConflictUnresolved)),
+            KernelError::RetryCapExhausted { .. } => Spec(Keyed::Coordinator(C::RetryCapExhausted)),
+            KernelError::RulesVersionMismatch { .. } => {
+                Spec(Keyed::Coordinator(C::RulesVersionMismatch))
+            }
+            KernelError::Overlap { .. } => Spec(Keyed::Coordinator(C::ConflictOverlap)),
+            KernelError::ChainTooDeep { .. } => Spec(Keyed::Coordinator(C::ChainTooDeep)),
+            KernelError::TooManySteps { .. } => {
+                Spec(Keyed::Router(angzarr_proto::v1::RouterReason::TooManySteps))
+            }
+            KernelError::HandlerUnavailable { .. } => {
+                Spec(Keyed::Coordinator(C::HandlerUnavailable))
+            }
+            KernelError::UnknownType { .. } => Own("angzarr-embedded-unknown-type"),
+            KernelError::InvalidPayload { .. } => Own("angzarr-embedded-invalid-payload"),
+            KernelError::Upcast { .. } => Own("angzarr-embedded-upcast"),
+            KernelError::WrongDomain { .. } => Own("angzarr-embedded-wrong-domain"),
+            KernelError::BeforeSnapshot { .. } => Own("angzarr-embedded-before-snapshot"),
+            KernelError::UnregisteredDomain { .. } => Own("angzarr-embedded-unregistered-domain"),
+            KernelError::Unreadable { .. } => Own("angzarr-embedded-unreadable"),
+            KernelError::Malformed(m) => Wrapped(m.code()),
+            KernelError::Replay(error) => Wrapped(error.code()),
+            KernelError::Store(error) => Wrapped(error.code()),
+            KernelError::Router(error) => Wrapped(&error.code),
+        }
     }
 
     pub fn recovery(&self) -> Recovery {
@@ -614,40 +635,56 @@ impl fmt::Display for KernelError {
 /// angzarr-embedded's own.
 impl Diagnostic for KernelError {
     fn code(&self) -> &str {
-        use angzarr_proto::v1::{CoordinatorReason, RouterReason};
-        match self {
-            KernelError::Malformed(m) => m.code(),
-            KernelError::Stale { .. } => CoordinatorReason::ExpectedSequenceStale.as_str_name(),
-            KernelError::ExpectedSequenceAhead { .. } => {
-                CoordinatorReason::ExpectedSequenceAhead.as_str_name()
-            }
-            KernelError::Unresolved { .. } => CoordinatorReason::ConflictUnresolved.as_str_name(),
-            KernelError::RetryCapExhausted { .. } => {
-                CoordinatorReason::RetryCapExhausted.as_str_name()
-            }
-            KernelError::RulesVersionMismatch { .. } => {
-                CoordinatorReason::RulesVersionMismatch.as_str_name()
-            }
-            KernelError::Overlap { .. } => CoordinatorReason::ConflictOverlap.as_str_name(),
-            KernelError::UnknownType { .. } => "angzarr-embedded-unknown-type",
-            KernelError::InvalidPayload { .. } => "angzarr-embedded-invalid-payload",
-            KernelError::Upcast { .. } => "angzarr-embedded-upcast",
-            KernelError::WrongDomain { .. } => "angzarr-embedded-wrong-domain",
-            KernelError::ChainTooDeep { .. } => CoordinatorReason::ChainTooDeep.as_str_name(),
-            KernelError::TooManySteps { .. } => RouterReason::TooManySteps.as_str_name(),
-            KernelError::BeforeSnapshot { .. } => "angzarr-embedded-before-snapshot",
-            KernelError::UnregisteredDomain { .. } => "angzarr-embedded-unregistered-domain",
-            KernelError::Replay(error) => error.code(),
-            KernelError::Unreadable { .. } => "angzarr-embedded-unreadable",
-            KernelError::Store(error) => error.code(),
-            KernelError::Router(error) => &error.code,
-            KernelError::HandlerUnavailable { .. } => {
-                CoordinatorReason::HandlerUnavailable.as_str_name()
-            }
+        match self.coded_as() {
+            CodedAs::Spec(key) => key.key(),
+            CodedAs::Own(code) | CodedAs::Wrapped(code) => code,
         }
     }
 
+    /// The stream the error names first, then what else it names
+    /// ([`KernelError::named_stream`], [`KernelError::details`]).
     fn args(&self) -> Vec<(&str, Arg)> {
+        let named = self
+            .named_stream()
+            .map(|s| (angzarr_proto::v1::reason_args::STREAM, stream(s)));
+        named.into_iter().chain(self.details()).collect()
+    }
+}
+
+impl KernelError {
+    /// The stream this error names first among its args: every error that
+    /// concerns one stream, coded under a spec key that declares `stream`
+    /// (decision 14.65) or under angzarr-embedded's own code. A router key
+    /// names none, so a decision past its step limit does not.
+    fn named_stream(&self) -> Option<&Cover> {
+        match self {
+            KernelError::Stale { stream, .. }
+            | KernelError::ExpectedSequenceAhead { stream, .. }
+            | KernelError::Unresolved { stream, .. }
+            | KernelError::Overlap { stream, .. }
+            | KernelError::RetryCapExhausted { stream, .. }
+            | KernelError::RulesVersionMismatch { stream, .. }
+            | KernelError::UnknownType { stream, .. }
+            | KernelError::InvalidPayload { stream, .. }
+            | KernelError::Upcast { stream, .. }
+            | KernelError::WrongDomain { stream, .. }
+            | KernelError::BeforeSnapshot { stream, .. }
+            | KernelError::Unreadable { stream, .. }
+            | KernelError::HandlerUnavailable { stream, .. } => Some(stream),
+            KernelError::Malformed(_)
+            | KernelError::ChainTooDeep { .. }
+            | KernelError::TooManySteps { .. }
+            | KernelError::UnregisteredDomain { .. }
+            | KernelError::Replay(_)
+            | KernelError::Store(_)
+            | KernelError::Router(_) => None,
+        }
+    }
+
+    /// The args after its stream: a spec key's as its option declares
+    /// them, angzarr-embedded's own as its catalog does, a wrapped error's
+    /// its own.
+    fn details(&self) -> Vec<(&str, Arg)> {
         use angzarr_proto::v1::reason_args as args;
         match self {
             KernelError::Malformed(m) => m.args(),
@@ -657,7 +694,6 @@ impl Diagnostic for KernelError {
                 (args::EXPECTED, (*expected).into()),
                 (args::ACTUAL, (*actual).into()),
             ],
-            KernelError::Unresolved { .. } => vec![],
             KernelError::ExpectedSequenceAhead { expected, head, .. } => vec![
                 (args::EXPECTED, (*expected).into()),
                 (args::HEAD, (*head).into()),
@@ -683,47 +719,26 @@ impl Diagnostic for KernelError {
                 (args::REGISTERED, registered.as_str().into()),
                 (args::REPORTED, reported.as_str().into()),
             ],
-            KernelError::UnknownType {
-                stream: s,
-                type_url,
-            } => vec![
-                ("stream", stream(s)),
-                ("type_url", type_url.as_str().into()),
-            ],
+            KernelError::UnknownType { type_url, .. } => {
+                vec![("type_url", type_url.as_str().into())]
+            }
             KernelError::InvalidPayload {
-                stream: s,
-                type_url,
-                reason,
+                type_url, reason, ..
             } => vec![
-                ("stream", stream(s)),
                 ("type_url", type_url.as_str().into()),
                 ("reason", Arg::nested(reason)),
             ],
-            KernelError::Upcast { stream: s, error } => {
-                vec![("stream", stream(s)), ("error", Arg::nested(error))]
-            }
-            KernelError::WrongDomain {
-                stream: s,
-                expected,
-            } => {
-                vec![("stream", stream(s)), ("expected", (*expected).into())]
-            }
+            KernelError::Upcast { error, .. } => vec![("error", Arg::nested(error))],
+            KernelError::WrongDomain { expected, .. } => vec![("expected", (*expected).into())],
             KernelError::ChainTooDeep { limit } | KernelError::TooManySteps { limit, .. } => {
                 vec![(args::LIMIT, (*limit).into())]
             }
-            KernelError::BeforeSnapshot { stream: s, first } => {
-                vec![("stream", stream(s)), ("first", (*first).into())]
-            }
-            KernelError::UnregisteredDomain { domain } => {
-                vec![("domain", domain.as_str().into())]
-            }
+            KernelError::BeforeSnapshot { first, .. } => vec![("first", (*first).into())],
+            KernelError::UnregisteredDomain { domain } => vec![("domain", domain.as_str().into())],
             KernelError::Replay(error) => error.args(),
             KernelError::Unreadable {
-                stream: s,
-                sequence,
-                reason,
+                sequence, reason, ..
             } => vec![
-                ("stream", stream(s)),
                 ("sequence", (*sequence).into()),
                 ("reason", Arg::nested(reason)),
             ],
@@ -733,10 +748,43 @@ impl Diagnostic for KernelError {
                 .iter()
                 .map(|(name, value)| (name.as_str(), Arg::Str(value.clone())))
                 .collect(),
+            KernelError::Unresolved { .. } => vec![],
             KernelError::HandlerUnavailable { stream: s, cause } => vec![
                 (args::DOMAIN, s.domain.as_str().into()),
                 (args::CAUSE, cause.as_str().into()),
             ],
+        }
+    }
+}
+
+/// What a [`KernelError`] is coded under ([`KernelError::coded_as`]).
+enum CodedAs<'a> {
+    /// A spec key, verbatim: the condition the spec keys.
+    Spec(Keyed),
+    /// angzarr-embedded's own code.
+    Own(&'static str),
+    /// The code of the error the variant wraps.
+    Wrapped(&'a str),
+}
+
+/// A spec key of one of core's key enums a kernel error travels as.
+#[derive(Clone, Copy)]
+enum Keyed {
+    Coordinator(angzarr_proto::v1::CoordinatorReason),
+    Router(angzarr_proto::v1::RouterReason),
+}
+
+impl super::route::SpecKey for Keyed {
+    fn key(self) -> &'static str {
+        match self {
+            Keyed::Coordinator(key) => key.as_str_name(),
+            Keyed::Router(key) => key.as_str_name(),
+        }
+    }
+    fn status(self) -> angzarr_proto::v1::ReasonStatus {
+        match self {
+            Keyed::Coordinator(key) => key.status(),
+            Keyed::Router(key) => key.status(),
         }
     }
 }

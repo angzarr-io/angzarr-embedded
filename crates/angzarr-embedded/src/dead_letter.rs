@@ -403,7 +403,7 @@ fn malformed_reason(malformed: &Malformed, payload: &Payload) -> angzarr_proto::
             (args::COMMAND_TYPE.to_string(), command_type.clone()),
         ]
     };
-    let naming = |reason: CoordinatorReason| coded(&route::internal(reason.as_str_name(), named()));
+    let naming = |reason: CoordinatorReason| coded(&route::spec_coded(reason, named()));
     match malformed {
         Malformed::HandlingOnPolicyCommand => naming(CoordinatorReason::PolicyCommandWithHandling),
         Malformed::NoRoot | Malformed::BadRoot { .. } => {
@@ -412,8 +412,8 @@ fn malformed_reason(malformed: &Malformed, payload: &Payload) -> angzarr_proto::
         Malformed::IdOnPolicyCommand {
             field: "correlation_id",
         } => naming(CoordinatorReason::PolicyCommandOtherCorrelation),
-        Malformed::IdOnPolicyCommand { field } => coded(&route::internal(
-            CoordinatorReason::PolicyCommandOtherIdentity.as_str_name(),
+        Malformed::IdOnPolicyCommand { field } => coded(&route::spec_coded(
+            CoordinatorReason::PolicyCommandOtherIdentity,
             named()
                 .into_iter()
                 .chain([(args::FIELD.to_string(), field.to_string())]),
@@ -421,8 +421,8 @@ fn malformed_reason(malformed: &Malformed, payload: &Payload) -> angzarr_proto::
         Malformed::FactFromPolicy => naming(CoordinatorReason::PolicyCommandIsFact),
         Malformed::CommandWithFactOrigin => naming(CoordinatorReason::PolicyCommandFactOrigin),
         Malformed::UnknownDomain { .. } => naming(CoordinatorReason::PolicyCommandUnknownDomain),
-        Malformed::RefusalMisaddressed => coded(&route::internal(
-            CoordinatorReason::RefusalFactWrongStream.as_str_name(),
+        Malformed::RefusalMisaddressed => coded(&route::spec_coded(
+            CoordinatorReason::RefusalFactWrongStream,
             [(args::DOMAIN.to_string(), domain.clone())],
         )),
         other => diagnostic(other),

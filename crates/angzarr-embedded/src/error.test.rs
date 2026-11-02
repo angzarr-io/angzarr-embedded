@@ -68,6 +68,7 @@ fn the_coordinators_conflicts_are_coded_under_their_keys() {
         (
             CoordinatorReason::ConflictOverlap.as_str_name().to_string(),
             extras(&[
+                ("stream", "shelf/"),
                 ("window_units", "items[a]"),
                 ("command_units", "items[a].count")
             ]),
@@ -84,7 +85,7 @@ fn the_coordinators_conflicts_are_coded_under_their_keys() {
             CoordinatorReason::ConflictUnresolved
                 .as_str_name()
                 .to_string(),
-            BTreeMap::new(),
+            extras(&[("stream", "shelf/")]),
             GrpcCode::Aborted
         )
     );
@@ -151,7 +152,11 @@ fn the_limits_and_an_unreachable_handler_are_coded_under_their_keys() {
             CoordinatorReason::HandlerUnavailable
                 .as_str_name()
                 .to_string(),
-            extras(&[("domain", "shelf"), ("cause", "timeout")]),
+            extras(&[
+                ("stream", "shelf/"),
+                ("domain", "shelf"),
+                ("cause", "timeout")
+            ]),
             GrpcCode::Unavailable
         )
     );
@@ -196,7 +201,7 @@ fn the_retryable_store_and_sidecar_failures_are_coded_under_their_keys() {
         ))),
         (
             CoordinatorReason::StoreConflict.as_str_name().to_string(),
-            extras(&[("expected", "3"), ("actual", "4")]),
+            extras(&[("stream", "shelf/"), ("expected", "3"), ("actual", "4")]),
             GrpcCode::Unavailable
         )
     );
