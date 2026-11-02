@@ -78,7 +78,7 @@ use super::error::{class, Class};
 use super::error::{Failure, KernelError, Step, StepError};
 use super::markup;
 use super::payload::type_name;
-use super::policy::{answered, check_reactions};
+use super::policy::{answered, check_reactions, Order};
 use super::registry::{PolicyEntry, Registry};
 use super::route::Rejected;
 use super::store::{DeadLetter, Port, Store, StoreError, StorePort};
@@ -974,19 +974,6 @@ fn step_error(failure: Failure<Rejected>) -> StepError {
     }
 }
 
-/// Write `positions` past a policy step's bug, already dead-lettered,
-/// unless `policy_bug` keeps them at the trigger ([`OnPolicyBug::Stay`]).
-async fn past_bug<P: Port>(
-    policy_bug: OnPolicyBug,
-    port: &mut P,
-    positions: &[(&str, &Cover, u64)],
-) -> Result<(), super::StoreError> {
-    match policy_bug {
-        OnPolicyBug::MovePast => port.write_positions(positions).await,
-        OnPolicyBug::Stay => Ok(()),
-    }
-}
-
 /// A chain's failure, as the caller's: the path to the failing step, and
 /// why.
 fn downstream<R>((path, error): (Vec<Step>, StepError)) -> Failure<R> {
@@ -1058,6 +1045,30 @@ struct Run<'k> {
     /// How a step's retryable failure is retried, and the timer.
     retry: OnRetryable,
     wait: &'k dyn Wait,
+}
+
+/// The book of `delivered`'s refusal fact, `fact`: to the exact stream of
+/// the triggering event, its origin the refused command's id and a
+/// description of the refusal.
+fn refusal_fact(refusal: &markup::v1::Refusal, delivered: &Identified, fact: Any) -> CommandBook {
+    CommandBook {
+        cover: refusal.event.as_ref().and_then(|e| e.cover.clone()),
+        page: Some(CommandPage {
+            body: Some(command_page::Body::Fact(Fact {
+                payload: Some(fact),
+            })),
+            fact_origin: Some(FactOrigin {
+                external_id: delivered.command_id().to_string(),
+                description: format!(
+                    "{} refused by {}",
+                    type_name(&delivered.payload().type_url),
+                    delivered.domain()
+                ),
+            }),
+            ..CommandPage::default()
+        }),
+        handling: None,
+    }
 }
 
 /// The pass-through refusal fact, the kernel's own (decision 14.42), for
@@ -1462,50 +1473,10 @@ impl<'k> Run<'k> {
             pages: vec![page.clone()],
             ..EventBook::default()
         };
-        let checked = policy
-            .dispatch
-            .dispatch(&event)
+        let orders = self
+            .orders(port, policy, &event, &trigger, &position)
             .await
-            .and_then(|reactions| {
-                check_reactions(
-                    &policy.output_domain,
-                    &event,
-                    reactions.reactions,
-                    policy.name(),
-                    &trigger,
-                )
-            });
-        let commands = match checked {
-            Ok(commands) => commands,
-            Err(error) => {
-                if let Some(failure) = super::route::policy_failure(&error) {
-                    dead_letter::write(
-                        self.letters,
-                        Payload::RejectedEvents(event),
-                        Component::policy(policy.name()),
-                        Cause::PolicyFailed(&failure),
-                    );
-                    past_bug(self.policy_bug, port, &position)
-                        .await
-                        .map_err(|e| (path.to_vec(), StepError::Kernel(KernelError::Store(e))))?;
-                    return Err((path.to_vec(), StepError::PolicyFailed(failure)));
-                }
-                let error = KernelError::Router(error);
-                dead_letter::write(
-                    self.letters,
-                    Payload::RejectedEvents(event),
-                    Component::policy(policy.name()),
-                    Cause::Kernel(&error),
-                );
-                return Err((path.to_vec(), StepError::Kernel(error)));
-            }
-        };
-        let correlation = page
-            .meta
-            .as_ref()
-            .and_then(|m| m.correlation_id.clone())
-            .unwrap_or_default();
-        let orders = answered(policy.name(), &trigger, &correlation, commands);
+            .map_err(|error| (path.to_vec(), error))?;
         let store = |path: Vec<Step>, e| (path, StepError::Kernel(KernelError::Store(e)));
         if orders.is_empty() {
             return port
@@ -1534,8 +1505,7 @@ impl<'k> Run<'k> {
                 false => &[],
             };
             match self.step(port, delivered.clone(), positions).await {
-                Ok(Stepped::Wrote(cover, head)) => self.queue.push_back((cover, path, Some(head))),
-                Ok(Stepped::Nothing) => {}
+                Ok(stepped) => self.enqueue(stepped, path),
                 Err(Failure::Rejected(rejected)) => {
                     if !policy.answers_refusals {
                         dead_letter::write(
@@ -1559,34 +1529,134 @@ impl<'k> Run<'k> {
                         .refusal_step(port, policy, &refusal, &ctx, &delivered, positions)
                         .await
                     {
-                        Ok(Stepped::Wrote(cover, head)) => {
-                            self.queue.push_back((cover, path, Some(head)))
-                        }
-                        Ok(Stepped::Nothing) => {}
+                        Ok(stepped) => self.enqueue(stepped, path),
                         Err(error) => return Err((path, error)),
                     }
                 }
                 Err(Failure::Kernel(KernelError::Router(error)))
                     if super::route::is_handler_fault(&error) =>
                 {
-                    past_bug(self.policy_bug, port, &position)
+                    self.past_bug(port, &position)
                         .await
-                        .map_err(|e| store(path.clone(), e))?;
+                        .map_err(|e| (path.clone(), e))?;
                     return Err((path, StepError::Kernel(KernelError::Router(error))));
                 }
                 Err(failure) => {
-                    // Retried or re-run to its cap and dead-lettered: the
-                    // position does what a bug's does.
-                    if self.retried(&failure, true) || given_up(&failure) {
-                        past_bug(self.policy_bug, port, &position)
-                            .await
-                            .map_err(|e| store(path.clone(), e))?;
-                    }
-                    return Err((path, step_error(failure)));
+                    let failed = self.step_failed(port, &position, failure).await;
+                    return Err((path, failed));
                 }
             }
         }
         Ok(())
+    }
+
+    /// `policy`'s answer to `event` (its one page, `trigger`): its commands,
+    /// checked ([`check_reactions`]) and ordered under the event's
+    /// correlation. Its own failure is dead-lettered, `position` written past
+    /// it ([`Run::policy_failed`]); the router's error, or a refused answer,
+    /// is dead-lettered and the position stays.
+    async fn orders<P: Port>(
+        &self,
+        port: &mut P,
+        policy: &PolicyEntry,
+        event: &EventBook,
+        trigger: &EventRef,
+        position: &[(&str, &Cover, u64)],
+    ) -> Result<Vec<Order>, StepError> {
+        let checked = policy.dispatch.dispatch(event).await.and_then(|reactions| {
+            check_reactions(
+                &policy.output_domain,
+                event,
+                reactions.reactions,
+                policy.name(),
+                trigger,
+            )
+        });
+        let error = match checked {
+            Ok(commands) => {
+                let correlation = (event.pages.first())
+                    .and_then(|page| page.meta.as_ref())
+                    .and_then(|m| m.correlation_id.clone())
+                    .unwrap_or_default();
+                return Ok(answered(policy.name(), trigger, &correlation, commands));
+            }
+            Err(error) => error,
+        };
+        let (payload, component) = (
+            Payload::RejectedEvents(event.clone()),
+            Component::policy(policy.name()),
+        );
+        if let Some(failure) = super::route::policy_failure(&error) {
+            return Err(self
+                .policy_failed(port, position, payload, component, failure)
+                .await);
+        }
+        let error = KernelError::Router(error);
+        dead_letter::write(self.letters, payload, component, Cause::Kernel(&error));
+        Err(StepError::Kernel(error))
+    }
+
+    /// A step's stream, at `path`, queued to settle from what it wrote.
+    fn enqueue(&mut self, stepped: Stepped, path: Vec<Step>) {
+        if let Stepped::Wrote(cover, head) = stepped {
+            self.queue.push_back((cover, path, Some(head)));
+        }
+    }
+
+    /// Write `positions` past a policy step's bug, already dead-lettered,
+    /// unless the kernel keeps them at the trigger ([`OnPolicyBug::Stay`]).
+    async fn past_bug<P: Port>(
+        &self,
+        port: &mut P,
+        positions: &[(&str, &Cover, u64)],
+    ) -> Result<(), StepError> {
+        match self.policy_bug {
+            OnPolicyBug::MovePast => port
+                .write_positions(positions)
+                .await
+                .map_err(|e| StepError::Kernel(KernelError::Store(e))),
+            OnPolicyBug::Stay => Ok(()),
+        }
+    }
+
+    /// A policy's own `failure` ([`StepError::PolicyFailed`]), a bug:
+    /// `payload` dead-lettered at `component` by its code and args, and
+    /// `positions` written past it ([`Run::past_bug`]).
+    async fn policy_failed<P: Port>(
+        &self,
+        port: &mut P,
+        positions: &[(&str, &Cover, u64)],
+        payload: Payload,
+        component: Component<'_>,
+        failure: Report,
+    ) -> StepError {
+        dead_letter::write(
+            self.letters,
+            payload,
+            component,
+            Cause::PolicyFailed(&failure),
+        );
+        match self.past_bug(port, positions).await {
+            Ok(()) => StepError::PolicyFailed(failure),
+            Err(error) => error,
+        }
+    }
+
+    /// A policy's step's `failure`, as the chain's: retried or re-run to
+    /// its cap and dead-lettered, `positions` do what a bug's do
+    /// ([`Run::past_bug`]).
+    async fn step_failed<P: Port>(
+        &self,
+        port: &mut P,
+        positions: &[(&str, &Cover, u64)],
+        failure: Failure<Rejected>,
+    ) -> StepError {
+        if self.retried(&failure, true) || given_up(&failure) {
+            if let Err(error) = self.past_bug(port, positions).await {
+                return error;
+            }
+        }
+        step_error(failure)
     }
 
     /// `delivered`'s refusal fact, the policy's OnRefused answer to
@@ -1617,39 +1687,16 @@ impl<'k> Run<'k> {
                 let Some(failure) = super::route::policy_failure(&error) else {
                     return Err(kernel(error));
                 };
-                dead_letter::write(
-                    self.letters,
-                    Payload::RejectedCommand(delivered.to_book()),
-                    Component::policy(policy.name()),
-                    Cause::PolicyFailed(&failure),
-                );
-                past_bug(self.policy_bug, port, positions)
-                    .await
-                    .map_err(|e| StepError::Kernel(KernelError::Store(e)))?;
-                return Err(StepError::PolicyFailed(failure));
+                let payload = Payload::RejectedCommand(delivered.to_book());
+                let component = Component::policy(policy.name());
+                return Err(self
+                    .policy_failed(port, positions, payload, component, failure)
+                    .await);
             }
         };
         let fact = answer.unwrap_or_else(|| passed_through(refusal));
         let trigger = delivered.causation_id().cloned().unwrap_or_default();
-        let book = CommandBook {
-            // The exact stream of the triggering event.
-            cover: refusal.event.as_ref().and_then(|e| e.cover.clone()),
-            page: Some(CommandPage {
-                body: Some(command_page::Body::Fact(Fact {
-                    payload: Some(fact),
-                })),
-                fact_origin: Some(FactOrigin {
-                    external_id: delivered.command_id().to_string(),
-                    description: format!(
-                        "{} refused by {}",
-                        type_name(&delivered.payload().type_url),
-                        delivered.domain()
-                    ),
-                }),
-                ..CommandPage::default()
-            }),
-            handling: None,
-        };
+        let book = refusal_fact(refusal, delivered, fact);
         let checked = check_refusal(
             book.clone(),
             self.registry.catalog(),
@@ -1677,34 +1724,20 @@ impl<'k> Run<'k> {
             {
                 error
             }
-            Err(failure) => {
-                if self.retried(&failure, true) || given_up(&failure) {
-                    past_bug(self.policy_bug, port, positions)
-                        .await
-                        .map_err(|e| StepError::Kernel(KernelError::Store(e)))?;
-                }
-                return Err(step_error(failure));
-            }
+            Err(failure) => return Err(self.step_failed(port, positions, failure).await),
         };
         if let Some(failure) = super::route::policy_failure(&error) {
-            dead_letter::write(
-                self.letters,
-                Payload::RejectedCommand(fact.to_book()),
-                Component::domain(self.registry.catalog(), fact.domain()),
-                Cause::PolicyFailed(&failure),
-            );
-            past_bug(self.policy_bug, port, positions)
-                .await
-                .map_err(|e| StepError::Kernel(KernelError::Store(e)))?;
-            return Err(StepError::PolicyFailed(failure));
+            let payload = Payload::RejectedCommand(fact.to_book());
+            let component = Component::domain(self.registry.catalog(), fact.domain());
+            return Err(self
+                .policy_failed(port, positions, payload, component, failure)
+                .await);
         }
         if error.code != RouterReason::NoFactHandler.as_str_name()
             && error.code != RouterReason::NoRefusalHandler.as_str_name()
         {
             if super::route::is_handler_fault(&error) {
-                past_bug(self.policy_bug, port, positions)
-                    .await
-                    .map_err(|e| StepError::Kernel(KernelError::Store(e)))?;
+                self.past_bug(port, positions).await?;
             }
             return Err(StepError::Kernel(KernelError::Router(error)));
         }
