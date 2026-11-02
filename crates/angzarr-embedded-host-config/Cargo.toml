@@ -8,7 +8,8 @@ publish.workspace = true
 rust-version = "1.77"
 
 # Dependency-light by design (see CLAUDE.md): a tool that only writes or
-# lints the config (angzarr-cli) takes no tokio, tonic or SQLite through it.
+# lints the config (angzarr-cli's generator, and so every application's
+# build script) takes no tokio, tonic or SQLite through it.
 # angzarr-yaml reads the file (versioned, then a strict serde decode, every
 # failure a key path and a code); serde derives the schema.
 [dependencies]
