@@ -977,7 +977,9 @@ pub use super::policy::{CommandTarget, EventSource, Policy};
 /// decision 14.69). For a process manager the root is the trigger's
 /// correlation ([`PolicyContext::correlation_id`]) by convention.
 pub struct Commands<T: CommandTarget> {
-    orders: Vec<(Uuid, command_page::Body)>,
+    orders: Vec<(Uuid, Any)>,
+    /// Whether each of `orders` is a fact, by its index.
+    facts: Vec<bool>,
     target: std::marker::PhantomData<fn() -> T>,
 }
 
@@ -986,6 +988,7 @@ impl<T: CommandTarget> Commands<T> {
     pub fn none() -> Commands<T> {
         Commands {
             orders: Vec::new(),
+            facts: Vec::new(),
             target: std::marker::PhantomData,
         }
     }
@@ -996,10 +999,7 @@ impl<T: CommandTarget> Commands<T> {
         C: DomainMessage,
         T: Decides<C>,
     {
-        self.then(
-            root,
-            command_page::Body::Command(command_of(pack_message(&command))),
-        )
+        self.then(root, pack_message(&command), false)
     }
 
     /// These outputs and `fact`, a fact of a type `T` declares one, for
@@ -1009,40 +1009,46 @@ impl<T: CommandTarget> Commands<T> {
         F: DomainMessage,
         T: Ingests<F>,
     {
-        self.then(
-            root,
-            command_page::Body::Fact(angzarr_proto::v1::Fact {
-                payload: Some(pack_message(&fact)),
-            }),
-        )
+        self.then(root, pack_message(&fact), true)
     }
 
-    /// These outputs and `body` for `root`.
-    fn then(self, root: Uuid, body: command_page::Body) -> Commands<T> {
-        let mut orders = self.orders;
-        orders.push((root, body));
+    /// These outputs and `payload` for `root`, a fact or a command.
+    fn then(self, root: Uuid, payload: Any, fact: bool) -> Commands<T> {
+        let (mut orders, mut facts) = (self.orders, self.facts);
+        orders.push((root, payload));
+        facts.push(fact);
         Commands {
             orders,
+            facts,
             target: self.target,
         }
     }
 
-    /// Each output, a command or a fact, its payload packed, with the root
-    /// of its stream, in order.
-    pub fn orders(&self) -> &[(Uuid, command_page::Body)] {
+    /// Each output, packed, with the root of its stream, in order: a
+    /// command, or a fact where [`Commands::is_fact`] says so.
+    pub fn orders(&self) -> &[(Uuid, Any)] {
         &self.orders
     }
 
-    /// As [`Commands::orders`], owned.
+    /// Whether the output at `index` of [`Commands::orders`] is a fact.
+    pub fn is_fact(&self, index: usize) -> bool {
+        self.facts.get(index).copied().unwrap_or(false)
+    }
+
+    /// Each output as its page's body, with its stream's root, in order.
     pub(crate) fn into_orders(self) -> Vec<(Uuid, command_page::Body)> {
         self.orders
-    }
-}
-
-/// `payload` as a command's body.
-fn command_of(payload: Any) -> angzarr_proto::v1::Command {
-    angzarr_proto::v1::Command {
-        payload: Some(payload),
+            .into_iter()
+            .zip(self.facts)
+            .map(|((root, payload), fact)| {
+                let payload = Some(payload);
+                let body = match fact {
+                    true => command_page::Body::Fact(angzarr_proto::v1::Fact { payload }),
+                    false => command_page::Body::Command(angzarr_proto::v1::Command { payload }),
+                };
+                (root, body)
+            })
+            .collect()
     }
 }
 
@@ -1051,10 +1057,7 @@ impl<T: Domain> Commands<T> {
     /// `root`: a hand-written policy's way to send one of a domain's
     /// command payload.
     pub fn send(self, root: Uuid, command: &<T as Domain>::Command) -> Commands<T> {
-        self.then(
-            root,
-            command_page::Body::Command(command_of(command.to_any())),
-        )
+        self.then(root, command.to_any(), false)
     }
 }
 

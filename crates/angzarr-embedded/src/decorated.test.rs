@@ -1691,13 +1691,6 @@ fn root() -> Uuid {
 }
 
 /// A domain value as the `Any` it travels as.
-/// `payload` as a policy's command output (`Commands::orders`).
-fn command_of(payload: Any) -> command_page::Body {
-    command_page::Body::Command(Command {
-        payload: Some(payload),
-    })
-}
-
 fn any<M: DomainMessage>(message: M) -> Any {
     pack(&message.to_wire())
 }
@@ -3932,15 +3925,13 @@ mod policy_events {
         assert_eq!(
             outputs.orders(),
             [
-                (correlation(2), command_of(any(RecordHeld { cents: 5 }))),
-                (
-                    correlation(3),
-                    command_page::Body::Fact(Fact {
-                        payload: Some(any(BuyInExpired {})),
-                    })
-                ),
+                (correlation(2), any(RecordHeld { cents: 5 })),
+                (correlation(3), any(BuyInExpired {})),
             ]
         );
+        assert!(!outputs.is_fact(0));
+        assert!(outputs.is_fact(1));
+        assert!(!outputs.is_fact(2), "no output there");
     }
 
     /// A policy answers an event of its source with its `#[on_event]`
@@ -3955,10 +3946,7 @@ mod policy_events {
             .on_event(&started, &ctx(&correlation(1)))
             .unwrap()
             .expect("the policy handles BuyInStarted");
-        assert_eq!(
-            commands.orders(),
-            [(root(), command_of(any(Hold { cents: 30 })))]
-        );
+        assert_eq!(commands.orders(), [(root(), any(Hold { cents: 30 }))]);
     }
 
     /// A policy addressing a process manager names the instance by the
@@ -3971,7 +3959,7 @@ mod policy_events {
             .expect("the policy handles Held");
         assert_eq!(
             commands.orders(),
-            [(correlation(7), command_of(any(RecordHeld { cents: 5 })))]
+            [(correlation(7), any(RecordHeld { cents: 5 }))]
         );
     }
 
@@ -4095,10 +4083,7 @@ mod policy_errors {
             .on_event(&started, &ctx)
             .unwrap()
             .expect("the policy handles BuyInStarted");
-        assert_eq!(
-            commands.orders(),
-            [(root(), command_of(any(Hold { cents: 30 })))]
-        );
+        assert_eq!(commands.orders(), [(root(), any(Hold { cents: 30 }))]);
     }
 }
 
