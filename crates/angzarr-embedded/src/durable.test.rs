@@ -362,3 +362,34 @@ fn memory_dead_letters_drain_takes_what_was_written_once() {
     assert!(log.drain().is_empty(), "once");
     assert!(log.lines().is_empty(), "its lines with it");
 }
+
+/// Every dead letter is stamped `occurred_at` from the kernel's clock, the
+/// instant the call was sampled at (`Sampled::now`, what its events'
+/// `recorded_at` reads too), a UTC instant (decision 14.66): the letter the
+/// log is handed and the one the store keeps alike.
+#[test]
+fn a_dead_letter_occurs_at_the_calls_sampled_instant() {
+    let registry = registry();
+    let log = MemoryDeadLetters::new();
+    let kernel = Kernel::new(&registry).log_with(&log);
+    let store = Recording::default();
+    let bad = fact(
+        cover("account", 1),
+        crate::pack(&crate::toys::account::fact::PaymentReceived { cents: -1 }),
+        "pi_bad",
+    );
+    let sampled = at(1_700_000_123);
+    let handled = kernel
+        .handle::<Account, _>(&store, bad, &sampled)
+        .ready()
+        .expect("parked");
+    let logged = log.letters();
+    assert_eq!(logged.len(), 1);
+    assert_eq!(logged[0].occurred_at, Some(sampled.now));
+    assert_eq!(
+        handled.dead_letters()[0].letter.occurred_at,
+        Some(sampled.now)
+    );
+    let kept = kept(&store, &cover("account", 1));
+    assert_eq!(kept[0].letter.occurred_at, Some(sampled.now));
+}
