@@ -138,10 +138,10 @@ pub enum HostError {
     /// is served through the host's listener.
     NotExposable { domain: String, kind: String },
     /// The child's descriptor fails the coordinator's validation
-    /// (decision 14.42, C-0687; [`DescriptorRefused`](crate::DescriptorRefused)).
+    /// (decision 14.42, C-0687; `angzarr_embedded::validate_descriptor`).
     Descriptor {
         domain: String,
-        cause: crate::DescriptorRefused,
+        cause: angzarr_embedded::Misconfigured,
     },
     /// A restarted child described another component than its first
     /// child did: another name or kind, or a policy or projector of other
@@ -417,7 +417,7 @@ fn component_samples() -> Vec<HostError> {
         },
         HostError::Descriptor {
             domain: d(),
-            cause: crate::DescriptorRefused::PolicyNoOutputDomain {
+            cause: angzarr_embedded::Misconfigured::PolicyNoOutputDomain {
                 component: "TableWalletPolicy".to_string(),
             },
         },

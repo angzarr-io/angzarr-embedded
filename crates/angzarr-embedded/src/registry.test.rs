@@ -117,8 +117,8 @@ fn misconfiguration_is_refused_at_registration() {
         fresh
             .register::<Unversioned>(Upcaster::new("u", "unversioned"), |t| t)
             .err(),
-        Some(Misconfigured::EmptyRulesVersion {
-            domain: "unversioned".to_string()
+        Some(Misconfigured::MissingRulesVersion {
+            component: "unversioned".to_string()
         })
     );
     assert!(
@@ -245,8 +245,8 @@ fn a_state_descriptor_without_the_implicit_base_is_refused() {
         registry
             .register::<Bad>(crate::Upcaster::new("u", "bad"), |t| t)
             .err(),
-        Some(crate::Misconfigured::BadStateDescriptor {
-            domain: "bad".to_string()
+        Some(crate::Misconfigured::StateResolutionsInvalid {
+            component: "bad".to_string()
         })
     );
 }
@@ -314,8 +314,13 @@ fn a_state_descriptor_naming_another_type_than_its_snapshot_is_refused() {
         registry
             .register::<Bad>(crate::Upcaster::new("u", "bad"), |t| t)
             .err(),
-        Some(crate::Misconfigured::BadStateDescriptor {
-            domain: "bad".to_string()
+        Some(crate::Misconfigured::StateTypeMismatch {
+            component: "bad".to_string(),
+            type_url: "/toy.bad.v1.Elsewhere".to_string(),
+            state_type_url: format!(
+                "/{}",
+                <<Misnamed as crate::State>::Snapshot as prost::Name>::full_name()
+            ),
         })
     );
 }
@@ -390,8 +395,8 @@ fn a_command_handler_registers_by_its_descriptor() {
     };
     assert_eq!(
         refused(unversioned),
-        Some(Misconfigured::EmptyRulesVersion {
-            domain: "hello".to_string()
+        Some(Misconfigured::MissingRulesVersion {
+            component: "hello".to_string()
         })
     );
     let untyped = crate::v1::StateDescriptor {
@@ -400,14 +405,16 @@ fn a_command_handler_registers_by_its_descriptor() {
     };
     assert_eq!(
         refused(hello(Some(untyped))),
-        Some(Misconfigured::BadStateDescriptor {
-            domain: "hello".to_string()
+        Some(Misconfigured::MissingStateType {
+            component: "hello".to_string(),
+            kind: "COMPONENT_KIND_AGGREGATE".to_string(),
         })
     );
     assert_eq!(
         refused(hello(None)),
-        Some(Misconfigured::BadStateDescriptor {
-            domain: "hello".to_string()
+        Some(Misconfigured::MissingStateType {
+            component: "hello".to_string(),
+            kind: "COMPONENT_KIND_AGGREGATE".to_string(),
         })
     );
 
@@ -509,8 +516,8 @@ fn a_described_domain_is_replaced_whole_by_its_new_descriptor() {
     });
     assert_eq!(
         refused,
-        Err(Misconfigured::EmptyRulesVersion {
-            domain: "hello".to_string()
+        Err(Misconfigured::MissingRulesVersion {
+            component: "hello".to_string()
         })
     );
     assert_eq!(

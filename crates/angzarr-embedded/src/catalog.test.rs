@@ -69,10 +69,7 @@ fn a_policy_or_projector_registered_twice_is_refused() {
     );
     assert_eq!(registry.policies("z").count(), 0, "nothing kept");
     assert_eq!(registry.projectors().len(), 1);
-    assert_eq!(
-        twice().code(),
-        "angzarr-embedded-misconfigured-component-registered"
-    );
+    assert_eq!(twice().code(), "ROUTER_REASON_DUPLICATE_COMPONENT");
 }
 
 /// A projector naming no domain it reads is refused under the spec's key
@@ -106,7 +103,7 @@ fn an_upcaster_for_a_domain_not_registered_is_refused() {
         registry
             .upcast_with("nowhere", Upcaster::new("u", "nowhere"))
             .err(),
-        Some(Misconfigured::NotRegistered {
+        Some(Misconfigured::UpcasterUnknownDomain {
             domain: "nowhere".to_string()
         })
     );

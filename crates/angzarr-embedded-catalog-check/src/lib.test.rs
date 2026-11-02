@@ -414,11 +414,17 @@ fn every_router_reason_is_sampled() {
     let mut problems = Vec::new();
     for reason in router {
         let key = reason.as_str_name();
-        let Some(sample) = samples.iter().find(|d| d.code() == key) else {
+        // A key whose answerers differ (the router's duplicate and the
+        // registry's, decision 14.44) gives every declared arg across them.
+        let answers: Vec<_> = samples.iter().filter(|d| d.code() == key).collect();
+        if answers.is_empty() {
             problems.push(format!("{key}: no sample"));
             continue;
-        };
-        let args: BTreeSet<&str> = sample.args().iter().map(|(n, _)| *n).collect();
+        }
+        let args: BTreeSet<&str> = answers
+            .iter()
+            .flat_map(|d| d.args().into_iter().map(|(n, _)| n))
+            .collect();
         let declared: BTreeSet<&str> = reason.args().iter().copied().collect();
         if args != declared {
             problems.push(format!("{key}: args {args:?}, declared {declared:?}"));

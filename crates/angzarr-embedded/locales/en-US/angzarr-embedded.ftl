@@ -76,12 +76,3 @@ angzarr-embedded-upcaster-duplicate = domain { $domain }'s upcaster has two type
 angzarr-embedded-upcaster-out-of-order = domain { $domain }'s upcaster registers the rule from { $source } before the rule from { $produced_by }, which produces it
 angzarr-embedded-upcaster-dead-end = domain { $domain }'s upcaster takes { $source } to { $ends_at }, which the domain does not decode
 
-angzarr-embedded-misconfigured-already-registered = domain "{ $domain }" is registered already
-angzarr-embedded-misconfigured-component-registered = a component named "{ $component }" is registered already
-angzarr-embedded-misconfigured-not-registered = an upcaster is given for domain "{ $domain }", which is not registered
-angzarr-embedded-misconfigured-upcaster-for-another-domain = the upcaster registered for domain "{ $domain }" is for "{ $upcaster }"
-angzarr-embedded-misconfigured-empty-rules-version = domain "{ $domain }"'s current rules version is empty
-angzarr-embedded-misconfigured-bad-state-descriptor = domain "{ $domain }"'s state descriptor lists a value that is not a resolution, or lacks STRICT or AGGREGATE_HANDLES
-angzarr-embedded-misconfigured-unsupported-resolution = domain "{ $domain }" is configured { $resolution }, which its state does not support
-angzarr-embedded-misconfigured-unsupported-command-resolution = domain "{ $domain }" configures { $command_type } { $resolution }, which its state does not support
-angzarr-embedded-misconfigured-remote-source = "{ $component }" handles the events of domain "{ $domain }", which is remote: its events are its coordinator's, never this process's

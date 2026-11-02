@@ -493,7 +493,15 @@ resolution, snapshot and start rule) and a `CatchUp` read only it. The
 `PolicyComponent`, a projector's `ProjectorHandler`, a remote domain's
 `CoordinatorPort`. Every registration answers `Result<_, Misconfigured>`,
 the same way for every kind; a refused one lists and keeps nothing, and
-none panics.
+none panics. One validator decides it (decision 14.65):
+`validate_descriptor` holds every domain's descriptor, a Rust
+registration's and a child's alike (the host calls it on every Describe),
+to 14.42's rules, and the catalog adds its own (a name registered twice, an
+upcaster for another domain or none, a resolution its state does not
+support, a remote source, a projector of nothing). Each refusal is a spec
+key, verbatim: the descriptor rules' `COORDINATOR_REASON_*` readiness keys,
+`ROUTER_REASON_DUPLICATE_COMPONENT`, and the host's `HOST_REASON_*`
+composition keys.
 
 ```rust
 ```

@@ -92,6 +92,7 @@ mod error;
 mod fixture;
 mod handle;
 pub mod markup;
+mod misconfigured;
 mod payload;
 mod policy;
 mod projector;
@@ -160,7 +161,7 @@ pub use angzarr_router::PageContext;
 #[cfg(feature = "sqlite")]
 pub use angzarr_store_sqlite;
 pub use book::{CommandBookExt, CoverExt};
-pub use catalog::{Catalog, Description, Misconfigured};
+pub use catalog::{Catalog, Description};
 pub use check::{check, Body, Checked, Identified, Malformed, Sampled};
 pub use conflict::{Key, UnitPath, Units};
 pub use dead_letter::{dead_letter_line, DeadLetterLog, MemoryDeadLetters, DEAD_LETTER_PREFIX};
@@ -174,6 +175,7 @@ pub use handle::{
     Handled, Kernel, OnPolicyBug, OnRetryable, Recorded, Wait, DEFAULT_DEPTH_LIMIT,
     DEFAULT_RACE_RUNS,
 };
+pub use misconfigured::{validate_descriptor, Misconfigured};
 pub use payload::{decode_as, pack, type_name, Decoder, Payload};
 pub use policy::{target_cover, translated, CommandTarget, EventSource, Order, Policy};
 pub use projector::{CatchUp, Caught};
@@ -524,41 +526,71 @@ fn chain_samples() -> Vec<UpcastChainError> {
 /// for one command type.
 pub(crate) fn misconfigured_samples() -> Vec<Misconfigured> {
     use v1::ConflictResolution;
+    let component = || sample_domain();
+    let kind = |k: v1::ComponentKind| k.as_str_name().to_string();
     vec![
         Misconfigured::AlreadyRegistered {
-            domain: sample_domain(),
+            domain: component(),
         },
         Misconfigured::ComponentRegistered {
             component: "bookkeeping".to_string(),
         },
-        Misconfigured::NotRegistered {
-            domain: sample_domain(),
+        Misconfigured::UpcasterUnknownDomain {
+            domain: component(),
         },
         Misconfigured::ProjectorNoInputDomain {
             component: "balances".to_string(),
         },
         Misconfigured::UpcasterForAnotherDomain {
-            domain: sample_domain(),
+            domain: component(),
             upcaster: "ledger".to_string(),
         },
-        Misconfigured::EmptyRulesVersion {
-            domain: sample_domain(),
+        Misconfigured::MissingRulesVersion {
+            component: component(),
         },
-        Misconfigured::BadStateDescriptor {
-            domain: sample_domain(),
+        Misconfigured::StartingTypesOnNonPm {
+            component: component(),
+            kind: kind(v1::ComponentKind::Aggregate),
+        },
+        Misconfigured::MissingStateType {
+            component: component(),
+            kind: kind(v1::ComponentKind::Aggregate),
+        },
+        Misconfigured::StateOnStatelessKind {
+            component: "balances".to_string(),
+            kind: kind(v1::ComponentKind::Projector),
+        },
+        Misconfigured::PolicyInputCount {
+            component: "bookkeeping".to_string(),
+            input_count: 2,
+        },
+        Misconfigured::PolicyNoOutputDomain {
+            component: "bookkeeping".to_string(),
+        },
+        Misconfigured::OutputDomainOnNonPolicy {
+            component: component(),
+            kind: kind(v1::ComponentKind::ProcessManager),
+        },
+        Misconfigured::StateResolutionsInvalid {
+            component: component(),
+        },
+        Misconfigured::StateTypeMismatch {
+            component: component(),
+            type_url: "/toy.account.v1.Account".to_string(),
+            state_type_url: "/toy.account.v1.Snapshot".to_string(),
         },
         Misconfigured::UnsupportedResolution {
-            domain: sample_domain(),
+            domain: component(),
             command_type: None,
             resolution: ConflictResolution::Commutative,
         },
         Misconfigured::UnsupportedResolution {
-            domain: sample_domain(),
+            domain: component(),
             command_type: Some("toy.cmd.v1.Note".to_string()),
             resolution: ConflictResolution::Commutative,
         },
         Misconfigured::RemoteSource {
-            domain: sample_domain(),
+            domain: component(),
             component: "bookkeeping".to_string(),
         },
     ]

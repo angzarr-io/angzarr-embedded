@@ -22,11 +22,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 
-use angzarr_diagnostic::{Arg, Diagnostic};
 use angzarr_proto::v1::{
     ComponentDescriptor, ComponentKind, ConflictResolution, Snapshot, StateDescriptor, Target,
 };
 
+use super::misconfigured::{supported, validate_descriptor, Misconfigured};
 use super::payload::type_name;
 use super::upcast::UpcastPort;
 
@@ -114,31 +114,27 @@ impl Description {
     }
 }
 
-/// What `descriptor` says of `domain`, a handler of `kind`, refused
-/// without a rules version or a state type, or with a state whose
-/// resolutions are not resolutions.
+/// What `descriptor` says of `domain`, a handler of `kind`, refused as
+/// [`validate_descriptor`] refuses it.
 fn described(
     domain: &str,
     kind: ComponentKind,
     descriptor: ComponentDescriptor,
 ) -> Result<Described, Misconfigured> {
-    if descriptor.rules_version.is_empty() {
-        return Err(Misconfigured::EmptyRulesVersion {
-            domain: domain.to_string(),
-        });
-    }
+    // Held to the rules as the domain's kind: a new descriptor lists the
+    // domain again, never another kind of it.
+    let descriptor = ComponentDescriptor {
+        kind: kind as i32,
+        ..descriptor
+    };
+    validate_descriptor(&descriptor)?;
     let starting = (kind == ComponentKind::ProcessManager).then(|| {
         // A listed type URL counts by the name it ends in.
         (descriptor.starting_types.iter())
             .map(|t| type_name(t).to_string())
             .collect()
     });
-    let state = descriptor
-        .state
-        .filter(|state| !state.type_url.is_empty())
-        .ok_or_else(|| Misconfigured::BadStateDescriptor {
-            domain: domain.to_string(),
-        })?;
+    let state = descriptor.state.unwrap_or_default();
     let supported = supported(domain, &state)?;
     Ok(Described {
         state,
@@ -146,158 +142,6 @@ fn described(
         rules_version: descriptor.rules_version,
         starting,
     })
-}
-
-/// The resolutions `state` lists, refused unless every one is a resolution
-/// and the implicit base (STRICT and AGGREGATE_HANDLES) is there.
-fn supported(
-    domain: &str,
-    state: &StateDescriptor,
-) -> Result<Vec<ConflictResolution>, Misconfigured> {
-    let bad = || Misconfigured::BadStateDescriptor {
-        domain: domain.to_string(),
-    };
-    let listed = state
-        .options
-        .as_ref()
-        .map(|o| o.conflict_resolutions.as_slice())
-        .unwrap_or_default();
-    let mut supported = Vec::with_capacity(listed.len());
-    for value in listed {
-        match ConflictResolution::try_from(*value) {
-            Ok(ConflictResolution::Unspecified) | Err(_) => return Err(bad()),
-            Ok(resolution) => supported.push(resolution),
-        }
-    }
-    if !supported.contains(&ConflictResolution::Strict)
-        || !supported.contains(&ConflictResolution::AggregateHandles)
-    {
-        return Err(bad());
-    }
-    Ok(supported)
-}
-
-/// Why a component could not be registered: angzarr refuses the same
-/// configuration when it is loaded or the component registers. Every
-/// registration answers one of these; none panics.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub enum Misconfigured {
-    /// `domain` is registered already.
-    AlreadyRegistered { domain: String },
-    /// A policy or a projector named `component` is registered already.
-    ComponentRegistered { component: String },
-    /// An upcaster is given for `domain`, which is not registered.
-    NotRegistered { domain: String },
-    /// The upcaster names another domain.
-    UpcasterForAnotherDomain { domain: String, upcaster: String },
-    /// The domain's rules version is empty: every event is stamped with
-    /// it, so it must say something.
-    EmptyRulesVersion { domain: String },
-    /// The state's descriptor lists a value that is not a resolution, or
-    /// lacks the implicit base (STRICT and AGGREGATE_HANDLES), which every
-    /// generated descriptor includes.
-    BadStateDescriptor { domain: String },
-    /// Configuration names a resolution the state does not support:
-    /// COMMUTATIVE for a state with no conflict units, or UNSPECIFIED.
-    /// `command_type` is the command's full type name, or `None` for the
-    /// domain's own default.
-    UnsupportedResolution {
-        domain: String,
-        command_type: Option<String>,
-        resolution: ConflictResolution,
-    },
-    /// A policy or projector here, `component`, handles the events of
-    /// `domain`, a remote domain ([`Registry::remote`](super::Registry::remote)):
-    /// a remote domain's events are its coordinator's, never written or
-    /// read here, so a local component of them would never run. Remote
-    /// stays remote.
-    RemoteSource { domain: String, component: String },
-    /// A projector that names no domain it reads: there is no wildcard
-    /// domain, so it would fold nothing. The spec's
-    /// `HOST_REASON_PROJECTOR_NO_INPUT_DOMAIN` (decision 14.55).
-    ProjectorNoInputDomain { component: String },
-}
-
-impl fmt::Display for Misconfigured {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        angzarr_diagnostic::display(self, f)
-    }
-}
-
-impl std::error::Error for Misconfigured {}
-
-impl Diagnostic for Misconfigured {
-    fn code(&self) -> &str {
-        match self {
-            Misconfigured::AlreadyRegistered { .. } => {
-                "angzarr-embedded-misconfigured-already-registered"
-            }
-            Misconfigured::ComponentRegistered { .. } => {
-                "angzarr-embedded-misconfigured-component-registered"
-            }
-            Misconfigured::NotRegistered { .. } => "angzarr-embedded-misconfigured-not-registered",
-            Misconfigured::UpcasterForAnotherDomain { .. } => {
-                "angzarr-embedded-misconfigured-upcaster-for-another-domain"
-            }
-            Misconfigured::EmptyRulesVersion { .. } => {
-                "angzarr-embedded-misconfigured-empty-rules-version"
-            }
-            Misconfigured::BadStateDescriptor { .. } => {
-                "angzarr-embedded-misconfigured-bad-state-descriptor"
-            }
-            Misconfigured::UnsupportedResolution {
-                command_type: None, ..
-            } => "angzarr-embedded-misconfigured-unsupported-resolution",
-            Misconfigured::UnsupportedResolution {
-                command_type: Some(_),
-                ..
-            } => "angzarr-embedded-misconfigured-unsupported-command-resolution",
-            Misconfigured::RemoteSource { .. } => "angzarr-embedded-misconfigured-remote-source",
-            Misconfigured::ProjectorNoInputDomain { .. } => {
-                angzarr_proto::v1::HostReason::ProjectorNoInputDomain.as_str_name()
-            }
-        }
-    }
-
-    fn args(&self) -> Vec<(&str, Arg)> {
-        match self {
-            Misconfigured::AlreadyRegistered { domain }
-            | Misconfigured::NotRegistered { domain }
-            | Misconfigured::EmptyRulesVersion { domain }
-            | Misconfigured::BadStateDescriptor { domain } => {
-                vec![("domain", domain.as_str().into())]
-            }
-            Misconfigured::ComponentRegistered { component } => {
-                vec![("component", component.as_str().into())]
-            }
-            Misconfigured::ProjectorNoInputDomain { component } => {
-                vec![(
-                    angzarr_proto::v1::reason_args::COMPONENT,
-                    component.as_str().into(),
-                )]
-            }
-            Misconfigured::RemoteSource { domain, component } => vec![
-                ("domain", domain.as_str().into()),
-                ("component", component.as_str().into()),
-            ],
-            Misconfigured::UpcasterForAnotherDomain { domain, upcaster } => vec![
-                ("domain", domain.as_str().into()),
-                ("upcaster", upcaster.as_str().into()),
-            ],
-            Misconfigured::UnsupportedResolution {
-                domain,
-                command_type,
-                resolution,
-            } => {
-                let mut args = vec![("domain", domain.as_str().into())];
-                if let Some(command_type) = command_type {
-                    args.push(("command_type", command_type.as_str().into()));
-                }
-                args.push(("resolution", resolution.as_str_name().into()));
-                args
-            }
-        }
-    }
 }
 
 /// types.proto's default snapshot compatibility rule: strip ONE leading
@@ -428,12 +272,12 @@ impl Catalog {
         domain: &str,
         port: Arc<dyn UpcastPort>,
     ) -> Result<(), Misconfigured> {
-        let listed = self
-            .domains
-            .get_mut(domain)
-            .ok_or_else(|| Misconfigured::NotRegistered {
-                domain: domain.to_string(),
-            })?;
+        let listed =
+            self.domains
+                .get_mut(domain)
+                .ok_or_else(|| Misconfigured::UpcasterUnknownDomain {
+                    domain: domain.to_string(),
+                })?;
         listed.upcast = Some(port);
         Ok(())
     }

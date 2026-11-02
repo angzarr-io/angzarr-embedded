@@ -467,7 +467,7 @@ fn a_policy_of_a_remote_domains_events_is_refused() {
         .map(|e| e.to_string());
     assert_eq!(
         refused.as_deref(),
-        Some("angzarr-embedded-misconfigured-remote-source domain=bank component=bank-till")
+        Some("HOST_REASON_REMOTE_SOURCE component=bank-till domain=bank")
     );
 }
 
@@ -482,7 +482,7 @@ fn a_projector_of_a_remote_domains_events_is_refused() {
         .map(|e| e.to_string());
     assert_eq!(
         refused.as_deref(),
-        Some("angzarr-embedded-misconfigured-remote-source domain=bank component=quiet")
+        Some("HOST_REASON_REMOTE_SOURCE component=quiet domain=bank")
     );
 }
 

@@ -17,8 +17,9 @@
 //! 3. connects to that socket and watches its gRPC health
 //!    (`grpc.health.v1`, the server's), which must report SERVING before
 //!    it calls `ComponentService.Describe`, refusing a child of another
-//!    kind than its `kind` says, and one whose descriptor fails
-//!    validation ([`descriptor::validate`]); an upcaster sidecar is not
+//!    kind than its `kind` says, and one whose descriptor fails the
+//!    kernel's one validation (`angzarr_embedded::validate_descriptor`,
+//!    the rules a Rust registration meets too); an upcaster sidecar is not
 //!    described, and may come up not serving;
 //! 4. hands back, by its kind, a [`RemoteCommandHandler`] over
 //!    `CommandHandlerService`, a [`RemotePolicyHandler`] over
@@ -50,7 +51,6 @@
 
 pub mod app;
 pub mod config;
-pub mod descriptor;
 pub mod error;
 pub mod exposure;
 pub mod handshake;
@@ -68,7 +68,6 @@ pub use config::{
     ComponentConfig, ComponentKindConfig, Expose, HostConfig, Language, Languages, Launch,
     Placement, StoreConfig, Supervision,
 };
-pub use descriptor::{validate, DescriptorRefused};
 pub use error::{HandshakeError, HostError};
 pub use exposure::{Arrival, NotExposed, Unserved};
 pub use host::{ChildExit, Host};
@@ -90,7 +89,6 @@ pub const EN_US: (&str, &str) = (
 /// catalog parity test.
 pub fn diagnostic_samples() -> Vec<Box<dyn angzarr_diagnostic::Diagnostic>> {
     let mut samples = error::diagnostic_samples();
-    samples.extend(descriptor::diagnostic_samples());
     samples.extend(exposure::diagnostic_samples());
     samples
 }

@@ -1041,9 +1041,11 @@ impl Supervisor {
                 })?
                 .into_inner();
             check_kind(&self.domain, self.kind, &descriptor)?;
-            crate::validate(&descriptor).map_err(|cause| HostError::Descriptor {
-                domain: domain(),
-                cause,
+            angzarr_embedded::validate_descriptor(&descriptor).map_err(|cause| {
+                HostError::Descriptor {
+                    domain: domain(),
+                    cause,
+                }
             })?;
             Ok((channel, descriptor, handshake.socket, true, Some(watch)))
         }

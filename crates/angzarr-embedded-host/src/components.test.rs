@@ -903,7 +903,7 @@ fn a_policy_child_with_no_output_domain_is_refused_at_start() {
         refused,
         Some(HostError::Descriptor {
             domain: "table-wallet".to_string(),
-            cause: crate::DescriptorRefused::PolicyNoOutputDomain {
+            cause: angzarr_embedded::Misconfigured::PolicyNoOutputDomain {
                 component: "TableWalletPolicy".to_string(),
             },
         })

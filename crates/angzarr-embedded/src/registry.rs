@@ -22,10 +22,11 @@ use angzarr_router::router::{
     self as router, DynCommandHandler, DynPolicyComponent, DynProjectorHandler,
 };
 
-use super::catalog::{Catalog, Configured, Description, Misconfigured};
+use super::catalog::{Catalog, Configured, Description};
 use super::domain::{Domain, State};
 use super::error::UpcastChainError;
 use super::markup::{self, AsyncProjector};
+use super::misconfigured::Misconfigured;
 use super::payload::{type_name, Payload};
 use super::route;
 use super::target::{CoordinatorPort, Target};
@@ -151,9 +152,13 @@ impl Registry {
         let state = D::State::descriptor();
         // A snapshot is found usable by the descriptor's type URL, and is
         // written as the snapshot form's: they must be one type.
-        if type_name(&state.type_url) != <<D::State as State>::Snapshot as prost::Name>::full_name()
-        {
-            return Err(Misconfigured::BadStateDescriptor { domain });
+        let snapshot = <<D::State as State>::Snapshot as prost::Name>::full_name();
+        if type_name(&state.type_url) != snapshot {
+            return Err(Misconfigured::StateTypeMismatch {
+                component: domain,
+                type_url: state.type_url,
+                state_type_url: format!("/{snapshot}"),
+            });
         }
         let process_manager = starting.is_some();
         let kind = match process_manager {
@@ -248,7 +253,7 @@ impl Registry {
     /// Upcast `domain`'s incoming payloads through `port` (decision
     /// 14.39): its upcaster sidecar, for a domain registered by
     /// [`Registry::command_handler`], or one in-process. Refused for a
-    /// domain not registered ([`Misconfigured::NotRegistered`]).
+    /// domain not registered ([`Misconfigured::UpcasterUnknownDomain`]).
     pub fn upcast_with(
         &mut self,
         domain: &str,

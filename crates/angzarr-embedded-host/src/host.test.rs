@@ -604,7 +604,13 @@ fn described(kind: pb::ComponentKind) -> pb::ComponentDescriptor {
         rules_version: "1.4.2+build.7".to_string(),
         state: stateful.then(|| pb::StateDescriptor {
             type_url: "/orders.v1.OrderState".to_string(),
-            options: None,
+            // The implicit base every state supports (decision 14.42).
+            options: Some(pb::StateOptions {
+                conflict_resolutions: vec![
+                    pb::ConflictResolution::Strict as i32,
+                    pb::ConflictResolution::AggregateHandles as i32,
+                ],
+            }),
         }),
         inputs: policy
             .then(|| pb::Target {
@@ -631,13 +637,15 @@ fn described(kind: pb::ComponentKind) -> pb::ComponentDescriptor {
 fn a_policy_descriptor_without_an_output_domain_is_refused() {
     use angzarr_diagnostic::Diagnostic;
     let mut descriptor = described(pb::ComponentKind::Policy);
-    assert_eq!(crate::validate(&descriptor), Ok(()));
+    assert_eq!(angzarr_embedded::validate_descriptor(&descriptor), Ok(()));
     descriptor.output_domain = String::new();
-    let refused = crate::validate(&descriptor).err().unwrap();
+    let refused = angzarr_embedded::validate_descriptor(&descriptor)
+        .err()
+        .unwrap();
     assert_eq!(refused.code(), "COORDINATOR_REASON_POLICY_NO_OUTPUT_DOMAIN");
     assert_eq!(
         refused,
-        crate::DescriptorRefused::PolicyNoOutputDomain {
+        angzarr_embedded::Misconfigured::PolicyNoOutputDomain {
             component: "order".to_string()
         }
     );
@@ -649,12 +657,16 @@ fn a_policy_descriptor_without_an_output_domain_is_refused() {
 fn a_descriptor_that_fails_its_validation_is_refused_for_its_reason() {
     use pb::ComponentKind::{Aggregate, Policy, ProcessManager, Projector};
     for kind in [Aggregate, Policy, ProcessManager, Projector] {
-        assert_eq!(crate::validate(&described(kind)), Ok(()), "{kind:?}");
+        assert_eq!(
+            angzarr_embedded::validate_descriptor(&described(kind)),
+            Ok(()),
+            "{kind:?}"
+        );
     }
     let reason = |kind, fault: Fault| {
         let mut descriptor = described(kind);
         fault(&mut descriptor);
-        crate::validate(&descriptor)
+        angzarr_embedded::validate_descriptor(&descriptor)
             .err()
             .map(|r| angzarr_diagnostic::Diagnostic::code(&r).to_string())
     };
@@ -716,8 +728,8 @@ fn a_descriptor_that_fails_its_validation_is_refused_for_its_reason() {
     let mut none = described(Policy);
     none.inputs.clear();
     assert_eq!(
-        crate::validate(&none),
-        Err(crate::DescriptorRefused::PolicyInputCount {
+        angzarr_embedded::validate_descriptor(&none),
+        Err(angzarr_embedded::Misconfigured::PolicyInputCount {
             component: "order".to_string(),
             input_count: 0
         })
@@ -880,7 +892,7 @@ fn a_child_described_again_is_refused_unless_the_registry_takes_it() {
     };
     let refused = order.registered_by(&unversioned, false);
     assert!(
-        matches!(&refused, Err(HostError::Register { cause }) if angzarr_diagnostic::Diagnostic::code(cause) == "angzarr-embedded-misconfigured-empty-rules-version"),
+        matches!(&refused, Err(HostError::Register { cause }) if angzarr_diagnostic::Diagnostic::code(cause) == "COORDINATOR_REASON_MISSING_RULES_VERSION"),
         "{refused:?}"
     );
     assert_eq!(order.link.registered().descriptor, first, "the old kept");

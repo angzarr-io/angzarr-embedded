@@ -34,9 +34,10 @@ use angzarr_proto::v1::{Cover, EventBook, EventPage};
 use angzarr_router::router::ProjectorHandler;
 use prost_types::Timestamp;
 
-use super::catalog::{Catalog, Misconfigured};
+use super::catalog::Catalog;
 use super::error::KernelError;
 use super::handle::Wait;
+use super::misconfigured::Misconfigured;
 use super::store::{
     ChangeToken, ListPositions, PositionKey, ReadStore, ReadUnit, Store, StoreError, StreamRef,
     Watch, Write,
