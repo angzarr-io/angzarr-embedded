@@ -375,16 +375,29 @@ fn assert_replay_fixtures_panics_with_every_failure() {
     assert_replay_fixtures::<Account>(&registry(), &[fixture]);
 }
 
-#[test]
-fn every_failure_says_how_to_recover() {
-    let stream = cover("account", 1);
-    let kernel = |e: KernelError| (Failure::<Malformed>::Kernel(e.clone()).recovery(), e);
-    let stale = KernelError::Stale {
-        stream: stream.clone(),
+/// Each error says how to recover, as itself and as the kernel's failure.
+fn assert_recovers<const N: usize>(cases: [(Recovery, KernelError); N]) {
+    for (recovery, error) in cases {
+        let failure = Failure::<Malformed>::Kernel(error.clone());
+        assert_eq!(failure.recovery(), recovery, "{error:?}");
+        assert_eq!(error.recovery(), recovery, "{error:?}");
+    }
+}
+
+/// A stale write, retried.
+fn stale() -> KernelError {
+    KernelError::Stale {
+        stream: cover("account", 1),
         expected: 1,
         actual: 2,
-    };
-    let cases = [
+    }
+}
+
+/// The kernel's own errors say how to recover.
+#[test]
+fn the_kernels_errors_say_how_to_recover() {
+    let stream = cover("account", 1);
+    assert_recovers([
         (
             Recovery::Invalid,
             KernelError::Malformed(Malformed::NoCover),
@@ -396,7 +409,7 @@ fn every_failure_says_how_to_recover() {
                 type_url: String::new(),
             },
         ),
-        (Recovery::Retry, stale.clone()),
+        (Recovery::Retry, stale()),
         (
             Recovery::Retry,
             KernelError::Unresolved {
@@ -404,40 +417,6 @@ fn every_failure_says_how_to_recover() {
                 expected: 1,
                 actual: 2,
             },
-        ),
-        (
-            Recovery::Retry,
-            KernelError::Store(StoreError::Conflict {
-                stream: Box::new(stream.clone()),
-                expected: 0,
-                actual: 1,
-            }),
-        ),
-        (
-            Recovery::Retry,
-            KernelError::Store(StoreError::Unavailable(Cause::new("x-down", []))),
-        ),
-        (
-            Recovery::Invalid,
-            KernelError::Store(StoreError::MalformedStream {
-                stream: Box::new(stream.clone()),
-            }),
-        ),
-        (
-            Recovery::Bug,
-            KernelError::Store(StoreError::Discontinuous {
-                stream: Box::new(stream.clone()),
-                expected: 0,
-                found: 1,
-            }),
-        ),
-        (
-            Recovery::Bug,
-            KernelError::Store(StoreError::Unreadable {
-                stream: Box::new(stream.clone()),
-                sequence: 0,
-                reason: Cause::new("x-bad", []),
-            }),
         ),
         (
             Recovery::Bug,
@@ -476,6 +455,55 @@ fn every_failure_says_how_to_recover() {
             Recovery::Bug,
             KernelError::Replay(ReplayError::RecordedBackwards { sequence: 1 }),
         ),
+    ]);
+}
+
+/// The store's errors, forwarded, say how to recover.
+#[test]
+fn the_stores_errors_say_how_to_recover() {
+    let stream = cover("account", 1);
+    assert_recovers([
+        (
+            Recovery::Retry,
+            KernelError::Store(StoreError::Conflict {
+                stream: Box::new(stream.clone()),
+                expected: 0,
+                actual: 1,
+            }),
+        ),
+        (
+            Recovery::Retry,
+            KernelError::Store(StoreError::Unavailable(Cause::new("x-down", []))),
+        ),
+        (
+            Recovery::Invalid,
+            KernelError::Store(StoreError::MalformedStream {
+                stream: Box::new(stream.clone()),
+            }),
+        ),
+        (
+            Recovery::Bug,
+            KernelError::Store(StoreError::Discontinuous {
+                stream: Box::new(stream.clone()),
+                expected: 0,
+                found: 1,
+            }),
+        ),
+        (
+            Recovery::Bug,
+            KernelError::Store(StoreError::Unreadable {
+                stream: Box::new(stream.clone()),
+                sequence: 0,
+                reason: Cause::new("x-bad", []),
+            }),
+        ),
+    ]);
+}
+
+/// A handler's code says how to recover by its status.
+#[test]
+fn a_handlers_code_says_how_to_recover_by_its_status() {
+    assert_recovers([
         (
             Recovery::Business,
             KernelError::Router(CodedError::rejection(
@@ -534,6 +562,14 @@ fn every_failure_says_how_to_recover() {
             KernelError::Router(own(GrpcCode::Unavailable)),
         ),
         (Recovery::Retry, KernelError::Router(own(GrpcCode::Aborted))),
+    ]);
+}
+
+/// The router's own errors and the coordinator's conflicts say how to
+/// recover.
+#[test]
+fn the_routers_and_coordinators_codes_say_how_to_recover() {
+    assert_recovers([
         (
             Recovery::Retry,
             KernelError::Router(CodedError::immediate(
@@ -555,12 +591,13 @@ fn every_failure_says_how_to_recover() {
             Recovery::Bug,
             KernelError::Router(router_own(RouterReason::AnyDecodeFailed.as_str_name())),
         ),
-    ];
-    for (recovery, error) in cases {
-        assert_eq!(kernel(error.clone()), (recovery, error.clone()));
-        assert_eq!(error.recovery(), recovery);
-    }
+    ]);
+}
 
+/// A failure says how to recover as its error does: a refusal is the
+/// caller's business, a chain's by its step's error.
+#[test]
+fn a_failure_says_how_to_recover_as_its_error() {
     assert_eq!(
         Failure::Rejected(Malformed::NoCover).recovery(),
         Recovery::Business
@@ -583,7 +620,7 @@ fn every_failure_says_how_to_recover() {
         "a malformed policy book is the kernel's, not the caller's"
     );
     assert_eq!(
-        downstream(StepError::Kernel(stale)).recovery(),
+        downstream(StepError::Kernel(stale())).recovery(),
         Recovery::Retry
     );
 }
