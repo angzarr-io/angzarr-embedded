@@ -96,8 +96,10 @@ strict YAML reader, pinned at the rev the other core crates are: the
 versioned loader and the strict serde decode, every failure a key path and
 a code) and `serde` (its derives), and on nothing else, because it is the
 host config's schema, `angzarr.yaml`, shared by angzarr-embedded-host, which
-runs it, and by angzarr-cli's `lint app` and `scaffold app`, which must not
-take tokio, tonic or SQLite to read it. It defines no errors: a config that
+runs it, and by angzarr-cli's generator (angzarr-codegen, behind `lint app`,
+`scaffold app` and every application's build script through angzarr-build),
+which must not take tokio, tonic or SQLite to read it; the cli's `probe`
+takes angzarr-embedded-host itself. It defines no errors: a config that
 does not load is angzarr-yaml's `LoadError`. The `language` closed set is
 the host's, since it is the languages the running application loads.
 
