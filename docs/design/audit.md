@@ -1126,7 +1126,10 @@ is dead-lettered (owner ruling, 2026-10-31): a policy's step, with its
 retry count, its position doing what `OnPolicyBug` says, and a fact,
 parked. A command its caller waits for is handed back (as last answered;
 at a race cap, `COORDINATOR_REASON_RETRY_CAP_EXHAUSTED`) and is not
-dead-lettered: the caller holds it. `Kernel::on_retryable(OnRetryable { max_retries, initial_backoff,
+dead-lettered: the caller holds it. A policy's own call failing
+retryably (its dispatch answering a retryable status, or ABORTED) is run
+again the same way, and at its retries its trigger is dead-lettered with
+them (C-0444). `Kernel::on_retryable(OnRetryable { max_retries, initial_backoff,
 multiplier, max_backoff, jitter })`: retry `n` (from 0) waits
 `initial_backoff * multiplier^n`, at most `max_backoff`, less up to
 `jitter` of it at random. On by default (3 retries, from 100 ms,

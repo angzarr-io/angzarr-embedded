@@ -1572,8 +1572,11 @@ impl<'k> Run<'k> {
     /// `policy`'s answer to `event` (its one page, `trigger`): its commands,
     /// checked ([`check_reactions`]) and ordered under the event's
     /// correlation. Its own failure is dead-lettered, `position` written past
-    /// it ([`Run::policy_failed`]); the router's error, or a refused answer,
-    /// is dead-lettered and the position stays.
+    /// it ([`Run::policy_failed`]); a retryable failure is run again under
+    /// the retry policy ([`Run::retried`], C-0444) and at its retries
+    /// dead-lettered with them, `position` doing what a bug's does
+    /// ([`Run::past_bug`]); any other error of the router's, or a refused
+    /// answer, is dead-lettered and the position stays.
     async fn orders<P: Port>(
         &self,
         port: &mut P,
@@ -1582,7 +1585,19 @@ impl<'k> Run<'k> {
         trigger: &EventRef,
         position: &[(&str, &Cover, u64)],
     ) -> Result<Vec<Order>, StepError> {
-        let checked = policy.dispatch.dispatch(event).await.and_then(|reactions| {
+        let mut retries = 0;
+        let dispatched = loop {
+            let dispatched = policy.dispatch.dispatch(event).await;
+            match &dispatched {
+                Err(error) if self.policy_retried(error) && retries < self.retry.max_retries => {
+                    let backoff = self.retry.backoff(retries, self.wait.draw());
+                    self.wait.wait(backoff).await;
+                    retries += 1;
+                }
+                _ => break dispatched,
+            }
+        };
+        let checked = dispatched.and_then(|reactions| {
             check_reactions(
                 &policy.output_domain,
                 event,
@@ -1610,9 +1625,27 @@ impl<'k> Run<'k> {
                 .policy_failed(port, position, payload, component, failure)
                 .await);
         }
+        let retried = self.policy_retried(&error);
         let error = KernelError::Router(error);
-        dead_letter::write(self.letters, payload, component, Cause::Kernel(&error));
+        if !retried {
+            dead_letter::write(self.letters, payload, component, Cause::Kernel(&error));
+            return Err(StepError::Kernel(error));
+        }
+        write_at_cap(
+            self.letters,
+            payload,
+            component,
+            Cause::Kernel(&error),
+            retries,
+        );
+        self.past_bug(port, position).await?;
         Err(StepError::Kernel(error))
+    }
+
+    /// Whether a policy's own dispatch failing with `error` is run again: a
+    /// policy's call is a step's, whose caller is the kernel ([`Run::retried`]).
+    fn policy_retried(&self, error: &angzarr_router::error::CodedError) -> bool {
+        self.retried(&Failure::Kernel(KernelError::Router(error.clone())), true)
     }
 
     /// A step's stream, at `path`, queued to settle from what it wrote.
