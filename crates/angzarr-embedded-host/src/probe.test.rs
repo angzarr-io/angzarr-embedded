@@ -271,6 +271,7 @@ fn an_input_not_answered_fails_the_handle_step() {
         outcomes(&died),
         expect(4, Some("COORDINATOR_REASON_HANDLER_UNAVAILABLE"))
     );
+    assert!(!died.passed(), "the steps before it passed; not the probe");
     let other_kind = probed(
         domain("player", "player", mode::SERVE),
         events("player", any("/examples.blackjack.SitDown")),

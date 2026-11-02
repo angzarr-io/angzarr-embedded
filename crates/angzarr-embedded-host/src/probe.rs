@@ -73,15 +73,11 @@ pub struct Probed {
 }
 
 impl Probed {
-    /// Whether every step that applies passed.
+    /// Whether every step that applies passed: the shutdown did, which
+    /// runs only when every step before it passed.
     pub fn passed(&self) -> bool {
-        self.steps
-            .iter()
-            .all(|(_, outcome)| !matches!(outcome, Outcome::Failed(_)))
-            && self
-                .steps
-                .iter()
-                .any(|(step, outcome)| *step == Step::Shutdown && *outcome == Outcome::Passed)
+        (self.steps.iter())
+            .any(|(step, outcome)| *step == Step::Shutdown && *outcome == Outcome::Passed)
     }
 }
 
