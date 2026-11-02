@@ -2112,16 +2112,16 @@ fn a_policys_commands_in_their_triggers_edition_and_correlation_are_delivered() 
     assert_eq!(position(&store, "unchecked", &cover("account", 1)), 1);
 }
 
-/// A policy's reaction that is not a bare command refuses the whole answer
-/// as the policy's bug, keyed as the spec spells it, naming its domain and
-/// type (decision 14.48, amended): a command id or causation other than
-/// the one its coordinator stamps,
+/// A policy's reaction that sets what its coordinator stamps refuses the
+/// whole answer as the policy's bug, keyed as the spec spells it, naming
+/// its domain and type (decision 14.48, amended): a command id or
+/// causation other than the stamp,
 /// `COORDINATOR_REASON_POLICY_COMMAND_OTHER_IDENTITY` with the `field`; a
-/// Fact, `COORDINATOR_REASON_POLICY_COMMAND_IS_FACT`; a command carrying
-/// `fact_origin`, `COORDINATOR_REASON_POLICY_COMMAND_FACT_ORIGIN`. Never
-/// delivered with the field dropped, nor a fact delivered as a command.
+/// `fact_origin` of its own, on either arm (the kernel stamps a fact's;
+/// decision 14.69), `COORDINATOR_REASON_POLICY_COMMAND_FACT_ORIGIN`. Never
+/// delivered with the field dropped.
 #[test]
-fn a_policys_reaction_that_is_not_a_bare_command_is_refused_by_the_kernel() {
+fn a_policys_reaction_that_sets_its_own_stamp_is_refused_by_the_kernel() {
     use crate::v1::{command_page::Body, Fact, FactOrigin};
     let named = |refused: &crate::angzarr_router::error::CodedError, code: &str| {
         assert_eq!(refused.code, code, "{refused:?}");
@@ -2168,7 +2168,7 @@ fn a_policys_reaction_that_is_not_a_bare_command_is_refused_by_the_kernel() {
     );
     assert_eq!(field(&other_cause).as_deref(), Some("causation_id"));
 
-    let is_fact = unchecked_refusal(|_| {
+    let fact_origin = unchecked_refusal(|_| {
         let mut book = record_for(ledger_cover());
         let page = book.page.as_mut().unwrap();
         let Some(Body::Command(command)) = page.body.take() else {
@@ -2183,8 +2183,11 @@ fn a_policys_reaction_that_is_not_a_bare_command_is_refused_by_the_kernel() {
         });
         vec![book]
     });
-    named(&is_fact, "COORDINATOR_REASON_POLICY_COMMAND_IS_FACT");
-    assert_eq!(field(&is_fact), None);
+    named(
+        &fact_origin,
+        "COORDINATOR_REASON_POLICY_COMMAND_FACT_ORIGIN",
+    );
+    assert_eq!(field(&fact_origin), None);
 
     let origin = unchecked_refusal(|_| {
         let mut book = record_for(ledger_cover());

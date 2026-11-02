@@ -297,7 +297,6 @@ fn malformed_samples() -> Vec<Malformed> {
         Malformed::IdOnPolicyCommand {
             field: "command_id",
         },
-        Malformed::FactFromPolicy,
         Malformed::HandlingOnPolicyCommand,
         Malformed::BadTrigger(ids::UuidError::MissingTrigger),
         Malformed::FactWithoutOrigin,

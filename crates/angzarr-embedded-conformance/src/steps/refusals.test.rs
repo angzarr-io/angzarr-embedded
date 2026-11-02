@@ -204,6 +204,7 @@ fn pass_through_policy(
             on: crate::tests::business::recorded(&command).to_string(),
             domain: output,
             command,
+            fact: false,
             root: Root::TriggerCorrelation,
             correlation: None,
             fault: None,

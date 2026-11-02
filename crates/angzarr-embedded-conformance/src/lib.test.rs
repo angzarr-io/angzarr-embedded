@@ -42,6 +42,8 @@ mod inputs;
 mod outcomes;
 #[path = "steps/policies.test.rs"]
 mod policies;
+#[path = "steps/policy_facts.test.rs"]
+mod policy_facts;
 #[path = "steps/process_managers.test.rs"]
 mod process_managers;
 #[path = "steps/processed.test.rs"]

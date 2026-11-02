@@ -112,13 +112,6 @@ const UNBOUND_REMOTE_POLICY: Tag = Tag {
     why: "an in-process callback answers a payload alone: only a remote policy's answer can be more, and no binding runs one",
 };
 
-/// A policy answers commands alone (`PolicyResponse.reactions`): it emits
-/// no event.
-const POLICY_EMITS_NO_EVENT: Tag = Tag {
-    name: "unsupported_policy_event",
-    why: "a policy answers commands alone (PolicyResponse): it emits no event",
-};
-
 /// The fold is business code's: angzarr-router's, which runs the
 /// handler-contract tier for it. A binding here needs a typed domain of
 /// its own; the kernel's part, the history it delivers, is C-0287's.
@@ -185,12 +178,13 @@ const TAGGED: &[(&str, Tag)] = &[
     ("C-0661", NO_EDITION_LIFECYCLE),
     ("C-0662", NO_EDITION_LIFECYCLE),
     ("C-0663", NO_EDITION_LIFECYCLE),
+    ("C-0781", NO_EDITION_LIFECYCLE),
     // edition_propagation.feature
-    ("C-0139", POLICY_EMITS_NO_EVENT),
     ("C-0410", NO_EDITION_LIFECYCLE),
     // fact_flow.feature
     ("C-0609", NO_OUTSIDE_CAUSATION),
     ("C-0610", NO_OUTSIDE_CAUSATION),
+    ("C-0782", NO_OUTSIDE_CAUSATION),
     // policy_addressing.feature
     ("C-0735", NO_OUTSIDE_CAUSATION),
     ("C-0737", WAITING_CALLER_ANSWERED),

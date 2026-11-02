@@ -11,7 +11,9 @@ Feature: Policy refusals - a refused command becomes one fact for the policy's o
   translate, the policy's callback turns Refusal { event, command, response
   } into a domestic fact, so the source need not unpack a foreign object.
   Either way the coordinator addresses the fact and stamps its identity:
-  the refused command's id. Both calls go through the outbox.
+  the refused command's id. Both calls go through the outbox. Only a
+  command takes this path: a fact a policy emits for its destination is
+  never refused (policy_facts.feature; decision 14.69).
 
   Background:
     Given a "wallet" aggregate that refuses HoldFunds with FAILED_PRECONDITION reason INSUFFICIENT_AVAILABLE_FUNDS and the refusal object InsufficientFunds when funds are short

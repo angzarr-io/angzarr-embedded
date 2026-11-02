@@ -309,6 +309,16 @@ impl Business {
                 refusal: None,
             });
         }
+        if !is_fact && declared {
+            // Its handler for the type is a fact handler: the router finds
+            // no command handler for it.
+            return Err(CodedError {
+                code: "ROUTER_REASON_UNKNOWN_COMMAND_TYPE".to_string(),
+                extras: BTreeMap::from([("type_url".to_string(), input.type_url.clone())]),
+                grpc: GrpcCode::Internal,
+                refusal: None,
+            });
+        }
         let handled = *locked(&self.every_fact) || declared;
         if is_fact && !handled {
             return Err(CodedError {

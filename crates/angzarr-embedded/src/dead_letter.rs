@@ -438,7 +438,6 @@ fn malformed_reason(
                 .into_iter()
                 .chain([(args::FIELD.to_string(), field.to_string())]),
         )),
-        Malformed::FactFromPolicy => naming(CoordinatorReason::PolicyCommandIsFact),
         Malformed::CommandWithFactOrigin => naming(CoordinatorReason::PolicyCommandFactOrigin),
         Malformed::UnknownDomain { .. } => naming(CoordinatorReason::PolicyCommandUnknownDomain),
         Malformed::RefusalMisaddressed => coded(&route::spec_coded(

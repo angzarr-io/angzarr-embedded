@@ -233,16 +233,15 @@ pub(crate) fn check_reaction(
                 naming(),
             ));
         }
-        let page = command.page.as_ref();
-        let refused = match page.and_then(|p| p.body.as_ref()) {
-            Some(command_page::Body::Fact(_)) => Some(CoordinatorReason::PolicyCommandIsFact),
-            _ if page.is_some_and(|p| p.fact_origin.is_some()) => {
-                Some(CoordinatorReason::PolicyCommandFactOrigin)
-            }
-            _ => None,
-        };
-        if let Some(reason) = refused {
-            return Err(super::route::spec_coded(reason, naming()));
+        if command
+            .page
+            .as_ref()
+            .is_some_and(|p| p.fact_origin.is_some())
+        {
+            return Err(super::route::spec_coded(
+                CoordinatorReason::PolicyCommandFactOrigin,
+                naming(),
+            ));
         }
         let carried = command
             .page

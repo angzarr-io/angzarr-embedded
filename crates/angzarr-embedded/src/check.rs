@@ -70,8 +70,6 @@ pub enum Malformed {
     /// id (`field`, the first set, by its `CommandPage` name): the kernel
     /// derives all three from the trigger.
     IdOnPolicyCommand { field: &'static str },
-    /// A policy's book with a fact: a reaction can never inject a fact.
-    FactFromPolicy,
     /// A policy's book with handling: the target stamps its own head.
     HandlingOnPolicyCommand,
     /// The reaction's trigger cannot name a command id
@@ -130,7 +128,6 @@ impl Diagnostic for Malformed {
             Malformed::IdOnPolicyCommand { .. } => {
                 code!("malformed-id-on-policy-command")
             }
-            Malformed::FactFromPolicy => code!("malformed-fact-from-policy"),
             Malformed::HandlingOnPolicyCommand => {
                 code!("malformed-handling-on-policy-command")
             }
@@ -382,7 +379,6 @@ fn parse(
             })
         }
         Some(entry @ Entry::Refusal { .. }) => entry,
-        Some(_) if is_fact => return Err(Malformed::FactFromPolicy),
         Some(_) if handled => return Err(Malformed::HandlingOnPolicyCommand),
         Some(entry) => entry,
     };

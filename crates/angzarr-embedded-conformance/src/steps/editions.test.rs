@@ -76,6 +76,7 @@ fn policy_sets_edition(w: &mut Coordinator, edition: String) {
             on: "OrderCreated".to_string(),
             domain: output,
             command: "ReserveStock".to_string(),
+            fact: false,
             root: crate::tests::policy::Root::Named("inv-1".to_string()),
             correlation: None,
             fault: Some(crate::tests::policy::Fault::Edition(edition)),
@@ -123,6 +124,7 @@ fn pass_through(w: &mut Coordinator, name: String, input: String, output: String
             on: "OrderCreated".to_string(),
             domain: output,
             command,
+            fact: false,
             root: crate::tests::policy::Root::Named("inv-1".to_string()),
             correlation: None,
             fault: None,
@@ -161,6 +163,7 @@ async fn dispatched_to_policy(w: &mut Coordinator) {
                 on: "OrderCreated".to_string(),
                 domain: output,
                 command: "ReserveStock".to_string(),
+                fact: false,
                 root: crate::tests::policy::Root::Named("inv-1".to_string()),
                 correlation: None,
                 fault: None,
@@ -184,7 +187,7 @@ async fn delivered_to_pm(w: &mut Coordinator) {
 }
 
 #[then(
-    regex = r#"^the (?:emitted|persisted) command's cover has (?:edition "([\w-]+)"|no edition set)$"#
+    regex = r#"^the (?:emitted|persisted) (?:command|fact)'s cover has (?:edition "([\w-]+)"|no edition set)$"#
 )]
 fn command_cover_edition(w: &mut Coordinator, edition: String) {
     let output = w.policies.last().expect("a policy").output.clone();

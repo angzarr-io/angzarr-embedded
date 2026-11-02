@@ -4,7 +4,8 @@ Feature: Process manager delivery - a process manager is a domain, behind its ow
   Its inputs are commands, which it may refuse, and facts, which it never
   refuses; its root is the one its input names (by convention the
   instance's correlation; decision 14.36). It subscribes to no
-  domain: policies turn other domains' events into commands to it. It records
+  domain: policies turn other domains' events into commands and facts to it
+  (decision 14.69). It records
   only its own events and sends no commands. The correlation ids below are
   UUIDs, as in every scenario (decision 14.18).
 
@@ -35,15 +36,17 @@ Feature: Process manager delivery - a process manager is a domain, behind its ow
 
   @process_manager @pm_start
   @C-0593
-  Scenario: A non-starting fact for an unknown correlation is skipped silently
+  Scenario: A non-starting fact for an unknown correlation is dead-lettered
+    # Owner's ruling (decision 14.69): dead-lettered like a command, never
+    # skipped; a fact is never refused, so its sender is answered PARKED.
     Given a process manager "Fulfillment" owning domain "fulfillment" whose StartFulfillment command is a starting input
     And "Fulfillment" also takes a FulfillmentTimedOut fact, which is not a starting input
     And "Fulfillment" has no instance for correlation "0192a6b0-0000-7000-8000-000000000011"
     When a FulfillmentTimedOut fact is sent to "fulfillment" root "0192a6b0-0000-7000-8000-000000000011"
     Then "Fulfillment" is not called
     And nothing is appended to stream "fulfillment" root "0192a6b0-0000-7000-8000-000000000011"
-    And nothing is dead-lettered and no alert is raised
-    And the sender is answered APPLIED with no events
+    And the fact is dead-lettered with reason COORDINATOR_REASON_PM_NO_INSTANCE, and an alert is raised
+    And the sender is answered OK with delivery PARKED and no events
 
   @process_manager @pm_start
   @C-0594
@@ -58,7 +61,7 @@ Feature: Process manager delivery - a process manager is a domain, behind its ow
   @C-0595
   Scenario: A non-starting command for an unknown correlation is refused
     # Owner's ruling, decision 14.31: refused, recording nothing; a fact
-    # is skipped silently instead (C-0593).
+    # is dead-lettered instead (C-0593).
     Given a process manager "Fulfillment" owning domain "fulfillment" whose StartFulfillment command is a starting input
     And "Fulfillment" also takes a RecordStockReserved command, which is not a starting input
     And "Fulfillment" has no instance for correlation "0192a6b0-0000-7000-8000-000000000013"

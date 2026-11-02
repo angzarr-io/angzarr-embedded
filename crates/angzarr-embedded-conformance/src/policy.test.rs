@@ -40,9 +40,8 @@ pub(crate) enum Fault {
     CommandId,
     /// A causation other than the trigger.
     CausationId,
-    /// A Fact, not a Command.
-    IsFact,
-    /// A fact origin on a Command.
+    /// A fact origin of its own, on either arm: the coordinator stamps a
+    /// fact's.
     FactOrigin,
     /// An expected sequence.
     Handling(u64),
@@ -50,13 +49,15 @@ pub(crate) enum Fault {
     Edition(String),
 }
 
-/// One reaction: on an event of type `on`, a command of type `command` to
-/// `domain`, at `root`.
+/// One reaction: on an event of type `on`, a command (or, `fact`, a fact)
+/// of type `command` to `domain`, at `root`.
 #[derive(Clone, Debug)]
 pub(crate) struct Reaction {
     pub(crate) on: String,
     pub(crate) domain: String,
     pub(crate) command: String,
+    /// The Fact arm, for a type its destination declares a fact.
+    pub(crate) fact: bool,
     pub(crate) root: Root,
     /// A correlation of its own, unlike the trigger's.
     pub(crate) correlation: Option<String>,
@@ -126,11 +127,11 @@ impl Reaction {
             Root::Unnamed => None,
         };
         let payload = payload(&self.domain, &self.command);
-        let body = match self.fault {
-            Some(Fault::IsFact) => command_page::Body::Fact(Fact {
+        let body = match self.fact {
+            true => command_page::Body::Fact(Fact {
                 payload: Some(payload),
             }),
-            _ => command_page::Body::Command(Command {
+            false => command_page::Body::Command(Command {
                 payload: Some(payload),
             }),
         };
@@ -149,7 +150,7 @@ impl Reaction {
             }),
             _ => None,
         };
-        let fact_origin = matches!(self.fault, Some(Fault::FactOrigin | Fault::IsFact));
+        let fact_origin = self.fault == Some(Fault::FactOrigin);
         let edition = match &self.fault {
             Some(Fault::Edition(edition)) => Some(edition.clone()),
             _ => None,

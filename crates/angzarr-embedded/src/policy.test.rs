@@ -252,19 +252,20 @@ fn each_reaction_is_held_to_the_page_it_names() {
     );
 }
 
-/// A reaction that is a Fact, or a command carrying `fact_origin`, is the
-/// policy's bug, refused INTERNAL naming its domain and type (decision
-/// 14.48, amended): `COORDINATOR_REASON_POLICY_COMMAND_IS_FACT`,
-/// `COORDINATOR_REASON_POLICY_COMMAND_FACT_ORIGIN`. A policy's business
-/// code emits Commands only.
+/// A reaction may be a Fact, a type its destination declares one
+/// (decision 14.69), and passes the checks a command does; one carrying
+/// a `fact_origin` of its own, on either arm, is the policy's bug, refused
+/// INTERNAL naming its domain and type,
+/// `COORDINATOR_REASON_POLICY_COMMAND_FACT_ORIGIN`: the kernel stamps a
+/// fact's.
 #[test]
-fn a_reaction_is_a_command_and_carries_no_fact_origin() {
-    use crate::v1::{command_page::Body, Fact, FactOrigin};
+fn a_reaction_is_either_arm_and_carries_no_fact_origin() {
+    use crate::v1::FactOrigin;
     let trigger = cover_in("account", 1, "what-if");
+    let check =
+        |book: CommandBook| check_reaction("ledger", &trigger, None, vec![record(None), book]);
     let refused = |book: CommandBook| {
-        let error = check_reaction("ledger", &trigger, None, vec![record(None), book])
-            .err()
-            .unwrap();
+        let error = check(book).err().unwrap();
         assert_eq!(error.grpc, crate::angzarr_router::error::GrpcCode::Internal);
         let extra = |key: &str| error.extras.get(key).cloned();
         assert_eq!(extra("domain").as_deref(), Some("ledger"));
@@ -274,21 +275,40 @@ fn a_reaction_is_a_command_and_carries_no_fact_origin() {
         );
         error.code
     };
-    let mut fact = record(None);
-    let page = fact.page.as_mut().unwrap();
+    let checked = check(as_fact(record(None))).unwrap();
+    assert!(
+        matches!(
+            checked[1].page.as_ref().and_then(|p| p.body.as_ref()),
+            Some(crate::v1::command_page::Body::Fact(_))
+        ),
+        "the fact kept its arm: {checked:?}"
+    );
+    assert_eq!(
+        checked[1].cover.as_ref().and_then(|c| c.edition.as_deref()),
+        Some("what-if"),
+        "and was stamped with its trigger's edition"
+    );
+    for arm in [record(None), as_fact(record(None))] {
+        let mut origin = arm;
+        origin.page.as_mut().unwrap().fact_origin = Some(FactOrigin::default());
+        assert_eq!(
+            refused(origin),
+            "COORDINATOR_REASON_POLICY_COMMAND_FACT_ORIGIN"
+        );
+    }
+}
+
+/// `book` with its command's payload as a Fact.
+fn as_fact(mut book: CommandBook) -> CommandBook {
+    use crate::v1::{command_page::Body, Fact};
+    let page = book.page.as_mut().unwrap();
     let Some(Body::Command(command)) = page.body.take() else {
         unreachable!()
     };
     page.body = Some(Body::Fact(Fact {
         payload: command.payload,
     }));
-    assert_eq!(refused(fact), "COORDINATOR_REASON_POLICY_COMMAND_IS_FACT");
-    let mut origin = record(None);
-    origin.page.as_mut().unwrap().fact_origin = Some(FactOrigin::default());
-    assert_eq!(
-        refused(origin),
-        "COORDINATOR_REASON_POLICY_COMMAND_FACT_ORIGIN"
-    );
+    book
 }
 
 /// A reaction's own command id and causation, where set, are the ones its

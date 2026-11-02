@@ -176,7 +176,7 @@ fn never_parked(w: &mut Coordinator) {
     );
 }
 
-#[then("the client is answered OK with delivery PARKED and no events")]
+#[then(regex = r"^the (?:client|sender) is answered OK with delivery PARKED and no events$")]
 fn parked(w: &mut Coordinator) {
     let (_, result) = w.handled.last().expect("an input was handled");
     match result {

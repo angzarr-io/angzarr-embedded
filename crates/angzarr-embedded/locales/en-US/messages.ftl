@@ -30,7 +30,6 @@ malformed-bad-correlation-id = the correlation id is { $len ->
     }, not a UUID's 16
 malformed-causation-from-outside = a client's book names a causation: only the kernel's chain issues policy commands
 malformed-id-on-policy-command = a policy's book names its own { $field }: the kernel derives its ids from the trigger
-malformed-fact-from-policy = a policy's book holds a fact: a policy never injects one
 malformed-handling-on-policy-command = a policy's book has handling: its target stamps its own head
 malformed-bad-trigger = the policy command's trigger cannot name a command id: { $reason ->
         [bad-root] its root is not a UUID's 16 bytes

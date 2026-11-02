@@ -1,13 +1,17 @@
 Feature: Fact injection
 
   A process manager is a domain (decision 14.31): facts reach it as they
-  reach an aggregate (timeouts, webhooks). A policy's business code never
-  emits a fact; the one fact a policy delivers is a refusal fact (the
-  standard CommandRefused, or a domestic fact its callback translates the
-  refusal into), for its own source domain only (policy_refusal.feature).
+  reach an aggregate (timeouts, webhooks). A policy delivers facts of two
+  kinds, told apart by their payload: the facts its destination declares,
+  which its business code emits as it emits commands (policy_facts.feature;
+  decision 14.69), and the refusal fact of a refused command (the standard
+  CommandRefused, or a domestic fact its callback translates the refusal
+  into), for the exact stream of its trigger only (policy_refusal.feature).
+  Only a CommandRefused is held to its trigger's stream by the receiver; a
+  translated refusal fact is addressed by the coordinator that issues it.
 
-  Retired with decision 14.31: C-0184, C-0188, C-0189 and C-0493, which had
-  a policy inject facts into an aggregate (C-0610 now refuses that).
+  C-0184, C-0188, C-0189 and C-0493 stay retired (decision 14.31): a
+  policy's facts are policy_facts.feature's.
 
   Facts (events) are injected
   directly into target aggregates without going through command handling.
@@ -65,18 +69,30 @@ Feature: Fact injection
 
   @C-0609
   Scenario: A fact carrying a causation_id is accepted by its trigger's own stream
-    # The one fact with a causation_id is a policy's refusal fact, for the
-    # exact stream of the policy's triggering event (decision 14.31).
+    # A policy's refusal fact, for the exact stream of the policy's
+    # triggering event (decision 14.31).
     Given an "order" aggregate "order-1" that declares fact DeliveryRefused
     When a framework component sends a DeliveryRefused fact to "order" root "order-1" whose causation_id names an event of "order" aggregate "order-1"
     Then the fact is recorded at the order's next sequence
 
   @C-0610
-  Scenario: A fact carrying a causation_id addressed to another domain is refused
-    Given an "order" aggregate "order-1" that declares fact ShipmentDispatched
-    When a framework component sends a ShipmentDispatched fact to "order" root "order-1" whose causation_id names an event of the "shipping" domain
+  Scenario: A CommandRefused addressed to another stream than its trigger's is refused
+    # A fact's kind is told by its payload (decision 14.69): a
+    # CommandRefused is accepted only by the exact stream its trigger names.
+    Given an "order" aggregate "order-1" that defines an on_refused handler
+    When a framework component sends a CommandRefused fact to "order" root "order-1" whose trigger names an event of the "shipping" domain
     Then the fact is refused INTERNAL, and dead-lettered and alerted as a policy bug
     And no event is persisted to "order" aggregate "order-1"
+
+  @C-0782
+  Scenario: A policy's fact carrying a causation_id of another domain is accepted by the stream it is addressed to
+    # A policy's fact for its destination (decision 14.69): its causation is
+    # its trigger, in its source domain, and its command_id the reaction id
+    # its policy's coordinator stamped, taken as given.
+    Given an "order" aggregate "order-1" that declares fact ShipmentDispatched
+    When a framework component sends a ShipmentDispatched fact to "order" root "order-1" whose causation_id names an event of the "shipping" domain, with the command_id its policy's coordinator stamped
+    Then the fact is recorded at the order's next sequence
+    And its events record that command_id as their causation
 
   # ---------------------------------------------------------------------------
   # Error handling

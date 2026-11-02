@@ -1,16 +1,17 @@
 # Coordinator-contract feature: edition propagation across cross-domain
 # emissions. When a policy or process-manager handler receives an event in
 # edition X, the coordinator stamps edition X onto every outgoing
-# CommandBook / EventBook (a policy's commands and events, a process
-# manager's process_events) before persistence or dispatch. The edition
-# name propagates verbatim, and always overrides whatever edition the
-# handler set. How an edition's streams are forked, and how forks
-# propagate, is edition_forks.feature (decision 14.32).
+# CommandBook / EventBook that names none (a policy's commands and facts, a
+# process manager's events) before persistence or dispatch. The edition
+# name propagates verbatim; a policy's output naming another edition is the
+# policy's bug, refused, never overridden (C-0140; decision 14.66). How an
+# edition's streams are forked, and how forks propagate, is
+# edition_forks.feature (decision 14.32).
 #
 # A process manager is a domain (decision 14.31): its inputs are commands
-# (from policies, in their trigger's edition) and facts, and its events land
-# in its input's edition, like any domain's. A policy's refusal fact keeps
-# its trigger's edition.
+# and facts (from policies, in their trigger's edition, or from outside),
+# and its events land in its input's edition, like any domain's. A policy's
+# refusal fact keeps its trigger's edition.
 #
 # Coverage in core: Rust unit tests in
 # src/orchestration/saga/local/tests.rs (C-0138..C-0142) and
@@ -18,13 +19,13 @@
 # 14.31; C-0590 is new).
 Feature: Edition propagation across cross-domain emissions
   As a policy / process-manager author
-  I want the framework to guarantee that emitted commands and events
+  I want the framework to guarantee that emitted commands, facts and events
   inherit the source / trigger cover's edition
   So that timeline consistency holds across cross-domain boundaries
   without requiring me to manually stamp every outgoing cover
 
   # ---------------------------------------------------------------
-  # Policy: source event → outgoing commands / events
+  # Policy: source event → outgoing commands / facts
   # ---------------------------------------------------------------
 
   @C-0138
@@ -36,12 +37,15 @@ Feature: Edition propagation across cross-domain emissions
     Then the emitted command's cover has edition "speculative"
 
   @C-0139
-  Scenario: Policy propagates source edition to outgoing events
+  Scenario: Policy propagates source edition to outgoing facts
+    # A policy's answer is commands and facts its destination declares
+    # (decision 14.69); a policy emits no event.
     Given a policy "OrderAudit" translating from "order" to "audit"
-    And the policy handles OrderCreated by emitting an OrderObserved event
+    And the audit aggregate declares fact OrderObserved
+    And the policy handles OrderCreated by emitting an OrderObserved fact
     And the source event has edition "speculative"
     When an OrderCreated event is dispatched to the policy
-    Then the emitted event's cover has edition "speculative"
+    Then the emitted fact's cover has edition "speculative"
 
   @C-0140
   Scenario: A policy's command naming another edition than its trigger's is refused

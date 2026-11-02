@@ -7,8 +7,8 @@ Feature: Editions are per-stream forks, and the fork travels with the data
   states it; an arrival's is the main head the system layer read. The fork
   point is per stream, and no cross-stream snapshot is promised; (D, X, R) reads
   main's events below that fork sequence, then X's own. The fork travels
-  with the data: a policy's command in X that reaches a stream with no fork
-  in X forks it on arrival. A command from outside to an unforked stream is
+  with the data: a policy's command or fact in X that reaches a stream with
+  no fork in X forks it on arrival (decision 14.69). A command from outside to an unforked stream is
   refused until propagated. There is no edition registry: an edition is
   known while any creation event of it exists. Deletion is an event too:
   each stream it reaches records an EditionDeleted meta-event in sequence,
@@ -59,6 +59,20 @@ Feature: Editions are per-stream forks, and the fork travels with the data
     When "player" "p-1" records PlayerReady again in edition "what-if"
     Then "table" "t-1" in edition "what-if" still holds exactly one EditionCreated event
     And the new SeatPlayer command is handled in edition "what-if"
+
+  @editions
+  @C-0781
+  Scenario: A policy's fact arriving at an unforked stream forks it, then is recorded
+    # A policy emits the facts its destination declares (decision 14.69),
+    # and its fact carries the fork as its command does.
+    Given "player" "p-1" is forked into edition "what-if" at sequence 5
+    And "table" "t-1" has no fork in edition "what-if"
+    And "PlayerToTable" sends PlayerArrived, a fact "table" declares, to "table" "t-1" on PlayerReady in place of SeatPlayer
+    When "player" "p-1" records PlayerReady in edition "what-if"
+    Then "table" "t-1" in edition "what-if" first gains an EditionCreated event at sequence 3
+    And its forked_by is the PlayerArrived fact's command_id
+    And the PlayerArrived fact is then recorded in edition "what-if"
+    And no policy business code was called for either fork event
 
   # C-0632 (a propagation hop bound) is retired: the fork travels with the
   # data, which is its only bound (decision 14.32).

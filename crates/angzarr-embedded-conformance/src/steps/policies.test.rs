@@ -67,6 +67,7 @@ fn reaction(on: &str, domain: &str, command: &str, root: Root) -> Reaction {
         on: on.to_string(),
         domain: domain.to_string(),
         command: command.to_string(),
+        fact: false,
         root,
         correlation: None,
         fault: None,
@@ -84,7 +85,6 @@ fn fault(text: &str) -> Fault {
     match text {
         "sets a command_id other than the stamped one" => Fault::CommandId,
         "sets a causation_id other than the trigger's" => Fault::CausationId,
-        "has a fact_origin" => Fault::IsFact,
         "carries a fact_origin" => Fault::FactOrigin,
         other => panic!("no fault {other}"),
     }
@@ -185,17 +185,19 @@ fn its_business_code_answers(
 }
 
 #[given(
-    regex = r#"^a policy ("\w+" translating from "[\w-]+" to "[\w-]+") whose business code answers an (\w+) event with a (\w+) (?:command|fact) for ("[\w-]+" "[^"]+") that (.+)$"#
+    regex = r#"^a policy ("\w+" translating from "[\w-]+" to "[\w-]+") whose business code answers an (\w+) event with a (\w+) (command|fact) for ("[\w-]+" "[^"]+") that (.+)$"#
 )]
 fn answers_with_fault(
     w: &mut Coordinator,
     header: Header,
     on: String,
     command: String,
+    arm: String,
     to: Address,
     faulty: String,
 ) {
     let mut reaction = reaction(&on, &to.domain, &command, Root::Named(to.root));
+    reaction.fact = arm == "fact";
     reaction.fault = Some(fault(&faulty));
     reacts(w, &header, reaction);
 }
@@ -208,16 +210,88 @@ fn answers_the_same_stream(w: &mut Coordinator, header: Header, on: String, comm
     reacts(w, &header, reaction);
 }
 
-#[given(regex = r"^the policy handles (\w+) by emitting an? (\w+) command$")]
-fn handles_by_emitting(w: &mut Coordinator, on: String, command: String) {
+#[given(regex = r"^the policy handles (\w+) by emitting an? (\w+) (command|fact)$")]
+fn handles_by_emitting(w: &mut Coordinator, on: String, command: String, arm: String) {
     let header = last_policy(w);
-    let reaction = reaction(
+    let mut reaction = reaction(
         &on,
         &header.output,
         &command,
         Root::Named("t-1".to_string()),
     );
+    reaction.fact = arm == "fact";
     reacts(w, &header, reaction);
+}
+
+#[given(
+    regex = r#"^a policy ("\w+" translating from "[\w-]+" to "[\w-]+") that sends (?:the fact (\w+)|(\w+) as an? (command|fact)) to ("[\w-]+" "[^"]+") on (\w+)$"#
+)]
+fn sends_arm_to_root(
+    w: &mut Coordinator,
+    header: Header,
+    fact: String,
+    named: String,
+    arm: String,
+    to: Address,
+    on: String,
+) {
+    let (command, fact) = match fact.is_empty() {
+        false => (fact, true),
+        true => (named, arm == "fact"),
+    };
+    let mut reaction = reaction(&on, &to.domain, &command, Root::Named(to.root));
+    reaction.fact = fact;
+    reacts(w, &header, reaction);
+}
+
+/// Two outputs as a scenario lists them, in order: `a ReserveStock command
+/// and then a StockHoldRequested fact`, each a type and whether it is a
+/// fact.
+#[derive(Debug, Default)]
+struct Outputs(Vec<(String, bool)>);
+
+impl std::str::FromStr for Outputs {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Outputs, String> {
+        text.split(" and then ")
+            .map(|output| match output.split(' ').collect::<Vec<_>>()[..] {
+                ["a" | "an", name, arm @ ("command" | "fact")] => {
+                    Ok((name.to_string(), arm == "fact"))
+                }
+                _ => Err(format!("no output: {output}")),
+            })
+            .collect::<Result<_, _>>()
+            .map(Outputs)
+    }
+}
+
+#[given(
+    regex = r#"^a policy ("\w+" translating from "[\w-]+" to "[\w-]+") whose business code answers an (\w+) event with (an? \w+ (?:command|fact) and then an? \w+ (?:command|fact)) for ("[\w-]+" "[^"]+")$"#
+)]
+fn answers_in_order(
+    w: &mut Coordinator,
+    header: Header,
+    on: String,
+    outputs: Outputs,
+    to: Address,
+) {
+    for (name, fact) in outputs.0 {
+        let mut reaction = reaction(&on, &to.domain, &name, Root::Named(to.root.clone()));
+        reaction.fact = fact;
+        reacts(w, &header, reaction);
+    }
+}
+
+/// From here on the last policy sends each of its reactions of type
+/// `command` as a fact.
+pub(crate) fn sends_as_fact(w: &Coordinator, command: &str) {
+    let def = w.policies.last().expect("a policy");
+    for reaction in &mut locked(&def.script).reactions {
+        if reaction.command == command {
+            reaction.fact = true;
+        }
+    }
 }
 
 #[given(

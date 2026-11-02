@@ -553,10 +553,6 @@ fn a_malformed_kernel_books_letter_is_keyed_where_the_spec_has_a_key() {
             ),
         ),
         (
-            Malformed::FactFromPolicy,
-            wire("COORDINATOR_REASON_POLICY_COMMAND_IS_FACT", &naming),
-        ),
-        (
             Malformed::CommandWithFactOrigin,
             wire("COORDINATOR_REASON_POLICY_COMMAND_FACT_ORIGIN", &naming),
         ),

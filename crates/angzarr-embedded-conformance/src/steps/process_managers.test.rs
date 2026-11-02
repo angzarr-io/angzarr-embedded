@@ -126,6 +126,7 @@ fn policy_to_each(w: &mut Coordinator, input: String, first: String, second: Str
             on: on.clone(),
             domain: domain.clone(),
             command: format!("Start{name}"),
+            fact: false,
             root: Root::TriggerCorrelation,
             correlation: None,
             fault: None,

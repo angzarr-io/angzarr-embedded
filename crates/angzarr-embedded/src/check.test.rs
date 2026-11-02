@@ -188,8 +188,37 @@ fn a_policys_book_is_identified_from_its_trigger() {
     assert_eq!(id.edition(), Some("what-if"));
 }
 
+/// A policy's fact (decision 14.69) is identified as its command would
+/// be: the reaction id derived from its trigger, never the fact
+/// derivation of its external id, the trigger's correlation and the
+/// trigger as its causation; it keeps its arm and its origin.
 #[test]
-fn a_policys_book_names_no_ids_no_fact_and_no_handling() {
+fn a_policys_fact_is_identified_from_its_trigger() {
+    let derived = ids::policy_command_id(&trigger(), "bookkeeping", 1).unwrap();
+    let origin = FactOrigin {
+        external_id: derived.to_string(),
+        description: "a policy's".to_string(),
+    };
+    let mut fact = book(command_page::Body::Fact(angzarr_proto::v1::Fact {
+        payload: Some(Any::default()),
+    }));
+    fact.page.as_mut().unwrap().fact_origin = Some(origin.clone());
+    let checked = react(fact).unwrap();
+    assert!(checked.is_policy_command());
+    assert!(checked.body().is_fact());
+    let id = checked.identify(&Sampled {
+        now: Timestamp::default(),
+        command_id: uuid(1),
+    });
+    assert_eq!(id.command_id(), &derived);
+    assert_ne!(id.command_id(), &ids::fact_command_id(&origin.external_id));
+    assert_eq!(id.correlation_id(), &uuid(8));
+    assert_eq!(id.causation_id(), Some(&trigger()));
+    assert_eq!(id.body().source(), Some(&origin));
+}
+
+#[test]
+fn a_policys_book_names_no_ids_and_no_handling() {
     let with = |edit: fn(&mut CommandBook)| {
         let mut book = book(command());
         edit(&mut book);
@@ -230,7 +259,11 @@ fn a_policys_book_names_no_ids_no_fact_and_no_handling() {
     let fact = book(command_page::Body::Fact(angzarr_proto::v1::Fact {
         payload: Some(Any::default()),
     }));
-    assert_eq!(react(fact).err(), Some(Malformed::FactFromPolicy));
+    assert_eq!(
+        react(fact).err(),
+        Some(Malformed::FactWithoutOrigin),
+        "a policy's fact carries the origin its order stamps"
+    );
     assert_eq!(
         check_policy_command(
             book(command()),

@@ -1,6 +1,8 @@
 Feature: Who a policy's command addresses, and the correlation it carries
-  A policy sends commands to foreign aggregates directly, and to process
-  managers (decision 14.36, as amended). Every command or fact a policy
+  A policy sends commands, and the facts its destination declares
+  (decision 14.69), to aggregates directly, and to process managers
+  (decision 14.36, as amended); every rule below holds for its facts as for
+  its commands. Every command or fact a policy
   sends, to any target, carries its trigger's correlation_id unchanged:
   correlation traces the causal chain, and a command carrying another is a
   policy bug (COORDINATOR_REASON_POLICY_COMMAND_OTHER_CORRELATION). A policy names its
@@ -106,10 +108,12 @@ Feature: Who a policy's command addresses, and the correlation it carries
     And the OrderPlaced trigger is dead-lettered and an alert is raised
 
   # Decision 14.48, amended: every dead letter is keyed, so the identity
-  # and Fact checks on a policy's reactions carry keys of their own.
+  # and fact-origin checks on a policy's reactions carry keys of their own.
+  # Its coordinator stamps a fact's origin (decision 14.69), so business
+  # code sets it on neither arm.
   @policy_addressing
   @C-0734
-  Scenario Outline: A policy's reaction that sets its own identity, is a Fact, or carries a fact origin is a policy bug
+  Scenario Outline: A policy's reaction that sets its own identity or carries a fact origin is a policy bug
     Given a policy "OrderToInventory" translating from "order" to "inventory" whose business code answers an OrderPlaced event with a ReserveStock <reaction> for "inventory" "inv-7" that <fault>
     When an OrderPlaced event with correlation "0192a6b0-0000-7000-8000-000000000049" is recorded for order "order-1"
     Then the policy's answer is refused INTERNAL with reason <reason>, naming domain "inventory" and command type ReserveStock<field>
@@ -121,7 +125,7 @@ Feature: Who a policy's command addresses, and the correlation it carries
       | reaction | fault                                        | reason                                           | field                     |
       | command  | sets a command_id other than the stamped one | COORDINATOR_REASON_POLICY_COMMAND_OTHER_IDENTITY | , with field command_id   |
       | command  | sets a causation_id other than the trigger's | COORDINATOR_REASON_POLICY_COMMAND_OTHER_IDENTITY | , with field causation_id |
-      | fact     | has a fact_origin                            | COORDINATOR_REASON_POLICY_COMMAND_IS_FACT        |                           |
+      | fact     | carries a fact_origin                        | COORDINATOR_REASON_POLICY_COMMAND_FACT_ORIGIN    |                           |
       | command  | carries a fact_origin                        | COORDINATOR_REASON_POLICY_COMMAND_FACT_ORIGIN    |                           |
 
   @policy_addressing
