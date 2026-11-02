@@ -151,6 +151,10 @@ pub(crate) struct Shipment {
     restocks: bool,
     compensation: Option<Compensation<ShipmentState, Event>>,
     recorded: Vec<Event>,
+    /// A refusal's handling recorded nothing, and so is dead-lettered: a
+    /// handling either records events or is dead-lettered, never both
+    /// (decision 38 (a)).
+    dead_lettered: bool,
 }
 
 impl fmt::Debug for Shipment {
@@ -266,6 +270,20 @@ fn refused(w: &mut Shipment) {
         .undo_refused::<RestockItems>(&state)
         .into_iter()
         .collect();
+    w.dead_lettered = w.recorded.is_empty();
+}
+
+#[then("the handling succeeds")]
+fn handling_succeeds(w: &mut Shipment) {
+    assert!(
+        !w.recorded.is_empty(),
+        "the handling recorded nothing: {w:?}"
+    );
+}
+
+#[then("nothing is dead-lettered for the refusal")]
+fn nothing_dead_lettered(w: &mut Shipment) {
+    assert!(!w.dead_lettered, "{w:?}");
 }
 
 /// `listed`, "A, B and C" or "A and B" or "A", as each event's text.
