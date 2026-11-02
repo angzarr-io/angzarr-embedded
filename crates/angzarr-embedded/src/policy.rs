@@ -155,6 +155,15 @@ pub(crate) fn check_reactions(
 fn named(command: &CommandBook) -> [(String, String); 2] {
     use angzarr_proto::v1::reason_args as args;
     let domain = command.cover.as_ref().map_or("", |c| c.domain.as_str());
+    [
+        (args::DOMAIN.to_string(), domain.to_string()),
+        typed(command),
+    ]
+}
+
+/// A policy's output's `command_type` arg: its payload's type, either arm.
+fn typed(command: &CommandBook) -> (String, String) {
+    use angzarr_proto::v1::reason_args as args;
     let command_type = command
         .page
         .as_ref()
@@ -164,10 +173,7 @@ fn named(command: &CommandBook) -> [(String, String); 2] {
             None => None,
         })
         .map_or("", |p| type_name(&p.type_url));
-    [
-        (args::DOMAIN.to_string(), domain.to_string()),
-        (args::COMMAND_TYPE.to_string(), command_type.to_string()),
-    ]
+    (args::COMMAND_TYPE.to_string(), command_type.to_string())
 }
 
 /// One triggering event's outputs, commands and facts (decision 14.69), as
@@ -186,7 +192,11 @@ fn named(command: &CommandBook) -> [(String, String); 2] {
 ///   (`COORDINATOR_REASON_POLICY_COMMAND_FACT_ORIGIN`, naming its domain
 ///   and type; decision 14.48, amended);
 /// - **correlation**: unset, or the trigger's, `correlation`
-///   (`COORDINATOR_REASON_POLICY_COMMAND_OTHER_CORRELATION`).
+///   (`COORDINATOR_REASON_POLICY_COMMAND_OTHER_CORRELATION`);
+/// - **not the trigger's own stream**: its own domain at another root is
+///   allowed, the trigger's root never, its edition being the trigger's
+///   by the edition rule (`COORDINATOR_REASON_POLICY_TARGETS_ITS_TRIGGER`,
+///   naming the stream and its type; decision 14.71).
 ///
 /// Its identity is held to its stamp by [`check_reactions`], which knows
 /// its index in the whole answer.
@@ -274,6 +284,19 @@ pub(crate) fn check_reaction(
                 ));
             }
             Some(_) => {}
+        }
+        // The edition rule stamped or matched the trigger's edition, so the
+        // same domain and root are the trigger's own stream (decision 14.71).
+        if let Some(cover) = (command.cover.as_ref())
+            .filter(|c| c.domain == trigger.domain && c.root == trigger.root)
+        {
+            return Err(super::route::spec_coded(
+                CoordinatorReason::PolicyTargetsItsTrigger,
+                [
+                    (args::STREAM.to_string(), super::error::cover_text(cover)),
+                    typed(command),
+                ],
+            ));
         }
     }
     Ok(commands)

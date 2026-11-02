@@ -10,8 +10,8 @@
 //! `Registry::aggregate` decides its commands as one decision (its event,
 //! or its rejection with nothing committed), and a hand-written policy
 //! registered with `Registry::policy` answers its source's event with a
-//! command to the trigger's own root (`PolicyContext::source_root`), which
-//! the kernel runs as the next step. A policy's target known by its name
+//! command to another root of its own domain (never the trigger's own
+//! stream, decision 14.71), which the kernel runs as the next step. A policy's target known by its name
 //! and commands alone (`CommandTarget`), a domain a coordinator elsewhere
 //! owns (`Registry::remote`), needs no stand-in aggregate: its step goes
 //! to that coordinator. A policy's source known by its name and events
@@ -427,8 +427,9 @@ impl Decides<Note> for Counter {}
 
 // ------------------------------------------------------------- the policy
 
-/// Notes every bump on the bumped counter itself: a command to the
-/// trigger's own root.
+/// Notes every bump on the notes counter, [`notes`]: its own domain at
+/// another root, as a policy may address it (never its trigger's own
+/// stream, decision 14.71).
 pub struct NoteBumps;
 
 impl Policy for NoteBumps {
@@ -440,15 +441,13 @@ impl Policy for NoteBumps {
     fn on_event(
         &self,
         event: &Any,
-        ctx: &PolicyContext,
+        _: &PolicyContext,
     ) -> Result<Option<Commands<Counter>>, Report> {
         let Some(_bumped) = markup::decode_message::<Bumped>(event).map_err(|e| Report::of(&e))?
         else {
             return Ok(None);
         };
-        markup::policy_answer::<Counter, Infallible>(Ok(
-            Commands::none().to(ctx.source_root().clone(), Note)
-        ))
+        markup::policy_answer::<Counter, Infallible>(Ok(Commands::none().to(notes(), Note)))
     }
 }
 
@@ -533,6 +532,11 @@ fn root() -> Uuid {
     Uuid::from_bytes([0x3c; 16])
 }
 
+/// The counter [`NoteBumps`] notes every bump on.
+fn notes() -> Uuid {
+    Uuid::from_bytes([0x3d; 16])
+}
+
 /// A bump by `by` of the counter at [`root`], as a client sends it.
 fn bump(by: i64) -> CommandBook {
     CommandBook {
@@ -613,7 +617,7 @@ fn a_hand_written_aggregate_and_policy_run_as_marked_up_ones_do() {
         settle(&registry(), bump(2)),
         Ok(vec![
             (root(), vec!["toy.counter.v1.Bumped".to_string()]),
-            (root(), vec!["toy.counter.v1.Noted".to_string()]),
+            (notes(), vec!["toy.counter.v1.Noted".to_string()]),
         ])
     );
 }

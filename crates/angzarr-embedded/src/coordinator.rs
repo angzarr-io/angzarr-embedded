@@ -49,7 +49,7 @@ use angzarr_proto::v1::{
     command_page, CommandBook, ComponentKind, ConflictResolution, Cover, DeliveryOutcome,
     EventBook, EventMeta, EventPage, Handling, Snapshot,
 };
-use angzarr_router::error::{CodedError, RouterReason};
+use angzarr_router::error::{CodedError, GrpcCode, RouterReason};
 
 use angzarr_proto::v1::ContextualCommand;
 use angzarr_proto::v1::{reason_args as args, CoordinatorReason};
@@ -610,9 +610,11 @@ pub(crate) async fn decide(
 /// The router's `error` for `command`, as the kernel fails it: a type the
 /// domain does not read named as sent; a conflict the window overlaps,
 /// [`KernelError::Overlap`]; one unresolved, [`KernelError::Unresolved`],
-/// dead-lettered; else its refusal ([`refused`]), keeping the handler's
-/// own (`kept`), or a router error, dead-lettered when it is a handler's
-/// bug.
+/// dead-lettered; a business rejection of a fact, which a fact never is
+/// (decision 14.72), its business process's bug: kept under the key and
+/// args it answered, as a fatal bug (INTERNAL), and dead-lettered; else
+/// its refusal ([`refused`]), keeping the handler's own (`kept`), or a
+/// router error, dead-lettered when it is a handler's bug.
 fn failed(
     command: &Contextual,
     error: CodedError,
@@ -650,6 +652,14 @@ fn failed(
             };
             dead_letter(&unresolved);
             Failure::Kernel(unresolved)
+        }
+        _ if identified.body().is_fact() && route::is_rejection(&error) => {
+            let error = KernelError::Router(CodedError {
+                grpc: GrpcCode::Internal,
+                ..error
+            });
+            dead_letter(&error);
+            Failure::Kernel(error)
         }
         _ => match refused(identified, error) {
             Failure::Rejected(rejected) => Failure::Rejected(rejected.kept(kept)),
