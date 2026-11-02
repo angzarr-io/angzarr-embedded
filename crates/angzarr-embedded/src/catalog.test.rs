@@ -169,7 +169,31 @@ fn a_remote_domain_is_listed_apart_and_keeps_its_readers_out() {
 #[test]
 fn every_misconfiguration_is_a_spec_key_with_its_declared_args() {
     use angzarr_diagnostic::Diagnostic as _;
-    for misconfigured in crate::misconfigured_samples() {
+    let samples = crate::misconfigured_samples();
+    let mut keys: Vec<&str> = samples.iter().map(|m| m.code()).collect();
+    keys.sort_unstable();
+    keys.dedup();
+    assert_eq!(
+        keys,
+        [
+            "COORDINATOR_REASON_MISSING_RULES_VERSION",
+            "COORDINATOR_REASON_MISSING_STATE_TYPE",
+            "COORDINATOR_REASON_OUTPUT_DOMAIN_ON_NON_POLICY",
+            "COORDINATOR_REASON_POLICY_INPUT_COUNT",
+            "COORDINATOR_REASON_POLICY_NO_OUTPUT_DOMAIN",
+            "COORDINATOR_REASON_STARTING_TYPES_ON_NON_PM",
+            "COORDINATOR_REASON_STATE_ON_STATELESS_KIND",
+            "COORDINATOR_REASON_STATE_RESOLUTIONS_INVALID",
+            "HOST_REASON_PROJECTOR_NO_INPUT_DOMAIN",
+            "HOST_REASON_REMOTE_SOURCE",
+            "HOST_REASON_RESOLUTION_UNSUPPORTED",
+            "HOST_REASON_STATE_TYPE_MISMATCH",
+            "HOST_REASON_UPCASTER_OTHER_DOMAIN",
+            "HOST_REASON_UPCASTER_UNKNOWN_DOMAIN",
+            "ROUTER_REASON_DUPLICATE_COMPONENT",
+        ]
+    );
+    for misconfigured in samples {
         let declared = angzarr_proto::reason_key_args(misconfigured.code())
             .unwrap_or_else(|| panic!("{} is no spec key", misconfigured.code()));
         let given: Vec<&str> = misconfigured.args().iter().map(|(n, _)| *n).collect();
