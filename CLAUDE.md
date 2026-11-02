@@ -98,7 +98,9 @@ angzarr-embedded-host depends on `angzarr-embedded` (the kernel's `Registry`,
 which `Host::register` fills), `angzarr-router` and `angzarr-proto`
 (pinned at the revs the router names, so its graph holds one angzarr-proto),
 `tonic` and `tonic-prost` (its gRPC client, and in its tests the fake
-child's server), `tokio`,
+child's server), `tonic-health` (`grpc.health.v1`, which the child
+protocol has every child serve: the host watches each child's, and the
+fake child serves it), `tokio`,
 `tower` and `hyper-util` (the runtime and the Unix-socket connector),
 `libc` (SIGTERM to a child at shutdown, which tokio cannot send),
 `angzarr-store-sqlite` (the store `run` opens), and
