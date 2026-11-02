@@ -27,6 +27,13 @@ and its one third-party dev-dependency, `fluent-bundle` (Apache-2.0 OR
 MIT), renders each message with its error's args.
 Nothing depends on it and it has no library to speak of.
 
+angzarr-embedded-conformance is test-only too: it runs the spec's
+coordinator-contract tier (see *The coordinator contract is run, and its
+tags are the divergences*), and its one third-party dev-dependency,
+`cucumber` (MIT OR Apache-2.0), at the version angzarr-router's
+conformance crate runs its features with, is the runner. Nothing depends
+on it and it has no library to speak of.
+
 angzarr-embedded depends on `angzarr-proto` (a git dependency pinned by rev:
 angzarr's own prost types for `io.angzarr.v1`, whose build needs `protoc`),
 `prost` and `prost-types`, because its event-sourcing kernel (`angzarr_embedded`)
@@ -210,6 +217,32 @@ not put its tests in the reader's (or an LLM's) context.
 - A test reaches the crate as `crate::`, its private items included.
 - Library-source scans (the catalog parity's code-literal check) skip
   `*.test.rs`.
+
+## The coordinator contract is run, and its tags are the divergences
+
+angzarr-embedded is not angzarr: the wire meaning is shared, the
+execution model is not. Where the two part is recorded in one place, as
+tags: `crates/angzarr-embedded-conformance` runs the spec's
+coordinator-contract tier (its `.feature` files, vendored in `features/`
+at the angzarr-project commit `SPEC_REV` names) against the kernel with
+cucumber, one libtest test, so `just test` and every hook run it (in about
+two seconds). Every domain is a scripted business process behind
+`Registry::command_handler`, every policy a scripted `PolicyComponent`, as
+a child's would be.
+
+- **Every scenario is bound or tagged.** `tags.test.rs` names each one the
+  runner does not run, by ID or outline row (`C-0558#4`), with a tag and
+  its why: `divergence_*` (the difference is deliberate, the why its
+  reason), `unsupported_*` (angzarr-embedded has no such surface) or
+  `unbound*` (no binding yet). An untagged scenario that fails, or whose
+  step matches no binding, fails the run; `SPEC_RUN_TAGGED=1` runs the
+  tagged ones too, to find a tag that no longer holds.
+- **A divergence is a tag, never prose.** A new difference from the
+  contract is a tag with its why, beside the scenario that shows it; the
+  design docs point here and keep no list of their own.
+- **Moving the spec** is `just spec-vendor <rev>`: it rewrites `features/`
+  and `SPEC_REV` from angzarr-project at `rev`; then bind or tag what is
+  new.
 
 ## Use `just`
 

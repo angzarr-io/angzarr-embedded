@@ -250,8 +250,8 @@ const TAGGED: &[(&str, Tag)] = &[
     ("C-0738", IN_PROCESS_CHAIN),
     ("C-0744", IN_PROCESS_CHAIN),
     ("C-0739", IN_PROCESS_CHAIN),
-    ("C-0445", UNBOUND),
     ("C-0444", POLICY_FAILURE_NOT_RETRIED),
+    ("C-0445", UNBOUND),
     ("C-0447", NO_CLAIM_CHECK),
     ("C-0730", IN_PROCESS_CHAIN),
     ("C-0731", IN_PROCESS_CHAIN),
@@ -298,11 +298,11 @@ const TAGGED: &[(&str, Tag)] = &[
     ("C-0737", WAITING_CALLER_ANSWERED),
     // policy_refusal.feature
     ("C-0616", NO_OUTBOX),
+    ("C-0619", FAILING_CALLBACK_ANSWERED),
     ("C-0621", UNBOUND_REMOTE_POLICY),
     ("C-0685", UNBOUND_REMOTE_POLICY),
     // process_manager_delivery.feature
     ("C-0599", FAILING_FACT_FAILS),
-    ("C-0619", FAILING_CALLBACK_ANSWERED),
     // query_server.feature
     ("C-0588", NO_QUERY),
     ("C-0589", NO_QUERY),

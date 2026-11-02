@@ -10,8 +10,9 @@ is a domain whose inputs are commands and facts, so no event is caused by
 another event); one `command_id` per command, deduplication on the events,
 no actor, `StateOptions`/`StateDescriptor`, commands may be upcast;
 and the record in angzarr's `docs/design/audit-meta/` (`decision-log.md`,
-`idempotency.md`, `annals-divergence.md`) and
-`docs/guide/state-and-conflicts.md`.
+`idempotency.md`) and `docs/guide/state-and-conflicts.md`. Where the kernel
+and the coordinator contract part is recorded as tags, not here: see
+[Where angzarr-embedded and angzarr part](#where-angzarr-embedded-and-angzarr-part).
 
 **Causation is the direct cause** (angzarr decisions 13.1 and 13.3). An
 event's `EventMeta.causation` names what produced it: its command
@@ -95,8 +96,9 @@ flowchart TB
   hatpick calls angzarr-embedded directly, in process: there is no HTTP or gRPC layer
   into angzarr-embedded, so no caller outside the process can deliver a policy command.
 - **angzarr-embedded is not angzarr.** They share the protos, some code and their
-  intents. Where the execution models differ, angzarr-embedded's choice is deliberate
-  and listed under [Divergences](#divergences-from-angzarr).
+  intents. Where the execution models differ, angzarr-embedded's choice is deliberate,
+  and tagged on the contract scenario that shows it
+  ([Where angzarr-embedded and angzarr part](#where-angzarr-embedded-and-angzarr-part)).
 - **Storage is opaque**: the encoded page as written and the metadata as
   typed columns. Typed views are projections; in hatpick they are replayed
   on read.
@@ -255,7 +257,8 @@ command is atomic with its effects, with nothing else to keep consistent.
 processed ids in the stream.)
 
 **Accepted costs** (the first two are angzarr's decision 12.2, the same in
-both runtimes; the third is angzarr-embedded's own, divergence 9):
+both runtimes; the third is angzarr-embedded's own, since a stream can be
+purged where its store opts in, [the store port](#the-store-port)):
 
 - **A decision that produced no events leaves nothing to find**, so a
   redelivery of it is decided again, against the stream as it is then
@@ -1278,51 +1281,19 @@ impl Catalog {
 }
 ```
 
-## Divergences from angzarr
+## Where angzarr-embedded and angzarr part
 
-angzarr-embedded is **not** angzarr; the wire meaning is shared, the execution model
-is not. This list matches angzarr's `docs/design/audit-meta/annals-divergence.md`.
+angzarr-embedded is **not** angzarr: the wire meaning is shared, the execution
+model is not. Every difference is recorded as a tag, with its reason, on
+the scenario of angzarr's coordinator-contract tier that shows it:
+`crates/angzarr-embedded-conformance/src/tags.test.rs`, whose runner holds
+every other scenario of the tier to the kernel (CLAUDE.md, *The
+coordinator contract is run, and its tags are the divergences*). That is
+the one record: a difference found is a tag there, never a list here.
 
-1. **The chain runs in process and waits to settle.** A command commits
-   on its own stream; each policy step after it is its own atomic write
-   to one stream, with the policy's position on its source, run before the
-   call returns. A refused policy command never undoes the commits before
-   it: a policy that answers refusals delivers its refusal fact to the
-   source; another's refused step is dead-lettered and its position moved
-   past it. A step left undone (a crash, a failed store) is resumed by
-   position (`Kernel::resume`) and deduplicated by its derived command id.
-   angzarr runs the same steps asynchronously, from a bus.
-2. **No transient outbox.** angzarr-embedded delivers each step in process, so it
-   writes no outbox entries; its positions say what is still owed. Its
-   command ids are the derived ones, so the audit record is identical.
-3. **Causation is never accepted from outside**: a book from the
-   application, or through the host's listener (`App::serve`), is a
-   client's, and angzarr-embedded has no framework component outside its
-   process to take one from; angzarr needs mTLS-identified framework
-   components for the same guarantee. (This is the command's
-   `causation_id`; it is never persisted on events, in either runtime.)
-4. **The dead-letter queue is a logger**, every line prefixed with its
-   warning; there is no PARKED and no replay.
-5. **COMMUTATIVE and AGGREGATE_HANDLES resolve in the kernel**, which is
-   both coordinator and client library; the nonce is an in-process token,
-   not bytes on a `ContextualCommand`.
-6. **Configuration lives on the domain** (`CONFLICT_RESOLUTION`,
-   `CONFLICT_RESOLUTION_BY_COMMAND`), checked at registration; there is no
-   configuration that forbids a `Handling` override.
-7. **No edition lifecycle.** Editions are angzarr's, created by its
-   system layer; angzarr-embedded creates none. A command to an edition stream
-   never forked is refused by the store at the write
-   (`EDITION_NOT_FORKED`), with nothing written.
-8. **`recorded_at` is sampled by the application** once per call, then
-   raised per stream; same guarantee as angzarr's stamp at persist.
-9. **A stream can be purged** where its store opts in
-    ([the store port](#the-store-port)). angzarr's events are
-    permanent and its deduplication forever; in angzarr-embedded deduplication lasts
-    as long as the stream, and a redelivery after a purge is decided again.
-
-Not divergences: `EventMeta` is the same in both runtimes
-(`causation`, the event's direct cause; no trigger on a policy command's events,
-no actor), and reactor re-runs deduplicate in both, with no switch.
+`EventMeta` is the same in both runtimes (`causation`, the event's direct
+cause; no trigger on a policy command's events, no actor), and reactor
+re-runs deduplicate in both, with no switch.
 
 ## hatpick changes
 

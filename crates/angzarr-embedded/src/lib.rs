@@ -18,8 +18,9 @@
 //! every id a 16-byte [`Uuid`](v1::Uuid), and derived ids are
 //! [`angzarr_proto::ids`]'. There is no parallel type for any of them.
 //! angzarr-embedded is **not** angzarr: where their execution models differ (the
-//! atomic in-process chain, above all) the difference is deliberate and
-//! listed in the design's *Divergences*.
+//! atomic in-process chain, above all) the difference is deliberate, and
+//! tagged on the coordinator-contract scenario that shows it
+//! (`crates/angzarr-embedded-conformance/src/tags.test.rs`).
 //!
 //! One command, end to end, in angzarr's normative order:
 //!
