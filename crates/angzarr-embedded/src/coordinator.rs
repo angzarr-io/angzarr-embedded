@@ -40,7 +40,7 @@
 //!    payload upcast through the domain's port before step 3 decided
 //!    anything by its type, decision 14.39; the nonce) through the router, whose handler decides or records; the
 //!    kernel stamps every event it answers with
-//!    [`event_meta`](crate::event_meta) of the context it handed the
+//!    [`CommandContext::event_meta`](angzarr_router::domain::CommandContext::event_meta) of the context it handed the
 //!    handler and the rules version the answer reports, which must be the
 //!    registered one. The router catches a panicking handler, a bug.
 
@@ -548,10 +548,8 @@ pub(crate) async fn decide(
         dead_letter::write_command(dead_letters, registry.catalog(), identified, &mismatch);
         return Err(Failure::Kernel(mismatch));
     }
-    let meta = crate::event_meta(
-        &angzarr_router::domain::command_context(&contextual),
-        &response.rules_version,
-    );
+    let meta =
+        angzarr_router::domain::command_context(&contextual).event_meta(&response.rules_version);
     Ok(stamped(
         response.events.unwrap_or_default(),
         command.head,

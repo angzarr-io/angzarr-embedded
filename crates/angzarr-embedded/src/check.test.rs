@@ -4,8 +4,8 @@ use prost::Message;
 use super::*;
 
 /// What the kernel stamps `id`'s events with when its handler is handed it
-/// at `recorded_at`, under `rules_version`: [`event_meta`](crate::event_meta)
-/// of the router's context of the `ContextualCommand` holding its book.
+/// at `recorded_at`, under `rules_version`: the router's
+/// `CommandContext::event_meta` of its context of the `ContextualCommand` holding its book.
 fn stamped(
     id: &Identified,
     recorded_at: Timestamp,
@@ -16,10 +16,7 @@ fn stamped(
         recorded_at: Some(recorded_at),
         ..Default::default()
     };
-    crate::event_meta(
-        &angzarr_router::domain::command_context(&contextual),
-        rules_version,
-    )
+    angzarr_router::domain::command_context(&contextual).event_meta(rules_version)
 }
 
 fn uuid(n: u8) -> Uuid {

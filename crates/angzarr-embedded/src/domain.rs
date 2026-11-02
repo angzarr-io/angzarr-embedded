@@ -129,7 +129,7 @@ pub trait Domain: Sized + 'static {
     /// cause, correlation, fact origin, rules version and `recorded_at`).
     /// An event of the decision being made is folded with the metadata it
     /// will be stamped with when it is committed
-    /// ([`event_meta`](crate::event_meta) of the handler's context: its
+    /// ([`CommandContext::event_meta`](angzarr_router::domain::CommandContext::event_meta) of the handler's context: its
     /// instant is the handler's `Context::recorded_at`), so the state
     /// decided is the state replayed. Pure: the same state, event and page
     /// always give the same result.

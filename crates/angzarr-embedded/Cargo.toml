@@ -29,7 +29,7 @@ angzarr-ports = { git = "https://github.com/angzarr-io/angzarr", rev = "ab3e9b50
 # kernel calls it and keeps the check, identification, admission,
 # upcasting, snapshots, a policy's output checks, the store writes,
 # positions and resume.
-angzarr-router = { git = "https://github.com/angzarr-io/angzarr-router", rev = "aeaff4fa58509025dd44c4ffbcf99db13c01abf8" }
+angzarr-router = { git = "https://github.com/angzarr-io/angzarr-router", rev = "eea1af96948c66f200fd6ccd9228c3c5544c46df" }
 # angzarr's shared SQLite store, re-exported (`angzarr_embedded::angzarr_store_sqlite`)
 # so an application pins it through angzarr-embedded, at the rev the kernel
 # is built with. Behind the `sqlite` feature, off by default: it brings

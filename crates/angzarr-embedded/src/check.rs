@@ -635,7 +635,7 @@ impl Checked {
 
 /// A [`Checked`] book with its ids assigned: what deduplication looks up
 /// and what every event it produces is stamped with
-/// ([`event_meta`](crate::event_meta) of its book's context).
+/// ([`CommandContext::event_meta`](angzarr_router::domain::CommandContext::event_meta) of its book's context).
 #[derive(Clone, PartialEq, Debug)]
 pub struct Identified {
     cover: Cover,
@@ -689,7 +689,7 @@ impl Identified {
     /// The command's own causation (`CommandPage.causation_id`): the
     /// trigger, for a reaction; `None` otherwise. Transport and trace
     /// metadata, and the input its derived command id hashes. It is **not**
-    /// stamped on the command's events ([`event_meta`](crate::event_meta)), whose
+    /// stamped on the command's events ([`CommandContext::event_meta`](angzarr_router::domain::CommandContext::event_meta)), whose
     /// causation is the command itself (angzarr decision 13.3): the
     /// trigger-to-command edge belongs in tracing and logs.
     pub fn causation_id(&self) -> Option<&EventRef> {

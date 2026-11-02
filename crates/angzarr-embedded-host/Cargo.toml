@@ -39,7 +39,7 @@ angzarr-store-sqlite = { path = "../angzarr-store-sqlite" }
 angzarr-proto = { git = "https://github.com/angzarr-io/angzarr", rev = "ab3e9b50ab777f1c4d7269f2744b0a42bc3a6845" }
 angzarr-proto-component = { git = "https://github.com/angzarr-io/angzarr", rev = "ab3e9b50ab777f1c4d7269f2744b0a42bc3a6845" }
 angzarr-proto-transport-embedded = { git = "https://github.com/angzarr-io/angzarr", rev = "ab3e9b50ab777f1c4d7269f2744b0a42bc3a6845" }
-angzarr-router = { git = "https://github.com/angzarr-io/angzarr-router", rev = "aeaff4fa58509025dd44c4ffbcf99db13c01abf8" }
+angzarr-router = { git = "https://github.com/angzarr-io/angzarr-router", rev = "eea1af96948c66f200fd6ccd9228c3c5544c46df" }
 hyper-util = { version = "0.1", features = ["tokio"] }
 # SIGTERM for a child that outlives its stdin at shutdown: tokio's Child
 # sends only SIGKILL. In the graph already, through tokio.

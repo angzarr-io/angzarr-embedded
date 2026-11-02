@@ -238,7 +238,7 @@ impl Identified {
 
 `component` is `Policy::NAME`; `index` is the order's place among those
 the trigger set off for that policy. The `causation_id` column is the
-command's own (`CommandPage.causation_id`); `event_meta` stamps the
+command's own (`CommandPage.causation_id`); `CommandContext::event_meta` stamps the
 events with `causation.command_id` only. Identification is infallible: the
 check refused everything that could make it fail. Text forms of ids exist
 only at display and input (`Display`/`FromStr` on `v1::Uuid`).
@@ -684,10 +684,11 @@ A panicking fact handler is a bug: the router catches it
 kernel logs a [dead letter](#dead-letters-durable-logged-and-answered).
 
 **Business output is payloads only.** The kernel builds the pages: their
-sequences and their `EventMeta` (`event_meta`, of the router's context of
-the `ContextualCommand` it handed the handler: the one builder, which the
-markup also folds a decision's own events with, so an applier reads at
-decide time the metadata replay hands it).
+sequences and their `EventMeta` (angzarr-router's `CommandContext::event_meta`,
+of the router's context of the `ContextualCommand` it handed the handler:
+the one builder, which the markup and the router's own decide path also fold
+a decision's own events with, so an applier reads at decide time the
+metadata replay hands it).
 
 ## Metadata
 
