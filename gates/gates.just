@@ -380,13 +380,11 @@ _require-nextest gate:
 # missing cargo-mutants fails rather than skipping: a mutation run that passes
 # by not running tested nothing. `lefthook` is ignored.
 #
-# For a branch other than the remote's default one, a red commit passes
-# it: when the pushed commit's tests fail unmutated (cargo-mutants' baseline,
-# exit 4), no mutant can be judged, since every one would be "caught" by a
-# test that fails anyway. The push that turns those tests green changes the
-# code they test, so that code is mutated then, against passing tests. Every
-# other failure, and a red baseline pushed to the default branch (or to any
-# branch when the remote's default one is unknown), is refused.
+# A red commit fails it, on every branch: when the pushed commit's tests fail
+# unmutated (cargo-mutants' baseline, exit 4), no mutant can be judged, and a
+# run that judged nothing has shown nothing. No hook runs it, so failing it
+# keeps no red commit off a branch (`push-check` allows those); judge the
+# commit that turns the tests green.
 #
 # A pushed commit is judged by its own tree's recipes, so a commit from before
 # this recipe existed cannot be: rebase it first.
@@ -398,7 +396,6 @@ mutants-push remote *lefthook:
     root='{{gates_root}}'
     remote=$1
     just --justfile "$root/justfile" _require-mutants mutants-push
-    default=$(just --justfile "$root/justfile" _default-branch "$remote") || default=
     work=$(mktemp -d)
     trap 'rm -rf "$work"' EXIT
     pushed=0
@@ -418,17 +415,7 @@ mutants-push remote *lefthook:
         fi
         git -C "$root" diff --no-color --no-ext-diff --no-renames --src-prefix=a/ --dst-prefix=b/ \
             "$base" "$local_sha" -- '*.rs' > "$work/push.patch"
-        rc=0
-        just --justfile "$root/justfile" _commit-tree "$local_sha" _mutants-pushed "$range" "$work/push.patch" || rc=$?
-        [ "$rc" -eq 0 ] && continue
-        [ "$rc" -eq 4 ] || exit "$rc"
-        if [ -n "$default" ] && [ "$remote_ref" != "refs/heads/$default" ]; then
-            echo "RED  mutants-push: $range not judged, the tests are red; allowed off $default, which $target cannot merge into until they pass"
-            continue
-        fi
-        [ -n "$default" ] || echo "No default branch of $remote was found, so $target is held to it (git remote set-head $remote --auto)." >&2
-        echo "FAIL mutants-push: red tests cannot be pushed to $remote/$target" >&2
-        exit 1
+        just --justfile "$root/justfile" _commit-tree "$local_sha" _mutants-pushed "$range" "$work/push.patch"
     done
     [ "$pushed" = 1 ] || echo "ok   mutants-push (no commit pushed, only deletions or nothing: nothing to mutate)"
 
@@ -475,10 +462,9 @@ _mutants-pushed scope patch:
 # quick check of a change's tests before committing, its mutants.out kept in
 # target/logs/mutants-staged/.
 #
-# Off the default branch (`_red-allowed`), a red commit passes it, as it does
-# `mutants-push`: when the staged tree's tests fail unmutated (cargo-mutants'
-# baseline, exit 4), no mutant can be judged. Every other failure, and a red
-# baseline on the default branch, is refused.
+# Red tests fail it, as they do `mutants-push`, on every branch: when the
+# staged tree's tests fail unmutated (cargo-mutants' baseline, exit 4), no
+# mutant can be judged.
 [no-exit-message]
 mutants-staged:
     #!/usr/bin/env bash
@@ -488,16 +474,7 @@ mutants-staged:
         echo "ok   mutants-staged (no mutants: the staged change touches no Rust source)"
         exit 0
     fi
-    rc=0
-    just --justfile '{{gates_root}}/justfile' _staged-tree _mutants-affected || rc=$?
-    [ "$rc" -eq 4 ] || exit "$rc"
-    if where=$(just --justfile '{{gates_root}}/justfile' _red-allowed); then
-        IFS=$'\t' read -r branch default <<< "$where"
-        echo "RED  mutants-staged: not judged, the tests are red; allowed on $branch, which cannot merge into $default until they pass"
-        exit 0
-    fi
-    echo "FAIL mutants-staged: red tests cannot be committed here: $where" >&2
-    exit 1
+    exec just --justfile '{{gates_root}}/justfile' _staged-tree _mutants-affected
 
 # The full pass, for the scheduled CI run (.github/workflows/mutation.yml) or
 # by hand; slow, minutes per crate. HEAD's tree checked out alone
@@ -635,18 +612,30 @@ _mutants-judge gate patch:
         4)
             verdict "the tree's tests fail unmutated (cargo-mutants baseline); fix them first" \
                 "baseline log: target/logs/$gate/mutants.out/log/baseline.log"
-            # cargo-mutants' own code for it: `mutants-push` and
-            # `mutants-staged` allow it off the default branch.
+            # cargo-mutants' own code for it, which every caller fails on.
             exit 4 ;;
         *)
             verdict "cargo mutants failed before a verdict (exit $rc)"
             exit 1 ;;
     esac
-    outcomes="$out/mutants.out/outcomes.json"
-    judged='[.outcomes[] | select(.scenario | type == "object") | {name: .scenario.Mutant.name, file: .scenario.Mutant.file, summary}]'
-    if [ ! -f "$outcomes" ] || [ "$(jq "$judged | length" "$outcomes")" -eq 0 ]; then
+    # Every mutant found must have been tested: a run that found some and
+    # judged fewer (its baseline failing under an exit code that did not say
+    # so, or cut short) has not shown the tests catch them, so it fails
+    # rather than passing on the ones it never ran.
+    found=0
+    [ -f "$out/mutants.out/mutants.json" ] && found=$(jq length "$out/mutants.out/mutants.json")
+    if [ "$found" -eq 0 ]; then
         echo "$gate: no mutants: the diff changes no mutable code."
         exit 0
+    fi
+    outcomes="$out/mutants.out/outcomes.json"
+    judged='[.outcomes[] | select(.scenario | type == "object") | {name: .scenario.Mutant.name, file: .scenario.Mutant.file, summary}]'
+    tested=0
+    [ -f "$outcomes" ] && tested=$(jq "$judged | length" "$outcomes")
+    if [ "$tested" -ne "$found" ]; then
+        verdict "$found mutants found but $tested tested (cargo mutants exit $rc); nothing is judged until every one is" \
+            "run log: target/logs/$gate.log"
+        exit 1
     fi
     read -ra tiers <<< "{{mutation_thresholds}}"
     # Each mutant's tier: the longest threshold prefix its file is under.
@@ -745,8 +734,7 @@ _scratch-tree source +recipe:
     "${scrub[@]}" "CARGO_TARGET_DIR=$top/target/staged" "GATE_LOG_DIR=$top/target/logs" just --justfile "$tree/justfile" "$@"
 
 # The red-on-branches rule: red tests may be committed on any branch but the
-# default one, and never reach it. `test-commit` and `mutants-staged` allow
-# them off it, and `mutants-push` a diff of them bound for another branch;
+# default one, and never reach it. `test-commit` allows them off it;
 # `push-check` (pre-push) refuses a push to it, and `merge-check`
 # (post-merge) reports a fast-forward of it, whose tests fail.
 # A merge commit into it is `test-commit`'s (pre-merge-commit).
