@@ -20,7 +20,7 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 [[package]]
 name = "angzarr-diagnostic"
 version = "0.1.0"
-source = "git+https://github.com/angzarr-io/angzarr?rev=63571a5c1a2d0478eca46d17aefaef02e5a41172#63571a5c1a2d0478eca46d17aefaef02e5a41172"
+source = "git+https://github.com/angzarr-io/angzarr?rev=2be5a43d83fa35a9be1696b57aed3474971bf9cf#2be5a43d83fa35a9be1696b57aed3474971bf9cf"
 
 [[package]]
 name = "angzarr-embedded"
@@ -98,7 +98,7 @@ dependencies = [
 [[package]]
 name = "angzarr-ports"
 version = "0.1.0"
-source = "git+https://github.com/angzarr-io/angzarr?rev=63571a5c1a2d0478eca46d17aefaef02e5a41172#63571a5c1a2d0478eca46d17aefaef02e5a41172"
+source = "git+https://github.com/angzarr-io/angzarr?rev=2be5a43d83fa35a9be1696b57aed3474971bf9cf#2be5a43d83fa35a9be1696b57aed3474971bf9cf"
 dependencies = [
  "angzarr-diagnostic",
  "angzarr-proto",
@@ -109,7 +109,7 @@ dependencies = [
 [[package]]
 name = "angzarr-proto"
 version = "0.1.0"
-source = "git+https://github.com/angzarr-io/angzarr?rev=63571a5c1a2d0478eca46d17aefaef02e5a41172#63571a5c1a2d0478eca46d17aefaef02e5a41172"
+source = "git+https://github.com/angzarr-io/angzarr?rev=2be5a43d83fa35a9be1696b57aed3474971bf9cf#2be5a43d83fa35a9be1696b57aed3474971bf9cf"
 dependencies = [
  "bytes",
  "prost",
@@ -124,7 +124,7 @@ dependencies = [
 [[package]]
 name = "angzarr-router"
 version = "0.1.0"
-source = "git+https://github.com/angzarr-io/angzarr-router?rev=152e18197b3ddf0fc7c06f7ba4ca0a401084921d#152e18197b3ddf0fc7c06f7ba4ca0a401084921d"
+source = "git+https://github.com/angzarr-io/angzarr-router?rev=f2a3aea530e74c8608f9c421a74ece99f0e97d78#f2a3aea530e74c8608f9c421a74ece99f0e97d78"
 dependencies = [
  "angzarr-ports",
  "angzarr-proto",
@@ -149,7 +149,7 @@ dependencies = [
 [[package]]
 name = "angzarr-yaml"
 version = "0.1.0"
-source = "git+https://github.com/angzarr-io/angzarr?rev=63571a5c1a2d0478eca46d17aefaef02e5a41172#63571a5c1a2d0478eca46d17aefaef02e5a41172"
+source = "git+https://github.com/angzarr-io/angzarr?rev=2be5a43d83fa35a9be1696b57aed3474971bf9cf#2be5a43d83fa35a9be1696b57aed3474971bf9cf"
 dependencies = [
  "angzarr-diagnostic",
  "serde",

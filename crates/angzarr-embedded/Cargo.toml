@@ -15,21 +15,21 @@ rust-version = "1.89"
 # and the kernel's are the same types. Dependency-freeness was given up for
 # this deliberately: see docs/design/audit.md, *Layering*.
 [dependencies]
-angzarr-diagnostic = { git = "https://github.com/angzarr-io/angzarr", rev = "63571a5c1a2d0478eca46d17aefaef02e5a41172" }
-angzarr-proto = { git = "https://github.com/angzarr-io/angzarr", rev = "63571a5c1a2d0478eca46d17aefaef02e5a41172" }
+angzarr-diagnostic = { git = "https://github.com/angzarr-io/angzarr", rev = "2be5a43d83fa35a9be1696b57aed3474971bf9cf" }
+angzarr-proto = { git = "https://github.com/angzarr-io/angzarr", rev = "2be5a43d83fa35a9be1696b57aed3474971bf9cf" }
 prost = "0.14"
 prost-types = "0.14"
 # angzarr's shared storage contract (one async trait set, its errors and
 # codes): angzarr-embedded's store ports are these, pinned with angzarr-proto at the
 # same rev of angzarr core (both crates moved there from angzarr-project), so
 # both share one set of wire types.
-angzarr-ports = { git = "https://github.com/angzarr-io/angzarr", rev = "63571a5c1a2d0478eca46d17aefaef02e5a41172" }
+angzarr-ports = { git = "https://github.com/angzarr-io/angzarr", rev = "2be5a43d83fa35a9be1696b57aed3474971bf9cf" }
 # angzarr's shared client router: business dispatch (handlers, typed
 # refusals and the refusal path), implemented once for every runtime. The
 # kernel calls it and keeps the check, identification, admission,
 # upcasting, snapshots, a policy's output checks, the store writes,
 # positions and resume.
-angzarr-router = { git = "https://github.com/angzarr-io/angzarr-router", rev = "152e18197b3ddf0fc7c06f7ba4ca0a401084921d" }
+angzarr-router = { git = "https://github.com/angzarr-io/angzarr-router", rev = "f2a3aea530e74c8608f9c421a74ece99f0e97d78" }
 # angzarr's shared SQLite store, re-exported (`angzarr_embedded::angzarr_store_sqlite`)
 # so an application pins it through angzarr-embedded, at the rev the kernel
 # is built with. Behind the `sqlite` feature, off by default: it brings
@@ -54,7 +54,7 @@ test-support = ["angzarr-ports/memory", "angzarr-ports/faulty"]
 # and `test-support`, its fixtures.
 [dev-dependencies]
 angzarr-embedded = { path = ".", features = ["sqlite", "test-support"] }
-angzarr-ports = { git = "https://github.com/angzarr-io/angzarr", rev = "63571a5c1a2d0478eca46d17aefaef02e5a41172", features = ["memory", "faulty"] }
+angzarr-ports = { git = "https://github.com/angzarr-io/angzarr", rev = "2be5a43d83fa35a9be1696b57aed3474971bf9cf", features = ["memory", "faulty"] }
 angzarr-embedded-macros = { path = "../angzarr-embedded-macros" }
 angzarr-store-sqlite = { path = "../angzarr-store-sqlite" }
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
