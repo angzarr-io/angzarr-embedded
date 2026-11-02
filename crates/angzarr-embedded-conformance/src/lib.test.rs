@@ -4,7 +4,9 @@
 //! that matches no binding, or a step that fails, fails the run. A tagged
 //! scenario is not run, and the run lists it with its tag; with
 //! `SPEC_RUN_TAGGED=1` in the environment every scenario runs, tagged or
-//! not, to see which tags no longer hold.
+//! not, to see which tags no longer hold. And the handler-contract tier's
+//! `compensation.feature`, vendored in `handler-contract/`, every scenario
+//! of it, against the markup's compensation tooling ([`compensation`]).
 
 use std::future::Future;
 use std::pin::pin;
@@ -19,6 +21,8 @@ use cucumber::World as _;
 mod answer;
 #[path = "business.test.rs"]
 mod business;
+#[path = "compensation.test.rs"]
+mod compensation;
 #[path = "policy.test.rs"]
 mod policy;
 #[path = "tags.test.rs"]
@@ -61,6 +65,8 @@ mod versions;
 
 /// Where the vendored tier is.
 const FEATURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/features");
+/// Where the vendored compensation.feature is.
+const HANDLER_CONTRACT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/handler-contract");
 
 /// Wakes the thread blocked in [`block_on`].
 struct Unpark(Thread);
@@ -103,6 +109,25 @@ fn coordinator_contract() {
             }),
     );
     print!("{}", tags::listing(FEATURES));
+    assert!(
+        !writer.execution_has_failed(),
+        "{} scenarios failed ({} steps failed, {} skipped), {} parsing errors: see the output above",
+        writer.scenarios_stats().failed,
+        writer.steps_stats().failed,
+        writer.steps_stats().skipped,
+        writer.parsing_errors(),
+    );
+}
+
+/// compensation.feature, run: every scenario passes, none tagged.
+#[test]
+fn compensation_tooling() {
+    let writer = block_on(
+        compensation::Shipment::cucumber()
+            .with_default_cli()
+            .fail_on_skipped()
+            .run(HANDLER_CONTRACT),
+    );
     assert!(
         !writer.execution_has_failed(),
         "{} scenarios failed ({} steps failed, {} skipped), {} parsing errors: see the output above",

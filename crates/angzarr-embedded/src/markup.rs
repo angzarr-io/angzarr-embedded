@@ -965,6 +965,10 @@ impl<C> Refusal<C> {
 /// [`StepError::PolicyFailed`](super::StepError::PolicyFailed).
 pub use super::policy::{CommandTarget, EventSource, Policy};
 
+/// A process manager's compensation (angzarr decision 14.74): its steps,
+/// each paired in code with its undo, and the rollback built from them.
+pub use super::compensation::{Compensation, UndoTargetsCommand};
+
 /// What a policy's `#[on_event(E)]` handler returns as its `Ok` (its `Err`
 /// is any [`Diagnostic`](angzarr_diagnostic::Diagnostic): a bug,
 /// dead-lettered as

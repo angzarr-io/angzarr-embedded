@@ -77,3 +77,7 @@ upcaster-duplicate = domain { $domain }'s upcaster has two typed rules from { $s
 upcaster-out-of-order = domain { $domain }'s upcaster registers the rule from { $source } before the rule from { $produced_by }, which produces it
 upcaster-dead-end = domain { $domain }'s upcaster takes { $source } to { $ends_at }, which the domain does not decode
 
+
+## A process manager's compensation (markup::Compensation, angzarr decision 14.74).
+
+undo-targets-command = the undo of step "{ $step }" becomes { $command }, a command its destination may refuse

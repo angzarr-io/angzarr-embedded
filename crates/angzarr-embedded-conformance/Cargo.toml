@@ -1,7 +1,7 @@
 [package]
 name = "angzarr-embedded-conformance"
 version = "0.1.0"
-description = "Test-only: angzarr's coordinator-contract tier (the spec's .feature files, vendored in features/ at the revision SPEC_REV names) run against angzarr-embedded's kernel. Part of angzarr-embedded, angzarr's in-app runtime (embedded in your application, not a microcontroller); for the distributed system see angzarr core, https://github.com/angzarr-io/angzarr."
+description = "Test-only: angzarr's coordinator-contract tier (the spec's .feature files, vendored in features/ at the revision SPEC_REV names) run against angzarr-embedded's kernel, and the handler-contract tier's compensation.feature against its markup's compensation tooling. Part of angzarr-embedded, angzarr's in-app runtime (embedded in your application, not a microcontroller); for the distributed system see angzarr core, https://github.com/angzarr-io/angzarr."
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
@@ -17,6 +17,9 @@ rust-version = "1.89"
 [dev-dependencies]
 angzarr-embedded = { path = "../angzarr-embedded", features = ["test-support"] }
 cucumber = "0.21"
+# The compensation fixture's messages (handler-contract/compensation.feature):
+# prost as angzarr-embedded has it, already in the graph.
+prost = "0.14"
 
 [lints]
 workspace = true

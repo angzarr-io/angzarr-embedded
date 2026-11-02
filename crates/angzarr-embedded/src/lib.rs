@@ -84,6 +84,7 @@
 mod book;
 mod catalog;
 mod check;
+mod compensation;
 mod conflict;
 mod coordinator;
 mod dead_letter;
@@ -247,6 +248,10 @@ pub fn diagnostic_samples() -> Vec<Box<dyn angzarr_diagnostic::Diagnostic>> {
     samples.push(Box::new(markup::NotItsStream {
         domain: sample_domain(),
         key: "swift-amber-falcon".to_string(),
+    }));
+    samples.push(Box::new(markup::UndoTargetsCommand {
+        step: "reserve stock",
+        command: "toy.v1.Restock".to_string(),
     }));
     samples.extend(boxed(wire_samples()));
     samples
