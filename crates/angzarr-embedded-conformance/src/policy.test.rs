@@ -197,13 +197,13 @@ impl PolicyComponent for Policy {
             .iter()
             .filter_map(|page| {
                 let name = bare(page.payload.as_ref()?);
-                let commands: Vec<CommandBook> = (script.reactions.iter())
+                let outputs: Vec<CommandBook> = (script.reactions.iter())
                     .filter(|r| r.on == name)
                     .map(|r| r.command(source, page))
                     .collect();
-                (!commands.is_empty()).then_some(PolicyReaction {
+                (!outputs.is_empty()).then_some(PolicyReaction {
                     trigger_sequence: page.sequence,
-                    commands,
+                    outputs,
                 })
             })
             .collect();

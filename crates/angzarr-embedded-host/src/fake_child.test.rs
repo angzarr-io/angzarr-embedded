@@ -681,7 +681,7 @@ impl PolicyService for Fake {
             }];
             reactions.push(pb::PolicyReaction {
                 trigger_sequence: page.sequence,
-                commands,
+                outputs: commands,
             });
         }
         Ok(Response::new(pb::PolicyResponse { reactions }))

@@ -1795,7 +1795,7 @@ impl crate::angzarr_router::router::PolicyComponent for Unchecked {
         Ok(angzarr_proto::v1::PolicyResponse {
             reactions: vec![angzarr_proto::v1::PolicyReaction {
                 trigger_sequence: source.pages[0].sequence,
-                commands: (self.answer)(source),
+                outputs: (self.answer)(source),
             }],
         })
     }

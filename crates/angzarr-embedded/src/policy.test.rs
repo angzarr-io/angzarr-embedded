@@ -200,9 +200,9 @@ fn each_reaction_is_held_to_the_page_it_names() {
             }));
         book
     };
-    let reaction = |trigger_sequence, commands| PolicyReaction {
+    let reaction = |trigger_sequence, outputs| PolicyReaction {
         trigger_sequence,
-        commands,
+        outputs,
     };
     let trigger = crate::v1::EventRef {
         stream: source.cover.clone(),
@@ -389,9 +389,9 @@ fn a_reactions_identity_is_unset_or_the_stamp() {
             &source,
             reactions
                 .into_iter()
-                .map(|commands| PolicyReaction {
+                .map(|outputs| PolicyReaction {
                     trigger_sequence: 4,
-                    commands,
+                    outputs,
                 })
                 .collect(),
             "bookkeeping",

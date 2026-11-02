@@ -124,7 +124,7 @@ pub(crate) fn check_reactions(
             output_domain,
             &stream,
             correlation,
-            reaction.commands,
+            reaction.outputs,
         )?);
     }
     for (index, command) in (0..).zip(&commands) {

@@ -15,7 +15,7 @@ rust-version = "1.89"
 # a query builder and a driver, and hand-rolling either is a second,
 # unchecked implementation of the dialect.
 [dependencies]
-angzarr-ports = { git = "https://github.com/angzarr-io/angzarr", rev = "b09fe13ad08979f0712fcfc639c48cb70afcc999" }
+angzarr-ports = { git = "https://github.com/angzarr-io/angzarr", rev = "7e578f149cac602d52a7b1d3992cf2e9a05cdccf" }
 prost = "0.14"
 prost-types = "0.14"
 sea-query = "0.32"
@@ -28,13 +28,13 @@ tokio = { version = "1", default-features = false, features = ["sync"] }
 
 # The conformance suite, run on this store under tokio.
 [dev-dependencies]
-angzarr-ports = { git = "https://github.com/angzarr-io/angzarr", rev = "b09fe13ad08979f0712fcfc639c48cb70afcc999", features = ["contract"] }
+angzarr-ports = { git = "https://github.com/angzarr-io/angzarr", rev = "7e578f149cac602d52a7b1d3992cf2e9a05cdccf", features = ["contract"] }
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
 
 # The build writes the catalog's source under the crate's name
 # (angzarr_diagnostic::build): no catalog spells its crate's name.
 [build-dependencies]
-angzarr-diagnostic = { git = "https://github.com/angzarr-io/angzarr", rev = "b09fe13ad08979f0712fcfc639c48cb70afcc999", features = ["build"] }
+angzarr-diagnostic = { git = "https://github.com/angzarr-io/angzarr", rev = "7e578f149cac602d52a7b1d3992cf2e9a05cdccf", features = ["build"] }
 
 [lints]
 workspace = true
