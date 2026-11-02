@@ -1914,9 +1914,8 @@ pub fn translated_fact<S, T: Translation<S>, E: angzarr_diagnostic::Diagnostic>(
     answer: Result<T, E>,
     refusal: &v1::Refusal,
 ) -> Result<Any, Report> {
-    let _ = refusal;
     answer
-        .map(|fact| fact.fact().expect("declining is not passed through yet"))
+        .map(|fact| fact.fact().unwrap_or_else(|| pass_through(refusal)))
         .map_err(|error| Report::of(&error))
 }
 

@@ -25,17 +25,18 @@
 //! 1. The proto declares the messages and the component: `(component)` on
 //!    the anchor, `(command){component, emits, refuses, starts}` on each
 //!    command and fact, `(event){component}` on each event.
-//! 2. `angzarr scaffold rust` writes the empty decorated impl, once: the
-//!    `#[aggregate]` (or `#[process_manager]`) impl, one
-//!    `#[handles_cmd(Cmd)]` stub per command typed from its `emits` and
+//! 2. angzarr-cli generates the decorated impls into the build's output
+//!    every build: the `#[aggregate]` (or `#[process_manager]`) impl, one
+//!    `#[handles_cmd(Cmd)]` handler per command typed from its `emits` and
 //!    `refuses` (and marked `starts` where the proto says so), one
-//!    `#[applies(Event)]` stub per event, `todo!()` bodies; and, for a policy,
-//!    the `#[policy]` impl, with an `#[on_refused(Cmd)]` callback stub for
-//!    each command angzarr-cli's refusal switch selects for translate. The file is the user's and is never
-//!    overwritten; `--missing` appends only the stubs that are absent.
-//!    Every handler it writes returns its events; a continuation step
-//!    (below) is the user's to add, where a later event depends on an
-//!    earlier one's state.
+//!    `#[applies(Event)]` per event; and, for a policy, the `#[policy]`
+//!    impl, with an `#[on_refused(Cmd)]` callback per command whose refusal
+//!    it may translate, which declines unless the user's implementation
+//!    translates it. Each delegates to a generated trait; `angzarr scaffold
+//!    rust` writes the user's implementation of it once, `todo!()` bodies,
+//!    and never overwrites it. Every handler returns its events; a
+//!    continuation step (below) is the user's to add, where a later event
+//!    depends on an earlier one's state.
 //! 3. The user writes the bodies.
 //! 4. This macro generates the glue, the trait and the constants.
 //!
@@ -362,7 +363,10 @@
 //!   handler was handed it (its cover, sequences, history, resolution,
 //!   conflict and identity), and returns `F`, a fact its source
 //!   ingests, so the source never refers to the target's types. A callback
-//!   returning anything else does not compile. Its `Err`, any `Diagnostic`,
+//!   returning `Result<Option<F>, E>` may decline: its `None` passes that
+//!   refusal through, as for a command with no callback
+//!   (`markup::Translation`). A callback returning anything else does not
+//!   compile. Its `Err`, any `Diagnostic`,
 //!   is a bug, as an `#[on_event]` handler's is, and so is a refused
 //!   command of the callback's type that does not decode: the step fails as
 //!   `StepError::PolicyFailed`, is dead-lettered by its code and args, and
@@ -372,9 +376,11 @@
 //!
 //! The callback's PRESENCE is the selection: nothing else marks the mode,
 //! and `TRANSLATES` lists the commands the policy has callbacks for. It is
-//! fixed at compile time, as angzarr-cli's refusal switch is angzarr's:
-//! in Rust the switch means the scaffold writes the callback stub, or does
-//! not. Nothing about it is visible at run time beyond which fact arrives.
+//! fixed at compile time, but for a callback that declines (answers
+//! `None`), which passes that one refusal through: angzarr-cli's generated
+//! trait gives every refusable command such a callback by default, and the
+//! implementation's override translates. Nothing about it is visible at run
+//! time beyond which fact arrives.
 //!
 //! The trade-off: deleting a policy's callback
 //! silently reverts that command to pass-through. The source then receives
