@@ -511,9 +511,11 @@ pub(crate) fn load(novel: Novel, nonces: &mut Nonces) -> Result<Contextual, Kern
 /// accepted, `recorded_at = max(sampled now, the stream's last)` (the
 /// `ContextualCommand.recorded_at` its handler read), with the rules
 /// version the answer reports, in full, from the head on. An answer
-/// reporting another version than the registered one is a handler bug
-/// (command_handler.proto, C-0558): [`KernelError::RulesVersionMismatch`],
-/// nothing kept, dead-lettered. The router catches a handler's panic,
+/// whose events book names another stream than the input's
+/// ([`KernelError::EventsNotItsStream`], C-0590), or reporting another
+/// version than the registered one (command_handler.proto, C-0558:
+/// [`KernelError::RulesVersionMismatch`]), is a handler bug: nothing kept,
+/// dead-lettered. The router catches a handler's panic,
 /// a bug (ROUTER_REASON_UNHANDLED_HANDLER_ERROR, cause ROUTER_REASON_HANDLER_PANICKED). A bug
 /// ([`route::is_handler_fault`]) fails it as [`KernelError::Router`], and
 /// `dead_letters` gets a line of its code and args.
@@ -538,6 +540,16 @@ pub(crate) async fn decide(
     let response = response
         .and_then(|response| judged(&contextual, response))
         .map_err(|error| failed(command, error, kept, registry, dead_letters))?;
+    if let Some(event_stream) = response.events.as_ref().and_then(|b| b.cover.as_ref()) {
+        if event_stream != identified.cover() {
+            let elsewhere = KernelError::EventsNotItsStream {
+                stream: identified.cover().clone(),
+                event_stream: event_stream.clone(),
+            };
+            dead_letter::write_command(dead_letters, registry.catalog(), identified, &elsewhere);
+            return Err(Failure::Kernel(elsewhere));
+        }
+    }
     // Read after the answer: a child described again is registered by its
     // new descriptor before it gets work, so its answer meets its version.
     let registered = registry.catalog().rules_version(domain).unwrap_or_default();

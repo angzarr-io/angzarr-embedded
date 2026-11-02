@@ -268,14 +268,42 @@ fn the_retryable_store_and_sidecar_failures_are_coded_under_their_keys() {
 #[test]
 fn a_spec_keyed_kernel_error_is_its_key_with_its_declared_args() {
     use angzarr_diagnostic::Diagnostic;
-    use angzarr_router::error::GrpcCode;
 
     use super::KernelError;
     let stream = || angzarr_proto::v1::Cover {
         domain: "shelf".to_string(),
         ..Default::default()
     };
-    let keyed = [
+    for (error, status) in spec_keyed(stream) {
+        let declared = angzarr_proto::reason_key_args(error.code())
+            .unwrap_or_else(|| panic!("{} is no spec key", error.code()));
+        let given: Vec<&str> = error.args().iter().map(|(n, _)| *n).collect();
+        assert_eq!(given, declared, "{error:?}");
+        let coded = error.as_coded().expect("a coordinator's answer");
+        assert_eq!(coded.code, error.code());
+        assert_eq!(coded.grpc, status, "{error:?}");
+        let names: Vec<&str> = coded.extras.keys().map(String::as_str).collect();
+        let mut sorted = declared.to_vec();
+        sorted.sort_unstable();
+        assert_eq!(names, sorted, "{error:?}");
+    }
+    let unkeyed = KernelError::BeforeSnapshot {
+        stream: stream(),
+        first: 4,
+    };
+    assert_eq!(angzarr_proto::reason_key_args(unkeyed.code()), None);
+    assert!(unkeyed.as_coded().is_none());
+}
+
+/// Every kernel error the spec keys, on `stream`, with the status its key
+/// travels with.
+fn spec_keyed(
+    stream: impl Fn() -> angzarr_proto::v1::Cover,
+) -> Vec<(super::KernelError, angzarr_router::error::GrpcCode)> {
+    use angzarr_router::error::GrpcCode;
+
+    use super::KernelError;
+    vec![
         (
             KernelError::Stale {
                 stream: stream(),
@@ -326,6 +354,16 @@ fn a_spec_keyed_kernel_error_is_its_key_with_its_declared_args() {
             },
             GrpcCode::Internal,
         ),
+        (
+            KernelError::EventsNotItsStream {
+                stream: stream(),
+                event_stream: angzarr_proto::v1::Cover {
+                    edition: Some("beta".to_string()),
+                    ..stream()
+                },
+            },
+            GrpcCode::Internal,
+        ),
         (KernelError::ChainTooDeep { limit: 8 }, GrpcCode::Internal),
         (
             KernelError::TooManySteps {
@@ -341,24 +379,5 @@ fn a_spec_keyed_kernel_error_is_its_key_with_its_declared_args() {
             },
             GrpcCode::Unavailable,
         ),
-    ];
-    for (error, status) in keyed {
-        let declared = angzarr_proto::reason_key_args(error.code())
-            .unwrap_or_else(|| panic!("{} is no spec key", error.code()));
-        let given: Vec<&str> = error.args().iter().map(|(n, _)| *n).collect();
-        assert_eq!(given, declared, "{error:?}");
-        let coded = error.as_coded().expect("a coordinator's answer");
-        assert_eq!(coded.code, error.code());
-        assert_eq!(coded.grpc, status, "{error:?}");
-        let names: Vec<&str> = coded.extras.keys().map(String::as_str).collect();
-        let mut sorted = declared.to_vec();
-        sorted.sort_unstable();
-        assert_eq!(names, sorted, "{error:?}");
-    }
-    let unkeyed = KernelError::BeforeSnapshot {
-        stream: stream(),
-        first: 4,
-    };
-    assert_eq!(angzarr_proto::reason_key_args(unkeyed.code()), None);
-    assert!(unkeyed.as_coded().is_none());
+    ]
 }

@@ -172,6 +172,17 @@ pub enum KernelError {
         registered: String,
         reported: String,
     },
+    /// The handler of `stream`'s domain answered events whose book names
+    /// another stream, `event_stream` (another edition included): a
+    /// domain's or process manager's answer is payloads for its own stream
+    /// alone. A handler bug, refused before any write with nothing
+    /// persisted, and dead-lettered as every handler bug is: angzarr's
+    /// INTERNAL, `COORDINATOR_REASON_EVENTS_NOT_ITS_STREAM` (C-0590;
+    /// decision 14.65).
+    EventsNotItsStream {
+        stream: Cover,
+        event_stream: Cover,
+    },
     /// A command's or fact's payload type that the domain does not decode,
     /// after the upcaster: refused naming its type URL (angzarr's
     /// INVALID_ARGUMENT). Found at step 5, after deduplication.
@@ -493,6 +504,9 @@ impl KernelError {
             KernelError::HandlerUnavailable { .. } => {
                 Spec(Keyed::Coordinator(C::HandlerUnavailable))
             }
+            KernelError::EventsNotItsStream { .. } => {
+                Spec(Keyed::Coordinator(C::EventsNotItsStream))
+            }
             KernelError::UnknownType { .. } => Own("angzarr-embedded-unknown-type"),
             KernelError::InvalidPayload { .. } => Own("angzarr-embedded-invalid-payload"),
             KernelError::Upcast { .. } => Own("angzarr-embedded-upcast"),
@@ -526,6 +540,7 @@ impl KernelError {
             KernelError::Upcast { .. }
             | KernelError::RetryCapExhausted { .. }
             | KernelError::RulesVersionMismatch { .. }
+            | KernelError::EventsNotItsStream { .. }
             | KernelError::WrongDomain { .. }
             | KernelError::ChainTooDeep { .. }
             | KernelError::TooManySteps { .. }
@@ -670,7 +685,8 @@ impl KernelError {
             | KernelError::WrongDomain { stream, .. }
             | KernelError::BeforeSnapshot { stream, .. }
             | KernelError::Unreadable { stream, .. }
-            | KernelError::HandlerUnavailable { stream, .. } => Some(stream),
+            | KernelError::HandlerUnavailable { stream, .. }
+            | KernelError::EventsNotItsStream { stream, .. } => Some(stream),
             KernelError::Malformed(_)
             | KernelError::ChainTooDeep { .. }
             | KernelError::TooManySteps { .. }
@@ -749,6 +765,9 @@ impl KernelError {
                 .map(|(name, value)| (name.as_str(), Arg::Str(value.clone())))
                 .collect(),
             KernelError::Unresolved { .. } => vec![],
+            KernelError::EventsNotItsStream { event_stream, .. } => {
+                vec![(args::EVENT_STREAM, stream(event_stream))]
+            }
             KernelError::HandlerUnavailable { stream: s, cause } => vec![
                 (args::DOMAIN, s.domain.as_str().into()),
                 (args::CAUSE, cause.as_str().into()),

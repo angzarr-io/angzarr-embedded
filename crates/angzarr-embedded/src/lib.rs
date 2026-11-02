@@ -342,6 +342,13 @@ fn kernel_samples() -> Vec<KernelError> {
             registered: "1.4.2+build.7".to_string(),
             reported: "1.5.0+build.9".to_string(),
         },
+        KernelError::EventsNotItsStream {
+            stream: sample_stream(),
+            event_stream: v1::Cover {
+                edition: Some("beta".to_string()),
+                ..sample_stream()
+            },
+        },
         KernelError::Overlap {
             stream: sample_stream(),
             expected: 2,
