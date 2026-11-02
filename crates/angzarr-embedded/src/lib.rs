@@ -220,6 +220,36 @@ pub fn not_before(floor: Option<&Timestamp>, now: Timestamp) -> Timestamp {
     Timestamp { seconds, nanos }
 }
 
+/// The metadata every event of the decision `context` is the router's
+/// context of is stamped with (angzarr's `EventMeta`), under
+/// `rules_version`: its causation (the input's command id, the
+/// deduplication key), its fact source and correlation, and the instant it
+/// is recorded at (`ContextualCommand.recorded_at`). No actor: who did it
+/// belongs in a security log. No trigger: a policy command's events name
+/// their command, not the event that set it off; that edge is the
+/// command's own causation ([`Identified::causation_id`]), for tracing.
+///
+/// The ONE builder of it: the kernel stamps the events it keeps with it,
+/// from the `ContextualCommand` it handed the handler, and the markup folds
+/// the decision's own events with it, from the handler's
+/// [`markup::Context`], so an applier reads at decide time exactly what
+/// replay will hand it.
+pub fn event_meta(
+    context: &angzarr_router::domain::CommandContext,
+    rules_version: &str,
+) -> v1::EventMeta {
+    v1::EventMeta {
+        causation: context
+            .command_id
+            .clone()
+            .map(v1::event_meta::Causation::CommandId),
+        fact: context.fact_origin.clone(),
+        correlation_id: context.correlation_id.clone(),
+        recorded_at: context.recorded_at,
+        rules_version: rules_version.to_string(),
+    }
+}
+
 /// One value of every error this crate defines, each variant once, for the
 /// catalog parity test: each one's code must have a message in every locale,
 /// using exactly its args. Its messages are in

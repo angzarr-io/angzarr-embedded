@@ -1126,9 +1126,15 @@ impl Toggle {
 /// and whose applier reads where each event sits (its `&PageContext`).
 #[derive(Clone, Default, PartialEq, Debug)]
 pub struct Badge {
-    /// Each folded event's sequence and recording second (`None` for an
-    /// event of the decision being made, not stamped yet).
-    seen: Vec<(u64, Option<i64>)>,
+    /// Each folded event's sequence and metadata, the decision's own
+    /// events' included: what the kernel stamps them with.
+    seen: Vec<(u64, Option<::angzarr_embedded::v1::EventMeta>)>,
+}
+
+std::thread_local! {
+    /// Each badge a continuation ran on: the working state of the decision
+    /// being made, its own event folded.
+    static DECIDED: std::cell::RefCell<Vec<Badge>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// A badge's continuation found its own event folded where it should not
@@ -1155,14 +1161,15 @@ impl Diagnostic for MisFolded {
 #[aggregate(domain = "badge")]
 impl Badge {
     /// Issue the badge its key names; the decision's own event is folded,
-    /// before the continuation runs, at the stream's next sequence with no
-    /// metadata yet.
+    /// before the continuation runs, at the stream's next sequence, and the
+    /// continuation keeps the badge it ran on ([`DECIDED`]).
     #[handles_cmd(Issue, rooted_by = key)]
     fn issue(&self, cmd: Issue, ctx: &Context) -> Result<Emit<Self>, Failed<Infallible>> {
-        let due = (ctx.command.next_sequence, None);
+        let due = ctx.command.next_sequence;
         Ok(
             Emit::of(Issued { key: cmd.key }).then(move |badge: &Self, _: &Context| {
-                match badge.seen.last() == Some(&due) {
+                DECIDED.with(|decided| decided.borrow_mut().push(badge.clone()));
+                match badge.seen.last().map(|(sequence, _)| *sequence) == Some(due) {
                     true => Ok(None::<Issued>),
                     false => Err(Failed::<Infallible>::bug(&MisFolded)),
                 }
@@ -1172,11 +1179,7 @@ impl Badge {
 
     #[applies(Issued)]
     fn issued(&mut self, _event: Issued, page: &PageContext) {
-        let second = page
-            .meta
-            .and_then(|meta| meta.recorded_at)
-            .map(|at| at.seconds);
-        self.seen.push((page.sequence, second));
+        self.seen.push((page.sequence, page.meta.cloned()));
     }
 }
 
@@ -3046,8 +3049,8 @@ mod full_context {
     }
 
     /// An applier taking the event's page reads its sequence and its
-    /// metadata as stored, and, for the decision's own event, its sequence
-    /// to be with no metadata yet (the continuation would fail otherwise).
+    /// metadata as stored, the decision's own event's included: at decide
+    /// time it reads the metadata the kernel stamps it with.
     #[test]
     fn an_applier_reads_where_each_event_sits() {
         let mut badge = badge("gold");
@@ -3058,16 +3061,33 @@ mod full_context {
             .into()
         };
         badge.given([issued(), issued()]);
-        assert_eq!(badge.state().seen, [(0, Some(1)), (1, Some(1))]);
+        let given = badge.pages();
+        assert_eq!(
+            badge.state().seen,
+            [(0, given[0].meta.clone()), (1, given[1].meta.clone())]
+        );
+        DECIDED.with(|decided| decided.borrow_mut().clear());
         let issued = badge
             .when(Issue {
                 key: "gold".to_string(),
             })
             .events();
         assert_eq!(issued.len(), 1);
+        let stored = badge.pages();
+        let decided = DECIDED.with(|decided| decided.take());
+        assert_eq!(decided.len(), 1, "one continuation ran");
+        let (sequence, meta) = decided[0].seen.last().cloned().unwrap();
+        assert_eq!(sequence, 2);
         assert_eq!(
-            badge.state().seen,
-            [(0, Some(1)), (1, Some(1)), (2, Some(2))]
+            meta.as_ref().and_then(|meta| meta.recorded_at),
+            stored[2].meta.as_ref().and_then(|meta| meta.recorded_at),
+            "the applier reads, at decide time, the recorded_at stored"
+        );
+        assert_eq!(meta, stored[2].meta, "and the whole metadata stored");
+        assert_eq!(
+            decided[0],
+            badge.state(),
+            "the state decided is the state replayed"
         );
     }
 

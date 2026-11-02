@@ -126,11 +126,13 @@ pub trait Domain: Sized + 'static {
     /// Fold one event into the state, given where it sits: `page`, the
     /// router's page context, its stream's cover, its sequence and its
     /// whole metadata ([`EventMeta`](angzarr_proto::v1::EventMeta): its
-    /// cause, correlation, fact origin, rules version and `recorded_at`),
-    /// the metadata `None` only for an event of the decision being made,
-    /// which is stamped when it is committed (its instant is the
-    /// handler's `Context::recorded_at`). Pure: the same state, event and
-    /// page always give the same result.
+    /// cause, correlation, fact origin, rules version and `recorded_at`).
+    /// An event of the decision being made is folded with the metadata it
+    /// will be stamped with when it is committed
+    /// ([`event_meta`](crate::event_meta) of the handler's context: its
+    /// instant is the handler's `Context::recorded_at`), so the state
+    /// decided is the state replayed. Pure: the same state, event and page
+    /// always give the same result.
     fn apply(state: &mut Self::State, event: &Self::Event, page: &PageContext<'_>);
 }
 

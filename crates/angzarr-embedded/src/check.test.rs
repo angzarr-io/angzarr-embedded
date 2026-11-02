@@ -3,6 +3,25 @@ use prost::Message;
 
 use super::*;
 
+/// What the kernel stamps `id`'s events with when its handler is handed it
+/// at `recorded_at`, under `rules_version`: [`event_meta`](crate::event_meta)
+/// of the router's context of the `ContextualCommand` holding its book.
+fn stamped(
+    id: &Identified,
+    recorded_at: Timestamp,
+    rules_version: &str,
+) -> angzarr_proto::v1::EventMeta {
+    let contextual = angzarr_proto::v1::ContextualCommand {
+        command: Some(id.to_book()),
+        recorded_at: Some(recorded_at),
+        ..Default::default()
+    };
+    crate::event_meta(
+        &angzarr_router::domain::command_context(&contextual),
+        rules_version,
+    )
+}
+
 fn uuid(n: u8) -> Uuid {
     Uuid {
         value: vec![n; 16].into(),
@@ -254,7 +273,7 @@ fn a_policy_commands_events_carry_its_command_id_as_causation_and_no_trigger() {
     let id = policy_command(trigger.clone());
     assert_eq!(id.causation_id(), Some(&trigger), "the command keeps it");
 
-    let meta = id.meta(Timestamp::default(), "v1");
+    let meta = stamped(&id, Timestamp::default(), "v1");
     assert_eq!(
         meta.causation,
         Some(Causation::CommandId(
@@ -579,6 +598,7 @@ mod identify {
     //! Step 2: ids are assigned once, after the check, as angzarr assigns them.
     //! These run: identification is implemented.
 
+    use super::stamped;
     use crate::v1::event_meta::Causation;
     use crate::v1::{EventMeta, FactOrigin};
     use crate::{check, ids, pack, Identified};
@@ -658,7 +678,7 @@ mod identify {
     fn every_event_of_a_command_carries_it_as_causation_and_no_actor() {
         let id = identified(command(cover("account", 1), deposit()).id(7), 30);
         assert_eq!(
-            id.meta(instant(31), "v2"),
+            stamped(&id, instant(31), "v2"),
             EventMeta {
                 causation: Some(Causation::CommandId(command_id(7))),
                 fact: None,
@@ -671,7 +691,7 @@ mod identify {
         let payment = pack(&account::fact::PaymentReceived { cents: 70 });
         let id = identified(fact(cover("account", 1), payment, "pi_9"), 30);
         assert_eq!(
-            id.meta(instant(31), "v2").fact,
+            stamped(&id, instant(31), "v2").fact,
             Some(FactOrigin {
                 external_id: "pi_9".to_string(),
                 description: "toy payments webhook".to_string(),
