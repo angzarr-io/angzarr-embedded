@@ -127,11 +127,12 @@ const NO_CLAIM_CHECK: Tag = Tag {
 };
 
 /// The host's component discovery (a child described on connect, its
-/// readiness, its descriptor validated) drives a child process: no binding
-/// runs one here yet. The host's own tests pin C-0563 and C-0687.
+/// readiness, its descriptor validated) and a component's serving status
+/// drive a child process: no binding runs one here yet. The host's own
+/// tests pin C-0563, C-0681 and C-0687.
 const UNBOUND_HOST: Tag = Tag {
     name: "unbound_host",
-    why: "the host's child discovery: no binding runs a child process yet",
+    why: "the host's: a child's discovery and serving status; no binding runs a child process yet",
 };
 
 /// An in-process policy's translating callback answers a payload alone
@@ -204,6 +205,23 @@ const EDITION_NOT_FORKED_AT_WRITE: Tag = Tag {
     why: "an input to an unforked edition stream is refused at the write, under angzarr-ports' key, INVALID_ARGUMENT",
 };
 
+/// The fold is business code's: angzarr-router's, which runs the
+/// handler-contract tier for it. A binding here needs a typed domain of
+/// its own; the kernel's part, the history it delivers, is C-0287's.
+const UNBOUND_FOLD: Tag = Tag {
+    name: "unbound_router_fold",
+    why: "the fold is business code's (angzarr-router's); no typed domain binds it here",
+};
+
+/// A policy's handler that fails is dead-lettered on its first failure,
+/// whatever its status: the kernel retries a step's delivery, never the
+/// policy's own call. The spec retries a retryable failure up to the retry
+/// cap first.
+const POLICY_FAILURE_NOT_RETRIED: Tag = Tag {
+    name: "divergence_policy_failure_not_retried",
+    why: "a failing policy handler is dead-lettered at once, never retried, whatever its status",
+};
+
 /// No step binding drives the scenario yet.
 const UNBOUND: Tag = Tag {
     name: "unbound",
@@ -232,12 +250,9 @@ const TAGGED: &[(&str, Tag)] = &[
     ("C-0738", IN_PROCESS_CHAIN),
     ("C-0744", IN_PROCESS_CHAIN),
     ("C-0739", IN_PROCESS_CHAIN),
-    ("C-0444", UNBOUND),
     ("C-0445", UNBOUND),
-    ("C-0446", UNBOUND),
+    ("C-0444", POLICY_FAILURE_NOT_RETRIED),
     ("C-0447", NO_CLAIM_CHECK),
-    ("C-0449", UNBOUND),
-    ("C-0673", UNBOUND),
     ("C-0730", IN_PROCESS_CHAIN),
     ("C-0731", IN_PROCESS_CHAIN),
     ("C-0732", IN_PROCESS_CHAIN),
@@ -275,12 +290,8 @@ const TAGGED: &[(&str, Tag)] = &[
     ("C-0409", MAIN_UNSET_ONLY),
     ("C-0410", NO_EDITION_LIFECYCLE),
     // fact_flow.feature
-    ("C-0185", UNBOUND),
-    ("C-0186", UNBOUND),
     ("C-0609", NO_OUTSIDE_CAUSATION),
     ("C-0610", NO_OUTSIDE_CAUSATION),
-    ("C-0492", UNBOUND),
-    ("C-0190", UNBOUND),
     // policy_addressing.feature
     ("C-0735", NO_OUTSIDE_CAUSATION),
     ("C-0736", UNKNOWN_DOMAIN_STEP_HELD),
@@ -306,29 +317,27 @@ const TAGGED: &[(&str, Tag)] = &[
     ("C-0560", NO_QUERY),
     ("C-0558#4", IN_PROCESS_CHAIN),
     // state_building.feature
-    ("C-0281", UNBOUND),
-    ("C-0282", UNBOUND),
-    ("C-0283", UNBOUND),
-    ("C-0284", UNBOUND),
-    ("C-0285", UNBOUND),
-    ("C-0286", UNBOUND),
-    ("C-0287", UNBOUND),
-    ("C-0288", UNBOUND),
-    ("C-0289", UNBOUND),
-    ("C-0290", UNBOUND),
-    ("C-0291", UNBOUND),
-    ("C-0292", UNBOUND),
-    ("C-0293", UNBOUND),
-    ("C-0294", UNBOUND),
-    ("C-0295", UNBOUND),
-    ("C-0296", UNBOUND),
-    ("C-0297", UNBOUND),
-    ("C-0298", UNBOUND),
-    ("C-0299", UNBOUND),
-    ("C-0300", UNBOUND),
-    ("C-0301", UNBOUND),
-    ("C-0302", UNBOUND),
-    ("C-0675", UNBOUND),
+    ("C-0281", UNBOUND_FOLD),
+    ("C-0282", UNBOUND_FOLD),
+    ("C-0283", UNBOUND_FOLD),
+    ("C-0284", UNBOUND_FOLD),
+    ("C-0285", UNBOUND_FOLD),
+    ("C-0286", UNBOUND_FOLD),
+    ("C-0288", UNBOUND_FOLD),
+    ("C-0289", UNBOUND_FOLD),
+    ("C-0290", UNBOUND_FOLD),
+    ("C-0291", UNBOUND_FOLD),
+    ("C-0292", UNBOUND_FOLD),
+    ("C-0293", UNBOUND_FOLD),
+    ("C-0294", UNBOUND_FOLD),
+    ("C-0295", UNBOUND_FOLD),
+    ("C-0296", UNBOUND_FOLD),
+    ("C-0297", UNBOUND_FOLD),
+    ("C-0298", UNBOUND_FOLD),
+    ("C-0299", UNBOUND_FOLD),
+    ("C-0300", UNBOUND_FOLD),
+    ("C-0301", UNBOUND_FOLD),
+    ("C-0302", UNBOUND_FOLD),
     // sync_modes.feature
     ("C-0425", IN_PROCESS_CHAIN),
     ("C-0426", IN_PROCESS_CHAIN),
@@ -346,16 +355,9 @@ const TAGGED: &[(&str, Tag)] = &[
     ("C-0407", NO_QUERY),
     ("C-0408", NO_QUERY),
     // upcasting.feature
-    ("C-0584", UNBOUND),
     ("C-0585", NO_QUERY),
     ("C-0586", UNBOUND),
-    ("C-0587", UNBOUND),
-    ("C-0537", UNBOUND),
-    ("C-0538", UNBOUND),
-    ("C-0539", UNBOUND),
-    ("C-0540", UNBOUND),
-    ("C-0680", UNBOUND),
-    ("C-0681", UNBOUND),
+    ("C-0681", UNBOUND_HOST),
 ];
 
 /// The scenario's ID, its one `@C-NNNN` tag.

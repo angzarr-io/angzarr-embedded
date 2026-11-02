@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 use std::fmt;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use angzarr_embedded::testing::{MemoryStore, Ready as _, Samples};
@@ -20,13 +20,14 @@ use angzarr_embedded::v1::{
 };
 use angzarr_embedded::{
     pack, Any, EventStore, Failure, Handled, Kernel, MemoryDeadLetters, OnRetryable, PositionKey,
-    PositionStore, Recorded, Registry, Rejected, SnapshotStore, StreamRef, Wait, Write,
+    PositionStore, Recorded, Registry, Rejected, SnapshotStore, StreamRef, Timestamp, Wait, Write,
     DEAD_LETTER_PREFIX,
 };
 
 use crate::tests::answer::Answered;
 use crate::tests::business::{Business, Process};
 use crate::tests::policy::{Policy, Script};
+use crate::tests::upcasting::{Port, Sidecar};
 
 /// A domain as its descriptor registers it, and the business process
 /// behind it.
@@ -103,6 +104,11 @@ pub(crate) struct Coordinator {
     /// The correlation an order's events are recorded under when a when
     /// names none: "the order's correlation".
     pub(crate) order_correlation: Option<String>,
+    /// Each domain's upcaster sidecar, if it has one.
+    pub(crate) sidecars: BTreeMap<String, Arc<Mutex<Sidecar>>>,
+    /// What the clock reads when the next input is accepted, if a given
+    /// set it.
+    pub(crate) clock: Option<Timestamp>,
     /// The edition the scenario's inputs are sent in, if not main.
     pub(crate) edition: Option<String>,
     /// What each catch-up of the owed policy steps came to.
@@ -182,6 +188,12 @@ pub(crate) fn resolution(name: &str) -> ConflictResolution {
 
 impl Coordinator {
     fn new() -> Coordinator {
+        let mut world = Coordinator::empty();
+        world.order_domain();
+        world
+    }
+
+    fn empty() -> Coordinator {
         Coordinator {
             store: MemoryStore::new(),
             domains: BTreeMap::new(),
@@ -202,6 +214,8 @@ impl Coordinator {
             order_correlation: None,
             resumed: Vec::new(),
             edition: None,
+            sidecars: BTreeMap::new(),
+            clock: None,
         }
     }
 
@@ -221,6 +235,12 @@ impl Coordinator {
             script: Arc::clone(&script),
         });
         script
+    }
+
+    /// `domain`'s upcaster sidecar, registered if it is not yet.
+    pub(crate) fn sidecar(&mut self, domain: &str) -> MutexGuard<'_, Sidecar> {
+        let sidecar = self.sidecars.entry(domain.to_string()).or_default();
+        sidecar.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// The domain of the component a scenario names (`Fulfillment`): its
@@ -254,6 +274,20 @@ impl Coordinator {
                 starting: Vec::new(),
             }
         })
+    }
+
+    /// The order domain, as [`Coordinator::domain`] registers it: its
+    /// business process handles every command a scenario sends but
+    /// `RemoveEverything`, the one C-0540 sends to no handler.
+    fn order_domain(&mut self) {
+        let business = self.business("order");
+        let mut error = crate::tests::policy::internal("ROUTER_REASON_UNKNOWN_COMMAND_TYPE");
+        error.grpc = angzarr_embedded::angzarr_router::error::GrpcCode::Internal;
+        business.rule(crate::tests::business::Rule {
+            input: "RemoveEverything".to_string(),
+            once: None,
+            error,
+        });
     }
 
     /// `name`, a process manager's domain, starting from the inputs
@@ -539,6 +573,11 @@ impl Coordinator {
                 .command_handler(name, process, descriptor)
                 .unwrap_or_else(|e| panic!("{name} registers: {e}"));
         }
+        for (domain, sidecar) in &self.sidecars {
+            registry
+                .upcast_with(domain, Port(Arc::clone(sidecar)))
+                .unwrap_or_else(|e| panic!("{domain}'s sidecar registers: {e}"));
+        }
         for def in &self.policies {
             let policy = Policy {
                 name: def.name.clone(),
@@ -591,7 +630,10 @@ impl Coordinator {
     /// its answer.
     pub(crate) async fn handle(&mut self, book: CommandBook) {
         let registry = self.registry();
-        let sampled = self.samples.next_sample();
+        let mut sampled = self.samples.next_sample();
+        if let Some(now) = self.clock {
+            sampled.now = now;
+        }
         let store = self.store.clone();
         let result = self
             .kernel(&registry)

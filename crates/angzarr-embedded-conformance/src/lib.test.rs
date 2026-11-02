@@ -26,10 +26,14 @@ mod tags;
 #[path = "world.test.rs"]
 mod world;
 
+#[path = "steps/dead_letters.test.rs"]
+mod dead_letters;
 #[path = "steps/deliveries.test.rs"]
 mod deliveries;
 #[path = "steps/editions.test.rs"]
 mod editions;
+#[path = "steps/facts.test.rs"]
+mod facts;
 #[path = "steps/history.test.rs"]
 mod history;
 #[path = "steps/inputs.test.rs"]
@@ -46,6 +50,8 @@ mod refusals;
 mod script;
 #[path = "steps/streams.test.rs"]
 mod streams;
+#[path = "steps/upcasting.test.rs"]
+mod upcasting;
 #[path = "steps/versions.test.rs"]
 mod versions;
 
