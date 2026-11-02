@@ -22,6 +22,10 @@ pub enum HandshakeError {
     Malformed { line: String },
     /// No handshake within the configured time.
     Timeout { timeout_ms: u64 },
+    /// A v1 handshake whose socket path is not UTF-8, which the host does
+    /// not decode into another path: `path` is its bytes, each outside
+    /// printable ASCII escaped (`\xe9`).
+    PathNotUtf8 { path: String },
     /// The child's stdout ended (it exited, or closed it) before a
     /// handshake.
     Closed,
@@ -42,6 +46,7 @@ impl Diagnostic for HandshakeError {
             HandshakeError::Malformed { .. } => {
                 angzarr_proto::v1::HostReason::HandshakeMalformed.as_str_name()
             }
+            HandshakeError::PathNotUtf8 { .. } => "angzarr-embedded-host-handshake-path-not-utf8",
             HandshakeError::Timeout { .. } => "angzarr-embedded-host-handshake-timeout",
             HandshakeError::Closed => "angzarr-embedded-host-handshake-closed",
             HandshakeError::Unreadable { .. } => "angzarr-embedded-host-handshake-unreadable",
@@ -53,6 +58,7 @@ impl Diagnostic for HandshakeError {
             HandshakeError::Malformed { line } => {
                 vec![(angzarr_proto::v1::reason_args::LINE, line.as_str().into())]
             }
+            HandshakeError::PathNotUtf8 { path } => vec![("path", path.as_str().into())],
             HandshakeError::Timeout { timeout_ms } => vec![("timeout_ms", (*timeout_ms).into())],
             HandshakeError::Closed => vec![],
             HandshakeError::Unreadable { kind } => vec![("kind", kind.as_str().into())],
@@ -98,10 +104,15 @@ pub enum HostError {
     /// `ComponentService.Describe` failed; `grpc_code` is the status's wire
     /// code.
     Describe { domain: String, grpc_code: i32 },
-    /// An upcaster sidecar's `grpc.health.v1.Health.Watch` failed (decision
-    /// 14.39: a sidecar serves gRPC health); `grpc_code` is the status's
-    /// wire code.
+    /// A child's `grpc.health.v1.Health.Watch` failed (the child protocol:
+    /// every child serves gRPC health); `grpc_code` is the status's wire
+    /// code.
     Health { domain: String, grpc_code: i32 },
+    /// A child that is described reported its server (service `""`) other
+    /// than SERVING once it had handshaken, when the child protocol says
+    /// it handshakes only once SERVING: `status` is the health status, by
+    /// its name (`NOT_SERVING`).
+    NotServing { domain: String, status: String },
     /// The child described itself as another kind than its `kind` says:
     /// `described` is its descriptor's `ComponentKind`, by name.
     KindMismatch {
@@ -183,6 +194,7 @@ impl Diagnostic for HostError {
             HostError::Connect { .. } => "angzarr-embedded-host-connect",
             HostError::Describe { .. } => "angzarr-embedded-host-describe",
             HostError::Health { .. } => "angzarr-embedded-host-health",
+            HostError::NotServing { .. } => "angzarr-embedded-host-not-serving",
             HostError::KindMismatch { .. } => "angzarr-embedded-host-kind-mismatch",
             HostError::NoInput { .. } => "angzarr-embedded-host-no-input",
             HostError::ProjectorNoInputDomain { .. } => {
@@ -243,6 +255,9 @@ impl Diagnostic for HostError {
             HostError::Connect { domain: d, socket } => {
                 vec![domain(d), ("socket", socket.as_str().into())]
             }
+            HostError::NotServing { domain: d, status } => {
+                vec![domain(d), ("status", status.as_str().into())]
+            }
             HostError::Describe {
                 domain: d,
                 grpc_code,
@@ -302,6 +317,9 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn Diagnostic>> {
         Box::new(HandshakeError::Malformed {
             line: "angzarr-handshake v2".to_string(),
         }),
+        Box::new(HandshakeError::PathNotUtf8 {
+            path: "/run/caf\\xe9.sock".to_string(),
+        }),
         Box::new(HandshakeError::Timeout { timeout_ms: 30_000 }),
         Box::new(HandshakeError::Closed),
         Box::new(HandshakeError::Unreadable {
@@ -338,6 +356,10 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn Diagnostic>> {
         Box::new(HostError::Health {
             domain: d(),
             grpc_code: 12,
+        }),
+        Box::new(HostError::NotServing {
+            domain: d(),
+            status: "NOT_SERVING".to_string(),
         }),
         Box::new(HostError::KindMismatch {
             domain: d(),

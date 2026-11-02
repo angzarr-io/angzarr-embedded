@@ -908,3 +908,123 @@ fn a_child_described_again_is_refused_unless_the_registry_takes_it() {
         "a sidecar is not described"
     );
 }
+
+/// A child given `env` beside its mode's.
+fn with(mut component: ComponentConfig, env: &[(&str, &str)]) -> ComponentConfig {
+    for (name, value) in env {
+        component.env.insert(name.to_string(), value.to_string());
+    }
+    component
+}
+
+/// The child's stdout after its handshake is drained from the moment the
+/// handshake is read, before the child is checked, described and
+/// registered: a child writing more there than a pipe holds before it
+/// serves (the fake's flood) comes up, where one left undrained would
+/// block on its write and never answer. Bounded: a host that never
+/// starts fails the test, never hangs it.
+#[test]
+fn stdout_after_the_handshake_is_drained_before_the_child_is_described() {
+    let mut config = config(vec![player(mode::FLOOD)]);
+    config.supervision.call_timeout_ms = 5_000;
+    let (started, start) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = started.send(Host::start(config).map(|host| host.shutdown()));
+    });
+    let exits = start
+        .recv_timeout(Duration::from_secs(30))
+        .expect("start returns")
+        .expect("the flooding child comes up");
+    assert_eq!(exits, [("player".to_string(), ChildExit::Exited(Some(0)))]);
+}
+
+/// A described child's health is checked once it has handshaken, before
+/// it is described: one that reports its server other than SERVING then
+/// is refused at start, naming the status (the child protocol: a child
+/// handshakes only once SERVING); one that serves no health at all is
+/// refused as a sidecar serving none is.
+#[test]
+fn a_described_child_is_checked_serving_before_it_is_described() {
+    use fake_child::{health, HEALTH_ENV};
+    assert_eq!(
+        Host::start(config(vec![with(
+            player(mode::SERVE),
+            &[(HEALTH_ENV, health::NOT_SERVING)]
+        )]))
+        .err(),
+        Some(HostError::NotServing {
+            domain: "player".to_string(),
+            status: "NOT_SERVING".to_string(),
+        })
+    );
+    assert_eq!(
+        Host::start(config(vec![with(
+            player(mode::SERVE),
+            &[(HEALTH_ENV, health::NONE)]
+        )]))
+        .err(),
+        Some(HostError::Health {
+            domain: "player".to_string(),
+            grpc_code: tonic::Code::Unimplemented as i32,
+        })
+    );
+}
+
+/// Every child's health is watched, not a sidecar's alone: a described
+/// child that turns NOT_SERVING (a readiness probe failing, a child
+/// wedged enough to say so) is down, its calls failing retryably, keyed
+/// `not-serving`, without reaching it; once it turns SERVING again it is
+/// up. It is the same process throughout: health is not its exit. Each
+/// turn is forced through the fake's control socket, and the supervisor's
+/// acting on it awaited, never polled for.
+#[test]
+fn a_described_child_is_up_only_while_its_health_reports_serving() {
+    use fake_child::CONTROL_ENV;
+    let socket = std::env::temp_dir().join(format!("angzarr-dctl-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&socket);
+    let control = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let player = with(
+        player(mode::SERVE),
+        &[(CONTROL_ENV, socket.to_str().unwrap())],
+    );
+    let (applied, acted) = mpsc::channel();
+    let hooks = Hooks {
+        applied: Some(applied),
+        ..Hooks::default()
+    };
+    let host = Host::start_with(config(vec![player]), hooks).expect("the host starts");
+    let (mut fake, _) = control.accept().unwrap();
+    let _ = std::fs::remove_file(&socket);
+    let handler = host.handler("player").unwrap();
+    let pid = pid_of(&handler);
+    let sit = || {
+        handler
+            .dispatch(&command("player", "/examples.blackjack.SitDown"))
+            .awaited()
+    };
+    let mut turned = |status: &[u8]| {
+        use std::io::Write;
+        fake.write_all(status).unwrap();
+        acted.recv_timeout(Duration::from_secs(20))
+    };
+
+    assert_eq!(
+        acted.recv_timeout(Duration::from_secs(20)),
+        Ok(true),
+        "came up"
+    );
+    assert!(sit().is_ok());
+    assert_eq!(turned(b"0"), Ok(false), "turned NOT_SERVING");
+    let down = sit().expect_err("not delivered");
+    assert!(is_retryable(&down), "{down:?}");
+    assert_eq!(
+        down.extras
+            .get(angzarr_proto::v1::reason_args::CAUSE)
+            .map(String::as_str),
+        Some(crate::remote::causes::NOT_SERVING)
+    );
+    assert_eq!(turned(b"1"), Ok(true), "turned SERVING");
+    assert!(sit().is_ok());
+    assert_eq!(pid_of(&handler), pid, "the same child");
+    host.shutdown();
+}

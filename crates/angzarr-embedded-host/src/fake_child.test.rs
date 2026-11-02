@@ -47,11 +47,13 @@
 //!   `UpcasterService` and gRPC health (no descriptor): a page whose
 //!   payload is `/test.table.v0.Sit` comes back `/test.table.v1.Seat`;
 //!   `...v0.Die` exits with code 7 mid-call; `...v0.Bad` is INTERNAL
-//!   (`UPCAST_RULE_BROKE`); any other passes through. Its health is
-//!   SERVING, or `ANGZARR_FAKE_HEALTH`'s ([`health`]); given
-//!   `ANGZARR_FAKE_CONTROL`, a Unix socket's path, it connects there as it
-//!   starts, and each byte read sets its status: `1` SERVING, any other
-//!   NOT_SERVING.
+//!   (`UPCAST_RULE_BROKE`); any other passes through.
+//!
+//! Every kind serves gRPC health, as the child protocol says a child must:
+//! SERVING, or `ANGZARR_FAKE_HEALTH`'s ([`health`]: `none` serves no
+//! health at all); given `ANGZARR_FAKE_CONTROL`, a Unix socket's path, it
+//! connects there as it starts, and each byte read sets its status: `1`
+//! SERVING, any other NOT_SERVING.
 //!
 //! It exits with code 0 when its stdin reaches end of file.
 
@@ -149,7 +151,15 @@ pub(crate) mod mode {
     /// Handshake, close stdout, then serve: the host sees stdout's end
     /// while the child lives on.
     pub(crate) const CLOSES_STDOUT: &str = "closes-stdout";
+    /// Handshake, then write more on stdout than a pipe holds
+    /// ([`FLOOD_BYTES`](super::FLOOD_BYTES)), then serve: it serves only
+    /// once the host drains its stdout.
+    pub(crate) const FLOOD: &str = "flood";
 }
+
+/// What the flooding fake writes on stdout after its handshake: four times
+/// Linux's default pipe capacity.
+pub(crate) const FLOOD_BYTES: usize = 4 * 65_536;
 
 /// The v2 line the malformed fake prints.
 pub(crate) const MALFORMED_LINE: &str = "angzarr-handshake v2 unix:/tmp/angzarr-fake.sock";
@@ -246,10 +256,11 @@ fn entry() {
         mode::NOISY => {
             say("Loading player...");
             say("");
-            serve(name, false)
+            serve(name, false, false)
         }
-        mode::CLOSES_STDOUT => serve(name, true),
-        _ => serve(name, false),
+        mode::CLOSES_STDOUT => serve(name, true, false),
+        mode::FLOOD => serve(name, false, true),
+        _ => serve(name, false, false),
     }
 }
 
@@ -265,7 +276,37 @@ fn park() -> ! {
     }
 }
 
-fn serve(name: String, close_stdout: bool) -> ! {
+/// The health a child starts with (`started`, [`HEALTH_ENV`]'s), changed by
+/// each byte read from the control socket [`CONTROL_ENV`] names, if any.
+async fn health_status(started: &str) -> tokio::sync::watch::Receiver<i32> {
+    let initial = match started {
+        health::NOT_SERVING => ServingStatus::NotServing,
+        health::UNKNOWN => ServingStatus::Unknown,
+        health::SERVICE_UNKNOWN => ServingStatus::ServiceUnknown,
+        _ => ServingStatus::Serving,
+    };
+    let (set, status) = tokio::sync::watch::channel(initial as i32);
+    let Ok(control) = std::env::var(CONTROL_ENV) else {
+        std::mem::forget(set);
+        return status;
+    };
+    let mut control = tokio::net::UnixStream::connect(control).await.unwrap();
+    tokio::spawn(async move {
+        use tokio::io::AsyncReadExt;
+        let mut byte = [0u8];
+        while control.read_exact(&mut byte).await.is_ok() {
+            let now = match byte[0] {
+                b'1' => ServingStatus::Serving,
+                _ => ServingStatus::NotServing,
+            };
+            let _ = set.send(now as i32);
+        }
+        std::future::pending::<()>().await;
+    });
+    status
+}
+
+fn serve(name: String, close_stdout: bool, flood: bool) -> ! {
     let socket = PathBuf::from(std::env::var(SOCKET_ENV).expect("the host sets ANGZARR_SOCKET"));
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async move {
@@ -275,54 +316,35 @@ fn serve(name: String, close_stdout: bool) -> ! {
         if close_stdout {
             close_stdout_for_good();
         }
+        if flood {
+            // More than a pipe holds, before anything is served: a child
+            // whose stdout is not drained blocks here.
+            let mut out = std::io::stdout().lock();
+            out.write_all(&[b'.'; FLOOD_BYTES]).unwrap();
+            writeln!(out).unwrap();
+            out.flush().unwrap();
+        }
         let fake = Fake { name };
         let kind = std::env::var(KIND_ENV).unwrap_or_default();
-        if kind == kind::UPCASTER {
-            let started = std::env::var(HEALTH_ENV).unwrap_or_default();
-            let initial = match started.as_str() {
-                health::NOT_SERVING => ServingStatus::NotServing,
-                health::UNKNOWN => ServingStatus::Unknown,
-                health::SERVICE_UNKNOWN => ServingStatus::ServiceUnknown,
-                _ => ServingStatus::Serving,
-            };
-            let (set, status) = tokio::sync::watch::channel(initial as i32);
-            if let Ok(control) = std::env::var(CONTROL_ENV) {
-                let mut control = tokio::net::UnixStream::connect(control).await.unwrap();
-                tokio::spawn(async move {
-                    use tokio::io::AsyncReadExt;
-                    let mut byte = [0u8];
-                    while control.read_exact(&mut byte).await.is_ok() {
-                        let now = if byte[0] == b'1' {
-                            ServingStatus::Serving
-                        } else {
-                            ServingStatus::NotServing
-                        };
-                        let _ = set.send(now as i32);
-                    }
-                    std::future::pending::<()>().await;
-                });
-            } else {
-                std::mem::forget(set);
-            }
-            let server =
-                tonic::transport::Server::builder().add_service(UpcasterServiceServer::new(fake));
-            let server = if started == health::NONE {
-                server
-            } else {
-                server.add_service(HealthServer::new(FakeHealth { status }))
-            };
-            server
-                .serve_with_incoming(UnixListenerStream::new(listener))
-                .await
-                .unwrap();
-            return;
-        }
-        let server = tonic::transport::Server::builder()
-            .add_service(ComponentServiceServer::new(fake.clone()));
+        let started = std::env::var(HEALTH_ENV).unwrap_or_default();
+        let health = match started.as_str() {
+            health::NONE => None,
+            _ => Some(HealthServer::new(FakeHealth {
+                status: health_status(&started).await,
+            })),
+        };
+        let server = tonic::transport::Server::builder().add_optional_service(health);
         let server = match kind.as_str() {
-            kind::POLICY => server.add_service(PolicyServiceServer::new(fake)),
-            kind::PROJECTOR => server.add_service(ProjectorServiceServer::new(fake)),
-            _ => server.add_service(CommandHandlerServiceServer::new(fake)),
+            kind::UPCASTER => server.add_service(UpcasterServiceServer::new(fake)),
+            kind::POLICY => server
+                .add_service(ComponentServiceServer::new(fake.clone()))
+                .add_service(PolicyServiceServer::new(fake)),
+            kind::PROJECTOR => server
+                .add_service(ComponentServiceServer::new(fake.clone()))
+                .add_service(ProjectorServiceServer::new(fake)),
+            _ => server
+                .add_service(ComponentServiceServer::new(fake.clone()))
+                .add_service(CommandHandlerServiceServer::new(fake)),
         };
         server
             .serve_with_incoming(UnixListenerStream::new(listener))
@@ -353,8 +375,8 @@ struct Fake {
     name: String,
 }
 
-/// An upcaster's gRPC health: the status it holds, for the server as a
-/// whole and for every service.
+/// A child's gRPC health: the status it holds, for the server as a whole
+/// and for every service.
 struct FakeHealth {
     status: tokio::sync::watch::Receiver<i32>,
 }

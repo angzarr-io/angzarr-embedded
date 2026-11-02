@@ -51,9 +51,12 @@ use angzarr_proto::v1::{reason_args as args, CoordinatorReason};
 /// (`COORDINATOR_REASON_HANDLER_UNAVAILABLE`, whose `domain` names the
 /// component's).
 pub mod causes {
-    /// No child is up: it exited and is being restarted, or, a sidecar,
-    /// its health does not report SERVING.
+    /// No child is up: it exited and is being restarted.
     pub const NOT_RUNNING: &str = "not-running";
+    /// Its child is running, but its gRPC health does not report SERVING:
+    /// it is not ready, or no longer (shutting down, a readiness probe
+    /// failing, its health watch ended).
+    pub const NOT_SERVING: &str = "not-serving";
     /// The call did not reach the child, or its answer did not come back.
     pub const TRANSPORT: &str = "transport";
     /// The child did not answer within the call timeout

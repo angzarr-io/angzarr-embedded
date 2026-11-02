@@ -162,3 +162,51 @@ async fn stdout_closing_first_is_closed() {
         Err(HandshakeError::Closed)
     );
 }
+
+/// A v1 handshake whose path is not UTF-8 is refused under its own key,
+/// the path given back without loss (its bytes escaped): it is never
+/// decoded into another path.
+#[tokio::test]
+async fn a_handshake_naming_a_path_that_is_not_utf8_is_refused() {
+    let (mut child, host) = tokio::io::duplex(1024);
+    child
+        .write_all(b"angzarr-handshake v1 unix:/tmp/caf\xe9.sock\n")
+        .await
+        .unwrap();
+    let mut host = BufReader::new(host);
+    assert_eq!(
+        read_handshake(&mut host, Duration::from_secs(5)).await,
+        Err(HandshakeError::PathNotUtf8 {
+            path: "/tmp/caf\\xe9.sock".to_string(),
+        })
+    );
+}
+
+/// A line that is not UTF-8 is classified by its first word all the same:
+/// one that is not a handshake is skipped, and a malformed one is refused
+/// with its bytes escaped, never decoded lossily.
+#[tokio::test]
+async fn a_line_that_is_not_utf8_is_classified_by_its_first_word() {
+    let (mut child, host) = tokio::io::duplex(1024);
+    child
+        .write_all(b"caf\xe9 starting\nangzarr-handshake v1 unix:/tmp/p.sock\n")
+        .await
+        .unwrap();
+    let mut host = BufReader::new(host);
+    assert_eq!(
+        read_handshake(&mut host, Duration::from_secs(5)).await,
+        Ok(Handshake {
+            socket: PathBuf::from("/tmp/p.sock"),
+        })
+    );
+    let (mut child, host) = tokio::io::duplex(1024);
+    child
+        .write_all(b"angzarr-handshake v2 unix:/tmp/caf\xe9.sock\n")
+        .await
+        .unwrap();
+    let mut host = BufReader::new(host);
+    assert_eq!(
+        read_handshake(&mut host, Duration::from_secs(5)).await,
+        Err(malformed("angzarr-handshake v2 unix:/tmp/caf\\xe9.sock"))
+    );
+}

@@ -6,6 +6,7 @@
 
 angzarr-embedded-host-handshake-timeout = no handshake within { $timeout_ms } ms
 angzarr-embedded-host-handshake-closed = stdout closed before a handshake
+angzarr-embedded-host-handshake-path-not-utf8 = the handshake names a socket path that is not UTF-8: { $path }
 angzarr-embedded-host-handshake-unreadable = stdout could not be read ({ $kind })
 angzarr-embedded-host-duplicate-domain = component "{ $domain }" is configured twice
 angzarr-embedded-host-no-launch = component "{ $domain }": language "{ $language }" has no default launch command; give one
@@ -16,6 +17,7 @@ angzarr-embedded-host-handshake = component "{ $domain }": { $cause }
 angzarr-embedded-host-connect = component "{ $domain }": could not connect to { $socket }
 angzarr-embedded-host-describe = component "{ $domain }": Describe failed with gRPC code { $grpc_code }
 angzarr-embedded-host-health = component "{ $domain }": its gRPC health watch failed with gRPC code { $grpc_code }
+angzarr-embedded-host-not-serving = component "{ $domain }" reported its health { $status } after its handshake, when a child handshakes only once it is SERVING
 angzarr-embedded-host-kind-mismatch = component "{ $domain }" is configured as a { $configured } but describes itself as { $described }
 angzarr-embedded-host-no-input = policy "{ $domain }" names no input domain in its descriptor
 angzarr-embedded-host-upcaster-no-domain = component "{ $domain }" is an upcaster that names no domain to upcast: give it `upcasts`
