@@ -61,17 +61,18 @@ fn refused_at(body: &str) -> (String, String) {
 }
 
 /// The file is `angzarr.yaml`, of kind `angzarr-host-config`, stamped
-/// `schema_version`, at version 2 (owner rulings, 2026-10-31: one reader,
+/// `schema_version`, at version 3 (owner rulings, 2026-10-31: one reader,
 /// `schema_version` an unsigned integer; 2026-11-01: supervision's health
-/// keys), reading every older version: 1, and 0, a file with no stamp.
+/// keys, then its reset window), reading every older version: 2, 1, and 0,
+/// a file with no stamp.
 #[test]
-fn the_file_is_angzarr_yaml_stamped_schema_version_at_version_2() {
+fn the_file_is_angzarr_yaml_stamped_schema_version_at_version_3() {
     assert_eq!(FILE_NAME, "angzarr.yaml");
     let loader = loader();
     assert_eq!(loader.kind(), "angzarr-host-config");
     assert_eq!(loader.key(), "schema_version");
-    assert_eq!((loader.oldest(), loader.current()), (0, 2));
-    assert_eq!(CURRENT, 2);
+    assert_eq!((loader.oldest(), loader.current()), (0, 3));
+    assert_eq!(CURRENT, 3);
     assert_eq!(loader.legacy_key(), None);
 }
 
@@ -96,13 +97,13 @@ fn the_fixtures_load() {
             loader().version_of(&doc).unwrap()
         })
         .collect();
-    assert_eq!(versions, [0, 1, 2].into());
+    assert_eq!(versions, [0, 1, 2, 3].into());
 }
 
 /// A current file loads, every key read as its comment says.
 #[test]
 fn a_current_file_loads() {
-    let documented = fixture("fixtures/v2-documented.yaml");
+    let documented = fixture("fixtures/v3-documented.yaml");
     let config = HostConfig::from_yaml(documented.input, documented.name).unwrap();
     let mut table = domain("table", "rust");
     table.expose = Expose::Loopback;
@@ -131,6 +132,7 @@ fn a_current_file_loads() {
                 health_check_deadline_ms: 500,
                 unhealthy_grace_ms: 10_000,
                 unhealthy_restart_limit: 5,
+                unhealthy_reset_ms: 300_000,
                 socket_dir: Some(PathBuf::from("/run/user/1000")),
                 ..Supervision::default()
             },
@@ -146,12 +148,12 @@ fn a_current_file_loads() {
 /// The least a file holds is its stamp: every mapping has its defaults.
 #[test]
 fn a_file_of_only_its_stamp_is_every_default() {
-    let minimal = fixture("fixtures/v2-minimal.yaml");
+    let minimal = fixture("fixtures/v3-minimal.yaml");
     assert_eq!(
         HostConfig::from_yaml(minimal.input, minimal.name),
         Ok(HostConfig::default())
     );
-    assert_eq!(stamped(""), "schema_version: 2\n");
+    assert_eq!(stamped(""), "schema_version: 3\n");
     assert_eq!(read(""), Ok(HostConfig::default()));
 }
 
@@ -191,6 +193,7 @@ fn the_defaults_are_the_kernels_and_the_hosts() {
             health_check_deadline_ms: 2_000,
             unhealthy_grace_ms: 15_000,
             unhealthy_restart_limit: 3,
+            unhealthy_reset_ms: 600_000,
             socket_dir: None,
         }
     );
@@ -200,12 +203,12 @@ fn the_defaults_are_the_kernels_and_the_hosts() {
 /// reader's code.
 #[test]
 fn a_newer_file_is_refused_with_the_readers_code() {
-    let problem = refused("schema_version: 3\ncomponent: []\n");
+    let problem = refused("schema_version: 4\ncomponent: []\n");
     assert_eq!(
         problem,
         LoadProblem::TooNew {
-            found: 3,
-            current: 2
+            found: 4,
+            current: 3
         }
     );
     assert_eq!(problem.code(), "angzarr-yaml-too-new");
@@ -471,6 +474,7 @@ fn a_version_1_file_loads_with_the_health_keys_defaulted() {
     let v2 = fixture("fixtures/v2-documented.yaml");
     let old = HostConfig::from_yaml(v1.input, v1.name).unwrap();
     let new = HostConfig::from_yaml(v2.input, v2.name).unwrap();
+    assert_eq!(new.supervision.unhealthy_reset_ms, 600_000);
     assert_eq!(
         old.supervision,
         Supervision {
@@ -484,5 +488,32 @@ fn a_version_1_file_loads_with_the_health_keys_defaulted() {
     assert_eq!(
         (old.components, old.store, old.policy, old.retry),
         (new.components, new.store, new.policy, new.retry)
+    );
+}
+
+/// A version-2 file loads as version 3: the reset window version 3 adds is
+/// left out, so it is its default (decision 14.67), and every other key
+/// reads as it did.
+#[test]
+fn a_version_2_file_loads_with_the_reset_window_defaulted() {
+    let v2 = fixture("fixtures/v2-documented.yaml");
+    let v3 = fixture("fixtures/v3-documented.yaml");
+    let old = HostConfig::from_yaml(v2.input, v2.name).unwrap();
+    let new = HostConfig::from_yaml(v3.input, v3.name).unwrap();
+    assert_eq!(
+        old.supervision,
+        Supervision {
+            unhealthy_reset_ms: 600_000,
+            ..new.supervision.clone()
+        }
+    );
+    assert_eq!(
+        (old.components, old.store, old.policy, old.retry),
+        (new.components, new.store, new.policy, new.retry)
+    );
+    assert_eq!(
+        HostConfig::from_yaml("schema_version: 2\n", "v2.yaml")
+            .map(|c| c.supervision.unhealthy_reset_ms),
+        Ok(600_000)
     );
 }

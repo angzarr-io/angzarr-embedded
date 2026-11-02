@@ -38,43 +38,60 @@ pub(crate) enum Verdict {
 }
 
 /// One component's health over its children's lives: how long its
-/// current child has been unhealthy, and how many children it has
-/// restarted for their health.
+/// current child has been unhealthy or healthy, and how many children it
+/// has restarted for their health since its count last cleared.
 pub(crate) struct Vitals {
     grace: Duration,
     limit: u32,
+    /// How long a child must be healthy, unbroken, for the count to clear
+    /// (decision 14.67).
+    reset: Duration,
     restarts: u32,
     /// When the current child was first seen unhealthy, unbroken since;
     /// `None` while it is healthy.
     unhealthy_since: Option<Duration>,
+    /// When the current child was first seen healthy, unbroken since;
+    /// `None` while it is unhealthy, or not yet seen.
+    healthy_since: Option<Duration>,
 }
 
 impl Vitals {
-    /// A component's, under `supervision`'s grace and restart limit, none
-    /// of its children restarted yet.
+    /// A component's, under `supervision`'s grace, restart limit and reset
+    /// window, none of its children restarted yet.
     pub(crate) fn new(supervision: &Supervision) -> Vitals {
         Vitals {
             grace: Duration::from_millis(supervision.unhealthy_grace_ms),
             limit: supervision.unhealthy_restart_limit,
+            reset: Duration::from_millis(supervision.unhealthy_reset_ms),
             restarts: 0,
             unhealthy_since: None,
+            healthy_since: None,
         }
     }
 
-    /// A child launched: healthy until it is seen otherwise. Its
-    /// component's restarts are counted on.
+    /// A child launched: healthy until it is seen otherwise, its healthy
+    /// window not begun until it is seen so. Its component's restarts are
+    /// counted on.
     pub(crate) fn launched(&mut self) {
         self.unhealthy_since = None;
+        self.healthy_since = None;
     }
 
     /// The current child's health seen `serving` (or not) at `now`: up,
-    /// down, or, unhealthy since at least the grace before `now`, restarted
-    /// (each restart counted) or, past the restart limit, given up.
+    /// its component's restart count cleared once it has been seen healthy
+    /// for the whole reset window, unbroken; down; or, unhealthy since at
+    /// least the grace before `now`, restarted (each restart counted) or,
+    /// past the restart limit, given up.
     pub(crate) fn seen(&mut self, serving: bool, now: Duration) -> Verdict {
         if serving {
             self.unhealthy_since = None;
+            let since = *self.healthy_since.get_or_insert(now);
+            if now.saturating_sub(since) >= self.reset {
+                self.restarts = 0;
+            }
             return Verdict::Up;
         }
+        self.healthy_since = None;
         let since = *self.unhealthy_since.get_or_insert(now);
         if now.saturating_sub(since) < self.grace {
             return Verdict::Down;

@@ -1071,7 +1071,14 @@ struct OnTheClock {
 
 impl OnTheClock {
     fn start(player: ComponentConfig, limit: u32) -> OnTheClock {
+        OnTheClock::resetting(player, limit, Duration::from_secs(3_600))
+    }
+
+    /// [`OnTheClock::start`], its restart count clearing after `reset`
+    /// healthy.
+    fn resetting(player: ComponentConfig, limit: u32, reset: Duration) -> OnTheClock {
         let mut config = config(vec![player]);
+        config.supervision.unhealthy_reset_ms = reset.as_millis() as u64;
         config.supervision.health_check_interval_ms = INTERVAL.as_millis() as u64;
         config.supervision.health_check_deadline_ms = DEADLINE.as_millis() as u64;
         config.supervision.unhealthy_grace_ms = GRACE_MS;
@@ -1280,6 +1287,39 @@ fn past_its_restart_limit_a_child_stays_down() {
         supervised.host.shutdown(),
         [("player".to_string(), ChildExit::NotRunning)]
     );
+}
+
+/// A child healthy for the whole reset window, unbroken, clears its
+/// component's restart count: wedged again past its grace, it is restarted
+/// once more, not given up (C-0769; decision 14.67). The supervisor's clock
+/// is the test's.
+#[test]
+fn a_child_healthy_for_the_reset_window_clears_the_restart_count() {
+    use crate::vitals::Verdict;
+    let wedge = scratch("reset");
+    std::fs::write(&wedge, "").unwrap();
+    let supervised = OnTheClock::resetting(
+        with(
+            player(mode::SERVE),
+            &[(fake_child::CHECK_HANG_ENV, wedge.to_str().unwrap())],
+        ),
+        1,
+        INTERVAL * 3,
+    );
+    assert_eq!(supervised.check(false), Verdict::Down);
+    assert_eq!(supervised.check(false), Verdict::Down);
+    assert_eq!(supervised.check(false), Verdict::Restart);
+    supervised.came_up(2);
+    std::fs::remove_file(&wedge).unwrap();
+    for _ in 0..4 {
+        assert_eq!(supervised.check(true), Verdict::Up);
+    }
+    std::fs::write(&wedge, "").unwrap();
+    assert_eq!(supervised.check(false), Verdict::Down);
+    assert_eq!(supervised.check(false), Verdict::Down);
+    assert_eq!(supervised.check(false), Verdict::Restart);
+    std::fs::remove_file(&wedge).unwrap();
+    drop(supervised.host.shutdown());
 }
 
 /// A command in flight on a child that is restarted fails retryably, and

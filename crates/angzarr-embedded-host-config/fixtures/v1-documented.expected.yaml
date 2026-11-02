@@ -1,6 +1,6 @@
-# fixtures/v1-documented.yaml at version 2: the step adds no key, so
+# fixtures/v1-documented.yaml at version 3: the step adds no key, so
 # each health key is its default.
-schema_version: 2
+schema_version: 3
 
 component:
   - name: table

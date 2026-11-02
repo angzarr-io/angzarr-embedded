@@ -7,7 +7,7 @@
 //! generated code to it. Both read it here, through one [`loader`].
 //!
 //! ```yaml
-//! schema_version: 2
+//! schema_version: 3
 //! component:
 //!   - name: table
 //!     kind: domain              # required: domain, policy, projector or upcaster
@@ -42,7 +42,9 @@
 //!   health_check_deadline_ms: 2000  # answered SERVING within this, or it is
 //!                                   # unhealthy;
 //!   unhealthy_grace_ms: 15000       # unhealthy this long, it is restarted,
-//!   unhealthy_restart_limit: 3      # at most this often, then left down
+//!   unhealthy_restart_limit: 3      # at most this often, then left down,
+//!   unhealthy_reset_ms: 600000      # the count clearing once a child is
+//!                                   # healthy this long, unbroken
 //! store:
 //!   path: angzarr.db            # SQLite; `in_memory: true` for none on disk
 //! policy:
@@ -105,7 +107,7 @@ pub const KIND: &str = "angzarr-host-config";
 pub const KEY: &str = angzarr_yaml::versioned::DEFAULT_KEY;
 
 /// The version this build reads and writes.
-pub const CURRENT: u32 = 2;
+pub const CURRENT: u32 = 3;
 
 /// The config's loader: kind [`KIND`], stamped under [`KEY`], at version
 /// [`CURRENT`], with a step from every older version it still reads:
@@ -120,10 +122,14 @@ pub const CURRENT: u32 = 2;
 ///   file is a version-2 file left at its defaults, and the stamp is what
 ///   tells a version-1 reader to refuse a file that may give them (as too
 ///   new, never as an unknown key).
+/// - **2 to 3**: `supervision` gains `unhealthy_reset_ms`, the healthy
+///   window after which a component's restart count clears (decision
+///   14.67), its default left in place as version 2's health keys were.
 pub fn loader() -> Loader {
     Migrations::new(KIND, CURRENT)
         .step(0, same_shape)
         .step(1, same_shape)
+        .step(2, same_shape)
         .build()
         .expect("the host config's migration chain is whole")
 }
@@ -156,11 +162,21 @@ pub const FIXTURES: &[Fixture<'static>] = &[
     Fixture {
         name: "fixtures/v2-documented.yaml",
         input: include_str!("../fixtures/v2-documented.yaml"),
-        expected: None,
+        expected: Some(include_str!("../fixtures/v2-documented.expected.yaml")),
     },
     Fixture {
         name: "fixtures/v2-minimal.yaml",
         input: include_str!("../fixtures/v2-minimal.yaml"),
+        expected: Some(include_str!("../fixtures/v2-minimal.expected.yaml")),
+    },
+    Fixture {
+        name: "fixtures/v3-documented.yaml",
+        input: include_str!("../fixtures/v3-documented.yaml"),
+        expected: None,
+    },
+    Fixture {
+        name: "fixtures/v3-minimal.yaml",
+        input: include_str!("../fixtures/v3-minimal.yaml"),
         expected: None,
     },
 ];
@@ -444,6 +460,10 @@ pub struct Supervision {
     /// restarted for its health). A child that exits by itself is
     /// restarted outside this limit.
     pub unhealthy_restart_limit: u32,
+    /// How long a component's child must be healthy, unbroken, for its
+    /// restarts for its health to stop counting against
+    /// `unhealthy_restart_limit` (the count clears; decision 14.67).
+    pub unhealthy_reset_ms: u64,
     /// The directory the host puts the children's sockets in. When absent,
     /// `$XDG_RUNTIME_DIR` if it is set, absolute and short enough, else
     /// `/tmp`: never `$TMPDIR`, which may be deep. A Unix socket's path is
@@ -465,6 +485,7 @@ impl Default for Supervision {
             health_check_deadline_ms: 2_000,
             unhealthy_grace_ms: 15_000,
             unhealthy_restart_limit: 3,
+            unhealthy_reset_ms: 600_000,
             socket_dir: None,
         }
     }

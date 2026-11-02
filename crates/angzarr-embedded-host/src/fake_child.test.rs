@@ -252,6 +252,7 @@ pub(crate) fn config(domains: Vec<ComponentConfig>) -> HostConfig {
             health_check_deadline_ms: 3_600_000,
             unhealthy_grace_ms: 3_600_000,
             unhealthy_restart_limit: 3,
+            unhealthy_reset_ms: 3_600_000,
             socket_dir: None,
         },
     }

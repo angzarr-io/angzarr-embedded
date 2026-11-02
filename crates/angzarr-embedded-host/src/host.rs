@@ -25,9 +25,10 @@
 //! it is described; an upcaster sidecar, which is not described, may come
 //! up down. A child down for `unhealthy_grace_ms`, unbroken, is stopped
 //! at the first check (or watch report) past it and launched again at
-//! once, up to `unhealthy_restart_limit` times for its component; past
-//! that, it is stopped and none launched, its calls retryable (cause
-//! `not-running`) until the host ends. A call in flight on a child that
+//! once, up to `unhealthy_restart_limit` times for its component, a count
+//! that clears once its child has been healthy for `unhealthy_reset_ms`,
+//! unbroken (decision 14.67); past the limit, it is stopped and none
+//! launched, its calls retryable (cause `not-running`) until the host ends. A call in flight on a child that
 //! is stopped fails retryably, and is never sent again.
 //!
 //! The generated `main.rs` calls [`crate::run`], which holds the
