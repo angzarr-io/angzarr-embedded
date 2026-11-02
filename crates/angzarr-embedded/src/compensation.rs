@@ -115,7 +115,13 @@ impl<S, E, R> Compensation<S, E, R> {
         U: DomainMessage,
         F: 'static,
     {
-        let _ = (TypeName::of::<U::Wire>(), D::command_types());
+        let target = TypeName::of::<U::Wire>().full_name();
+        if D::command_types().contains(&target) {
+            self.warnings.push(UndoTargetsCommand {
+                step: name,
+                command: target,
+            });
+        }
         let undo = Arc::new(undo);
         let replied = Arc::clone(&undo);
         self.steps.push(Step {
@@ -138,12 +144,9 @@ impl<S, E, R> Compensation<S, E, R> {
     /// undo of each step the state records done, newest first (the
     /// reverse of their registration). One handling's events.
     pub fn rollback(&self, state: &S, reason: R) -> Vec<E> {
-        let _ = (state, reason, &self.failed, &self.rolled_back);
-        let _ = (
-            &self.compensation_failed,
-            self.steps.iter().map(Step::touch).count(),
-        );
-        todo!("rollback")
+        let failed = (self.failed)(state, reason);
+        let undos = self.steps.iter().rev().filter_map(|s| (s.recorded)(state));
+        std::iter::once(failed).chain(undos).collect()
     }
 
     /// The events recording `reply`, the event that records a step done:
@@ -153,22 +156,24 @@ impl<S, E, R> Compensation<S, E, R> {
     where
         F: Into<E> + 'static,
     {
-        let _ = (state, reply);
-        todo!("reply")
+        let undo = if (self.rolled_back)(state) {
+            let forward = TypeId::of::<F>();
+            self.steps
+                .iter()
+                .filter(|s| s.forward == forward)
+                .find_map(|s| (s.replied)(&reply))
+        } else {
+            None
+        };
+        std::iter::once(reply.into()).chain(undo).collect()
     }
 
     /// The event recording that the undo becoming `U` was refused: its
     /// step's CompensationFailed; `None` when no step's undo becomes `U`.
     pub fn undo_refused<U: 'static>(&self, state: &S) -> Option<E> {
-        let _ = state;
-        todo!("undo_refused")
-    }
-}
-
-impl<S, E> Step<S, E> {
-    /// Red: not yet read.
-    fn touch(&self) -> (TypeId, TypeId, &Recorded<S, E>, &Replied<E>) {
-        (self.forward, self.target, &self.recorded, &self.replied)
+        let target = TypeId::of::<U>();
+        let step = self.steps.iter().find(|s| s.target == target)?;
+        Some((self.compensation_failed)(state, step.name))
     }
 }
 

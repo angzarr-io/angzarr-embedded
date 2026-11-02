@@ -22,7 +22,8 @@ itself.
   `Diagnostic` with a stable code and named args), **ingest** turns a fact
   into events, and **apply** folds an event into the state. No state is
   ever stored: every state is a fold of a stream, resumed from a snapshot
-  at most. A process manager is a domain too.
+  at most. A process manager is a domain too; its rollback, each step
+  paired in code with its undo, is `markup::Compensation`'s.
 - A stream is angzarr's: a `Cover` (domain, edition, root), its events
   `EventPage`s with angzarr's `EventMeta`, which the kernel stamps.
 - A **policy** carries one domain's events into another's commands.

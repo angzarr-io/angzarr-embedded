@@ -34,7 +34,11 @@
 //!   `#[on_refused]` handler reads it, and a refusal as a translating
 //!   policy's callback reads it.
 //! - [`ProcessManager`]: what sets a process manager, a domain, apart: its
-//!   starting inputs.
+//!   starting inputs. [`Compensation`] its rollback (angzarr decision
+//!   14.74): each step paired in code with its undo, the failed event and
+//!   the completed steps' undos, newest first, a late reply undone at once,
+//!   an undo that becomes a command warned of ([`UndoTargetsCommand`]) and
+//!   one refused recorded as CompensationFailed.
 //! - [`Routed`]: a marked-up domain's handlers, registered on
 //!   angzarr-router's table.
 //! - [`Policy`], [`Commands`] and [`PolicyContext`]: a policy, its output
