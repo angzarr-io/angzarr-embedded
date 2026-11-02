@@ -61,34 +61,49 @@ fn refused_at(body: &str) -> (String, String) {
 }
 
 /// The file is `angzarr.yaml`, of kind `angzarr-host-config`, stamped
-/// `schema_version`, at version 1 (owner rulings, 2026-10-31: one reader,
-/// `schema_version` an unsigned integer).
+/// `schema_version`, at version 2 (owner rulings, 2026-10-31: one reader,
+/// `schema_version` an unsigned integer; 2026-11-01: supervision's health
+/// keys), reading every older version: 1, and 0, a file with no stamp.
 #[test]
-fn the_file_is_angzarr_yaml_stamped_schema_version_at_version_1() {
+fn the_file_is_angzarr_yaml_stamped_schema_version_at_version_2() {
     assert_eq!(FILE_NAME, "angzarr.yaml");
     let loader = loader();
     assert_eq!(loader.kind(), "angzarr-host-config");
     assert_eq!(loader.key(), "schema_version");
-    // No older generation, so no step: the reader itself reads a file with
-    // no stamp as current.
-    assert_eq!((loader.oldest(), loader.current()), (1, 1));
-    assert_eq!(CURRENT, 1);
+    assert_eq!((loader.oldest(), loader.current()), (0, 2));
+    assert_eq!(CURRENT, 2);
     assert_eq!(loader.legacy_key(), None);
 }
 
-/// Every fixture loads to itself: each is at the current version.
+/// The fixture named `name`.
+fn fixture(name: &str) -> &'static Fixture<'static> {
+    FIXTURES
+        .iter()
+        .find(|f| f.name == name)
+        .unwrap_or_else(|| panic!("no fixture {name}"))
+}
+
+/// Every fixture loads to what it must: the current ones to themselves,
+/// an older one to its expected current text. There is one of every
+/// version the loader reads.
 #[test]
 fn the_fixtures_load() {
     loader().assert_fixtures(FIXTURES);
-    assert!(FIXTURES
+    let versions: std::collections::BTreeSet<u32> = FIXTURES
         .iter()
-        .all(|f| f.input.contains("\nschema_version: 1\n")));
+        .map(|f| {
+            let doc = angzarr_yaml::parse(f.input).unwrap();
+            loader().version_of(&doc).unwrap()
+        })
+        .collect();
+    assert_eq!(versions, [0, 1, 2].into());
 }
 
 /// A current file loads, every key read as its comment says.
 #[test]
 fn a_current_file_loads() {
-    let config = HostConfig::from_yaml(FIXTURES[0].input, FIXTURES[0].name).unwrap();
+    let documented = fixture("fixtures/v2-documented.yaml");
+    let config = HostConfig::from_yaml(documented.input, documented.name).unwrap();
     let mut table = domain("table", "rust");
     table.expose = Expose::Loopback;
     let mut policy = domain("policy-table-player", "rust");
@@ -112,6 +127,10 @@ fn a_current_file_loads() {
             components: vec![table, policy, player, table_player, upcaster, dealer],
             supervision: Supervision {
                 handshake_timeout_ms: 10_000,
+                health_check_interval_ms: 1_000,
+                health_check_deadline_ms: 500,
+                unhealthy_grace_ms: 10_000,
+                unhealthy_restart_limit: 5,
                 socket_dir: Some(PathBuf::from("/run/user/1000")),
                 ..Supervision::default()
             },
@@ -127,11 +146,12 @@ fn a_current_file_loads() {
 /// The least a file holds is its stamp: every mapping has its defaults.
 #[test]
 fn a_file_of_only_its_stamp_is_every_default() {
+    let minimal = fixture("fixtures/v2-minimal.yaml");
     assert_eq!(
-        HostConfig::from_yaml(FIXTURES[1].input, FIXTURES[1].name),
+        HostConfig::from_yaml(minimal.input, minimal.name),
         Ok(HostConfig::default())
     );
-    assert_eq!(stamped(""), "schema_version: 1\n");
+    assert_eq!(stamped(""), "schema_version: 2\n");
     assert_eq!(read(""), Ok(HostConfig::default()));
 }
 
@@ -167,6 +187,10 @@ fn the_defaults_are_the_kernels_and_the_hosts() {
             shutdown_grace_ms: 5_000,
             terminate_grace_ms: 2_000,
             call_timeout_ms: 30_000,
+            health_check_interval_ms: 5_000,
+            health_check_deadline_ms: 2_000,
+            unhealthy_grace_ms: 15_000,
+            unhealthy_restart_limit: 3,
             socket_dir: None,
         }
     );
@@ -176,27 +200,27 @@ fn the_defaults_are_the_kernels_and_the_hosts() {
 /// reader's code.
 #[test]
 fn a_newer_file_is_refused_with_the_readers_code() {
-    let problem = refused("schema_version: 2\ncomponent: []\n");
+    let problem = refused("schema_version: 3\ncomponent: []\n");
     assert_eq!(
         problem,
         LoadProblem::TooNew {
-            found: 2,
-            current: 1
+            found: 3,
+            current: 2
         }
     );
     assert_eq!(problem.code(), "angzarr-yaml-too-new");
 }
 
-/// A file with no stamp is the oldest generation (the config-versioning
-/// rule), and the host config has none older than version 1, its first
-/// versioned shape, which is the shape the unstamped files already had:
-/// so it loads as the current version, as the same file stamped does. An
-/// empty or comment-only file is this case: every default.
+/// A file with no stamp is the oldest generation, version 0 (the
+/// config-versioning rule), which has version 1's shape: it loads through
+/// every step, as the same file stamped does, every key it leaves out its
+/// default, the supervision's health keys among them. An empty or
+/// comment-only file is this case: every default.
 #[test]
-fn a_file_with_no_stamp_loads_as_the_current_version() {
+fn a_file_with_no_stamp_loads_through_every_step() {
     let body = "component:\n  - name: table\n    kind: domain\n    language: rust\n";
     let doc = angzarr_yaml::parse(body).unwrap();
-    assert_eq!(loader().version_of(&doc), Ok(CURRENT));
+    assert_eq!(loader().version_of(&doc), Ok(0));
     let stamped_config = read(body).unwrap();
     assert_eq!(stamped_config.components, [domain("table", "rust")]);
     assert_eq!(HostConfig::from_yaml(body, FILE_NAME), Ok(stamped_config));
@@ -435,5 +459,30 @@ fn the_store_mapping_names_the_file_or_memory() {
     assert_eq!(
         read("store:\n  path: data/app.db\n").map(|c| c.store.path),
         Ok(PathBuf::from("data/app.db"))
+    );
+}
+
+/// A version-1 file loads as version 2: the health keys version 2 adds
+/// are left out, so each is its default, and every other key reads as it
+/// did.
+#[test]
+fn a_version_1_file_loads_with_the_health_keys_defaulted() {
+    let v1 = fixture("fixtures/v1-documented.yaml");
+    let v2 = fixture("fixtures/v2-documented.yaml");
+    let old = HostConfig::from_yaml(v1.input, v1.name).unwrap();
+    let new = HostConfig::from_yaml(v2.input, v2.name).unwrap();
+    assert_eq!(
+        old.supervision,
+        Supervision {
+            health_check_interval_ms: 5_000,
+            health_check_deadline_ms: 2_000,
+            unhealthy_grace_ms: 15_000,
+            unhealthy_restart_limit: 3,
+            ..new.supervision.clone()
+        }
+    );
+    assert_eq!(
+        (old.components, old.store, old.policy, old.retry),
+        (new.components, new.store, new.policy, new.retry)
     );
 }

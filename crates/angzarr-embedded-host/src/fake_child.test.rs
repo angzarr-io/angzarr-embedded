@@ -222,6 +222,12 @@ pub(crate) fn config(domains: Vec<ComponentConfig>) -> HostConfig {
             shutdown_grace_ms: 3_000,
             terminate_grace_ms: 3_000,
             call_timeout_ms: 20_000,
+            // No test waits for a check: one that is about checks holds
+            // the supervisor's clock (`Hooks::clock`) and moves it itself.
+            health_check_interval_ms: 3_600_000,
+            health_check_deadline_ms: 3_600_000,
+            unhealthy_grace_ms: 3_600_000,
+            unhealthy_restart_limit: 3,
             socket_dir: None,
         },
     }
