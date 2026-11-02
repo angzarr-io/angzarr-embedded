@@ -24,7 +24,7 @@
 
 use std::fmt;
 
-use angzarr_diagnostic::{Arg, Diagnostic};
+use angzarr_diagnostic::{code, Arg, Diagnostic};
 use angzarr_proto::ids::{self, UuidError};
 use angzarr_proto::v1::{
     command_page, CommandBook, CommandPage, ConflictResolution, Cover, EventRef, FactOrigin,
@@ -116,41 +116,41 @@ impl fmt::Display for Malformed {
 impl Diagnostic for Malformed {
     fn code(&self) -> &str {
         match self {
-            Malformed::NoCover => "angzarr-embedded-malformed-no-cover",
-            Malformed::UnknownDomain { .. } => "angzarr-embedded-malformed-unknown-domain",
-            Malformed::NoRoot => "angzarr-embedded-malformed-no-root",
-            Malformed::BadRoot { .. } => "angzarr-embedded-malformed-bad-root",
-            Malformed::EmptyEdition => "angzarr-embedded-malformed-empty-edition",
-            Malformed::NoPage => "angzarr-embedded-malformed-no-page",
-            Malformed::NoBody => "angzarr-embedded-malformed-no-body",
-            Malformed::NoPayload => "angzarr-embedded-malformed-no-payload",
-            Malformed::BadCommandId { .. } => "angzarr-embedded-malformed-bad-command-id",
-            Malformed::BadCorrelationId { .. } => "angzarr-embedded-malformed-bad-correlation-id",
-            Malformed::CausationFromOutside => "angzarr-embedded-malformed-causation-from-outside",
+            Malformed::NoCover => code!("malformed-no-cover"),
+            Malformed::UnknownDomain { .. } => code!("malformed-unknown-domain"),
+            Malformed::NoRoot => code!("malformed-no-root"),
+            Malformed::BadRoot { .. } => code!("malformed-bad-root"),
+            Malformed::EmptyEdition => code!("malformed-empty-edition"),
+            Malformed::NoPage => code!("malformed-no-page"),
+            Malformed::NoBody => code!("malformed-no-body"),
+            Malformed::NoPayload => code!("malformed-no-payload"),
+            Malformed::BadCommandId { .. } => code!("malformed-bad-command-id"),
+            Malformed::BadCorrelationId { .. } => code!("malformed-bad-correlation-id"),
+            Malformed::CausationFromOutside => code!("malformed-causation-from-outside"),
             Malformed::IdOnPolicyCommand { .. } => {
-                "angzarr-embedded-malformed-id-on-policy-command"
+                code!("malformed-id-on-policy-command")
             }
-            Malformed::FactFromPolicy => "angzarr-embedded-malformed-fact-from-policy",
+            Malformed::FactFromPolicy => code!("malformed-fact-from-policy"),
             Malformed::HandlingOnPolicyCommand => {
-                "angzarr-embedded-malformed-handling-on-policy-command"
+                code!("malformed-handling-on-policy-command")
             }
-            Malformed::BadTrigger(_) => "angzarr-embedded-malformed-bad-trigger",
-            Malformed::FactWithoutOrigin => "angzarr-embedded-malformed-fact-without-origin",
-            Malformed::EmptyExternalId => "angzarr-embedded-malformed-empty-external-id",
+            Malformed::BadTrigger(_) => code!("malformed-bad-trigger"),
+            Malformed::FactWithoutOrigin => code!("malformed-fact-without-origin"),
+            Malformed::EmptyExternalId => code!("malformed-empty-external-id"),
             Malformed::CommandWithFactOrigin => {
-                "angzarr-embedded-malformed-command-with-fact-origin"
+                code!("malformed-command-with-fact-origin")
             }
             Malformed::FactCommandIdNotDerived => {
-                "angzarr-embedded-malformed-fact-command-id-not-derived"
+                code!("malformed-fact-command-id-not-derived")
             }
-            Malformed::HandlingOnFact => "angzarr-embedded-malformed-handling-on-fact",
+            Malformed::HandlingOnFact => code!("malformed-handling-on-fact"),
             Malformed::UnknownConflictResolution { .. } => {
-                "angzarr-embedded-malformed-unknown-conflict-resolution"
+                code!("malformed-unknown-conflict-resolution")
             }
             Malformed::UnsupportedConflictResolution { .. } => {
-                "angzarr-embedded-malformed-unsupported-conflict-resolution"
+                code!("malformed-unsupported-conflict-resolution")
             }
-            Malformed::RefusalMisaddressed => "angzarr-embedded-malformed-refusal-misaddressed",
+            Malformed::RefusalMisaddressed => code!("malformed-refusal-misaddressed"),
         }
     }
 

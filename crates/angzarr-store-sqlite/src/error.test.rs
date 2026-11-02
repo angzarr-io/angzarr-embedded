@@ -1,6 +1,7 @@
 use angzarr_ports::{Arg, StoreError};
 
 use super::{causes, damaged, unavailable, Damage, SqlError};
+use angzarr_ports::angzarr_diagnostic::code;
 
 /// An error's `Display` is its code, then its args (` name=value` each),
 /// never English of angzarr's (decision 14.37): text is rendered only
@@ -16,7 +17,10 @@ fn an_error_displays_its_code_and_args_never_english() {
             detail: "Permission denied".to_string()
         }
         .to_string(),
-        "angzarr-store-sqlite-backup-uncreatable path=/p/x ext_err_txt=\"Permission denied\""
+        concat!(
+            code!("backup-uncreatable"),
+            " path=/p/x ext_err_txt=\"Permission denied\""
+        )
     );
     let unavailable = SqlError::Unavailable {
         errno: None,
@@ -25,7 +29,7 @@ fn an_error_displays_its_code_and_args_never_english() {
     .to_string();
     assert_eq!(
         unavailable,
-        "angzarr-store-sqlite-driver-failed ext_err_txt=\"disk I/O error\""
+        concat!(code!("driver-failed"), " ext_err_txt=\"disk I/O error\"")
     );
     assert!(
         !unavailable.contains("the database failed"),
@@ -36,28 +40,31 @@ fn an_error_displays_its_code_and_args_never_english() {
             detail: "bad \"utf8\" at C:\\db".to_string()
         }
         .to_string(),
-        "angzarr-store-sqlite-undecodable ext_err_txt=\"bad \\\"utf8\\\" at C:\\\\db\""
+        concat!(
+            code!("undecodable"),
+            " ext_err_txt=\"bad \\\"utf8\\\" at C:\\\\db\""
+        )
     );
     assert_eq!(
         SqlError::Undecodable {
             detail: String::new()
         }
         .to_string(),
-        "angzarr-store-sqlite-undecodable ext_err_txt=\"\""
+        concat!(code!("undecodable"), " ext_err_txt=\"\"")
     );
     assert_eq!(
         SqlError::Undecodable {
             detail: "k=v".to_string()
         }
         .to_string(),
-        "angzarr-store-sqlite-undecodable ext_err_txt=\"k=v\""
+        concat!(code!("undecodable"), " ext_err_txt=\"k=v\"")
     );
     assert_eq!(
         SqlError::Undecodable {
             detail: "plain".to_string()
         }
         .to_string(),
-        "angzarr-store-sqlite-undecodable ext_err_txt=plain"
+        concat!(code!("undecodable"), " ext_err_txt=plain")
     );
 }
 
@@ -69,9 +76,12 @@ fn damage_shows_the_first_problem_and_counts_the_rest() {
     let one = damage(&["row 1 missing from index i"]);
     assert_eq!(
         one.to_string(),
-        "angzarr-store-sqlite-damaged first=\"row 1 missing from index i\" more=0"
+        concat!(
+            code!("damaged"),
+            " first=\"row 1 missing from index i\" more=0"
+        )
     );
-    assert_eq!(one.code(), "angzarr-store-sqlite-damaged");
+    assert_eq!(one.code(), code!("damaged"));
     let args = one.args();
     assert_eq!(args.len(), 2);
     assert_eq!(
@@ -83,13 +93,13 @@ fn damage_shows_the_first_problem_and_counts_the_rest() {
     let two = damage(&["a", "b"]);
     assert_eq!(
         two.to_string(),
-        "angzarr-store-sqlite-damaged first=a more=1"
+        concat!(code!("damaged"), " first=a more=1")
     );
     assert_eq!(two.args()[1], ("more", Arg::Uint(1)));
     let three = damage(&["a", "b", "c"]);
     assert_eq!(
         three.to_string(),
-        "angzarr-store-sqlite-damaged first=a more=2"
+        concat!(code!("damaged"), " first=a more=2")
     );
     assert_eq!(three.problems(), ["a", "b", "c"]);
 }
@@ -107,7 +117,7 @@ fn a_failure_reaches_the_ports_with_the_drivers_code_and_text() {
     let StoreError::Unavailable(cause) = StoreError::Unavailable(locked.cause()) else {
         panic!("unavailable");
     };
-    assert_eq!(cause.code, "angzarr-store-sqlite-unavailable");
+    assert_eq!(cause.code, code!("unavailable"));
     assert_eq!(
         cause.args,
         [
@@ -117,13 +127,17 @@ fn a_failure_reaches_the_ports_with_the_drivers_code_and_text() {
     );
     assert_eq!(
         locked.to_string(),
-        "angzarr-store-sqlite-unavailable errno=5 ext_err_txt=\"database is locked\""
+        concat!(
+            code!("unavailable"),
+            " errno=5 ext_err_txt=\"database is locked\""
+        )
     );
     let StoreError::Unavailable(cause) = unavailable("pool timed out") else {
         panic!("unavailable");
     };
     assert_eq!(
-        cause.code, "angzarr-store-sqlite-driver-failed",
+        cause.code,
+        code!("driver-failed"),
         "the driver failed before SQLite answered: a key of its own, whose \
          message names no errno"
     );
@@ -135,7 +149,7 @@ fn a_failure_reaches_the_ports_with_the_drivers_code_and_text() {
     let StoreError::Unavailable(cause) = damaged(26, "file is not a database".to_string()) else {
         panic!("unavailable");
     };
-    assert_eq!(cause.code, "angzarr-store-sqlite-damaged-file");
+    assert_eq!(cause.code, code!("damaged-file"));
     assert_eq!(
         cause.args,
         [
@@ -154,14 +168,14 @@ fn every_cause_has_this_crates_code_once() {
     assert_eq!(
         codes,
         [
-            "angzarr-store-sqlite-unavailable",
-            "angzarr-store-sqlite-driver-failed",
-            "angzarr-store-sqlite-undecodable",
-            "angzarr-store-sqlite-backup-uncreatable",
-            "angzarr-store-sqlite-damaged-file",
-            "angzarr-store-sqlite-no-data-version",
-            "angzarr-store-sqlite-bad-root",
-            "angzarr-store-sqlite-bad-dead-letter-place",
+            code!("unavailable"),
+            code!("driver-failed"),
+            code!("undecodable"),
+            code!("backup-uncreatable"),
+            code!("damaged-file"),
+            code!("no-data-version"),
+            code!("bad-root"),
+            code!("bad-dead-letter-place"),
         ]
     );
     assert_eq!(

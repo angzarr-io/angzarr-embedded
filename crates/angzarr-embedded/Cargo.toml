@@ -59,5 +59,10 @@ angzarr-embedded-macros = { path = "../angzarr-embedded-macros" }
 angzarr-store-sqlite = { path = "../angzarr-store-sqlite" }
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
 
+# The build writes the catalog's source under the crate's name
+# (angzarr_diagnostic::build): no catalog spells its crate's name.
+[build-dependencies]
+angzarr-diagnostic = { git = "https://github.com/angzarr-io/angzarr", rev = "4d7ef3573aad114d789a9c30f9cd702d7bb5c213", features = ["build"] }
+
 [lints]
 workspace = true

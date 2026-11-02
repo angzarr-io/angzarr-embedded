@@ -62,10 +62,11 @@ pub use sqlite::{SqliteRead, SqliteStore, BUSY_TIMEOUT};
 
 /// This crate's en-US Fluent catalog, its name first: what a dependent
 /// embeds to render this crate's errors. The text of
-/// `crates/angzarr-store-sqlite/locales/en-US/angzarr-store-sqlite.ftl`.
+/// `locales/en-US/messages.ftl`, its ids under the crate's package name
+/// (`angzarr_diagnostic::build`).
 pub const EN_US: (&str, &str) = (
-    "angzarr-store-sqlite",
-    include_str!("../locales/en-US/angzarr-store-sqlite.ftl"),
+    env!("CARGO_PKG_NAME"),
+    include_str!(concat!(env!("OUT_DIR"), "/en-US.ftl")),
 );
 
 /// What differs between SQL backends in how a stream is keyed.

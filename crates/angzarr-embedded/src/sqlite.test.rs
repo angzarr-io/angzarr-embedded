@@ -225,8 +225,9 @@ fn database() -> Database {
             .duration_since(UNIX_EPOCH)
             .map_or(0, |since| since.as_nanos());
         format!(
-            "angzarr-embedded-kernel-on-sqlite-{}-{nanos}-{}",
+            concat!(env!("CARGO_PKG_NAME"), "-kernel-on-sqlite-{}-{}-{}"),
             std::process::id(),
+            nanos,
             RUN.fetch_add(1, Ordering::Relaxed)
         )
     })

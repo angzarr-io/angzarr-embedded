@@ -392,22 +392,45 @@ fn every_forwarded_store_error_is_sampled() {
         .iter()
         .map(|d| d.code().to_string())
         .collect();
-    for code in [
-        "angzarr-ports-store-conflict",
-        "angzarr-ports-store-discontinuous",
-        "angzarr-ports-store-malformed-stream",
-        "angzarr-ports-store-unavailable",
-        "angzarr-ports-store-unreadable",
-        "angzarr-ports-store-edition-not-forked",
-        "angzarr-ports-edition-not-found",
-        "angzarr-ports-store-newer-than-build",
-        "angzarr-ports-store-migration-failed",
-        "angzarr-ports-store-migration-changed",
-        "angzarr-ports-store-migration-missing",
-        "angzarr-ports-store-migration-unknown",
-        "angzarr-ports-store-migration-irreversible",
-        "angzarr-ports-store-backup-exists",
+    use angzarr_ports::{Cause, StoreError};
+    let stream = || Box::new(angzarr_proto::v1::Cover::default());
+    let cause = || Cause::new("x-cause", []);
+    for error in [
+        StoreError::Conflict {
+            stream: stream(),
+            expected: 1,
+            actual: 2,
+        },
+        StoreError::Discontinuous {
+            stream: stream(),
+            expected: 1,
+            found: 2,
+        },
+        StoreError::MalformedStream { stream: stream() },
+        StoreError::Unavailable(cause()),
+        StoreError::Unreadable {
+            stream: stream(),
+            sequence: 1,
+            reason: cause(),
+        },
+        StoreError::EditionNotForked { stream: stream() },
+        StoreError::EditionNotFound {
+            name: "what-if".to_string(),
+        },
+        StoreError::NewerThanBuild {
+            applied: 2,
+            build: 1,
+        },
+        StoreError::MigrationFailed { version: 1 },
+        StoreError::MigrationChanged { version: 1 },
+        StoreError::MigrationMissing { version: 1 },
+        StoreError::MigrationUnknown { version: 1 },
+        StoreError::MigrationIrreversible { version: 1 },
+        StoreError::BackupExists {
+            target: "state.db.backup".to_string(),
+        },
     ] {
+        let code = error.code();
         assert!(sampled.iter().any(|c| c == code), "{code} is not sampled");
     }
 }

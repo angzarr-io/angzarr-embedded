@@ -5,7 +5,7 @@
 
 use std::fmt;
 
-use angzarr_diagnostic::{Arg, Diagnostic};
+use angzarr_diagnostic::{code, Arg, Diagnostic};
 
 /// A field of a decoded message that its domain type cannot hold.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -35,8 +35,8 @@ impl fmt::Display for WireError {
 impl Diagnostic for WireError {
     fn code(&self) -> &str {
         match self {
-            WireError::Missing { .. } => "angzarr-embedded-wire-missing",
-            WireError::UnknownEnum { .. } => "angzarr-embedded-wire-unknown-enum",
+            WireError::Missing { .. } => code!("wire-missing"),
+            WireError::UnknownEnum { .. } => code!("wire-unknown-enum"),
         }
     }
 

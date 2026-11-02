@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use angzarr_diagnostic::Diagnostic;
+use angzarr_diagnostic::{code, Diagnostic};
 use angzarr_proto::v1 as pb;
 use prost_types::Any;
 
@@ -129,10 +129,7 @@ fn a_program_that_cannot_start_fails_the_launch() {
         player,
         command("player", any("/examples.blackjack.SitDown")),
     );
-    assert_eq!(
-        outcomes(&probed),
-        expect(0, Some("angzarr-embedded-host-spawn"))
-    );
+    assert_eq!(outcomes(&probed), expect(0, Some(code!("spawn"))));
     assert!(!probed.passed());
 }
 
@@ -143,16 +140,13 @@ fn an_in_process_component_fails_the_launch() {
     table.language = "rust".to_string();
     table.launch = None;
     let in_process = probed(table, command("table", any("/examples.blackjack.SitDown")));
-    assert_eq!(
-        outcomes(&in_process),
-        expect(0, Some("angzarr-embedded-host-no-launch"))
-    );
+    assert_eq!(outcomes(&in_process), expect(0, Some(code!("no-launch"))));
     let mut cobol = domain("table", "table", mode::SERVE);
     cobol.language = "cobol".to_string();
     let unknown = probed(cobol, command("table", any("/examples.blackjack.SitDown")));
     assert_eq!(
         outcomes(&unknown),
-        expect(0, Some("angzarr-embedded-host-unknown-language"))
+        expect(0, Some(code!("unknown-language")))
     );
 }
 
@@ -163,10 +157,7 @@ fn a_malformed_handshake_fails_the_handshake() {
         domain("player", "player", mode::MALFORMED),
         command("player", any("/examples.blackjack.SitDown")),
     );
-    assert_eq!(
-        outcomes(&probed),
-        expect(1, Some("angzarr-embedded-host-handshake"))
-    );
+    assert_eq!(outcomes(&probed), expect(1, Some(code!("handshake"))));
     let Outcome::Failed(report) = &probed.steps[1].1 else {
         panic!("{probed:?}");
     };
@@ -200,10 +191,7 @@ fn a_child_not_serving_fails_the_health_step() {
         ),
         command("player", any("/examples.blackjack.SitDown")),
     );
-    assert_eq!(
-        outcomes(&no_health),
-        expect(2, Some("angzarr-embedded-host-health"))
-    );
+    assert_eq!(outcomes(&no_health), expect(2, Some(code!("health"))));
 }
 
 /// A child describing itself as another kind than its entry says fails
@@ -222,10 +210,7 @@ fn a_child_of_another_kind_fails_the_describe_step() {
         player,
         command("player", any("/examples.blackjack.SitDown")),
     );
-    assert_eq!(
-        outcomes(&probed),
-        expect(3, Some("angzarr-embedded-host-kind-mismatch"))
-    );
+    assert_eq!(outcomes(&probed), expect(3, Some(code!("kind-mismatch"))));
 }
 
 /// An input the child does not answer (it exits mid-call) fails the

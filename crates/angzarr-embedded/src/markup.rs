@@ -68,6 +68,7 @@
 
 use std::fmt;
 
+use angzarr_diagnostic::code;
 use angzarr_proto::v1::event_meta::Causation;
 use angzarr_proto::v1::{Cover, EventBook, EventMeta, EventRef, FactOrigin, Uuid};
 use prost_types::{Any, Timestamp};
@@ -207,7 +208,7 @@ impl fmt::Display for NotItsStream {
 
 impl angzarr_diagnostic::Diagnostic for NotItsStream {
     fn code(&self) -> &str {
-        "angzarr-embedded-not-its-stream"
+        code!("not-its-stream")
     }
 
     fn args(&self) -> Vec<(&str, angzarr_diagnostic::Arg)> {

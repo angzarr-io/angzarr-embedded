@@ -54,7 +54,7 @@ use ::angzarr_embedded::{
     MemoryDeadLetters, Payload, PayloadError, Recovery, Registry, Rejected, Sampled, State,
     StepError, Stream, Timestamp, Upcaster, WireError,
 };
-use angzarr_diagnostic::{Arg, Diagnostic, Report};
+use angzarr_diagnostic::{code, Arg, Diagnostic, Report};
 use angzarr_embedded_macros::{
     aggregate, applies, handles_cmd, handles_fact, on_event, on_refused, policy, process_manager,
     projector, projects,
@@ -3104,7 +3104,7 @@ mod full_context {
         assert_eq!(
             said(&refused),
             (
-                "angzarr-embedded-not-its-stream".to_string(),
+                code!("not-its-stream").to_string(),
                 vec![
                     ("domain".to_string(), "badge".to_string()),
                     ("key".to_string(), "silver".to_string()),
@@ -4037,7 +4037,7 @@ mod policy_errors {
             .on_event(&corrupt, &ctx)
             .err()
             .expect("an event it marks that does not decode fails it");
-        assert_eq!(error.code(), "angzarr-embedded-payload-decode");
+        assert_eq!(error.code(), code!("payload-decode"));
         assert!(
             error.args().iter().any(|(name, arg)| *name == "type_url"
                 && matches!(arg, Arg::Str(url) if *url == corrupt.type_url)),
@@ -4550,7 +4550,7 @@ mod policy_refusals {
         let error = TranslatingBuyInWallet
             .on_refused(&refusal, &CommandContext::default())
             .expect_err("a command it translates that does not decode fails it");
-        assert_eq!(error.code(), "angzarr-embedded-payload-decode");
+        assert_eq!(error.code(), code!("payload-decode"));
         let args = error.args();
         assert!(
             args.iter().any(|(name, arg)| *name == "type_url"
@@ -4701,10 +4701,7 @@ mod policy_refusals {
         ) else {
             panic!("a refusal fact for another stream is malformed");
         };
-        assert_eq!(
-            refused.code(),
-            "angzarr-embedded-malformed-refusal-misaddressed"
-        );
+        assert_eq!(refused.code(), code!("malformed-refusal-misaddressed"));
         assert_eq!(
             buy_in_events(&store, &correlation(3)),
             buy_in(&["BuyInStarted"])

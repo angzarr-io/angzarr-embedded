@@ -2,6 +2,7 @@ use prost_types::Any;
 
 use super::{is_nothing, NOTHING};
 use crate::v1::EventPage;
+use angzarr_diagnostic::code;
 
 /// A fact's record of nothing is known by its type URL alone.
 #[test]
@@ -58,11 +59,7 @@ fn a_fold_that_fails_carries_its_cause_as_a_key_and_args() {
         .expect_err("the persisted event does not fold");
     assert_eq!(error.code, RouterReason::FoldFailed.as_str_name());
     let extra = |key: &str| error.extras.get(key).map(String::as_str);
-    assert_eq!(
-        extra("cause"),
-        Some("angzarr-embedded-payload-decode"),
-        "{error:?}"
-    );
+    assert_eq!(extra("cause"), Some(code!("payload-decode")), "{error:?}");
     assert_eq!(
         extra("cause.type_url"),
         Some(type_url.as_str()),

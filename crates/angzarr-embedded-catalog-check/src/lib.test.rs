@@ -2,18 +2,26 @@
 //! every shipped locale, using exactly the error's args; codes are unique;
 //! and no variant goes unsampled.
 //!
+//! No crate's name is written here: each checked crate is named by its own
+//! exported `EN_US.0` (its package name, `CARGO_PKG_NAME`), each crate of
+//! the workspace by its manifest, so a renamed crate is checked under its
+//! new name with no edit here.
+//!
 //! The errors come from each crate's samples, one value of every variant.
-//! Each crate's catalogs, `crates/<crate>/locales/<locale>/<crate>.ftl`, are
-//! checked against them by angzarr-diagnostic's [`catalog::check`]: a message
-//! for every code with exactly its args, an error for every message, codes
-//! under the crate's name, and a display of the code and args. A nested
-//! cause of another crate's is that crate's to check (angzarr-ports' store
-//! errors, which angzarr-embedded forwards under their own codes, are
-//! checked against `angzarr_ports::EN_US` in core). A variant added without
-//! a sample is caught by reading the crates' sources: every code literal
-//! there (`"angzarr-embedded-..."`) must be the code of some sample. Each
-//! crate's en-US catalog is also its exported `EN_US`, which must be that
-//! file.
+//! Each crate's catalog sources, `crates/<crate>/locales/<locale>/messages.ftl`,
+//! named by the codes' suffixes, are read under the crate's name as its
+//! build writes them ([`catalog::prefixed`]) and checked against them by
+//! angzarr-diagnostic's [`catalog::check`]: a message for every code with
+//! exactly its args, an error for every message, codes under the crate's
+//! name, and a display of the code and args. A nested cause of another
+//! crate's is that crate's to check (angzarr-ports' store errors, which
+//! angzarr-embedded forwards under their own codes, are checked against
+//! `angzarr_ports::EN_US` in core). A variant added without a sample is
+//! caught by reading the crates' sources: every code a crate writes there
+//! (`code!("...")`, under the crate's name) must be the code of some
+//! sample, and a crate that writes codes must be checked. Each crate's
+//! en-US catalog is also its exported `EN_US`, which must be its source
+//! under its name.
 //!
 //! A condition the spec keys is coded under its key (decision 14.60), its
 //! English the spec's catalog of the key's package (decision 14.64:
@@ -28,29 +36,36 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use angzarr_diagnostic::build::SOURCE;
 use angzarr_diagnostic::catalog::{self, Catalog};
 use angzarr_diagnostic::{Arg, Diagnostic};
 use angzarr_embedded::angzarr_proto;
 
-/// The crates whose errors are checked, and their samples.
-fn samples() -> Vec<(&'static str, Vec<Box<dyn Diagnostic>>)> {
+/// A checked crate's exported en-US catalog: its package name and its text.
+type Exported = (&'static str, &'static str);
+
+/// The crates whose errors are checked: each one's exported catalog, which
+/// names it, and one value of every error it defines.
+fn checked() -> Vec<(Exported, Vec<Box<dyn Diagnostic>>)> {
     vec![
-        ("angzarr-embedded", angzarr_embedded::diagnostic_samples()),
         (
-            "angzarr-embedded-host",
+            angzarr_embedded::EN_US,
+            angzarr_embedded::diagnostic_samples(),
+        ),
+        (
+            angzarr_embedded_host::EN_US,
             angzarr_embedded_host::diagnostic_samples(),
         ),
-        ("angzarr-store-sqlite", sqlite_samples()),
+        (angzarr_store_sqlite::EN_US, sqlite_samples()),
     ]
 }
 
-/// Each checked crate's exported en-US catalog: its name and its text.
-fn exported() -> Vec<(&'static str, &'static str)> {
-    vec![
-        angzarr_embedded::EN_US,
-        angzarr_embedded_host::EN_US,
-        angzarr_store_sqlite::EN_US,
-    ]
+/// The checked crates, by name, and their samples.
+fn samples() -> Vec<(&'static str, Vec<Box<dyn Diagnostic>>)> {
+    checked()
+        .into_iter()
+        .map(|((name, _), samples)| (name, samples))
+        .collect()
 }
 
 /// angzarr-store-sqlite's errors: each one it puts in a store error as its
@@ -64,13 +79,12 @@ fn sqlite_samples() -> Vec<Box<dyn Diagnostic>> {
     samples
 }
 
-/// Crates that define no codes of their own.
-const NO_CODES: &[&str] = &[
-    "angzarr-embedded-catalog-check",
-    "angzarr-embedded-conformance",
-    "angzarr-embedded-host-config",
-    "angzarr-embedded-macros",
-];
+/// Whether `code` is angzarr-ports' own: a store error a crate forwards
+/// under its own code, checked against angzarr-ports' catalog.
+fn is_forwarded(code: &str) -> bool {
+    code.strip_prefix(angzarr_ports::EN_US.0)
+        .is_some_and(|rest| rest.starts_with('-'))
+}
 
 fn crates_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -79,30 +93,63 @@ fn crates_dir() -> PathBuf {
         .to_path_buf()
 }
 
-/// Every crate's catalogs, by crate then locale: the text of each
-/// `locales/<locale>/<crate>.ftl`. Any other file there is a problem.
+/// The `name` of `manifest`'s `[package]`.
+fn package_name(manifest: &str) -> Option<String> {
+    let mut package = false;
+    for line in manifest.lines().map(str::trim) {
+        if line.starts_with('[') {
+            package = line == "[package]";
+        } else if let Some(value) = line
+            .strip_prefix("name")
+            .map(str::trim_start)
+            .and_then(|rest| rest.strip_prefix('='))
+            .filter(|_| package)
+        {
+            return Some(value.trim().trim_matches('"').to_string());
+        }
+    }
+    None
+}
+
+/// The workspace's crates (`crates/*`, as the root manifest's members):
+/// each one's package name, read from its manifest, and its directory.
+fn members() -> BTreeMap<String, PathBuf> {
+    let mut out = BTreeMap::new();
+    for entry in fs::read_dir(crates_dir()).unwrap() {
+        let dir = entry.unwrap().path();
+        let Ok(manifest) = fs::read_to_string(dir.join("Cargo.toml")) else {
+            continue;
+        };
+        let name = package_name(&manifest)
+            .unwrap_or_else(|| panic!("{}: no [package] name", dir.display()));
+        out.insert(name, dir);
+    }
+    out
+}
+
+/// Every crate's catalogs, by crate (its package name) then locale: each
+/// `locales/<locale>/messages.ftl` under the crate's name, as its build
+/// writes it. Any other file there is a problem.
 fn catalogs(problems: &mut Vec<String>) -> BTreeMap<String, BTreeMap<String, String>> {
     let mut out = BTreeMap::new();
-    for krate in fs::read_dir(crates_dir()).unwrap() {
-        let krate = krate.unwrap().path();
-        let name = krate.file_name().unwrap().to_string_lossy().into_owned();
-        let Ok(locales) = fs::read_dir(krate.join("locales")) else {
+    for (name, dir) in members() {
+        let Ok(locales) = fs::read_dir(dir.join("locales")) else {
             continue;
         };
         let mut by_locale = BTreeMap::new();
         for locale in locales {
             let locale = locale.unwrap().path();
             let tag = locale.file_name().unwrap().to_string_lossy().into_owned();
-            let file = locale.join(format!("{name}.ftl"));
+            let file = locale.join(SOURCE);
             for other in fs::read_dir(&locale).unwrap() {
                 let other = other.unwrap().path();
                 if other != file {
-                    problems.push(format!("{}: not {name}.ftl", other.display()));
+                    problems.push(format!("{}: not {SOURCE}", other.display()));
                 }
             }
             match fs::read_to_string(&file) {
                 Ok(text) => {
-                    by_locale.insert(tag, text);
+                    by_locale.insert(tag, catalog::prefixed(&name, &text));
                 }
                 Err(_) => problems.push(format!("{}: missing", file.display())),
             }
@@ -188,9 +235,10 @@ fn spec_keyed(d: &dyn Diagnostic, problems: &mut Vec<String>) {
     }
 }
 
-/// Every `"angzarr-embedded-..."` string literal in a crate's library source (not its
-/// `*.test.rs` tests), outside comments: the codes its errors can produce.
-fn code_literals(krate: &str) -> BTreeSet<String> {
+/// Every code a crate's library source (not its `*.test.rs` tests) writes,
+/// outside comments: each `code!("suffix")` there, under the crate's name
+/// `krate`, as the macro expands it.
+fn source_codes(krate: &str, dir: &Path) -> BTreeSet<String> {
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         for e in fs::read_dir(dir).unwrap() {
             let p = e.unwrap().path();
@@ -204,28 +252,29 @@ fn code_literals(krate: &str) -> BTreeSet<String> {
         }
     }
     let mut files = Vec::new();
-    walk(&crates_dir().join(krate).join("src"), &mut files);
-    let prefix = format!("\"{krate}-");
+    walk(&dir.join("src"), &mut files);
     let mut codes = BTreeSet::new();
     for file in files {
         let text = fs::read_to_string(&file).unwrap();
-        for line in text.lines().filter(|l| !l.trim_start().starts_with("//")) {
-            let mut rest = line;
-            while let Some(at) = rest.find(&prefix) {
-                let body = &rest[at + 1..];
-                let end = body.find('"').unwrap_or(body.len());
-                let lit = &body[..end];
-                if lit
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-                {
-                    codes.insert(lit.to_string());
-                }
-                rest = &body[end..];
-            }
-        }
+        let code: Vec<&str> = text
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect();
+        codes.extend(suffixes(&code.join("\n")).map(|s| format!("{krate}-{s}")));
     }
     codes
+}
+
+/// The suffix of each `code!("...")` in `source`, spaces and line breaks
+/// inside the call allowed.
+fn suffixes(source: &str) -> impl Iterator<Item = &str> {
+    source.split("code!(").skip(1).filter_map(|call| {
+        let (suffix, _) = call.trim_start().strip_prefix('"')?.split_once('"')?;
+        suffix
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            .then_some(suffix)
+    })
 }
 
 #[test]
@@ -254,7 +303,7 @@ fn every_code_has_a_message_with_exactly_its_args_in_every_locale() {
         let (forwarded, own): (Vec<_>, Vec<_>) = diagnostics
             .into_iter()
             .filter(|d| !is_spec_key(d.code()))
-            .partition(|d| d.code().starts_with("angzarr-ports-"));
+            .partition(|d| is_forwarded(d.code()));
         for locale in &locales {
             match catalogs.get(krate).and_then(|c| c.get(locale)) {
                 None => problems.push(format!("{krate}: no {locale} catalog")),
@@ -267,11 +316,12 @@ fn every_code_has_a_message_with_exactly_its_args_in_every_locale() {
         }
         // Every forwarded error has its message there; that each of
         // angzarr-ports' messages has an error is checked in core.
+        let (ports, ports_ftl) = angzarr_ports::EN_US;
         problems.extend(
-            catalog::check("angzarr-ports", angzarr_ports::EN_US.1, &forwarded)
+            catalog::check(ports, ports_ftl, &forwarded)
                 .into_iter()
                 .filter(|p| !matches!(p, catalog::Problem::Unsampled { .. }))
-                .map(|p| format!("{krate} forwarding angzarr-ports: {p:?}")),
+                .map(|p| format!("{krate} forwarding {ports}: {p:?}")),
         );
         let mut codes = BTreeSet::new();
         for d in &own {
@@ -284,36 +334,31 @@ fn every_code_has_a_message_with_exactly_its_args_in_every_locale() {
         }
     }
 
-    // Every crate with a catalog is checked, and every crate is either
-    // checked or known to have no codes.
+    // Every crate with a catalog is checked, every checked crate is one of
+    // the workspace's, and a crate that writes codes is checked.
     for name in catalogs.keys() {
         if !checked.contains(&name.as_str()) {
             problems.push(format!("{name}: a catalog no samples are checked against"));
         }
     }
-    let crates = fs::read_dir(crates_dir())
-        .unwrap()
-        .map(|e| e.unwrap())
-        .filter(|e| e.path().join("Cargo.toml").exists());
-    for name in crates.map(|e| e.file_name().to_string_lossy().into_owned()) {
-        if !checked.contains(&name.as_str()) && !NO_CODES.contains(&name.as_str()) {
-            problems.push(format!(
-                "{name}: a crate with neither samples nor a place in NO_CODES"
-            ));
+    let members = members();
+    for krate in &checked {
+        if !members.contains_key(*krate) {
+            problems.push(format!("{krate}: checked, but no crate of this workspace"));
         }
     }
 
     // No variant without a sample: every code in a crate's source is seen.
-    for krate in &checked {
-        for code in code_literals(krate) {
-            if !seen.contains_key(&code) {
-                problems.push(format!("{code}: in {krate}'s source but in no sample"));
+    for (name, dir) in &members {
+        let checked = checked.contains(&name.as_str());
+        for code in source_codes(name, dir) {
+            if !checked {
+                problems.push(format!(
+                    "{code}: in {name}'s source, whose samples are not checked"
+                ));
+            } else if !seen.contains_key(&code) {
+                problems.push(format!("{code}: in {name}'s source but in no sample"));
             }
-        }
-    }
-    for krate in NO_CODES {
-        for code in code_literals(krate) {
-            problems.push(format!("{code}: {krate} is listed as having no codes"));
         }
     }
 
@@ -327,22 +372,76 @@ fn every_code_has_a_message_with_exactly_its_args_in_every_locale() {
     );
 }
 
-/// A dependent renders from the exported catalog, so it must be the file
-/// checked here, under the crate's own name, for every checked crate.
+/// A dependent renders from the exported catalog, so it must be the
+/// crate's en-US source under the crate's own name, as checked here.
 #[test]
 fn every_checked_crate_exports_its_en_us_catalog() {
-    let exported = exported();
-    let names: Vec<&str> = exported.iter().map(|(name, _)| *name).collect();
-    let checked: Vec<&str> = samples().iter().map(|(krate, _)| *krate).collect();
-    assert_eq!(names, checked);
-    for (name, text) in exported {
-        let path = crates_dir()
-            .join(name)
-            .join("locales/en-US")
-            .join(format!("{name}.ftl"));
+    let members = members();
+    for ((name, text), _) in checked() {
+        let dir = members
+            .get(name)
+            .unwrap_or_else(|| panic!("{name}: no crate of this workspace"));
+        let path = dir.join("locales/en-US").join(SOURCE);
         let file =
             fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-        assert_eq!(text, file, "{name}::EN_US is not {}", path.display());
+        assert_eq!(
+            text,
+            catalog::prefixed(name, &file),
+            "{name}::EN_US is not {} under {name}",
+            path.display()
+        );
+    }
+}
+
+/// A code in a crate's source is each `code!("...")` call's suffix, under
+/// the crate's name, wherever the call's literal sits; a commented-out
+/// call, and anything that is no such call, is none.
+#[test]
+fn a_crates_codes_are_its_code_calls_under_its_name() {
+    let source = "x => code!(\"one\"),\n\
+                  y => angzarr_diagnostic::code!( \"two-2\" ),\n\
+                  z => code!(\n    \"three\"\n),\n\
+                  // w => code!(\"commented\"),\n\
+                  v => code!(SUFFIX), u => code!(\"Not-Kebab\"), t => \"code!(\",\n";
+    let found: Vec<&str> = suffixes(source).collect();
+    assert_eq!(found, ["one", "two-2", "three", "commented"]);
+
+    let dir =
+        std::env::temp_dir().join(format!("{}-{}", env!("CARGO_PKG_NAME"), std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(dir.join("src/inner")).unwrap();
+    fs::write(dir.join("src/lib.rs"), source).unwrap();
+    fs::write(dir.join("src/inner/deep.rs"), "code!(\"deep\")").unwrap();
+    fs::write(dir.join("src/lib.test.rs"), "code!(\"tested\")").unwrap();
+    fs::write(dir.join("src/notes.txt"), "code!(\"text\")").unwrap();
+    let codes: Vec<String> = source_codes("my-crate", &dir).into_iter().collect();
+    assert_eq!(
+        codes,
+        [
+            "my-crate-deep",
+            "my-crate-one",
+            "my-crate-three",
+            "my-crate-two-2"
+        ]
+    );
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A crate's name is its manifest's `[package]` `name`, not a dependency's
+/// or a target's.
+#[test]
+fn a_crates_name_is_its_packages() {
+    let manifest = "[lib]\nname = \"lib_name\"\n\n[package]\nversion = \"1\"\n\
+                    name   =   \"the-package\"\n\n[dependencies]\nname = \"x\"\n";
+    assert_eq!(package_name(manifest).as_deref(), Some("the-package"));
+    assert_eq!(package_name("[dependencies]\nname = \"x\"\n"), None);
+    let members = members();
+    assert_eq!(
+        members.get(env!("CARGO_PKG_NAME")),
+        Some(&PathBuf::from(env!("CARGO_MANIFEST_DIR")))
+    );
+    for ((name, _), _) in checked() {
+        assert!(members.contains_key(name), "{name}");
     }
 }
 
@@ -350,9 +449,7 @@ fn every_checked_crate_exports_its_en_us_catalog() {
 /// rendered from angzarr-ports' own catalog, re-exported here: no copy.
 #[test]
 fn angzarr_embedded_reexports_the_angzarr_ports_catalog() {
-    let (name, text) = angzarr_embedded::angzarr_ports::EN_US;
-    assert_eq!(name, "angzarr-ports");
-    assert_eq!(text, angzarr_ports::EN_US.1);
+    assert_eq!(angzarr_embedded::angzarr_ports::EN_US, angzarr_ports::EN_US);
 }
 
 /// Every live key of the spec's enums embedded answers, with its declared
@@ -493,7 +590,8 @@ fn a_spec_keyed_error_is_held_to_its_keys_args() {
 /// same, so no old code maps onto one that already meant something else.
 #[test]
 fn the_kernels_codes_lost_next_and_collide_with_nothing() {
-    const OLD: &str = "angzarr-embedded-next-";
+    let kernel_name = angzarr_embedded::EN_US.0;
+    let old = format!("{kernel_name}-next-");
     let mut problems = Vec::new();
     let catalogs = catalogs(&mut problems);
     let mut all: BTreeMap<String, &str> = BTreeMap::new();
@@ -502,7 +600,7 @@ fn the_kernels_codes_lost_next_and_collide_with_nothing() {
         let mut codes = BTreeSet::new();
         for d in diagnostics
             .iter()
-            .filter(|d| !d.code().starts_with("angzarr-ports-") && !is_spec_key(d.code()))
+            .filter(|d| !is_forwarded(d.code()) && !is_spec_key(d.code()))
         {
             own_codes(&**d, krate, &mut codes);
         }
@@ -511,29 +609,29 @@ fn the_kernels_codes_lost_next_and_collide_with_nothing() {
                 problems.push(format!("{code}: {previous}'s and {krate}'s"));
             }
         }
-        if krate == "angzarr-embedded" {
+        if krate == kernel_name {
             kernel = codes;
         }
     }
     assert!(!kernel.is_empty(), "no kernel codes sampled");
     for code in &kernel {
-        if code.starts_with(OLD) {
-            problems.push(format!("{code}: still under {OLD}"));
+        if code.starts_with(&old) {
+            problems.push(format!("{code}: still under {old}"));
         }
-        if owner(code) != Some("angzarr-embedded") {
+        if owner(code) != Some(kernel_name) {
             problems.push(format!("{code}: reads as {:?}'s", owner(code)));
         }
     }
     for (krate, by_locale) in &catalogs {
         for (locale, ftl) in by_locale {
-            if ftl.contains(OLD) {
-                problems.push(format!("{krate} ({locale}): names {OLD}…"));
+            if ftl.contains(&old) {
+                problems.push(format!("{krate} ({locale}): names {old}…"));
             }
         }
     }
-    for code in code_literals("angzarr-embedded") {
-        if code.starts_with(OLD) {
-            problems.push(format!("{code}: in angzarr-embedded's source"));
+    for code in source_codes(kernel_name, &members()[kernel_name]) {
+        if code.starts_with(&old) {
+            problems.push(format!("{code}: in {kernel_name}'s source"));
         }
     }
     assert!(problems.is_empty(), "{}", problems.join("\n"));
@@ -565,7 +663,8 @@ fn owner(code: &str) -> Option<&'static str> {
 /// `code`'s message in `locale`, rendered with `args`: the text, and every
 /// error Fluent reported (a variable the message names and `args` lack is
 /// one). The catalog is the code's owner's ([`owner`]): a checked crate's
-/// file, or a [`foreign`] crate's own `EN_US`.
+/// source under its name ([`catalogs`]), or a [`foreign`] crate's own
+/// `EN_US`.
 fn render(code: &str, args: &[(&str, Arg)], locale: &str) -> (String, Vec<String>) {
     use fluent_bundle::{FluentArgs, FluentBundle, FluentResource, FluentValue};
     let spec = spec_key(code).map(|(_, catalog)| catalog);
@@ -588,14 +687,12 @@ fn render(code: &str, args: &[(&str, Arg)], locale: &str) -> (String, Vec<String
             )
         }
         None => {
-            let path = crates_dir()
-                .join(krate)
-                .join("locales")
-                .join(locale)
-                .join(format!("{krate}.ftl"));
-            let text = fs::read_to_string(&path)
-                .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-            (path, text)
+            let text = catalogs(&mut Vec::new())
+                .get(krate)
+                .and_then(|by_locale| by_locale.get(locale))
+                .unwrap_or_else(|| panic!("{krate}: no {locale} catalog"))
+                .clone();
+            (PathBuf::from(format!("{krate} ({locale})")), text)
         }
     };
     let resource = FluentResource::try_new(text).unwrap_or_else(|(r, _)| r);

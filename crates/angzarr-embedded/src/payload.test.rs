@@ -5,6 +5,7 @@ use crate::{pack, type_name, Any, Payload, PayloadError};
 use prost::Message;
 
 use crate::toys::{account, AccountEvent};
+use angzarr_diagnostic::code;
 
 #[test]
 fn payloads_are_any_packed_by_their_prost_name() {
@@ -136,7 +137,7 @@ fn decode_as_refuses_a_wire_message_its_domain_type_cannot_hold() {
         panic!("expected an invalid payload, got {error:?}");
     };
     assert_eq!(type_url, "/toy.wire.v1.Stamped");
-    assert_eq!(reason.code(), "angzarr-embedded-wire-missing");
+    assert_eq!(reason.code(), code!("wire-missing"));
 }
 
 #[test]

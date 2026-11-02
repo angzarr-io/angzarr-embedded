@@ -79,10 +79,11 @@ pub use stores::{OneStore, Stores};
 
 /// This crate's en-US Fluent catalog, its name first: what a dependent
 /// embeds to render this crate's diagnostics. The text of
-/// `crates/angzarr-embedded-host/locales/en-US/angzarr-embedded-host.ftl`.
+/// `locales/en-US/messages.ftl`, its ids under the crate's package name
+/// (`angzarr_diagnostic::build`).
 pub const EN_US: (&str, &str) = (
-    "angzarr-embedded-host",
-    include_str!("../locales/en-US/angzarr-embedded-host.ftl"),
+    env!("CARGO_PKG_NAME"),
+    include_str!(concat!(env!("OUT_DIR"), "/en-US.ftl")),
 );
 
 /// One value of every error this crate defines, each variant once, for the

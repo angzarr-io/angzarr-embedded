@@ -35,6 +35,7 @@ use sqlx::{ConnectOptions, Connection};
 use super::{into_wal, pause, SqliteStore, BUSY_TIMEOUT, MIGRATOR};
 use crate::test_database::{database, database_in, Database};
 use crate::{Damage, Integrity};
+use angzarr_ports::angzarr_diagnostic::code;
 
 /// A database left where this test's would be, by a run before the
 /// guards removed theirs, or one killed before its guard dropped, and in
@@ -558,7 +559,7 @@ async fn reading_what_is_there_but_no_database_fails() {
     let opened = SqliteStore::open_existing(&dir).await.map(drop);
     assert_eq!(
         opened.map_err(|e| code(&e)),
-        Err(Some("angzarr-store-sqlite-unavailable"))
+        Err(Some(code!("unavailable")))
     );
 }
 
@@ -601,7 +602,7 @@ async fn a_read_only_file_in_a_read_only_directory_opens_for_reading() {
     assert_eq!(read.unwrap().pages, [page(0, 1)]);
     assert_eq!(
         written.as_ref().map_err(code),
-        Err(Some("angzarr-store-sqlite-unavailable"))
+        Err(Some(code!("unavailable")))
     );
 }
 
@@ -1169,7 +1170,7 @@ async fn an_index_entry_changed_is_reported_as_sqlite_words_it() {
     // The page's last byte is the last entry's last key byte: the page
     // still reads, and the entry no longer matches its row.
     for damage in check_damaged(|page| *page.last_mut().unwrap() ^= 1).await {
-        assert_eq!(damage.code(), "angzarr-store-sqlite-damaged");
+        assert_eq!(damage.code(), code!("damaged"));
         assert!(
             damage
                 .problems()
@@ -1215,7 +1216,7 @@ async fn a_check_that_cannot_run_is_a_failure_not_damage() {
         .await;
     assert_eq!(
         checked.as_ref().map_err(code),
-        Err(Some("angzarr-store-sqlite-unavailable")),
+        Err(Some(code!("unavailable"))),
         "{checked:?}"
     );
     held.rollback().await.unwrap();
@@ -1296,7 +1297,7 @@ async fn a_file_that_is_no_database_is_damaged_however_it_is_opened() {
     // and its text verbatim as `ext_err_txt`: a third party's error, kept
     // as it said it (the owner's ruling, 2026-10-29).
     for (code, args) in found {
-        assert_eq!(code, Some("angzarr-store-sqlite-damaged-file"));
+        assert_eq!(code, Some(code!("damaged-file")));
         assert_eq!(args, sqlite_said(26, "file is not a database"));
     }
 }
@@ -1305,7 +1306,7 @@ async fn a_file_that_is_no_database_is_damaged_however_it_is_opened() {
 async fn a_database_whose_header_is_overwritten_is_damaged_however_it_is_opened() {
     // The magic string gone: SQLite no longer takes it for a database.
     for (code, args) in open_damaged(|bytes| bytes[..16].fill(0)).await {
-        assert_eq!(code, Some("angzarr-store-sqlite-damaged-file"));
+        assert_eq!(code, Some(code!("damaged-file")));
         assert_eq!(args, sqlite_said(26, "file is not a database"));
     }
 }
@@ -1321,7 +1322,7 @@ async fn a_database_whose_schema_is_beyond_reading_is_damaged_however_it_is_open
     .await;
     // SQLITE_CORRUPT, as the cause's `errno`, and SQLite's text.
     for (code, args) in found {
-        assert_eq!(code, Some("angzarr-store-sqlite-damaged-file"));
+        assert_eq!(code, Some(code!("damaged-file")));
         assert_eq!(args, sqlite_said(11, "database disk image is malformed"));
     }
 }
@@ -1373,7 +1374,7 @@ async fn a_purge_that_fails_part_way_deletes_nothing() {
     let purged = store.purge(s, 2).await;
     assert_eq!(
         purged.as_ref().map_err(code),
-        Err(Some("angzarr-store-sqlite-unavailable")),
+        Err(Some(code!("unavailable"))),
         "{purged:?}"
     );
     assert_whole(&store, s, "after the failed purge").await;
@@ -1412,7 +1413,7 @@ async fn a_purge_racing_an_append_waits_for_it_then_is_refused() {
     let refused = hasty.purge(s, read).await;
     assert_eq!(
         refused.as_ref().map_err(code),
-        Err(Some("angzarr-store-sqlite-unavailable")),
+        Err(Some(code!("unavailable"))),
         "{refused:?}"
     );
 
@@ -1451,7 +1452,7 @@ async fn an_append_racing_a_purge_lands_after_it_on_a_new_stream() {
     let refused = append(&hasty, s, 2, &[page(2, 2)]).await;
     assert_eq!(
         refused.as_ref().map_err(code),
-        Err(Some("angzarr-store-sqlite-unavailable")),
+        Err(Some(code!("unavailable"))),
         "{refused:?}"
     );
     assert_eq!(
@@ -2121,7 +2122,10 @@ async fn an_undecodable_dead_letter_is_unreadable() {
     conn.close().await.unwrap();
     let store = SqliteStore::open(&path).await.unwrap();
     let refused = store.dead_letters(s).await.unwrap_err();
-    assert_eq!(refused.code(), "angzarr-ports-store-dead-letter-unreadable");
+    assert!(
+        matches!(refused, StoreError::DeadLetterUnreadable { .. }),
+        "{refused:?}"
+    );
     assert_eq!(refused.stream(), Some(&s.to_cover()));
 }
 
@@ -2156,7 +2160,7 @@ async fn a_bad_dead_letter_place_is_unreadable() {
     else {
         panic!("not unreadable");
     };
-    assert_eq!(reason.code, "angzarr-store-sqlite-bad-dead-letter-place");
+    assert_eq!(reason.code, code!("bad-dead-letter-place"));
     assert_eq!(
         reason.args,
         [("kind", Arg::Uint(0)), ("length", Arg::Uint(2))]
@@ -2582,7 +2586,7 @@ async fn a_backup_whose_destination_cannot_be_made_is_refused_with_the_systems_w
     let StoreError::Unavailable(cause) = store.backup(&dest).await.unwrap_err() else {
         panic!("not the store's own failure");
     };
-    assert_eq!(cause.code, "angzarr-store-sqlite-backup-uncreatable");
+    assert_eq!(cause.code, code!("backup-uncreatable"));
     assert_eq!(
         cause.args.first(),
         Some(&("path", Arg::Str(dest.display().to_string())))

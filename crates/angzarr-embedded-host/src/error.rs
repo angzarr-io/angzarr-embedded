@@ -9,7 +9,7 @@
 
 use std::fmt;
 
-use angzarr_diagnostic::{Arg, Diagnostic, Report};
+use angzarr_diagnostic::{code, Arg, Diagnostic, Report};
 // A child's failures are the local-process transport's keys; a projector
 // with no input domain is core's (decision 14.64).
 use angzarr_proto::v1::HostReason as CoreHostReason;
@@ -50,7 +50,7 @@ impl Diagnostic for HandshakeError {
             HandshakeError::Malformed { .. } => HostReason::HandshakeMalformed.as_str_name(),
             HandshakeError::Timeout { .. } => HostReason::HandshakeTimeout.as_str_name(),
             HandshakeError::Closed => HostReason::HandshakeClosed.as_str_name(),
-            HandshakeError::Unreadable { .. } => "angzarr-embedded-host-handshake-unreadable",
+            HandshakeError::Unreadable { .. } => code!("handshake-unreadable"),
         }
     }
 
@@ -200,36 +200,36 @@ impl fmt::Display for HostError {
 impl Diagnostic for HostError {
     fn code(&self) -> &str {
         match self {
-            HostError::DuplicateDomain { .. } => "angzarr-embedded-host-duplicate-domain",
-            HostError::NoLaunch { .. } => "angzarr-embedded-host-no-launch",
-            HostError::EmptyLaunch { .. } => "angzarr-embedded-host-empty-launch",
-            HostError::UnknownLanguage { .. } => "angzarr-embedded-host-unknown-language",
-            HostError::Spawn { .. } => "angzarr-embedded-host-spawn",
-            HostError::Handshake { .. } => "angzarr-embedded-host-handshake",
-            HostError::Connect { .. } => "angzarr-embedded-host-connect",
-            HostError::Describe { .. } => "angzarr-embedded-host-describe",
-            HostError::Health { .. } => "angzarr-embedded-host-health",
+            HostError::DuplicateDomain { .. } => code!("duplicate-domain"),
+            HostError::NoLaunch { .. } => code!("no-launch"),
+            HostError::EmptyLaunch { .. } => code!("empty-launch"),
+            HostError::UnknownLanguage { .. } => code!("unknown-language"),
+            HostError::Spawn { .. } => code!("spawn"),
+            HostError::Handshake { .. } => code!("handshake"),
+            HostError::Connect { .. } => code!("connect"),
+            HostError::Describe { .. } => code!("describe"),
+            HostError::Health { .. } => code!("health"),
             HostError::NotServing { .. } => HostReason::ChildNotServing.as_str_name(),
-            HostError::KindMismatch { .. } => "angzarr-embedded-host-kind-mismatch",
-            HostError::NoInput { .. } => "angzarr-embedded-host-no-input",
+            HostError::KindMismatch { .. } => code!("kind-mismatch"),
+            HostError::NoInput { .. } => code!("no-input"),
             HostError::ProjectorNoInputDomain { .. } => {
                 CoreHostReason::ProjectorNoInputDomain.as_str_name()
             }
-            HostError::Descriptor { .. } => "angzarr-embedded-host-descriptor",
-            HostError::DescriptorChanged { .. } => "angzarr-embedded-host-descriptor-changed",
-            HostError::UpcasterNoDomain { .. } => "angzarr-embedded-host-upcaster-no-domain",
-            HostError::NotExposable { .. } => "angzarr-embedded-host-not-exposable",
+            HostError::Descriptor { .. } => code!("descriptor"),
+            HostError::DescriptorChanged { .. } => code!("descriptor-changed"),
+            HostError::UpcasterNoDomain { .. } => code!("upcaster-no-domain"),
+            HostError::NotExposable { .. } => code!("not-exposable"),
             HostError::ExitStatus { .. } => HostReason::ChildExitStatus.as_str_name(),
             HostError::NotExited { .. } => HostReason::ChildNotExited.as_str_name(),
             HostError::ProbeInput { .. } => HostReason::ProbeInput.as_str_name(),
-            HostError::SocketDirTooLong { .. } => "angzarr-embedded-host-socket-dir-too-long",
-            HostError::ConfigUnreadable { .. } => "angzarr-embedded-host-config-unreadable",
-            HostError::ConfigInvalid { .. } => "angzarr-embedded-host-config-invalid",
-            HostError::NotRegistered { .. } => "angzarr-embedded-host-not-registered",
-            HostError::NotListed { .. } => "angzarr-embedded-host-not-listed",
-            HostError::Register { .. } => "angzarr-embedded-host-register",
-            HostError::Store { .. } => "angzarr-embedded-host-store",
-            HostError::Runtime { .. } => "angzarr-embedded-host-runtime",
+            HostError::SocketDirTooLong { .. } => code!("socket-dir-too-long"),
+            HostError::ConfigUnreadable { .. } => code!("config-unreadable"),
+            HostError::ConfigInvalid { .. } => code!("config-invalid"),
+            HostError::NotRegistered { .. } => code!("not-registered"),
+            HostError::NotListed { .. } => code!("not-listed"),
+            HostError::Register { .. } => code!("register"),
+            HostError::Store { .. } => code!("store"),
+            HostError::Runtime { .. } => code!("runtime"),
         }
     }
 
@@ -465,10 +465,10 @@ fn host_samples() -> Vec<HostError> {
             ),
         },
         HostError::Register {
-            cause: Report::new("angzarr-embedded-host-duplicate-domain").arg("domain", "player"),
+            cause: Report::new(code!("duplicate-domain")).arg("domain", "player"),
         },
         HostError::Store {
-            cause: Report::new("angzarr-embedded-host-runtime").arg("kind", "Other"),
+            cause: Report::new(code!("runtime")).arg("kind", "Other"),
         },
         HostError::Runtime {
             kind: "Other".to_string(),

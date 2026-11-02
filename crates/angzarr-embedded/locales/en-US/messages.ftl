@@ -1,0 +1,80 @@
+# Messages for the angzarr-embedded crate's errors. Each id is an error's
+# code without the crate's name, which the build prefixes
+# (angzarr_diagnostic::build); the variables are its args. Messages are
+# lowercase fragments, like the English Display, so a nested cause reads
+# well inside another message. A condition the spec keys is coded under its
+# key, whose English is the spec's catalog (angzarr_proto::REASONS_EN_US;
+# decision 14.60), never here.
+
+## The audited kernel, angzarr_embedded's crate root. $stream names a stream as domain/root,
+## with @edition outside the main timeline.
+
+malformed-no-cover = the book has no cover
+malformed-unknown-domain = no domain "{ $domain }" is registered
+malformed-no-root = the cover has no root
+malformed-bad-root = the root is { $len ->
+        [one] one byte
+       *[other] { $len } bytes
+    }, not a UUID's 16
+malformed-empty-edition = the edition is set but empty: the main timeline is the unset edition
+malformed-no-page = the book has no page
+malformed-no-body = the page has neither a command nor a fact
+malformed-no-payload = the command or fact has no payload
+malformed-bad-command-id = the command id is { $len ->
+        [one] one byte
+       *[other] { $len } bytes
+    }, not a UUID's 16
+malformed-bad-correlation-id = the correlation id is { $len ->
+        [one] one byte
+       *[other] { $len } bytes
+    }, not a UUID's 16
+malformed-causation-from-outside = a client's book names a causation: only the kernel's chain issues policy commands
+malformed-id-on-policy-command = a policy's book names its own { $field }: the kernel derives its ids from the trigger
+malformed-fact-from-policy = a policy's book holds a fact: a policy never injects one
+malformed-handling-on-policy-command = a policy's book has handling: its target stamps its own head
+malformed-bad-trigger = the policy command's trigger cannot name a command id: { $reason ->
+        [bad-root] its root is not a UUID's 16 bytes
+        [missing-trigger] it needs a stream with a root
+        [empty-edition] its stream's edition is set but empty
+        [empty-component] the reacting component has no name
+       *[other] { $reason }
+    }
+malformed-fact-without-origin = a fact without its origin
+malformed-empty-external-id = the fact's external id is empty: it is the fact's identity
+malformed-command-with-fact-origin = a command with a fact origin
+malformed-fact-command-id-not-derived = the fact's command id is not the one derived from its external id
+malformed-handling-on-fact = a fact with handling: a fact is never checked against a sequence nor conflict-resolved
+malformed-unknown-conflict-resolution = conflict resolution { $value } is not one this build knows
+malformed-unsupported-conflict-resolution = domain "{ $domain }"'s state does not support { $requested }
+malformed-refusal-misaddressed = the refusal fact is for another stream than the one its trigger names
+
+projection-failed = the command committed, then { $failures ->
+    [one] projector { $projector } failed: { $error }
+   *[other] { $failures } projectors failed, the first { $projector }: { $error }
+}
+downstream = a policy command down the chain failed, at depth { $depth }: { $error }
+unknown-type = stream { $stream }'s domain does not decode the type { $type_url }
+invalid-payload = a { $type_url } for stream { $stream } is not a valid value: { $reason }
+upcast = upcasting a payload for stream { $stream } failed: { $error }
+wrong-domain = stream { $stream } was given to the { $expected } domain's code
+before-snapshot = stream { $stream } holds its events from { $first } on only, after its snapshot
+unregistered-domain = a stored { $domain } stream was read, but no domain "{ $domain }" is registered
+replay-out-of-sequence = page { $index } of the log claims sequence { $found }, not the one due
+replay-recorded-backwards = event { $sequence } was recorded before the event before it
+replay-incomplete-meta = event { $sequence }'s metadata lacks a well-formed { $field }
+replay-wrong-domain = a { $found } log was given to the { $expected } domain's code
+
+unreadable = event { $sequence } of stream { $stream } cannot be replayed: { $reason }
+
+payload-unknown-type = no decoder for the type { $type_url }
+payload-decode = a payload of type { $type_url } does not decode
+not-its-stream = a command whose { $domain } key is { $key } was sent to another stream: its stream is the one that key names
+payload-invalid = a payload of type { $type_url } is not a valid value: { $reason }
+wire-missing = { $message }.{ $field } is required and absent
+wire-unknown-enum = { $message }.{ $field } holds { $value }, which no variant defines
+upcast-unavailable = the upcaster sidecar is not serving ({ $cause }): retry
+upcast-rule = the upcast rule from { $source } failed: { $error }
+upcaster-duplicate = domain { $domain }'s upcaster has two typed rules from { $source }: the second never runs
+upcaster-out-of-order = domain { $domain }'s upcaster registers the rule from { $source } before the rule from { $produced_by }, which produces it
+upcaster-dead-end = domain { $domain }'s upcaster takes { $source } to { $ends_at }, which the domain does not decode
+

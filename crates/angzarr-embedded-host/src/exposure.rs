@@ -17,7 +17,7 @@
 
 use std::fmt;
 
-use angzarr_diagnostic::{Arg, Diagnostic};
+use angzarr_diagnostic::{code, Arg, Diagnostic};
 use angzarr_embedded::{Failure, Rejected};
 
 use crate::config::Expose;
@@ -69,7 +69,7 @@ impl fmt::Display for NotExposed {
 
 impl Diagnostic for NotExposed {
     fn code(&self) -> &str {
-        "angzarr-embedded-host-not-exposed"
+        code!("not-exposed")
     }
 
     fn args(&self) -> Vec<(&str, Arg)> {

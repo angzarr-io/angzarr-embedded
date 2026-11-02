@@ -1,4 +1,5 @@
 use super::*;
+use angzarr_diagnostic::code;
 
 /// Loopback is admitted by "loopback" and "ip"; the network by "ip"
 /// alone; "none" admits nothing.
@@ -26,7 +27,7 @@ fn not_exposed_is_its_code_and_args() {
     .to_string();
     assert_eq!(
         line,
-        "angzarr-embedded-host-not-exposed domain=table arrival=ip expose=none"
+        concat!(code!("not-exposed"), " domain=table arrival=ip expose=none")
     );
 }
 

@@ -208,10 +208,11 @@ pub use prost_types::{Any, Timestamp};
 
 /// This crate's en-US Fluent catalog, its name first: what a dependent
 /// embeds to render this crate's diagnostics. The text of
-/// `crates/angzarr-embedded/locales/en-US/angzarr-embedded.ftl`.
+/// `locales/en-US/messages.ftl`, its ids under the crate's package name
+/// (`angzarr_diagnostic::build`).
 pub const EN_US: (&str, &str) = (
-    "angzarr-embedded",
-    include_str!("../locales/en-US/angzarr-embedded.ftl"),
+    env!("CARGO_PKG_NAME"),
+    include_str!(concat!(env!("OUT_DIR"), "/en-US.ftl")),
 );
 
 /// The later of two instants: what `recorded_at` is raised to, so it never
@@ -225,8 +226,7 @@ pub fn not_before(floor: Option<&Timestamp>, now: Timestamp) -> Timestamp {
 
 /// One value of every error this crate defines, each variant once, for the
 /// catalog parity test: each one's code must have a message in every locale,
-/// using exactly its args. Its messages are in
-/// `crates/angzarr-embedded/locales/en-US/angzarr-embedded.ftl`.
+/// using exactly its args. Its messages are in [`EN_US`].
 pub fn diagnostic_samples() -> Vec<Box<dyn angzarr_diagnostic::Diagnostic>> {
     fn boxed<E: angzarr_diagnostic::Diagnostic + 'static>(
         errors: impl IntoIterator<Item = E>,

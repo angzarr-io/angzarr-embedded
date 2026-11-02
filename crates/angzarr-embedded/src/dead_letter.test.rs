@@ -9,6 +9,7 @@ use crate::{
 };
 
 use crate::toys::{account, at, command, cover, fact, registry, Account, Edit};
+use angzarr_diagnostic::code;
 
 #[test]
 fn a_dead_letter_line_starts_with_the_warning_and_names_the_command() {
@@ -403,7 +404,7 @@ fn a_kernel_error_with_no_spec_key_keeps_its_own_code() {
     };
     let letter = letter_for(Cause::Kernel(&error));
     let reason = crate::route::diagnostic(&error);
-    assert_eq!(reason.code, "angzarr-embedded-unregistered-domain");
+    assert_eq!(reason.code, code!("unregistered-domain"));
     assert_eq!(letter.reason, Some(reason.clone()));
     assert_eq!(
         letter.rejection_details,
@@ -478,8 +479,13 @@ fn an_unavailable_handlers_letter_names_its_domain_and_cause() {
 fn a_retryable_store_or_sidecar_failures_letter_is_keyed_as_the_spec_spells_it() {
     use crate::toys::{processing_failed, wire};
     use angzarr_diagnostic::Report;
+    let sqlite = angzarr_store_sqlite::SqlError::Unavailable {
+        errno: Some(5),
+        detail: String::new(),
+    }
+    .code();
     let store = KernelError::Store(crate::StoreError::Unavailable(angzarr_ports::Cause::new(
-        "angzarr-store-sqlite-unavailable",
+        sqlite,
         [("errno", angzarr_ports::Arg::Uint(5))],
     )));
     let sidecar = KernelError::Upcast {
@@ -493,10 +499,7 @@ fn a_retryable_store_or_sidecar_failures_letter_is_keyed_as_the_spec_spells_it()
             store,
             wire(
                 "COORDINATOR_REASON_STORE_UNAVAILABLE",
-                &[
-                    ("cause", "angzarr-store-sqlite-unavailable"),
-                    ("cause.errno", "5"),
-                ],
+                &[("cause", sqlite), ("cause.errno", "5")],
             ),
         ),
         (
@@ -590,10 +593,7 @@ fn a_malformed_kernel_books_letter_is_keyed_where_the_spec_has_a_key() {
             },
             wire("COORDINATOR_REASON_POLICY_COMMAND_UNKNOWN_DOMAIN", &naming),
         ),
-        (
-            Malformed::NoBody,
-            wire("angzarr-embedded-malformed-no-body", &[]),
-        ),
+        (Malformed::NoBody, wire(code!("malformed-no-body"), &[])),
     ] {
         let letter = letter_for(Cause::Malformed(&malformed));
         assert_eq!(letter.reason, Some(reason.clone()), "{malformed:?}");

@@ -14,7 +14,7 @@
 
 use std::fmt;
 
-use angzarr_ports::angzarr_diagnostic::{self, Diagnostic};
+use angzarr_ports::angzarr_diagnostic::{self, code, Diagnostic};
 use angzarr_ports::{Arg, Cause, StoreError};
 
 /// The database's own failures, as causes.
@@ -51,14 +51,14 @@ pub enum SqlError {
 impl SqlError {
     pub fn code(&self) -> &'static str {
         match self {
-            SqlError::Unavailable { errno: Some(_), .. } => "angzarr-store-sqlite-unavailable",
-            SqlError::Unavailable { errno: None, .. } => "angzarr-store-sqlite-driver-failed",
-            SqlError::Undecodable { .. } => "angzarr-store-sqlite-undecodable",
-            SqlError::BackupUncreatable { .. } => "angzarr-store-sqlite-backup-uncreatable",
-            SqlError::DamagedFile { .. } => "angzarr-store-sqlite-damaged-file",
-            SqlError::NoDataVersion => "angzarr-store-sqlite-no-data-version",
-            SqlError::BadRoot { .. } => "angzarr-store-sqlite-bad-root",
-            SqlError::BadDeadLetterPlace { .. } => "angzarr-store-sqlite-bad-dead-letter-place",
+            SqlError::Unavailable { errno: Some(_), .. } => code!("unavailable"),
+            SqlError::Unavailable { errno: None, .. } => code!("driver-failed"),
+            SqlError::Undecodable { .. } => code!("undecodable"),
+            SqlError::BackupUncreatable { .. } => code!("backup-uncreatable"),
+            SqlError::DamagedFile { .. } => code!("damaged-file"),
+            SqlError::NoDataVersion => code!("no-data-version"),
+            SqlError::BadRoot { .. } => code!("bad-root"),
+            SqlError::BadDeadLetterPlace { .. } => code!("bad-dead-letter-place"),
         }
     }
 
@@ -152,7 +152,7 @@ impl Damage {
     }
 
     pub fn code(&self) -> &'static str {
-        "angzarr-store-sqlite-damaged"
+        code!("damaged")
     }
 
     pub fn args(&self) -> Vec<(&'static str, Arg)> {

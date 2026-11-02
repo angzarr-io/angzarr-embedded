@@ -185,8 +185,13 @@ angzarr-ports' own catalog, `angzarr_ports::EN_US` (re-exported as
   (`errno`) where it has one. A user handler's text (an escaped error's, a
   panic's) is never captured: it stays in the handler's own log.
 - **A new variant needs a code and an en-US message** in
-  `crates/<crate>/locales/en-US/<crate>.ftl`, using exactly the variant's
-  args, with a Fluent selector wherever a count is shown. The catalog check
+  `crates/<crate>/locales/en-US/messages.ftl`, using exactly the variant's
+  args, with a Fluent selector wherever a count is shown. No code or
+  catalog spells its crate's name: the code is `code!("suffix")`
+  (angzarr-diagnostic's macro, prefixing `CARGO_PKG_NAME`), the message's
+  id is the same suffix, and the crate's build script
+  (`angzarr_diagnostic::build::catalogs`) writes the catalog under the
+  crate's name, exported as `EN_US`. The catalog check
   (angzarr-embedded-catalog-check, on angzarr-diagnostic's `catalog::check`)
   holds the two to each other.
 - A game's error that an angzarr-embedded error carries (a migration step's, a content

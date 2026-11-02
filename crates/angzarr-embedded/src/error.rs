@@ -7,8 +7,8 @@
 //! key, verbatim (`COORDINATOR_REASON_EXPECTED_SEQUENCE_STALE`), its args
 //! the key's, and its English is the spec's catalog
 //! (`angzarr_proto::REASONS_EN_US`; decision 14.60); every other is coded
-//! under `angzarr-embedded-*`, its messages in
-//! `locales/en-US/angzarr-embedded.ftl`. A wrapper of another error
+//! under the crate's name (`code!("...")`), its messages in
+//! `locales/en-US/messages.ftl` ([`EN_US`](crate::EN_US)). A wrapper of another error
 //! ([`Failure::Rejected`], [`Failure::Kernel`], [`StepError`],
 //! [`KernelError::Malformed`], [`KernelError::Replay`],
 //! [`KernelError::Store`], [`KernelError::Router`], [`UpcastError::Payload`])
@@ -20,7 +20,7 @@
 
 use std::fmt;
 
-use angzarr_diagnostic::{Arg, Diagnostic, Report};
+use angzarr_diagnostic::{code, Arg, Diagnostic, Report};
 use angzarr_ports::StoreError;
 use angzarr_proto::v1::{Cover, EventBook, EventRef, Uuid};
 
@@ -504,13 +504,13 @@ impl KernelError {
             KernelError::EventsNotItsStream { .. } => {
                 Spec(Keyed::Coordinator(C::EventsNotItsStream))
             }
-            KernelError::UnknownType { .. } => Own("angzarr-embedded-unknown-type"),
-            KernelError::InvalidPayload { .. } => Own("angzarr-embedded-invalid-payload"),
-            KernelError::Upcast { .. } => Own("angzarr-embedded-upcast"),
-            KernelError::WrongDomain { .. } => Own("angzarr-embedded-wrong-domain"),
-            KernelError::BeforeSnapshot { .. } => Own("angzarr-embedded-before-snapshot"),
-            KernelError::UnregisteredDomain { .. } => Own("angzarr-embedded-unregistered-domain"),
-            KernelError::Unreadable { .. } => Own("angzarr-embedded-unreadable"),
+            KernelError::UnknownType { .. } => Own(code!("unknown-type")),
+            KernelError::InvalidPayload { .. } => Own(code!("invalid-payload")),
+            KernelError::Upcast { .. } => Own(code!("upcast")),
+            KernelError::WrongDomain { .. } => Own(code!("wrong-domain")),
+            KernelError::BeforeSnapshot { .. } => Own(code!("before-snapshot")),
+            KernelError::UnregisteredDomain { .. } => Own(code!("unregistered-domain")),
+            KernelError::Unreadable { .. } => Own(code!("unreadable")),
             KernelError::Malformed(m) => Wrapped(m.code()),
             KernelError::Replay(error) => Wrapped(error.code()),
             KernelError::Store(error) => Wrapped(error.code()),
@@ -585,9 +585,9 @@ impl<R: Diagnostic> Diagnostic for Failure<R> {
     fn code(&self) -> &str {
         match self {
             Failure::Rejected(rejection) => rejection.code(),
-            Failure::Downstream { .. } => "angzarr-embedded-downstream",
+            Failure::Downstream { .. } => code!("downstream"),
             Failure::Kernel(error) => error.code(),
-            Failure::Projection { .. } => "angzarr-embedded-projection-failed",
+            Failure::Projection { .. } => code!("projection-failed"),
         }
     }
 
@@ -858,10 +858,10 @@ impl fmt::Display for ReplayError {
 impl Diagnostic for ReplayError {
     fn code(&self) -> &str {
         match self {
-            ReplayError::OutOfSequence { .. } => "angzarr-embedded-replay-out-of-sequence",
-            ReplayError::RecordedBackwards { .. } => "angzarr-embedded-replay-recorded-backwards",
-            ReplayError::IncompleteMeta { .. } => "angzarr-embedded-replay-incomplete-meta",
-            ReplayError::WrongDomain { .. } => "angzarr-embedded-replay-wrong-domain",
+            ReplayError::OutOfSequence { .. } => code!("replay-out-of-sequence"),
+            ReplayError::RecordedBackwards { .. } => code!("replay-recorded-backwards"),
+            ReplayError::IncompleteMeta { .. } => code!("replay-incomplete-meta"),
+            ReplayError::WrongDomain { .. } => code!("replay-wrong-domain"),
         }
     }
 
@@ -922,9 +922,9 @@ impl std::error::Error for PayloadError {}
 impl Diagnostic for PayloadError {
     fn code(&self) -> &str {
         match self {
-            PayloadError::UnknownType { .. } => "angzarr-embedded-payload-unknown-type",
-            PayloadError::Decode { .. } => "angzarr-embedded-payload-decode",
-            PayloadError::Invalid { .. } => "angzarr-embedded-payload-invalid",
+            PayloadError::UnknownType { .. } => code!("payload-unknown-type"),
+            PayloadError::Decode { .. } => code!("payload-decode"),
+            PayloadError::Invalid { .. } => code!("payload-invalid"),
         }
     }
 
@@ -951,8 +951,8 @@ impl Diagnostic for UpcastError {
     fn code(&self) -> &str {
         match self {
             UpcastError::Payload(error) => error.code(),
-            UpcastError::Rule { .. } => "angzarr-embedded-upcast-rule",
-            UpcastError::Unavailable { .. } => "angzarr-embedded-upcast-unavailable",
+            UpcastError::Rule { .. } => code!("upcast-rule"),
+            UpcastError::Unavailable { .. } => code!("upcast-unavailable"),
         }
     }
 
@@ -977,9 +977,9 @@ impl fmt::Display for UpcastChainError {
 impl Diagnostic for UpcastChainError {
     fn code(&self) -> &str {
         match self.problem {
-            ChainProblem::Duplicate { .. } => "angzarr-embedded-upcaster-duplicate",
-            ChainProblem::OutOfOrder { .. } => "angzarr-embedded-upcaster-out-of-order",
-            ChainProblem::DeadEnd { .. } => "angzarr-embedded-upcaster-dead-end",
+            ChainProblem::Duplicate { .. } => code!("upcaster-duplicate"),
+            ChainProblem::OutOfOrder { .. } => code!("upcaster-out-of-order"),
+            ChainProblem::DeadEnd { .. } => code!("upcaster-dead-end"),
         }
     }
 

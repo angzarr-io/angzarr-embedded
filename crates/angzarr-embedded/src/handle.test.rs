@@ -1620,7 +1620,14 @@ fn a_policy_steps_lost_race_is_reloaded_and_run_again() {
 #[test]
 fn a_policy_steps_unavailable_store_is_run_again() {
     a_policy_step_failing_once_lands_on_its_retry(crate::StoreError::Unavailable(
-        angzarr_ports::Cause::new("angzarr-store-sqlite-unavailable", []),
+        angzarr_ports::Cause::new(
+            angzarr_store_sqlite::SqlError::Unavailable {
+                errno: Some(5),
+                detail: String::new(),
+            }
+            .code(),
+            [],
+        ),
     ));
 }
 

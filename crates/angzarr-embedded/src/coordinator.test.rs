@@ -581,6 +581,7 @@ mod snapshot {
     use super::super::{steps::Coordinator, Deduplicated};
     use crate::v1::{ConflictResolution, Snapshot};
     use crate::{check, pack, Payload, Stream};
+    use angzarr_diagnostic::code;
 
     use crate::toys::{
         account, at, command, cover, opened, registry, root, set, shelf, Account, AccountCmd, Edit,
@@ -865,7 +866,7 @@ mod snapshot {
         let KernelError::Unreadable { reason, .. } = error else {
             panic!("expected an unreadable snapshot, got {error:?}");
         };
-        assert_eq!(reason.code(), "angzarr-embedded-payload-invalid");
+        assert_eq!(reason.code(), code!("payload-invalid"));
     }
 }
 

@@ -8,7 +8,7 @@ use crate::{
     assert_replay_fixtures, check_replay_fixtures, pack, Failure, KernelError, Malformed, Recovery,
     ReplayError, ReplayFixture, StepError, StoreError, Stream,
 };
-use angzarr_diagnostic::Report;
+use angzarr_diagnostic::{code, Report};
 use angzarr_ports::Cause;
 use angzarr_router::error::{BusinessStatus, CodedError, GrpcCode, RouterReason};
 
@@ -644,11 +644,14 @@ fn errors_display_their_code_and_args_and_wrappers_their_cause_flattened() {
     let text = stale.to_string();
     assert_eq!(
         text,
-        format!("angzarr-embedded-before-snapshot stream={at} first=4")
+        format!(
+            concat!(code!("before-snapshot"), " stream={at} first=4"),
+            at = at
+        )
     );
     let failure = Failure::<crate::toys::Refused>::Kernel(stale.clone());
     assert_eq!(failure.to_string(), text);
-    assert_eq!(failure.code(), "angzarr-embedded-before-snapshot");
+    assert_eq!(failure.code(), code!("before-snapshot"));
     assert_eq!(failure.args().len(), 2);
     // A condition the spec keys shows its key and the key's args alone
     // (decision 14.60).
@@ -676,8 +679,14 @@ fn errors_display_their_code_and_args_and_wrappers_their_cause_flattened() {
     assert_eq!(
         downstream.to_string(),
         format!(
-            "angzarr-embedded-downstream depth=0 error=angzarr-embedded-before-snapshot \
+            concat!(
+                code!("downstream"),
+                " depth=0 error=",
+                code!("before-snapshot"),
+                " \
              error.stream={at} error.first=4"
+            ),
+            at = at
         )
     );
     let upcast = crate::UpcastError::Payload(crate::PayloadError::UnknownType {
@@ -685,21 +694,20 @@ fn errors_display_their_code_and_args_and_wrappers_their_cause_flattened() {
     });
     assert_eq!(
         upcast.to_string(),
-        "angzarr-embedded-payload-unknown-type type_url=/a.B"
+        concat!(code!("payload-unknown-type"), " type_url=/a.B")
     );
     let malformed = KernelError::Malformed(Malformed::NoCover);
-    assert_eq!(malformed.to_string(), "angzarr-embedded-malformed-no-cover");
+    assert_eq!(malformed.to_string(), code!("malformed-no-cover"));
     let replay = KernelError::Replay(ReplayError::RecordedBackwards { sequence: 3 });
     assert_eq!(
         replay.to_string(),
-        "angzarr-embedded-replay-recorded-backwards sequence=3"
+        concat!(code!("replay-recorded-backwards"), " sequence=3")
     );
+    // A store error is angzarr-ports' code, forwarded.
+    let unavailable = StoreError::Unavailable(Cause::new("x-down", [])).code();
     let store = KernelError::Store(StoreError::Unavailable(Cause::new("x-down", [])));
-    assert_eq!(store.code(), "angzarr-ports-store-unavailable");
-    assert_eq!(
-        store.to_string(),
-        "angzarr-ports-store-unavailable cause=x-down"
-    );
+    assert_eq!(store.code(), unavailable);
+    assert_eq!(store.to_string(), format!("{unavailable} cause=x-down"));
     // A value that would not parse back is quoted, a cause's too.
     let locked = KernelError::Store(StoreError::Unavailable(Cause::new(
         "x-down",
@@ -710,7 +718,7 @@ fn errors_display_their_code_and_args_and_wrappers_their_cause_flattened() {
     )));
     assert_eq!(
         locked.to_string(),
-        "angzarr-ports-store-unavailable cause=x-down cause.ext_err_txt=\"database is locked\""
+        format!("{unavailable} cause=x-down cause.ext_err_txt=\"database is locked\"")
     );
     let router = KernelError::Router(CodedError::bug(
         "PLAYER_BROKE",
@@ -752,12 +760,13 @@ fn an_unreachable_handler_carries_its_cause_as_a_key() {
 fn a_store_error_keeps_its_angzarr_ports_code_and_args() {
     use angzarr_diagnostic::{Arg, Diagnostic};
     let stream = cover("account", 1);
-    let conflict = KernelError::Store(StoreError::Conflict {
+    let inner = StoreError::Conflict {
         stream: Box::new(stream.clone()),
         expected: 1,
         actual: 2,
-    });
-    assert_eq!(conflict.code(), "angzarr-ports-store-conflict");
+    };
+    let conflict = KernelError::Store(inner.clone());
+    assert_eq!(conflict.code(), inner.code());
     let args = conflict.args();
     let names: Vec<&str> = args.iter().map(|(name, _)| *name).collect();
     assert_eq!(names, ["stream", "expected", "actual"]);
@@ -765,24 +774,31 @@ fn a_store_error_keeps_its_angzarr_ports_code_and_args() {
     assert!(matches!(args[1].1, Arg::Uint(1)));
     assert!(matches!(args[2].1, Arg::Uint(2)));
 
-    let not_forked = KernelError::Store(StoreError::EditionNotForked {
+    let inner = StoreError::EditionNotForked {
         stream: Box::new(crate::toys::cover_in("account", 1, "what-if")),
-    });
-    assert_eq!(not_forked.code(), "angzarr-ports-store-edition-not-forked");
+    };
+    let not_forked = KernelError::Store(inner.clone());
+    assert_eq!(not_forked.code(), inner.code());
     assert_eq!(not_forked.args().len(), 1);
 
     // The adapter's cause carries its own args (the driver's numeric code,
     // never its text: decision 14.37), nested under the cause's code.
-    let down = KernelError::Store(StoreError::Unavailable(Cause::new(
-        "angzarr-store-sqlite-unavailable",
+    let sqlite = angzarr_store_sqlite::SqlError::Unavailable {
+        errno: Some(10),
+        detail: String::new(),
+    }
+    .code();
+    let inner = StoreError::Unavailable(Cause::new(
+        sqlite,
         [("errno", angzarr_ports::Arg::Uint(10))],
-    )));
+    ));
+    let down = KernelError::Store(inner.clone());
     let args = down.args();
     assert_eq!(args.len(), 1);
     let ("cause", Arg::Nested(cause)) = &args[0] else {
         panic!("a nested cause: {args:?}");
     };
-    assert_eq!(cause.code(), "angzarr-store-sqlite-unavailable");
+    assert_eq!(cause.code(), sqlite);
     assert!(
         matches!(cause.args()[..], [("errno", Arg::Uint(10))]),
         "{:?}",
@@ -790,7 +806,7 @@ fn a_store_error_keeps_its_angzarr_ports_code_and_args() {
     );
     assert_eq!(
         down.to_string(),
-        "angzarr-ports-store-unavailable cause=angzarr-store-sqlite-unavailable cause.errno=10"
+        format!("{} cause={sqlite} cause.errno=10", inner.code())
     );
 }
 
@@ -805,7 +821,7 @@ fn an_event_the_kernel_cannot_replay_is_its_own_error() {
         sequence: 4,
         reason: Report::new("x-bad"),
     };
-    assert_eq!(unreadable.code(), "angzarr-embedded-unreadable");
+    assert_eq!(unreadable.code(), code!("unreadable"));
     assert_eq!(
         unreadable
             .args()
@@ -816,7 +832,7 @@ fn an_event_the_kernel_cannot_replay_is_its_own_error() {
     );
     assert!(unreadable
         .to_string()
-        .starts_with("angzarr-embedded-unreadable stream=account/"));
+        .starts_with(concat!(code!("unreadable"), " stream=account/")));
 }
 
 #[test]

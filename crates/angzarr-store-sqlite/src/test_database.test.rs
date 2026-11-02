@@ -19,8 +19,9 @@ pub(crate) fn database() -> Database {
             .duration_since(UNIX_EPOCH)
             .map_or(0, |since| since.as_nanos());
         format!(
-            "angzarr-store-sqlite-test-{}-{nanos}-{}",
+            concat!(env!("CARGO_PKG_NAME"), "-test-{}-{}-{}"),
             std::process::id(),
+            nanos,
             RUN.fetch_add(1, Ordering::Relaxed)
         )
     })

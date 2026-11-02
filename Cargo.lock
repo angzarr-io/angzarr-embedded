@@ -171,6 +171,7 @@ dependencies = [
 name = "angzarr-store-sqlite"
 version = "0.1.0"
 dependencies = [
+ "angzarr-diagnostic",
  "angzarr-ports",
  "prost",
  "prost-types",

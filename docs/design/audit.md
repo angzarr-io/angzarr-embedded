@@ -1183,7 +1183,8 @@ names the trigger; angzarr-embedded has no tracing dependency and reports it now
 
 A duplicate is not an error: it is `Handled::Duplicate`. Each error becomes
 a `Diagnostic` with the implementation (codes under `angzarr-embedded-*`,
-messages in `locales/en-US/angzarr-embedded.ftl`).
+messages in `locales/en-US/messages.ftl`, each id the code without the
+crate's name, which the build prefixes).
 
 **The renames of the kernel's codes (2026-10-31).** The kernel's codes
 were `angzarr-embedded-next-*`, after the `next` module the kernel lived in;
