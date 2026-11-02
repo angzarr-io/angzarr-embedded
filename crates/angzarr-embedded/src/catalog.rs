@@ -371,20 +371,20 @@ pub struct Catalog {
 }
 
 impl Catalog {
-    /// List domain `descriptor.name`, its handler of `kind`, by its
-    /// descriptor, configured as `configured`, its payloads upcast through
-    /// `upcast`. Refused when the name is taken (here or remote), without
+    /// List domain `descriptor.name` by its descriptor (its handler's
+    /// kind, `descriptor.kind`), configured as `configured`, its payloads
+    /// upcast through `upcast`. Refused when the name is taken (here or remote), without
     /// a rules version or a state type, with a state whose resolutions are
     /// not resolutions, or configured with one its state does not support;
     /// refused, nothing is listed.
     pub(crate) fn list_domain(
         &mut self,
-        kind: ComponentKind,
         descriptor: ComponentDescriptor,
         configured: Configured,
         upcast: Option<Arc<dyn UpcastPort>>,
     ) -> Result<Description, Misconfigured> {
         let domain = descriptor.name.clone();
+        let kind = descriptor.kind();
         self.free(&domain)?;
         let described = described(&domain, kind, descriptor)?;
         let unsupported = |command_type: Option<&str>, resolution| {
@@ -457,19 +457,10 @@ impl Catalog {
         Ok(())
     }
 
-    /// List policy `name`, of `source`'s events, its commands to
-    /// `output_domain`. Refused for a name listed already and for a remote
-    /// source.
-    pub(crate) fn list_policy(
-        &mut self,
-        name: &str,
-        source: &str,
-        output_domain: &str,
-    ) -> Result<(), Misconfigured> {
-        let descriptor = ComponentDescriptor {
-            output_domain: output_domain.to_string(),
-            ..self.reader(name, ComponentKind::Policy, &[source], &self.policies)?
-        };
+    /// List policy `name`, of `source`'s events. Refused for a name listed
+    /// already and for a remote source.
+    pub(crate) fn list_policy(&mut self, name: &str, source: &str) -> Result<(), Misconfigured> {
+        let descriptor = self.reader(name, &[source], &self.policies)?;
         self.policies.push(descriptor);
         Ok(())
     }
@@ -486,18 +477,17 @@ impl Catalog {
                 component: name.to_string(),
             });
         }
-        let descriptor = self.reader(name, ComponentKind::Projector, sources, &self.projectors)?;
+        let descriptor = self.reader(name, sources, &self.projectors)?;
         self.projectors.push(descriptor);
         Ok(())
     }
 
     /// The descriptor of a reader of `sources`' events (a policy, a
-    /// projector), named `name` and of `kind`: refused when `listed`
-    /// holds its name, or a source is remote.
+    /// projector), named `name`: its name and inputs. Refused when
+    /// `listed` holds its name, or a source is remote.
     fn reader(
         &self,
         name: &str,
-        kind: ComponentKind,
         sources: &[&str],
         listed: &[ComponentDescriptor],
     ) -> Result<ComponentDescriptor, Misconfigured> {
@@ -514,7 +504,6 @@ impl Catalog {
         }
         Ok(ComponentDescriptor {
             name: name.to_string(),
-            kind: kind as i32,
             inputs: (sources.iter())
                 .map(|domain| Target {
                     domain: domain.to_string(),

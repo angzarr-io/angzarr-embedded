@@ -177,7 +177,7 @@ impl Registry {
         let upcaster = Arc::new(upcaster);
         let port: Arc<dyn UpcastPort> = upcaster.clone();
         self.catalog
-            .list_domain(kind, descriptor, configured, Some(port))?;
+            .list_domain(descriptor, configured, Some(port))?;
         let table = route::table::<D>(Arc::clone(&fresh), process_manager);
         let handler = Handler {
             dispatch: Box::new(handlers(table)),
@@ -234,9 +234,9 @@ impl Registry {
             kind: kind as i32,
             ..descriptor
         };
-        let description =
-            self.catalog
-                .list_domain(kind, descriptor, Configured::default(), None)?;
+        let description = self
+            .catalog
+            .list_domain(descriptor, Configured::default(), None)?;
         let handler = Handler {
             dispatch: Box::new(handler),
             typed: None,
@@ -366,7 +366,7 @@ impl Registry {
         answers_refusals: bool,
     ) -> Result<&mut Self, Misconfigured> {
         self.catalog
-            .list_policy(dispatch.name(), dispatch.input_domain(), &output_domain)?;
+            .list_policy(dispatch.name(), dispatch.input_domain())?;
         self.policies.push(PolicyEntry {
             dispatch,
             output_domain,
