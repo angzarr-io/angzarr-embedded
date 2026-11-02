@@ -220,7 +220,7 @@ fn a_child_not_serving_fails_the_health_step() {
     );
     assert_eq!(
         outcomes(&not_serving),
-        expect(2, Some("angzarr-embedded-host-not-serving"))
+        expect(2, Some("HOST_REASON_CHILD_NOT_SERVING"))
     );
     let no_health = probed(
         with(
@@ -278,7 +278,7 @@ fn an_input_not_answered_fails_the_handle_step() {
     );
     assert_eq!(
         outcomes(&other_kind),
-        expect(4, Some("angzarr-embedded-host-probe-input"))
+        expect(4, Some("HOST_REASON_PROBE_INPUT"))
     );
 }
 
@@ -292,14 +292,14 @@ fn a_child_ignoring_its_stdins_end_fails_the_shutdown_step() {
     );
     assert_eq!(
         outcomes(&probed),
-        expect(5, Some("angzarr-embedded-host-not-exited"))
+        expect(5, Some("HOST_REASON_CHILD_NOT_EXITED"))
     );
     let Outcome::Failed(report) = &probed.steps[5].1 else {
         panic!("{probed:?}");
     };
     assert_eq!(
         report.to_string(),
-        "angzarr-embedded-host-not-exited domain=player ended=terminated"
+        "HOST_REASON_CHILD_NOT_EXITED component=player ended=terminated"
     );
 }
 
@@ -363,4 +363,26 @@ fn client_pythons_child_shim_passes_every_step() {
         ),
     );
     assert_eq!(outcomes(&probed), expect(6, None), "{probed:?}");
+}
+
+/// The probe's shutdown and input failures are the spec's keys (decision
+/// 14.62), naming the child as `component`.
+#[test]
+fn the_probes_failures_are_spec_keys() {
+    let exit_status = HostError::ExitStatus {
+        component: "player".to_string(),
+        exit_code: 3,
+    };
+    assert_eq!(
+        exit_status.to_string(),
+        "HOST_REASON_CHILD_EXIT_STATUS component=player exit_code=3"
+    );
+    let probe_input = HostError::ProbeInput {
+        component: "player".to_string(),
+        kind: "policy".to_string(),
+    };
+    assert_eq!(
+        probe_input.to_string(),
+        "HOST_REASON_PROBE_INPUT component=player kind=policy"
+    );
 }

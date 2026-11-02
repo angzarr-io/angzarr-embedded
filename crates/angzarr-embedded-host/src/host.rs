@@ -880,7 +880,7 @@ impl Supervisor {
             // so one described must be.
             if !serving {
                 return Err(HostError::NotServing {
-                    domain: domain(),
+                    component: domain(),
                     status: ServingStatus::try_from(status)
                         .map_or_else(|_| status.to_string(), |s| s.as_str_name().to_string()),
                 });

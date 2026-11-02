@@ -166,11 +166,11 @@ pub fn probe(
             match exit {
                 ChildExit::Exited(Some(0)) => Ok(()),
                 ChildExit::Exited(Some(exit_code)) => Err(Report::of(&HostError::ExitStatus {
-                    domain: component.name.clone(),
+                    component: component.name.clone(),
                     exit_code,
                 })),
                 exit => Err(Report::of(&HostError::NotExited {
-                    domain: component.name.clone(),
+                    component: component.name.clone(),
                     ended: exit.ended().to_string(),
                 })),
             },
@@ -276,7 +276,7 @@ async fn handle(
         }
         (kind, _) => {
             return Err(Report::of(&HostError::ProbeInput {
-                domain: name,
+                component: name,
                 kind: kind.as_str().to_string(),
             }))
         }

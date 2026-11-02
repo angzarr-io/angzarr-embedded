@@ -953,7 +953,7 @@ fn a_described_child_is_checked_serving_before_it_is_described() {
         )]))
         .err(),
         Some(HostError::NotServing {
-            domain: "player".to_string(),
+            component: "player".to_string(),
             status: "NOT_SERVING".to_string(),
         })
     );

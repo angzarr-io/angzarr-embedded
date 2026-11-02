@@ -112,7 +112,7 @@ pub enum HostError {
     /// than SERVING once it had handshaken, when the child protocol says
     /// it handshakes only once SERVING: `status` is the health status, by
     /// its name (`NOT_SERVING`).
-    NotServing { domain: String, status: String },
+    NotServing { component: String, status: String },
     /// The child described itself as another kind than its `kind` says:
     /// `described` is its descriptor's `ComponentKind`, by name.
     KindMismatch {
@@ -147,14 +147,14 @@ pub enum HostError {
     DescriptorChanged { domain: String },
     /// A probed child exited on its stdin's end with a status other than
     /// 0 ([`crate::probe`]).
-    ExitStatus { domain: String, exit_code: i32 },
+    ExitStatus { component: String, exit_code: i32 },
     /// A probed child did not exit by itself on its stdin's end within the
     /// shutdown grace ([`crate::probe`]): `ended` is how it ended
     /// ([`ChildExit::ended`](crate::ChildExit::ended)).
-    NotExited { domain: String, ended: String },
+    NotExited { component: String, ended: String },
     /// The probe was given an input a child of `kind` does not handle (a
     /// command for a policy, a book of events for a domain).
-    ProbeInput { domain: String, kind: String },
+    ProbeInput { component: String, kind: String },
     /// The configured `socket_dir` is too long for a Unix socket path to
     /// hold the host's socket names in it: at most `max_bytes` bytes.
     SocketDirTooLong { dir: String, max_bytes: u64 },
@@ -261,14 +261,19 @@ impl Diagnostic for HostError {
                 vec![domain(d), ("cause", Arg::nested(cause))]
             }
             HostError::ExitStatus {
-                domain: d,
+                component: c,
                 exit_code,
-            } => vec![domain(d), ("exit_code", (*exit_code).into())],
-            HostError::NotExited { domain: d, ended } => {
-                vec![domain(d), ("ended", ended.as_str().into())]
+            } => vec![domain(c), ("exit_code", (*exit_code).into())],
+            HostError::NotExited {
+                component: c,
+                ended,
+            } => {
+                vec![domain(c), ("ended", ended.as_str().into())]
+            }
+            HostError::ProbeInput { component: c, kind } => {
+                vec![domain(c), ("kind", kind.as_str().into())]
             }
             HostError::NotExposable { domain: d, kind }
-            | HostError::ProbeInput { domain: d, kind }
             | HostError::NotRegistered { domain: d, kind }
             | HostError::NotListed { domain: d, kind } => {
                 vec![domain(d), ("kind", kind.as_str().into())]
@@ -276,8 +281,11 @@ impl Diagnostic for HostError {
             HostError::Connect { domain: d, socket } => {
                 vec![domain(d), ("socket", socket.as_str().into())]
             }
-            HostError::NotServing { domain: d, status } => {
-                vec![domain(d), ("status", status.as_str().into())]
+            HostError::NotServing {
+                component: c,
+                status,
+            } => {
+                vec![domain(c), ("status", status.as_str().into())]
             }
             HostError::Describe {
                 domain: d,
@@ -379,7 +387,7 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn Diagnostic>> {
             grpc_code: 12,
         }),
         Box::new(HostError::NotServing {
-            domain: d(),
+            component: d(),
             status: "NOT_SERVING".to_string(),
         }),
         Box::new(HostError::KindMismatch {
@@ -402,15 +410,15 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn Diagnostic>> {
         }),
         Box::new(HostError::DescriptorChanged { domain: d() }),
         Box::new(HostError::ExitStatus {
-            domain: d(),
+            component: d(),
             exit_code: 3,
         }),
         Box::new(HostError::NotExited {
-            domain: d(),
+            component: d(),
             ended: "terminated".to_string(),
         }),
         Box::new(HostError::ProbeInput {
-            domain: d(),
+            component: d(),
             kind: "policy".to_string(),
         }),
         Box::new(HostError::SocketDirTooLong {
