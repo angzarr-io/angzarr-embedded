@@ -435,10 +435,7 @@ impl KernelError {
         let CodedAs::Spec(key) = self.coded_as() else {
             return None;
         };
-        Some(angzarr_router::error::CodedError {
-            grpc: key.grpc()?,
-            ..super::route::spec_coded(key, super::route::flat_args(self))
-        })
+        Some(super::route::spec_coded(key, super::route::flat_args(self)))
     }
 
     /// The store's and the upcaster sidecar's failures the coordinator
