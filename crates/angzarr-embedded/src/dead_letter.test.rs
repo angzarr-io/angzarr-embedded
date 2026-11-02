@@ -4,7 +4,7 @@ use super::{Cause, Component};
 use crate::toys::prelude::*;
 use crate::v1::{angzarr_dead_letter, AngzarrDeadLetter, ComponentKind, Diagnostic};
 use crate::{
-    check, dead_letter_line, pack, DeadLetterLog, Failure, Kernel, KernelError, MemoryDeadLetters,
+    check, dead_letter_line, pack, DeadLetterLog, Kernel, KernelError, MemoryDeadLetters,
     DEAD_LETTER_PREFIX,
 };
 
@@ -109,8 +109,12 @@ fn an_edition_removals_line_names_its_stream_and_sequence() {
     assert!(line.contains(" sequence=4 stream=account/"), "{line}");
 }
 
+/// A fact whose handler panics is parked (C-0599): the router catches the
+/// panic, a handler's bug (cause ROUTER_REASON_HANDLER_PANICKED; decision
+/// 14.37), the kernel dead-letters the fact and answers OK, PARKED, and
+/// nothing is written.
 #[test]
-fn a_panicking_ingest_aborts_the_chain_and_is_logged() {
+fn a_panicking_ingest_is_dead_lettered_and_parked() {
     let registry = registry();
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry).log_with(&log);
@@ -121,26 +125,20 @@ fn a_panicking_ingest_aborts_the_chain_and_is_logged() {
         pack(&account::fact::PaymentReceived { cents: -1 }),
         "pi_bad",
     );
-    let failure = kernel
+    let handled = kernel
         .handle::<Account, _>(&store, bad, &at(30))
         .ready()
-        .err()
-        .expect("a bug, never a business rejection");
-    // The router catches the panic: a handler's bug, its cause
-    // ROUTER_REASON_HANDLER_PANICKED (decision 14.37).
-    assert!(
-        matches!(
-            &failure,
-            Failure::Kernel(KernelError::Router(e))
-                if e.extras.get("cause").map(String::as_str) == Some("ROUTER_REASON_HANDLER_PANICKED")
-        ),
-        "{failure:?}"
-    );
-    assert_eq!(failure.recovery(), crate::Recovery::Bug);
+        .expect("parked, never failed");
+    assert!(matches!(handled, crate::Handled::Parked(_)), "parked");
     assert!(streams(&store).is_empty(), "nothing written");
     let lines = log.lines();
     assert_eq!(lines.len(), 1);
     assert!(lines[0].starts_with(DEAD_LETTER_PREFIX));
+    assert!(
+        lines[0].contains("cause=ROUTER_REASON_HANDLER_PANICKED"),
+        "{}",
+        lines[0]
+    );
     assert!(lines[0].contains(&crate::ids::fact_command_id("pi_bad").to_string()));
 }
 

@@ -208,11 +208,11 @@ fn under_stay_a_policys_bug_is_kept_alone_and_once_across_resumes() {
     assert_eq!(log.lines().len(), 2, "logged each time");
 }
 
-/// A command its caller waits for is the caller's (owner ruling,
-/// 2026-10-31): a panicking ingest fails the call, its line is logged, and
-/// no letter is kept or answered.
+/// A fact whose handler fails is parked (C-0599): no caller holds it, so
+/// its letter is kept, keyed by its stream and command id, the call
+/// answered OK, PARKED with it, and nothing else is written.
 #[test]
-fn a_callers_own_bug_is_answered_and_kept_nowhere() {
+fn a_fact_whose_handler_fails_is_parked_and_its_letter_kept() {
     let registry = registry();
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry).log_with(&log);
@@ -222,19 +222,26 @@ fn a_callers_own_bug_is_answered_and_kept_nowhere() {
         crate::pack(&crate::toys::account::fact::PaymentReceived { cents: -1 }),
         "pi_bad",
     );
-    let failure = kernel
+    let handled = kernel
         .handle::<Account, _>(&store, bad, &at(30))
         .ready()
-        .err()
-        .expect("the bug fails the call");
-    assert!(matches!(failure, Failure::Kernel(_)), "{failure:?}");
-    assert!(failure.dead_letters().is_empty());
-    assert_eq!(log.lines().len(), 1, "logged");
+        .expect("parked, not failed");
+    assert!(matches!(handled, crate::Handled::Parked(_)), "parked");
+    let letters = places(handled.dead_letters());
+    assert_eq!(letters.len(), 1, "{letters:?}");
+    assert_eq!(letters[0].0, cover("account", 1));
     assert!(
-        store.writes().iter().all(|w| w.letters.is_empty()),
-        "nothing kept: {:?}",
-        store.writes()
+        matches!(letters[0].1, DeadLetterAt::Command(_)),
+        "{letters:?}"
     );
+    assert_eq!(log.lines().len(), 1, "logged");
+    let kept: Vec<_> = store
+        .writes()
+        .into_iter()
+        .filter(|w| !w.letters.is_empty())
+        .collect();
+    assert_eq!(kept.len(), 1, "one write keeps it: {kept:?}");
+    assert_eq!(kept[0].wrote, None, "and nothing else: {kept:?}");
 }
 
 /// A projector (a `ProjectorHandler`) that fails with a bug.

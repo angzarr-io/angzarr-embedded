@@ -356,10 +356,12 @@ pub enum Handled {
     /// was written; the policy steps its stream still owed ran, and these
     /// are the dead letters they wrote.
     Duplicate(EventBook, Vec<DeadLetter>),
-    /// A fact the kernel gave up on, its write lost to another write to its
-    /// stream until the race re-run cap: dead-lettered, no event written
-    /// (decision 14.46). A fact is never refused, so its sender is answered
-    /// accepted and parked, with no events, and with its dead letter.
+    /// A fact the kernel dead-lettered: its handler failed with a bug, a
+    /// retryable failure outlasted its retries, or its write was lost to
+    /// another write to its stream until the race re-run cap (decision
+    /// 14.46); no event written. A fact is never refused, so its sender is
+    /// answered accepted and parked, with no events, and with its dead
+    /// letter (C-0599).
     Parked(Vec<DeadLetter>),
 }
 
@@ -708,10 +710,13 @@ impl<'k> Kernel<'k> {
             }
         };
         let origin = match origin {
-            // A fact is never refused: given up at the cap, it is parked,
-            // its letter kept, for no caller holds it.
-            Err(Failure::Kernel(KernelError::RetryCapExhausted { .. }))
-                if identified.body().is_fact() =>
+            // A fact is never refused: one whose handler ran and the kernel
+            // dead-lettered (the handler's bug, a retryable failure at its
+            // retries, a race given up at its cap) is parked, its letter
+            // kept, for no caller holds it, and answered OK, PARKED
+            // (C-0599). One of a type no handler takes is its sender's.
+            Err(failure)
+                if identified.body().is_fact() && letters.raised() && !unhandled_type(&failure) =>
             {
                 port.write_letters(None)
                     .await
@@ -1200,6 +1205,23 @@ fn given_up(failure: &Failure<Rejected>) -> bool {
     matches!(
         failure,
         Failure::Kernel(KernelError::RetryCapExhausted { .. })
+    )
+}
+
+/// Whether `failure` is the router's for an input of a type no handler of
+/// its domain takes (a fact's, a refusal's, a command's): its sender's
+/// mistake, answered to it, never a handler that ran and failed.
+fn unhandled_type(failure: &Failure<Rejected>) -> bool {
+    let Failure::Kernel(KernelError::Router(error)) = failure else {
+        return false;
+    };
+    matches!(
+        RouterReason::from_str_name(&error.code),
+        Some(
+            RouterReason::NoFactHandler
+                | RouterReason::NoRefusalHandler
+                | RouterReason::UnknownCommandType
+        )
     )
 }
 

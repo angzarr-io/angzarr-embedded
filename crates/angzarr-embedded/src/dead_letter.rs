@@ -518,7 +518,8 @@ impl DeadLetterLog for MemoryDeadLetters {
 /// write), or in a write of its own at the step's end. The originating
 /// command's own letters are never placed: they come only with its
 /// failure, which ends the call (answered to its caller, never kept),
-/// and a parked fact's is placed before it is answered. Every letter
+/// and a fact the kernel dead-lettered is parked, its letter placed before
+/// it is answered. Every letter
 /// placed is the call's, whether its write lands or not (a step whose
 /// write fails holds its position, so it runs again and raises the letter
 /// again).
@@ -560,6 +561,12 @@ impl<'k> CallLetters<'k> {
             .collect();
         held.placed.extend(placed.iter().cloned());
         placed
+    }
+
+    /// Whether a letter was raised since the last placement: the call's
+    /// failure was dead-lettered.
+    pub(crate) fn raised(&self) -> bool {
+        !self.held().raised.is_empty()
     }
 
     /// Every letter placed so far, taken: what the call answers.

@@ -331,7 +331,8 @@ INTERNAL, `COORDINATOR_REASON_RETRY_CAP_EXHAUSTED` (`KernelError::as_coded`):
 the dead letter holds it, so no caller retries it, and a policy's step
 moves its position as `on_policy_bug` says. A fact is never refused: at the
 race re-run cap it is dead-lettered the same way and answered
-`Handled::Parked` (OK, PARKED, no events).
+`Handled::Parked` (OK, PARKED, no events), as is a fact whose handler
+fails.
 
 Pinned by `src/concurrency.test.rs`, which forces the race with a barrier
 only the two first dispatches pass; by `src/races.test.rs`, whose
@@ -1110,7 +1111,10 @@ here.
 certainly indicates a problem, so an operator alerts on it. The line is
 built from angzarr's own `AngzarrDeadLetter`, so it says what an angzarr
 DLQ entry would.
-angzarr-embedded never answers PARKED.
+A fact the kernel dead-letters (its handler's bug, a retryable failure at
+its retries, a race at its cap) is parked: its letter kept, answered
+`Handled::Parked` (OK, PARKED, no events; C-0599). A fact of a type no
+handler takes is its sender's, answered, never parked.
 
 ## Retrying, capped, then dead-lettered
 
