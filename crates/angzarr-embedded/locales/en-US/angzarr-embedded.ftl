@@ -77,6 +77,8 @@ angzarr-embedded-upcaster-out-of-order = domain { $domain }'s upcaster registers
 angzarr-embedded-upcaster-dead-end = domain { $domain }'s upcaster takes { $source } to { $ends_at }, which the domain does not decode
 
 angzarr-embedded-misconfigured-already-registered = domain "{ $domain }" is registered already
+angzarr-embedded-misconfigured-component-registered = a component named "{ $component }" is registered already
+angzarr-embedded-misconfigured-not-registered = an upcaster is given for domain "{ $domain }", which is not registered
 angzarr-embedded-misconfigured-upcaster-for-another-domain = the upcaster registered for domain "{ $domain }" is for "{ $upcaster }"
 angzarr-embedded-misconfigured-empty-rules-version = domain "{ $domain }"'s current rules version is empty
 angzarr-embedded-misconfigured-bad-state-descriptor = domain "{ $domain }"'s state descriptor lists a value that is not a resolution, or lacks STRICT or AGGREGATE_HANDLES

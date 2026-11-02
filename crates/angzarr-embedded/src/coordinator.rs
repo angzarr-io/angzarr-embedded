@@ -12,9 +12,9 @@
 //! 3. [`deduplicate`]: **load the stream first** (resolve the conflict
 //!    resolution: the book's, the command type's, the domain's, else
 //!    COMMUTATIVE where the state supports it and STRICT otherwise,
-//!    [`Registry::resolve`]; then the newest usable snapshot (of the
+//!    [`Catalog::resolve`](super::Catalog::resolve); then the newest usable snapshot (of the
 //!    registered state type, its rules version compatible with the
-//!    registered one, [`Registry::snapshot_usable`], and below the head) and the events
+//!    registered one, [`Catalog::snapshot_usable`](super::Catalog::snapshot_usable), and below the head) and the events
 //!    after it), **then** look the command id up (the store's
 //!    `find_command`), and [`admit`] the input, the kernel's own
 //!    (decision 14.42): what an input meets before its handler runs (a
@@ -45,7 +45,8 @@
 
 use angzarr_proto::v1::angzarr_dead_letter::Payload;
 use angzarr_proto::v1::{
-    command_page, CommandBook, ConflictResolution, Cover, EventBook, EventPage, Handling, Snapshot,
+    command_page, CommandBook, ComponentKind, ConflictResolution, Cover, DeliveryOutcome,
+    EventBook, EventPage, Handling, Snapshot,
 };
 use angzarr_router::error::{BusinessStatus, CodedError, RouterReason};
 
@@ -53,6 +54,7 @@ use angzarr_proto::v1::ContextualCommand;
 use angzarr_proto::v1::{reason_args as args, CoordinatorReason};
 use prost_types::{Any, Timestamp};
 
+use super::catalog::Catalog;
 use super::check::{Identified, Malformed, Sampled};
 use super::dead_letter::{self, Cause, Component, DeadLetterLog};
 use super::domain::Domain;
@@ -63,6 +65,7 @@ use super::registry::Registry;
 use super::route::{self, Rejected};
 use super::store::Port;
 use super::stream::Stream;
+use super::target::CoordinatorPort;
 use super::upcast::{upcast_input, upcast_pages};
 
 /// What step 3 found.
@@ -285,7 +288,7 @@ pub(crate) fn admit(
     if !recorded.is_empty() {
         return Ok(Admitted::Duplicate(recorded));
     }
-    let Some(starting) = registry.starting_types(command.domain()) else {
+    let Some(starting) = registry.catalog().starting_types(command.domain()) else {
         return Ok(Admitted::Dispatch);
     };
     if exists {
@@ -317,7 +320,7 @@ pub(crate) fn admit(
 /// before the kernel decides anything by its type: as sent when the domain
 /// has no port.
 pub(crate) async fn upcast(registry: &Registry, command: &Identified) -> Result<Any, UpcastError> {
-    match registry.upcast_port(command.domain()) {
+    match registry.catalog().upcast_port(command.domain()) {
         Some(port) => upcast_input(port, command.domain(), command.payload()).await,
         None => Ok(command.payload().clone()),
     }
@@ -334,19 +337,19 @@ pub(crate) fn with_payload(mut book: CommandBook, payload: &Any) -> CommandBook 
     book
 }
 
-/// The command's resolution ([`Registry::resolve`]): never UNSPECIFIED.
+/// The command's resolution ([`Catalog::resolve`](super::Catalog::resolve)): never UNSPECIFIED.
 /// The configuration per command type is looked up by the command's
 /// `current` type, after upcasting, so an old type has the setting of the
 /// type it upcasts to. A payload whose upcast failed is looked up as sent;
 /// the failure is reported at [`load`].
 pub(crate) fn resolution(
-    registry: &Registry,
+    catalog: &Catalog,
     command: &Identified,
     current: &Result<Any, UpcastError>,
 ) -> Result<ConflictResolution, KernelError> {
     let domain = command.domain();
     let current = current.as_ref().unwrap_or(command.payload());
-    registry
+    catalog
         .resolve(domain, &current.type_url, command.conflict_resolution())
         .ok_or_else(|| unknown_domain(domain))
 }
@@ -393,10 +396,10 @@ pub(crate) async fn read<P: Port>(
     command: &Identified,
 ) -> Result<Loaded, KernelError> {
     let current = upcast(registry, command).await;
-    let resolution = resolution(registry, command, &current)?;
+    let resolution = resolution(registry.catalog(), command, &current)?;
     let windowed = resolution != ConflictResolution::Strict;
     let usable = |s: &Snapshot| {
-        registry.snapshot_usable(command.domain(), s)
+        registry.catalog().snapshot_usable(command.domain(), s)
             && !(windowed && command.expected_sequence().is_some_and(|e| s.sequence >= e))
     };
     let (history, head) = read_history(port, command.cover(), usable).await?;
@@ -535,7 +538,7 @@ pub(crate) async fn decide(
                 dead_letter::write(
                     dead_letters,
                     Payload::RejectedCommand(identified.to_book()),
-                    Component::domain(registry, domain),
+                    Component::domain(registry.catalog(), domain),
                     Cause::Kernel(&unresolved),
                 );
                 Failure::Kernel(unresolved)
@@ -550,7 +553,7 @@ pub(crate) async fn decide(
                         dead_letter::write(
                             dead_letters,
                             Payload::RejectedCommand(identified.to_book()),
-                            Component::domain(registry, domain),
+                            Component::domain(registry.catalog(), domain),
                             Cause::Kernel(error),
                         );
                     }
@@ -561,7 +564,7 @@ pub(crate) async fn decide(
     })?;
     // Read after the answer: a child described again is registered by its
     // new descriptor before it gets work, so its answer meets its version.
-    let registered = registry.rules_version(domain).unwrap_or_default();
+    let registered = registry.catalog().rules_version(domain).unwrap_or_default();
     if response.rules_version != registered {
         let mismatch = KernelError::RulesVersionMismatch {
             stream: identified.cover().clone(),
@@ -571,7 +574,7 @@ pub(crate) async fn decide(
         dead_letter::write(
             dead_letters,
             Payload::RejectedCommand(identified.to_book()),
-            Component::domain(registry, domain),
+            Component::domain(registry.catalog(), domain),
             Cause::Kernel(&mismatch),
         );
         return Err(Failure::Kernel(mismatch));
@@ -687,7 +690,7 @@ pub(crate) async fn contextual_command(
     now: Timestamp,
 ) -> Result<ContextualCommand, KernelError> {
     let identified = &command.command;
-    let pages = match registry.upcast_port(identified.domain()) {
+    let pages = match registry.catalog().upcast_port(identified.domain()) {
         Some(port) => upcast_pages(port, identified.domain(), &command.pages).await,
         None => Ok(command.pages.clone()),
     }
@@ -724,6 +727,59 @@ pub(crate) async fn contextual_command(
 #[cfg(test)]
 #[path = "steps.test.rs"]
 pub(crate) mod steps;
+
+/// What a remote coordinator's answer came to: the events it persisted for
+/// the command's stream (perhaps none), or the ones it had already, a
+/// duplicate.
+pub(crate) enum Forwarded {
+    Applied(EventBook),
+    Duplicate(EventBook),
+}
+
+/// `command`, identified here, handed to the coordinator `port` that owns
+/// its stream, and its answer in the kernel's terms: its events, under
+/// their delivery; or its refusal as [`refused`] reads a local handler's,
+/// a handler's bug dead-lettered by its code and args as a local one is.
+/// An answer naming no stream is for the command's.
+pub(crate) async fn forward(
+    port: &dyn CoordinatorPort,
+    command: &Identified,
+    dead_letters: &dyn DeadLetterLog,
+) -> Result<Forwarded, Failure<Rejected>> {
+    match port.handle(command.to_remote_book()).await {
+        Ok(response) => {
+            let mut events = response.events.unwrap_or_default();
+            if events.cover.is_none() {
+                events.cover = Some(command.cover().clone());
+            }
+            let duplicate = response
+                .outcome
+                .is_some_and(|o| o.delivery == DeliveryOutcome::Duplicate as i32);
+            Ok(match duplicate {
+                true => Forwarded::Duplicate(events),
+                false => Forwarded::Applied(events),
+            })
+        }
+        Err(error) => {
+            let failure = refused(command, error);
+            if let Failure::Kernel(error @ KernelError::Router(coded)) = &failure {
+                if route::is_handler_fault(coded) {
+                    dead_letter::write(
+                        dead_letters,
+                        Payload::RejectedCommand(command.to_book()),
+                        // Its kind is its coordinator's to say: unknown here.
+                        Component {
+                            name: command.domain(),
+                            kind: ComponentKind::Unspecified,
+                        },
+                        Cause::Kernel(error),
+                    );
+                }
+            }
+            Err(failure)
+        }
+    }
+}
 
 #[cfg(test)]
 #[path = "coordinator.test.rs"]

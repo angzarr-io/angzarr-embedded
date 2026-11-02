@@ -326,7 +326,7 @@ impl<D: Domain> Stream<D> {
 
     /// Rebuild a stream from a snapshot and the pages after it, checked as
     /// [`Stream::replay`] checks. The caller has checked the snapshot is
-    /// usable ([`Registry::snapshot_usable`]); `last_recorded_at` is the
+    /// usable ([`Catalog::snapshot_usable`](super::Catalog::snapshot_usable)); `last_recorded_at` is the
     /// snapshot's last event's, the floor for the next. The state is a
     /// fresh one (as [`Stream::replay`]'s) [restored](State::restore) from
     /// the snapshot, so what the snapshot does not hold is the factory's.
@@ -386,7 +386,7 @@ impl<D: Domain> Stream<D> {
         Some(Snapshot {
             sequence,
             state: Some(pack(&self.state.to_snapshot())),
-            rules_version: registry.rules_version(D::NAME)?,
+            rules_version: registry.catalog().rules_version(D::NAME)?,
         })
     }
 

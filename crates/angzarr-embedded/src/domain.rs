@@ -106,7 +106,7 @@ pub trait Domain: Sized + 'static {
     /// chosen by hand (`#[aggregate]` and `#[process_manager]` give
     /// `env!("CARGO_PKG_VERSION")`). The domain is registered at it, and its
     /// answers report it; the kernel reads it only to choose which
-    /// snapshots to offer ([`Registry::snapshot_usable`](super::Registry::snapshot_usable)).
+    /// snapshots to offer ([`Catalog::snapshot_usable`](super::Catalog::snapshot_usable)).
     const RULES_VERSION: &'static str;
 
     /// The domain's configured conflict resolution (angzarr's component

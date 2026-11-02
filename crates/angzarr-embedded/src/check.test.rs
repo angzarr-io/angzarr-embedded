@@ -135,7 +135,7 @@ fn command() -> command_page::Body {
 fn react(book: CommandBook) -> Result<Checked, Malformed> {
     check_policy_command(
         book,
-        &empty::registry(),
+        empty::registry().catalog(),
         trigger(),
         "bookkeeping",
         1,
@@ -218,7 +218,7 @@ fn a_policys_book_names_no_ids_no_fact_and_no_handling() {
     assert_eq!(
         check_policy_command(
             book(command()),
-            &empty::registry(),
+            empty::registry().catalog(),
             EventRef::default(),
             "bookkeeping",
             0,
@@ -230,7 +230,7 @@ fn a_policys_book_names_no_ids_no_fact_and_no_handling() {
     assert_eq!(
         check_policy_command(
             book(command()),
-            &empty::registry(),
+            empty::registry().catalog(),
             trigger(),
             "",
             0,
@@ -299,7 +299,7 @@ mod parse {
     #[test]
     fn a_checked_command_has_non_optional_accessors() {
         let book = command(cover("account", 1), deposit(5));
-        let checked = check(book, &registry()).unwrap();
+        let checked = check(book, registry().catalog()).unwrap();
 
         assert_eq!(checked.cover(), &cover("account", 1));
         assert_eq!(checked.domain(), "account");
@@ -325,7 +325,7 @@ mod parse {
     #[test]
     fn a_checked_fact_carries_its_source_in_its_body() {
         let book = fact(cover_in("account", 2, "what-if"), payment(70), "pi_1234");
-        let checked = check(book, &registry()).unwrap();
+        let checked = check(book, registry().catalog()).unwrap();
 
         assert_eq!(checked.edition(), Some("what-if"));
         let source = FactOrigin {
@@ -354,7 +354,7 @@ mod parse {
             .id(9)
             .correlated(4)
             .expecting(7, ConflictResolution::AggregateHandles);
-        let checked = check(book, &registry()).unwrap();
+        let checked = check(book, registry().catalog()).unwrap();
 
         assert_eq!(checked.command_id(), Some(&crate::toys::command_id(9)));
         assert_eq!(checked.correlation_id(), Some(&correlation(4)));
@@ -369,7 +369,8 @@ mod parse {
     fn an_empty_handling_is_unset() {
         let mut book = fact(cover("account", 1), payment(1), "pi_1");
         book.handling = Some(Handling::default());
-        let checked = check(book, &registry()).expect("an empty handling on a fact is fine");
+        let checked =
+            check(book, registry().catalog()).expect("an empty handling on a fact is fine");
         assert_eq!(checked.expected_sequence(), None);
 
         let mut book = command(cover("account", 1), deposit(1));
@@ -378,7 +379,9 @@ mod parse {
             conflict_resolution: ConflictResolution::Unspecified as i32,
         });
         assert_eq!(
-            check(book, &registry()).unwrap().conflict_resolution(),
+            check(book, registry().catalog())
+                .unwrap()
+                .conflict_resolution(),
             None,
             "UNSPECIFIED is the configured default"
         );
@@ -388,7 +391,10 @@ mod parse {
     fn a_fact_may_name_its_derived_command_id_and_nothing_else() {
         let mut book = fact(cover("account", 1), payment(1), "pi_1234");
         book.page_mut().command_id = Some(ids::fact_command_id("pi_1234"));
-        assert!(check(book, &registry()).is_ok(), "an SDK may compute it");
+        assert!(
+            check(book, registry().catalog()).is_ok(),
+            "an SDK may compute it"
+        );
     }
 
     #[test]
@@ -396,13 +402,15 @@ mod parse {
         let book =
             command(cover("shelf", 1), set("a", 1)).resolved_by(ConflictResolution::Commutative);
         assert_eq!(
-            check(book, &registry()).unwrap().conflict_resolution(),
+            check(book, registry().catalog())
+                .unwrap()
+                .conflict_resolution(),
             Some(ConflictResolution::Commutative)
         );
         let book = command(cover("account", 1), deposit(1))
             .resolved_by(ConflictResolution::AggregateHandles);
         assert!(
-            check(book, &registry()).is_ok(),
+            check(book, registry().catalog()).is_ok(),
             "AGGREGATE_HANDLES is in every state's implicit base"
         );
     }
@@ -562,7 +570,7 @@ mod parse {
 
         let registry = registry();
         for (case, book, malformed) in cases {
-            assert_eq!(check(book, &registry), Err(malformed), "{case}");
+            assert_eq!(check(book, registry.catalog()), Err(malformed), "{case}");
         }
     }
 }
@@ -580,7 +588,9 @@ mod identify {
     };
 
     fn identified(book: crate::v1::CommandBook, seconds: i64) -> Identified {
-        check(book, &registry()).unwrap().identify(&at(seconds))
+        check(book, registry().catalog())
+            .unwrap()
+            .identify(&at(seconds))
     }
 
     fn deposit() -> crate::Any {
@@ -682,8 +692,8 @@ mod identify {
                 "pi_2",
             ),
         ] {
-            let first = check(book, &registry).unwrap().identify(&at(40));
-            let again = check(first.to_book(), &registry)
+            let first = check(book, registry.catalog()).unwrap().identify(&at(40));
+            let again = check(first.to_book(), registry.catalog())
                 .expect("its ids are well formed, a fact's the derived one")
                 .identify(&at(41));
             // Its correlation, filled in when unset, is set in the book: so

@@ -355,7 +355,7 @@ mod tx {
     fn decide_reads_the_rules_version_the_stream_the_instant_and_the_ids() {
         let plain = registry();
         let mut registry = registry();
-        registry.policy(Probing);
+        registry.policy(Probing).unwrap();
         let log = MemoryDeadLetters::new();
         let kernel = Kernel::new(&registry).log_with(&log);
         let store = MemoryStore::new();
@@ -440,8 +440,8 @@ mod tx {
     fn a_two_deep_chain_keeps_the_path_to_the_step_running_and_its_limit() {
         let plain = registry();
         let mut registry = registry();
-        registry.policy(Probing);
-        registry.policy(ProbeToLedger);
+        registry.policy(Probing).unwrap();
+        registry.policy(ProbeToLedger).unwrap();
         registry
             .register::<crate::toys::Ledger>(
                 Upcaster::new("u", "ledger"),
@@ -505,7 +505,7 @@ mod tx {
             2,
             "the account's and the probe's commits stand; no ledger step ran"
         );
-        assert_eq!(shallow.registry().domains().count(), 3);
+        assert_eq!(shallow.registry().catalog().domains().count(), 3);
     }
 
     #[test]
@@ -522,7 +522,7 @@ mod tx {
             let book = command(cover("probe", 1), Probe { stash }.to_any())
                 .id(n)
                 .resolved_by(ConflictResolution::AggregateHandles);
-            let identified = check(book, &registry).unwrap().identify(&at(60));
+            let identified = check(book, registry.catalog()).unwrap().identify(&at(60));
             let Deduplicated::Novel(novel) = coordinator.deduplicate(identified).unwrap() else {
                 panic!("new");
             };

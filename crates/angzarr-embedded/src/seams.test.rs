@@ -88,7 +88,7 @@ fn three_runs() -> OnRetryable {
 #[test]
 fn a_kernel_with_no_log_still_answers_the_dead_letters_its_call_wrote() {
     let mut registry = registry();
-    registry.policy(Bookkeeping);
+    registry.policy(Bookkeeping).unwrap();
     let kernel = Kernel::new(&registry);
     let store = MemoryStore::new();
     opened(&store, &registry, 1, 0);
@@ -103,7 +103,7 @@ fn a_kernel_with_no_log_still_answers_the_dead_letters_its_call_wrote() {
 #[test]
 fn a_kernel_given_a_log_writes_each_dead_letters_line_to_it() {
     let mut registry = registry();
-    registry.policy(Bookkeeping);
+    registry.policy(Bookkeeping).unwrap();
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry).log_with(&log);
     let store = MemoryStore::new();
@@ -263,7 +263,7 @@ fn a_decision_with_no_events_leaves_the_state_it_was_decided_on() {
 #[test]
 fn a_policy_steps_target_state_is_its_steps_commit() {
     let mut registry = registry();
-    registry.policy(Bookkeeping);
+    registry.policy(Bookkeeping).unwrap();
     let kernel = Kernel::new(&registry).on_retryable(no_retries());
     let store = MemoryStore::new();
     opened(&store, &registry, 1, 0);
@@ -325,7 +325,7 @@ fn a_duplicate_has_no_state_of_its_own() {
 #[test]
 fn a_stream_of_another_domain_does_not_fold_as_this_one() {
     let mut registry = registry();
-    registry.policy(Bookkeeping);
+    registry.policy(Bookkeeping).unwrap();
     let kernel = Kernel::new(&registry).on_retryable(no_retries());
     let store = MemoryStore::new();
     opened(&store, &registry, 1, 0);

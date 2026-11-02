@@ -429,14 +429,18 @@ mod pipeline {
         let mut coordinator = Coordinator::new(&store, &registry);
 
         // An applied command: step 3 answers it.
-        let applied = check(deposit(2), &registry).unwrap().identify(&at(30));
+        let applied = check(deposit(2), registry.catalog())
+            .unwrap()
+            .identify(&at(30));
         assert!(matches!(
             coordinator.deduplicate(applied).unwrap(),
             Deduplicated::Duplicate { .. }
         ));
 
         // A new one goes on: stamped at the head, STRICT, no window, no nonce.
-        let novel = check(deposit(3), &registry).unwrap().identify(&at(30));
+        let novel = check(deposit(3), registry.catalog())
+            .unwrap()
+            .identify(&at(30));
         let Deduplicated::Novel(novel) = coordinator.deduplicate(novel).unwrap() else {
             panic!("never applied");
         };
@@ -470,7 +474,7 @@ mod pipeline {
         let book = command(cover("shelf", 3), set("d", 1))
             .id(9)
             .expecting(1, ConflictResolution::AggregateHandles);
-        let identified = check(book, &registry).unwrap().identify(&at(30));
+        let identified = check(book, registry.catalog()).unwrap().identify(&at(30));
         let Deduplicated::Novel(novel) = coordinator.deduplicate(identified).unwrap() else {
             panic!("never applied");
         };
@@ -508,7 +512,9 @@ mod pipeline {
         let store = MemoryStore::new();
         opened(&store, &registry, 1, 100);
         let mut coordinator = Coordinator::new(&store, &registry);
-        let identified = check(deposit(3), &registry).unwrap().identify(&at(30));
+        let identified = check(deposit(3), registry.catalog())
+            .unwrap()
+            .identify(&at(30));
         let Deduplicated::Novel(novel) = coordinator.deduplicate(identified).unwrap() else {
             panic!("never applied");
         };
@@ -528,7 +534,7 @@ mod pipeline {
         opened(&store, &registry, 2, 0);
         let sweep = check(
             command(cover("account", 2), AccountCmd::Sweep.to_any()).id(5),
-            &registry,
+            registry.catalog(),
         )
         .unwrap()
         .identify(&at(32));
@@ -546,7 +552,9 @@ mod pipeline {
 
         // A cover of another domain than the one decoded for.
         let mut wrong = Coordinator::new(&store, &registry);
-        let identified = check(deposit(6), &registry).unwrap().identify(&at(33));
+        let identified = check(deposit(6), registry.catalog())
+            .unwrap()
+            .identify(&at(33));
         let Deduplicated::Novel(novel) = wrong.deduplicate(identified).unwrap() else {
             panic!("never applied");
         };
@@ -605,7 +613,7 @@ mod snapshot {
             book = book.expecting(sequence, resolution);
         }
         let mut coordinator = Coordinator::new(store, &registry);
-        let identified = check(book, &registry).unwrap().identify(&at(30));
+        let identified = check(book, registry.catalog()).unwrap().identify(&at(30));
         let Deduplicated::Novel(novel) = coordinator.deduplicate(identified).unwrap() else {
             panic!("never applied");
         };
@@ -738,7 +746,7 @@ mod snapshot {
         assert_eq!(snapshot.sequence, 1, "the last event's");
         assert_eq!(snapshot.rules_version, "v2", "the domain's current rules");
         assert_eq!(state(&snapshot).cents, 100);
-        assert!(registry.snapshot_usable("account", &snapshot));
+        assert!(registry.catalog().snapshot_usable("account", &snapshot));
 
         let deposit = command(stream.clone(), AccountCmd::Deposit(5).to_any()).id(3);
         handle::<Account>(&store, &registry, deposit, &at(12)).unwrap();
@@ -784,7 +792,7 @@ mod snapshot {
             snapshot.state.as_ref().unwrap().type_url,
             "/toy.shelf.v1.ShelfState"
         );
-        assert!(registry.snapshot_usable("shelf", &snapshot));
+        assert!(registry.catalog().snapshot_usable("shelf", &snapshot));
         assert!(Stream::<Shelf>::new(root(4), None)
             .unwrap()
             .snapshot(&registry)
@@ -931,7 +939,7 @@ mod upcasting {
                 ),
             )
             .unwrap();
-        registry.upcast_with("account", upcaster);
+        registry.upcast_with("account", upcaster).unwrap();
         (registry, seen)
     }
 
@@ -999,7 +1007,7 @@ mod upcasting {
     #[test]
     fn a_sidecar_that_is_down_is_retried_and_writes_nothing() {
         let (mut registry, seen) = seen_account(Upcaster::new("account-upcaster", "account"));
-        registry.upcast_with("account", Down);
+        registry.upcast_with("account", Down).unwrap();
         let store = MemoryStore::new();
         let open = command(cover("account", 1), AccountCmd::Open.to_any()).id(1);
         let failure = any(&store, &registry, open, 10).err().unwrap();
@@ -1110,7 +1118,7 @@ mod upcasting {
                 ),
             )
             .unwrap();
-        registry.upcast_with("account", upcaster);
+        registry.upcast_with("account", upcaster).unwrap();
         crate::toys::register::<crate::toys::Ledger>(
             &mut registry,
             crate::Upcaster::new("ledger-upcaster", "ledger"),
@@ -1176,7 +1184,7 @@ mod upcasting {
     fn a_policy_reads_a_handlers_stored_events_as_the_current_types() {
         use crate::toys::{ledger, ledger_root, no_retries, Bookkeeping};
         let (mut registry, _) = handled_account(account_upcaster());
-        registry.policy(Bookkeeping);
+        registry.policy(Bookkeeping).unwrap();
         let store = MemoryStore::new();
         old_history(&store);
         let log = crate::MemoryDeadLetters::new();
@@ -1341,9 +1349,15 @@ mod admission {
             stream: Some(cover("account", trigger)),
             sequence: 0,
         };
-        crate::check::check_refusal(book, registry, trigger, correlation(1), command_id(9))
-            .unwrap()
-            .identify(&at(1))
+        crate::check::check_refusal(
+            book,
+            registry.catalog(),
+            trigger,
+            correlation(1),
+            command_id(9),
+        )
+        .unwrap()
+        .identify(&at(1))
     }
 
     #[test]
@@ -1377,7 +1391,7 @@ mod admission {
         use crate::{check, KernelError, UpcastError};
         let registry = registry();
         let deposit = command(cover("account", 1), AccountCmd::Deposit(5).to_any()).id(2);
-        let identified = check(deposit, &registry).unwrap().identify(&at(1));
+        let identified = check(deposit, registry.catalog()).unwrap().identify(&at(1));
         let failed: Result<crate::Any, UpcastError> = Err(UpcastError::Rule {
             source: "toy.account.cmd.v1.Deposit".to_string(),
             error: angzarr_diagnostic::Report::new("toy-broken"),
@@ -1398,7 +1412,7 @@ mod admission {
         let aggregate = crate::toys::registry();
         let identified = check(
             command(cover("account", 1), AccountCmd::Deposit(5).to_any()).id(2),
-            &aggregate,
+            aggregate.catalog(),
         )
         .unwrap()
         .identify(&at(1));

@@ -1668,10 +1668,15 @@ fn configured(config: WalletConfig) -> Registry {
     let mut registry = Registry::new();
     registry
         .aggregate::<Wallet>(move || Wallet::with(config.clone()))
+        .unwrap()
         .aggregate::<Lamp>(Lamp::default)
+        .unwrap()
         .aggregate::<Meter>(Meter::default)
+        .unwrap()
         .aggregate::<Ladder>(Ladder::default)
-        .aggregate::<Pot>(Pot::default);
+        .unwrap()
+        .aggregate::<Pot>(Pot::default)
+        .unwrap();
     registry
         .register::<Tally>(Upcaster::new("tally-upcaster", "tally"), tally_handlers)
         .unwrap();
@@ -2437,7 +2442,7 @@ mod registration {
     fn its_events_carry_its_crates_build_version() {
         let registry = registry();
         assert_eq!(
-            registry.rules_version("wallet").as_deref(),
+            registry.catalog().rules_version("wallet").as_deref(),
             Some(env!("CARGO_PKG_VERSION"))
         );
         let wallet = opened(&registry, 5);
@@ -2451,16 +2456,19 @@ mod registration {
     #[test]
     fn an_upcaster_given_reads_its_old_events() {
         let mut registry = Registry::new();
-        registry.aggregate::<Wallet>(Wallet::default).upcaster(
-            Upcaster::new("wallet-upcaster", "wallet").rule(
-                |old: wire::OldDeposited| -> Result<wire::Deposited, Report> {
-                    Ok(wire::Deposited {
-                        cents: old.cents,
-                        at: Some(at(0)),
-                    })
-                },
-            ),
-        );
+        registry
+            .aggregate_upcast::<Wallet>(
+                Wallet::default,
+                Upcaster::new("wallet-upcaster", "wallet").rule(
+                    |old: wire::OldDeposited| -> Result<wire::Deposited, Report> {
+                        Ok(wire::Deposited {
+                            cents: old.cents,
+                            at: Some(at(0)),
+                        })
+                    },
+                ),
+            )
+            .unwrap();
         let original = opened(&registry, 7);
         let mut pages: Vec<_> = original.events().iter().map(Envelope::page).collect();
         pages[1].payload = Some(pack(&wire::OldDeposited { cents: 7 }));
@@ -2477,15 +2485,18 @@ mod registration {
         );
     }
 
-    /// Registering one aggregate twice is a bug in the composition root:
-    /// it panics there, at startup, rather than being an error to handle.
+    /// Registering one aggregate twice is refused, as registering any
+    /// domain twice is.
     #[test]
-    #[should_panic(expected = "wallet")]
-    fn registering_an_aggregate_twice_panics() {
+    fn registering_an_aggregate_twice_is_refused() {
         let mut registry = Registry::new();
-        registry
-            .aggregate::<Wallet>(Wallet::default)
-            .aggregate::<Wallet>(Wallet::default);
+        registry.aggregate::<Wallet>(Wallet::default).unwrap();
+        assert_eq!(
+            registry.aggregate::<Wallet>(Wallet::default).err(),
+            Some(::angzarr_embedded::Misconfigured::AlreadyRegistered {
+                domain: "wallet".to_string()
+            })
+        );
     }
 }
 
@@ -2979,7 +2990,7 @@ mod named_payloads {
 
     fn toggle() -> Harness<Toggle> {
         let mut registry = Registry::new();
-        registry.aggregate::<Toggle>(Toggle::default);
+        registry.aggregate::<Toggle>(Toggle::default).unwrap();
         Harness::new(
             registry,
             Cover {
@@ -3030,7 +3041,7 @@ mod full_context {
 
     fn badge(key: &str) -> Harness<Badge> {
         let mut registry = Registry::new();
-        registry.aggregate::<Badge>(Badge::default);
+        registry.aggregate::<Badge>(Badge::default).unwrap();
         Harness::new(registry, Cover::natural("badge", key))
     }
 
@@ -3577,7 +3588,7 @@ fn buy_in(names: &[&str]) -> Option<Vec<String>> {
 /// The wallet and the buy-in, with no policy between them.
 fn buy_ins() -> Registry {
     let mut registry = registry();
-    registry.process_manager::<BuyIn>(BuyIn::default);
+    registry.process_manager::<BuyIn>(BuyIn::default).unwrap();
     registry
 }
 
@@ -3585,11 +3596,12 @@ fn buy_ins() -> Registry {
 /// policy's mode).
 fn flows(translating: bool) -> Registry {
     let mut registry = buy_ins();
-    registry.policy(WalletBuyIn);
+    registry.policy(WalletBuyIn).unwrap();
     match translating {
         true => registry.policy(TranslatingBuyInWallet),
         false => registry.policy(BuyInWallet),
-    };
+    }
+    .unwrap();
     registry
 }
 
@@ -3842,12 +3854,15 @@ mod process_manager {
     }
 
     #[test]
-    #[should_panic(expected = "buyin")]
-    fn registering_a_process_manager_twice_panics() {
+    fn registering_a_process_manager_twice_is_refused() {
         let mut registry = registry();
-        registry
-            .process_manager::<BuyIn>(BuyIn::default)
-            .process_manager::<BuyIn>(BuyIn::default);
+        registry.process_manager::<BuyIn>(BuyIn::default).unwrap();
+        assert_eq!(
+            registry.process_manager::<BuyIn>(BuyIn::default).err(),
+            Some(::angzarr_embedded::Misconfigured::AlreadyRegistered {
+                domain: "buyin".to_string()
+            })
+        );
     }
 }
 
@@ -3855,10 +3870,15 @@ mod policy_registration {
     use super::*;
 
     #[test]
-    #[should_panic(expected = "buyin-wallet")]
-    fn registering_a_policy_twice_panics() {
+    fn registering_a_policy_twice_is_refused() {
         let mut registry = registry();
-        registry.policy(BuyInWallet).policy(BuyInWallet);
+        registry.policy(BuyInWallet).unwrap();
+        assert_eq!(
+            registry.policy(BuyInWallet).err(),
+            Some(::angzarr_embedded::Misconfigured::ComponentRegistered {
+                component: "buyin-wallet".to_string()
+            })
+        );
     }
 }
 
@@ -4207,7 +4227,7 @@ mod typed_refusals {
         use ::angzarr_embedded::v1::angzarr_dead_letter::RejectionDetails;
         use ::angzarr_embedded::v1::CommandRefusedDetails;
         let mut registry = buy_ins();
-        registry.policy(QuietBuyInWallet);
+        registry.policy(QuietBuyInWallet).unwrap();
         let store = Mem::new();
         let log = MemoryDeadLetters::new();
         handle_in::<Wallet>(
@@ -4980,7 +5000,7 @@ mod refusal_flow {
     #[test]
     fn a_malformed_policy_books_dead_letter_carries_its_code_and_args() {
         let mut registry = registry();
-        registry.policy(WalletBuyIn);
+        registry.policy(WalletBuyIn).unwrap();
         let (_, store) = funded(false, 50);
         let log = MemoryDeadLetters::new();
         let _ = settle_in::<Wallet>(
@@ -5009,7 +5029,7 @@ mod refusal_flow {
     #[test]
     fn a_failing_step_keeps_the_commits_before_it() {
         let mut registry = registry();
-        registry.policy(WalletBuyIn);
+        registry.policy(WalletBuyIn).unwrap();
         let (_, store) = funded(false, 50);
         let log = MemoryDeadLetters::new();
         let settled = settle_in::<Wallet>(
@@ -5113,7 +5133,7 @@ mod router {
     /// opened with 50 (command 1, in a correlation of its own).
     fn opened_with<P: Policy>(policy: P) -> (Registry, Mem) {
         let mut registry = buy_ins();
-        registry.policy(policy);
+        registry.policy(policy).unwrap();
         let store = Mem::new();
         let log = MemoryDeadLetters::new();
         handle_in::<Wallet>(
@@ -5170,7 +5190,7 @@ mod router {
     /// 50.
     fn opened_with_dispatch(dispatch: PolicyDispatch) -> (Registry, Mem) {
         let mut registry = buy_ins();
-        registry.policy_dispatch(dispatch);
+        registry.policy_dispatch(dispatch).unwrap();
         let store = Mem::new();
         let log = MemoryDeadLetters::new();
         handle_in::<Wallet>(
@@ -5507,8 +5527,10 @@ mod router {
             "a retry is a duplicate"
         );
         assert_eq!(
-            registry.command_handler("remote", Remote, remote_descriptor()),
-            Err(::angzarr_embedded::Misconfigured::AlreadyRegistered {
+            registry
+                .command_handler("remote", Remote, remote_descriptor())
+                .err(),
+            Some(::angzarr_embedded::Misconfigured::AlreadyRegistered {
                 domain: "remote".to_string()
             })
         );
@@ -5633,27 +5655,29 @@ mod router {
         registry
             .command_handler("remote", flaky, remote_descriptor())
             .unwrap();
-        registry.policy_dispatch(
-            PolicyDispatch::new("wallet-remote", "wallet", "remote").on_event(
-                "toy.wallet.v1.Held",
-                |_, source| {
-                    Ok(vec![pb::CommandBook {
-                        cover: Some(pb::Cover {
-                            domain: "remote".to_string(),
-                            root: source.and_then(|c| c.root.clone()),
-                            edition: None,
-                        }),
-                        page: Some(pb::CommandPage {
-                            body: Some(pb::command_page::Body::Command(pb::Command {
-                                payload: Some(any(Note {})),
-                            })),
-                            ..Default::default()
-                        }),
-                        handling: None,
-                    }])
-                },
-            ),
-        );
+        registry
+            .policy_dispatch(
+                PolicyDispatch::new("wallet-remote", "wallet", "remote").on_event(
+                    "toy.wallet.v1.Held",
+                    |_, source| {
+                        Ok(vec![pb::CommandBook {
+                            cover: Some(pb::Cover {
+                                domain: "remote".to_string(),
+                                root: source.and_then(|c| c.root.clone()),
+                                edition: None,
+                            }),
+                            page: Some(pb::CommandPage {
+                                body: Some(pb::command_page::Body::Command(pb::Command {
+                                    payload: Some(any(Note {})),
+                                })),
+                                ..Default::default()
+                            }),
+                            handling: None,
+                        }])
+                    },
+                ),
+            )
+            .unwrap();
         let store = Mem::new();
         let log = MemoryDeadLetters::new();
         let kernel = ::angzarr_embedded::Kernel::new(&registry)
@@ -5821,27 +5845,29 @@ mod router {
         registry
             .command_handler("remote", remote, remote_descriptor())
             .unwrap();
-        registry.policy_dispatch(
-            PolicyDispatch::new("wallet-remote", "wallet", "remote").on_event(
-                "toy.wallet.v1.Held",
-                |_, source| {
-                    Ok(vec![pb::CommandBook {
-                        cover: Some(pb::Cover {
-                            domain: "remote".to_string(),
-                            root: source.and_then(|c| c.root.clone()),
-                            edition: None,
-                        }),
-                        page: Some(pb::CommandPage {
-                            body: Some(pb::command_page::Body::Command(pb::Command {
-                                payload: Some(any(Note {})),
-                            })),
-                            ..Default::default()
-                        }),
-                        handling: None,
-                    }])
-                },
-            ),
-        );
+        registry
+            .policy_dispatch(
+                PolicyDispatch::new("wallet-remote", "wallet", "remote").on_event(
+                    "toy.wallet.v1.Held",
+                    |_, source| {
+                        Ok(vec![pb::CommandBook {
+                            cover: Some(pb::Cover {
+                                domain: "remote".to_string(),
+                                root: source.and_then(|c| c.root.clone()),
+                                edition: None,
+                            }),
+                            page: Some(pb::CommandPage {
+                                body: Some(pb::command_page::Body::Command(pb::Command {
+                                    payload: Some(any(Note {})),
+                                })),
+                                ..Default::default()
+                            }),
+                            handling: None,
+                        }])
+                    },
+                ),
+            )
+            .unwrap();
         registry
     }
 
@@ -6345,30 +6371,32 @@ mod router {
         /// on each wallet's `Held`.
         fn probing(status: i64) -> Registry {
             let mut registry = registry();
-            registry.policy_dispatch(
-                PolicyDispatch::new("wallet-meter", "wallet", "meter").on_event(
-                    "toy.wallet.v1.Held",
-                    move |_, source| {
-                        Ok(vec![pb::CommandBook {
-                            cover: Some(pb::Cover {
-                                domain: "meter".to_string(),
-                                root: source.and_then(|c| c.root.clone()),
-                                edition: None,
-                            }),
-                            page: Some(pb::CommandPage {
-                                body: Some(pb::command_page::Body::Command(pb::Command {
-                                    payload: Some(any(Probe {
-                                        status,
-                                        step: false,
+            registry
+                .policy_dispatch(
+                    PolicyDispatch::new("wallet-meter", "wallet", "meter").on_event(
+                        "toy.wallet.v1.Held",
+                        move |_, source| {
+                            Ok(vec![pb::CommandBook {
+                                cover: Some(pb::Cover {
+                                    domain: "meter".to_string(),
+                                    root: source.and_then(|c| c.root.clone()),
+                                    edition: None,
+                                }),
+                                page: Some(pb::CommandPage {
+                                    body: Some(pb::command_page::Body::Command(pb::Command {
+                                        payload: Some(any(Probe {
+                                            status,
+                                            step: false,
+                                        })),
                                     })),
-                                })),
-                                ..Default::default()
-                            }),
-                            handling: None,
-                        }])
-                    },
-                ),
-            );
+                                    ..Default::default()
+                                }),
+                                handling: None,
+                            }])
+                        },
+                    ),
+                )
+                .unwrap();
             registry
         }
 
@@ -6562,27 +6590,29 @@ mod router {
         registry
             .command_handler("remote", faulty, remote_descriptor())
             .unwrap();
-        registry.policy_dispatch(
-            PolicyDispatch::new("wallet-remote", "wallet", "remote").on_event(
-                "toy.wallet.v1.Held",
-                |_, source| {
-                    Ok(vec![pb::CommandBook {
-                        cover: Some(pb::Cover {
-                            domain: "remote".to_string(),
-                            root: source.and_then(|c| c.root.clone()),
-                            edition: None,
-                        }),
-                        page: Some(pb::CommandPage {
-                            body: Some(pb::command_page::Body::Command(pb::Command {
-                                payload: Some(any(Note {})),
-                            })),
-                            ..Default::default()
-                        }),
-                        handling: None,
-                    }])
-                },
-            ),
-        );
+        registry
+            .policy_dispatch(
+                PolicyDispatch::new("wallet-remote", "wallet", "remote").on_event(
+                    "toy.wallet.v1.Held",
+                    |_, source| {
+                        Ok(vec![pb::CommandBook {
+                            cover: Some(pb::Cover {
+                                domain: "remote".to_string(),
+                                root: source.and_then(|c| c.root.clone()),
+                                edition: None,
+                            }),
+                            page: Some(pb::CommandPage {
+                                body: Some(pb::command_page::Body::Command(pb::Command {
+                                    payload: Some(any(Note {})),
+                                })),
+                                ..Default::default()
+                            }),
+                            handling: None,
+                        }])
+                    },
+                ),
+            )
+            .unwrap();
         registry
     }
 
@@ -6934,23 +6964,25 @@ mod router {
         registry
             .command_handler("picky", picky, remote_descriptor())
             .unwrap();
-        registry.policy_dispatch(
-            PolicyDispatch::new("picky-wallet", "picky", "wallet").on_event(
-                "toy.wallet.v1.Noted",
-                |_, _| {
-                    Ok(vec![pb::CommandBook {
-                        cover: Some(wallet_cover("wallet")),
-                        page: Some(pb::CommandPage {
-                            body: Some(pb::command_page::Body::Command(pb::Command {
-                                payload: Some(any(Hold { cents: 1000 })),
-                            })),
-                            ..Default::default()
-                        }),
-                        handling: None,
-                    }])
-                },
-            ),
-        );
+        registry
+            .policy_dispatch(
+                PolicyDispatch::new("picky-wallet", "picky", "wallet").on_event(
+                    "toy.wallet.v1.Noted",
+                    |_, _| {
+                        Ok(vec![pb::CommandBook {
+                            cover: Some(wallet_cover("wallet")),
+                            page: Some(pb::CommandPage {
+                                body: Some(pb::command_page::Body::Command(pb::Command {
+                                    payload: Some(any(Hold { cents: 1000 })),
+                                })),
+                                ..Default::default()
+                            }),
+                            handling: None,
+                        }])
+                    },
+                ),
+            )
+            .unwrap();
         let store = Mem::new();
         let log = MemoryDeadLetters::new();
         handle_in::<Wallet>(
@@ -7329,10 +7361,12 @@ mod projector {
 
     fn projected(port: &BalancePort) -> Registry {
         let mut registry = registry();
-        registry.projector(Balances {
-            port: port.clone(),
-            written: 0,
-        });
+        registry
+            .projector(Balances {
+                port: port.clone(),
+                written: 0,
+            })
+            .unwrap();
         registry
     }
 
@@ -7428,9 +7462,11 @@ mod projector {
             .projector(Audit {
                 port: audit.clone(),
             })
+            .unwrap()
             .projector(Trail {
                 port: trail.clone(),
-            });
+            })
+            .unwrap();
         let store = Mem::new();
         handle_async(&store, &registry, 1, any(Open { bonus: 5 }), root()).unwrap();
         assert_eq!(*port.lines.lock().unwrap(), [(1, 5)]);
@@ -7452,9 +7488,11 @@ mod projector {
             .projector(Audit {
                 port: audit.clone(),
             })
+            .unwrap()
             .projector(Trail {
                 port: trail.clone(),
-            });
+            })
+            .unwrap();
         let store = Mem::new();
         let failed = handle_async(&store, &registry, 1, any(Open { bonus: 5 }), root());
         let Err(Failure::Projection { failures, .. }) = failed else {
@@ -7481,9 +7519,11 @@ mod projector {
         );
         let trail = TrailPort::default();
         let mut registry = registry();
-        registry.projector(Lights {
-            port: trail.clone(),
-        });
+        registry
+            .projector(Lights {
+                port: trail.clone(),
+            })
+            .unwrap();
         let store = Mem::new();
         handle_async(&store, &registry, 1, any(Open { bonus: 5 }), root()).unwrap();
         let log = MemoryDeadLetters::new();
@@ -7529,7 +7569,9 @@ mod projector {
     fn a_hand_written_projector_projects_the_domains_it_is_registered_for() {
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let mut registry = registry();
-        registry.projector_handler(&["wallet", "lamp"], Books(seen.clone()));
+        registry
+            .projector_handler(&["wallet", "lamp"], Books(seen.clone()))
+            .unwrap();
         let store = Mem::new();
         handle_async(&store, &registry, 1, any(Open { bonus: 5 }), root()).unwrap();
         let log = MemoryDeadLetters::new();
@@ -7596,8 +7638,9 @@ mod projector {
                 port: port.clone(),
                 written: 0,
             }),
-        );
-        let caught = ready(catch_up.step(&store, &registry)).unwrap();
+        )
+        .unwrap();
+        let caught = ready(catch_up.step(&store, registry.catalog())).unwrap();
         assert!(caught.failures().is_empty(), "{:?}", caught.failures());
         let mut lines = port.lines.lock().unwrap().clone();
         lines.sort_by_key(|(_, cents)| *cents);
@@ -7605,10 +7648,14 @@ mod projector {
     }
 
     #[test]
-    #[should_panic(expected = "balances")]
-    fn registering_a_projector_twice_panics() {
+    fn registering_a_projector_twice_is_refused() {
         let port = BalancePort::default();
         let mut registry = projected(&port);
-        registry.projector(Balances { port, written: 0 });
+        assert_eq!(
+            registry.projector(Balances { port, written: 0 }).err(),
+            Some(::angzarr_embedded::Misconfigured::ComponentRegistered {
+                component: "balances".to_string()
+            })
+        );
     }
 }

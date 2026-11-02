@@ -57,7 +57,7 @@ fn kept(store: &Recording, stream: &Cover) -> Vec<crate::DeadLetter> {
 fn a_policys_bug_is_kept_in_the_write_that_moves_its_position_past_it() {
     let plain = registry();
     let mut registry = registry();
-    registry.policy(Unlucky);
+    registry.policy(Unlucky).unwrap();
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry).log_with(&log);
     let store = Recording::default();
@@ -121,7 +121,7 @@ fn a_policys_bug_is_kept_in_the_write_that_moves_its_position_past_it() {
 fn a_refused_policy_command_is_kept_with_the_position_it_moves_past() {
     let plain = registry();
     let mut registry = registry();
-    registry.policy(Bookkeeping);
+    registry.policy(Bookkeeping).unwrap();
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry).log_with(&log);
     let store = Recording::default();
@@ -171,7 +171,7 @@ fn a_refused_policy_command_is_kept_with_the_position_it_moves_past() {
 fn under_stay_a_policys_bug_is_kept_alone_and_once_across_resumes() {
     let plain = registry();
     let mut registry = registry();
-    registry.policy(Unlucky);
+    registry.policy(Unlucky).unwrap();
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry)
         .log_with(&log)
@@ -257,7 +257,7 @@ impl angzarr_router::router::ProjectorHandler for Broken {
 fn a_projectors_bug_is_kept_and_answered() {
     let plain = registry();
     let mut registry = registry();
-    registry.projector_handler(&["account"], Broken);
+    registry.projector_handler(&["account"], Broken).unwrap();
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry).log_with(&log);
     let store = Recording::default();

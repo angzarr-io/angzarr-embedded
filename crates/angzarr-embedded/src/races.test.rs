@@ -993,21 +993,23 @@ fn a_policy_step_losing_every_race_is_dead_lettered_at_the_cap() {
     registry
         .command_handler("bell", Bell, bell_descriptor())
         .unwrap();
-    registry.policy_dispatch(PolicyDispatch::new("bell-order", "bell", "order").on_event(
-        RUNG,
-        |_, _| {
-            Ok(vec![CommandBook {
-                cover: Some(order()),
-                page: Some(CommandPage {
-                    body: Some(command_page::Body::Command(Command {
-                        payload: Some(any("/toy.order.v1.AddItem")),
-                    })),
-                    ..CommandPage::default()
-                }),
-                handling: None,
-            }])
-        },
-    ));
+    registry
+        .policy_dispatch(PolicyDispatch::new("bell-order", "bell", "order").on_event(
+            RUNG,
+            |_, _| {
+                Ok(vec![CommandBook {
+                    cover: Some(order()),
+                    page: Some(CommandPage {
+                        body: Some(command_page::Body::Command(Command {
+                            payload: Some(any("/toy.order.v1.AddItem")),
+                        })),
+                        ..CommandPage::default()
+                    }),
+                    handling: None,
+                }])
+            },
+        ))
+        .unwrap();
     let log = MemoryDeadLetters::new();
     let waits = Waits::default();
     let retry = OnRetryable {
@@ -1064,21 +1066,23 @@ fn with_no_race_reruns_a_policy_step_that_loses_the_race_goes_back_as_the_stores
     registry
         .command_handler("bell", Bell, bell_descriptor())
         .unwrap();
-    registry.policy_dispatch(PolicyDispatch::new("bell-order", "bell", "order").on_event(
-        RUNG,
-        |_, _| {
-            Ok(vec![CommandBook {
-                cover: Some(order()),
-                page: Some(CommandPage {
-                    body: Some(command_page::Body::Command(Command {
-                        payload: Some(any("/toy.order.v1.AddItem")),
-                    })),
-                    ..CommandPage::default()
-                }),
-                handling: None,
-            }])
-        },
-    ));
+    registry
+        .policy_dispatch(PolicyDispatch::new("bell-order", "bell", "order").on_event(
+            RUNG,
+            |_, _| {
+                Ok(vec![CommandBook {
+                    cover: Some(order()),
+                    page: Some(CommandPage {
+                        body: Some(command_page::Body::Command(Command {
+                            payload: Some(any("/toy.order.v1.AddItem")),
+                        })),
+                        ..CommandPage::default()
+                    }),
+                    handling: None,
+                }])
+            },
+        ))
+        .unwrap();
     let log = MemoryDeadLetters::new();
     let waits = Waits::default();
     let retry = OnRetryable {

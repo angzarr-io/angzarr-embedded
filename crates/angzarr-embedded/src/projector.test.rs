@@ -82,7 +82,7 @@ fn purge(store: &MemoryStore, n: u128) {
 }
 
 fn step(catch_up: &mut CatchUp<Recorder>, store: &MemoryStore, registry: &Registry) {
-    let caught = catch_up.step(store, registry).ready().unwrap();
+    let caught = catch_up.step(store, registry.catalog()).ready().unwrap();
     assert!(caught.failures().is_empty(), "{:?}", caught.failures());
 }
 
@@ -95,7 +95,7 @@ fn each_stream_is_handed_what_it_is_owed_once() {
     opened(&store, &registry, 1, 5);
     opened(&store, &registry, 2, 7);
     let recorder = Recorder::default();
-    let mut catch_up = CatchUp::new(&["account"], recorder.clone());
+    let mut catch_up = CatchUp::new(&["account"], recorder.clone()).unwrap();
 
     step(&mut catch_up, &store, &registry);
     assert_eq!(
@@ -119,7 +119,7 @@ fn each_stream_is_handed_what_it_is_owed_once() {
 #[test]
 fn only_the_sources_streams_are_handed() {
     let mut registry = registry();
-    registry.policy(crate::toys::Bookkeeping);
+    registry.policy(crate::toys::Bookkeeping).unwrap();
     let store = MemoryStore::new();
     opened(&store, &registry, 1, 5);
     let ledger = Cover {
@@ -132,7 +132,7 @@ fn only_the_sources_streams_are_handed() {
         "the policy wrote the ledger"
     );
     let recorder = Recorder::default();
-    let mut catch_up = CatchUp::new(&["account"], recorder.clone());
+    let mut catch_up = CatchUp::new(&["account"], recorder.clone()).unwrap();
     step(&mut catch_up, &store, &registry);
     let handed: Vec<Cover> = recorder.take().into_iter().map(|b| b.0).collect();
     assert_eq!(handed, [cover("account", 1)]);
@@ -146,7 +146,7 @@ fn a_stream_purged_and_written_again_is_handed_from_its_start() {
     let store = MemoryStore::new();
     opened(&store, &registry, 1, 5);
     let recorder = Recorder::default();
-    let mut catch_up = CatchUp::new(&["account"], recorder.clone());
+    let mut catch_up = CatchUp::new(&["account"], recorder.clone()).unwrap();
     step(&mut catch_up, &store, &registry);
     recorder.take();
 
@@ -175,12 +175,12 @@ fn a_purged_stream_is_handed_as_gone_once() {
     opened(&store, &registry, 1, 5);
     opened(&store, &registry, 2, 7);
     let recorder = Recorder::default();
-    let mut catch_up = CatchUp::new(&["account"], recorder.clone());
+    let mut catch_up = CatchUp::new(&["account"], recorder.clone()).unwrap();
     step(&mut catch_up, &store, &registry);
     recorder.take();
 
     purge(&store, 1);
-    let caught = catch_up.step(&store, &registry).ready().unwrap();
+    let caught = catch_up.step(&store, registry.catalog()).ready().unwrap();
     assert_eq!(caught.handed(), [cover("account", 1)]);
     assert_eq!(recorder.take(), [(cover("account", 1), vec![], 0)]);
     step(&mut catch_up, &store, &registry);
@@ -216,7 +216,7 @@ fn an_edition_stream_is_not_handed() {
     assert!(store.covers("account").ready().unwrap().contains(&fork));
 
     let recorder = Recorder::default();
-    let mut catch_up = CatchUp::new(&["account"], recorder.clone());
+    let mut catch_up = CatchUp::new(&["account"], recorder.clone()).unwrap();
     step(&mut catch_up, &store, &registry);
     let handed: Vec<Cover> = recorder.take().into_iter().map(|b| b.0).collect();
     assert_eq!(handed, [main]);
@@ -232,9 +232,9 @@ fn a_failed_book_is_handed_again_at_the_next_step() {
     opened(&store, &registry, 2, 7);
     let recorder = Recorder::default();
     recorder.fail(Some(cover("account", 1)));
-    let mut catch_up = CatchUp::new(&["account"], recorder.clone());
+    let mut catch_up = CatchUp::new(&["account"], recorder.clone()).unwrap();
 
-    let caught = catch_up.step(&store, &registry).ready().unwrap();
+    let caught = catch_up.step(&store, registry.catalog()).ready().unwrap();
     assert_eq!(caught.failures().len(), 1);
     let (stream, error) = &caught.failures()[0];
     assert_eq!(stream, &cover("account", 1));
@@ -263,7 +263,7 @@ fn a_write_landing_during_a_step_is_the_next_steps() {
     *recorder.meanwhile.lock().unwrap() = Some(Box::new(move || {
         deposit(&writer, &writes, 2, 3, 4);
     }));
-    let mut catch_up = CatchUp::new(&["account"], recorder.clone());
+    let mut catch_up = CatchUp::new(&["account"], recorder.clone()).unwrap();
 
     step(&mut catch_up, &store, &registry);
     assert_eq!(
@@ -287,13 +287,13 @@ fn stored_positions_resume_in_a_new_catch_up() {
     let store = MemoryStore::new();
     opened(&store, &registry, 1, 5);
     let recorder = Recorder::default();
-    let mut first = CatchUp::stored(&["account"], recorder.clone());
+    let mut first = CatchUp::stored(&["account"], recorder.clone()).unwrap();
     step(&mut first, &store, &registry);
     assert_eq!(recorder.take(), [(cover("account", 1), vec![0, 1], 2)]);
     assert_eq!(position(&store, "recorder", &cover("account", 1)), 2);
 
     deposit(&store, &registry, 1, 3, 4);
-    let mut again = CatchUp::stored(&["account"], recorder.clone());
+    let mut again = CatchUp::stored(&["account"], recorder.clone()).unwrap();
     step(&mut again, &store, &registry);
     assert_eq!(recorder.take(), [(cover("account", 1), vec![2], 3)]);
     assert_eq!(position(&store, "recorder", &cover("account", 1)), 3);
@@ -308,7 +308,7 @@ fn a_stored_catch_up_hands_a_stream_written_again_from_its_start() {
     opened(&store, &registry, 1, 5);
     let recorder = Recorder::default();
     step(
-        &mut CatchUp::stored(&["account"], recorder.clone()),
+        &mut CatchUp::stored(&["account"], recorder.clone()).unwrap(),
         &store,
         &registry,
     );
@@ -322,7 +322,7 @@ fn a_stored_catch_up_hands_a_stream_written_again_from_its_start() {
     )
     .unwrap();
     step(
-        &mut CatchUp::stored(&["account"], recorder.clone()),
+        &mut CatchUp::stored(&["account"], recorder.clone()).unwrap(),
         &store,
         &registry,
     );
@@ -339,12 +339,12 @@ fn a_new_stored_catch_up_hands_gone_a_stream_it_was_handed_before() {
     opened(&store, &registry, 1, 5);
     let recorder = Recorder::default();
     step(
-        &mut CatchUp::stored(&["account"], recorder.clone()),
+        &mut CatchUp::stored(&["account"], recorder.clone()).unwrap(),
         &store,
         &registry,
     );
     recorder.take();
-    let mut again = CatchUp::stored(&["account"], recorder.clone());
+    let mut again = CatchUp::stored(&["account"], recorder.clone()).unwrap();
     step(&mut again, &store, &registry);
     assert_eq!(recorder.take(), [], "nothing new");
     purge(&store, 1);
@@ -366,7 +366,7 @@ fn a_position_left_by_a_racing_purge_is_handed_gone_and_cleared() {
     let racing = Arc::clone(&store);
     *recorder.meanwhile.lock().unwrap() = Some(Box::new(move || purge(&racing, 1)));
     step(
-        &mut CatchUp::stored(&["account"], recorder.clone()),
+        &mut CatchUp::stored(&["account"], recorder.clone()).unwrap(),
         &store,
         &registry,
     );
@@ -377,7 +377,7 @@ fn a_position_left_by_a_racing_purge_is_handed_gone_and_cleared() {
         "written past the purge"
     );
 
-    let mut again = CatchUp::stored(&["account"], recorder.clone());
+    let mut again = CatchUp::stored(&["account"], recorder.clone()).unwrap();
     step(&mut again, &store, &registry);
     assert_eq!(recorder.take(), [(cover("account", 1), vec![], 0)]);
     assert_eq!(position(&store, "recorder", &cover("account", 1)), 0);
@@ -406,7 +406,7 @@ fn a_stored_position_outside_the_sources_is_not_handed() {
     store.write(Write::positions(&[(key, 3)])).ready().unwrap();
     let recorder = Recorder::default();
     step(
-        &mut CatchUp::stored(&["account"], recorder.clone()),
+        &mut CatchUp::stored(&["account"], recorder.clone()).unwrap(),
         &store,
         &registry,
     );
@@ -422,8 +422,8 @@ fn a_failed_books_stored_position_stays() {
     opened(&store, &registry, 1, 5);
     let recorder = Recorder::default();
     recorder.fail(Some(cover("account", 1)));
-    let mut catch_up = CatchUp::stored(&["account"], recorder.clone());
-    let caught = catch_up.step(&store, &registry).ready().unwrap();
+    let mut catch_up = CatchUp::stored(&["account"], recorder.clone()).unwrap();
+    let caught = catch_up.step(&store, registry.catalog()).ready().unwrap();
     assert_eq!(caught.failures().len(), 1);
     assert_eq!(position(&store, "recorder", &cover("account", 1)), 0);
     recorder.fail(None);
@@ -439,19 +439,28 @@ fn a_step_if_changed_skips_while_nothing_was_committed() {
     let store = MemoryStore::new();
     opened(&store, &registry, 1, 5);
     let recorder = Recorder::default();
-    let mut catch_up = CatchUp::new(&["account"], recorder.clone());
-    let ran = catch_up.step_if_changed(&store, &registry).ready().unwrap();
+    let mut catch_up = CatchUp::new(&["account"], recorder.clone()).unwrap();
+    let ran = catch_up
+        .step_if_changed(&store, registry.catalog())
+        .ready()
+        .unwrap();
     assert_eq!(
         ran.map(|c| c.handed().to_vec()),
         Some(vec![cover("account", 1)])
     );
     recorder.take();
 
-    let skipped = catch_up.step_if_changed(&store, &registry).ready().unwrap();
+    let skipped = catch_up
+        .step_if_changed(&store, registry.catalog())
+        .ready()
+        .unwrap();
     assert!(skipped.is_none(), "unchanged: not run");
 
     deposit(&store, &registry, 1, 3, 4);
-    let ran = catch_up.step_if_changed(&store, &registry).ready().unwrap();
+    let ran = catch_up
+        .step_if_changed(&store, registry.catalog())
+        .ready()
+        .unwrap();
     assert!(ran.is_some(), "changed: run");
     assert_eq!(recorder.take(), [(cover("account", 1), vec![2], 3)]);
 }
@@ -465,11 +474,17 @@ fn a_step_with_a_failure_runs_again_unchanged() {
     opened(&store, &registry, 1, 5);
     let recorder = Recorder::default();
     recorder.fail(Some(cover("account", 1)));
-    let mut catch_up = CatchUp::new(&["account"], recorder.clone());
-    let failed = catch_up.step_if_changed(&store, &registry).ready().unwrap();
+    let mut catch_up = CatchUp::new(&["account"], recorder.clone()).unwrap();
+    let failed = catch_up
+        .step_if_changed(&store, registry.catalog())
+        .ready()
+        .unwrap();
     assert_eq!(failed.map(|c| c.failures().len()), Some(1));
     recorder.fail(None);
-    let ran = catch_up.step_if_changed(&store, &registry).ready().unwrap();
+    let ran = catch_up
+        .step_if_changed(&store, registry.catalog())
+        .ready()
+        .unwrap();
     assert!(ran.is_some(), "run again");
     assert_eq!(recorder.take(), [(cover("account", 1), vec![0, 1], 2)]);
 }
@@ -501,12 +516,12 @@ fn follow_polls_waits_and_stops_when_told() {
     let store = MemoryStore::new();
     opened(&store, &registry, 1, 5);
     let recorder = Recorder::default();
-    let mut catch_up = CatchUp::new(&["account"], recorder.clone());
+    let mut catch_up = CatchUp::new(&["account"], recorder.clone()).unwrap();
     let wait = Counting::default();
     let every = std::time::Duration::from_millis(250);
     let mut polls = Vec::new();
     catch_up
-        .follow(&store, &registry, &wait, every, |caught| {
+        .follow(&store, registry.catalog(), &wait, every, |caught| {
             polls.push(caught.map(|c| c.handed().len()));
             if polls.len() == 2 {
                 deposit(&store, &registry, 1, 3, 4);
@@ -526,8 +541,13 @@ fn follow_polls_waits_and_stops_when_told() {
     );
 }
 
+/// A catch-up of no source is refused, as registering such a projector
+/// is, held or stored.
 #[test]
-#[should_panic(expected = "recorder")]
-fn a_catch_up_with_no_source_panics() {
-    let _ = CatchUp::new(&[], Recorder::default());
+fn a_catch_up_with_no_source_is_refused() {
+    let refused = Some(crate::Misconfigured::ProjectorNoInputDomain {
+        component: "recorder".to_string(),
+    });
+    assert_eq!(CatchUp::new(&[], Recorder::default()).err(), refused);
+    assert_eq!(CatchUp::stored(&[], Recorder::default()).err(), refused);
 }

@@ -81,8 +81,9 @@ flowchart TB
 - **annals-angzarr is folded into the kernel.** What it held that was more
   than mapping lives on in `angzarr_embedded`: the `Payload` trait, `pack`,
   `type_name` and `Decoder`; the `Upcaster` (the in-process `UpcastPort`),
-  for events and commands; the `Registry`, now also the
-  mirror of `ComponentDescriptor.state`; and the golden replay fixtures. The
+  for events and commands; the `Catalog`, the
+  mirror of the `ComponentDescriptor`s registered, beside the `Registry`'s
+  handlers; and the golden replay fixtures. The
   opaque-row store adapter (`Opaque`, `Stored`) is gone: the store port
   itself is opaque now. The id helpers are angzarr-proto's own
   (`angzarr_proto::ids`, re-exported as `angzarr_embedded::ids`). One crate, not
@@ -165,7 +166,7 @@ unknown command type is refused only for a command that is new and current.
 ## Step 1: one check
 
 ```rust
-pub fn check(book: CommandBook, registry: &Registry) -> Result<Checked, Malformed>;
+pub fn check(book: CommandBook, catalog: &Catalog) -> Result<Checked, Malformed>;
 
 impl Checked {
     pub fn cover(&self) -> &Cover;            pub fn domain(&self) -> &str;
@@ -188,7 +189,7 @@ apart once; what it returns holds the required parts outside their prost
 `Option` are the sender's genuine choices. `Body` attaches `fact_origin` to
 the fact arm, so a fact's source is never optional.
 
-**Domain-blind.** `check` knows no domain's types. It asks the `Registry`
+**Domain-blind.** `check` knows no domain's types. It asks the `Catalog`
 only what angzarr's coordinator reads off a `StateDescriptor`: is
 `cover.domain` registered, and which resolutions does its state support.
 
@@ -354,7 +355,7 @@ The **in-process coordinator** is the chain's steps 3 and 4, over the
 store, domain-blind like angzarr's: they see covers,
 pages and the registry. There is no service and nothing is sent.
 
-**The resolution** (`Registry::resolve`, angzarr's precedence, highest
+**The resolution** (`Catalog::resolve`, angzarr's precedence, highest
 first): the book's `Handling.conflict_resolution`; the domain's
 configuration for the command's type (`Domain::CONFLICT_RESOLUTION_BY_COMMAND`,
 by full type name, looked up by the command's current type after upcasting,
@@ -431,8 +432,8 @@ pub trait State: Default + Clone + Send + 'static {
 The state is a domain type and its snapshot form the prost message: a
 snapshot that decodes but is not a valid state (`from_snapshot` refuses it)
 is unreadable, `PayloadError::Invalid`. A state that is itself a prost
-message is its own snapshot form. `Registry::register::<D>` fills its entry
-from `D::State::descriptor()`, as angzarr's `registry.register::<D>()` fills
+message is its own snapshot form. `Registry::register::<D>` lists it in the
+catalog by the descriptor `D` generates, its state `D::State::descriptor()`, as angzarr's `registry.register::<D>()` fills
 `ComponentDescriptor.state`, and refuses a descriptor whose type URL is not
 the snapshot form's. angzarr's generator (backlog CR-1, CR-4) emits the impl;
 the test fixtures write it by hand (`src/toys.test.rs`).
@@ -467,13 +468,30 @@ pub trait Domain: Sized + 'static {
 impl Registry {
     pub fn register<D: Domain>(&mut self, upcaster: Upcaster,
         handlers: impl FnOnce(DomainDispatch<D::State>) -> DomainDispatch<D::State>)
-        -> Result<(), Misconfigured>;
+        -> Result<&mut Self, Misconfigured>;
     pub fn command_handler(&mut self, domain: &str, handler: impl CommandHandler + 'static,
-        descriptor: ComponentDescriptor) -> Result<(), Misconfigured>;
+        descriptor: ComponentDescriptor) -> Result<&mut Self, Misconfigured>;
     pub fn remote(&mut self, domain: &str, coordinator: impl CoordinatorPort + 'static)
-        -> Result<(), Misconfigured>;
+        -> Result<&mut Self, Misconfigured>;
     pub fn target(&self, domain: &str) -> Option<Target<'_>>;  // Local(&dyn DynCommandHandler) | Remote(&dyn CoordinatorPort)
+    pub fn catalog(&self) -> &Catalog;                         // what is registered, read-only
 }
+```
+
+**The registry is two things.** Its `Catalog` is what is registered: every
+component listed by its `ComponentDescriptor` (generated for a Rust
+component, answered to `Describe` by a child, held to the same rules
+either way), with its configured resolutions and what its payloads are
+upcast through; the domain-blind steps (`check`, the coordinator's
+resolution, snapshot and start rule) and a `CatchUp` read only it. The
+`Registry` holds the catalog and the handler behind each entry: a domain's
+`CommandHandler` (and a typed domain's factory and upcaster), a policy's
+`PolicyComponent`, a projector's `ProjectorHandler`, a remote domain's
+`CoordinatorPort`. Every registration answers `Result<_, Misconfigured>`,
+the same way for every kind; a refused one lists and keeps nothing, and
+none panics.
+
+```rust
 ```
 
 The kernel awaits each dispatch (angzarr-router's `CommandHandler`,
@@ -859,7 +877,10 @@ ways:
   across streams: **held** in memory (`CatchUp::new`, for a read model
   held in memory, rebuilt by its first step), or **stored** in the
   store's positions under the projector's name (`CatchUp::stored`, so a
-  durable read model resumes, as a policy does). A book the projector
+  durable read model resumes, as a policy does; its first step lists the
+  positions the projector holds, angzarr-ports' `ListPositions`, so a
+  stream it was handed before it started is known, and handed gone once
+  it is purged). A book the projector
   fails keeps its stream where it was, for the next step; the other
   streams go on.
 
@@ -992,7 +1013,7 @@ replaces the last). It is its own call (`write_snapshot`), never in a
 step's write, and a cache: its failure fails nothing. A state with no
 snapshot form returns none, and none is written. `Stream::snapshot` makes
 one from a stream run in memory, for the application to write. On
-load the coordinator uses it only if `Registry::snapshot_usable` (the
+load the coordinator uses it only if `Catalog::snapshot_usable` (the
 state's type URL is the registered one, and its rules version passes
 types.proto's default rule against the registered version: one leading
 `v` or `V` stripped from each, equal SemVer major and minor, or, when
@@ -1176,13 +1197,13 @@ type itself:
 angzarr-embedded's own types are the ones angzarr has no message for, because they
 are execution, not wire: `Checked`, `Identified`, `Contextual`, `Prepared`,
 `Envelope` (a checked, decoded page), `Stream`, `Rejected`,
-`Registry`, `Order`, `Kernel`.
+`Catalog`, `Registry`, `Order`, `Kernel`.
 
 ## Key signatures
 
 ```rust
 // step 1-2
-pub fn check(book: CommandBook, registry: &Registry) -> Result<Checked, Malformed>;
+pub fn check(book: CommandBook, catalog: &Catalog) -> Result<Checked, Malformed>;
 impl Checked { pub fn identify(self, sampled: &Sampled) -> Identified; }
 // step 3-5: the chain's own, pub(crate)
 async fn deduplicate<P: Port>(port: &mut P, registry, command: Identified) -> Result<Deduplicated, Failure<Rejected>>;
@@ -1228,26 +1249,32 @@ impl<D: Domain> Stream<D> {
 }
 // a projector caught up from the store
 impl<P: ProjectorHandler> CatchUp<P> {
-    pub fn new(sources: &[&str], projector: P) -> CatchUp<P>;      // positions held in memory
-    pub fn stored(sources: &[&str], projector: P) -> CatchUp<P>;   // positions in the store
-    pub async fn step<S: ReadStore + Store>(&mut self, store: &S, registry: &Registry)
+    pub fn new(sources: &[&str], projector: P) -> Result<CatchUp<P>, Misconfigured>;    // held in memory
+    pub fn stored(sources: &[&str], projector: P) -> Result<CatchUp<P>, Misconfigured>; // in the store
+    pub async fn step<S: ReadStore + Store + ListPositions>(&mut self, store: &S, catalog: &Catalog)
         -> Result<Caught, KernelError>;
-    pub async fn step_if_changed<S: ReadStore + Store + Watch>(&mut self, store: &S,
-        registry: &Registry) -> Result<Option<Caught>, KernelError>;
-    pub async fn follow<S: ReadStore + Store + Watch>(&mut self, store: &S, registry: &Registry,
+    pub async fn step_if_changed<S: ReadStore + Store + ListPositions + Watch>(&mut self, store: &S,
+        catalog: &Catalog) -> Result<Option<Caught>, KernelError>;
+    pub async fn follow<S: ReadStore + Store + ListPositions + Watch>(&mut self, store: &S, catalog: &Catalog,
         wait: &dyn Wait, every: Duration, more: impl FnMut(Option<&Caught>) -> bool)
         -> Result<(), KernelError>;
 }
 // registration
 impl Registry {
     pub fn register<D: Domain>(&mut self, upcaster: Upcaster,
-        handlers: impl FnOnce(DomainDispatch<D::State>) -> DomainDispatch<D::State>) -> Result<(), Misconfigured>;
-    pub fn command_handler(&mut self, domain: &str, handler: impl CommandHandler + 'static) -> Result<(), Misconfigured>;
-    pub fn policy<P: Policy>(&mut self, policy: P) -> &mut Self;   // one list, run in registration order
-    pub fn policy_dispatch(&mut self, dispatch: PolicyDispatch) -> &mut Self;
+        handlers: impl FnOnce(DomainDispatch<D::State>) -> DomainDispatch<D::State>) -> Result<&mut Self, Misconfigured>;
+    pub fn command_handler(&mut self, domain: &str, handler: impl CommandHandler + 'static,
+        descriptor: ComponentDescriptor) -> Result<&mut Self, Misconfigured>;
+    pub fn policy<P: Policy>(&mut self, policy: P) -> Result<&mut Self, Misconfigured>;  // one list, run in registration order
+    pub fn policy_dispatch(&mut self, dispatch: PolicyDispatch) -> Result<&mut Self, Misconfigured>;
+    pub fn catalog(&self) -> &Catalog;
+}
+// what is registered, read-only
+impl Catalog {
     pub fn resolve(&self, domain: &str, command_type_url: &str, requested: Option<ConflictResolution>)
         -> Option<ConflictResolution>;
     pub fn snapshot_usable(&self, domain: &str, snapshot: &Snapshot) -> bool;
+    pub fn domains(&self) -> impl Iterator<Item = &str>;    // and remotes, policy_names, projector_names
 }
 ```
 

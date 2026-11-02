@@ -408,7 +408,7 @@ fn a_policy_is_handed_its_triggers_whole_metadata() {
     use crate::testing::Harness;
     use crate::toys::{cover, Account, AccountCmd, AccountEvent};
     let mut registry = crate::toys::registry();
-    registry.policy(Witness);
+    registry.policy(Witness).unwrap();
     let mut account = Harness::<Account>::new(registry, cover("account", 9));
     account.given([AccountEvent::Opened]);
     account.when(AccountCmd::Deposit(5)).events();

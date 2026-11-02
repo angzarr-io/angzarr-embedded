@@ -43,12 +43,12 @@ use angzarr_router::error::CodedError;
 use angzarr_router::policy::PolicyDispatch;
 use prost_types::Any;
 
+use super::catalog::Catalog;
 use super::check::{check_policy_command, Checked, Malformed};
 use super::dead_letter::{self, Cause, Component, DeadLetterLog};
 use super::domain::Domain;
 use super::markup::{self, CommandContext, Commands, PolicyContext, TypeName};
 use super::payload::{type_name, Payload};
-use super::registry::Registry;
 
 // ---------------------------------------------------------------- policies
 
@@ -519,10 +519,10 @@ impl Order {
     /// The order as a book, checked through the kernel's policy entry:
     /// the target's cover, the command packed as `Any`, no ids, no
     /// handling. Malformed only by a bug (a policy or kernel one).
-    pub(crate) fn check(&self, registry: &Registry) -> Result<Checked, Malformed> {
+    pub(crate) fn check(&self, catalog: &Catalog) -> Result<Checked, Malformed> {
         check_policy_command(
             self.book(),
-            registry,
+            catalog,
             self.trigger.clone(),
             &self.policy,
             self.index,
@@ -534,10 +534,10 @@ impl Order {
     /// bug makes one.
     pub(crate) fn check_logged(
         &self,
-        registry: &Registry,
+        catalog: &Catalog,
         dead_letters: &dyn DeadLetterLog,
     ) -> Result<Checked, Malformed> {
-        self.check(registry).inspect_err(|malformed| {
+        self.check(catalog).inspect_err(|malformed| {
             dead_letter::write(
                 dead_letters,
                 Letter::RejectedCommand(self.book()),

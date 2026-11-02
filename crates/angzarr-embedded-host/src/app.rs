@@ -54,9 +54,10 @@ use std::sync::Arc;
 
 use angzarr_diagnostic::Report;
 use angzarr_embedded::v1::{CommandBook, Cover, EventBook, EventPage};
+use angzarr_embedded::{Catalog, Misconfigured};
 use angzarr_embedded::{
     DeadLetterLog, EventStore, Failure, Handled, Kernel, KernelError, Malformed, OnPolicyBug,
-    OnRetryable, Recorded, Registry, Rejected, Sampled, StoreError, StreamRef, Target, Wait,
+    OnRetryable, Recorded, Registry, Rejected, Sampled, StoreError, StreamRef, Wait,
 };
 use angzarr_proto::v1::{CommandResponse, ComponentKind};
 use angzarr_store_sqlite::SqliteStore;
@@ -70,7 +71,8 @@ use crate::stores::{OneStore, Stores};
 /// Runs the application the config at `config` describes: reads it
 /// (`angzarr.yaml`, strictly: [`crate::config::parse`]), starts its remote
 /// components ([`Host::start`]), registers them by kind and calls
-/// `register` to register the in-process ones, holding what it registers
+/// `register` to register the in-process ones (a registration it refuses
+/// is [`HostError::Register`]), holding what it registers
 /// to the in-process `component` entries, by name and kind (one listed and
 /// not registered, [`HostError::NotRegistered`]; one registered and not
 /// listed, [`HostError::NotListed`]), opens
@@ -86,7 +88,7 @@ use crate::stores::{OneStore, Stores};
 /// more, and [`run_with`] runs a config already in hand.
 pub async fn run(
     config: impl AsRef<Path>,
-    register: impl FnOnce(&mut Registry),
+    register: impl FnOnce(&mut Registry) -> Result<(), Misconfigured>,
 ) -> Result<App, HostError> {
     run_with_languages(config, Languages::builtin(), register).await
 }
@@ -100,7 +102,7 @@ pub async fn run(
 pub async fn run_with_languages(
     config: impl AsRef<Path>,
     languages: Languages,
-    register: impl FnOnce(&mut Registry),
+    register: impl FnOnce(&mut Registry) -> Result<(), Misconfigured>,
 ) -> Result<App, HostError> {
     let path = config.as_ref().to_path_buf();
     let config = blocking(move || read(&path)).await?;
@@ -113,7 +115,7 @@ pub async fn run_with_languages(
 pub async fn run_with(
     config: HostConfig,
     languages: Languages,
-    register: impl FnOnce(&mut Registry),
+    register: impl FnOnce(&mut Registry) -> Result<(), Misconfigured>,
 ) -> Result<App, HostError> {
     let (config, host, languages) = blocking(move || {
         let host = Host::start_with_languages(config.clone(), &languages)?;
@@ -121,18 +123,18 @@ pub async fn run_with(
     })
     .await?;
     let mut registry = Registry::new();
-    let registered = host
-        .register(&mut registry)
-        .map_err(|e| HostError::Register {
-            cause: Report::of(&e),
-        });
-    if let Err(error) = registered {
+    let refused = |e: Misconfigured| HostError::Register {
+        cause: Report::of(&e),
+    };
+    if let Err(error) = host.register(&mut registry).map_err(refused) {
         return Err(stopped(host, error).await);
     }
-    let hosted = Registered::of(&registry);
-    register(&mut registry);
-    let local = Registered::of(&registry).since(&hosted);
-    if let Err(error) = listed(&config, &languages, &local, &registry) {
+    let hosted = Registered::of(registry.catalog());
+    if let Err(error) = register(&mut registry).map_err(refused) {
+        return Err(stopped(host, error).await);
+    }
+    let local = Registered::of(registry.catalog()).since(&hosted);
+    if let Err(error) = listed(&config, &languages, &local, registry.catalog()) {
         return Err(stopped(host, error).await);
     }
     let exposed: BTreeMap<String, Expose> = config
@@ -141,7 +143,10 @@ pub async fn run_with(
         .filter(|c| c.expose != Expose::None)
         .map(|c| (c.name.clone(), c.expose))
         .collect();
-    if let Some(name) = exposed.keys().find(|name| process_manager(&registry, name)) {
+    if let Some(name) = exposed
+        .keys()
+        .find(|name| process_manager(registry.catalog(), name))
+    {
         let error = HostError::NotExposable {
             domain: name.clone(),
             kind: PROCESS_MANAGER.to_string(),
@@ -200,17 +205,12 @@ const PROCESS_MANAGER: &str = "process_manager";
 /// Whether the component `name` is registered here as a process manager:
 /// a domain whose component name it is (decision 14.50), or a remote
 /// domain the host registered under its `component` entry name.
-fn process_manager(registry: &Registry, name: &str) -> bool {
-    let is = |domain: &str| {
-        matches!(
-            registry.target(domain),
-            Some(Target::Local(handler)) if handler.kind() == ComponentKind::ProcessManager
-        )
-    };
+fn process_manager(catalog: &Catalog, name: &str) -> bool {
+    let is = |domain: &str| catalog.kind(domain) == ComponentKind::ProcessManager;
     is(name)
-        || registry
+        || catalog
             .domains()
-            .any(|domain| registry.component_name(domain).as_deref() == Some(name) && is(domain))
+            .any(|domain| catalog.component_name(domain).as_deref() == Some(name) && is(domain))
 }
 
 /// The config at `path`, read strictly.
@@ -232,16 +232,16 @@ struct Registered {
 }
 
 impl Registered {
-    /// What `registry` holds now.
-    fn of(registry: &Registry) -> Registered {
+    /// What `catalog` lists now.
+    fn of(catalog: &Catalog) -> Registered {
         let names = |names: &mut dyn Iterator<Item = &str>| names.map(str::to_string).collect();
         Registered {
-            domains: registry
+            domains: catalog
                 .domains()
-                .filter_map(|domain| registry.component_name(domain))
+                .filter_map(|domain| catalog.component_name(domain))
                 .collect(),
-            policies: names(&mut registry.policy_names()),
-            projectors: names(&mut registry.projector_names()),
+            policies: names(&mut catalog.policy_names()),
+            projectors: names(&mut catalog.projector_names()),
         }
     }
 
@@ -274,7 +274,7 @@ fn listed(
     config: &HostConfig,
     languages: &Languages,
     local: &Registered,
-    registry: &Registry,
+    catalog: &Catalog,
 ) -> Result<(), HostError> {
     use crate::config::{ComponentKindConfig as Kind, Placement};
     let in_process: Vec<_> = config
@@ -294,7 +294,7 @@ fn listed(
             Kind::Upcaster => component
                 .upcasts
                 .as_deref()
-                .is_some_and(|domain| registry.domains().any(|d| d == domain)),
+                .is_some_and(|domain| catalog.domains().any(|d| d == domain)),
         };
         if !registered {
             return Err(HostError::NotRegistered {

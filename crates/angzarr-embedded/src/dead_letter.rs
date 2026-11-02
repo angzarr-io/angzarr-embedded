@@ -91,10 +91,10 @@ use angzarr_proto::v1::{
 };
 use angzarr_router::error::CodedError;
 
+use super::catalog::Catalog;
 use super::check::Malformed;
 use super::error::{cover_text, KernelError};
 use super::payload::type_name;
-use super::registry::Registry;
 use super::route::{self, diagnostic, flat_args, Rejected};
 use super::store::{DeadLetter, DeadLetterAt, StreamRef};
 use angzarr_proto::v1::{reason_args as args, CoordinatorReason};
@@ -197,11 +197,11 @@ impl<'a> Component<'a> {
     }
 
     /// The domain `name`, of the kind `registry` holds it as
-    /// ([`Registry::kind`]).
-    pub(crate) fn domain(registry: &Registry, name: &'a str) -> Self {
+    /// ([`Catalog::kind`]).
+    pub(crate) fn domain(catalog: &Catalog, name: &'a str) -> Self {
         Component {
             name,
-            kind: registry.kind(name),
+            kind: catalog.kind(name),
         }
     }
 }

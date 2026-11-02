@@ -18,7 +18,7 @@ fn a_dead_letter_line_starts_with_the_warning_and_names_the_command() {
             pack(&account::cmd::Deposit { cents: 1 }),
         )
         .id(5),
-        &registry(),
+        registry().catalog(),
     )
     .unwrap()
     .identify(&at(30));
@@ -279,7 +279,7 @@ fn a_letter_names_its_component_and_its_kind() {
         ACCOUNT,
         Component::policy("bookkeeping"),
         Component::projector("balances"),
-        Component::domain(&registry(), "account"),
+        Component::domain(registry().catalog(), "account"),
     ] {
         for letter in [
             super::letter(payload(), component, Cause::Kernel(&error)),
@@ -295,11 +295,11 @@ fn a_letter_names_its_component_and_its_kind() {
         ComponentKind::Projector
     );
     assert_eq!(
-        Component::domain(&registry(), "account").kind,
+        Component::domain(registry().catalog(), "account").kind,
         ComponentKind::Aggregate
     );
     assert_eq!(
-        Component::domain(&registry(), "nowhere").kind,
+        Component::domain(registry().catalog(), "nowhere").kind,
         ComponentKind::Unspecified,
         "not registered here: no kind known"
     );
@@ -313,7 +313,7 @@ fn deposit_book() -> crate::v1::CommandBook {
             pack(&account::cmd::Deposit { cents: 1 }),
         )
         .id(5),
-        &registry(),
+        registry().catalog(),
     )
     .unwrap()
     .identify(&at(30))
@@ -602,7 +602,7 @@ fn a_malformed_kernel_books_letter_is_keyed_where_the_spec_has_a_key() {
             pack(&account::fact::PaymentReceived { cents: 1 }),
             "pi_1",
         ),
-        &registry(),
+        registry().catalog(),
     )
     .unwrap()
     .identify(&at(30))

@@ -2,7 +2,7 @@
 //! **identify** it.
 //!
 //! [`check`] is the one place a book is checked. It is domain-blind: it
-//! knows no domain's types, only the [`Registry`]'s entry for
+//! knows no domain's types, only the [`Catalog`]'s entry for
 //! `cover.domain` (is it registered, and which conflict resolutions does
 //! its state support, as angzarr's coordinator reads them off the
 //! `StateDescriptor`). Everything it refuses is [`Malformed`], before any
@@ -32,7 +32,7 @@ use angzarr_proto::v1::{
 };
 use prost_types::{Any, Timestamp};
 
-use super::registry::Registry;
+use super::catalog::Catalog;
 
 /// Why a book was refused before anything was minted, looked up or decided:
 /// angzarr's INVALID_ARGUMENT for a client's book. For a policy's book,
@@ -269,12 +269,12 @@ pub struct Checked {
 }
 
 /// Validate a client's `book`: step 1, the client entry. Domain-blind; the
-/// registry answers only whether `cover.domain` is registered and what its
+/// catalog answers only whether `cover.domain` is registered and what its
 /// state supports. Refuses, in [`Malformed`]'s order, every case angzarr's
 /// `Handling` region lists as malformed, plus a causation (only the
 /// kernel's chain issues policy commands).
-pub fn check(book: CommandBook, registry: &Registry) -> Result<Checked, Malformed> {
-    parse(book, registry, None)
+pub fn check(book: CommandBook, catalog: &Catalog) -> Result<Checked, Malformed> {
+    parse(book, catalog, None)
 }
 
 /// Validate a policy's `book`, built by the kernel for the `index`-th
@@ -288,7 +288,7 @@ pub fn check(book: CommandBook, registry: &Registry) -> Result<Checked, Malforme
 /// deduplicates (angzarr decision 13.4). Repairs are new commands.
 pub(crate) fn check_policy_command(
     book: CommandBook,
-    registry: &Registry,
+    catalog: &Catalog,
     trigger: EventRef,
     component: &str,
     index: u32,
@@ -298,7 +298,7 @@ pub(crate) fn check_policy_command(
         ids::policy_command_id(&trigger, component, index).map_err(Malformed::BadTrigger)?;
     parse(
         book,
-        registry,
+        catalog,
         Some(Entry::Policy {
             trigger,
             correlation_id,
@@ -313,14 +313,14 @@ pub(crate) fn check_policy_command(
 /// trigger's stream.
 pub(crate) fn check_refusal(
     book: CommandBook,
-    registry: &Registry,
+    catalog: &Catalog,
     trigger: EventRef,
     correlation_id: Uuid,
     command_id: Uuid,
 ) -> Result<Checked, Malformed> {
     parse(
         book,
-        registry,
+        catalog,
         Some(Entry::Refusal {
             trigger,
             correlation_id,
@@ -332,7 +332,7 @@ pub(crate) fn check_refusal(
 /// The one parse: `policy` is `None` for a client's book.
 fn parse(
     book: CommandBook,
-    registry: &Registry,
+    catalog: &Catalog,
     policy: Option<Entry>,
 ) -> Result<Checked, Malformed> {
     let CommandBook {
@@ -342,13 +342,13 @@ fn parse(
     } = book;
 
     let cover = cover.ok_or(Malformed::NoCover)?;
-    let Some(target) = registry.target(&cover.domain) else {
+    // A remote domain's capabilities are its coordinator's to judge.
+    let local = catalog.is_here(&cover.domain);
+    if !local && !catalog.is_remote(&cover.domain) {
         return Err(Malformed::UnknownDomain {
             domain: cover.domain,
         });
-    };
-    // A remote domain's capabilities are its coordinator's to judge.
-    let local = matches!(target, super::Target::Local(_));
+    }
     let root = cover.root.clone().ok_or(Malformed::NoRoot)?;
     if !root.is_well_formed() {
         return Err(Malformed::BadRoot {
@@ -437,7 +437,7 @@ fn parse(
     // An input to a process manager whose correlation is unset is given
     // its cover's root (decision 14.31); a set one is kept, whatever it is
     // (decision 14.36).
-    let process_manager = registry.is_process_manager(&cover.domain);
+    let process_manager = catalog.is_process_manager(&cover.domain);
     if let Body::Fact { payload, .. } = &body {
         if !refusal_addressed(payload, &cover) {
             return Err(Malformed::RefusalMisaddressed);
@@ -449,7 +449,7 @@ fn parse(
         value => {
             let requested = ConflictResolution::try_from(value)
                 .map_err(|_| Malformed::UnknownConflictResolution { value })?;
-            if local && !registry.supports(&cover.domain, requested) {
+            if local && !catalog.supports(&cover.domain, requested) {
                 return Err(Malformed::UnsupportedConflictResolution {
                     domain: cover.domain,
                     requested,
@@ -537,7 +537,7 @@ impl Checked {
 
     /// The requested resolution, supported by the domain's state when set.
     /// `None` (UNSPECIFIED, or no handling): resolved from configuration at
-    /// load ([`Registry::resolve`]).
+    /// load ([`Catalog::resolve`]).
     pub fn conflict_resolution(&self) -> Option<ConflictResolution> {
         self.conflict_resolution
     }

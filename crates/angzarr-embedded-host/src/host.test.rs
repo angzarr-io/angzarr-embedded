@@ -895,7 +895,10 @@ fn a_child_described_again_is_refused_unless_the_registry_takes_it() {
     };
     assert_eq!(order.registered_by(&rebuilt, false), Ok(()));
     assert_eq!(order.link.registered().descriptor, rebuilt);
-    assert_eq!(registry.rules_version("order").as_deref(), Some("1.5.0"));
+    assert_eq!(
+        registry.catalog().rules_version("order").as_deref(),
+        Some("1.5.0")
+    );
 
     let sidecar = supervisor(ComponentKindConfig::Upcaster);
     assert_eq!(sidecar.registered_by(&renamed, false), Ok(()));

@@ -39,7 +39,7 @@ fn ledger_cover() -> crate::v1::Cover {
 fn a_policys_events_carry_the_derived_command_id_as_causation_and_no_trigger() {
     let plain = registry();
     let mut registry = registry();
-    registry.policy(Bookkeeping);
+    registry.policy(Bookkeeping).unwrap();
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry).log_with(&log);
     let store = MemoryStore::new();
@@ -94,7 +94,7 @@ fn a_policys_events_carry_the_derived_command_id_as_causation_and_no_trigger() {
 fn a_rejected_policy_step_keeps_the_commands_commit_and_is_dead_lettered() {
     let plain = registry();
     let mut registry = registry();
-    registry.policy(Bookkeeping);
+    registry.policy(Bookkeeping).unwrap();
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry).log_with(&log);
     let store = MemoryStore::new();
@@ -176,7 +176,7 @@ fn a_rejected_policy_step_keeps_the_commands_commit_and_is_dead_lettered() {
 fn a_chain_deeper_than_its_limit_is_refused() {
     let plain = registry();
     let mut registry = registry();
-    registry.policy(Bookkeeping);
+    registry.policy(Bookkeeping).unwrap();
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry).log_with(&log).limit(0);
     let store = MemoryStore::new();
@@ -208,7 +208,7 @@ fn a_chain_deeper_than_its_limit_is_refused() {
 #[test]
 fn a_command_to_an_edition_is_refused_and_writes_nothing() {
     let mut registry = registry();
-    registry.policy(Bookkeeping);
+    registry.policy(Bookkeeping).unwrap();
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry).log_with(&log);
     let store = MemoryStore::new();
@@ -287,7 +287,7 @@ fn a_book_for_another_domain_is_refused() {
 fn each_step_loads_what_the_steps_before_it_committed() {
     let plain = registry();
     let mut registry = registry();
-    registry.policy(Bookkeeping);
+    registry.policy(Bookkeeping).unwrap();
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry).log_with(&log);
     let store = MemoryStore::new();
@@ -374,9 +374,11 @@ impl angzarr_router::router::ProjectorHandler for Deposits {
 fn projectors_run_after_commit_over_their_sources_streams() {
     let plain = registry();
     let mut registry = registry();
-    registry.policy(Bookkeeping);
+    registry.policy(Bookkeeping).unwrap();
     let deposits = Deposits::default();
-    registry.projector_handler(&["account"], deposits.clone());
+    registry
+        .projector_handler(&["account"], deposits.clone())
+        .unwrap();
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry).log_with(&log);
     let store = MemoryStore::new();
@@ -420,7 +422,9 @@ fn projectors_run_after_commit_over_their_sources_streams() {
 fn a_duplicate_runs_no_projector_and_commits_nothing() {
     let mut registry = registry();
     let deposits = Deposits::default();
-    registry.projector_handler(&["account"], deposits.clone());
+    registry
+        .projector_handler(&["account"], deposits.clone())
+        .unwrap();
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry).log_with(&log);
     let store = MemoryStore::new();
@@ -443,7 +447,7 @@ fn handle_is_a_send_future_over_a_send_store() {
     }
     let plain = registry();
     let mut registry = registry();
-    registry.policy(Bookkeeping);
+    registry.policy(Bookkeeping).unwrap();
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry).log_with(&log);
     let store = MemoryStore::new();
@@ -502,7 +506,7 @@ impl crate::Policy for DepositsOnly {
 fn a_policys_error_dead_letters_its_step_and_moves_its_position_past_it() {
     let plain = registry();
     let mut registry = registry();
-    registry.policy(Unlucky);
+    registry.policy(Unlucky).unwrap();
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry).log_with(&log);
     let store = MemoryStore::new();
@@ -627,7 +631,7 @@ fn a_kernel_moves_a_policys_position_past_its_bug_by_default() {
 fn under_stay_a_policys_error_holds_its_position() {
     let plain = registry();
     let mut registry = registry();
-    registry.policy(Unlucky);
+    registry.policy(Unlucky).unwrap();
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry)
         .log_with(&log)
@@ -680,7 +684,7 @@ fn under_stay_a_policys_error_holds_its_position() {
 fn under_stay_a_policys_refusal_answer_error_holds_its_position() {
     let plain = registry();
     let mut registry = registry();
-    registry.policy(UnansweringBookkeeping);
+    registry.policy(UnansweringBookkeeping).unwrap();
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry)
         .log_with(&log)
@@ -714,7 +718,7 @@ fn under_stay_a_policys_refusal_answer_error_holds_its_position() {
 #[test]
 fn a_filtered_policy_reaches_its_target_only_for_the_events_it_targets() {
     let mut registry = registry();
-    registry.policy(DepositsOnly);
+    registry.policy(DepositsOnly).unwrap();
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry).log_with(&log);
     let store = MemoryStore::new();
@@ -751,7 +755,7 @@ fn a_filtered_policy_reaches_its_target_only_for_the_events_it_targets() {
 #[test]
 fn a_policy_book_for_an_unregistered_target_is_a_dead_lettered_bug() {
     let mut registry = crate::Registry::new();
-    registry.policy(Bookkeeping);
+    registry.policy(Bookkeeping).unwrap();
     registry
         .register::<Account>(
             crate::Upcaster::new("u", "account"),
@@ -813,7 +817,7 @@ fn a_policy_book_for_an_unregistered_target_is_a_dead_lettered_bug() {
 fn a_command_owes_policy_steps_for_its_own_events_only() {
     let plain = registry();
     let mut registry = registry();
-    registry.policy(Bookkeeping);
+    registry.policy(Bookkeeping).unwrap();
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry).log_with(&log);
     let store = Recording::default();
@@ -855,7 +859,9 @@ fn a_chain_on_a_stream_loaded_from_a_snapshot_records_only_its_events() {
     let (one, two) = (Deposits::named("first"), Deposits::named("second"));
     registry
         .projector_handler(&["account"], one.clone())
-        .projector_handler(&["account"], two.clone());
+        .unwrap()
+        .projector_handler(&["account"], two.clone())
+        .unwrap();
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry).log_with(&log);
     let store = MemoryStore::new();
@@ -917,7 +923,7 @@ fn two_ledgers_root(n: u8) -> crate::v1::Uuid {
 fn a_triggers_commands_are_indexed_in_target_order() {
     let plain = registry();
     let mut registry = registry();
-    registry.policy(TwoLedgers);
+    registry.policy(TwoLedgers).unwrap();
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry).log_with(&log);
     let store = MemoryStore::new();
@@ -958,8 +964,8 @@ fn two_ledgers(n: u8) -> crate::v1::Cover {
 #[test]
 fn every_policy_on_a_source_runs_for_each_of_its_events_in_registration_order() {
     let mut registry = registry();
-    registry.policy(TwoLedgers);
-    registry.policy(Bookkeeping);
+    registry.policy(TwoLedgers).unwrap();
+    registry.policy(Bookkeeping).unwrap();
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry).log_with(&log);
     let store = Recording::default();
@@ -1006,8 +1012,8 @@ fn every_policy_on_a_source_runs_for_each_of_its_events_in_registration_order() 
 fn a_policy_step_commits_its_position_with_its_events() {
     let plain = registry();
     let mut registry = registry();
-    registry.policy(TwoLedgers);
-    registry.policy(Bookkeeping);
+    registry.policy(TwoLedgers).unwrap();
+    registry.policy(Bookkeeping).unwrap();
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry).log_with(&log);
     let store = Recording::default();
@@ -1048,7 +1054,7 @@ fn a_policy_step_commits_its_position_with_its_events() {
 #[test]
 fn a_step_the_store_failed_is_resumed_by_position() {
     let mut registry = registry();
-    registry.policy(Bookkeeping);
+    registry.policy(Bookkeeping).unwrap();
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry)
         .log_with(&log)
@@ -1144,7 +1150,7 @@ impl crate::Policy for SweepNine {
 #[test]
 fn a_policy_step_that_decides_no_event_still_moves_its_position() {
     let mut registry = registry();
-    registry.policy(SweepNine);
+    registry.policy(SweepNine).unwrap();
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry).log_with(&log);
     let store = Recording::default();
@@ -1258,7 +1264,9 @@ fn a_policys_refusal_answer_reads_the_refused_commands_context() {
     let plain = registry();
     let mut registry = registry();
     let refusals = Answered::default();
-    registry.policy(AnsweringBookkeeping(std::sync::Arc::clone(&refusals)));
+    registry
+        .policy(AnsweringBookkeeping(std::sync::Arc::clone(&refusals)))
+        .unwrap();
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry).log_with(&log);
     let store = MemoryStore::new();
@@ -1320,7 +1328,7 @@ fn a_policys_refusal_answer_reads_the_refused_commands_context() {
 fn a_policys_refusal_answer_error_dead_letters_as_policy_failed() {
     let plain = registry();
     let mut registry = registry();
-    registry.policy(UnansweringBookkeeping);
+    registry.policy(UnansweringBookkeeping).unwrap();
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry).log_with(&log);
     let store = MemoryStore::new();
@@ -1395,7 +1403,9 @@ fn a_refusal_carries_its_triggering_event() {
     let plain = registry();
     let mut registry = registry();
     let refusals = std::sync::Arc::default();
-    registry.policy(AnsweringBookkeeping(std::sync::Arc::clone(&refusals)));
+    registry
+        .policy(AnsweringBookkeeping(std::sync::Arc::clone(&refusals)))
+        .unwrap();
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry).log_with(&log);
     let store = MemoryStore::new();
@@ -1427,7 +1437,7 @@ fn a_refusal_carries_its_triggering_event() {
 fn a_retry_after_a_crash_settles_what_its_stream_still_owes() {
     let plain = registry();
     let mut registry = registry();
-    registry.policy(Bookkeeping);
+    registry.policy(Bookkeeping).unwrap();
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry)
         .log_with(&log)
@@ -1461,7 +1471,7 @@ fn a_retry_after_a_crash_settles_what_its_stream_still_owes() {
 fn resume_runs_a_new_policy_over_its_sources_history() {
     let plain = registry();
     let mut registry = registry();
-    registry.policy(Bookkeeping);
+    registry.policy(Bookkeeping).unwrap();
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry).log_with(&log);
     let store = MemoryStore::new();
@@ -1488,7 +1498,7 @@ fn resume_runs_a_new_policy_over_its_sources_history() {
 fn a_resumed_step_that_already_landed_is_a_duplicate() {
     let plain = registry();
     let mut registry = registry();
-    registry.policy(Bookkeeping);
+    registry.policy(Bookkeeping).unwrap();
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry).log_with(&log);
     let store = MemoryStore::new();
@@ -1556,7 +1566,7 @@ impl crate::Wait for Waits {
 /// run again after one backoff: it lands, and nothing is dead-lettered.
 fn a_policy_step_failing_once_lands_on_its_retry(error: crate::StoreError) {
     let mut registry = registry();
-    registry.policy(Bookkeeping);
+    registry.policy(Bookkeeping).unwrap();
     let log = MemoryDeadLetters::new();
     let waits = Waits::default();
     let kernel = Kernel::new(&registry).log_with(&log).wait_with(&waits);
@@ -1791,20 +1801,22 @@ fn record_for(cover: crate::v1::Cover) -> CommandBook {
 #[test]
 fn a_policy_command_outside_its_destination_is_refused_by_the_kernel() {
     let mut registry = registry();
-    registry.policy_component(
-        Unchecked {
-            answer: |_| {
-                vec![
-                    record_for(ledger_cover()),
-                    record_for(crate::v1::Cover {
-                        domain: "shelf".to_string(),
-                        ..ledger_cover()
-                    }),
-                ]
+    registry
+        .policy_component(
+            Unchecked {
+                answer: |_| {
+                    vec![
+                        record_for(ledger_cover()),
+                        record_for(crate::v1::Cover {
+                            domain: "shelf".to_string(),
+                            ..ledger_cover()
+                        }),
+                    ]
+                },
             },
-        },
-        "ledger",
-    );
+            "ledger",
+        )
+        .unwrap();
     let log = MemoryDeadLetters::new();
     let store = MemoryStore::new();
     let failure = Kernel::new(&registry)
@@ -1866,7 +1878,9 @@ fn unchecked_refusal(
     answer: fn(&crate::v1::EventBook) -> Vec<CommandBook>,
 ) -> crate::angzarr_router::error::CodedError {
     let mut registry = registry();
-    registry.policy_component(Unchecked { answer }, "ledger");
+    registry
+        .policy_component(Unchecked { answer }, "ledger")
+        .unwrap();
     let log = MemoryDeadLetters::new();
     let store = MemoryStore::new();
     let failure = Kernel::new(&registry)
@@ -1945,16 +1959,18 @@ fn a_policys_command_with_handling_is_refused_by_the_kernel() {
     }
     // An empty Handling is unset, and fine.
     let mut registry = registry();
-    registry.policy_component(
-        Unchecked {
-            answer: |_| {
-                let mut book = record_for(ledger_cover());
-                book.handling = Some(crate::v1::Handling::default());
-                vec![book]
+    registry
+        .policy_component(
+            Unchecked {
+                answer: |_| {
+                    let mut book = record_for(ledger_cover());
+                    book.handling = Some(crate::v1::Handling::default());
+                    vec![book]
+                },
             },
-        },
-        "ledger",
-    );
+            "ledger",
+        )
+        .unwrap();
     let log = MemoryDeadLetters::new();
     let store = MemoryStore::new();
     Kernel::new(&registry)
@@ -2034,20 +2050,22 @@ fn a_policys_commands_are_held_to_their_trigger_by_the_kernel() {
 #[test]
 fn a_policys_commands_in_their_triggers_edition_and_correlation_are_delivered() {
     let mut registry = registry();
-    registry.policy_component(
-        Unchecked {
-            answer: |source| {
-                let trigger = source.pages[0]
-                    .meta
-                    .as_ref()
-                    .and_then(|m| m.correlation_id.clone());
-                let mut named = record_for(ledger_cover());
-                named.page.as_mut().unwrap().correlation_id = trigger;
-                vec![record_for(ledger_cover()), named]
+    registry
+        .policy_component(
+            Unchecked {
+                answer: |source| {
+                    let trigger = source.pages[0]
+                        .meta
+                        .as_ref()
+                        .and_then(|m| m.correlation_id.clone());
+                    let mut named = record_for(ledger_cover());
+                    named.page.as_mut().unwrap().correlation_id = trigger;
+                    vec![record_for(ledger_cover()), named]
+                },
             },
-        },
-        "ledger",
-    );
+            "ledger",
+        )
+        .unwrap();
     let log = MemoryDeadLetters::new();
     let store = MemoryStore::new();
     Kernel::new(&registry)
@@ -2160,28 +2178,31 @@ fn a_policys_reaction_that_is_not_a_bare_command_is_refused_by_the_kernel() {
 #[test]
 fn a_policys_commands_naming_their_stamped_identity_are_delivered() {
     let mut registry = registry();
-    registry.policy_component(
-        Unchecked {
-            answer: |source| {
-                let trigger = EventRef {
-                    stream: source.cover.clone(),
-                    sequence: source.pages[0].sequence,
-                };
-                (0..2)
-                    .map(|index| {
-                        let mut book = record_for(ledger_cover());
-                        let page = book.page.as_mut().unwrap();
-                        page.command_id = Some(
-                            crate::ids::policy_command_id(&trigger, "unchecked", index).unwrap(),
-                        );
-                        page.causation_id = Some(trigger.clone());
-                        book
-                    })
-                    .collect()
+    registry
+        .policy_component(
+            Unchecked {
+                answer: |source| {
+                    let trigger = EventRef {
+                        stream: source.cover.clone(),
+                        sequence: source.pages[0].sequence,
+                    };
+                    (0..2)
+                        .map(|index| {
+                            let mut book = record_for(ledger_cover());
+                            let page = book.page.as_mut().unwrap();
+                            page.command_id = Some(
+                                crate::ids::policy_command_id(&trigger, "unchecked", index)
+                                    .unwrap(),
+                            );
+                            page.causation_id = Some(trigger.clone());
+                            book
+                        })
+                        .collect()
+                },
             },
-        },
-        "ledger",
-    );
+            "ledger",
+        )
+        .unwrap();
     let log = MemoryDeadLetters::new();
     let store = MemoryStore::new();
     Kernel::new(&registry)
@@ -2274,31 +2295,33 @@ fn no_translation_makes_the_kernel_build_the_pass_through_fact() {
         crate::Upcaster::new("ledger-upcaster", "ledger"),
     )
     .unwrap();
-    registry.policy_component(
-        Unchecked {
-            answer: |source| {
-                let deposited = source.pages[0]
-                    .payload
-                    .as_ref()
-                    .is_some_and(|p| p.type_url.ends_with("Deposited"));
-                match deposited {
-                    true => {
-                        let mut book = record_for(ledger_cover());
-                        book.page.as_mut().unwrap().body =
-                            Some(Body::Command(crate::v1::Command {
-                                payload: Some(crate::pack(&ledger::Record {
-                                    source_sequence: 1,
-                                    cents: LEDGER_LIMIT + 1,
-                                })),
-                            }));
-                        vec![book]
+    registry
+        .policy_component(
+            Unchecked {
+                answer: |source| {
+                    let deposited = source.pages[0]
+                        .payload
+                        .as_ref()
+                        .is_some_and(|p| p.type_url.ends_with("Deposited"));
+                    match deposited {
+                        true => {
+                            let mut book = record_for(ledger_cover());
+                            book.page.as_mut().unwrap().body =
+                                Some(Body::Command(crate::v1::Command {
+                                    payload: Some(crate::pack(&ledger::Record {
+                                        source_sequence: 1,
+                                        cents: LEDGER_LIMIT + 1,
+                                    })),
+                                }));
+                            vec![book]
+                        }
+                        false => Vec::new(),
                     }
-                    false => Vec::new(),
-                }
+                },
             },
-        },
-        "ledger",
-    );
+            "ledger",
+        )
+        .unwrap();
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry)
         .log_with(&log)

@@ -191,14 +191,22 @@ fn a_domain_is_either_local_or_remote_never_both() {
     let coordinator = FakeCoordinator::answering(Answer::Events(DeliveryOutcome::Applied, vec![]));
     let mut registry = registry_with(&coordinator);
     let taken = |domain: &str| {
-        Err(Misconfigured::AlreadyRegistered {
+        Some(Misconfigured::AlreadyRegistered {
             domain: domain.to_string(),
         })
     };
-    assert_eq!(registry.remote("till", coordinator.clone()), taken("till"));
-    assert_eq!(registry.remote("bank", coordinator.clone()), taken("bank"));
     assert_eq!(
-        registry.command_handler("bank", Till, till_descriptor()),
+        registry.remote("till", coordinator.clone()).err(),
+        taken("till")
+    );
+    assert_eq!(
+        registry.remote("bank", coordinator.clone()).err(),
+        taken("bank")
+    );
+    assert_eq!(
+        registry
+            .command_handler("bank", Till, till_descriptor())
+            .err(),
         taken("bank")
     );
 }
@@ -380,25 +388,27 @@ fn a_policy_step_into_a_remote_domain_goes_to_its_coordinator() {
     let coordinator =
         FakeCoordinator::answering(Answer::Events(DeliveryOutcome::Applied, deposited()));
     let mut registry = registry_with(&coordinator);
-    registry.policy_dispatch(PolicyDispatch::new("till-bank", "till", "bank").on_event(
-        RUNG,
-        |_, source| {
-            Ok(vec![CommandBook {
-                cover: Some(Cover {
-                    domain: "bank".to_string(),
-                    root: source.and_then(|c| c.root.clone()),
-                    edition: None,
-                }),
-                page: Some(CommandPage {
-                    body: Some(command_page::Body::Command(Command {
-                        payload: Some(any("/toy.bank.v1.Deposit")),
-                    })),
-                    ..CommandPage::default()
-                }),
-                handling: None,
-            }])
-        },
-    ));
+    registry
+        .policy_dispatch(PolicyDispatch::new("till-bank", "till", "bank").on_event(
+            RUNG,
+            |_, source| {
+                Ok(vec![CommandBook {
+                    cover: Some(Cover {
+                        domain: "bank".to_string(),
+                        root: source.and_then(|c| c.root.clone()),
+                        edition: None,
+                    }),
+                    page: Some(CommandPage {
+                        body: Some(command_page::Body::Command(Command {
+                            payload: Some(any("/toy.bank.v1.Deposit")),
+                        })),
+                        ..CommandPage::default()
+                    }),
+                    handling: None,
+                }])
+            },
+        ))
+        .unwrap();
     let log = MemoryDeadLetters::new();
     let store = MemoryStore::new();
     let ring = command(cover("till", 1), any("/toy.till.v1.Ring"));
@@ -447,26 +457,34 @@ impl angzarr_router::router::ProjectorHandler for Quiet {
 /// Remote stays remote (owner ruling): a remote domain's events are its
 /// coordinator's, never written here, so a policy here of them would
 /// never run. Registering one after the domain is routed remote is
-/// refused at startup, naming both.
+/// refused, naming both.
 #[test]
-#[should_panic(
-    expected = "angzarr-embedded-misconfigured-remote-source domain=bank component=bank-till"
-)]
 fn a_policy_of_a_remote_domains_events_is_refused() {
     let coordinator = FakeCoordinator::answering(Answer::Events(DeliveryOutcome::Applied, vec![]));
     let mut registry = registry_with(&coordinator);
-    registry.policy_dispatch(till_policy("bank-till", "bank"));
+    let refused = registry
+        .policy_dispatch(till_policy("bank-till", "bank"))
+        .err()
+        .map(|e| e.to_string());
+    assert_eq!(
+        refused.as_deref(),
+        Some("angzarr-embedded-misconfigured-remote-source domain=bank component=bank-till")
+    );
 }
 
 /// The same, a projector of a remote domain's events, among its sources.
 #[test]
-#[should_panic(
-    expected = "angzarr-embedded-misconfigured-remote-source domain=bank component=quiet"
-)]
 fn a_projector_of_a_remote_domains_events_is_refused() {
     let coordinator = FakeCoordinator::answering(Answer::Events(DeliveryOutcome::Applied, vec![]));
     let mut registry = registry_with(&coordinator);
-    registry.projector_handler(&["till", "bank"], Quiet);
+    let refused = registry
+        .projector_handler(&["till", "bank"], Quiet)
+        .err()
+        .map(|e| e.to_string());
+    assert_eq!(
+        refused.as_deref(),
+        Some("angzarr-embedded-misconfigured-remote-source domain=bank component=quiet")
+    );
 }
 
 /// In either order: routing a domain remote once a policy or projector
@@ -476,24 +494,30 @@ fn a_projector_of_a_remote_domains_events_is_refused() {
 fn routing_remote_a_domain_whose_events_a_component_here_handles_is_refused() {
     let coordinator = FakeCoordinator::answering(Answer::Events(DeliveryOutcome::Applied, vec![]));
     let mut registry = Registry::new();
-    registry.policy_dispatch(till_policy("bank-till", "bank"));
-    registry.projector_handler(&["till", "ledger"], Quiet);
-    registry.policy_dispatch(till_policy("till-till", "till"));
+    registry
+        .policy_dispatch(till_policy("bank-till", "bank"))
+        .unwrap();
+    registry
+        .projector_handler(&["till", "ledger"], Quiet)
+        .unwrap();
+    registry
+        .policy_dispatch(till_policy("till-till", "till"))
+        .unwrap();
     assert_eq!(
-        registry.remote("bank", coordinator.clone()),
-        Err(Misconfigured::RemoteSource {
+        registry.remote("bank", coordinator.clone()).err(),
+        Some(Misconfigured::RemoteSource {
             domain: "bank".to_string(),
             component: "bank-till".to_string(),
         })
     );
     assert_eq!(
-        registry.remote("ledger", coordinator.clone()),
-        Err(Misconfigured::RemoteSource {
+        registry.remote("ledger", coordinator.clone()).err(),
+        Some(Misconfigured::RemoteSource {
             domain: "ledger".to_string(),
             component: "quiet".to_string(),
         })
     );
-    assert_eq!(registry.remote("vault", coordinator.clone()), Ok(()));
+    assert!(registry.remote("vault", coordinator.clone()).is_ok());
     assert!(registry.target("bank").is_none(), "not routed remote");
 }
 
@@ -541,25 +565,27 @@ fn a_remote_policy_step_carries_its_triggers_correlation() {
     let coordinator =
         FakeCoordinator::answering(Answer::Events(DeliveryOutcome::Applied, deposited()));
     let mut registry = registry_with(&coordinator);
-    registry.policy_dispatch(PolicyDispatch::new("till-bank", "till", "bank").on_event(
-        RUNG,
-        |_, source| {
-            Ok(vec![CommandBook {
-                cover: Some(Cover {
-                    domain: "bank".to_string(),
-                    root: source.and_then(|c| c.root.clone()),
-                    edition: None,
-                }),
-                page: Some(CommandPage {
-                    body: Some(command_page::Body::Command(Command {
-                        payload: Some(any("/toy.bank.v1.Deposit")),
-                    })),
-                    ..CommandPage::default()
-                }),
-                handling: None,
-            }])
-        },
-    ));
+    registry
+        .policy_dispatch(PolicyDispatch::new("till-bank", "till", "bank").on_event(
+            RUNG,
+            |_, source| {
+                Ok(vec![CommandBook {
+                    cover: Some(Cover {
+                        domain: "bank".to_string(),
+                        root: source.and_then(|c| c.root.clone()),
+                        edition: None,
+                    }),
+                    page: Some(CommandPage {
+                        body: Some(command_page::Body::Command(Command {
+                            payload: Some(any("/toy.bank.v1.Deposit")),
+                        })),
+                        ..CommandPage::default()
+                    }),
+                    handling: None,
+                }])
+            },
+        ))
+        .unwrap();
     let log = MemoryDeadLetters::new();
     let ring = command(cover("till", 1), any("/toy.till.v1.Ring")).correlated(6);
     Kernel::new(&registry)

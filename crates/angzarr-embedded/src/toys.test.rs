@@ -288,7 +288,7 @@ pub fn handlers<D: Toy>() -> impl FnOnce(DomainDispatch<D::State>) -> DomainDisp
 
 /// Register toy `D` with `upcaster`, its handlers [`handlers`].
 pub fn register<D: Toy>(registry: &mut Registry, upcaster: Upcaster) -> Result<(), Misconfigured> {
-    registry.register::<D>(upcaster, handlers::<D>())
+    registry.register::<D>(upcaster, handlers::<D>()).map(drop)
 }
 
 /// The descriptor angzarr-build generates for typed domain `D` when a

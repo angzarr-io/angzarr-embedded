@@ -599,7 +599,9 @@ fn registry() -> Registry {
     let mut registry = Registry::new();
     registry
         .aggregate::<Counter>(Counter::default)
-        .policy(NoteBumps);
+        .unwrap()
+        .policy(NoteBumps)
+        .unwrap();
     registry
 }
 
@@ -687,9 +689,9 @@ fn hand_written_payloads_round_trip() {
 fn a_policy_targets_a_remote_domain_by_its_command_set_alone() {
     let bank = BankCoordinator::default();
     let mut registry = Registry::new();
-    registry.aggregate::<Counter>(Counter::default);
+    registry.aggregate::<Counter>(Counter::default).unwrap();
     registry.remote(Bank::DOMAIN, bank.clone()).unwrap();
-    registry.policy(BankBumps);
+    registry.policy(BankBumps).unwrap();
     // Only the counter's step is committed here: the bank's events are its
     // coordinator's.
     assert_eq!(
@@ -894,11 +896,11 @@ fn decide() -> CommandBook {
 #[test]
 fn a_policy_is_sourced_from_a_child_hosted_domain_by_its_event_set_alone() {
     let mut registry = Registry::new();
-    registry.aggregate::<Counter>(Counter::default);
+    registry.aggregate::<Counter>(Counter::default).unwrap();
     registry
         .command_handler(Player::DOMAIN, PlayerChild, player_descriptor())
         .unwrap();
-    registry.policy(PlayerBumps);
+    registry.policy(PlayerBumps).unwrap();
     let store = Mem::default();
     let log = MemoryDeadLetters::new();
     let sampled = Sampled {

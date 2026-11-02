@@ -24,7 +24,7 @@
 //! One command, end to end, in angzarr's normative order:
 //!
 //! 1. **Validate** ([`check`]): the one place a [`CommandBook`](v1::CommandBook)
-//!    is checked, domain-blind, with the [`Registry`] for capabilities.
+//!    is checked, domain-blind, with the [`Catalog`] for capabilities.
 //!    What comes out is a [`Checked`], whose accessors are never optional
 //!    where the book was required to say something. Nothing downstream
 //!    unwraps a prost `Option`.
@@ -81,6 +81,7 @@
 #![allow(clippy::result_large_err)]
 
 mod book;
+mod catalog;
 mod check;
 mod conflict;
 mod coordinator;
@@ -158,6 +159,7 @@ pub use angzarr_router::PageContext;
 #[cfg(feature = "sqlite")]
 pub use angzarr_store_sqlite;
 pub use book::{CommandBookExt, CoverExt};
+pub use catalog::{Catalog, Description, Misconfigured};
 pub use check::{check, Body, Checked, Identified, Malformed, Sampled};
 pub use conflict::{Key, UnitPath, Units};
 pub use dead_letter::{dead_letter_line, DeadLetterLog, MemoryDeadLetters, DEAD_LETTER_PREFIX};
@@ -174,7 +176,7 @@ pub use handle::{
 pub use payload::{decode_as, pack, type_name, Decoder, Payload};
 pub use policy::{target_cover, translated, CommandTarget, EventSource, Order, Policy};
 pub use projector::{CatchUp, Caught};
-pub use registry::{Aggregate, Description, Misconfigured, Registry};
+pub use registry::Registry;
 pub use route::{rejection, Rejected};
 pub use store::{
     Append, ChangeToken, DeadLetter, DeadLetterAt, DeadLetterKey, DeadLetterStore, EventStore,
@@ -444,6 +446,13 @@ pub fn diagnostic_samples() -> Vec<Box<dyn angzarr_diagnostic::Diagnostic>> {
     });
     let misconfigured = [
         Misconfigured::AlreadyRegistered { domain: domain() },
+        Misconfigured::ComponentRegistered {
+            component: "bookkeeping".to_string(),
+        },
+        Misconfigured::NotRegistered { domain: domain() },
+        Misconfigured::ProjectorNoInputDomain {
+            component: "balances".to_string(),
+        },
         Misconfigured::UpcasterForAnotherDomain {
             domain: domain(),
             upcaster: "ledger".to_string(),

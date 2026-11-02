@@ -61,7 +61,7 @@ fn written(dir: &Path, body: &str) -> PathBuf {
 /// [`run_with`] on `config`, in the built-in languages.
 async fn run_config(
     config: &HostConfig,
-    register: impl FnOnce(&mut Registry),
+    register: impl FnOnce(&mut Registry) -> Result<(), Misconfigured>,
 ) -> Result<App, HostError> {
     run_with(config.clone(), Languages::builtin(), register).await
 }
@@ -106,7 +106,9 @@ fn sampled(n: u8) -> Sampled {
     }
 }
 
-fn nothing(_: &mut Registry) {}
+fn nothing(_: &mut Registry) -> Result<(), Misconfigured> {
+    Ok(())
+}
 
 /// The whole application from its config: a command for the remote domain
 /// goes through the kernel and its event is in the store.
@@ -141,17 +143,20 @@ async fn run_calls_register_for_the_in_process_domains() {
     config.store.in_memory = true;
     let app = run_config(&config, |registry: &mut Registry| {
         assert_eq!(
-            registry.command_handler("player", NoHandler, Default::default()),
-            Err(Misconfigured::AlreadyRegistered {
+            registry
+                .command_handler("player", NoHandler, Default::default())
+                .err(),
+            Some(Misconfigured::AlreadyRegistered {
                 domain: "player".to_string(),
             }),
             "the remote domain is registered before register runs"
         );
+        Ok(())
     })
     .await
     .unwrap();
     assert_eq!(
-        app.registry().domains().collect::<Vec<_>>(),
+        app.registry().catalog().domains().collect::<Vec<_>>(),
         ["player"],
         "the app's registry is the one run filled"
     );
@@ -315,9 +320,8 @@ async fn a_language_not_loaded_is_refused_and_one_loaded_runs() {
     );
     let languages = Languages::builtin().with(Language::in_process("rustacean"));
     let app = run_with_languages(&path, languages, |registry: &mut Registry| {
-        registry
-            .command_handler("table", NoHandler, fixtures::descriptor("table"))
-            .unwrap();
+        registry.command_handler("table", NoHandler, fixtures::descriptor("table"))?;
+        Ok(())
     })
     .await;
     assert!(app.is_ok(), "{:?}", app.err());
@@ -560,10 +564,13 @@ mod concurrency {
             in_memory(&dir, &["left", "right"]),
             move |registry: &mut Registry| {
                 for domain in ["left", "right"] {
-                    registry
-                        .command_handler(domain, Meeting(meeting.clone()), descriptor(domain))
-                        .unwrap();
+                    registry.command_handler(
+                        domain,
+                        Meeting(meeting.clone()),
+                        descriptor(domain),
+                    )?;
                 }
+                Ok(())
             },
         )
         .await
@@ -599,9 +606,8 @@ mod concurrency {
         let app = run(
             in_memory(&dir, &["left"]),
             move |registry: &mut Registry| {
-                registry
-                    .command_handler("left", Meeting(meeting), descriptor("left"))
-                    .unwrap();
+                registry.command_handler("left", Meeting(meeting), descriptor("left"))?;
+                Ok(())
             },
         )
         .await
@@ -668,14 +674,13 @@ mod exposure {
         config.store.in_memory = true;
         run_config(&config, |registry: &mut Registry| {
             for domain in ["hidden", "local", "open"] {
-                registry
-                    .command_handler(
-                        domain,
-                        Meeting(std::sync::Arc::new(Rendezvous::of(1))),
-                        descriptor(domain),
-                    )
-                    .unwrap();
+                registry.command_handler(
+                    domain,
+                    Meeting(std::sync::Arc::new(Rendezvous::of(1))),
+                    descriptor(domain),
+                )?;
             }
+            Ok(())
         })
         .await
         .expect("the app runs")
@@ -870,9 +875,8 @@ mod exposure_edges {
             if kind == ComponentKind::ProcessManager {
                 described.starting_types = vec!["test.meet.v1.Meet".to_string()];
             }
-            registry
-                .command_handler("quiet", Quiet(kind), described)
-                .unwrap();
+            registry.command_handler("quiet", Quiet(kind), described)?;
+            Ok(())
         })
         .await
     }
@@ -1014,20 +1018,17 @@ mod listing {
         config.store.in_memory = true;
         run_config(&config, move |registry: &mut Registry| {
             let rendezvous = || Meeting(std::sync::Arc::new(Rendezvous::of(1)));
-            registry
-                .command_handler("left", rendezvous(), descriptor("left"))
-                .unwrap();
+            registry.command_handler("left", rendezvous(), descriptor("left"))?;
             if with.right {
-                registry
-                    .command_handler("right", rendezvous(), descriptor("right"))
-                    .unwrap();
+                registry.command_handler("right", rendezvous(), descriptor("right"))?;
             }
             if with.policy {
-                registry.policy_dispatch(PolicyDispatch::new("left-right", "left", "right"));
+                registry.policy_dispatch(PolicyDispatch::new("left-right", "left", "right"))?;
             }
             if with.projector {
-                registry.projector_handler(&["left"], Still);
+                registry.projector_handler(&["left"], Still)?;
             }
+            Ok(())
         })
         .await
     }
@@ -1169,15 +1170,14 @@ mod listing {
         config.store.in_memory = true;
         let refused = run_config(&config, |registry: &mut Registry| {
             for domain in ["left", "right"] {
-                registry
-                    .command_handler(
-                        domain,
-                        Meeting(std::sync::Arc::new(Rendezvous::of(1))),
-                        descriptor(domain),
-                    )
-                    .unwrap();
+                registry.command_handler(
+                    domain,
+                    Meeting(std::sync::Arc::new(Rendezvous::of(1))),
+                    descriptor(domain),
+                )?;
             }
-            registry.policy_dispatch(PolicyDispatch::new("right", "left", "right"));
+            registry.policy_dispatch(PolicyDispatch::new("right", "left", "right"))?;
+            Ok(())
         })
         .await
         .err();
@@ -1335,14 +1335,13 @@ mod resume {
         config.store.path = db.clone();
         let app = run_config(&config, |registry: &mut Registry| {
             left(registry);
-            registry
-                .command_handler(
-                    "right",
-                    Meeting(std::sync::Arc::new(Rendezvous::of(1))),
-                    descriptor("right"),
-                )
-                .unwrap();
-            registry.policy_dispatch(left_right());
+            registry.command_handler(
+                "right",
+                Meeting(std::sync::Arc::new(Rendezvous::of(1))),
+                descriptor("right"),
+            )?;
+            registry.policy_dispatch(left_right())?;
+            Ok(())
         })
         .await
         .expect("the app runs");
@@ -1476,7 +1475,7 @@ mod parts {
     async fn the_store_keeps_a_policys_dead_letter_and_the_call_answers_it() {
         let mut registry = Registry::new();
         meeting(&mut registry, "left");
-        registry.policy_dispatch(buggy());
+        registry.policy_dispatch(buggy()).unwrap();
         let log = Arc::new(MemoryDeadLetters::new());
         let app = App::builder(OneStore::new(MemoryStore::new()), registry)
             .dead_letter_log(log.clone())
@@ -1522,7 +1521,9 @@ mod parts {
         let mut registry = Registry::new();
         meeting(&mut registry, "left");
         let counted = Counted::default();
-        registry.projector_handler(&["left"], counted.clone());
+        registry
+            .projector_handler(&["left"], counted.clone())
+            .unwrap();
         let app = App::builder(OneStore::new(MemoryStore::new()), registry)
             .start()
             .await;
@@ -1558,20 +1559,22 @@ mod parts {
         meeting(&mut registry, "left");
         meeting(&mut registry, "right");
         // Root 2's step is a bug; root 1's sends right a Meet.
-        registry.policy_dispatch(PolicyDispatch::new("left-right", "left", "right").on_event(
-            MET.trim_start_matches('/'),
-            |_, source| {
-                let root = source.and_then(|c| c.root.clone());
-                if root == cover("left", 2).root {
-                    return Err(CodedError::bug("toy-left-right-broken", []).into());
-                }
-                let mut meet = book("right", 1, 9, "/test.meet.v1.Meet");
-                if let Some(page) = meet.page.as_mut() {
-                    page.command_id = None;
-                }
-                Ok(vec![meet])
-            },
-        ));
+        registry
+            .policy_dispatch(PolicyDispatch::new("left-right", "left", "right").on_event(
+                MET.trim_start_matches('/'),
+                |_, source| {
+                    let root = source.and_then(|c| c.root.clone());
+                    if root == cover("left", 2).root {
+                        return Err(CodedError::bug("toy-left-right-broken", []).into());
+                    }
+                    let mut meet = book("right", 1, 9, "/test.meet.v1.Meet");
+                    if let Some(page) = meet.page.as_mut() {
+                        page.command_id = None;
+                    }
+                    Ok(vec![meet])
+                },
+            ))
+            .unwrap();
         let app = App::builder(projects, registry).start().await;
         let ok = app.events_in(&"ok".to_string(), &cover("right", 1)).await;
         assert_eq!(ok.unwrap().len(), 1, "resumed before any command");

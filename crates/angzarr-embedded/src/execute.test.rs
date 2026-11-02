@@ -40,8 +40,8 @@ impl<D: Domain> Stream<D> {
         dead_letters: &dyn DeadLetterLog,
     ) -> Result<Executed<'_, D::Event>, Failure<Rejected>> {
         let kernel = Failure::Kernel;
-        let checked =
-            check(book, registry).map_err(|m| Failure::Kernel(KernelError::Malformed(m)))?;
+        let checked = check(book, registry.catalog())
+            .map_err(|m| Failure::Kernel(KernelError::Malformed(m)))?;
         if checked.domain() != D::NAME {
             return Err(kernel(KernelError::WrongDomain {
                 stream: checked.cover().clone(),
@@ -71,7 +71,7 @@ impl<D: Domain> Stream<D> {
             Admitted::Skip => return Ok(Executed::Applied(&[])),
             Admitted::Dispatch => {}
         }
-        let resolution = resolution(registry, &command, &current).map_err(kernel)?;
+        let resolution = resolution(registry.catalog(), &command, &current).map_err(kernel)?;
         let mut nonces = head;
         let (expected, nonce) = expect(&command, resolution, head, &mut nonces).map_err(kernel)?;
         if nonce.is_some() && expected < self.first {
@@ -84,7 +84,10 @@ impl<D: Domain> Stream<D> {
         let snapshot = (self.first > 0).then(|| Snapshot {
             sequence: self.first - 1,
             state: Some(pack(&self.base.to_snapshot())),
-            rules_version: registry.rules_version(D::NAME).unwrap_or_default(),
+            rules_version: registry
+                .catalog()
+                .rules_version(D::NAME)
+                .unwrap_or_default(),
         });
         let current = current.map_err(|error| {
             kernel(KernelError::Upcast {

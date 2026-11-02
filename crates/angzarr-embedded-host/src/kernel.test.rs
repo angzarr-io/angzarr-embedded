@@ -194,24 +194,26 @@ fn a_policy_step_from_an_in_process_domain_reaches_the_remote_one() {
         .command_handler("table", Table, table_descriptor())
         .unwrap();
     host.register(&mut registry).unwrap();
-    registry.policy_dispatch(
-        PolicyDispatch::new("table-player", "table", "player").on_event(SEATED, |_, source| {
-            Ok(vec![CommandBook {
-                cover: Some(Cover {
-                    domain: "player".to_string(),
-                    root: source.and_then(|c| c.root.clone()),
-                    edition: None,
-                }),
-                page: Some(CommandPage {
-                    body: Some(command_page::Body::Command(Command {
-                        payload: Some(any("/test.player.v1.SitDown")),
-                    })),
-                    ..Default::default()
-                }),
-                handling: None,
-            }])
-        }),
-    );
+    registry
+        .policy_dispatch(
+            PolicyDispatch::new("table-player", "table", "player").on_event(SEATED, |_, source| {
+                Ok(vec![CommandBook {
+                    cover: Some(Cover {
+                        domain: "player".to_string(),
+                        root: source.and_then(|c| c.root.clone()),
+                        edition: None,
+                    }),
+                    page: Some(CommandPage {
+                        body: Some(command_page::Body::Command(Command {
+                            payload: Some(any("/test.player.v1.SitDown")),
+                        })),
+                        ..Default::default()
+                    }),
+                    handling: None,
+                }])
+            }),
+        )
+        .unwrap();
     let store = MemoryStore::new();
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry).log_with(&log);
@@ -400,6 +402,7 @@ fn a_restarted_child_is_registered_at_its_new_version_before_it_gets_work() {
     host.register(&mut registry).unwrap();
     let handler = host.handler("player").unwrap();
     let first = registry
+        .catalog()
         .rules_version("player")
         .map(|v| v.to_string())
         .expect("registered");
@@ -421,6 +424,7 @@ fn a_restarted_child_is_registered_at_its_new_version_before_it_gets_work() {
     });
     assert_eq!(published, Ok(true), "the child was restarted");
     let registered = registry
+        .catalog()
         .rules_version("player")
         .map(|v| v.to_string())
         .expect("registered");

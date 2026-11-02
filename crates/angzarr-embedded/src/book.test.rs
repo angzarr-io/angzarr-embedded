@@ -50,7 +50,7 @@ fn a_command_book_carries_the_payload_to_the_cover_with_no_ids_and_no_handling()
     // The book the kernel checks, as a hand-built one would be.
     let checked = check(
         CommandBook::command(crate::toys::cover("account", 1), AccountCmd::Open.to_any()),
-        &registry(),
+        registry().catalog(),
     )
     .expect("well formed");
     assert_eq!(checked.domain(), <Account as crate::Domain>::NAME);

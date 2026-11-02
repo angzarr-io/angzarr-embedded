@@ -170,6 +170,10 @@ fn the_harness_starts_its_clock_where_it_is_told() {
             nanos: 0
         })
     );
-    assert!(harness.registry().domains().any(|d| d == "account"));
+    assert!(harness
+        .registry()
+        .catalog()
+        .domains()
+        .any(|d| d == "account"));
     assert_eq!(harness.cover(), &cover("account", 1));
 }

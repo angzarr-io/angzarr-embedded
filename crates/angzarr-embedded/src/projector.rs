@@ -6,8 +6,10 @@
 //! remote one (a child's `ProjectorService`, the host's) are the same
 //! port, and run either way:
 //!
-//! - **inline**, registered in the [`Registry`] ([`Registry::projector`],
-//!   [`Registry::projector_handler`]): the kernel hands it each step's
+//! - **inline**, registered in the [`Registry`](super::Registry)
+//!   ([`Registry::projector`](super::Registry::projector),
+//!   [`Registry::projector_handler`](super::Registry::projector_handler)):
+//!   the kernel hands it each step's
 //!   committed book of its sources and awaits it before the call returns
 //!   ([`Kernel::handle`](super::Kernel::handle));
 //! - **catch-up**, a [`CatchUp`] the application runs, a step at a time
@@ -32,9 +34,9 @@ use angzarr_proto::v1::{Cover, EventBook, EventPage};
 use angzarr_router::router::ProjectorHandler;
 use prost_types::Timestamp;
 
+use super::catalog::{Catalog, Misconfigured};
 use super::error::KernelError;
 use super::handle::Wait;
-use super::registry::Registry;
 use super::store::{
     ChangeToken, ListPositions, PositionKey, ReadStore, ReadUnit, Store, StoreError, StreamRef,
     Watch, Write,
@@ -152,28 +154,31 @@ impl Caught {
 
 impl<P: ProjectorHandler> CatchUp<P> {
     /// `projector` over the streams of `sources`, its positions held in
-    /// memory. PANICS for no source, as registering one does.
-    pub fn new(sources: &[&str], projector: P) -> CatchUp<P> {
+    /// memory. Refused for no source, as registering one is
+    /// ([`Misconfigured::ProjectorNoInputDomain`]).
+    pub fn new(sources: &[&str], projector: P) -> Result<CatchUp<P>, Misconfigured> {
         Self::kept(sources, projector, Kept::Held)
     }
 
     /// `projector` over the streams of `sources`, its positions in the
-    /// store, under its name. PANICS for no source.
-    pub fn stored(sources: &[&str], projector: P) -> CatchUp<P> {
+    /// store, under its name. Refused for no source.
+    pub fn stored(sources: &[&str], projector: P) -> Result<CatchUp<P>, Misconfigured> {
         Self::kept(sources, projector, Kept::Stored { listed: false })
     }
 
-    fn kept(sources: &[&str], projector: P, kept: Kept) -> CatchUp<P> {
+    fn kept(sources: &[&str], projector: P, kept: Kept) -> Result<CatchUp<P>, Misconfigured> {
         if sources.is_empty() {
-            panic!("projector \"{}\" names no source domain", projector.name());
+            return Err(Misconfigured::ProjectorNoInputDomain {
+                component: projector.name().to_string(),
+            });
         }
-        CatchUp {
+        Ok(CatchUp {
             projector,
             sources: sources.iter().map(|source| source.to_string()).collect(),
             kept,
             seen: BTreeMap::new(),
             token: None,
-        }
+        })
     }
 
     /// The projector.
@@ -189,7 +194,7 @@ impl<P: ProjectorHandler> CatchUp<P> {
     pub async fn step<S: ReadStore + Store + ListPositions>(
         &mut self,
         store: &S,
-        registry: &Registry,
+        catalog: &Catalog,
     ) -> Result<Caught, KernelError> {
         let mut caught = Caught::default();
         self.listed(store).await.map_err(KernelError::Store)?;
@@ -199,7 +204,7 @@ impl<P: ProjectorHandler> CatchUp<P> {
             let covers = reads.covers(&source).await.map_err(KernelError::Store)?;
             for cover in covers.into_iter().filter(|c| c.edition.is_none()) {
                 held.insert(key(&cover));
-                self.catch_stream(store, &mut reads, registry, cover, &mut caught)
+                self.catch_stream(store, &mut reads, catalog, cover, &mut caught)
                     .await?;
             }
         }
@@ -214,13 +219,13 @@ impl<P: ProjectorHandler> CatchUp<P> {
     pub async fn step_if_changed<S: ReadStore + Store + ListPositions + Watch>(
         &mut self,
         store: &S,
-        registry: &Registry,
+        catalog: &Catalog,
     ) -> Result<Option<Caught>, KernelError> {
         let token = store.change_token().await.map_err(KernelError::Store)?;
         if self.token == Some(token) {
             return Ok(None);
         }
-        let caught = self.step(store, registry).await?;
+        let caught = self.step(store, catalog).await?;
         self.token = caught.failures.is_empty().then_some(token);
         Ok(Some(caught))
     }
@@ -232,13 +237,13 @@ impl<P: ProjectorHandler> CatchUp<P> {
     pub async fn follow<S: ReadStore + Store + ListPositions + Watch>(
         &mut self,
         store: &S,
-        registry: &Registry,
+        catalog: &Catalog,
         wait: &dyn Wait,
         every: std::time::Duration,
         mut more: impl FnMut(Option<&Caught>) -> bool,
     ) -> Result<(), KernelError> {
         loop {
-            let caught = self.step_if_changed(store, registry).await?;
+            let caught = self.step_if_changed(store, catalog).await?;
             if !more(caught.as_ref()) {
                 return Ok(());
             }
@@ -268,7 +273,7 @@ impl<P: ProjectorHandler> CatchUp<P> {
         &mut self,
         store: &S,
         reads: &mut U,
-        registry: &Registry,
+        catalog: &Catalog,
         cover: Cover,
         caught: &mut Caught,
     ) -> Result<(), KernelError> {
@@ -285,7 +290,7 @@ impl<P: ProjectorHandler> CatchUp<P> {
             return Ok(());
         }
         let first = first.unwrap_or_else(|| Fingerprint::of(slice.pages.first()));
-        let pages = match registry.upcast_port(&cover.domain) {
+        let pages = match catalog.upcast_port(&cover.domain) {
             None => slice.pages,
             Some(port) => match upcast_pages(port, &cover.domain, &slice.pages).await {
                 Ok(pages) => pages,

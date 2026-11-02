@@ -403,7 +403,7 @@ async fn a_command_to_an_edition_is_refused_and_writes_nothing() {
 #[tokio::test]
 async fn a_command_and_its_policy_step_each_commit_and_survive_reopening() {
     let mut registry = toys::registry();
-    registry.policy(Bookkeeping);
+    registry.policy(Bookkeeping).unwrap();
     let path = database();
     {
         let store = SqliteStore::open(&path).await.unwrap();
@@ -429,7 +429,7 @@ async fn a_command_and_its_policy_step_each_commit_and_survive_reopening() {
 #[tokio::test]
 async fn a_rejected_policy_step_on_a_file_keeps_the_commands_commit() {
     let mut registry = toys::registry();
-    registry.policy(Bookkeeping);
+    registry.policy(Bookkeeping).unwrap();
     let path = database();
     {
         let store = SqliteStore::open(&path).await.unwrap();
@@ -457,7 +457,7 @@ async fn a_rejected_policy_step_on_a_file_keeps_the_commands_commit() {
 #[tokio::test]
 async fn resume_after_reopening_runs_what_a_crash_left_owed() {
     let mut registry = toys::registry();
-    registry.policy(Bookkeeping);
+    registry.policy(Bookkeeping).unwrap();
     let path = database();
     {
         let store = SqliteStore::open(&path).await.unwrap();

@@ -71,6 +71,7 @@ use super::coordinator::{
     contextual_command, decide, deduplicate, load, read_history, write_snapshot, Contextual,
     Deduplicated, History,
 };
+use super::coordinator::{forward, Forwarded};
 use super::dead_letter::{self, write_at_cap, CallLetters, Cause, Component, DeadLetterLog};
 use super::domain::Domain;
 use super::error::{class, Class};
@@ -82,7 +83,7 @@ use super::registry::{PolicyEntry, Registry};
 use super::route::Rejected;
 use super::store::{DeadLetter, Port, Store, StoreError, StorePort};
 use super::stream::{Envelope, Stream};
-use super::target::{forward, Forwarded, Target};
+use super::target::Target;
 use super::upcast::upcast_pages;
 use angzarr_diagnostic::Report;
 use angzarr_router::router::DynProjectorHandler;
@@ -549,8 +550,9 @@ impl<'k> Kernel<'k> {
         let letters = CallLetters::new(self.dead_letters);
         let mut port = StorePort::new(store, &letters);
         let registry = self.registry;
-        let usable =
-            |snapshot: &angzarr_proto::v1::Snapshot| registry.snapshot_usable(D::NAME, snapshot);
+        let usable = |snapshot: &angzarr_proto::v1::Snapshot| {
+            registry.catalog().snapshot_usable(D::NAME, snapshot)
+        };
         let (history, head) = read_history(&mut port, stream, usable).await?;
         Ok((history.stream::<D>(stream.clone(), registry)?, head))
     }
@@ -666,8 +668,8 @@ impl<'k> Kernel<'k> {
         book: CommandBook,
         sampled: &Sampled,
     ) -> Result<Handled, Failure<Rejected>> {
-        let checked =
-            check(book, self.registry).map_err(|m| Failure::Kernel(KernelError::Malformed(m)))?;
+        let checked = check(book, self.registry.catalog())
+            .map_err(|m| Failure::Kernel(KernelError::Malformed(m)))?;
         self.handle_checked(store, checked, sampled).await
     }
 
@@ -950,8 +952,8 @@ impl<'k> Kernel<'k> {
 
     /// Step 1 for a `D` stream: the book checked, and naming a `D` stream.
     fn check<D: Domain>(&self, book: CommandBook) -> Result<Checked, Failure<Rejected>> {
-        let checked =
-            check(book, self.registry).map_err(|m| Failure::Kernel(KernelError::Malformed(m)))?;
+        let checked = check(book, self.registry.catalog())
+            .map_err(|m| Failure::Kernel(KernelError::Malformed(m)))?;
         if checked.domain() != D::NAME {
             return Err(Failure::Kernel(KernelError::WrongDomain {
                 stream: checked.cover().clone(),
@@ -1279,7 +1281,7 @@ impl<'k> Run<'k> {
                     dead_letter::write(
                         self.letters,
                         Payload::RejectedCommand(command.to_book()),
-                        Component::domain(self.registry, command.domain()),
+                        Component::domain(self.registry.catalog(), command.domain()),
                         Cause::Kernel(&given_up),
                     );
                 }
@@ -1300,7 +1302,7 @@ impl<'k> Run<'k> {
                 write_at_cap(
                     self.letters,
                     Payload::RejectedCommand(command.to_book()),
-                    Component::domain(self.registry, command.domain()),
+                    Component::domain(self.registry.catalog(), command.domain()),
                     Cause::Kernel(error),
                     tries.retries,
                 );
@@ -1387,7 +1389,7 @@ impl<'k> Run<'k> {
         let owed = positions.iter().copied().min().unwrap_or_default();
         let from = written.map_or(owed, |written| written.max(owed));
         let slice = port.read_from(source, from).await.map_err(store)?;
-        let sidecar = registry.upcast_port(&source.domain);
+        let sidecar = registry.catalog().upcast_port(&source.domain);
         for page in &slice.pages {
             let event = match sidecar {
                 Some(sidecar) => upcast_pages(sidecar, &source.domain, std::slice::from_ref(page))
@@ -1522,7 +1524,7 @@ impl<'k> Run<'k> {
                 let limit = self.limit;
                 return Err((path, StepError::Kernel(KernelError::ChainTooDeep { limit })));
             }
-            let checked = match order.check_logged(self.registry, self.letters) {
+            let checked = match order.check_logged(self.registry.catalog(), self.letters) {
                 Ok(checked) => checked,
                 Err(m) => return Err((path, StepError::Kernel(KernelError::Malformed(m)))),
             };
@@ -1650,7 +1652,7 @@ impl<'k> Run<'k> {
         };
         let checked = check_refusal(
             book.clone(),
-            self.registry,
+            self.registry.catalog(),
             trigger,
             delivered.correlation_id().clone(),
             delivered.command_id().clone(),
@@ -1688,7 +1690,7 @@ impl<'k> Run<'k> {
             dead_letter::write(
                 self.letters,
                 Payload::RejectedCommand(fact.to_book()),
-                Component::domain(self.registry, fact.domain()),
+                Component::domain(self.registry.catalog(), fact.domain()),
                 Cause::PolicyFailed(&failure),
             );
             past_bug(self.policy_bug, port, positions)

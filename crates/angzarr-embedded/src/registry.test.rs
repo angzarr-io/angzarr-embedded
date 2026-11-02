@@ -9,19 +9,32 @@ use crate::toys::{account, registry, shelf, Account};
 #[test]
 fn registration_fills_the_state_descriptor_from_the_generated_impl() {
     let registry = registry();
-    let shelf = registry.state("shelf").unwrap();
+    let shelf = registry.catalog().state("shelf").unwrap();
     assert_eq!(shelf.type_url, "/toy.shelf.v1.ShelfState");
-    assert!(registry.supports("shelf", ConflictResolution::Commutative));
-    assert!(registry.supports("shelf", ConflictResolution::Strict));
-    assert!(registry.supports("account", ConflictResolution::AggregateHandles));
+    assert!(registry
+        .catalog()
+        .supports("shelf", ConflictResolution::Commutative));
+    assert!(registry
+        .catalog()
+        .supports("shelf", ConflictResolution::Strict));
+    assert!(registry
+        .catalog()
+        .supports("account", ConflictResolution::AggregateHandles));
     assert!(
-        !registry.supports("account", ConflictResolution::Commutative),
+        !registry
+            .catalog()
+            .supports("account", ConflictResolution::Commutative),
         "no conflict units"
     );
-    assert!(!registry.supports("nowhere", ConflictResolution::Strict));
-    assert_eq!(registry.rules_version("account").as_deref(), Some("v2"));
+    assert!(!registry
+        .catalog()
+        .supports("nowhere", ConflictResolution::Strict));
     assert_eq!(
-        registry.domains().collect::<Vec<_>>(),
+        registry.catalog().rules_version("account").as_deref(),
+        Some("v2")
+    );
+    assert_eq!(
+        registry.catalog().domains().collect::<Vec<_>>(),
         ["account", "ledger", "shelf"]
     );
 }
@@ -32,22 +45,24 @@ fn commutative_is_the_default_where_the_state_declares_units_else_strict() {
     let set = "/toy.shelf.cmd.v1.Set";
     let deposit = "/toy.account.cmd.v1.Deposit";
     assert_eq!(
-        registry.resolve("shelf", set, None),
+        registry.catalog().resolve("shelf", set, None),
         Some(ConflictResolution::Commutative),
         "the built-in default where the state supports it"
     );
     assert_eq!(
-        registry.resolve("account", deposit, None),
+        registry.catalog().resolve("account", deposit, None),
         Some(ConflictResolution::Strict),
         "and STRICT where it does not"
     );
     assert_eq!(
-        registry.resolve("shelf", "/toy.shelf.cmd.v1.Note", None),
+        registry
+            .catalog()
+            .resolve("shelf", "/toy.shelf.cmd.v1.Note", None),
         Some(ConflictResolution::Strict),
         "a command type's configuration is above the default"
     );
     assert_eq!(
-        registry.resolve(
+        registry.catalog().resolve(
             "shelf",
             "type.googleapis.com/toy.shelf.cmd.v1.Note",
             Some(ConflictResolution::AggregateHandles)
@@ -55,29 +70,33 @@ fn commutative_is_the_default_where_the_state_declares_units_else_strict() {
         Some(ConflictResolution::AggregateHandles),
         "and the book's request above that"
     );
-    assert_eq!(registry.resolve("nowhere", set, None), None);
+    assert_eq!(registry.catalog().resolve("nowhere", set, None), None);
 }
 
 #[test]
 fn misconfiguration_is_refused_at_registration() {
     let mut registry = registry();
     assert_eq!(
-        registry.register::<Account>(
-            Upcaster::new("u", "account"),
-            crate::toys::handlers::<crate::toys::Account>()
-        ),
-        Err(Misconfigured::AlreadyRegistered {
+        registry
+            .register::<Account>(
+                Upcaster::new("u", "account"),
+                crate::toys::handlers::<crate::toys::Account>()
+            )
+            .err(),
+        Some(Misconfigured::AlreadyRegistered {
             domain: "account".to_string()
         })
     );
 
     let mut fresh = Registry::new();
     assert_eq!(
-        fresh.register::<Account>(
-            Upcaster::new("u", "ledger"),
-            crate::toys::handlers::<crate::toys::Account>()
-        ),
-        Err(Misconfigured::UpcasterForAnotherDomain {
+        fresh
+            .register::<Account>(
+                Upcaster::new("u", "ledger"),
+                crate::toys::handlers::<crate::toys::Account>()
+            )
+            .err(),
+        Some(Misconfigured::UpcasterForAnotherDomain {
             domain: "account".to_string(),
             upcaster: "ledger".to_string()
         })
@@ -95,12 +114,17 @@ fn misconfiguration_is_refused_at_registration() {
         fn apply(_: &mut account::AccountState, _: &Self::Event, _: &crate::PageContext<'_>) {}
     }
     assert_eq!(
-        fresh.register::<Unversioned>(Upcaster::new("u", "unversioned"), |t| t),
-        Err(Misconfigured::EmptyRulesVersion {
+        fresh
+            .register::<Unversioned>(Upcaster::new("u", "unversioned"), |t| t)
+            .err(),
+        Some(Misconfigured::EmptyRulesVersion {
             domain: "unversioned".to_string()
         })
     );
-    assert!(fresh.domains().next().is_none(), "nothing half-registered");
+    assert!(
+        fresh.catalog().domains().next().is_none(),
+        "nothing half-registered"
+    );
 }
 
 #[test]
@@ -124,8 +148,10 @@ fn a_configured_resolution_the_state_lacks_is_refused() {
     }
 
     assert_eq!(
-        Registry::new().register::<Eager>(Upcaster::new("u", "eager"), |t| t),
-        Err(Misconfigured::UnsupportedResolution {
+        Registry::new()
+            .register::<Eager>(Upcaster::new("u", "eager"), |t| t)
+            .err(),
+        Some(Misconfigured::UnsupportedResolution {
             domain: "eager".to_string(),
             command_type: None,
             resolution: ConflictResolution::Commutative
@@ -142,19 +168,25 @@ fn a_snapshot_is_usable_only_under_a_compatible_version_and_the_state_type() {
         state: Some(state.clone()),
         rules_version: rules.to_string(),
     };
-    assert!(registry.snapshot_usable("account", &snapshot("v2", &state)));
+    assert!(registry
+        .catalog()
+        .snapshot_usable("account", &snapshot("v2", &state)));
     assert!(
-        !registry.snapshot_usable("account", &snapshot("v1", &state)),
+        !registry
+            .catalog()
+            .snapshot_usable("account", &snapshot("v1", &state)),
         "another build's, not SemVer: not offered"
     );
     assert!(
-        !registry.snapshot_usable(
+        !registry.catalog().snapshot_usable(
             "account",
             &snapshot("v2", &pack(&shelf::ShelfState::default()))
         ),
         "another state type: discarded"
     );
-    assert!(!registry.snapshot_usable("nowhere", &snapshot("v2", &state)));
+    assert!(!registry
+        .catalog()
+        .snapshot_usable("nowhere", &snapshot("v2", &state)));
 }
 
 #[test]
@@ -210,8 +242,10 @@ fn a_state_descriptor_without_the_implicit_base_is_refused() {
 
     let mut registry = crate::Registry::new();
     assert_eq!(
-        registry.register::<Bad>(crate::Upcaster::new("u", "bad"), |t| t),
-        Err(crate::Misconfigured::BadStateDescriptor {
+        registry
+            .register::<Bad>(crate::Upcaster::new("u", "bad"), |t| t)
+            .err(),
+        Some(crate::Misconfigured::BadStateDescriptor {
             domain: "bad".to_string()
         })
     );
@@ -277,8 +311,10 @@ fn a_state_descriptor_naming_another_type_than_its_snapshot_is_refused() {
 
     let mut registry = crate::Registry::new();
     assert_eq!(
-        registry.register::<Bad>(crate::Upcaster::new("u", "bad"), |t| t),
-        Err(crate::Misconfigured::BadStateDescriptor {
+        registry
+            .register::<Bad>(crate::Upcaster::new("u", "bad"), |t| t)
+            .err(),
+        Some(crate::Misconfigured::BadStateDescriptor {
             domain: "bad".to_string()
         })
     );
@@ -385,10 +421,19 @@ fn a_command_handler_registers_by_its_descriptor() {
             hello(Some(base_state())),
         )
         .unwrap();
-    assert!(registry.is_process_manager("hello"));
-    assert_eq!(registry.kind("hello"), ComponentKind::ProcessManager);
-    assert_eq!(registry.kind("nowhere"), ComponentKind::Unspecified);
-    assert_eq!(registry.rules_version("hello").as_deref(), Some("h1"));
+    assert!(registry.catalog().is_process_manager("hello"));
+    assert_eq!(
+        registry.catalog().kind("hello"),
+        ComponentKind::ProcessManager
+    );
+    assert_eq!(
+        registry.catalog().kind("nowhere"),
+        ComponentKind::Unspecified
+    );
+    assert_eq!(
+        registry.catalog().rules_version("hello").as_deref(),
+        Some("h1")
+    );
     let mut aggregate = crate::Registry::new();
     aggregate
         .command_handler(
@@ -399,8 +444,8 @@ fn a_command_handler_registers_by_its_descriptor() {
             hello(Some(base_state())),
         )
         .unwrap();
-    assert!(!aggregate.is_process_manager("hello"));
-    assert_eq!(aggregate.kind("hello"), ComponentKind::Aggregate);
+    assert!(!aggregate.catalog().is_process_manager("hello"));
+    assert_eq!(aggregate.catalog().kind("hello"), ComponentKind::Aggregate);
 }
 
 /// C-0563: a domain registered by its descriptor is described again
@@ -445,11 +490,16 @@ fn a_described_domain_is_replaced_whole_by_its_new_descriptor() {
             ..hello(Some(commutative.clone()))
         })
         .unwrap();
-    assert_eq!(registry.rules_version("hello").as_deref(), Some("h2"));
-    assert_eq!(registry.state("hello"), Some(commutative));
-    assert!(registry.supports("hello", ConflictResolution::Commutative));
     assert_eq!(
-        registry.starting_types("hello"),
+        registry.catalog().rules_version("hello").as_deref(),
+        Some("h2")
+    );
+    assert_eq!(registry.catalog().state("hello"), Some(commutative));
+    assert!(registry
+        .catalog()
+        .supports("hello", ConflictResolution::Commutative));
+    assert_eq!(
+        registry.catalog().starting_types("hello"),
         Some(["toy.hello.v1.Begin".to_string()].into())
     );
 
@@ -464,7 +514,7 @@ fn a_described_domain_is_replaced_whole_by_its_new_descriptor() {
         })
     );
     assert_eq!(
-        registry.rules_version("hello").as_deref(),
+        registry.catalog().rules_version("hello").as_deref(),
         Some("h2"),
         "the old kept"
     );
@@ -491,8 +541,8 @@ fn a_domain_is_named_as_a_component_by_its_kind() {
             .command_handler("hello", Hello { kind }, hello(Some(base_state())))
             .unwrap();
         (
-            registry.component_name("hello"),
-            registry.component_name("nowhere"),
+            registry.catalog().component_name("hello"),
+            registry.catalog().component_name("nowhere"),
         )
     };
     assert_eq!(
@@ -528,29 +578,25 @@ impl angzarr_router::router::ProjectorHandler for Named {
 fn the_registry_names_its_policies_and_projectors_in_order() {
     use angzarr_router::policy::PolicyDispatch;
     let mut registry = Registry::new();
-    assert_eq!(registry.policy_names().count(), 0);
-    assert_eq!(registry.projector_names().count(), 0);
+    assert_eq!(registry.catalog().policy_names().count(), 0);
+    assert_eq!(registry.catalog().projector_names().count(), 0);
     registry
         .policy_dispatch(PolicyDispatch::new("b-policy", "x", "y"))
+        .unwrap()
         .policy_dispatch(PolicyDispatch::new("a-policy", "x", "y"))
+        .unwrap()
         .projector_handler(&["x"], Named("b-view"))
-        .projector_handler(&["x", "y"], Named("a-view"));
+        .unwrap()
+        .projector_handler(&["x", "y"], Named("a-view"))
+        .unwrap();
     assert_eq!(
-        registry.policy_names().collect::<Vec<_>>(),
+        registry.catalog().policy_names().collect::<Vec<_>>(),
         ["b-policy", "a-policy"]
     );
     assert_eq!(
-        registry.projector_names().collect::<Vec<_>>(),
+        registry.catalog().projector_names().collect::<Vec<_>>(),
         ["b-view", "a-view"]
     );
-}
-
-/// A projector projects at least one source domain: one naming none is
-/// a composition-root bug, refused at startup by its name.
-#[test]
-#[should_panic(expected = "no-view")]
-fn a_projector_with_no_source_panics() {
-    Registry::new().projector_handler(&[], Named("no-view"));
 }
 
 /// types.proto's Snapshot region, the default rule: a snapshot is offered
@@ -593,7 +639,9 @@ fn a_snapshot_is_usable_under_the_registered_major_and_minor() {
         "1.4.3-0",
     ] {
         assert!(
-            registry.snapshot_usable("hello", &snapshot(usable)),
+            registry
+                .catalog()
+                .snapshot_usable("hello", &snapshot(usable)),
             "{usable}"
         );
     }
@@ -617,11 +665,19 @@ fn a_snapshot_is_usable_under_the_registered_major_and_minor() {
         "1.4.2-01",
     ] {
         assert!(
-            !registry.snapshot_usable("hello", &snapshot(unusable)),
+            !registry
+                .catalog()
+                .snapshot_usable("hello", &snapshot(unusable)),
             "{unusable}"
         );
     }
-    assert!(registry.snapshot_usable("label", &snapshot("release-7")));
-    assert!(!registry.snapshot_usable("label", &snapshot("release-8")));
-    assert!(!registry.snapshot_usable("label", &snapshot("vrelease-7")));
+    assert!(registry
+        .catalog()
+        .snapshot_usable("label", &snapshot("release-7")));
+    assert!(!registry
+        .catalog()
+        .snapshot_usable("label", &snapshot("release-8")));
+    assert!(!registry
+        .catalog()
+        .snapshot_usable("label", &snapshot("vrelease-7")));
 }

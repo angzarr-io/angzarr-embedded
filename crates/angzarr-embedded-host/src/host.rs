@@ -323,12 +323,11 @@ impl Host {
     /// other policy of its source; a projector of its sources; and, last, an
     /// upcaster sidecar as the port its domain's inputs are upcast through
     /// (decision 14.39), which domain the caller registers first if it is
-    /// in-process (one not registered PANICS). In-process
-    /// components are registered by the caller as ever. Refused as the
-    /// registry refuses a domain (one registered already, a descriptor with
-    /// no state or rules version); a policy or projector of a name
-    /// registered already PANICS, as the registry's every such
-    /// registration does.
+    /// in-process. In-process components are registered by the caller as
+    /// ever. Refused as the registry refuses a component: a domain
+    /// registered already, a descriptor with no state or rules version, a
+    /// policy or projector of a name registered already, an upcaster of a
+    /// domain not registered.
     pub fn register(&self, registry: &mut Registry) -> Result<(), Misconfigured> {
         for component in &self.domains {
             match &component.hosted {
@@ -345,10 +344,11 @@ impl Host {
                     registered.description = Some(description);
                 }
                 Hosted::Policy(handler) => {
-                    registry.policy_component(handler.clone(), &handler.descriptor().output_domain);
+                    let output_domain = &handler.descriptor().output_domain;
+                    registry.policy_component(handler.clone(), output_domain)?;
                 }
                 Hosted::Projector(handler) => {
-                    registry.projector_handler(&handler.sources(), handler.clone());
+                    registry.projector_handler(&handler.sources(), handler.clone())?;
                 }
                 Hosted::Upcaster(_) => {}
             }
@@ -357,7 +357,7 @@ impl Host {
         // above, or an in-process one, by the caller before.
         for component in &self.domains {
             if let Hosted::Upcaster(upcaster) = &component.hosted {
-                registry.upcast_with(upcaster.upcasts(), upcaster.clone());
+                registry.upcast_with(upcaster.upcasts(), upcaster.clone())?;
             }
         }
         Ok(())
