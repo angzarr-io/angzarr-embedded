@@ -136,16 +136,6 @@ const FAILING_CALLBACK_ANSWERED: Tag = Tag {
     why: "a failing translating callback is answered to the caller and not dead-lettered",
 };
 
-/// A policy's command for a domain the kernel cannot route is its own
-/// malformed step: the command is dead-lettered (`rejected_command`) and
-/// the policy's position held at the trigger, so the step runs once the
-/// domain is registered. The spec dead-letters the trigger
-/// (`rejected_events`).
-const UNKNOWN_DOMAIN_STEP_HELD: Tag = Tag {
-    name: "divergence_unknown_domain_step_held",
-    why: "a command for an unroutable domain is dead-lettered as the command, its policy's position held; the spec dead-letters the trigger",
-};
-
 /// The fold is business code's: angzarr-router's, which runs the
 /// handler-contract tier for it. A binding here needs a typed domain of
 /// its own; the kernel's part, the history it delivers, is C-0287's.
@@ -230,7 +220,6 @@ const TAGGED: &[(&str, Tag)] = &[
     ("C-0610", NO_OUTSIDE_CAUSATION),
     // policy_addressing.feature
     ("C-0735", NO_OUTSIDE_CAUSATION),
-    ("C-0736", UNKNOWN_DOMAIN_STEP_HELD),
     ("C-0737", WAITING_CALLER_ANSWERED),
     // policy_refusal.feature
     ("C-0616", NO_OUTBOX),
