@@ -1278,11 +1278,11 @@ impl<'k> Run<'k> {
                     cap,
                 };
                 if Self::callerless(policy_step, command) {
-                    dead_letter::write(
+                    dead_letter::write_command(
                         self.letters,
-                        Payload::RejectedCommand(command.to_book()),
-                        Component::domain(self.registry.catalog(), command.domain()),
-                        Cause::Kernel(&given_up),
+                        self.registry.catalog(),
+                        command,
+                        &given_up,
                     );
                 }
                 return Err(Failure::Kernel(given_up));

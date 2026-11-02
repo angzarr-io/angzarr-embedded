@@ -47,7 +47,7 @@
 use angzarr_proto::v1::angzarr_dead_letter::Payload;
 use angzarr_proto::v1::{
     command_page, CommandBook, ComponentKind, ConflictResolution, Cover, DeliveryOutcome,
-    EventBook, EventPage, Handling, Snapshot,
+    EventBook, EventMeta, EventPage, Handling, Snapshot,
 };
 use angzarr_router::error::{BusinessStatus, CodedError, RouterReason};
 
@@ -532,61 +532,10 @@ pub(crate) async fn decide(
         .map_err(kernel)?;
     // The handler's own refusal, as it made it, when it is in process:
     // kept beside the refusal's report for the caller to match.
-    let (response, mut kept) = route::catching(|| handler.dispatch(&contextual)).await;
-    let response = response.and_then(|response| judged(&contextual, response));
-    let response = response.map_err(|error| {
-        let error = match RouterReason::from_str_name(&error.code) {
-            Some(RouterReason::UnknownCommandType | RouterReason::NoFactHandler) => {
-                as_sent(error, identified.payload(), &command.current)
-            }
-            _ => error,
-        };
-        let (stream, expected, actual) =
-            (identified.cover().clone(), command.expected, command.head);
-        match CoordinatorReason::from_str_name(&error.code) {
-            Some(CoordinatorReason::ConflictOverlap) => {
-                let units = |key: &str| error.extras.get(key).cloned().unwrap_or_default();
-                Failure::Kernel(KernelError::Overlap {
-                    stream,
-                    expected,
-                    actual,
-                    window_units: units(args::WINDOW_UNITS),
-                    command_units: units(args::COMMAND_UNITS),
-                })
-            }
-            Some(CoordinatorReason::ConflictUnresolved) => {
-                let unresolved = KernelError::Unresolved {
-                    stream,
-                    expected,
-                    actual,
-                };
-                dead_letter::write(
-                    dead_letters,
-                    Payload::RejectedCommand(identified.to_book()),
-                    Component::domain(registry.catalog(), domain),
-                    Cause::Kernel(&unresolved),
-                );
-                Failure::Kernel(unresolved)
-            }
-            _ => {
-                let failure = match refused(identified, error) {
-                    Failure::Rejected(rejected) => Failure::Rejected(rejected.kept(kept.take())),
-                    failure => failure,
-                };
-                if let Failure::Kernel(error @ KernelError::Router(coded)) = &failure {
-                    if route::is_handler_fault(coded) {
-                        dead_letter::write(
-                            dead_letters,
-                            Payload::RejectedCommand(identified.to_book()),
-                            Component::domain(registry.catalog(), domain),
-                            Cause::Kernel(error),
-                        );
-                    }
-                }
-                failure
-            }
-        }
-    })?;
+    let (response, kept) = route::catching(|| handler.dispatch(&contextual)).await;
+    let response = response
+        .and_then(|response| judged(&contextual, response))
+        .map_err(|error| failed(command, error, kept, registry, dead_letters))?;
     // Read after the answer: a child described again is registered by its
     // new descriptor before it gets work, so its answer meets its version.
     let registered = registry.catalog().rules_version(domain).unwrap_or_default();
@@ -596,21 +545,82 @@ pub(crate) async fn decide(
             registered,
             reported: response.rules_version,
         };
-        dead_letter::write(
-            dead_letters,
-            Payload::RejectedCommand(identified.to_book()),
-            Component::domain(registry.catalog(), domain),
-            Cause::Kernel(&mismatch),
-        );
+        dead_letter::write_command(dead_letters, registry.catalog(), identified, &mismatch);
         return Err(Failure::Kernel(mismatch));
     }
-    let rules_version = response.rules_version;
     let meta = crate::event_meta(
         &angzarr_router::domain::command_context(&contextual),
-        &rules_version,
+        &response.rules_version,
     );
-    let events = response.events.unwrap_or_default();
-    let pages: Vec<EventPage> = (command.head..)
+    Ok(stamped(
+        response.events.unwrap_or_default(),
+        command.head,
+        &meta,
+        response.rules_version,
+    ))
+}
+
+/// The router's `error` for `command`, as the kernel fails it: a type the
+/// domain does not read named as sent; a conflict the window overlaps,
+/// [`KernelError::Overlap`]; one unresolved, [`KernelError::Unresolved`],
+/// dead-lettered; else its refusal ([`refused`]), keeping the handler's
+/// own (`kept`), or a router error, dead-lettered when it is a handler's
+/// bug.
+fn failed(
+    command: &Contextual,
+    error: CodedError,
+    kept: Option<route::Typed>,
+    registry: &Registry,
+    dead_letters: &dyn DeadLetterLog,
+) -> Failure<Rejected> {
+    let identified = &command.command;
+    let error = match RouterReason::from_str_name(&error.code) {
+        Some(RouterReason::UnknownCommandType | RouterReason::NoFactHandler) => {
+            as_sent(error, identified.payload(), &command.current)
+        }
+        _ => error,
+    };
+    let (stream, expected, actual) = (identified.cover().clone(), command.expected, command.head);
+    let dead_letter = |error: &KernelError| {
+        dead_letter::write_command(dead_letters, registry.catalog(), identified, error);
+    };
+    match CoordinatorReason::from_str_name(&error.code) {
+        Some(CoordinatorReason::ConflictOverlap) => {
+            let units = |key: &str| error.extras.get(key).cloned().unwrap_or_default();
+            Failure::Kernel(KernelError::Overlap {
+                stream,
+                expected,
+                actual,
+                window_units: units(args::WINDOW_UNITS),
+                command_units: units(args::COMMAND_UNITS),
+            })
+        }
+        Some(CoordinatorReason::ConflictUnresolved) => {
+            let unresolved = KernelError::Unresolved {
+                stream,
+                expected,
+                actual,
+            };
+            dead_letter(&unresolved);
+            Failure::Kernel(unresolved)
+        }
+        _ => match refused(identified, error) {
+            Failure::Rejected(rejected) => Failure::Rejected(rejected.kept(kept)),
+            Failure::Kernel(KernelError::Router(coded)) if route::is_handler_fault(&coded) => {
+                let error = KernelError::Router(coded);
+                dead_letter(&error);
+                Failure::Kernel(error)
+            }
+            failure => failure,
+        },
+    }
+}
+
+/// The answer's `events`, kept from the stream's `head` on, each stamped
+/// with `meta`, and its snapshot, at the last of them, under
+/// `rules_version`. A placeholder for no event keeps no sequence.
+fn stamped(events: EventBook, head: u64, meta: &EventMeta, rules_version: String) -> Decided {
+    let pages: Vec<EventPage> = (head..)
         .zip(
             events
                 .pages
@@ -631,7 +641,7 @@ pub(crate) async fn decide(
         }),
         _ => None,
     };
-    Ok(Decided { pages, snapshot })
+    Decided { pages, snapshot }
 }
 
 /// `response` to `delivered`, judged by its conflict report (decision

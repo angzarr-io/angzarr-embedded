@@ -92,7 +92,7 @@ use angzarr_proto::v1::{
 use angzarr_router::error::CodedError;
 
 use super::catalog::Catalog;
-use super::check::Malformed;
+use super::check::{Identified, Malformed};
 use super::error::{cover_text, KernelError};
 use super::payload::type_name;
 use super::route::{self, diagnostic, flat_args, Rejected};
@@ -224,6 +224,22 @@ pub(crate) enum Cause<'a> {
 /// for `cause` ([`letter`]).
 pub(crate) fn write(log: &dyn DeadLetterLog, payload: Payload, component: Component, cause: Cause) {
     log.letter(&letter(payload, component, cause));
+}
+
+/// Write the dead letter for `command`, which its domain could not take
+/// for the kernel's `error`.
+pub(crate) fn write_command(
+    log: &dyn DeadLetterLog,
+    catalog: &Catalog,
+    command: &Identified,
+    error: &KernelError,
+) {
+    write(
+        log,
+        Payload::RejectedCommand(command.to_book()),
+        Component::domain(catalog, command.domain()),
+        Cause::Kernel(error),
+    );
 }
 
 /// Write the dead letter for `payload` (a command, or a projector's
