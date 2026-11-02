@@ -12,7 +12,7 @@
 //!   events, its failures following the four classes (decision 14.37). A
 //!   child that describes itself as another kind is refused at start.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 use angzarr_diagnostic::Diagnostic;
@@ -37,6 +37,7 @@ use crate::fake_child::{
     config, domain, health, kind, mode, noted, CONTROL_ENV, HEALTH_ENV, HOLD, HOLD_TOO_MUCH,
     INPUT_ENV, KIND_ENV, LOG_ENV, SEAT_RELEASED, STARTING_ENV, TARGET_ENV,
 };
+use crate::test_dir::TestFile;
 
 /// The kernel's key for angzarr's `COORDINATOR_REASON_PM_NO_INSTANCE` (a router code reaches
 /// the caller under the kernel's own key, `angzarr-embedded-` and the
@@ -235,11 +236,10 @@ impl CommandHandler for Wallet {
     }
 }
 
-/// A fresh call log for a fake policy or projector, by test.
-fn log_file(test: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(format!("angzarr-fake-{}-{test}.log", std::process::id()));
-    let _ = std::fs::remove_file(&path);
-    path
+/// A fresh call log for a fake policy or projector, by test, removed with
+/// its directory when the guard drops.
+fn log_file(test: &str) -> TestFile {
+    TestFile::new("angzarr-fake", &format!("{test}.log"))
 }
 
 fn log_lines(path: &Path) -> Vec<String> {
@@ -1088,8 +1088,7 @@ fn not_serving<R>(failure: &Failure<R>) -> bool {
 /// polled for: the timeout is a safety net, never the way the test passes.
 #[test]
 fn a_sidecar_is_up_only_while_its_health_reports_serving() {
-    let socket = std::env::temp_dir().join(format!("angzarr-ctl-{}.sock", std::process::id()));
-    let _ = std::fs::remove_file(&socket);
+    let socket = TestFile::new("angzarr-ctl", "c.sock");
     let control = std::os::unix::net::UnixListener::bind(&socket).unwrap();
     let sidecar = with_env(
         upcaster_domain(),

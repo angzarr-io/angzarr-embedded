@@ -11,6 +11,7 @@ use crate::config::ComponentConfig;
 use crate::error::HandshakeError;
 use crate::fake_child::{self, config, domain, mode};
 use crate::remote::is_retryable;
+use crate::test_dir::TestFile;
 
 fn command(domain: &str, type_url: &str) -> pb::ContextualCommand {
     pb::ContextualCommand {
@@ -551,12 +552,7 @@ fn a_child_ignoring_sigterm_is_killed_after_its_grace() {
 /// Dropping the host stops its children as shutdown does.
 #[test]
 fn dropping_the_host_stops_its_children() {
-    let mark = std::env::temp_dir().join(format!(
-        "angzarr-host-drop-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    let _ = std::fs::remove_file(&mark);
+    let mark = TestFile::new("angzarr-host-drop", "eof");
     let mut player = player(mode::SERVE);
     player.env.insert(
         fake_child::EOF_MARK_ENV.to_string(),
@@ -569,7 +565,6 @@ fn dropping_the_host_stops_its_children() {
     // Stopped by its stdin's end, and waited for: not killed, as a
     // dropped runtime would have it (kill_on_drop).
     assert!(mark.exists(), "the child exited on stdin's end");
-    let _ = std::fs::remove_file(&mark);
 }
 
 /// A variable the tests set on a child to find it again.
@@ -980,8 +975,7 @@ fn a_described_child_is_checked_serving_before_it_is_described() {
 #[test]
 fn a_described_child_is_up_only_while_its_health_reports_serving() {
     use fake_child::CONTROL_ENV;
-    let socket = std::env::temp_dir().join(format!("angzarr-dctl-{}.sock", std::process::id()));
-    let _ = std::fs::remove_file(&socket);
+    let socket = TestFile::new("angzarr-dctl", "c.sock");
     let control = std::os::unix::net::UnixListener::bind(&socket).unwrap();
     let player = with(
         player(mode::SERVE),
@@ -1128,9 +1122,10 @@ impl OnTheClock {
     }
 }
 
-/// A path for a test's file, unique to this process and `tag`.
-fn scratch(tag: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("angzarr-{tag}-{}", std::process::id()))
+/// A path for a test's file, `tag`, in a directory of its own, removed
+/// with it when the guard drops.
+fn scratch(tag: &str) -> TestFile {
+    TestFile::new("angzarr-host", tag)
 }
 
 /// `error`'s `cause`.
@@ -1193,7 +1188,6 @@ fn a_child_not_serving_past_its_grace_is_restarted() {
     use crate::vitals::Verdict;
     use fake_child::CONTROL_ENV;
     let socket = scratch("nsctl.sock");
-    let _ = std::fs::remove_file(&socket);
     let control = std::os::unix::net::UnixListener::bind(&socket).unwrap();
     let supervised = OnTheClock::start(
         with(
@@ -1287,8 +1281,6 @@ fn a_command_in_flight_on_a_restarted_child_fails_retryably_once() {
     let socket = scratch("ifctl.sock");
     let log = scratch("inflight.log");
     let wedge = scratch("inflight");
-    let _ = std::fs::remove_file(&socket);
-    let _ = std::fs::remove_file(&log);
     let control = std::os::unix::net::UnixListener::bind(&socket).unwrap();
     let supervised = OnTheClock::start(
         with(
@@ -1336,6 +1328,5 @@ fn a_command_in_flight_on_a_restarted_child_fails_retryably_once() {
         "sent once, to the first child: {logged}"
     );
     assert!(logged.contains(&format!("handle /examples.blackjack.SitDown {second}")));
-    let _ = std::fs::remove_file(&log);
     supervised.host.shutdown();
 }
