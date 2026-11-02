@@ -1050,7 +1050,9 @@ floor for the next `recorded_at` comes from the store
 angzarr dead-letters what it cannot deliver and cannot refuse to a caller.
 angzarr-embedded is in process: there is no queue and no relay. Each letter,
 angzarr's `AngzarrDeadLetter`, goes three ways (owner ruling Q5,
-2026-10-31):
+2026-10-31), stamped `occurred_at` with the call's instant (`Sampled::now`,
+the clock its events' `recorded_at` reads: a UTC instant, never a local
+time; decision 14.66):
 
 - to the application's `DeadLetterLog`, at once, as one line;
 - into the store, durably, when the step that raised it has no caller

@@ -546,7 +546,7 @@ impl<'k> Kernel<'k> {
                 expected: D::NAME,
             });
         }
-        let letters = CallLetters::new(self.dead_letters);
+        let letters = CallLetters::new(self.dead_letters, None);
         let mut port = StorePort::new(store, &letters);
         let registry = self.registry;
         let usable = |snapshot: &angzarr_proto::v1::Snapshot| {
@@ -680,7 +680,7 @@ impl<'k> Kernel<'k> {
         checked: Checked,
         sampled: &Sampled,
     ) -> Result<Handled, Failure<Rejected>> {
-        let letters = CallLetters::new(self.dead_letters);
+        let letters = CallLetters::new(self.dead_letters, Some(sampled.now));
         let mut port = StorePort::new(store, &letters);
         let handled = self.chain(&mut port, &letters, checked, sampled).await;
         lettered(handled, letters.take())
@@ -780,7 +780,7 @@ impl<'k> Kernel<'k> {
         store: &S,
         sampled: &Sampled,
     ) -> Result<Recorded, Failure<Infallible>> {
-        let letters = CallLetters::new(self.dead_letters);
+        let letters = CallLetters::new(self.dead_letters, Some(sampled.now));
         let mut port = StorePort::new(store, &letters);
         let resumed = self.resume_on(&mut port, &letters, sampled).await;
         match lettered(resumed.map(Handled::Applied), letters.take())? {

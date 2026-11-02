@@ -90,6 +90,7 @@ use angzarr_proto::v1::{
     ProcessingFailedDetails, SequenceMismatchDetails,
 };
 use angzarr_router::error::CodedError;
+use prost_types::Timestamp;
 
 use super::catalog::Catalog;
 use super::check::{Identified, Malformed};
@@ -526,6 +527,9 @@ impl DeadLetterLog for MemoryDeadLetters {
 pub(crate) struct CallLetters<'k> {
     log: &'k dyn DeadLetterLog,
     held: Mutex<Held>,
+    /// The kernel's clock for the call, `Sampled::now` (what its events'
+    /// `recorded_at` reads): every letter raised occurs at it.
+    occurred_at: Option<Timestamp>,
 }
 
 #[derive(Default)]
@@ -537,10 +541,14 @@ struct Held {
 }
 
 impl<'k> CallLetters<'k> {
-    pub(crate) fn new(log: &'k dyn DeadLetterLog) -> CallLetters<'k> {
+    /// The letters of a call sampled at `now`: each raised is stamped
+    /// `occurred_at` with it, a UTC instant (decision 14.66). A call that
+    /// samples no instant (a load) raises none, and stamps none.
+    pub(crate) fn new(log: &'k dyn DeadLetterLog, now: Option<Timestamp>) -> CallLetters<'k> {
         CallLetters {
             log,
             held: Mutex::default(),
+            occurred_at: now,
         }
     }
 
@@ -581,8 +589,12 @@ impl DeadLetterLog for CallLetters<'_> {
     }
 
     fn letter(&self, letter: &AngzarrDeadLetter) {
+        let letter = AngzarrDeadLetter {
+            occurred_at: self.occurred_at.or(letter.occurred_at),
+            ..letter.clone()
+        };
         self.held().raised.push(letter.clone());
-        self.log.letter(letter);
+        self.log.letter(&letter);
     }
 }
 

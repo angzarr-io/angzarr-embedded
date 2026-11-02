@@ -339,7 +339,7 @@ fn a_parked_facts_letter_is_kept_and_answered() {
 fn a_calls_letters_reach_the_kernels_log() {
     use crate::DeadLetterLog;
     let log = MemoryDeadLetters::new();
-    let letters = crate::dead_letter::CallLetters::new(&log);
+    let letters = crate::dead_letter::CallLetters::new(&log, None);
     letters.write("DEAD_LETTER x: a line");
     assert_eq!(log.lines(), ["DEAD_LETTER x: a line"]);
     assert!(
