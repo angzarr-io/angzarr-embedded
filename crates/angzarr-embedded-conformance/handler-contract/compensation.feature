@@ -73,3 +73,16 @@ Feature: Compensation - a process manager's rollback, kept by the client library
     And the shipment has completed "reserve stock" and rolled back
     When the refusal of its "test.compensation.RestockItems" reaches the shipment
     Then it records CompensationFailed for "reserve stock"
+
+  @C-0796
+  Scenario: A refused undo's handling succeeds and dead-letters nothing
+    # Owner decision 38 (a), 2026-11-02 (14.74): CompensationFailed is the
+    # alert. A handling either records events or is dead-lettered, never
+    # both, so the refusal is not dead-lettered; a human learns of it by
+    # watching CompensationFailed, through a projector or subscriber.
+    Given "reserve stock" is registered with an undo that becomes "test.compensation.RestockItems"
+    And the shipment has completed "reserve stock" and rolled back
+    When the refusal of its "test.compensation.RestockItems" reaches the shipment
+    Then the handling succeeds
+    And it records CompensationFailed for "reserve stock"
+    And nothing is dead-lettered for the refusal
