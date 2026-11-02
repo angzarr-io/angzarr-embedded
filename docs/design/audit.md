@@ -989,9 +989,15 @@ from one handle mean nothing was committed between), `ReadUntilTime`,
 positions, per stream: what a stored catch-up reads when it starts) and
 the `Outbox`.
 
-**Editions** are per-stream forks (14.32), their lifecycle angzarr's. A
-command to an edition stream never forked is refused by the store at the
-write (`EDITION_NOT_FORKED`); angzarr-embedded creates no edition.
+**Editions** are per-stream forks (14.32), their lifecycle angzarr's. An
+outside input to an edition stream never forked is refused before its
+handler runs (`COORDINATOR_REASON_EDITION_NOT_FORKED`, FAILED_PRECONDITION,
+C-0633), the fork read off the stream step 3 loads (its creation event, or
+a snapshot, which never falls through); a policy's command to one is
+refused by the store at the write (`angzarr-ports-store-edition-not-forked`).
+angzarr-embedded creates no edition. A handler's answer whose events book
+names another stream is refused before any write and dead-lettered
+(`COORDINATOR_REASON_EVENTS_NOT_ITS_STREAM`, C-0590).
 
 On SQLite (angzarr-store-sqlite) a write is one `BEGIN IMMEDIATE`, begun
 and committed inside the call; the file is kept in WAL, so a reader waits
