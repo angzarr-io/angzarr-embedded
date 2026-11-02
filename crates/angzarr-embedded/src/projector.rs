@@ -36,7 +36,8 @@ use super::error::KernelError;
 use super::handle::Wait;
 use super::registry::Registry;
 use super::store::{
-    ChangeToken, PositionKey, ReadStore, ReadUnit, Store, StoreError, StreamRef, Watch, Write,
+    ChangeToken, ListPositions, PositionKey, ReadStore, ReadUnit, Store, StoreError, StreamRef,
+    Watch, Write,
 };
 use super::upcast::upcast_pages;
 
@@ -55,7 +56,11 @@ use super::upcast::upcast_pages;
 ///   under the projector's name, as the kernel keeps a policy's, so a
 ///   durable projection resumes where it left off in a new process. A
 ///   purge removes the positions on its stream, so one written again is
-///   handed from its start.
+///   handed from its start. Its first step reads every position the
+///   projector holds ([`ListPositions`]): a stream it was handed before it
+///   started is known from the start, so one purged since is handed gone,
+///   and its position is put back to 0 (a purge landing between a step's
+///   read and its position's write leaves that position behind).
 ///
 /// A step reads in one read-only unit ([`ReadStore`]): what it hands is
 /// one moment of the store, and a write landing meanwhile is the next
@@ -81,7 +86,10 @@ pub struct CatchUp<P> {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Kept {
     Held,
-    Stored,
+    /// In the store; `listed` once its positions have been read.
+    Stored {
+        listed: bool,
+    },
 }
 
 /// One stream a catch-up has handed a book.
@@ -152,7 +160,7 @@ impl<P: ProjectorHandler> CatchUp<P> {
     /// `projector` over the streams of `sources`, its positions in the
     /// store, under its name. PANICS for no source.
     pub fn stored(sources: &[&str], projector: P) -> CatchUp<P> {
-        Self::kept(sources, projector, Kept::Stored)
+        Self::kept(sources, projector, Kept::Stored { listed: false })
     }
 
     fn kept(sources: &[&str], projector: P, kept: Kept) -> CatchUp<P> {
@@ -175,14 +183,16 @@ impl<P: ProjectorHandler> CatchUp<P> {
 
     /// One step: every stream of the sources the store holds handed what
     /// it is owed, then every stream handed before and no longer held
-    /// handed as gone. A store error ends the step; what was handed before
-    /// it stays handed.
-    pub async fn step<S: ReadStore + Store>(
+    /// handed as gone (stored, "before" counts from the positions the
+    /// store holds when the first step begins: [`ListPositions`]). A store
+    /// error ends the step; what was handed before it stays handed.
+    pub async fn step<S: ReadStore + Store + ListPositions>(
         &mut self,
         store: &S,
         registry: &Registry,
     ) -> Result<Caught, KernelError> {
         let mut caught = Caught::default();
+        self.listed(store).await.map_err(KernelError::Store)?;
         let mut reads = store.begin_read().await.map_err(KernelError::Store)?;
         let mut held = BTreeSet::new();
         for source in self.sources.clone() {
@@ -193,7 +203,7 @@ impl<P: ProjectorHandler> CatchUp<P> {
                     .await?;
             }
         }
-        self.hand_gone(&held, &mut caught).await;
+        self.hand_gone(store, &held, &mut caught).await;
         Ok(caught)
     }
 
@@ -201,7 +211,7 @@ impl<P: ProjectorHandler> CatchUp<P> {
     /// that handed everything it owed (the store's [`Watch`] token is
     /// unchanged): then `None`, and nothing is read. Tokens compare only
     /// from one handle, so every call is given the same store handle.
-    pub async fn step_if_changed<S: ReadStore + Store + Watch>(
+    pub async fn step_if_changed<S: ReadStore + Store + ListPositions + Watch>(
         &mut self,
         store: &S,
         registry: &Registry,
@@ -219,7 +229,7 @@ impl<P: ProjectorHandler> CatchUp<P> {
     /// on `wait` (the caller's timer), again and again while `more`, asked
     /// after each poll with what that step did (`None`: nothing changed),
     /// says so. Returns when it does not, or at a store error.
-    pub async fn follow<S: ReadStore + Store + Watch>(
+    pub async fn follow<S: ReadStore + Store + ListPositions + Watch>(
         &mut self,
         store: &S,
         registry: &Registry,
@@ -234,6 +244,22 @@ impl<P: ProjectorHandler> CatchUp<P> {
             }
             wait.wait(every).await;
         }
+    }
+
+    /// Stored, before its first step: every main-timeline stream of its
+    /// sources it holds a position on, known as handed to there.
+    async fn listed<S: ListPositions>(&mut self, store: &S) -> Result<(), StoreError> {
+        if self.kept != (Kept::Stored { listed: false }) {
+            return Ok(());
+        }
+        let ours = |cover: &Cover| cover.edition.is_none() && self.sources.contains(&cover.domain);
+        let listed = store.list_positions(self.projector.name()).await?;
+        for (cover, next) in listed.into_iter().filter(|(cover, _)| ours(cover)) {
+            let first = Fingerprint::of(None);
+            self.seen.insert(key(&cover), Seen { cover, first, next });
+        }
+        self.kept = Kept::Stored { listed: true };
+        Ok(())
     }
 
     /// Hand `cover`'s stream what it is owed, read through `reads`: its
@@ -304,7 +330,7 @@ impl<P: ProjectorHandler> CatchUp<P> {
         let stream = StreamRef::try_from(cover)?;
         let seen = self.seen.get(&key(cover));
         let from = match (self.kept, seen) {
-            (Kept::Stored, _) => {
+            (Kept::Stored { .. }, _) => {
                 let handler = self.projector.name();
                 store.position(PositionKey { handler, stream }).await?
             }
@@ -330,21 +356,40 @@ impl<P: ProjectorHandler> CatchUp<P> {
         first: Fingerprint,
         next: u64,
     ) -> Result<(), StoreError> {
-        if self.kept == Kept::Stored {
-            let handler = self.projector.name();
-            let stream = StreamRef::try_from(cover)?;
-            store
-                .write(Write::positions(&[(PositionKey { handler, stream }, next)]))
-                .await?;
+        if self.kept != Kept::Held {
+            self.store_position(store, cover, next).await?;
         }
         let cover = cover.clone();
         self.seen.insert(key(&cover), Seen { cover, first, next });
         Ok(())
     }
 
+    /// Put the projector's position on `cover`'s stream at `next`, in the
+    /// store.
+    async fn store_position<S: Store>(
+        &self,
+        store: &S,
+        cover: &Cover,
+        next: u64,
+    ) -> Result<(), StoreError> {
+        let handler = self.projector.name();
+        let stream = StreamRef::try_from(cover)?;
+        store
+            .write(Write::positions(&[(PositionKey { handler, stream }, next)]))
+            .await
+            .map(drop)
+    }
+
     /// Hand every stream seen before and not `held` now its gone book: no
-    /// page, at 0. One the projector fails stays seen, to be handed again.
-    async fn hand_gone(&mut self, held: &BTreeSet<(String, Vec<u8>)>, caught: &mut Caught) {
+    /// page, at 0; stored, its position put back to 0. One the projector
+    /// fails (or whose position is not put back) stays seen, to be handed
+    /// again.
+    async fn hand_gone<S: Store>(
+        &mut self,
+        store: &S,
+        held: &BTreeSet<(String, Vec<u8>)>,
+        caught: &mut Caught,
+    ) {
         let gone: Vec<_> = self
             .seen
             .keys()
@@ -357,13 +402,18 @@ impl<P: ProjectorHandler> CatchUp<P> {
                 cover: Some(cover.clone()),
                 ..EventBook::default()
             };
-            match self.projector.dispatch(&book).await {
-                Ok(_) => {
-                    self.seen.remove(&key);
-                    caught.handed.push(cover);
-                }
-                Err(error) => caught.failures.push((cover, KernelError::Router(error))),
+            if let Err(error) = self.projector.dispatch(&book).await {
+                caught.failures.push((cover, KernelError::Router(error)));
+                continue;
             }
+            if self.kept != Kept::Held {
+                if let Err(error) = self.store_position(store, &cover, 0).await {
+                    caught.failures.push((cover, KernelError::Store(error)));
+                    continue;
+                }
+            }
+            self.seen.remove(&key);
+            caught.handed.push(cover);
         }
     }
 }
