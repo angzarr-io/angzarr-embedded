@@ -186,15 +186,6 @@ const MAIN_UNSET_ONLY: Tag = Tag {
     why: "the main timeline is unset only: an empty edition is malformed and \"angzarr\" is an edition like any other",
 };
 
-/// What an answer's events book names as its cover is not judged: the
-/// kernel records the answer's events on the input's own stream. The spec
-/// refuses another cover as a handler bug, under no key reasons.proto
-/// holds.
-const ANSWER_COVER_UNJUDGED: Tag = Tag {
-    name: "divergence_answer_cover_unjudged",
-    why: "an answer's events book naming another stream is not refused: its events land on the input's stream",
-};
-
 /// An input to an edition stream not forked is refused by the store at
 /// the write, under angzarr-ports' key
 /// (`angzarr-ports-store-edition-not-forked`, INVALID_ARGUMENT), after
@@ -286,7 +277,6 @@ const TAGGED: &[(&str, Tag)] = &[
     // edition_propagation.feature
     ("C-0139", POLICY_EMITS_NO_EVENT),
     ("C-0140", OUTSIDE_EDITION_REFUSED),
-    ("C-0590", ANSWER_COVER_UNJUDGED),
     ("C-0409", MAIN_UNSET_ONLY),
     ("C-0410", NO_EDITION_LIFECYCLE),
     // fact_flow.feature

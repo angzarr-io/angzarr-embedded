@@ -206,6 +206,30 @@ fn refused_internal(w: &mut Coordinator) {
     );
 }
 
+#[then(
+    regex = r#"^the command is refused INTERNAL with reason (\w+), naming the stream and the event stream in edition "([\w-]+)"$"#
+)]
+fn refused_naming_streams(w: &mut Coordinator, reason: String, edition: String) {
+    refused_internal(w);
+    let letters: Vec<_> = w
+        .log
+        .letters()
+        .into_iter()
+        .filter_map(|l| l.reason)
+        .filter(|r| r.code == reason)
+        .collect();
+    assert_eq!(letters.len(), 1, "one dead letter of {reason}: {letters:?}");
+    let args = &letters[0].args;
+    let stream = args.get("stream").expect("the input's stream");
+    let event_stream = args.get("event_stream").expect("the events' stream");
+    assert!(stream.starts_with("fulfillment/"), "{stream}");
+    assert_eq!(
+        event_stream,
+        &format!("{}@{edition}", stream.split('@').next().unwrap_or(stream))
+    );
+    assert_ne!(stream, event_stream);
+}
+
 #[then(regex = r#"^the refusal fact's cover has edition "([\w-]+)"$"#)]
 fn refusal_fact_edition(w: &mut Coordinator, edition: String) {
     let input = w.policies.last().expect("a policy").input.clone();
