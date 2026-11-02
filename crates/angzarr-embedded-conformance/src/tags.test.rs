@@ -119,14 +119,6 @@ const POLICY_EMITS_NO_EVENT: Tag = Tag {
     why: "a policy answers commands alone (PolicyResponse): it emits no event",
 };
 
-/// A failing translating callback fails its policy step, answered to the
-/// call the chain runs in, and is not dead-lettered; a policy's own
-/// failure on an event is dead-lettered as well.
-const FAILING_CALLBACK_ANSWERED: Tag = Tag {
-    name: "divergence_failing_callback_answered",
-    why: "a failing translating callback is answered to the caller and not dead-lettered",
-};
-
 /// The fold is business code's: angzarr-router's, which runs the
 /// handler-contract tier for it. A binding here needs a typed domain of
 /// its own; the kernel's part, the history it delivers, is C-0287's.
@@ -204,7 +196,6 @@ const TAGGED: &[(&str, Tag)] = &[
     ("C-0737", WAITING_CALLER_ANSWERED),
     // policy_refusal.feature
     ("C-0616", NO_OUTBOX),
-    ("C-0619", FAILING_CALLBACK_ANSWERED),
     ("C-0621", UNBOUND_REMOTE_POLICY),
     ("C-0685", UNBOUND_REMOTE_POLICY),
     // query_server.feature
