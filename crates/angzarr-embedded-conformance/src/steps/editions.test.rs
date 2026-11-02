@@ -313,6 +313,14 @@ async fn sends_in_edition(
     w.handle(book).await;
 }
 
+#[then("the router is never called")]
+fn router_never_called(w: &mut Coordinator) {
+    for domain in w.domains.keys().cloned().collect::<Vec<_>>() {
+        let delivered = w.business(&domain).delivered();
+        assert!(delivered.is_empty(), "{domain}: {delivered:?}");
+    }
+}
+
 #[then(regex = r#"^"([\w-]+)" "([\w-]+)" holds no event in edition "([\w-]+)"$"#)]
 fn holds_no_event_in(w: &mut Coordinator, domain: String, name: String, edition: String) {
     let cover = in_edition(&w.cover(&domain, &name), Some(&edition));

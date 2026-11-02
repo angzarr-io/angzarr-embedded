@@ -88,9 +88,10 @@ const COMMUTATIVE_AT_HEAD: Tag = Tag {
 
 /// No edition lifecycle. Editions are angzarr's, created by its system
 /// layer (ForkStream, a fork on arrival, ListEditions, DeleteEdition);
-/// angzarr-embedded creates none. A command to an edition stream never
-/// forked is refused by the store at the write (`EDITION_NOT_FORKED`),
-/// with nothing written.
+/// angzarr-embedded creates none. An outside input to an edition stream
+/// never forked is refused before its handler runs
+/// (`COORDINATOR_REASON_EDITION_NOT_FORKED`), and a policy's command to one
+/// by the store at the write, with nothing written.
 const NO_EDITION_LIFECYCLE: Tag = Tag {
     name: "divergence_no_edition_lifecycle",
     why: "editions are angzarr's system layer's: angzarr-embedded forks, lists and deletes none",
@@ -186,16 +187,6 @@ const MAIN_UNSET_ONLY: Tag = Tag {
     why: "the main timeline is unset only: an empty edition is malformed and \"angzarr\" is an edition like any other",
 };
 
-/// An input to an edition stream not forked is refused by the store at
-/// the write, under angzarr-ports' key
-/// (`angzarr-ports-store-edition-not-forked`, INVALID_ARGUMENT), after
-/// business code ran; the spec answers `EDITION_NOT_FORKED`,
-/// FAILED_PRECONDITION, before it, a key reasons.proto does not hold.
-const EDITION_NOT_FORKED_AT_WRITE: Tag = Tag {
-    name: "divergence_edition_not_forked_at_write",
-    why: "an input to an unforked edition stream is refused at the write, under angzarr-ports' key, INVALID_ARGUMENT",
-};
-
 /// The fold is business code's: angzarr-router's, which runs the
 /// handler-contract tier for it. A binding here needs a typed domain of
 /// its own; the kernel's part, the history it delivers, is C-0287's.
@@ -253,7 +244,6 @@ const TAGGED: &[(&str, Tag)] = &[
     ("C-0629", NO_EDITION_LIFECYCLE),
     ("C-0630", NO_EDITION_LIFECYCLE),
     ("C-0631", NO_EDITION_LIFECYCLE),
-    ("C-0633", EDITION_NOT_FORKED_AT_WRITE),
     ("C-0634", NO_QUERY),
     ("C-0635", NO_EDITION_LIFECYCLE),
     ("C-0636", NO_EDITION_LIFECYCLE),
