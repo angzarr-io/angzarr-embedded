@@ -3167,11 +3167,12 @@ fn policy_impl(imp: &ItemImpl, args: FlowArgs) -> syn::Result<Tokens> {
                 ctx: &#m::CommandContext,
             ) -> ::core::result::Result<::angzarr_embedded::Any, #m::Report> {
                 #(
-                    if let ::core::option::Option::Some(refusal) =
+                    if let ::core::option::Option::Some(typed) =
                         #m::decode_refusal::<#commands>(refusal)?
                     {
                         return #m::translated_fact::<<Self as #m::Policy>::Source, _, _>(
-                            <#self_ty>::#callback_methods(self, &refusal, ctx),
+                            <#self_ty>::#callback_methods(self, &typed, ctx),
+                            refusal,
                         );
                     }
                 )*

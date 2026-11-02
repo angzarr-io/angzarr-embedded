@@ -1882,16 +1882,41 @@ pub fn decode_refusal<C: DomainMessage>(
     }))
 }
 
-/// A translating callback's answer as
-/// [`Policy::on_refused`] returns it: its fact,
-/// one the policy's source `S` ingests ([`Ingests`]), packed; or its
-/// error as a [`Report`], whose code and args are the dead letter's
-/// `cause`.
-pub fn translated_fact<S: Ingests<F>, F: DomainMessage, E: angzarr_diagnostic::Diagnostic>(
-    answer: Result<F, E>,
+/// What a policy's translating callback (`#[on_refused(C)]`) answers on
+/// success, for its source `S`: a fact `F` the source ingests
+/// ([`Ingests`]), the refusal translated; or `Option<F>`, whose `None`
+/// declines, the refusal passed through as it is for a command the policy
+/// has no callback for. A callback answering anything else does not
+/// compile.
+pub trait Translation<S> {
+    /// The fact, packed; `None` when the callback declined.
+    fn fact(self) -> Option<Any>;
+}
+
+impl<S: Ingests<F>, F: DomainMessage> Translation<S> for F {
+    fn fact(self) -> Option<Any> {
+        Some(pack_message(&self))
+    }
+}
+
+impl<S: Ingests<F>, F: DomainMessage> Translation<S> for Option<F> {
+    fn fact(self) -> Option<Any> {
+        self.map(|fact| pack_message(&fact))
+    }
+}
+
+/// A translating callback's answer to `refusal` as
+/// [`Policy::on_refused`] returns it: its fact, one the policy's source
+/// `S` ingests, packed; the pass-through `CommandRefused`
+/// ([`pass_through`]) when it declined ([`Translation`]); or its error as a
+/// [`Report`], whose code and args are the dead letter's `cause`.
+pub fn translated_fact<S, T: Translation<S>, E: angzarr_diagnostic::Diagnostic>(
+    answer: Result<T, E>,
+    refusal: &v1::Refusal,
 ) -> Result<Any, Report> {
+    let _ = refusal;
     answer
-        .map(|fact| pack_message(&fact))
+        .map(|fact| fact.fact().expect("declining is not passed through yet"))
         .map_err(|error| Report::of(&error))
 }
 

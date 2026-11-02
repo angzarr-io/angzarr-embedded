@@ -965,7 +965,10 @@ fn a_domain_is_its_own_event_source() {
 /// fact does.
 #[test]
 fn a_fact_for_a_child_hosted_source_packs_as_any_fact() {
-    let fact = markup::translated_fact::<Player, Noted, Infallible>(Ok(Noted));
+    let fact = markup::translated_fact::<Player, Noted, Infallible>(
+        Ok(Noted),
+        &markup::v1::Refusal::default(),
+    );
     assert_eq!(
         fact.ok().map(|any| any.type_url),
         Some("/toy.counter.v1.Noted".to_string())

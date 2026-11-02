@@ -3464,6 +3464,37 @@ impl TranslatingBuyInWallet {
     }
 }
 
+/// As [`TranslatingBuyInWallet`], its callback declining what it does not
+/// translate: a hold refused for insufficient funds is the buy-in's
+/// `HoldLost`; any other refusal of a hold is `None`, passed through to the
+/// buy-in as `CommandRefused`, as if it had no callback.
+pub struct DecliningBuyInWallet;
+
+#[policy(name = "buyin-wallet", source = BuyIn, target = Wallet)]
+impl DecliningBuyInWallet {
+    #[on_event(BuyInStarted)]
+    fn started(
+        &self,
+        event: &BuyInStarted,
+        _ctx: &PolicyContext,
+    ) -> Result<Commands<Wallet>, Infallible> {
+        Ok(Commands::none().to(uuid(&event.wallet), Hold { cents: event.cents }))
+    }
+
+    #[on_refused(Hold)]
+    fn hold_refused(
+        &self,
+        refusal: &Refusal<Hold>,
+        _ctx: &CommandContext,
+    ) -> Result<Option<HoldLost>, Infallible> {
+        Ok(refusal
+            .refusal::<InsufficientFunds>()
+            .map(|object| HoldLost {
+                short: object.short,
+            }))
+    }
+}
+
 /// The policy for (wallet, buy-in): a hold on the wallet is recorded on the
 /// buy-in of its correlation. The buy-in's root IS that correlation.
 pub struct WalletBuyIn;
@@ -4537,6 +4568,34 @@ mod policy_refusals {
                 .on_refused(&refusal, &CommandContext::default())
                 .unwrap(),
             any(HoldLost { short: 20 })
+        );
+    }
+
+    /// A callback answering `Some` translates: the source's own fact.
+    #[test]
+    fn a_callback_answering_some_translates() {
+        let refusal = hold_refusal(&correlation(1), 30, insufficient(20));
+        assert_eq!(
+            DecliningBuyInWallet
+                .on_refused(&refusal, &CommandContext::default())
+                .unwrap(),
+            any(HoldLost { short: 20 })
+        );
+    }
+
+    /// A callback answering `None` declines: the refusal is passed through,
+    /// angzarr's `CommandRefused`, exactly as a policy with no callback for
+    /// the command answers it.
+    #[test]
+    fn a_callback_answering_none_passes_the_refusal_through() {
+        let closed = RefusalResponse {
+            reason: Some(refusal_response::Reason::Refusal(any(WalletClosed {}))),
+        };
+        let refusal = hold_refusal(&correlation(1), 30, closed);
+        let ctx = CommandContext::default();
+        assert_eq!(
+            DecliningBuyInWallet.on_refused(&refusal, &ctx).unwrap(),
+            BuyInWallet.on_refused(&refusal, &ctx).unwrap()
         );
     }
 
