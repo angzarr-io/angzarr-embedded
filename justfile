@@ -16,7 +16,7 @@ import 'gates/gates.just'
 # hand-written library code whose behaviour its tests reach in-process
 # (angzarr-store-sqlite's SQLite included), so every crate is held to the
 # same bar.
-mutation_thresholds := "crates/angzarr-embedded=90 crates/angzarr-embedded-catalog-check=90 crates/angzarr-embedded-host=90 crates/angzarr-embedded-host-config=90 crates/angzarr-embedded-macros=90 crates/angzarr-store-sqlite=90"
+mutation_thresholds := "crates/angzarr-embedded=90 crates/angzarr-embedded-catalog-check=90 crates/angzarr-embedded-conformance=90 crates/angzarr-embedded-host=90 crates/angzarr-embedded-host-config=90 crates/angzarr-embedded-macros=90 crates/angzarr-store-sqlite=90"
 
 # Staged paths outside any crate that test the whole workspace.
 workspace_wide := "Cargo.toml Cargo.lock rust-toolchain.toml .cargo/config.toml .cargo/config"
@@ -88,6 +88,25 @@ licence-check:
     check "README's do-not-carry-angzarr-proto bullet" "$(bullet '- **Do not carry angzarr-proto:**' | names)" "$bsd"
     [ "$fail" = 0 ] && echo "licence-check: angzarr-proto in" $actual"; not in:" $bsd
     exit "$fail"
+
+# Vendor the spec's coordinator-contract tier at `rev` (any commit of
+# angzarr-project's) into crates/angzarr-embedded-conformance/features, the
+# commit recorded in its SPEC_REV: the one way the vendored tier changes. Run
+# at SPEC_REV's commit, it changes nothing; a diff after it is drift.
+# `repo` is angzarr-project's URL or a local clone.
+spec-vendor rev repo="https://github.com/angzarr-io/angzarr-project.git":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    src=target/spec-src
+    [ -d "$src/.git" ] || git clone --quiet --no-checkout '{{repo}}' "$src"
+    git -C "$src" fetch --quiet '{{repo}}' '{{rev}}'
+    commit=$(git -C "$src" rev-parse --verify FETCH_HEAD^{commit})
+    crate=crates/angzarr-embedded-conformance
+    rm -rf "$crate/features"
+    mkdir -p "$crate/features"
+    git -C "$src" archive "$commit" features/coordinator-contract | tar -x --strip-components=2 -C "$crate/features"
+    echo "$commit" > "$crate/SPEC_REV"
+    echo "spec-vendor: the coordinator-contract tier at $commit"
 
 # Build the crates that must run in a browser for wasm32-unknown-unknown.
 #   rustup target add wasm32-unknown-unknown

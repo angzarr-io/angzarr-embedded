@@ -37,6 +37,7 @@ was `angzarr_embedded::next`, and that path is gone, with no alias.
 | [`angzarr-store-sqlite`](crates/angzarr-store-sqlite) | angzarr-ports on SQLite, the one SQLite adapter angzarr-embedded and angzarr share: a leaf (nothing of angzarr-embedded), sea-query statements on sqlx, with its migrations; held to the ports' conformance suite |
 | [`angzarr-embedded-macros`](crates/angzarr-embedded-macros) | markup over hand-written aggregates, process managers, policies and projectors, generating their `angzarr_embedded` glue |
 | [`angzarr-embedded-catalog-check`](crates/angzarr-embedded-catalog-check) | test-only: every error code has a message, with exactly its args, in every shipped Fluent catalog |
+| [`angzarr-embedded-conformance`](crates/angzarr-embedded-conformance) | test-only: the spec's coordinator-contract tier (vendored `.feature` files) run against the kernel by cucumber; each scenario it does not run is tagged with why, the one record of where angzarr-embedded and the contract part |
 
 ```
 just test           # cargo-nextest over the workspace
@@ -70,8 +71,8 @@ only tests build, aside):
 - **Carry angzarr-proto:** `angzarr-embedded` and `angzarr-embedded-host`,
   which depend on it directly, and `angzarr-store-sqlite`, which depends on
   angzarr-ports.
-- **Do not carry angzarr-proto:** `angzarr-embedded-catalog-check`, `angzarr-embedded-host-config` and `angzarr-embedded-macros`.
-  `angzarr-embedded-catalog-check` and `angzarr-embedded-macros` reach angzarr-proto only
+- **Do not carry angzarr-proto:** `angzarr-embedded-catalog-check`, `angzarr-embedded-conformance`, `angzarr-embedded-host-config` and `angzarr-embedded-macros`.
+  `angzarr-embedded-catalog-check`, `angzarr-embedded-conformance` and `angzarr-embedded-macros` reach angzarr-proto only
   through dev-dependencies, so their tests link it but
   a binary built on them does not; `angzarr-embedded-host-config` does
   not reach it at all.
