@@ -68,15 +68,6 @@ const WAITING_CALLER_ANSWERED: Tag = Tag {
     why: "what a waiting caller's call gives up on is answered to it and not dead-lettered (owner ruling 2026-10-31)",
 };
 
-/// A fact whose handler fails with a bug fails the call that sent it: it
-/// is dead-lettered and its sender answered the failure, where the spec
-/// answers it OK, PARKED. The kernel parks only a fact given up at the race
-/// re-run cap (`Handled::Parked`).
-const FAILING_FACT_FAILS: Tag = Tag {
-    name: "divergence_failing_fact_answered_failed",
-    why: "a fact whose handler fails is answered the failure, not OK PARKED",
-};
-
 /// No edition lifecycle. Editions are angzarr's, created by its system
 /// layer (ForkStream, a fork on arrival, ListEditions, DeleteEdition);
 /// angzarr-embedded creates none. An outside input to an edition stream
@@ -226,8 +217,6 @@ const TAGGED: &[(&str, Tag)] = &[
     ("C-0619", FAILING_CALLBACK_ANSWERED),
     ("C-0621", UNBOUND_REMOTE_POLICY),
     ("C-0685", UNBOUND_REMOTE_POLICY),
-    // process_manager_delivery.feature
-    ("C-0599", FAILING_FACT_FAILS),
     // query_server.feature
     ("C-0588", NO_QUERY),
     ("C-0589", NO_QUERY),
