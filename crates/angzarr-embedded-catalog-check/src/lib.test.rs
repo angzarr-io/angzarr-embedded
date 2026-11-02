@@ -371,6 +371,29 @@ fn every_router_reason_is_forwarded_under_its_own_key() {
     assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
 
+/// Every reason angzarr-router refuses with is among angzarr-embedded's
+/// samples, every declared arg given, so each forwarded key is held to the
+/// spec's catalog as every sample is.
+#[test]
+fn every_router_reason_is_sampled() {
+    let samples = angzarr_embedded::diagnostic_samples();
+    let router = (1..).map_while(|n| angzarr_embedded::v1::RouterReason::try_from(n).ok());
+    let mut problems = Vec::new();
+    for reason in router {
+        let key = reason.as_str_name();
+        let Some(sample) = samples.iter().find(|d| d.code() == key) else {
+            problems.push(format!("{key}: no sample"));
+            continue;
+        };
+        let args: BTreeSet<&str> = sample.args().iter().map(|(n, _)| *n).collect();
+        let declared: BTreeSet<&str> = reason.args().iter().copied().collect();
+        if args != declared {
+            problems.push(format!("{key}: args {args:?}, declared {declared:?}"));
+        }
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
 /// The spec's catalog renders every live key, in en-US, with its declared
 /// args and no error: the parity the crates' own catalogs have, for the
 /// catalog every runtime embeds.
