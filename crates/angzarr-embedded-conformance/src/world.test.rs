@@ -31,6 +31,8 @@ pub(crate) struct Domain {
     pub(crate) rules_version: String,
     pub(crate) state_type: String,
     pub(crate) resolutions: Vec<ConflictResolution>,
+    /// A process manager's starting input types, by bare name.
+    pub(crate) starting: Vec<String>,
     pub(crate) business: Arc<Business>,
 }
 
@@ -85,6 +87,8 @@ pub(crate) struct Coordinator {
     current: Option<Cover>,
     samples: Samples,
     inputs: u32,
+    /// The scenario's outline row, its values by their header.
+    pub(crate) row: BTreeMap<String, String>,
 }
 
 impl fmt::Debug for Coordinator {
@@ -104,6 +108,18 @@ fn package(domain: &str) -> String {
         other => other,
     };
     format!("{}.v1.", plural.replace('-', ""))
+}
+
+/// `name` in upper camel case: `buy-in` is `BuyIn`.
+pub(crate) fn camel(name: &str) -> String {
+    name.split(['-', ' ', '_'])
+        .map(|part| {
+            let mut chars = part.chars();
+            chars.next().map_or(String::new(), |c| {
+                c.to_ascii_uppercase().to_string() + chars.as_str()
+            })
+        })
+        .collect()
 }
 
 /// The stream `cover` names, as the store's ports take it.
@@ -151,17 +167,18 @@ impl Coordinator {
             current: None,
             samples: Samples::starting_at(1_700_000_000),
             inputs: 0,
+            row: BTreeMap::new(),
         }
     }
 
     /// `name`'s aggregate, registered at rules version `1.4.2+build.7`
-    /// with state `/<package>State`, supporting every resolution, unless a
-    /// given has said otherwise.
+    /// with state `/<package><Name>State` (`/orders.v1.OrderState`),
+    /// supporting every resolution, unless a given has said otherwise.
     pub(crate) fn domain(&mut self, name: &str) -> &mut Domain {
         let store = self.store.clone();
         self.domains.entry(name.to_string()).or_insert_with(|| {
             let package = package(name);
-            let state_type = format!("/{package}State");
+            let state_type = format!("/{package}{}State", camel(name));
             let rules_version = "1.4.2+build.7";
             Domain {
                 kind: ComponentKind::Aggregate,
@@ -173,8 +190,27 @@ impl Coordinator {
                     ConflictResolution::AggregateHandles,
                     ConflictResolution::Commutative,
                 ],
+                starting: Vec::new(),
             }
         })
+    }
+
+    /// `name`, a process manager's domain, starting from the inputs
+    /// `starting`, as [`Coordinator::domain`] registers a domain.
+    pub(crate) fn process_manager(&mut self, name: &str, starting: &[&str]) -> &mut Domain {
+        let domain = self.domain(name);
+        domain.kind = ComponentKind::ProcessManager;
+        domain
+            .starting
+            .extend(starting.iter().map(|s| s.to_string()));
+        domain
+    }
+
+    /// `name` registered at, and its business process built at, `version`.
+    pub(crate) fn registered_at(&mut self, name: &str, version: &str) {
+        let domain = self.domain(name);
+        domain.rules_version = version.to_string();
+        domain.business.built_at(version);
     }
 
     /// `name`'s business process.
@@ -362,10 +398,14 @@ impl Coordinator {
     fn registry(&self) -> Registry {
         let mut registry = Registry::new();
         for (name, domain) in &self.domains {
+            let package = package(name);
             let descriptor = ComponentDescriptor {
                 name: name.clone(),
                 kind: domain.kind as i32,
                 rules_version: domain.rules_version.clone(),
+                starting_types: (domain.starting.iter())
+                    .map(|s| format!("{package}{s}"))
+                    .collect(),
                 state: Some(StateDescriptor {
                     type_url: domain.state_type.clone(),
                     options: Some(StateOptions {
@@ -378,11 +418,25 @@ impl Coordinator {
                 }),
                 ..ComponentDescriptor::default()
             };
+            let process = Process {
+                business: Arc::clone(&domain.business),
+                kind: domain.kind,
+            };
             registry
-                .command_handler(name, Process(Arc::clone(&domain.business)), descriptor)
+                .command_handler(name, process, descriptor)
                 .unwrap_or_else(|e| panic!("{name} registers: {e}"));
         }
         registry
+    }
+
+    /// `text` with each `<name>` placeholder of the scenario's outline row
+    /// filled in.
+    pub(crate) fn resolve(&self, text: &str) -> String {
+        let mut text = text.to_string();
+        for (name, value) in &self.row {
+            text = text.replace(&format!("<{name}>"), value);
+        }
+        text
     }
 
     /// The first when begins: what the givens wrote is the baseline.

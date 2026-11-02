@@ -251,16 +251,6 @@ const TAGGED: &[(&str, Tag)] = &[
     ("C-0588", NO_QUERY),
     ("C-0589", NO_QUERY),
     // rules_version.feature
-    ("C-0518", UNBOUND),
-    ("C-0519", UNBOUND),
-    ("C-0520", UNBOUND),
-    ("C-0521", UNBOUND),
-    ("C-0522", UNBOUND),
-    ("C-0523", UNBOUND),
-    ("C-0524", UNBOUND),
-    ("C-0525", UNBOUND),
-    ("C-0526", UNBOUND),
-    ("C-0553", UNBOUND),
     ("C-0527", NO_SNAPSHOT_PATTERNS),
     ("C-0528", NO_SNAPSHOT_PATTERNS),
     ("C-0529", NO_SNAPSHOT_PATTERNS),
@@ -269,11 +259,9 @@ const TAGGED: &[(&str, Tag)] = &[
     ("C-0555", NO_QUERY),
     ("C-0556", NO_QUERY),
     ("C-0560", NO_QUERY),
-    ("C-0558", UNBOUND),
-    ("C-0748", UNBOUND),
+    ("C-0558#4", IN_PROCESS_CHAIN),
+    ("C-0558#5", UNBOUND),
     ("C-0559", UNBOUND),
-    ("C-0568", UNBOUND),
-    ("C-0569", UNBOUND),
     // state_building.feature
     ("C-0281", UNBOUND),
     ("C-0282", UNBOUND),
@@ -341,27 +329,58 @@ pub(crate) fn id(scenario: &Scenario) -> Option<&str> {
     }
 }
 
-/// The scenario's key: its ID, then, for an outline's row, `#` and the row
-/// counted from 1 across its examples' tables.
-pub(crate) fn key(scenario: &Scenario) -> Option<String> {
-    let id = id(scenario)?;
+/// An expanded outline row: its number, counted from 1 across the
+/// outline's examples' tables, and its values by their header.
+struct Row {
+    number: usize,
+    values: BTreeMap<String, String>,
+}
+
+/// The outline row `scenario` was expanded from, if it was.
+fn row(scenario: &Scenario) -> Option<Row> {
     let mut first = 1;
     for examples in &scenario.examples {
-        let rows = examples
-            .table
-            .as_ref()
-            .map_or(0, |t| t.rows.len().saturating_sub(1));
+        let rows = examples.table.as_ref().map_or(&[][..], |t| &t.rows[..]);
+        let Some((header, values)) = rows.split_first() else {
+            continue;
+        };
         // An expanded row sits at its table's line plus its index plus two.
         let offset = scenario
             .position
             .line
             .checked_sub(examples.position.line + 2);
-        if let Some(index) = offset.filter(|i| *i < rows) {
-            return Some(format!("{id}#{}", first + index));
+        if let Some(index) = offset.filter(|i| *i < values.len()) {
+            let values = header
+                .iter()
+                .cloned()
+                .zip(values[index].iter().cloned())
+                .collect();
+            return Some(Row {
+                number: first + index,
+                values,
+            });
         }
-        first += rows;
+        first += values.len();
     }
-    Some(id.to_string())
+    None
+}
+
+/// The scenario's outline row's values by their header: empty for a
+/// scenario that is no outline's row. cucumber fills in an outline's
+/// placeholders, but not one with a space in its name (`<snapshot
+/// version>`): a step resolves those from these.
+pub(crate) fn values(scenario: &Scenario) -> BTreeMap<String, String> {
+    row(scenario).map(|row| row.values).unwrap_or_default()
+}
+
+/// The scenario's key: its ID, then, for an outline's row, `#` and the row
+/// counted from 1 across its examples' tables.
+pub(crate) fn key(scenario: &Scenario) -> Option<String> {
+    let id = id(scenario)?;
+    Some(match row(scenario) {
+        Some(row) => format!("{id}#{}", row.number),
+        None => id.to_string(),
+    })
 }
 
 /// The tag on `scenario`, by its row's key, else its ID.

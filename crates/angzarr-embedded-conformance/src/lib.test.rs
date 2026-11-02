@@ -34,6 +34,8 @@ mod inputs;
 mod outcomes;
 #[path = "steps/script.test.rs"]
 mod script;
+#[path = "steps/versions.test.rs"]
+mod versions;
 
 /// Where the vendored tier is.
 const FEATURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/features");
@@ -69,6 +71,10 @@ fn coordinator_contract() {
     let writer = block_on(
         world::Coordinator::cucumber()
             .with_default_cli()
+            .before(|_, _, scenario, world| {
+                world.row = tags::values(scenario);
+                Box::pin(std::future::ready(()))
+            })
             .fail_on_skipped()
             .filter_run(FEATURES, move |_, _, scenario| {
                 run_tagged || tags::of(scenario).is_none()

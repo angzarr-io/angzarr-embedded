@@ -13,8 +13,8 @@ use angzarr_embedded::angzarr_router::error::{CodedError, GrpcCode};
 use angzarr_embedded::angzarr_router::router::CommandHandler;
 use angzarr_embedded::testing::MemoryStore;
 use angzarr_embedded::v1::{
-    command_page, CommandHandlerResponse, ConflictReport, ConflictResolution, ContextualCommand,
-    Cover, EventBook, EventPage, Snapshot,
+    command_page, CommandHandlerResponse, ComponentKind, ConflictReport, ConflictResolution,
+    ContextualCommand, Cover, EventBook, EventPage, Snapshot,
 };
 use angzarr_embedded::{type_name, Any, EventStore, StreamRef, Write};
 
@@ -54,6 +54,9 @@ pub(crate) struct Answer {
     pub(crate) race: Option<Race>,
     /// The rules version reported, if not the registered one.
     pub(crate) rules_version: Option<String>,
+    /// The types of the events recorded, if not the one named for the
+    /// input.
+    pub(crate) events: Option<Vec<String>>,
 }
 
 /// A business refusal under `code`, FAILED_PRECONDITION.
@@ -77,7 +80,8 @@ struct Script {
 pub(crate) struct Business {
     /// Its domain's type URL package: `/orders.v1.` for `order`.
     package: String,
-    rules_version: String,
+    /// The version it reports: the one it was built at.
+    rules_version: Mutex<String>,
     state_type: String,
     /// The stream it lands races on.
     store: MemoryStore,
@@ -89,6 +93,8 @@ pub(crate) struct Business {
     alias: Mutex<Option<String>>,
     /// The deliveries made before the scenario's first when.
     before: Mutex<usize>,
+    /// The state returned with each answer, in order.
+    returned: Mutex<Vec<(usize, Any)>>,
 }
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -104,7 +110,7 @@ impl Business {
     ) -> Business {
         Business {
             package: package.to_string(),
-            rules_version: rules_version.to_string(),
+            rules_version: Mutex::new(rules_version.to_string()),
             state_type: state_type.to_string(),
             store: store.clone(),
             facts: Mutex::default(),
@@ -112,7 +118,13 @@ impl Business {
             seen: Mutex::default(),
             alias: Mutex::default(),
             before: Mutex::default(),
+            returned: Mutex::default(),
         }
+    }
+
+    /// It is built at `version` from now on: what it reports.
+    pub(crate) fn built_at(&self, version: &str) {
+        *locked(&self.rules_version) = version.to_string();
     }
 
     /// Its handler for the fact `name` (a bare name: `ShipmentDispatched`).
@@ -154,6 +166,17 @@ impl Business {
     pub(crate) fn delivered(&self) -> Vec<ContextualCommand> {
         let before = *locked(&self.before);
         locked(&self.seen)[before..].to_vec()
+    }
+
+    /// The state returned with each answer since the first when, in order.
+    pub(crate) fn returned(&self) -> Vec<Any> {
+        let before = *locked(&self.before);
+        let returned = locked(&self.returned);
+        returned
+            .iter()
+            .filter(|(n, _)| *n > before)
+            .map(|(_, s)| s.clone())
+            .collect()
     }
 
     /// The answer for the delivery just kept as the `n`th.
@@ -201,8 +224,13 @@ impl Business {
             .expect("another write lands");
     }
 
-    /// What `delivered`'s handler records: one event, named for its input.
-    fn event(&self, delivered: &ContextualCommand) -> Result<Any, CodedError> {
+    /// What `delivered`'s handler records: the events `answer` names, else
+    /// one named for its input.
+    fn events(
+        &self,
+        delivered: &ContextualCommand,
+        answer: &Answer,
+    ) -> Result<Vec<Any>, CodedError> {
         let page = delivered
             .command
             .as_ref()
@@ -226,10 +254,17 @@ impl Business {
                 refusal: None,
             });
         }
-        Ok(Any {
-            type_url: self.type_url(recorded(&name)),
-            value: Vec::new(),
-        })
+        let names = match &answer.events {
+            Some(names) => names.clone(),
+            None => vec![recorded(&name).to_string()],
+        };
+        Ok(names
+            .iter()
+            .map(|name| Any {
+                type_url: self.type_url(name),
+                value: Vec::new(),
+            })
+            .collect())
     }
 
     /// The report `report` makes for `delivered`.
@@ -273,13 +308,20 @@ fn recorded(name: &str) -> &str {
     }
 }
 
-/// A [`Business`] as the router's `CommandHandler`.
+/// A [`Business`] as the router's `CommandHandler`, of its kind.
 #[derive(Clone)]
-pub(crate) struct Process(pub(crate) Arc<Business>);
+pub(crate) struct Process {
+    pub(crate) business: Arc<Business>,
+    pub(crate) kind: ComponentKind,
+}
 
 impl CommandHandler for Process {
     fn name(&self) -> &str {
         "business"
+    }
+
+    fn kind(&self) -> ComponentKind {
+        self.kind
     }
 
     fn command_types(&self) -> Vec<String> {
@@ -290,7 +332,7 @@ impl CommandHandler for Process {
         &self,
         delivered: &ContextualCommand,
     ) -> Result<CommandHandlerResponse, CodedError> {
-        let business = &self.0;
+        let business = &self.business;
         let n = {
             let mut seen = locked(&business.seen);
             seen.push(delivered.clone());
@@ -308,26 +350,31 @@ impl CommandHandler for Process {
         if let Some(refusal) = answer.refuse {
             return Err(refusal);
         }
-        let event = business.event(delivered)?;
+        let events = business.events(delivered, &answer)?;
+        let state = Any {
+            type_url: business.state_type.clone(),
+            value: n.to_be_bytes().to_vec(),
+        };
+        locked(&business.returned).push((n, state.clone()));
         Ok(CommandHandlerResponse {
             conflict: business.report(&answer.report, delivered),
             events: Some(EventBook {
                 snapshot: Some(Snapshot {
-                    state: Some(Any {
-                        type_url: business.state_type.clone(),
-                        value: n.to_be_bytes().to_vec(),
-                    }),
+                    state: Some(state),
                     ..Snapshot::default()
                 }),
-                pages: vec![EventPage {
-                    payload: Some(event),
-                    ..EventPage::default()
-                }],
+                pages: events
+                    .into_iter()
+                    .map(|event| EventPage {
+                        payload: Some(event),
+                        ..EventPage::default()
+                    })
+                    .collect(),
                 ..EventBook::default()
             }),
             rules_version: answer
                 .rules_version
-                .unwrap_or_else(|| business.rules_version.clone()),
+                .unwrap_or_else(|| locked(&business.rules_version).clone()),
         })
     }
 }
