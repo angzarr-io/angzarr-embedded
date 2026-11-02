@@ -1718,11 +1718,12 @@ impl<'k> Run<'k> {
     /// kernel (decision 14.42), as a
     /// step of its own in the stream of the triggering event, with the
     /// refused command's id and correlation. A refusal its source has no handler for is
-    /// dead-lettered, and writes only `positions`; one whose handler fails
-    /// is the policy's failure ([`StepError::PolicyFailed`]), dead-lettered
-    /// by its code and args, and one its source's handler fails on with a
-    /// bug is dead-lettered as that bug: both write only `positions`, unless
-    /// the kernel says to stay ([`OnPolicyBug::Stay`]).
+    /// dead-lettered, and writes only `positions`; one whose translating
+    /// callback fails, or whose handler fails, is the policy's failure,
+    /// dead-lettered by its code and args (C-0619), and one its source's
+    /// handler fails on with a bug is dead-lettered as that bug: each writes
+    /// only `positions`, unless the kernel says to stay
+    /// ([`OnPolicyBug::Stay`]).
     async fn refusal_step<P: Port>(
         &mut self,
         port: &mut P,
@@ -1732,15 +1733,19 @@ impl<'k> Run<'k> {
         delivered: &Identified,
         positions: &[(&str, &Cover, u64)],
     ) -> Result<Stepped, StepError> {
-        let kernel = |error| StepError::Kernel(KernelError::Router(error));
         let answer = match policy.dispatch.dispatch_refusal(refusal, ctx).await {
             Ok(answer) => answer,
             Err(error) => {
-                let Some(failure) = super::route::policy_failure(&error) else {
-                    return Err(kernel(error));
-                };
                 let payload = Payload::RejectedCommand(delivered.to_book());
                 let component = Component::policy(policy.name());
+                let Some(failure) = super::route::policy_failure(&error) else {
+                    // The callback's failure is the policy's bug:
+                    // dead-lettered with the refused command (C-0619).
+                    let error = KernelError::Router(error);
+                    dead_letter::write(self.letters, payload, component, Cause::Kernel(&error));
+                    self.past_bug(port, positions).await?;
+                    return Err(StepError::Kernel(error));
+                };
                 return Err(self
                     .policy_failed(port, positions, payload, component, failure)
                     .await);

@@ -842,7 +842,9 @@ kernel.resume(&store, &sampled).await?;                      // -> Recorded
   defect (`Recovery::Bug`), never a business `Rejected`: the step is
   dead-lettered as a handler's bug, the error's code and args its
   `cause`, never English, and the policy's position moves past the trigger, so nothing
-  runs it again.
+  runs it again. A translating callback answering the router's error (a
+  remote policy's `OnRefused`) is dead-lettered the same way, under that
+  error's key, with the refused command (C-0619).
 - <a id="a-policys-bug-and-its-position"></a>**A policy's bug and its
   position** are a setting: `Kernel::on_policy_bug(OnPolicyBug)`, one for
   every policy. A policy step that hits a bug (the policy's own error,
