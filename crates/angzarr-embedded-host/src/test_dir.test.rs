@@ -9,7 +9,10 @@
 //!
 //! - A directory is `<temp_dir>/<prefix>-<pid>-<n>`, `n` counting within
 //!   the test binary: short, for the tests that put a socket in it, and
-//!   fresh (a leftover of that name is removed first).
+//!   fresh (a leftover of that name is removed first). A directory for a
+//!   host's own sockets ([`TestDir::for_sockets`], this crate's alone) is
+//!   under the host's default socket directory instead, which is short
+//!   whatever `$TMPDIR` is.
 //! - It is removed when the guard drops. Bind the guard for as long as the
 //!   path is used: `let log = TestFile::new(..)`, never
 //!   `TestFile::new(..).to_path_buf()`, whose guard drops at once.
@@ -44,8 +47,24 @@ impl TestDir {
     /// [`TestDir::new`], kept on a panic when `keep_on_panic`, whatever the
     /// environment holds.
     pub(crate) fn keeping_on_panic(prefix: &str, keep_on_panic: bool) -> TestDir {
+        TestDir::under(&std::env::temp_dir(), prefix, keep_on_panic)
+    }
+
+    /// [`TestDir::new`] for a host's sockets: under the host's default
+    /// socket directory (`$XDG_RUNTIME_DIR`, else `/tmp`), not the
+    /// temporary one, so it is short enough to hold the host's socket
+    /// names whatever `$TMPDIR` is.
+    pub(crate) fn for_sockets(prefix: &str) -> TestDir {
+        let base =
+            crate::host::socket_dir(None, std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from))
+                .expect("the default socket directory is short");
+        TestDir::under(&base, prefix, std::env::var_os(KEEP).is_some())
+    }
+
+    /// A fresh, empty `<base>/<prefix>-<pid>-<n>`.
+    fn under(base: &Path, prefix: &str, keep_on_panic: bool) -> TestDir {
         static RUN: AtomicUsize = AtomicUsize::new(0);
-        let path = std::env::temp_dir().join(format!(
+        let path = base.join(format!(
             "{prefix}-{}-{}",
             std::process::id(),
             RUN.fetch_add(1, Ordering::Relaxed)

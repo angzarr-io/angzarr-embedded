@@ -600,7 +600,7 @@ fn fake_supervisor(sockets: &Path) -> Supervisor {
 /// runtime dropped, mid-way) leaves none behind.
 #[test]
 fn a_dropped_child_leaves_no_socket_file() {
-    let sockets = TestDir::new("angzarr-sockets");
+    let sockets = TestDir::for_sockets("angzarr-sockets");
     let up = fake_supervisor(&sockets)
         .come_up()
         .awaited()
@@ -1121,7 +1121,7 @@ impl OnTheClock {
     /// [`OnTheClock::start`], its restart count clearing after `reset`
     /// healthy.
     fn resetting(player: ComponentConfig, limit: u32, reset: Duration) -> OnTheClock {
-        let sockets = TestDir::new("angzarr-sockets");
+        let sockets = TestDir::for_sockets("angzarr-sockets");
         let mut config = config(vec![player]);
         config.supervision.socket_dir = Some(sockets.to_path_buf());
         config.supervision.unhealthy_reset_ms = reset.as_millis() as u64;
