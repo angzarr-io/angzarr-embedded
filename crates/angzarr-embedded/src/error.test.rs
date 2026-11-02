@@ -381,3 +381,33 @@ fn spec_keyed(
         ),
     ]
 }
+
+/// Every store error a step's reads and write, or an open migrating the
+/// store, can meet is among the crate's diagnostic samples, forwarded
+/// under its angzarr-ports code (`KernelError::Store`), so the catalog
+/// check holds each forwarded code to angzarr-ports' messages.
+#[test]
+fn every_forwarded_store_error_is_sampled() {
+    let sampled: Vec<String> = crate::diagnostic_samples()
+        .iter()
+        .map(|d| d.code().to_string())
+        .collect();
+    for code in [
+        "angzarr-ports-store-conflict",
+        "angzarr-ports-store-discontinuous",
+        "angzarr-ports-store-malformed-stream",
+        "angzarr-ports-store-unavailable",
+        "angzarr-ports-store-unreadable",
+        "angzarr-ports-store-edition-not-forked",
+        "angzarr-ports-edition-not-found",
+        "angzarr-ports-store-newer-than-build",
+        "angzarr-ports-store-migration-failed",
+        "angzarr-ports-store-migration-changed",
+        "angzarr-ports-store-migration-missing",
+        "angzarr-ports-store-migration-unknown",
+        "angzarr-ports-store-migration-irreversible",
+        "angzarr-ports-store-backup-exists",
+    ] {
+        assert!(sampled.iter().any(|c| c == code), "{code} is not sampled");
+    }
+}
