@@ -10,7 +10,10 @@
 use std::fmt;
 
 use angzarr_diagnostic::{Arg, Diagnostic, Report};
-use angzarr_proto::v1::{reason_args, HostReason};
+// A child's failures are the local-process transport's keys; a projector
+// with no input domain is core's (decision 14.64).
+use angzarr_proto::v1::HostReason as CoreHostReason;
+use angzarr_proto_transport_embedded::v1::{reason_args, HostReason};
 
 /// What was wrong with a child's handshake: the one stdout line,
 /// `angzarr-handshake v1 unix:<absolute-socket-path>`, it prints once it is
@@ -210,7 +213,7 @@ impl Diagnostic for HostError {
             HostError::KindMismatch { .. } => "angzarr-embedded-host-kind-mismatch",
             HostError::NoInput { .. } => "angzarr-embedded-host-no-input",
             HostError::ProjectorNoInputDomain { .. } => {
-                HostReason::ProjectorNoInputDomain.as_str_name()
+                CoreHostReason::ProjectorNoInputDomain.as_str_name()
             }
             HostError::Descriptor { .. } => "angzarr-embedded-host-descriptor",
             HostError::DescriptorChanged { .. } => "angzarr-embedded-host-descriptor-changed",

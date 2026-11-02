@@ -2,7 +2,9 @@
 //! serving `CommandHandlerCoordinatorService`, routed by `cover.domain`)
 //! calls for each request, [`App::serve`](crate::App::serve). It takes the
 //! request's book and where the request arrived from, and answers as
-//! `CommandHandlerCoordinatorService.Handle` does: a `CommandResponse`, or
+//! `CommandHandlerCoordinatorService.Handle` does, in core's messages (the
+//! kernel's [`Answered`](angzarr_embedded::Answered), from which the listener
+//! builds the distributed transport's `CommandResponse`; decision 14.64), or
 //! the kernel's refusal. A domain is served only when its `component` entry's
 //! `expose` admits the arrival ([`Expose`]): a request on loopback reaches
 //! a component exposed `"loopback"` or `"ip"`, one from the network only a

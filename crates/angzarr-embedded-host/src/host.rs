@@ -75,7 +75,7 @@ use crate::remote::{
 };
 use crate::rpc::connect_unix;
 use crate::vitals::{check, Clock, Verdict, Vitals};
-use angzarr_proto::v1::component_service_client::ComponentServiceClient;
+use angzarr_proto_component::v1::component_service_client::ComponentServiceClient;
 use tonic_health::pb::health_check_response::ServingStatus;
 use tonic_health::pb::health_client::HealthClient;
 use tonic_health::pb::{HealthCheckRequest, HealthCheckResponse};
@@ -530,8 +530,10 @@ fn next_backoff(backoff: Duration, max: Duration) -> Duration {
     (backoff * 2).min(max)
 }
 
-/// The longest Unix socket path, in bytes: `sun_path`'s 108, less the NUL.
-pub const MAX_SOCKET_PATH: usize = 107;
+/// The longest Unix socket path, in bytes: `sun_path`'s 108, less the NUL
+/// (the spec's, from its `(child_protocol)` option).
+pub const MAX_SOCKET_PATH: usize =
+    angzarr_proto_transport_embedded::child_protocol::MAX_SOCKET_PATH_BYTES;
 
 /// The longest name [`socket_path`] gives, with its leading `/`: a pid
 /// (at most 7 digits on Linux) and a counter (at most 20).
@@ -997,7 +999,8 @@ impl Supervisor {
                         .map_or_else(|_| status.to_string(), |s| s.as_str_name().to_string()),
                 });
             }
-            let mut describe = tonic::Request::new(pb::DescribeRequest::default());
+            let mut describe =
+                tonic::Request::new(angzarr_proto_component::v1::DescribeRequest::default());
             describe.set_timeout(call_timeout);
             let descriptor = ComponentServiceClient::new(channel.clone())
                 .describe(describe)

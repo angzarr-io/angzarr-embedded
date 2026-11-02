@@ -1332,7 +1332,6 @@ pub fn processing_failed(
             failure: Some(reason.clone()),
             retry_count,
             is_transient,
-            ..crate::v1::ProcessingFailedDetails::default()
         },
     )
 }

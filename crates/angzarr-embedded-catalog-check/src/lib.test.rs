@@ -16,7 +16,9 @@
 //! file.
 //!
 //! A condition the spec keys is coded under its key (decision 14.60), its
-//! English the spec's catalog (`angzarr_proto::REASONS_EN_US`), never a
+//! English the spec's catalog of the key's package (decision 14.64:
+//! `angzarr_proto::REASONS_EN_US` for core's keys,
+//! `angzarr_proto_transport_embedded::REASONS_EN_US` for a child's), never a
 //! crate's: each such sample, and each such nested cause, must have its
 //! message there, give only args its key declares, and give every arg its
 //! message names; and every live key's message renders with its declared
@@ -123,9 +125,34 @@ fn own_codes(d: &dyn Diagnostic, krate: &str, out: &mut BTreeSet<String>) {
     }
 }
 
-/// Whether `code` is a live key of the spec's (decision 14.60).
+/// A spec package whose keys angzarr-embedded answers (decision 14.64): its
+/// lookup of a key's declared args, and its en-US catalog.
+type SpecPackage = (
+    fn(&str) -> Option<&'static [&'static str]>,
+    (&'static str, &'static str),
+);
+
+/// The spec's packages with keys that embedded answers: core's, and the
+/// local-process transport's (a child's failures).
+const SPEC_PACKAGES: [SpecPackage; 2] = [
+    (angzarr_proto::reason_key_args, angzarr_proto::REASONS_EN_US),
+    (
+        angzarr_proto_transport_embedded::reason_key_args,
+        angzarr_proto_transport_embedded::REASONS_EN_US,
+    ),
+];
+
+/// `code`'s declared args and its package's catalog, when it is a live key
+/// of the spec's (decisions 14.60 and 14.64).
+fn spec_key(code: &str) -> Option<(&'static [&'static str], (&'static str, &'static str))> {
+    SPEC_PACKAGES
+        .iter()
+        .find_map(|(args, catalog)| args(code).map(|declared| (declared, *catalog)))
+}
+
+/// Whether `code` is a live key of the spec's.
 fn is_spec_key(code: &str) -> bool {
-    angzarr_proto::reason_key_args(code).is_some()
+    spec_key(code).is_some()
 }
 
 /// `d` and each of its nested causes, where coded under a spec key, held to
@@ -133,10 +160,9 @@ fn is_spec_key(code: &str) -> bool {
 /// flattened `cause.<arg>` counting as `cause`), and every variable its
 /// message names given.
 fn spec_keyed(d: &dyn Diagnostic, problems: &mut Vec<String>) {
-    let catalog =
-        Catalog::parse(angzarr_proto::REASONS_EN_US.1).expect("the spec's catalog parses");
     let code = d.code();
-    if let Some(declared) = angzarr_proto::reason_key_args(code) {
+    if let Some((declared, (_, text))) = spec_key(code) {
+        let catalog = Catalog::parse(text).expect("the spec's catalog parses");
         let given: BTreeSet<&str> = d.args().iter().map(|(name, _)| *name).collect();
         for name in &given {
             let base = name.split_once('.').map_or(*name, |(base, _)| base);
@@ -329,16 +355,23 @@ fn angzarr_embedded_reexports_the_angzarr_ports_catalog() {
     assert_eq!(text, angzarr_ports::EN_US.1);
 }
 
-/// Every live key of the spec's three enums, with its declared args.
+/// Every live key of the spec's enums embedded answers, with its declared
+/// args: core's three, and the local-process transport's HostReason. An
+/// enum's numbers may skip those reserved for keys it moved (decision
+/// 14.64), so every number up to a bound is tried.
 fn spec_keys() -> Vec<(&'static str, &'static [&'static str])> {
     use angzarr_embedded::v1::{CoordinatorReason, HostReason, RouterReason};
-    let router = (1..).map_while(|n| RouterReason::try_from(n).ok());
-    let host = (1..).map_while(|n| HostReason::try_from(n).ok());
-    let coordinator = (1..).map_while(|n| CoordinatorReason::try_from(n).ok());
+    use angzarr_proto_transport_embedded::v1::HostReason as ChildReason;
+    let numbers = || 1..=64;
+    let router = numbers().filter_map(|n| RouterReason::try_from(n).ok());
+    let host = numbers().filter_map(|n| HostReason::try_from(n).ok());
+    let coordinator = numbers().filter_map(|n| CoordinatorReason::try_from(n).ok());
+    let child = numbers().filter_map(|n| ChildReason::try_from(n).ok());
     router
         .map(|r| (r.as_str_name(), r.args()))
         .chain(host.map(|r| (r.as_str_name(), r.args())))
         .chain(coordinator.map(|r| (r.as_str_name(), r.args())))
+        .chain(child.map(|r| (r.as_str_name(), r.args())))
         .collect()
 }
 
@@ -506,7 +539,7 @@ fn owner(code: &str) -> Option<&'static str> {
 /// file, or a [`foreign`] crate's own `EN_US`.
 fn render(code: &str, args: &[(&str, Arg)], locale: &str) -> (String, Vec<String>) {
     use fluent_bundle::{FluentArgs, FluentBundle, FluentResource, FluentValue};
-    let spec = is_spec_key(code).then_some(angzarr_proto::REASONS_EN_US);
+    let spec = spec_key(code).map(|(_, catalog)| catalog);
     let krate = spec
         .map(|(name, _)| name)
         .or_else(|| owner(code))

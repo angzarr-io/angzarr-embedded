@@ -24,8 +24,8 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use ::angzarr_embedded::angzarr_proto::v1::{
-    CommandHandlerResponse, CommandResponse, ComponentDescriptor, ComponentKind,
-    ConflictResolution, ContextualCommand, StateOptions,
+    CommandHandlerResponse, ComponentDescriptor, ComponentKind, ConflictResolution,
+    ContextualCommand, StateOptions,
 };
 use ::angzarr_embedded::angzarr_router::domain::DomainDispatch;
 use ::angzarr_embedded::angzarr_router::error::CodedError;
@@ -39,7 +39,7 @@ use ::angzarr_embedded::v1::{
     Outcome, StateDescriptor, Uuid,
 };
 use ::angzarr_embedded::{
-    type_name, Any, Coordinated, CoordinatorPort, Domain, Failure, Handled, Kernel,
+    type_name, Answered, Any, Coordinated, CoordinatorPort, Domain, Failure, Handled, Kernel,
     MemoryDeadLetters, OnRetryable, Payload, PayloadError, Registry, Sampled, State, Timestamp,
     WireError,
 };
@@ -505,7 +505,7 @@ impl CoordinatorPort for BankCoordinator {
         let cover = book.cover.clone();
         self.handed.lock().unwrap().push(book);
         Box::pin(async move {
-            Ok(CommandResponse {
+            Ok(Answered {
                 events: Some(EventBook {
                     cover,
                     pages: vec![EventPage {
@@ -519,7 +519,6 @@ impl CoordinatorPort for BankCoordinator {
                 }),
                 outcome: Some(Outcome {
                     delivery: DeliveryOutcome::Applied as i32,
-                    ..Outcome::default()
                 }),
             })
         })

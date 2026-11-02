@@ -71,6 +71,10 @@ only tests build, aside):
 - **Carry angzarr-proto:** `angzarr-embedded` and `angzarr-embedded-host`,
   which depend on it directly, and `angzarr-store-sqlite`, which depends on
   angzarr-ports.
+  `angzarr-embedded-host` also carries angzarr-proto-component and
+  angzarr-proto-transport-embedded, angzarr core's crates for the component
+  contract and the local-process transport (decision 14.64), under the
+  same licence.
 - **Do not carry angzarr-proto:** `angzarr-embedded-catalog-check`, `angzarr-embedded-conformance`, `angzarr-embedded-host-config` and `angzarr-embedded-macros`.
   `angzarr-embedded-catalog-check`, `angzarr-embedded-conformance` and `angzarr-embedded-macros` reach angzarr-proto only
   through dev-dependencies, so their tests link it but

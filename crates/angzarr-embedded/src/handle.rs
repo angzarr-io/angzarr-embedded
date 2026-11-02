@@ -372,15 +372,12 @@ impl Handled {
         match self {
             Handled::Applied(_) => Outcome {
                 delivery: DeliveryOutcome::Applied as i32,
-                ..Outcome::default()
             },
             Handled::Duplicate(..) => Outcome {
                 delivery: DeliveryOutcome::Duplicate as i32,
-                ..Outcome::default()
             },
             Handled::Parked(_) => Outcome {
                 delivery: DeliveryOutcome::Parked as i32,
-                ..Outcome::default()
             },
         }
     }

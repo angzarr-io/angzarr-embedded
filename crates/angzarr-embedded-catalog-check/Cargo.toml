@@ -15,12 +15,15 @@ rust-version = "1.89"
 # Test-only: nothing in angzarr-embedded renders Fluent; the client does.
 [dev-dependencies]
 angzarr-embedded = { path = "../angzarr-embedded" }
-angzarr-diagnostic = { git = "https://github.com/angzarr-io/angzarr", rev = "2be5a43d83fa35a9be1696b57aed3474971bf9cf" }
+angzarr-diagnostic = { git = "https://github.com/angzarr-io/angzarr", rev = "ab3e9b50ab777f1c4d7269f2744b0a42bc3a6845" }
 angzarr-embedded-host = { path = "../angzarr-embedded-host" }
+# The local-process transport's keys and their English (decision 14.64):
+# the host codes a child's failures under them.
+angzarr-proto-transport-embedded = { git = "https://github.com/angzarr-io/angzarr", rev = "ab3e9b50ab777f1c4d7269f2744b0a42bc3a6845" }
 angzarr-store-sqlite = { path = "../angzarr-store-sqlite" }
 # angzarr-ports' own en-US catalog, which renders the store errors
 # angzarr-embedded forwards.
-angzarr-ports = { git = "https://github.com/angzarr-io/angzarr", rev = "2be5a43d83fa35a9be1696b57aed3474971bf9cf" }
+angzarr-ports = { git = "https://github.com/angzarr-io/angzarr", rev = "ab3e9b50ab777f1c4d7269f2744b0a42bc3a6845" }
 # fluent-bundle (Apache-2.0 OR MIT) renders each sample's message with its
 # args, so a message naming an arg its error may not give fails here, not in
 # the client.

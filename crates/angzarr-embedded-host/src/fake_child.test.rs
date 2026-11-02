@@ -78,14 +78,20 @@ use tonic::{Request, Response, Status};
 
 use crate::config::{ComponentConfig, HostConfig, Supervision};
 use crate::handshake::SOCKET_ENV;
-use angzarr_proto::v1::command_handler_service_server::{
+use angzarr_proto_component::v1::command_handler_service_server::{
     CommandHandlerService, CommandHandlerServiceServer,
 };
-use angzarr_proto::v1::component_service_server::{ComponentService, ComponentServiceServer};
-use angzarr_proto::v1::policy_service_server::{PolicyService, PolicyServiceServer};
-use angzarr_proto::v1::projector_service_server::{ProjectorService, ProjectorServiceServer};
-use angzarr_proto::v1::upcaster_service_server::{UpcasterService, UpcasterServiceServer};
-use angzarr_proto::v1::DescribeRequest;
+use angzarr_proto_component::v1::component_service_server::{
+    ComponentService, ComponentServiceServer,
+};
+use angzarr_proto_component::v1::policy_service_server::{PolicyService, PolicyServiceServer};
+use angzarr_proto_component::v1::projector_service_server::{
+    ProjectorService, ProjectorServiceServer,
+};
+use angzarr_proto_component::v1::upcaster_service_server::{
+    UpcasterService, UpcasterServiceServer,
+};
+use angzarr_proto_component::v1::DescribeRequest;
 use tonic_health::pb::health_check_response::ServingStatus;
 use tonic_health::pb::health_server::{Health, HealthServer};
 use tonic_health::pb::{HealthCheckRequest, HealthCheckResponse};

@@ -119,7 +119,7 @@ pub trait DeadLetterLog: Send + Sync {
 /// A dead letter as one line, keys and values only: [`DEAD_LETTER_PREFIX`],
 /// the component that produced it, the reason's code and its args as
 /// `name=value` in name order (a value quoted where it would not parse
-/// back, `angzarr_diagnostic::quote`), then any metadata, a retried step's
+/// back, `angzarr_diagnostic::quote`), then a retried step's
 /// `retry_count`, and the command's `command_id` and `stream`, or the
 /// event's `sequence` and `stream` (the failed events', or an edition
 /// removal's `EditionDeleted`), as the letter holds. Built from
@@ -138,7 +138,6 @@ pub fn dead_letter_line(letter: &AngzarrDeadLetter) -> String {
         line.push_str(&format!(" {}", reason.code));
         fields.extend(pairs(&reason.args));
     }
-    fields.extend(pairs(&letter.metadata));
     if let Some(RejectionDetails::ProcessingFailed(details)) = &letter.rejection_details {
         if details.retry_count > 0 {
             fields.push(("retry_count".to_string(), details.retry_count.to_string()));
@@ -318,7 +317,6 @@ fn processing_failed(
         failure: Some(reason.clone()),
         retry_count,
         is_transient,
-        ..ProcessingFailedDetails::default()
     })
 }
 

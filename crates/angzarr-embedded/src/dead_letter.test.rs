@@ -186,8 +186,8 @@ fn a_panicking_ingests_dead_letter_carries_its_code_not_english() {
 }
 
 /// A dead letter's value that would not parse back is quoted (decision
-/// 14.37's display rule), its reason's args and its metadata alike: one
-/// empty, or holding whitespace, `=`, `"` or `\`, double-quoted with its
+/// 14.37's display rule), each of its reason's args: one empty, or
+/// holding whitespace, `=`, `"` or `\`, double-quoted with its
 /// `"` and `\` escaped; any other value bare.
 #[test]
 fn a_dead_letters_ambiguous_value_is_quoted() {
@@ -206,16 +206,16 @@ fn a_dead_letters_ambiguous_value_is_quoted() {
                 ("path", "C:\\dir"),
                 ("said", "say \"hi\""),
                 ("seat", "3"),
+                ("note", "k=v"),
             ]),
         }),
-        metadata: pairs(&[("note", "k=v")]),
         source_component: "account".to_string(),
         ..AngzarrDeadLetter::default()
     };
     assert_eq!(
         dead_letter_line(&letter),
         "DEAD_LETTER account: toy-store-down empty=\"\" ext_err_txt=\"database is locked\" \
-         path=\"C:\\\\dir\" said=\"say \\\"hi\\\"\" seat=3 note=\"k=v\""
+         note=\"k=v\" path=\"C:\\\\dir\" said=\"say \\\"hi\\\"\" seat=3"
     );
 }
 

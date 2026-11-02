@@ -17,7 +17,9 @@ Feature: Dead letter queue routing
   - policy / PM / projector handler failures once retries are exhausted
     (processing_failed details)
   - claim-check payloads that cannot be retrieved, at the retry cap
-    (payload_retrieval_failed details, COORDINATOR_REASON_PAYLOAD_UNAVAILABLE)
+    (processing_failed details, COORDINATOR_REASON_PAYLOAD_UNAVAILABLE; the
+    retrieval's details ride the distributed transport's DeadLetterEnvelope,
+    decision 14.64)
   - inputs whose event store keeps failing, at the retry cap
     (processing_failed details, COORDINATOR_REASON_STORE_UNAVAILABLE)
 
@@ -116,7 +118,9 @@ Feature: Dead letter queue routing
   @C-0447
   Scenario: An unretrievable claim-check payload is dead-lettered at the retry cap with the payload key
     # Decision 14.51: a retryable failure carries a key, so the dead letter
-    # at the cap records it.
+    # at the cap records it. A claim check is the distributed transport's
+    # (decision 14.64): the core entry carries processing_failed, and the
+    # retrieval's details ride the envelope around it.
     Given the retry cap is reached after 3 attempts
     And an OrderCreated event for "order-1" whose payload is a PayloadReference to "s3://payloads/abc.bin"
     And the payload store cannot return "s3://payloads/abc.bin"
@@ -124,8 +128,9 @@ Feature: Dead letter queue routing
     Then the coordinator attempts the retrieval 3 times, backing off between attempts
     And a dead letter is published to "angzarr.dlq.order"
     And the dead letter's reason has code COORDINATOR_REASON_PAYLOAD_UNAVAILABLE, arg uri "s3://payloads/abc.bin" and arg cause
-    And the dead letter's payload_retrieval_failed details have storage_type S3, uri "s3://payloads/abc.bin" and failure code COORDINATOR_REASON_PAYLOAD_UNAVAILABLE
+    And the dead letter's processing_failed details have failure code COORDINATOR_REASON_PAYLOAD_UNAVAILABLE, retry_count 2 and is_transient true
     And the dead letter carries no other rejection_details variant
+    And the dead letter envelope's payload_retrieval_failed details have storage_type S3, uri "s3://payloads/abc.bin" and failure code COORDINATOR_REASON_PAYLOAD_UNAVAILABLE
     And an alert is raised
 
   @C-0449

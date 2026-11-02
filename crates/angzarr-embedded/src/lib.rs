@@ -188,7 +188,7 @@ pub use store::{
 #[cfg(any(test, feature = "test-support"))]
 pub use stream::execute::Executed;
 pub use stream::{Envelope, Stream};
-pub use target::{Coordinated, CoordinatorPort, Target};
+pub use target::{Answered, Coordinated, CoordinatorPort, Target};
 pub use upcast::{UpcastFn, UpcastPort, Upcaster};
 pub use wire::WireError;
 

@@ -118,15 +118,22 @@ angzarr.yaml the CLI writes, whose `component` entries name each
 component's `kind`: domain, policy, projector or upcaster), because a remote
 component (a domain, a policy or a projector) is a child process speaking
 gRPC on a Unix socket: hand-rolling HTTP/2 would be a second, unchecked
-implementation of gRPC. Its stubs are angzarr-proto's (its `grpc`
-feature), generated once from the spec's protos with the messages, so no
-`io.angzarr.v1` message or service is written by hand or generated
-twice. Nothing else in the workspace depends on it but the catalog check's
+implementation of gRPC. Its stubs are angzarr-proto-component's (the
+spec's component contract, `io.angzarr.component.v1`, on angzarr-proto's
+messages), and the child protocol's constants and keys
+angzarr-proto-transport-embedded's (the local-process transport), all of
+angzarr core at one rev (decision 14.64), so no message, service or
+protocol constant is written by hand or generated twice. Nothing else in the workspace depends on it but the catalog check's
 tests.
 
-Protobuf code lives in angzarr-proto (core's shared crate: every
-message, and the service stubs behind `grpc`); every other crate stays
-dependency-free except as above.
+Protobuf code lives in angzarr core's proto crates (decision 14.64):
+angzarr-proto, core's messages (`io.angzarr.v1`, prost only), which the
+kernel uses; angzarr-proto-component, the handler services' stubs; and
+angzarr-proto-transport-embedded, the child protocol's constants and keys,
+which only the host uses. The kernel never names a transport's message: a
+remote coordinator answers it in core's (`Answered`), and the distributed
+transport's `CommandResponse` is a port's to build or read. Every other
+crate stays dependency-free except as above.
 
 ## Licence: Apache-2.0 OR BSD-3-Clause; not published
 
@@ -160,9 +167,11 @@ angzarr-ports' own catalog, `angzarr_ports::EN_US` (re-exported as
   whose meaning changes gets a new code; a retired code is not given to
   anything else. A condition the spec keys is the exception: its code is
   the key, verbatim (`HOST_REASON_HANDSHAKE_MALFORMED`), its args the
-  key's `(io.angzarr.v1.reason)` option's (`angzarr_proto::v1::reason_args`),
-  and its English the spec's catalog (`angzarr_proto::REASONS_EN_US`),
-  never this repository's (decision 14.60). Two renames were ruled: the
+  key's `(io.angzarr.v1.reason)` option's (`reason_args` of the key's
+  package), and its English the spec's catalog of that package
+  (`angzarr_proto::REASONS_EN_US` for core's keys,
+  `angzarr_proto_transport_embedded::REASONS_EN_US` for a child's; decision
+  14.64), never this repository's (decision 14.60). Two renames were ruled: the
   kernel's `angzarr-embedded-next-*` codes lost their `next-`, and the codes
   of spec conditions became their keys (docs/design/audit.md, *The renames
   of the kernel's codes*); the `next` module itself is gone, with no alias.

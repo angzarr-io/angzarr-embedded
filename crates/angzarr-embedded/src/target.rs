@@ -25,20 +25,35 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use angzarr_proto::v1::{CommandBook, CommandResponse};
+use angzarr_proto::v1::{CommandBook, EventBook, Outcome};
 use angzarr_router::error::CodedError;
 use angzarr_router::router::DynCommandHandler;
 
+/// What a coordinator answers for one command, in core's messages: the
+/// addressed stream's persisted events and what it did with the delivery
+/// (`outcome.delivery` APPLIED or DUPLICATE), as
+/// `CommandHandlerCoordinatorService.Handle` answers. That answer is the
+/// distributed transport's `CommandResponse` (decision 14.64), which the
+/// kernel never names: a port over that transport builds this from its
+/// `events` and its `SyncOutcome`'s core `outcome`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Answered {
+    /// The addressed stream's events: those persisted, or, for a duplicate,
+    /// those the stream already held; its cover unset means the command's.
+    pub events: Option<EventBook>,
+    /// What the coordinator did with the delivery.
+    pub outcome: Option<Outcome>,
+}
+
 /// What a [`CoordinatorPort`]'s call is: a `Send` future, so the kernel's
 /// own future stays `Send` across it.
-pub type Coordinated<'a> =
-    Pin<Box<dyn Future<Output = Result<CommandResponse, CodedError>> + Send + 'a>>;
+pub type Coordinated<'a> = Pin<Box<dyn Future<Output = Result<Answered, CodedError>> + Send + 'a>>;
 
 /// A coordinator elsewhere that owns a domain's streams, as the kernel
 /// reaches it: angzarr's `CommandHandlerCoordinatorService.Handle`. It is
 /// handed the book as the kernel identified it (its command id fixed
 /// here, so a retry is deduplicated there; its correlation as its sender
-/// set it, or unset) and answers as `Handle` does:
+/// set it, or unset) and answers as `Handle` does ([`Answered`]):
 /// the persisted events, under `outcome.delivery` APPLIED or DUPLICATE; or
 /// a refusal, as the router carries one ([`CodedError`]: a business
 /// refusal's code and args, a bug, a retryable failure), which the kernel

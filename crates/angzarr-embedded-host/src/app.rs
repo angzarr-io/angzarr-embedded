@@ -54,12 +54,12 @@ use std::sync::Arc;
 
 use angzarr_diagnostic::Report;
 use angzarr_embedded::v1::{CommandBook, Cover, EventBook, EventPage};
-use angzarr_embedded::{Catalog, Misconfigured};
+use angzarr_embedded::{Answered, Catalog, Misconfigured};
 use angzarr_embedded::{
     DeadLetterLog, EventStore, Failure, Handled, Kernel, KernelError, Malformed, OnPolicyBug,
     OnRetryable, Recorded, Registry, Rejected, Sampled, StoreError, StreamRef, Wait,
 };
-use angzarr_proto::v1::{CommandResponse, ComponentKind};
+use angzarr_proto::v1::ComponentKind;
 use angzarr_store_sqlite::SqliteStore;
 
 use crate::config::{on_policy_bug, on_retryable, Expose, HostConfig, Languages};
@@ -562,8 +562,10 @@ impl<R: Stores> App<R> {
     /// listener, which arrived from `arrived`, for the store of `key`.
     /// Handled as [`App::handle_in`] handles a book when its domain's
     /// `component` entry is exposed to the arrival, and answered as
-    /// `CommandHandlerCoordinatorService.Handle` answers: the addressed
-    /// stream's events and the delivery outcome. A domain not exposed to
+    /// `CommandHandlerCoordinatorService.Handle` answers, in core's messages
+    /// ([`Answered`]; its listener builds the distributed transport's
+    /// `CommandResponse` from it): the addressed stream's events and the
+    /// delivery outcome. A domain not exposed to
     /// the arrival is refused as an unknown domain is
     /// (`Malformed::UnknownDomain`), the real reason beside it for the
     /// listener's own log ([`Unserved::Hidden`]).
@@ -573,7 +575,7 @@ impl<R: Stores> App<R> {
         book: CommandBook,
         arrived: Arrival,
         sampled: &Sampled,
-    ) -> Result<CommandResponse, Unserved> {
+    ) -> Result<Answered, Unserved> {
         let cover = book.cover.clone();
         if let Some(cover) = &cover {
             let expose = self.exposed.get(&cover.domain).copied().unwrap_or_default();
@@ -602,7 +604,7 @@ impl<R: Stores> App<R> {
                 cover,
                 ..EventBook::default()
             });
-        Ok(CommandResponse {
+        Ok(Answered {
             events: Some(events),
             outcome: Some(handled.outcome()),
         })
@@ -640,7 +642,7 @@ impl<R: Stores<Key = ()>> App<R> {
         book: CommandBook,
         arrived: Arrival,
         sampled: &Sampled,
-    ) -> Result<CommandResponse, Unserved> {
+    ) -> Result<Answered, Unserved> {
         self.serve_in(&(), book, arrived, sampled).await
     }
 }

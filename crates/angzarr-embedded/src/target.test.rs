@@ -8,7 +8,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use angzarr_proto::v1::{CommandHandlerResponse, CommandResponse};
+use angzarr_proto::v1::CommandHandlerResponse;
 use angzarr_router::error::{CodedError, HandlerError};
 use angzarr_router::policy::PolicyDispatch;
 use angzarr_router::router::CommandHandler;
@@ -70,7 +70,7 @@ impl CoordinatorPort for FakeCoordinator {
         Box::pin(async move {
             match answer {
                 Answer::Refused(error) => Err(error),
-                Answer::Events(delivery, payloads) => Ok(CommandResponse {
+                Answer::Events(delivery, payloads) => Ok(Answered {
                     events: Some(EventBook {
                         cover,
                         pages: payloads
@@ -86,7 +86,6 @@ impl CoordinatorPort for FakeCoordinator {
                     }),
                     outcome: Some(Outcome {
                         delivery: delivery as i32,
-                        ..Outcome::default()
                     }),
                 }),
             }

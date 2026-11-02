@@ -25,16 +25,20 @@ use std::time::Duration;
 
 use tokio::io::{AsyncBufRead, AsyncBufReadExt};
 
+use angzarr_proto_transport_embedded::child_protocol;
+
 use crate::error::HandshakeError;
 
-/// The first word of a handshake line.
-pub const HANDSHAKE_PREFIX: &str = "angzarr-handshake";
+/// The first word of a handshake line: the spec's, generated from its
+/// `(child_protocol)` option (angzarr-proto-transport-embedded; decision
+/// 14.64), as are the two below.
+pub const HANDSHAKE_PREFIX: &str = child_protocol::HANDSHAKE_PREFIX;
 
 /// The protocol version this host speaks.
-pub const PROTOCOL_VERSION: &str = "v1";
+pub const PROTOCOL_VERSION: &str = child_protocol::PROTOCOL_VERSION;
 
 /// The environment variable the host sets to the socket path it chose.
-pub const SOCKET_ENV: &str = "ANGZARR_SOCKET";
+pub const SOCKET_ENV: &str = child_protocol::SOCKET_ENV;
 
 /// A parsed handshake: where the child serves.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -62,7 +66,9 @@ pub fn parse_line(line: impl AsRef<[u8]>) -> Result<Option<Handshake>, Handshake
     let rest = rest.strip_prefix(b" ").ok_or_else(malformed)?;
     let space = rest.iter().position(|b| *b == b' ').ok_or_else(malformed)?;
     let (version, address) = (&rest[..space], &rest[space + 1..]);
-    let path = address.strip_prefix(b"unix:").ok_or_else(malformed)?;
+    let path = address
+        .strip_prefix(child_protocol::ADDRESS_SCHEME.as_bytes())
+        .ok_or_else(malformed)?;
     if version != PROTOCOL_VERSION.as_bytes() || !path.starts_with(b"/") {
         return Err(malformed());
     }
