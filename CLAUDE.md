@@ -219,6 +219,13 @@ not put its tests in the reader's (or an LLM's) context.
 - A test reaches the crate as `crate::`, its private items included.
 - Library-source scans (the catalog parity's code-literal check) skip
   `*.test.rs`.
+- angzarr-embedded-host's tests put their scratch under the temporary
+  directory (a fake child's call log, a control socket, a config) in a
+  guard, `test_dir::TestDir` or `TestFile`, removed when it drops, on a pass
+  and on a panic: the rule angzarr-cli's `test-support/test_dir.rs` keeps.
+  Never a bare `temp_dir().join(..)`, which a failing test leaves behind.
+  `ANGZARR_KEEP_TEST_DIRS=1` keeps a failing test's files, named on its
+  stderr.
 
 ## The coordinator contract is run, and its tags are the divergences
 

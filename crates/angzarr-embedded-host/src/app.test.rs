@@ -7,48 +7,7 @@ use angzarr_embedded::{Any, Handled, Misconfigured, Registry, Sampled, Timestamp
 use super::*;
 use crate::config::HostConfig;
 use crate::fake_child::{config, domain, mode, noted};
-
-/// A directory of this test's own, emptied, and removed with what is in it
-/// when the guard drops, the test passing or not.
-fn scratch(name: &str) -> Scratch {
-    let dir = std::env::temp_dir().join(format!("angzarr-host-app-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    Scratch(dir)
-}
-
-/// A scratch directory, removed on drop.
-struct Scratch(PathBuf);
-
-impl std::ops::Deref for Scratch {
-    type Target = Path;
-
-    fn deref(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl AsRef<Path> for Scratch {
-    fn as_ref(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-#[test]
-fn a_scratch_directory_is_gone_once_dropped() {
-    let dir = scratch("dropped");
-    std::fs::write(dir.join("angzarr.yaml"), "").unwrap();
-    let path = dir.to_path_buf();
-    assert!(path.is_dir());
-    drop(dir);
-    assert!(!path.exists(), "{} was left behind", path.display());
-}
+use crate::test_dir::TestDir;
 
 /// `body` stamped at the current version, written as `angzarr.yaml` into
 /// `dir`.
@@ -167,7 +126,7 @@ async fn run_calls_register_for_the_in_process_domains() {
 /// reads, and the next command reaches the child with it.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_store_is_the_configured_sqlite_file() {
-    let dir = scratch("sqlite");
+    let dir = TestDir::new("angzarr-host-app");
     let mut config = player_config();
     config.store.path = dir.join("app.db");
     let app = run_config(&config, nothing).await.unwrap();
@@ -192,7 +151,7 @@ async fn the_store_is_the_configured_sqlite_file() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_kernel_follows_the_configs_policy_setting() {
     use angzarr_embedded::OnPolicyBug;
-    let dir = scratch("policy");
+    let dir = TestDir::new("angzarr-host-app");
     let path = written(&dir, "store:\n  in_memory: true\n");
     let app = run(&path, nothing).await.unwrap();
     assert_eq!(app.kernel().policy_bug(), OnPolicyBug::MovePast);
@@ -210,7 +169,7 @@ async fn the_kernel_follows_the_configs_policy_setting() {
 async fn the_kernel_follows_the_configs_retry_setting() {
     use angzarr_embedded::OnRetryable;
     use std::time::Duration;
-    let dir = scratch("retry");
+    let dir = TestDir::new("angzarr-host-app");
     let path = written(&dir, "store:\n  in_memory: true\n");
     let app = run(&path, nothing).await.unwrap();
     assert_eq!(app.kernel().retryable(), OnRetryable::default());
@@ -237,7 +196,7 @@ async fn the_kernel_follows_the_configs_retry_setting() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_missing_config_is_unreadable() {
-    let dir = scratch("missing");
+    let dir = TestDir::new("angzarr-host-app");
     let path = dir.join("angzarr.yaml");
     assert_eq!(
         run(&path, nothing).await.err(),
@@ -253,7 +212,7 @@ async fn a_missing_config_is_unreadable() {
 /// TOML among it) and a file of a newer version.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_invalid_config_is_refused_where_it_goes_wrong() {
-    let dir = scratch("invalid");
+    let dir = TestDir::new("angzarr-host-app");
     let path = written(&dir, "store:\n  in_memory: true\n  lanuch: 1\n");
     let refused = run(&path, nothing).await.err();
     assert!(
@@ -282,7 +241,7 @@ async fn an_invalid_config_is_refused_where_it_goes_wrong() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_config_in_hand_runs_as_its_file_does() {
     use angzarr_embedded::OnPolicyBug;
-    let dir = scratch("in-hand");
+    let dir = TestDir::new("angzarr-host-app");
     let path = written(&dir, "store:\n  in_memory: true\npolicy:\n  on_bug: stay\n");
     let text = std::fs::read_to_string(&path).unwrap();
     let config = crate::config::parse(&text, "angzarr.yaml").unwrap();
@@ -303,7 +262,7 @@ async fn a_config_in_hand_runs_as_its_file_does() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_language_not_loaded_is_refused_and_one_loaded_runs() {
     use crate::config::{Language, Languages};
-    let dir = scratch("languages");
+    let dir = TestDir::new("angzarr-host-app");
     let path = written(
         &dir,
         "component:\n  - name: table\n    kind: domain\n    language: rustacean\n\
@@ -331,7 +290,7 @@ async fn a_language_not_loaded_is_refused_and_one_loaded_runs() {
 /// store error; the children started are stopped.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_store_that_cannot_open_fails_the_run() {
-    let dir = scratch("nostore");
+    let dir = TestDir::new("angzarr-host-app");
     let mut config = player_config();
     config.store.path = dir.join("no/such/dir/app.db");
     let failed = run_config(&config, nothing).await.err();
@@ -557,7 +516,7 @@ mod concurrency {
     /// handled one after the other would leave the first [`ALONE`].
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn two_aggregates_handle_commands_concurrently() {
-        let dir = scratch("concurrent-domains");
+        let dir = TestDir::new("angzarr-host-app");
         let rendezvous = Arc::new(Rendezvous::of(2));
         let meeting = rendezvous.clone();
         let app = run(
@@ -600,7 +559,7 @@ mod concurrency {
     /// included.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn two_streams_of_one_aggregate_handle_commands_concurrently() {
-        let dir = scratch("concurrent-streams");
+        let dir = TestDir::new("angzarr-host-app");
         let rendezvous = Arc::new(Rendezvous::of(2));
         let meeting = rendezvous.clone();
         let app = run(
@@ -1298,7 +1257,7 @@ mod resume {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn policy_work_owed_at_a_crash_is_resumed_at_start() {
-        let dir = scratch("resume");
+        let dir = TestDir::new("angzarr-host-app");
         let db = dir.join("app.db");
 
         // The first process: `left`'s event committed, its step never run.
