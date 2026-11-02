@@ -147,7 +147,7 @@ angzarr-ports' own catalog, `angzarr_ports::EN_US` (re-exported as
 `angzarr_embedded::angzarr_ports`), checked against its errors in core.
 
 - **Codes are stable and never reused.** Kebab-case, starting with the
-  crate's name (`angzarr-embedded-host-handshake-timeout`), and a valid Fluent message id. A code
+  crate's name (`angzarr-embedded-host-spawn`), and a valid Fluent message id. A code
   whose meaning changes gets a new code; a retired code is not given to
   anything else. A condition the spec keys is the exception: its code is
   the key, verbatim (`HOST_REASON_HANDSHAKE_MALFORMED`), its args the

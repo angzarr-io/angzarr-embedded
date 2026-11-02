@@ -10,6 +10,7 @@
 use std::fmt;
 
 use angzarr_diagnostic::{Arg, Diagnostic, Report};
+use angzarr_proto::v1::{reason_args, HostReason};
 
 /// What was wrong with a child's handshake: the one stdout line,
 /// `angzarr-handshake v1 unix:<absolute-socket-path>`, it prints once it is
@@ -17,17 +18,17 @@ use angzarr_diagnostic::{Arg, Diagnostic, Report};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HandshakeError {
     /// A line that announces itself as a handshake (it starts
-    /// `angzarr-handshake`) but is not a v1 one naming an absolute Unix
-    /// socket path. `line` is the line as read, its line ending removed.
+    /// `angzarr-handshake`) but is not a v1 one naming an absolute UTF-8
+    /// Unix socket path: the spec's `HOST_REASON_HANDSHAKE_MALFORMED`.
+    /// `line` is the line as read, its line ending removed; one that is
+    /// not UTF-8 has each byte outside printable ASCII, and each
+    /// backslash, written `\xhh` (`\xe9`), so nothing is decoded lossily.
     Malformed { line: String },
-    /// No handshake within the configured time.
+    /// No handshake within the configured time: the spec's
+    /// `HOST_REASON_HANDSHAKE_TIMEOUT`.
     Timeout { timeout_ms: u64 },
-    /// A v1 handshake whose socket path is not UTF-8, which the host does
-    /// not decode into another path: `path` is its bytes, each outside
-    /// printable ASCII escaped (`\xe9`).
-    PathNotUtf8 { path: String },
     /// The child's stdout ended (it exited, or closed it) before a
-    /// handshake.
+    /// handshake: the spec's `HOST_REASON_HANDSHAKE_CLOSED`.
     Closed,
     /// Reading the child's stdout failed. `kind` is the I/O error's
     /// `std::io::ErrorKind`, by name.
@@ -43,12 +44,9 @@ impl fmt::Display for HandshakeError {
 impl Diagnostic for HandshakeError {
     fn code(&self) -> &str {
         match self {
-            HandshakeError::Malformed { .. } => {
-                angzarr_proto::v1::HostReason::HandshakeMalformed.as_str_name()
-            }
-            HandshakeError::PathNotUtf8 { .. } => "angzarr-embedded-host-handshake-path-not-utf8",
-            HandshakeError::Timeout { .. } => "angzarr-embedded-host-handshake-timeout",
-            HandshakeError::Closed => "angzarr-embedded-host-handshake-closed",
+            HandshakeError::Malformed { .. } => HostReason::HandshakeMalformed.as_str_name(),
+            HandshakeError::Timeout { .. } => HostReason::HandshakeTimeout.as_str_name(),
+            HandshakeError::Closed => HostReason::HandshakeClosed.as_str_name(),
             HandshakeError::Unreadable { .. } => "angzarr-embedded-host-handshake-unreadable",
         }
     }
@@ -56,10 +54,11 @@ impl Diagnostic for HandshakeError {
     fn args(&self) -> Vec<(&str, Arg)> {
         match self {
             HandshakeError::Malformed { line } => {
-                vec![(angzarr_proto::v1::reason_args::LINE, line.as_str().into())]
+                vec![(reason_args::LINE, line.as_str().into())]
             }
-            HandshakeError::PathNotUtf8 { path } => vec![("path", path.as_str().into())],
-            HandshakeError::Timeout { timeout_ms } => vec![("timeout_ms", (*timeout_ms).into())],
+            HandshakeError::Timeout { timeout_ms } => {
+                vec![(reason_args::TIMEOUT_MS, (*timeout_ms).into())]
+            }
             HandshakeError::Closed => vec![],
             HandshakeError::Unreadable { kind } => vec![("kind", kind.as_str().into())],
         }
@@ -110,7 +109,8 @@ pub enum HostError {
     Health { domain: String, grpc_code: i32 },
     /// A child that is described reported its server (service `""`) other
     /// than SERVING once it had handshaken, when the child protocol says
-    /// it handshakes only once SERVING: `status` is the health status, by
+    /// it handshakes only once SERVING: the spec's
+    /// `HOST_REASON_CHILD_NOT_SERVING`. `status` is the health status, by
     /// its name (`NOT_SERVING`).
     NotServing { component: String, status: String },
     /// The child described itself as another kind than its `kind` says:
@@ -146,14 +146,16 @@ pub enum HostError {
     /// takes such a change only when it starts.
     DescriptorChanged { domain: String },
     /// A probed child exited on its stdin's end with a status other than
-    /// 0 ([`crate::probe`]).
+    /// 0 ([`crate::probe`]): the spec's `HOST_REASON_CHILD_EXIT_STATUS`.
     ExitStatus { component: String, exit_code: i32 },
     /// A probed child did not exit by itself on its stdin's end within the
-    /// shutdown grace ([`crate::probe`]): `ended` is how it ended
+    /// shutdown grace ([`crate::probe`]): the spec's
+    /// `HOST_REASON_CHILD_NOT_EXITED`. `ended` is how it ended
     /// ([`ChildExit::ended`](crate::ChildExit::ended)).
     NotExited { component: String, ended: String },
     /// The probe was given an input a child of `kind` does not handle (a
-    /// command for a policy, a book of events for a domain).
+    /// command for a policy, a book of events for a domain): the spec's
+    /// `HOST_REASON_PROBE_INPUT`.
     ProbeInput { component: String, kind: String },
     /// The configured `socket_dir` is too long for a Unix socket path to
     /// hold the host's socket names in it: at most `max_bytes` bytes.
@@ -204,19 +206,19 @@ impl Diagnostic for HostError {
             HostError::Connect { .. } => "angzarr-embedded-host-connect",
             HostError::Describe { .. } => "angzarr-embedded-host-describe",
             HostError::Health { .. } => "angzarr-embedded-host-health",
-            HostError::NotServing { .. } => "angzarr-embedded-host-not-serving",
+            HostError::NotServing { .. } => HostReason::ChildNotServing.as_str_name(),
             HostError::KindMismatch { .. } => "angzarr-embedded-host-kind-mismatch",
             HostError::NoInput { .. } => "angzarr-embedded-host-no-input",
             HostError::ProjectorNoInputDomain { .. } => {
-                angzarr_proto::v1::HostReason::ProjectorNoInputDomain.as_str_name()
+                HostReason::ProjectorNoInputDomain.as_str_name()
             }
             HostError::Descriptor { .. } => "angzarr-embedded-host-descriptor",
             HostError::DescriptorChanged { .. } => "angzarr-embedded-host-descriptor-changed",
             HostError::UpcasterNoDomain { .. } => "angzarr-embedded-host-upcaster-no-domain",
             HostError::NotExposable { .. } => "angzarr-embedded-host-not-exposable",
-            HostError::ExitStatus { .. } => "angzarr-embedded-host-exit-status",
-            HostError::NotExited { .. } => "angzarr-embedded-host-not-exited",
-            HostError::ProbeInput { .. } => "angzarr-embedded-host-probe-input",
+            HostError::ExitStatus { .. } => HostReason::ChildExitStatus.as_str_name(),
+            HostError::NotExited { .. } => HostReason::ChildNotExited.as_str_name(),
+            HostError::ProbeInput { .. } => HostReason::ProbeInput.as_str_name(),
             HostError::SocketDirTooLong { .. } => "angzarr-embedded-host-socket-dir-too-long",
             HostError::ConfigUnreadable { .. } => "angzarr-embedded-host-config-unreadable",
             HostError::ConfigInvalid { .. } => "angzarr-embedded-host-config-invalid",
@@ -230,6 +232,7 @@ impl Diagnostic for HostError {
 
     fn args(&self) -> Vec<(&str, Arg)> {
         let domain = |d: &str| ("domain", Arg::from(d));
+        let component = |c: &str| (reason_args::COMPONENT, Arg::from(c));
         match self {
             HostError::DuplicateDomain { domain: d }
             | HostError::EmptyLaunch { domain: d }
@@ -238,12 +241,7 @@ impl Diagnostic for HostError {
             | HostError::UpcasterNoDomain { domain: d } => {
                 vec![domain(d)]
             }
-            HostError::ProjectorNoInputDomain { component } => {
-                vec![(
-                    angzarr_proto::v1::reason_args::COMPONENT,
-                    component.as_str().into(),
-                )]
-            }
+            HostError::ProjectorNoInputDomain { component: c } => vec![component(c)],
             HostError::NoLaunch {
                 domain: d,
                 language,
@@ -263,15 +261,15 @@ impl Diagnostic for HostError {
             HostError::ExitStatus {
                 component: c,
                 exit_code,
-            } => vec![domain(c), ("exit_code", (*exit_code).into())],
+            } => vec![component(c), (reason_args::EXIT_CODE, (*exit_code).into())],
             HostError::NotExited {
                 component: c,
                 ended,
             } => {
-                vec![domain(c), ("ended", ended.as_str().into())]
+                vec![component(c), (reason_args::ENDED, ended.as_str().into())]
             }
             HostError::ProbeInput { component: c, kind } => {
-                vec![domain(c), ("kind", kind.as_str().into())]
+                vec![component(c), (reason_args::KIND, kind.as_str().into())]
             }
             HostError::NotExposable { domain: d, kind }
             | HostError::NotRegistered { domain: d, kind }
@@ -285,7 +283,7 @@ impl Diagnostic for HostError {
                 component: c,
                 status,
             } => {
-                vec![domain(c), ("status", status.as_str().into())]
+                vec![component(c), (reason_args::STATUS, status.as_str().into())]
             }
             HostError::Describe {
                 domain: d,
@@ -345,9 +343,6 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn Diagnostic>> {
     vec![
         Box::new(HandshakeError::Malformed {
             line: "angzarr-handshake v2".to_string(),
-        }),
-        Box::new(HandshakeError::PathNotUtf8 {
-            path: "/run/caf\\xe9.sock".to_string(),
         }),
         Box::new(HandshakeError::Timeout { timeout_ms: 30_000 }),
         Box::new(HandshakeError::Closed),
@@ -448,7 +443,7 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn Diagnostic>> {
             cause: Report::new("angzarr-embedded-host-duplicate-domain").arg("domain", "player"),
         }),
         Box::new(HostError::Store {
-            cause: Report::new("angzarr-embedded-host-handshake-closed"),
+            cause: Report::new("angzarr-embedded-host-runtime").arg("kind", "Other"),
         }),
         Box::new(HostError::Runtime {
             kind: "Other".to_string(),

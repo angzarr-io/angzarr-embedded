@@ -4,9 +4,6 @@
 # keys is coded under its key, whose English is the spec's catalog
 # (angzarr_proto::REASONS_EN_US; decision 14.60), never here.
 
-angzarr-embedded-host-handshake-timeout = no handshake within { $timeout_ms } ms
-angzarr-embedded-host-handshake-closed = stdout closed before a handshake
-angzarr-embedded-host-handshake-path-not-utf8 = the handshake names a socket path that is not UTF-8: { $path }
 angzarr-embedded-host-handshake-unreadable = stdout could not be read ({ $kind })
 angzarr-embedded-host-duplicate-domain = component "{ $domain }" is configured twice
 angzarr-embedded-host-no-launch = component "{ $domain }": language "{ $language }" has no default launch command; give one
@@ -17,7 +14,6 @@ angzarr-embedded-host-handshake = component "{ $domain }": { $cause }
 angzarr-embedded-host-connect = component "{ $domain }": could not connect to { $socket }
 angzarr-embedded-host-describe = component "{ $domain }": Describe failed with gRPC code { $grpc_code }
 angzarr-embedded-host-health = component "{ $domain }": its gRPC health watch failed with gRPC code { $grpc_code }
-angzarr-embedded-host-not-serving = component "{ $domain }" reported its health { $status } after its handshake, when a child handshakes only once it is SERVING
 angzarr-embedded-host-kind-mismatch = component "{ $domain }" is configured as a { $configured } but describes itself as { $described }
 angzarr-embedded-host-no-input = policy "{ $domain }" names no input domain in its descriptor
 angzarr-embedded-host-upcaster-no-domain = component "{ $domain }" is an upcaster that names no domain to upcast: give it `upcasts`
@@ -25,9 +21,6 @@ angzarr-embedded-host-not-exposable = component "{ $domain }" is a { $kind }: on
 angzarr-embedded-host-not-exposed = a request for "{ $domain }" from { $arrival } was answered as an unknown domain: its component is exposed { $expose }
 angzarr-embedded-host-descriptor = component "{ $domain }": its descriptor is refused: { $cause }
 angzarr-embedded-host-descriptor-changed = component "{ $domain }" restarted describing another component than it is registered as: restart the host to take the change
-angzarr-embedded-host-exit-status = component "{ $domain }" exited on its stdin's end with status { $exit_code }, not 0
-angzarr-embedded-host-not-exited = component "{ $domain }" did not exit by itself on its stdin's end within its grace ({ $ended })
-angzarr-embedded-host-probe-input = the probe's input for component "{ $domain }" is not one a { $kind } handles
 angzarr-embedded-host-runtime = the host's runtime could not be built ({ $kind })
 angzarr-embedded-host-socket-dir-too-long = socket_dir "{ $dir }" is too long for a Unix socket path: at most { $max_bytes ->
         [one] { $max_bytes } byte

@@ -14,11 +14,11 @@
 //! by its first word, as bytes: lines before the handshake whose first
 //! word is not `angzarr-handshake` (a library's banner, a test harness's)
 //! are skipped; a line whose first word is and that is not a v1 handshake
-//! naming an absolute Unix socket is refused, never skipped
-//! (`HOST_REASON_HANDSHAKE_MALFORMED`). Nothing read is decoded lossily: a
-//! handshake naming a path that is not UTF-8 is refused under its own key,
-//! and a refused line that is not UTF-8 is given back with its bytes
-//! escaped.
+//! naming an absolute UTF-8 Unix socket path is refused, never skipped
+//! (`HOST_REASON_HANDSHAKE_MALFORMED`), a path that is not UTF-8 included
+//! (decision 14.62). Nothing read is decoded lossily: a refused line that
+//! is not UTF-8 is given back with each byte outside printable ASCII, and
+//! each backslash, written `\xhh`, as the protocol says.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -46,8 +46,7 @@ pub struct Handshake {
 /// One stdout line, as read, its line ending (`\n` or `\r\n`) included
 /// or not: `Ok(Some)` for a handshake, `Ok(None)` for a line that is not
 /// one, and an error for a line whose first word is `angzarr-handshake`
-/// but is not a v1 handshake naming an absolute Unix socket path, or one
-/// whose path is not UTF-8.
+/// but is not a v1 handshake naming an absolute UTF-8 Unix socket path.
 pub fn parse_line(line: impl AsRef<[u8]>) -> Result<Option<Handshake>, HandshakeError> {
     let line = line.as_ref();
     let line = line.strip_suffix(b"\n").unwrap_or(line);
@@ -67,18 +66,26 @@ pub fn parse_line(line: impl AsRef<[u8]>) -> Result<Option<Handshake>, Handshake
     if version != PROTOCOL_VERSION.as_bytes() || !path.starts_with(b"/") {
         return Err(malformed());
     }
-    let path = std::str::from_utf8(path).map_err(|_| HandshakeError::PathNotUtf8 {
-        path: path.escape_ascii().to_string(),
-    })?;
+    let path = std::str::from_utf8(path).map_err(|_| malformed())?;
     Ok(Some(Handshake {
         socket: PathBuf::from(path),
     }))
 }
 
-/// `bytes` as text: as they are when they are UTF-8, else every byte
-/// outside printable ASCII escaped, so nothing is lost.
+/// `bytes` as text: as they are when they are UTF-8, else each byte
+/// outside printable ASCII, and each backslash, written `\xhh`, so nothing
+/// is lost and none is decoded into another character (the child
+/// protocol's escape for a refused line).
 fn text(bytes: &[u8]) -> String {
-    String::from_utf8(bytes.to_vec()).unwrap_or_else(|_| bytes.escape_ascii().to_string())
+    String::from_utf8(bytes.to_vec()).unwrap_or_else(|_| {
+        let printable = |b: u8| (b' '..=b'~').contains(&b) && b != b'\\';
+        (bytes.iter())
+            .map(|&b| match printable(b) {
+                true => char::from(b).to_string(),
+                false => format!("\\x{b:02x}"),
+            })
+            .collect()
+    })
 }
 
 /// Reads `stdout` line by line to its handshake, skipping the lines before
