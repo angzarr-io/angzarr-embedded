@@ -2270,6 +2270,98 @@ fn a_policys_fact_whose_handler_fails_is_parked_and_its_step_done() {
     assert_eq!(position(&store, "unchecked", &cover("account", 1)), 1);
 }
 
+/// A ledger whose business process answers every input with a business
+/// rejection: what a remote one may answer a fact, though a fact is never
+/// refused.
+struct RefusesAll;
+
+impl crate::angzarr_router::router::CommandHandler for RefusesAll {
+    fn name(&self) -> &str {
+        "ledger"
+    }
+    fn command_types(&self) -> Vec<String> {
+        Vec::new()
+    }
+    async fn dispatch(
+        &self,
+        _: &angzarr_proto::v1::ContextualCommand,
+    ) -> Result<angzarr_proto::v1::CommandHandlerResponse, crate::angzarr_router::error::CodedError>
+    {
+        Err(crate::angzarr_router::error::CodedError {
+            code: "TOY_REFUSED".to_string(),
+            extras: Default::default(),
+            grpc: crate::angzarr_router::error::GrpcCode::FailedPrecondition,
+            refusal: None,
+        })
+    }
+}
+
+/// A policy's fact its destination answers with a business rejection,
+/// which a fact never is: not the refusal path (no OnRefused, no refusal
+/// fact), and, as nothing dead-lettered it, not parked either: its step
+/// fails as the rejection, and nothing is dead-lettered.
+#[test]
+fn a_policys_fact_answered_with_a_rejection_is_neither_refused_nor_parked() {
+    use crate::v1::{command_page::Body, Fact};
+    let mut registry = crate::Registry::new();
+    crate::toys::register::<Account>(
+        &mut registry,
+        crate::Upcaster::new("account-upcaster", "account"),
+    )
+    .unwrap();
+    registry
+        .command_handler(
+            "ledger",
+            RefusesAll,
+            crate::toys::descriptor_of::<Ledger>(crate::v1::ComponentKind::Aggregate, "v2", &[]),
+        )
+        .unwrap();
+    registry
+        .policy_component(
+            Unchecked {
+                answer: |_| {
+                    let mut fact = record_for(ledger_cover());
+                    let page = fact.page.as_mut().unwrap();
+                    let Some(Body::Command(record)) = page.body.take() else {
+                        unreachable!()
+                    };
+                    page.body = Some(Body::Fact(Fact {
+                        payload: record.payload,
+                    }));
+                    vec![fact]
+                },
+            },
+            "ledger",
+        )
+        .unwrap();
+    let log = MemoryDeadLetters::new();
+    let store = MemoryStore::new();
+    let failure = Kernel::new(&registry)
+        .log_with(&log)
+        .on_retryable(crate::toys::no_retries())
+        .handle::<Account, _>(
+            &store,
+            command(cover("account", 1), AccountCmd::Open.to_any()),
+            &at(30),
+        )
+        .ready()
+        .err()
+        .expect("the step fails");
+    assert!(
+        matches!(
+            failure,
+            Failure::Downstream {
+                error: StepError::Rejected(_),
+                ..
+            }
+        ),
+        "{failure:?}"
+    );
+    assert!(log.letters().is_empty(), "{:?}", log.letters());
+    assert_eq!(streams(&store), [cover("account", 1)], "no refusal fact");
+    assert_eq!(position(&store, "unchecked", &cover("account", 1)), 0);
+}
+
 /// A policy's commands naming exactly the command id and causation their
 /// coordinator stamps (decision 14.48, amended: no id that DIFFERS from
 /// the stamp) are delivered, each by its own index in the answer.
