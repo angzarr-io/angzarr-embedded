@@ -234,7 +234,13 @@ not put its tests in the reader's (or an LLM's) context.
   and on a panic: the rule angzarr-cli's `test-support/test_dir.rs` keeps.
   Never a bare `temp_dir().join(..)`, which a failing test leaves behind.
   `ANGZARR_KEEP_TEST_DIRS=1` keeps a failing test's files, named on its
-  stderr.
+  stderr. A directory for the host's own sockets is
+  `TestDir::for_sockets`, under the host's default socket directory, short
+  whatever `$TMPDIR` is. angzarr-store-sqlite's tests take a database file
+  from its `test_database::database()` guard, on the same rule.
+- The host's socket for a child is a `SocketFile`, removed when it drops,
+  however the child's supervision ends; only a host (or test binary)
+  killed outright leaves one in `$XDG_RUNTIME_DIR`.
 
 ## The coordinator contract is run, and its tags are the divergences
 
