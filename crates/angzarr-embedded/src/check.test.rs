@@ -449,19 +449,42 @@ mod parse {
         }
     }
 
-    #[test]
-    fn malformed_books_are_refused_naming_the_first_malformation() {
-        let ok = || command(cover("account", 1), deposit(1));
-        let ok_fact = || fact(cover("account", 1), payment(1), "pi_1");
-        let short = |n: usize| Uuid {
-            value: vec![0xab; n].into(),
-        };
-        let edit = |mut book: CommandBook, f: &dyn Fn(&mut CommandBook)| {
-            f(&mut book);
-            book
-        };
+    /// A book that checks: a deposit to account 1.
+    fn ok() -> CommandBook {
+        command(cover("account", 1), deposit(1))
+    }
 
-        let cases: Vec<(&str, CommandBook, Malformed)> = vec![
+    /// A fact that checks: a payment to account 1.
+    fn ok_fact() -> CommandBook {
+        fact(cover("account", 1), payment(1), "pi_1")
+    }
+
+    /// An id of `n` bytes, never well formed but at 16.
+    fn short(n: usize) -> Uuid {
+        Uuid {
+            value: vec![0xab; n].into(),
+        }
+    }
+
+    /// `book`, edited by `f`.
+    fn edit(mut book: CommandBook, f: &dyn Fn(&mut CommandBook)) -> CommandBook {
+        f(&mut book);
+        book
+    }
+
+    /// Each case's book is refused, naming its first malformation.
+    fn assert_refused(cases: Vec<(&str, CommandBook, Malformed)>) {
+        let registry = registry();
+        for (case, book, malformed) in cases {
+            assert_eq!(check(book, registry.catalog()), Err(malformed), "{case}");
+        }
+    }
+
+    /// The cover: present, its domain known, its root 16 bytes, its edition
+    /// unset or named.
+    #[test]
+    fn a_malformed_cover_is_refused() {
+        assert_refused(vec![
             (
                 "no cover",
                 edit(ok(), &|b| b.cover = None),
@@ -507,6 +530,14 @@ mod parse {
                 ),
                 Malformed::NoRoot,
             ),
+        ]);
+    }
+
+    /// The page: present, with a body and a payload, its ids 16 bytes, and no
+    /// causation from a client.
+    #[test]
+    fn a_malformed_page_is_refused() {
+        assert_refused(vec![
             ("no page", edit(ok(), &|b| b.page = None), Malformed::NoPage),
             (
                 "no body",
@@ -535,6 +566,14 @@ mod parse {
                 ok().caused_by(trigger()),
                 Malformed::CausationFromOutside,
             ),
+        ]);
+    }
+
+    /// The body: a fact has its origin, its derived command id and no
+    /// handling; a command has no origin.
+    #[test]
+    fn a_malformed_body_is_refused() {
+        assert_refused(vec![
             (
                 "a fact without its origin",
                 edit(ok_fact(), &|b| b.page_mut().fact_origin = None),
@@ -567,6 +606,14 @@ mod parse {
                 ok_fact().resolved_by(ConflictResolution::Strict),
                 Malformed::HandlingOnFact,
             ),
+        ]);
+    }
+
+    /// The handling: a conflict resolution angzarr defines, and the state
+    /// supports.
+    #[test]
+    fn an_unsupported_handling_is_refused() {
+        assert_refused(vec![
             (
                 "a resolution this build does not know",
                 edit(ok(), &|b| {
@@ -585,12 +632,7 @@ mod parse {
                     requested: ConflictResolution::Commutative,
                 },
             ),
-        ];
-
-        let registry = registry();
-        for (case, book, malformed) in cases {
-            assert_eq!(check(book, registry.catalog()), Err(malformed), "{case}");
-        }
+        ]);
     }
 }
 

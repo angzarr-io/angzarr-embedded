@@ -256,24 +256,63 @@ pub fn event_meta(
 /// using exactly its args. Its messages are in
 /// `crates/angzarr-embedded/locales/en-US/angzarr-embedded.ftl`.
 pub fn diagnostic_samples() -> Vec<Box<dyn angzarr_diagnostic::Diagnostic>> {
-    use angzarr_diagnostic::Report;
-    use angzarr_ports::Cause;
-    use v1::ConflictResolution;
+    fn boxed<E: angzarr_diagnostic::Diagnostic + 'static>(
+        errors: impl IntoIterator<Item = E>,
+    ) -> impl Iterator<Item = Box<dyn angzarr_diagnostic::Diagnostic>> {
+        errors.into_iter().map(|e| Box::new(e) as _)
+    }
+    let mut samples = Vec::new();
+    samples.extend(boxed(malformed_samples()));
+    samples.extend(boxed(kernel_samples()));
+    samples.extend(boxed(replay_samples()));
+    samples.extend(boxed(store_samples().into_iter().map(KernelError::Store)));
+    samples.extend(boxed(payload_samples()));
+    samples.extend(boxed(chain_samples()));
+    samples.extend(boxed(misconfigured_samples()));
+    samples.extend(boxed(upcast_samples()));
+    samples.extend(boxed(failure_samples()));
+    samples.extend(boxed(router_samples()));
+    samples.push(Box::new(markup::NotItsStream {
+        domain: sample_domain(),
+        key: "swift-amber-falcon".to_string(),
+    }));
+    samples.extend(boxed(wire_samples()));
+    samples
+}
 
-    let stream = || v1::Cover {
+/// The stream the samples are about.
+fn sample_stream() -> v1::Cover {
+    v1::Cover {
         domain: "account".to_string(),
         root: Some(v1::Uuid::from_bytes([7; 16])),
         edition: Some("what-if".to_string()),
-    };
-    let missing = WireError::Missing {
-        message: "toy.v1.Deposited",
-        field: "at",
-    };
-    let report = || Report::of(&missing);
-    let domain = || "account".to_string();
-    let malformed = [
+    }
+}
+
+/// The domain the samples name.
+fn sample_domain() -> String {
+    "account".to_string()
+}
+
+/// The cause the samples carry: a wire error.
+const SAMPLE_MISSING: WireError = WireError::Missing {
+    message: "toy.v1.Deposited",
+    field: "at",
+};
+
+/// [`SAMPLE_MISSING`], reported.
+fn sample_report() -> angzarr_diagnostic::Report {
+    angzarr_diagnostic::Report::of(&SAMPLE_MISSING)
+}
+
+/// Each [`Malformed`] variant.
+fn malformed_samples() -> Vec<Malformed> {
+    use v1::ConflictResolution;
+    vec![
         Malformed::NoCover,
-        Malformed::UnknownDomain { domain: domain() },
+        Malformed::UnknownDomain {
+            domain: sample_domain(),
+        },
         Malformed::NoRoot,
         Malformed::BadRoot { len: 15 },
         Malformed::EmptyEdition,
@@ -297,86 +336,98 @@ pub fn diagnostic_samples() -> Vec<Box<dyn angzarr_diagnostic::Diagnostic>> {
         Malformed::UnknownConflictResolution { value: 9 },
         Malformed::RefusalMisaddressed,
         Malformed::UnsupportedConflictResolution {
-            domain: domain(),
+            domain: sample_domain(),
             requested: ConflictResolution::Commutative,
         },
-    ];
-    let kernel = [
+    ]
+}
+
+/// Each [`KernelError`] variant but `Store` ([`store_samples`]) and
+/// `Router` ([`router_samples`]).
+fn kernel_samples() -> Vec<KernelError> {
+    use angzarr_diagnostic::Report;
+    vec![
         KernelError::Stale {
-            stream: stream(),
+            stream: sample_stream(),
             expected: 2,
             actual: 4,
         },
         KernelError::ExpectedSequenceAhead {
-            stream: stream(),
+            stream: sample_stream(),
             expected: 7,
             head: 3,
         },
         KernelError::RetryCapExhausted {
-            stream: stream(),
+            stream: sample_stream(),
             attempts: 3,
             cap: 3,
         },
         KernelError::Unresolved {
-            stream: stream(),
+            stream: sample_stream(),
             expected: 2,
             actual: 4,
         },
         KernelError::RulesVersionMismatch {
-            stream: stream(),
+            stream: sample_stream(),
             registered: "1.4.2+build.7".to_string(),
             reported: "1.5.0+build.9".to_string(),
         },
         KernelError::Overlap {
-            stream: stream(),
+            stream: sample_stream(),
             expected: 2,
             actual: 4,
             window_units: "items[a],items[b]".to_string(),
             command_units: "items[b].count".to_string(),
         },
         KernelError::UnknownType {
-            stream: stream(),
+            stream: sample_stream(),
             type_url: "/toy.v9.Bonus".to_string(),
         },
         KernelError::InvalidPayload {
-            stream: stream(),
+            stream: sample_stream(),
             type_url: "/toy.v1.Deposit".to_string(),
-            reason: report(),
+            reason: sample_report(),
         },
         KernelError::Upcast {
-            stream: stream(),
+            stream: sample_stream(),
             error: UpcastError::Rule {
                 source: "toy.v0.Credited".to_string(),
-                error: report(),
+                error: sample_report(),
             },
         },
         KernelError::WrongDomain {
-            stream: stream(),
+            stream: sample_stream(),
             expected: "ledger",
         },
         KernelError::ChainTooDeep { limit: 8 },
         KernelError::TooManySteps {
-            stream: stream(),
+            stream: sample_stream(),
             limit: 16,
         },
         KernelError::BeforeSnapshot {
-            stream: stream(),
+            stream: sample_stream(),
             first: 10,
         },
-        KernelError::UnregisteredDomain { domain: domain() },
+        KernelError::UnregisteredDomain {
+            domain: sample_domain(),
+        },
         KernelError::Unreadable {
-            stream: stream(),
+            stream: sample_stream(),
             sequence: 0,
             reason: Report::of(&PayloadError::UnknownType {
                 type_url: "/toy.v9.Bonus".to_string(),
             }),
         },
         KernelError::HandlerUnavailable {
-            stream: stream(),
+            stream: sample_stream(),
             cause: "not-running".to_string(),
         },
-    ];
-    let replay = [
+    ]
+}
+
+/// Each [`ReplayError`] variant.
+fn replay_samples() -> Vec<ReplayError> {
+    vec![
         ReplayError::OutOfSequence { index: 1, found: 2 },
         ReplayError::RecordedBackwards { sequence: 4 },
         ReplayError::IncompleteMeta {
@@ -387,24 +438,29 @@ pub fn diagnostic_samples() -> Vec<Box<dyn angzarr_diagnostic::Diagnostic>> {
             found: "ledger".to_string(),
             expected: "account",
         },
-    ];
-    // The store's errors are angzarr-ports': forwarded under their own
-    // codes, every one a step's reads and write, or an open migrating the
-    // store, can meet (an edition's creation, deletion and removal are the
-    // application's).
-    let boxed = || Box::new(stream());
-    let store = [
+    ]
+}
+
+/// The store's errors, angzarr-ports': forwarded under their own codes,
+/// every one a step's reads and write, or an open migrating the store, can
+/// meet (an edition's creation, deletion and removal are the
+/// application's).
+fn store_samples() -> Vec<StoreError> {
+    use angzarr_ports::Cause;
+    vec![
         StoreError::Conflict {
-            stream: boxed(),
+            stream: Box::new(sample_stream()),
             expected: 1,
             actual: 2,
         },
         StoreError::Discontinuous {
-            stream: boxed(),
+            stream: Box::new(sample_stream()),
             expected: 2,
             found: 3,
         },
-        StoreError::MalformedStream { stream: boxed() },
+        StoreError::MalformedStream {
+            stream: Box::new(sample_stream()),
+        },
         StoreError::Unavailable(Cause::new(
             "angzarr-store-sqlite-unavailable",
             [
@@ -416,7 +472,7 @@ pub fn diagnostic_samples() -> Vec<Box<dyn angzarr_diagnostic::Diagnostic>> {
             ],
         )),
         StoreError::Unreadable {
-            stream: boxed(),
+            stream: Box::new(sample_stream()),
             sequence: 0,
             reason: Cause::new(
                 "angzarr-store-sqlite-undecodable",
@@ -426,7 +482,9 @@ pub fn diagnostic_samples() -> Vec<Box<dyn angzarr_diagnostic::Diagnostic>> {
                 )],
             ),
         },
-        StoreError::EditionNotForked { stream: boxed() },
+        StoreError::EditionNotForked {
+            stream: Box::new(sample_stream()),
+        },
         StoreError::EditionNotFound {
             name: "what-if".to_string(),
         },
@@ -443,11 +501,14 @@ pub fn diagnostic_samples() -> Vec<Box<dyn angzarr_diagnostic::Diagnostic>> {
             target: "/p/state.db.pre-4-20261031T120000.000Z".to_string(),
         },
     ]
-    .map(KernelError::Store);
-    let payload = [
+}
+
+/// Each [`PayloadError`] variant.
+fn payload_samples() -> Vec<PayloadError> {
+    vec![
         PayloadError::Invalid {
             type_url: "/toy.v1.Deposited".to_string(),
-            reason: Report::of(&missing),
+            reason: sample_report(),
         },
         PayloadError::UnknownType {
             type_url: "/toy.v9.Bonus".to_string(),
@@ -457,8 +518,12 @@ pub fn diagnostic_samples() -> Vec<Box<dyn angzarr_diagnostic::Diagnostic>> {
             error: <Timestamp as prost::Message>::decode(&[0x08][..])
                 .expect_err("a tag without its value is not a message"),
         },
-    ];
-    let chain = [
+    ]
+}
+
+/// An [`UpcastChainError`] of each [`ChainProblem`].
+fn chain_samples() -> Vec<UpcastChainError> {
+    [
         ChainProblem::Duplicate {
             source: "toy.v0.Credited".to_string(),
         },
@@ -472,90 +537,109 @@ pub fn diagnostic_samples() -> Vec<Box<dyn angzarr_diagnostic::Diagnostic>> {
         },
     ]
     .map(|problem| UpcastChainError {
-        domain: domain(),
+        domain: sample_domain(),
         problem,
-    });
-    let misconfigured = [
-        Misconfigured::AlreadyRegistered { domain: domain() },
+    })
+    .into()
+}
+
+/// Each [`Misconfigured`] variant, `UnsupportedResolution` for a domain and
+/// for one command type.
+fn misconfigured_samples() -> Vec<Misconfigured> {
+    use v1::ConflictResolution;
+    vec![
+        Misconfigured::AlreadyRegistered {
+            domain: sample_domain(),
+        },
         Misconfigured::ComponentRegistered {
             component: "bookkeeping".to_string(),
         },
-        Misconfigured::NotRegistered { domain: domain() },
+        Misconfigured::NotRegistered {
+            domain: sample_domain(),
+        },
         Misconfigured::ProjectorNoInputDomain {
             component: "balances".to_string(),
         },
         Misconfigured::UpcasterForAnotherDomain {
-            domain: domain(),
+            domain: sample_domain(),
             upcaster: "ledger".to_string(),
         },
-        Misconfigured::EmptyRulesVersion { domain: domain() },
-        Misconfigured::BadStateDescriptor { domain: domain() },
+        Misconfigured::EmptyRulesVersion {
+            domain: sample_domain(),
+        },
+        Misconfigured::BadStateDescriptor {
+            domain: sample_domain(),
+        },
         Misconfigured::UnsupportedResolution {
-            domain: domain(),
+            domain: sample_domain(),
             command_type: None,
             resolution: ConflictResolution::Commutative,
         },
         Misconfigured::UnsupportedResolution {
-            domain: domain(),
+            domain: sample_domain(),
             command_type: Some("toy.cmd.v1.Note".to_string()),
             resolution: ConflictResolution::Commutative,
         },
         Misconfigured::RemoteSource {
-            domain: domain(),
+            domain: sample_domain(),
             component: "bookkeeping".to_string(),
         },
-    ];
+    ]
+}
 
-    let mut samples: Vec<Box<dyn angzarr_diagnostic::Diagnostic>> = Vec::new();
-    samples.extend(malformed.map(|e| Box::new(e) as Box<_>));
-    samples.extend(kernel.map(|e| Box::new(e) as Box<_>));
-    samples.extend(replay.map(|e| Box::new(e) as Box<_>));
-    samples.extend(store.map(|e| Box::new(e) as Box<_>));
-    samples.extend(payload.map(|e| Box::new(e) as Box<_>));
-    samples.extend(chain.map(|e| Box::new(e) as Box<_>));
-    samples.extend(misconfigured.map(|e| Box::new(e) as Box<_>));
-    samples.push(Box::new(UpcastError::Unavailable {
-        cause: Report::of(&KernelError::HandlerUnavailable {
-            stream: stream(),
-            cause: "not-running".to_string(),
-        }),
-    }));
-    samples.push(Box::new(UpcastError::Rule {
-        source: "toy.v0.Credited".to_string(),
-        error: report(),
-    }));
-    samples.push(Box::new(Failure::<WireError>::Downstream {
-        path: Vec::new(),
-        error: StepError::Kernel(KernelError::ChainTooDeep { limit: 8 }),
-        dead_letters: Vec::new(),
-    }));
-    samples.push(Box::new(Failure::<WireError>::Projection {
-        committed: Vec::new(),
-        failures: vec![("balances".to_string(), report())],
-        dead_letters: Vec::new(),
-    }));
-    // The router's answer under each of its keys, every declared arg given:
-    // forwarded under the key, verbatim (decision 14.60).
+/// Each [`UpcastError`] variant.
+fn upcast_samples() -> Vec<UpcastError> {
+    vec![
+        UpcastError::Unavailable {
+            cause: angzarr_diagnostic::Report::of(&KernelError::HandlerUnavailable {
+                stream: sample_stream(),
+                cause: "not-running".to_string(),
+            }),
+        },
+        UpcastError::Rule {
+            source: "toy.v0.Credited".to_string(),
+            error: sample_report(),
+        },
+    ]
+}
+
+/// Each [`Failure`] variant with a code of its own.
+fn failure_samples() -> Vec<Failure<WireError>> {
+    vec![
+        Failure::Downstream {
+            path: Vec::new(),
+            error: StepError::Kernel(KernelError::ChainTooDeep { limit: 8 }),
+            dead_letters: Vec::new(),
+        },
+        Failure::Projection {
+            committed: Vec::new(),
+            failures: vec![("balances".to_string(), sample_report())],
+            dead_letters: Vec::new(),
+        },
+    ]
+}
+
+/// The router's answer under each of its keys, every declared arg given:
+/// forwarded under the key, verbatim (decision 14.60).
+fn router_samples() -> impl Iterator<Item = KernelError> {
     let router = (1..).map_while(|n| angzarr_proto::v1::RouterReason::try_from(n).ok());
-    for reason in router {
+    router.map(|reason| {
         let args = reason
             .args()
             .iter()
             .map(|a| (a.to_string(), "1".to_string()));
-        samples.push(Box::new(KernelError::Router(route::internal(
-            reason.as_str_name(),
-            args,
-        ))));
-    }
-    samples.push(Box::new(markup::NotItsStream {
-        domain: domain(),
-        key: "swift-amber-falcon".to_string(),
-    }));
-    samples.push(Box::new(missing));
-    samples.push(Box::new(WireError::UnknownEnum {
-        message: "toy.v1.Closed",
-        field: "reason",
-        value: 0,
-    }));
-    samples
+        KernelError::Router(route::internal(reason.as_str_name(), args))
+    })
+}
+
+/// Each [`WireError`] variant.
+fn wire_samples() -> Vec<WireError> {
+    vec![
+        SAMPLE_MISSING,
+        WireError::UnknownEnum {
+            message: "toy.v1.Closed",
+            field: "reason",
+            value: 0,
+        },
+    ]
 }

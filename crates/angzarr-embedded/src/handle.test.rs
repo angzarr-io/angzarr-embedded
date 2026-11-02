@@ -2265,14 +2265,11 @@ impl crate::angzarr_router::router::CommandHandler for Recorded {
     }
 }
 
-/// With no translation, the kernel builds the pass-through `CommandRefused`
-/// itself and addresses it (decision 14.42, C-0613): to the exact stream of
-/// the triggering event, under the refused command's id, correlation and
-/// causation, its fact origin the refused command's id.
-#[test]
-fn no_translation_makes_the_kernel_build_the_pass_through_fact() {
-    use crate::markup::v1::CommandRefused;
-    use crate::v1::command_page::Body;
+/// With no translation, the refusal fact the kernel builds itself
+/// (decision 14.42, C-0613), as the account is handed it: the account opens
+/// and takes a deposit, on which the policy records more on the ledger than
+/// its limit, which the ledger refuses.
+fn pass_through_fact() -> CommandBook {
     let books = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let mut registry = crate::Registry::new();
     let table = crate::route::table::<Account>(
@@ -2307,7 +2304,7 @@ fn no_translation_makes_the_kernel_build_the_pass_through_fact() {
                         true => {
                             let mut book = record_for(ledger_cover());
                             book.page.as_mut().unwrap().body =
-                                Some(Body::Command(crate::v1::Command {
+                                Some(crate::v1::command_page::Body::Command(crate::v1::Command {
                                     payload: Some(crate::pack(&ledger::Record {
                                         source_sequence: 1,
                                         cents: LEDGER_LIMIT + 1,
@@ -2336,8 +2333,27 @@ fn no_translation_makes_the_kernel_build_the_pass_through_fact() {
     }
 
     let books = books.lock().unwrap();
-    let fact = books.last().expect("the refusal fact reached the account");
-    assert_eq!(fact.cover, Some(account.clone()), "the trigger's stream");
+    books
+        .last()
+        .expect("the refusal fact reached the account")
+        .clone()
+}
+
+/// The trigger the pass-through fact answers: the account's deposit.
+fn pass_through_trigger() -> EventRef {
+    EventRef {
+        stream: Some(cover("account", 1)),
+        sequence: 1,
+    }
+}
+
+/// The pass-through fact is the standard `CommandRefused`, its trigger the
+/// triggering event and its command the refused one, as sent.
+#[test]
+fn no_translation_makes_the_kernel_build_the_pass_through_fact() {
+    use crate::markup::v1::CommandRefused;
+    use crate::v1::command_page::Body;
+    let fact = pass_through_fact();
     let page = fact.page.as_ref().unwrap();
     let Some(Body::Fact(f)) = &page.body else {
         panic!("a fact: {page:?}");
@@ -2348,18 +2364,31 @@ fn no_translation_makes_the_kernel_build_the_pass_through_fact() {
         "io.angzarr.v1.CommandRefused"
     );
     let refused = <CommandRefused as prost::Message>::decode(&payload.value[..]).unwrap();
-    let trigger = EventRef {
-        stream: Some(account.clone()),
-        sequence: 1,
-    };
+    let trigger = pass_through_trigger();
     assert_eq!(refused.trigger, Some(trigger.clone()));
     let command = refused.command.expect("the refused command");
     assert_eq!(command.cover, Some(ledger_cover()));
     let refused_id = ids::policy_command_id(&trigger, "unchecked", 0).unwrap();
     assert_eq!(
         command.page.as_ref().and_then(|p| p.command_id.clone()),
-        Some(refused_id.clone())
+        Some(refused_id)
     );
+}
+
+/// The kernel addresses the pass-through fact itself: to the exact stream
+/// of the triggering event, under the refused command's id, correlation and
+/// causation, its fact origin the refused command's id.
+#[test]
+fn the_kernel_addresses_the_pass_through_fact() {
+    let fact = pass_through_fact();
+    assert_eq!(
+        fact.cover,
+        Some(cover("account", 1)),
+        "the trigger's stream"
+    );
+    let page = fact.page.as_ref().unwrap();
+    let trigger = pass_through_trigger();
+    let refused_id = ids::policy_command_id(&trigger, "unchecked", 0).unwrap();
     assert_eq!(
         page.command_id,
         Some(refused_id.clone()),

@@ -341,23 +341,7 @@ fn parse(
         handling,
     } = book;
 
-    let cover = cover.ok_or(Malformed::NoCover)?;
-    // A remote domain's capabilities are its coordinator's to judge.
-    let local = catalog.is_here(&cover.domain);
-    if !local && !catalog.is_remote(&cover.domain) {
-        return Err(Malformed::UnknownDomain {
-            domain: cover.domain,
-        });
-    }
-    let root = cover.root.clone().ok_or(Malformed::NoRoot)?;
-    if !root.is_well_formed() {
-        return Err(Malformed::BadRoot {
-            len: root.value.len(),
-        });
-    }
-    if cover.edition.as_deref() == Some("") {
-        return Err(Malformed::EmptyEdition);
-    }
+    let (cover, root) = checked_cover(cover, catalog)?;
 
     let CommandPage {
         body,
@@ -372,20 +356,10 @@ fn parse(
     };
     let payload = payload.ok_or(Malformed::NoPayload)?;
 
-    if let Some(id) = &command_id {
-        if !id.is_well_formed() {
-            return Err(Malformed::BadCommandId {
-                len: id.value.len(),
-            });
-        }
-    }
-    if let Some(id) = &correlation_id {
-        if !id.is_well_formed() {
-            return Err(Malformed::BadCorrelationId {
-                len: id.value.len(),
-            });
-        }
-    }
+    well_formed(command_id.as_ref(), |len| Malformed::BadCommandId { len })?;
+    well_formed(correlation_id.as_ref(), |len| Malformed::BadCorrelationId {
+        len,
+    })?;
 
     let handling = handling.unwrap_or_default();
     let handled = handling != Handling::default();
@@ -444,20 +418,8 @@ fn parse(
         }
     }
 
-    let conflict_resolution = match handling.conflict_resolution {
-        0 => None,
-        value => {
-            let requested = ConflictResolution::try_from(value)
-                .map_err(|_| Malformed::UnknownConflictResolution { value })?;
-            if local && !catalog.supports(&cover.domain, requested) {
-                return Err(Malformed::UnsupportedConflictResolution {
-                    domain: cover.domain,
-                    requested,
-                });
-            }
-            Some(requested)
-        }
-    };
+    let conflict_resolution =
+        conflict_resolution(handling.conflict_resolution, &cover.domain, catalog)?;
 
     Ok(Checked {
         cover,
@@ -470,6 +432,54 @@ fn parse(
         entry,
         process_manager,
     })
+}
+
+/// The book's cover, and its root: a domain here or a remote one's, a
+/// well-formed root, and an edition unset or named.
+fn checked_cover(cover: Option<Cover>, catalog: &Catalog) -> Result<(Cover, Uuid), Malformed> {
+    let cover = cover.ok_or(Malformed::NoCover)?;
+    if !catalog.is_here(&cover.domain) && !catalog.is_remote(&cover.domain) {
+        return Err(Malformed::UnknownDomain {
+            domain: cover.domain,
+        });
+    }
+    let root = cover.root.clone().ok_or(Malformed::NoRoot)?;
+    well_formed(Some(&root), |len| Malformed::BadRoot { len })?;
+    if cover.edition.as_deref() == Some("") {
+        return Err(Malformed::EmptyEdition);
+    }
+    Ok((cover, root))
+}
+
+/// `id`, when there is one, is 16 bytes; else it is `malformed` of its
+/// length.
+fn well_formed(id: Option<&Uuid>, malformed: fn(usize) -> Malformed) -> Result<(), Malformed> {
+    match id {
+        Some(id) if !id.is_well_formed() => Err(malformed(id.value.len())),
+        _ => Ok(()),
+    }
+}
+
+/// The handling's conflict resolution (`value`, 0 for none): one
+/// angzarr defines, and, for a domain here, one its state supports. A
+/// remote domain's capabilities are its coordinator's to judge.
+fn conflict_resolution(
+    value: i32,
+    domain: &str,
+    catalog: &Catalog,
+) -> Result<Option<ConflictResolution>, Malformed> {
+    if value == 0 {
+        return Ok(None);
+    }
+    let requested = ConflictResolution::try_from(value)
+        .map_err(|_| Malformed::UnknownConflictResolution { value })?;
+    if catalog.is_here(domain) && !catalog.supports(domain, requested) {
+        return Err(Malformed::UnsupportedConflictResolution {
+            domain: domain.to_string(),
+            requested,
+        });
+    }
+    Ok(Some(requested))
 }
 
 /// Whether `payload`, if it is angzarr's `CommandRefused`, is for `cover`:

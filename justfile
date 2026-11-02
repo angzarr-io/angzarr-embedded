@@ -44,6 +44,8 @@ build:
         cargo build "${terse[@]}" --release --workspace --all-targets
 
 # Lint the Rust, and check the licence lists: the pre-commit clippy gate.
+# The complexity gate is among its lints (Cargo.toml's
+# [workspace.lints.clippy] and clippy.toml), denied with every warning.
 [no-exit-message]
 lint:
     @just _run lint workspace cargo just _lint

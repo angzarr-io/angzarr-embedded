@@ -342,114 +342,136 @@ impl std::error::Error for HostError {}
 
 /// One value of every error this module defines, each variant once.
 pub(crate) fn diagnostic_samples() -> Vec<Box<dyn Diagnostic>> {
+    let handshake = handshake_samples()
+        .into_iter()
+        .map(|e| Box::new(e) as Box<dyn Diagnostic>);
+    let host = component_samples().into_iter().chain(host_samples());
+    handshake.chain(host.map(|e| Box::new(e) as _)).collect()
+}
+
+/// Each [`HandshakeError`] variant.
+fn handshake_samples() -> Vec<HandshakeError> {
+    vec![
+        HandshakeError::Malformed {
+            line: "angzarr-handshake v2".to_string(),
+        },
+        HandshakeError::Timeout { timeout_ms: 30_000 },
+        HandshakeError::Closed,
+        HandshakeError::Unreadable {
+            kind: "BrokenPipe".to_string(),
+        },
+    ]
+}
+
+/// Each [`HostError`] variant about one component, which it names.
+fn component_samples() -> Vec<HostError> {
     let d = || "player".to_string();
     vec![
-        Box::new(HandshakeError::Malformed {
-            line: "angzarr-handshake v2".to_string(),
-        }),
-        Box::new(HandshakeError::Timeout { timeout_ms: 30_000 }),
-        Box::new(HandshakeError::Closed),
-        Box::new(HandshakeError::Unreadable {
-            kind: "BrokenPipe".to_string(),
-        }),
-        Box::new(HostError::DuplicateDomain { domain: d() }),
-        Box::new(HostError::NoLaunch {
+        HostError::DuplicateDomain { domain: d() },
+        HostError::NoLaunch {
             domain: d(),
             language: "go".to_string(),
-        }),
-        Box::new(HostError::EmptyLaunch { domain: d() }),
-        Box::new(HostError::UnknownLanguage {
+        },
+        HostError::EmptyLaunch { domain: d() },
+        HostError::UnknownLanguage {
             key: "component[1].language".to_string(),
             language: "go".to_string(),
             loaded: "python,rust".to_string(),
-        }),
-        Box::new(HostError::Spawn {
+        },
+        HostError::Spawn {
             domain: d(),
             program: "uv".to_string(),
             kind: "NotFound".to_string(),
-        }),
-        Box::new(HostError::Handshake {
+        },
+        HostError::Handshake {
             domain: d(),
             cause: HandshakeError::Closed,
-        }),
-        Box::new(HostError::Connect {
+        },
+        HostError::Connect {
             domain: d(),
             socket: "/run/angzarr/player.sock".to_string(),
-        }),
-        Box::new(HostError::Describe {
+        },
+        HostError::Describe {
             domain: d(),
             grpc_code: 14,
-        }),
-        Box::new(HostError::Health {
+        },
+        HostError::Health {
             domain: d(),
             grpc_code: 12,
-        }),
-        Box::new(HostError::NotServing {
+        },
+        HostError::NotServing {
             component: d(),
             status: "NOT_SERVING".to_string(),
-        }),
-        Box::new(HostError::KindMismatch {
+        },
+        HostError::KindMismatch {
             domain: d(),
             configured: "policy".to_string(),
             described: "AGGREGATE".to_string(),
-        }),
-        Box::new(HostError::NoInput { domain: d() }),
-        Box::new(HostError::ProjectorNoInputDomain { component: d() }),
-        Box::new(HostError::UpcasterNoDomain { domain: d() }),
-        Box::new(HostError::NotExposable {
+        },
+        HostError::NoInput { domain: d() },
+        HostError::ProjectorNoInputDomain { component: d() },
+        HostError::UpcasterNoDomain { domain: d() },
+        HostError::NotExposable {
             domain: d(),
             kind: "policy".to_string(),
-        }),
-        Box::new(HostError::Descriptor {
+        },
+        HostError::Descriptor {
             domain: d(),
             cause: crate::DescriptorRefused::PolicyNoOutputDomain {
                 component: "TableWalletPolicy".to_string(),
             },
-        }),
-        Box::new(HostError::DescriptorChanged { domain: d() }),
-        Box::new(HostError::ExitStatus {
+        },
+        HostError::DescriptorChanged { domain: d() },
+        HostError::ExitStatus {
             component: d(),
             exit_code: 3,
-        }),
-        Box::new(HostError::NotExited {
+        },
+        HostError::NotExited {
             component: d(),
             ended: "terminated".to_string(),
-        }),
-        Box::new(HostError::ProbeInput {
+        },
+        HostError::ProbeInput {
             component: d(),
             kind: "policy".to_string(),
-        }),
-        Box::new(HostError::SocketDirTooLong {
+        },
+        HostError::NotRegistered {
+            domain: d(),
+            kind: "policy".to_string(),
+        },
+        HostError::NotListed {
+            domain: d(),
+            kind: "projector".to_string(),
+        },
+    ]
+}
+
+/// Each [`HostError`] variant of the host as a whole: its config, its
+/// socket directory, its registry, its store and its runtime.
+fn host_samples() -> Vec<HostError> {
+    vec![
+        HostError::SocketDirTooLong {
             dir: "/very/deep/directory".to_string(),
             max_bytes: 65,
-        }),
-        Box::new(HostError::ConfigUnreadable {
+        },
+        HostError::ConfigUnreadable {
             path: "angzarr.yaml".to_string(),
             kind: "NotFound".to_string(),
-        }),
-        Box::new(HostError::ConfigInvalid {
+        },
+        HostError::ConfigInvalid {
             path: "angzarr.yaml".to_string(),
             cause: Report::of(
                 &crate::config::HostConfig::from_yaml("schema_version: 99\n", "angzarr.yaml")
                     .expect_err("a newer config is refused"),
             ),
-        }),
-        Box::new(HostError::NotRegistered {
-            domain: d(),
-            kind: "policy".to_string(),
-        }),
-        Box::new(HostError::NotListed {
-            domain: d(),
-            kind: "projector".to_string(),
-        }),
-        Box::new(HostError::Register {
+        },
+        HostError::Register {
             cause: Report::new("angzarr-embedded-host-duplicate-domain").arg("domain", "player"),
-        }),
-        Box::new(HostError::Store {
+        },
+        HostError::Store {
             cause: Report::new("angzarr-embedded-host-runtime").arg("kind", "Other"),
-        }),
-        Box::new(HostError::Runtime {
+        },
+        HostError::Runtime {
             kind: "Other".to_string(),
-        }),
+        },
     ]
 }

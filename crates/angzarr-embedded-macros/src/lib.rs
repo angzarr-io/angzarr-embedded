@@ -3027,9 +3027,30 @@ struct Marked<'a> {
     args: Marker,
 }
 
+/// The marked methods of an impl, in impl order.
+struct Markup<'a>(Vec<Marked<'a>>);
+
+impl<'a> Markup<'a> {
+    /// Every marked method, in impl order.
+    fn iter(&self) -> std::slice::Iter<'_, Marked<'a>> {
+        self.0.iter()
+    }
+
+    /// The methods marked with any of `markers`, in impl order.
+    fn of<'s>(&'s self, markers: &'s [&str]) -> impl Iterator<Item = &'s Marked<'a>> + 's {
+        self.iter().filter(move |x| markers.contains(&x.marker))
+    }
+
+    /// The types of the methods marked with any of `markers`, in impl
+    /// order.
+    fn types<'s>(&'s self, markers: &'s [&str]) -> impl Iterator<Item = &'s Type> + 's {
+        self.of(markers).map(|x| &x.args.ty)
+    }
+}
+
 /// The methods of `imp` marked with one of `markers`, in impl order. A
 /// method with two markers is refused.
-fn marked<'a>(imp: &'a ItemImpl, markers: &[&'static str]) -> syn::Result<Vec<Marked<'a>>> {
+fn marked<'a>(imp: &'a ItemImpl, markers: &[&'static str]) -> syn::Result<Markup<'a>> {
     let mut found = Vec::new();
     for item in &imp.items {
         let ImplItem::Fn(method) = item else {
@@ -3053,148 +3074,182 @@ fn marked<'a>(imp: &'a ItemImpl, markers: &[&'static str]) -> syn::Result<Vec<Ma
             args: attr.parse_args::<Marker>()?,
         });
     }
-    Ok(found)
+    Ok(Markup(found))
+}
+
+/// `&[TypeName, ..]`: the wire type names of `types`, in order, as every
+/// component's type-list constant gives them.
+fn type_names<'t>(types: impl IntoIterator<Item = &'t Type>) -> Tokens {
+    let m = markup();
+    let types = types.into_iter();
+    quote!(&[#(#m::TypeName::of::<<#types as #m::DomainMessage>::Wire>(),)*])
+}
+
+/// A policy's or a projector's arguments: its name, its source (a
+/// policy's `source`, a projector's `sources`) and a policy's target.
+struct FlowArgs {
+    name: Expr,
+    source: Expr,
+    target: Option<Expr>,
+}
+
+impl FlowArgs {
+    /// `flow`'s arguments, each key one `flow` takes, `name` and the
+    /// source given.
+    fn parse(attr: Tokens, flow: Flow) -> syn::Result<Self> {
+        let args = Punctuated::<FlowArg, Token![,]>::parse_terminated.parse2(attr)?;
+        let (mut name, mut source, mut target) = (None, None, None);
+        for FlowArg { key, value } in args {
+            match (key.to_string().as_str(), flow) {
+                ("name", _) => name = Some(value),
+                ("source", Flow::Policy) | ("sources", Flow::Projector) => source = Some(value),
+                ("target", Flow::Policy) => target = Some(value),
+                _ => return Err(Error::new_spanned(key, usage(flow))),
+            }
+        }
+        let missing = || Error::new(Span::call_site(), usage(flow));
+        Ok(FlowArgs {
+            name: name.ok_or_else(missing)?,
+            source: source.ok_or_else(missing)?,
+            target,
+        })
+    }
 }
 
 /// The expansion of a policy or a projector: the impl as given (its markers
 /// inert) and its trait.
 fn flow(attr: Tokens, item: Tokens, flow: Flow) -> syn::Result<Tokens> {
-    let args = Punctuated::<FlowArg, Token![,]>::parse_terminated.parse2(attr)?;
-    let (mut name, mut source, mut target) = (None, None, None);
-    for FlowArg { key, value } in args {
-        match (key.to_string().as_str(), flow) {
-            ("name", _) => name = Some(value),
-            ("source", Flow::Policy) | ("sources", Flow::Projector) => source = Some(value),
-            ("target", Flow::Policy) => target = Some(value),
-            _ => return Err(Error::new_spanned(key, usage(flow))),
-        }
-    }
-    let name = name.ok_or_else(|| Error::new(Span::call_site(), usage(flow)))?;
-    let source = source.ok_or_else(|| Error::new(Span::call_site(), usage(flow)))?;
+    let args = FlowArgs::parse(attr, flow)?;
     let imp: ItemImpl = syn::parse2(item)?;
-    let self_ty = &imp.self_ty;
-    let m = markup();
     let generated = match flow {
-        Flow::Policy => {
-            let target = target.ok_or_else(|| Error::new(Span::call_site(), usage(flow)))?;
-            let methods = marked(&imp, &["on_event", "on_refused"])?;
-            let events: Vec<_> = methods.iter().filter(|x| x.marker == "on_event").collect();
-            let callbacks: Vec<_> = methods
-                .iter()
-                .filter(|x| x.marker == "on_refused")
-                .collect();
-            for x in &methods {
-                refuse_extras(x, false)?;
-            }
-            let event_types: Vec<_> = events.iter().map(|x| &x.args.ty).collect();
-            let event_methods: Vec<_> = events.iter().map(|x| &x.method.sig.ident).collect();
-            let commands: Vec<_> = callbacks.iter().map(|x| &x.args.ty).collect();
-            let callback_methods: Vec<_> = callbacks.iter().map(|x| &x.method.sig.ident).collect();
-            quote! {
-                impl #m::Policy for #self_ty {
-                    const NAME: &'static str = #name;
-                    type Source = #source;
-                    type Target = #target;
-                    const EVENTS: &'static [#m::TypeName] = &[
-                        #(#m::TypeName::of::<<#event_types as #m::DomainMessage>::Wire>(),)*
-                    ];
-                    const TRANSLATES: &'static [#m::TypeName] = &[
-                        #(#m::TypeName::of::<<#commands as #m::DomainMessage>::Wire>(),)*
-                    ];
-                    const ANSWERS_REFUSALS: bool = true;
-
-                    fn on_refused(
-                        &self,
-                        refusal: &#m::v1::Refusal,
-                        ctx: &#m::CommandContext,
-                    ) -> ::core::result::Result<::angzarr_embedded::Any, #m::Report> {
-                        #(
-                            if let ::core::option::Option::Some(refusal) =
-                                #m::decode_refusal::<#commands>(refusal)?
-                            {
-                                return #m::translated_fact::<<Self as #m::Policy>::Source, _, _>(
-                                    <#self_ty>::#callback_methods(self, &refusal, ctx),
-                                );
-                            }
-                        )*
-                        let _ = ctx;
-                        ::core::result::Result::Ok(#m::pass_through(refusal))
-                    }
-
-                    fn on_event(
-                        &self,
-                        event: &::angzarr_embedded::Any,
-                        ctx: &#m::PolicyContext,
-                    ) -> ::core::result::Result<
-                        ::core::option::Option<#m::Commands<<Self as #m::Policy>::Target>>,
-                        #m::Report,
-                    > {
-                        #(
-                            match #m::decode_message::<#event_types>(event) {
-                                ::core::result::Result::Ok(::core::option::Option::Some(event)) => {
-                                    return #m::policy_answer::<<Self as #m::Policy>::Target, _>(
-                                        <#self_ty>::#event_methods(self, &event, ctx),
-                                    );
-                                }
-                                ::core::result::Result::Ok(::core::option::Option::None) => {}
-                                ::core::result::Result::Err(error) => {
-                                    return ::core::result::Result::Err(#m::Report::of(&error));
-                                }
-                            }
-                        )*
-                        let _ = (event, ctx);
-                        ::core::result::Result::Ok(::core::option::Option::None)
-                    }
-                }
-            }
-        }
-        Flow::Projector => {
-            let sources = projector_sources(&source)?;
-            let methods = marked(&imp, &["projects"])?;
-            for x in &methods {
-                refuse_extras(x, false)?;
-            }
-            let types: Vec<_> = methods.iter().map(|x| &x.args.ty).collect();
-            let names: Vec<_> = methods.iter().map(|x| &x.method.sig.ident).collect();
-            quote! {
-                impl #m::AsyncProjector for #self_ty {
-                    const NAME: &'static str = #name;
-                    const SOURCES: &'static [&'static str] = &[#(#sources,)*];
-                    const PROJECTS: &'static [#m::TypeName] = &[
-                        #(#m::TypeName::of::<<#types as #m::DomainMessage>::Wire>(),)*
-                    ];
-
-                    fn project<'a>(
-                        &'a mut self,
-                        event: &'a ::angzarr_embedded::Any,
-                        ctx: &'a #m::ProjectionContext,
-                    ) -> ::core::option::Option<#m::Projecting<'a>> {
-                        #(
-                            match #m::decode_message::<#types>(event) {
-                                ::core::result::Result::Ok(::core::option::Option::Some(event)) => {
-                                    return ::core::option::Option::Some(#m::projecting(
-                                        async move { <#self_ty>::#names(self, &event, ctx).await },
-                                    ));
-                                }
-                                ::core::result::Result::Err(error) => {
-                                    return ::core::option::Option::Some(#m::projecting(
-                                        async move { ::core::result::Result::Err(#m::Report::of(&error)) },
-                                    ));
-                                }
-                                ::core::result::Result::Ok(::core::option::Option::None) => {}
-                            }
-                        )*
-                        let _ = (event, ctx);
-                        ::core::option::Option::None
-                    }
-                }
-            }
-        }
+        Flow::Policy => policy_impl(&imp, args)?,
+        Flow::Projector => projector_impl(&imp, args)?,
     };
     Ok(quote! {
         #imp
 
         #generated
+    })
+}
+
+/// A policy's `markup::Policy`: its events routed to their `#[on_event]`
+/// handlers, and each refusal to its `#[on_refused]` callback, or passed
+/// through.
+fn policy_impl(imp: &ItemImpl, args: FlowArgs) -> syn::Result<Tokens> {
+    let FlowArgs { name, source, .. } = args;
+    let target = args
+        .target
+        .ok_or_else(|| Error::new(Span::call_site(), usage(Flow::Policy)))?;
+    let methods = marked(imp, &["on_event", "on_refused"])?;
+    for x in methods.iter() {
+        refuse_extras(x, false)?;
+    }
+    let self_ty = &imp.self_ty;
+    let m = markup();
+    let event_types: Vec<_> = methods.types(&["on_event"]).collect();
+    let event_methods = methods.of(&["on_event"]).map(|x| &x.method.sig.ident);
+    let commands: Vec<_> = methods.types(&["on_refused"]).collect();
+    let callback_methods = methods.of(&["on_refused"]).map(|x| &x.method.sig.ident);
+    let events_constant = type_names(event_types.iter().copied());
+    let translates_constant = type_names(commands.iter().copied());
+    Ok(quote! {
+        impl #m::Policy for #self_ty {
+            const NAME: &'static str = #name;
+            type Source = #source;
+            type Target = #target;
+            const EVENTS: &'static [#m::TypeName] = #events_constant;
+            const TRANSLATES: &'static [#m::TypeName] = #translates_constant;
+            const ANSWERS_REFUSALS: bool = true;
+
+            fn on_refused(
+                &self,
+                refusal: &#m::v1::Refusal,
+                ctx: &#m::CommandContext,
+            ) -> ::core::result::Result<::angzarr_embedded::Any, #m::Report> {
+                #(
+                    if let ::core::option::Option::Some(refusal) =
+                        #m::decode_refusal::<#commands>(refusal)?
+                    {
+                        return #m::translated_fact::<<Self as #m::Policy>::Source, _, _>(
+                            <#self_ty>::#callback_methods(self, &refusal, ctx),
+                        );
+                    }
+                )*
+                let _ = ctx;
+                ::core::result::Result::Ok(#m::pass_through(refusal))
+            }
+
+            fn on_event(
+                &self,
+                event: &::angzarr_embedded::Any,
+                ctx: &#m::PolicyContext,
+            ) -> ::core::result::Result<
+                ::core::option::Option<#m::Commands<<Self as #m::Policy>::Target>>,
+                #m::Report,
+            > {
+                #(
+                    match #m::decode_message::<#event_types>(event) {
+                        ::core::result::Result::Ok(::core::option::Option::Some(event)) => {
+                            return #m::policy_answer::<<Self as #m::Policy>::Target, _>(
+                                <#self_ty>::#event_methods(self, &event, ctx),
+                            );
+                        }
+                        ::core::result::Result::Ok(::core::option::Option::None) => {}
+                        ::core::result::Result::Err(error) => {
+                            return ::core::result::Result::Err(#m::Report::of(&error));
+                        }
+                    }
+                )*
+                let _ = (event, ctx);
+                ::core::result::Result::Ok(::core::option::Option::None)
+            }
+        }
+    })
+}
+
+/// A projector's `markup::AsyncProjector`: its events routed to their
+/// `#[projects]` handlers, every other event skipped.
+fn projector_impl(imp: &ItemImpl, args: FlowArgs) -> syn::Result<Tokens> {
+    let sources = projector_sources(&args.source)?;
+    let methods = marked(imp, &["projects"])?;
+    for x in methods.iter() {
+        refuse_extras(x, false)?;
+    }
+    let (self_ty, name) = (&imp.self_ty, &args.name);
+    let m = markup();
+    let types: Vec<_> = methods.types(&["projects"]).collect();
+    let names = methods.iter().map(|x| &x.method.sig.ident);
+    let projects_constant = type_names(types.iter().copied());
+    Ok(quote! {
+        impl #m::AsyncProjector for #self_ty {
+            const NAME: &'static str = #name;
+            const SOURCES: &'static [&'static str] = &[#(#sources,)*];
+            const PROJECTS: &'static [#m::TypeName] = #projects_constant;
+
+            fn project<'a>(
+                &'a mut self,
+                event: &'a ::angzarr_embedded::Any,
+                ctx: &'a #m::ProjectionContext,
+            ) -> ::core::option::Option<#m::Projecting<'a>> {
+                #(
+                    match #m::decode_message::<#types>(event) {
+                        ::core::result::Result::Ok(::core::option::Option::Some(event)) => {
+                            return ::core::option::Option::Some(#m::projecting(
+                                async move { <#self_ty>::#names(self, &event, ctx).await },
+                            ));
+                        }
+                        ::core::result::Result::Err(error) => {
+                            return ::core::option::Option::Some(#m::projecting(
+                                async move { ::core::result::Result::Err(#m::Report::of(&error)) },
+                            ));
+                        }
+                        ::core::result::Result::Ok(::core::option::Option::None) => {}
+                    }
+                )*
+                let _ = (event, ctx);
+                ::core::option::Option::None
+            }
+        }
     })
 }
 
@@ -3517,69 +3572,96 @@ fn renamed(sig: &Signature) -> (Signature, Vec<Ident>) {
     (sig, names)
 }
 
-/// A payload enum: one variant per type, with its `Payload` impl. `extra`
-/// are further variants (a refusal handler's), each with its type, how it
-/// is decoded and how it is packed.
-fn payload_set(
-    name: &Ident,
-    variants: &[(Ident, Type)],
-    refused: &[(Ident, Type)],
-    vis: &Visibility,
-) -> Tokens {
-    let m = markup();
-    let (idents, types): (Vec<_>, Vec<_>) = variants.iter().cloned().unzip();
-    let (refused_idents, refused_types): (Vec<_>, Vec<_>) = refused.iter().cloned().unzip();
-    let packing = if variants.is_empty() && refused.is_empty() {
-        quote!(match *self {})
-    } else {
+/// A payload enum: one variant per type, and one per refused command (a
+/// refusal handler's), each its `CommandRefused` with the refusal as it
+/// came.
+struct PayloadSet<'s> {
+    name: &'s Ident,
+    variants: &'s [(Ident, Type)],
+    refused: &'s [(Ident, Type)],
+}
+
+impl PayloadSet<'_> {
+    /// The enum, with its `Payload` impl.
+    fn written(&self, vis: &Visibility) -> Tokens {
+        let (m, name) = (markup(), self.name);
+        let (idents, types): (Vec<_>, Vec<_>) = self.variants.iter().cloned().unzip();
+        let (refused_idents, refused_types): (Vec<_>, Vec<_>) =
+            self.refused.iter().cloned().unzip();
+        let refusal_url =
+            (!self.refused.is_empty()).then(|| quote!(#m::command_refused_type_url(),));
+        let (packing, reading) = (self.packing(), self.reading());
+        quote! {
+            #[doc(hidden)]
+            #[derive(Clone, Debug)]
+            #[allow(non_camel_case_types)]
+            #vis enum #name {
+                #(#idents(#types),)*
+                #(#refused_idents(#m::CommandRefused<#refused_types>, ::angzarr_embedded::Any),)*
+            }
+
+            impl ::angzarr_embedded::Payload for #name {
+                fn to_any(&self) -> ::angzarr_embedded::Any {
+                    #packing
+                }
+
+                fn from_any(
+                    any: &::angzarr_embedded::Any,
+                ) -> ::core::result::Result<Self, ::angzarr_embedded::PayloadError> {
+                    #reading
+                }
+
+                fn type_urls() -> ::std::vec::Vec<::std::string::String> {
+                    ::std::vec![#(#m::type_url_of::<#types>(),)* #refusal_url]
+                }
+            }
+        }
+    }
+
+    /// How a value is packed: a type's as its message, a refusal as it
+    /// came.
+    fn packing(&self) -> Tokens {
+        if self.variants.is_empty() && self.refused.is_empty() {
+            return quote!(match *self {});
+        }
+        let (m, name) = (markup(), self.name);
+        let idents = self.variants.iter().map(|(ident, _)| ident);
+        let refused_idents = self.refused.iter().map(|(ident, _)| ident);
         quote! {
             match self {
                 #(#name::#idents(value) => #m::pack_message(value),)*
                 #(#name::#refused_idents(_, any) => ::core::clone::Clone::clone(any),)*
             }
         }
-    };
-    let refusal_url = (!refused.is_empty()).then(|| quote!(#m::command_refused_type_url(),));
-    quote! {
-        #[doc(hidden)]
-        #[derive(Clone, Debug)]
-        #[allow(non_camel_case_types)]
-        #vis enum #name {
-            #(#idents(#types),)*
-            #(#refused_idents(#m::CommandRefused<#refused_types>, ::angzarr_embedded::Any),)*
-        }
+    }
 
-        impl ::angzarr_embedded::Payload for #name {
-            fn to_any(&self) -> ::angzarr_embedded::Any {
-                #packing
-            }
-
-            fn from_any(
-                any: &::angzarr_embedded::Any,
-            ) -> ::core::result::Result<Self, ::angzarr_embedded::PayloadError> {
-                #(
-                    if let ::core::option::Option::Some(value) = #m::decode_message::<#types>(any)? {
-                        return ::core::result::Result::Ok(#name::#idents(value));
-                    }
-                )*
-                #(
-                    if let ::core::option::Option::Some(refused) =
-                        #m::decode_command_refused::<#refused_types>(any)?
-                    {
-                        return ::core::result::Result::Ok(
-                            #name::#refused_idents(refused, ::core::clone::Clone::clone(any)),
-                        );
-                    }
-                )*
-                ::core::result::Result::Err(::angzarr_embedded::PayloadError::UnknownType {
-                    type_url: #m::refused_command_type_url(any)
-                        .unwrap_or_else(|| ::core::clone::Clone::clone(&any.type_url)),
-                })
-            }
-
-            fn type_urls() -> ::std::vec::Vec<::std::string::String> {
-                ::std::vec![#(#m::type_url_of::<#types>(),)* #refusal_url]
-            }
+    /// How an `Any` is read: as each type in turn, then as the refusal of
+    /// each refused command; a type it has none of is unknown, named as the
+    /// refused command's type where it is a refusal.
+    fn reading(&self) -> Tokens {
+        let (m, name) = (markup(), self.name);
+        let (idents, types): (Vec<_>, Vec<_>) = self.variants.iter().cloned().unzip();
+        let (refused_idents, refused_types): (Vec<_>, Vec<_>) =
+            self.refused.iter().cloned().unzip();
+        quote! {
+            #(
+                if let ::core::option::Option::Some(value) = #m::decode_message::<#types>(any)? {
+                    return ::core::result::Result::Ok(#name::#idents(value));
+                }
+            )*
+            #(
+                if let ::core::option::Option::Some(refused) =
+                    #m::decode_command_refused::<#refused_types>(any)?
+                {
+                    return ::core::result::Result::Ok(
+                        #name::#refused_idents(refused, ::core::clone::Clone::clone(any)),
+                    );
+                }
+            )*
+            ::core::result::Result::Err(::angzarr_embedded::PayloadError::UnknownType {
+                type_url: #m::refused_command_type_url(any)
+                    .unwrap_or_else(|| ::core::clone::Clone::clone(&any.type_url)),
+            })
         }
     }
 }
@@ -3591,228 +3673,364 @@ fn variant(ty: &Type, prefix: &str) -> syn::Result<Ident> {
         .ok_or_else(|| Error::new_spanned(ty, "names no type"))
 }
 
-/// The expansion of an aggregate or a process manager (see the crate
-/// docs).
-fn domain(attr: Tokens, item: Tokens, kind: Kind) -> syn::Result<Tokens> {
-    let args = Punctuated::<Arg, Token![,]>::parse_terminated.parse2(attr)?;
-    let (mut domain, mut rejection, mut snapshot) = (None, None, None);
-    let (mut command_enum, mut event_enum): (Option<Type>, Option<Type>) = (None, None);
-    let mut vis: Visibility = syn::parse_quote!(pub);
-    for arg in args {
-        match arg {
-            Arg::Domain(value) => domain = Some(value),
-            Arg::Rejection(value) => rejection = Some(value),
-            Arg::Snapshot(value) => snapshot = Some(value),
-            Arg::Vis(value) => vis = value,
-            Arg::Command(value) => command_enum = Some(value),
-            Arg::Event(value) => event_enum = Some(value),
-        }
-    }
-    let domain = domain.ok_or_else(|| Error::new(Span::call_site(), "needs `domain = \"..\"`"))?;
-    let imp: ItemImpl = syn::parse2(item)?;
-    let self_ty = &imp.self_ty;
-    let name = last_ident(self_ty)
-        .ok_or_else(|| Error::new_spanned(self_ty, "goes on `impl <Type>`"))?
-        .clone();
-    let m = markup();
-    let methods = marked(
-        &imp,
-        &["handles_cmd", "handles_fact", "on_refused", "applies"],
-    )?;
+/// `#[aggregate]`'s or `#[process_manager]`'s arguments.
+struct DomainArgs {
+    domain: Expr,
+    snapshot: Option<Type>,
+    rejection: Option<Type>,
+    vis: Visibility,
+    command: Option<Type>,
+    event: Option<Type>,
+}
 
-    // Each signature held to its marker; one handler per type.
-    let mut seen: Vec<(&'static str, String)> = Vec::new();
-    for x in &methods {
-        refuse_extras(x, kind == Kind::ProcessManager)?;
-        check_signature(x)?;
-        let set = match x.marker {
-            "handles_cmd" | "handles_fact" => "input",
-            other => other,
-        };
-        let key = (set, x.args.ty.to_token_stream().to_string());
-        if seen.contains(&key) {
-            return Err(Error::new_spanned(
-                &x.args.ty,
-                "a second handler for this type: which one decides is not a question the \
-                 markup leaves open",
-            ));
-        }
-        seen.push(key);
-    }
-    let of = |marker: &'static str| methods.iter().filter(move |x| x.marker == marker);
-
-    // The domain's own rejection: given, or the message-only command
-    // handlers', which must agree.
-    let rejection = match rejection {
-        Some(rejection) => rejection,
-        None => {
-            let mut found: Option<Type> = None;
-            for x in of("handles_cmd").filter(|x| x.args.refuses.is_empty()) {
-                let Some(error) = returned(&x.method.sig)
-                    .and_then(|(_, args)| args.get(1).cloned())
-                    .map(own_rejection)
-                else {
-                    continue;
-                };
-                match &found {
-                    None => found = Some(error),
-                    Some(first)
-                        if first.to_token_stream().to_string()
-                            != error.to_token_stream().to_string() =>
-                    {
-                        return Err(Error::new_spanned(
-                            &x.method.sig.output,
-                            format!(
-                                "the command handlers disagree on the rejection: `{}` here, \
-                                 `{}` before; the domain has one (or give `rejection = ..`)",
-                                error.to_token_stream(),
-                                first.to_token_stream()
-                            ),
-                        ));
-                    }
-                    Some(_) => {}
-                }
+impl DomainArgs {
+    /// The arguments, `domain` given; `vis` is `pub` when absent.
+    fn parse(attr: Tokens) -> syn::Result<Self> {
+        let args = Punctuated::<Arg, Token![,]>::parse_terminated.parse2(attr)?;
+        let (mut domain, mut snapshot, mut rejection) = (None, None, None);
+        let (mut command, mut event) = (None, None);
+        let mut vis: Visibility = syn::parse_quote!(pub);
+        for arg in args {
+            match arg {
+                Arg::Domain(value) => domain = Some(value),
+                Arg::Rejection(value) => rejection = Some(value),
+                Arg::Snapshot(value) => snapshot = Some(value),
+                Arg::Vis(value) => vis = value,
+                Arg::Command(value) => command = Some(value),
+                Arg::Event(value) => event = Some(value),
             }
-            found.unwrap_or_else(|| syn::parse_quote!(::core::convert::Infallible))
         }
-    };
-    let rejection_ty = quote!(#m::Rejection<#rejection>);
+        Ok(DomainArgs {
+            domain: domain
+                .ok_or_else(|| Error::new(Span::call_site(), "needs `domain = \"..\"`"))?,
+            snapshot,
+            rejection,
+            vis,
+            command,
+            event,
+        })
+    }
+}
 
-    let command_set = format_ident!("__{}Command", name);
-    let fact_set = format_ident!("__{}Fact", name);
-    let event_set = format_ident!("__{}Event", name);
-    let typed = |marker: &'static str, prefix: &str| -> syn::Result<Vec<(Ident, Type)>> {
-        of(marker)
+/// A domain's payload types, its `Domain::Command`, `Fact` and `Event`,
+/// and the enums written for those the markup does not give.
+struct Payloads {
+    command: Type,
+    fact: Ident,
+    event: Type,
+    written: Vec<Tokens>,
+}
+
+/// An aggregate's or a process manager's impl: its type, the names the
+/// expansion writes after it, and its marked methods, each held to its
+/// marker.
+struct Decorated<'a> {
+    kind: Kind,
+    self_ty: &'a Type,
+    name: Ident,
+    vis: Visibility,
+    methods: Markup<'a>,
+}
+
+impl<'a> Decorated<'a> {
+    fn new(imp: &'a ItemImpl, kind: Kind, vis: Visibility) -> syn::Result<Self> {
+        let self_ty = &*imp.self_ty;
+        let name = last_ident(self_ty)
+            .ok_or_else(|| Error::new_spanned(self_ty, "goes on `impl <Type>`"))?
+            .clone();
+        let methods = marked(
+            imp,
+            &["handles_cmd", "handles_fact", "on_refused", "applies"],
+        )?;
+        let decorated = Decorated {
+            kind,
+            self_ty,
+            name,
+            vis,
+            methods,
+        };
+        decorated.hold_to_markers()?;
+        Ok(decorated)
+    }
+
+    /// Each signature held to its marker; one handler per type.
+    fn hold_to_markers(&self) -> syn::Result<()> {
+        let mut seen: Vec<(&'static str, String)> = Vec::new();
+        for x in self.methods.iter() {
+            refuse_extras(x, self.kind == Kind::ProcessManager)?;
+            check_signature(x)?;
+            let set = match x.marker {
+                "handles_cmd" | "handles_fact" => "input",
+                other => other,
+            };
+            let key = (set, x.args.ty.to_token_stream().to_string());
+            if seen.contains(&key) {
+                return Err(Error::new_spanned(
+                    &x.args.ty,
+                    "a second handler for this type: which one decides is not a question the \
+                     markup leaves open",
+                ));
+            }
+            seen.push(key);
+        }
+        Ok(())
+    }
+
+    /// The domain's own rejection: `given`, or the message-only command
+    /// handlers', which must agree (`Infallible` when there are none).
+    fn rejection(&self, given: Option<Type>) -> syn::Result<Type> {
+        if let Some(given) = given {
+            return Ok(given);
+        }
+        let mut found: Option<Type> = None;
+        for x in self
+            .methods
+            .of(&["handles_cmd"])
+            .filter(|x| x.args.refuses.is_empty())
+        {
+            let Some(error) = returned(&x.method.sig)
+                .and_then(|(_, args)| args.get(1).cloned())
+                .map(own_rejection)
+            else {
+                continue;
+            };
+            let Some(first) = &found else {
+                found = Some(error);
+                continue;
+            };
+            if first.to_token_stream().to_string() != error.to_token_stream().to_string() {
+                return Err(Error::new_spanned(
+                    &x.method.sig.output,
+                    format!(
+                        "the command handlers disagree on the rejection: `{}` here, `{}` \
+                         before; the domain has one (or give `rejection = ..`)",
+                        error.to_token_stream(),
+                        first.to_token_stream()
+                    ),
+                ));
+            }
+        }
+        Ok(found.unwrap_or_else(|| syn::parse_quote!(::core::convert::Infallible)))
+    }
+
+    /// The variants for the methods marked `marker`: each type, named as
+    /// [`variant`] names it after `prefix`.
+    fn variants(&self, marker: &str, prefix: &str) -> syn::Result<Vec<(Ident, Type)>> {
+        self.methods
+            .of(&[marker])
             .map(|x| Ok((variant(&x.args.ty, prefix)?, x.args.ty.clone())))
             .collect()
-    };
-    let commands = typed("handles_cmd", "")?;
-    let facts = typed("handles_fact", "")?;
-    let refusals = typed("on_refused", "Refused")?;
-    let events = typed("applies", "")?;
-    // A payload enum given (`command = ..`, `event = ..`, angzarr-build's
-    // named enum or one written by hand) is the domain's; otherwise the
-    // macro writes one no path names.
-    let mut sets = vec![payload_set(&fact_set, &facts, &refusals, &vis)];
-    let own_commands = command_enum.is_none();
-    let command_ty: Type = match command_enum {
-        Some(given) => given,
-        None => {
-            sets.push(payload_set(&command_set, &commands, &[], &vis));
-            syn::parse_quote!(#command_set)
-        }
-    };
-    let own_events = event_enum.is_none();
-    let event_ty: Type = match event_enum {
-        Some(given) => given,
-        None => {
-            sets.push(payload_set(&event_set, &events, &[], &vis));
-            syn::parse_quote!(#event_set)
-        }
-    };
+    }
 
-    let call = |x: &Marked<'_>| x.method.sig.ident.clone();
-    let full_name =
-        |ty: &Type| quote!(&#m::TypeName::of::<<#ty as #m::DomainMessage>::Wire>().full_name());
-    let command_routes = of("handles_cmd").map(|x| {
-        let (ty, method) = (&x.args.ty, call(x));
-        let name = full_name(ty);
-        let run = match &x.args.rooted_by {
-            None => quote! {
-                #m::run_command::<#self_ty, _, #ty, _, _>(any, &*state, cctx, <#self_ty>::#method)
-            },
-            Some(field) => quote! {
-                #m::run_rooted_command::<#self_ty, _, #ty, _, _>(
-                    any,
-                    &*state,
-                    cctx,
-                    |cmd: &#ty| ::core::convert::AsRef::<str>::as_ref(&cmd.#field),
-                    <#self_ty>::#method,
-                )
-            },
+    /// The domain's payload types. A command or event enum given
+    /// (`command = ..`, `event = ..`: angzarr-build's named enum or one
+    /// written by hand) is the domain's; otherwise the macro writes one no
+    /// path names. The fact enum is always written.
+    fn payloads(&self, command: Option<Type>, event: Option<Type>) -> syn::Result<Payloads> {
+        let commands = self.variants("handles_cmd", "")?;
+        let facts = self.variants("handles_fact", "")?;
+        let refusals = self.variants("on_refused", "Refused")?;
+        let events = self.variants("applies", "")?;
+        let fact = format_ident!("__{}Fact", self.name);
+        let mut written = vec![PayloadSet {
+            name: &fact,
+            variants: &facts,
+            refused: &refusals,
+        }
+        .written(&self.vis)];
+        let command = self.payload_enum(command, "Command", &commands, &mut written);
+        let event = self.payload_enum(event, "Event", &events, &mut written);
+        Ok(Payloads {
+            command,
+            fact,
+            event,
+            written,
+        })
+    }
+
+    /// The payload enum `given`, or, with none given, `__<Name><set>` of
+    /// `variants`, written with each variant's `From` (a fact enum has none).
+    fn payload_enum(
+        &self,
+        given: Option<Type>,
+        set: &str,
+        variants: &[(Ident, Type)],
+        written: &mut Vec<Tokens>,
+    ) -> Type {
+        if let Some(given) = given {
+            return given;
+        }
+        let name = format_ident!("__{}{}", self.name, set);
+        written.push(
+            PayloadSet {
+                name: &name,
+                variants,
+                refused: &[],
+            }
+            .written(&self.vis),
+        );
+        written.extend(variants.iter().map(|(v, ty)| {
+            quote! {
+                impl ::core::convert::From<#ty> for #name {
+                    fn from(value: #ty) -> Self {
+                        #name::#v(value)
+                    }
+                }
+            }
+        }));
+        syn::parse_quote!(#name)
+    }
+
+    /// `markup::Routed`: each command, fact and refusal on the router's
+    /// table, run by its handler.
+    fn routed(&self) -> Tokens {
+        let (m, self_ty) = (markup(), self.self_ty);
+        let route = |x: &Marked<'_>| {
+            let (ty, method) = (&x.args.ty, &x.method.sig.ident);
+            let name = quote!(&#m::TypeName::of::<<#ty as #m::DomainMessage>::Wire>().full_name());
+            let handler = quote!(<#self_ty>::#method);
+            match (x.marker, &x.args.rooted_by) {
+                ("handles_cmd", None) => quote! {
+                    .on_command(#name, |any, state, cctx| {
+                        #m::run_command::<#self_ty, _, #ty, _, _>(any, &*state, cctx, #handler)
+                    })
+                },
+                ("handles_cmd", Some(field)) => quote! {
+                    .on_command(#name, |any, state, cctx| {
+                        #m::run_rooted_command::<#self_ty, _, #ty, _, _>(
+                            any,
+                            &*state,
+                            cctx,
+                            |cmd: &#ty| ::core::convert::AsRef::<str>::as_ref(&cmd.#field),
+                            #handler,
+                        )
+                    })
+                },
+                ("handles_fact", _) => quote! {
+                    .on_fact_with_context(#name, |any, state, cctx| {
+                        #m::run_fact::<#self_ty, #ty, _>(any, state, cctx, #handler)
+                    })
+                },
+                _ => quote! {
+                    .on_refused(#name, |refused, state, cctx| {
+                        #m::run_on_refused::<#self_ty, #ty, _, _>(refused, state, cctx, #handler)
+                    })
+                },
+            }
+        };
+        // Commands, then facts, then refusals.
+        let routes = ["handles_cmd", "handles_fact", "on_refused"]
+            .iter()
+            .flat_map(|marker| self.methods.of(std::slice::from_ref(marker)))
+            .map(route);
+        quote! {
+            impl #m::Routed for #self_ty {
+                fn route(
+                    table: ::angzarr_embedded::angzarr_router::domain::DomainDispatch<Self>,
+                ) -> ::angzarr_embedded::angzarr_router::domain::DomainDispatch<Self> {
+                    table
+                        #(#routes)*
+                }
+            }
+        }
+    }
+
+    /// `Domain` itself: its payload and rejection types, its name, and its
+    /// fold, each event handed to its applier.
+    fn domain_impl(&self, domain: &Expr, payloads: &Payloads, rejection: &Tokens) -> Tokens {
+        let self_ty = self.self_ty;
+        let Payloads {
+            command,
+            fact,
+            event,
+            ..
+        } = payloads;
+        let appliers = self.methods.of(&["applies"]);
+        let apply_arms = appliers.map(|x| {
+            let (v, method) = (variant(&x.args.ty, "").expect("checked"), &x.method.sig.ident);
+            let page = (x.method.sig.inputs.len() == 3).then(|| quote!(, page));
+            quote! {
+                #event::#v(event) => <#self_ty>::#method(state, ::core::clone::Clone::clone(event) #page),
+            }
+        });
+        let apply_body = if self.methods.of(&["applies"]).next().is_none() {
+            quote!(match *event {})
+        } else {
+            quote!(match event { #(#apply_arms)* })
         };
         quote! {
-            .on_command(#name, |any, state, cctx| { #run })
-        }
-    });
-    let fact_routes = of("handles_fact").map(|x| {
-        let (ty, method) = (&x.args.ty, call(x));
-        let name = full_name(ty);
-        quote! {
-            .on_fact_with_context(#name, |any, state, cctx| {
-                #m::run_fact::<#self_ty, #ty, _>(any, state, cctx, <#self_ty>::#method)
-            })
-        }
-    });
-    let refusal_routes = of("on_refused").map(|x| {
-        let (ty, method) = (&x.args.ty, call(x));
-        let name = full_name(ty);
-        quote! {
-            .on_refused(#name, |refused, state, cctx| {
-                #m::run_on_refused::<#self_ty, #ty, _, _>(refused, state, cctx, <#self_ty>::#method)
-            })
-        }
-    });
-    let apply_arms = of("applies").map(|x| {
-        let (v, method) = (variant(&x.args.ty, "").expect("checked"), call(x));
-        let page = (x.method.sig.inputs.len() == 3).then(|| quote!(, page));
-        quote! {
-            #event_ty::#v(event) => <#self_ty>::#method(state, ::core::clone::Clone::clone(event) #page),
-        }
-    });
-    let apply_body = if events.is_empty() {
-        quote!(match *event {})
-    } else {
-        quote!(match event { #(#apply_arms)* })
-    };
+            impl ::angzarr_embedded::Domain for #self_ty {
+                type State = Self;
+                type Command = #command;
+                type Fact = #fact;
+                type Event = #event;
+                type Rejection = #rejection;
 
-    // A process manager's starting inputs: its descriptor's starting
-    // types, which the kernel's start rule reads.
-    let process_manager = match kind {
-        Kind::Aggregate => quote!(),
-        Kind::ProcessManager => {
-            let starts = methods
+                const NAME: &'static str = #domain;
+                const RULES_VERSION: &'static str = ::core::env!("CARGO_PKG_VERSION");
+
+                fn apply(
+                    state: &mut Self,
+                    event: &#event,
+                    page: &::angzarr_embedded::PageContext<'_>,
+                ) {
+                    let _ = page;
+                    #apply_body
+                }
+            }
+        }
+    }
+
+    /// The marker traits of what it handles: `Decides` each command,
+    /// `Ingests` each fact.
+    fn handles(&self) -> Tokens {
+        let (m, self_ty) = (markup(), self.self_ty);
+        let commands = self.methods.types(&["handles_cmd"]);
+        let facts = self.methods.types(&["handles_fact"]);
+        quote! {
+            #(impl #m::Decides<#commands> for #self_ty {})*
+            #(impl #m::Ingests<#facts> for #self_ty {})*
+        }
+    }
+
+    /// A process manager's starting inputs (`markup::ProcessManager`): its
+    /// descriptor's starting types, which the kernel's start rule reads.
+    /// Nothing for an aggregate.
+    fn starts(&self) -> Tokens {
+        if self.kind == Kind::Aggregate {
+            return Tokens::new();
+        }
+        let (m, self_ty) = (markup(), self.self_ty);
+        let starts = type_names(
+            self.methods
                 .iter()
                 .filter(|x| x.args.starts.is_some())
-                .map(|x| &x.args.ty);
-            quote! {
-                impl #m::ProcessManager for #self_ty {
-                    const STARTS: &'static [#m::TypeName] = &[
-                        #(#m::TypeName::of::<<#starts as #m::DomainMessage>::Wire>(),)*
-                    ];
-                }
+                .map(|x| &x.args.ty),
+        );
+        quote! {
+            impl #m::ProcessManager for #self_ty {
+                const STARTS: &'static [#m::TypeName] = #starts;
             }
         }
-    };
+    }
 
-    let from_commands = commands.iter().filter(|_| own_commands).map(|(v, ty)| {
-        quote! {
-            impl ::core::convert::From<#ty> for #command_set {
-                fn from(command: #ty) -> Self {
-                    #command_set::#v(command)
-                }
-            }
-        }
-    });
-    let from_events = events.iter().filter(|_| own_events).map(|(v, ty)| {
-        quote! {
-            impl ::core::convert::From<#ty> for #event_set {
-                fn from(event: #ty) -> Self {
-                    #event_set::#v(event)
-                }
-            }
-        }
-    });
-    let decides = commands
-        .iter()
-        .map(|(_, ty)| quote!(impl #m::Decides<#ty> for #self_ty {}));
-    let ingests = facts
-        .iter()
-        .map(|(_, ty)| quote!(impl #m::Ingests<#ty> for #self_ty {}));
-    let mut refusing = Vec::new();
-    for x in of("handles_cmd").filter(|x| !x.args.refuses.is_empty()) {
+    /// Each refusing command handler's typed refusal choice (see *Typed
+    /// refusals*).
+    fn refusal_choices(&self, rejection: &Tokens) -> syn::Result<Vec<Tokens>> {
+        self.methods
+            .of(&["handles_cmd"])
+            .filter(|x| !x.args.refuses.is_empty())
+            .map(|x| self.refusal_choice(x, rejection))
+            .collect()
+    }
+
+    /// `x`'s choice, `__<Name><Cmd>Refuses`: one variant per refusal
+    /// object, each `From` its object, and the choice a `TypedRefusal`, a
+    /// rejection of the domain's and its `Fails`.
+    fn refusal_choice(&self, x: &Marked<'_>, rejection: &Tokens) -> syn::Result<Tokens> {
+        let (m, self_ty, vis) = (markup(), self.self_ty, &self.vis);
         let command = &x.args.ty;
-        let choice = format_ident!("__{}{}Refuses", name, variant(command, "")?);
+        let choice = format_ident!("__{}{}Refuses", self.name, variant(command, "")?);
         let variants = x
             .args
             .refuses
@@ -3820,7 +4038,8 @@ fn domain(attr: Tokens, item: Tokens, kind: Kind) -> syn::Result<Tokens> {
             .map(|ty| variant(ty, ""))
             .collect::<syn::Result<Vec<_>>>()?;
         let types = &x.args.refuses;
-        refusing.push(quote! {
+        let refuses = type_names(types);
+        Ok(quote! {
             #[doc(hidden)]
             #[allow(non_camel_case_types)]
             #vis enum #choice {
@@ -3843,58 +4062,79 @@ fn domain(attr: Tokens, item: Tokens, kind: Kind) -> syn::Result<Tokens> {
                 }
             }
 
-            impl ::core::convert::From<#choice> for #rejection_ty {
+            impl ::core::convert::From<#choice> for #rejection {
                 fn from(choice: #choice) -> Self {
                     #m::Rejection::Typed(::core::convert::Into::into(choice))
                 }
             }
 
             impl #m::Fails<#self_ty> for #choice {
-                fn into_failed(self) -> #m::Failed<#rejection_ty> {
+                fn into_failed(self) -> #m::Failed<#rejection> {
                     #m::Failed::rejected(self)
                 }
             }
 
             impl #m::Refusing<#command> for #self_ty {
                 type Refuses = #choice;
-                const REFUSES: &'static [#m::TypeName] = &[
-                    #(#m::TypeName::of::<<#types as #m::DomainMessage>::Wire>(),)*
-                ];
+                const REFUSES: &'static [#m::TypeName] = #refuses;
             }
-        });
+        })
     }
 
-    // The snapshot form: the user's conversions, or none.
-    let state = match snapshot {
-        Some(snapshot) => quote! {
-            impl ::angzarr_embedded::State for #self_ty {
-                type Snapshot = #snapshot;
-
-                fn to_snapshot(&self) -> #snapshot {
-                    <#snapshot as ::core::convert::From<&#self_ty>>::from(self)
-                }
-
-                fn from_snapshot(
-                    snapshot: #snapshot,
-                ) -> ::core::result::Result<Self, #m::Report> {
-                    let mut state = <#self_ty as ::core::default::Default>::default();
-                    ::angzarr_embedded::State::restore(&mut state, snapshot)?;
-                    ::core::result::Result::Ok(state)
-                }
-
-                fn restore(
-                    &mut self,
-                    snapshot: #snapshot,
-                ) -> ::core::result::Result<(), #m::Report> {
-                    <#self_ty>::restore(self, snapshot).map_err(|error| #m::Report::of(&error))
-                }
-
-                fn descriptor() -> ::angzarr_embedded::v1::StateDescriptor {
-                    #m::state_descriptor::<#snapshot>()
-                }
+    /// The handler trait, `<Name>Handler`: every marked method, forwarded.
+    fn handler_trait(&self) -> Tokens {
+        let (self_ty, vis) = (self.self_ty, &self.vis);
+        let handler = format_ident!("{}Handler", self.name);
+        let (declared, forwarded): (Vec<_>, Vec<_>) = self
+            .methods
+            .iter()
+            .map(|x| {
+                let (sig, names) = renamed(&x.method.sig);
+                let method = &sig.ident;
+                let declared = own_type(quote!(#sig), self_ty);
+                let forwarded = quote!(#declared { <#self_ty>::#method(self, #(#names),*) });
+                (declared, forwarded)
+            })
+            .unzip();
+        quote! {
+            /// The domain's handler set: every marked method.
+            #vis trait #handler {
+                #(#declared;)*
             }
-        },
-        None => quote! {
+
+            impl #handler for #self_ty {
+                #(#forwarded)*
+            }
+        }
+    }
+
+    /// The type-list constants: `HANDLES`, `REFUSALS` and `APPLIES`.
+    fn constants(&self) -> Tokens {
+        let m = markup();
+        let self_ty = self.self_ty;
+        let handles = type_names(self.methods.types(&["handles_cmd", "handles_fact"]));
+        let refusals = type_names(self.methods.types(&["on_refused"]));
+        let applies = type_names(self.methods.types(&["applies"]));
+        quote! {
+            impl #self_ty {
+                /// The handled commands and facts, in marker order.
+                pub const HANDLES: &'static [#m::TypeName] = #handles;
+                /// The commands whose refusals it handles (`#[on_refused]`),
+                /// in marker order.
+                pub const REFUSALS: &'static [#m::TypeName] = #refusals;
+                /// The applied events, in marker order.
+                pub const APPLIES: &'static [#m::TypeName] = #applies;
+            }
+        }
+    }
+}
+
+/// The aggregate's `State`: snapshotted as `snapshot` through the user's
+/// conversions, or, with none, never snapshotted.
+fn state_impl(self_ty: &Type, snapshot: Option<Type>) -> Tokens {
+    let m = markup();
+    let Some(snapshot) = snapshot else {
+        return quote! {
             impl ::angzarr_embedded::State for #self_ty {
                 type Snapshot = #m::NoSnapshot;
 
@@ -3921,65 +4161,69 @@ fn domain(attr: Tokens, item: Tokens, kind: Kind) -> syn::Result<Tokens> {
                     #m::state_descriptor::<#m::NoSnapshot>()
                 }
             }
-        },
+        };
     };
+    quote! {
+        impl ::angzarr_embedded::State for #self_ty {
+            type Snapshot = #snapshot;
 
-    // The handler trait: every marked method, forwarded.
-    let handler = format_ident!("{}Handler", name);
-    let (declared, forwarded): (Vec<_>, Vec<_>) = methods
-        .iter()
-        .map(|x| {
-            let (sig, names) = renamed(&x.method.sig);
-            let method = &sig.ident;
-            let declared = own_type(quote!(#sig), self_ty);
-            let forwarded = quote!(#declared { <#self_ty>::#method(self, #(#names),*) });
-            (declared, forwarded)
-        })
-        .unzip();
-    let constant = |marker: &'static str| {
-        let types: Vec<_> = of(marker).map(|x| &x.args.ty).collect();
-        quote!(&[#(#m::TypeName::of::<<#types as #m::DomainMessage>::Wire>(),)*])
-    };
-    let handled: Vec<_> = methods
-        .iter()
-        .filter(|x| x.marker == "handles_cmd" || x.marker == "handles_fact")
-        .map(|x| &x.args.ty)
-        .collect();
-    let refusal_constant = constant("on_refused");
-    let applies_constant = constant("applies");
+            fn to_snapshot(&self) -> #snapshot {
+                <#snapshot as ::core::convert::From<&#self_ty>>::from(self)
+            }
 
+            fn from_snapshot(
+                snapshot: #snapshot,
+            ) -> ::core::result::Result<Self, #m::Report> {
+                let mut state = <#self_ty as ::core::default::Default>::default();
+                ::angzarr_embedded::State::restore(&mut state, snapshot)?;
+                ::core::result::Result::Ok(state)
+            }
+
+            fn restore(
+                &mut self,
+                snapshot: #snapshot,
+            ) -> ::core::result::Result<(), #m::Report> {
+                <#self_ty>::restore(self, snapshot).map_err(|error| #m::Report::of(&error))
+            }
+
+            fn descriptor() -> ::angzarr_embedded::v1::StateDescriptor {
+                #m::state_descriptor::<#snapshot>()
+            }
+        }
+    }
+}
+
+/// The expansion of an aggregate or a process manager (see the crate
+/// docs).
+fn domain(attr: Tokens, item: Tokens, kind: Kind) -> syn::Result<Tokens> {
+    let args = DomainArgs::parse(attr)?;
+    let imp: ItemImpl = syn::parse2(item)?;
+    let decorated = Decorated::new(&imp, kind, args.vis)?;
+    let self_ty = decorated.self_ty;
+    let m = markup();
+    let rejection = decorated.rejection(args.rejection)?;
+    let rejection_ty = quote!(#m::Rejection<#rejection>);
+    let payloads = decorated.payloads(args.command, args.event)?;
+    let refusing = decorated.refusal_choices(&rejection_ty)?;
+    let written = &payloads.written;
+    let state = state_impl(self_ty, args.snapshot);
+    let handles = decorated.handles();
+    let domain_impl = decorated.domain_impl(&args.domain, &payloads, &rejection_ty);
+    let routed = decorated.routed();
+    let starts = decorated.starts();
+    let handler_trait = decorated.handler_trait();
+    let constants = decorated.constants();
     Ok(quote! {
         #imp
 
-        #(#sets)*
+        #(#written)*
 
         #state
 
-        #(#from_commands)*
-        #(#from_events)*
-        #(#decides)*
-        #(#ingests)*
+        #handles
         #(#refusing)*
 
-        impl ::angzarr_embedded::Domain for #self_ty {
-            type State = Self;
-            type Command = #command_ty;
-            type Fact = #fact_set;
-            type Event = #event_ty;
-            type Rejection = #rejection_ty;
-
-            const NAME: &'static str = #domain;
-            const RULES_VERSION: &'static str = ::core::env!("CARGO_PKG_VERSION");
-
-            fn apply(
-                state: &mut Self,
-                event: &#event_ty,
-                page: &::angzarr_embedded::PageContext<'_>,
-            ) {
-                let _ = page;
-                #apply_body
-            }
-        }
+        #domain_impl
 
         impl #m::Fails<#self_ty> for #rejection {
             fn into_failed(self) -> #m::Failed<#rejection_ty> {
@@ -3987,38 +4231,13 @@ fn domain(attr: Tokens, item: Tokens, kind: Kind) -> syn::Result<Tokens> {
             }
         }
 
-        impl #m::Routed for #self_ty {
-            fn route(
-                table: ::angzarr_embedded::angzarr_router::domain::DomainDispatch<Self>,
-            ) -> ::angzarr_embedded::angzarr_router::domain::DomainDispatch<Self> {
-                table
-                    #(#command_routes)*
-                    #(#fact_routes)*
-                    #(#refusal_routes)*
-            }
-        }
+        #routed
 
-        #process_manager
+        #starts
 
-        /// The domain's handler set: every marked method.
-        #vis trait #handler {
-            #(#declared;)*
-        }
+        #handler_trait
 
-        impl #handler for #self_ty {
-            #(#forwarded)*
-        }
-
-        impl #self_ty {
-            /// The handled commands and facts, in marker order.
-            pub const HANDLES: &'static [#m::TypeName] =
-                &[#(#m::TypeName::of::<<#handled as #m::DomainMessage>::Wire>(),)*];
-            /// The commands whose refusals it handles (`#[on_refused]`),
-            /// in marker order.
-            pub const REFUSALS: &'static [#m::TypeName] = #refusal_constant;
-            /// The applied events, in marker order.
-            pub const APPLIES: &'static [#m::TypeName] = #applies_constant;
-        }
+        #constants
     })
 }
 

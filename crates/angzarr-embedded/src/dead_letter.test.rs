@@ -595,7 +595,14 @@ fn a_malformed_kernel_books_letter_is_keyed_where_the_spec_has_a_key() {
             "{malformed:?}"
         );
     }
-    // A fact's payload type names it too.
+}
+
+/// A malformed book's letter names its payload's type, a fact's too; events
+/// name no command, and leave it empty.
+#[test]
+fn a_malformed_books_letter_names_its_payloads_type() {
+    use crate::toys::wire;
+    use crate::Malformed;
     let fact = check(
         crate::toys::fact(
             cover("account", 1),
@@ -621,7 +628,6 @@ fn a_malformed_kernel_books_letter_is_keyed_where_the_spec_has_a_key() {
             .map(String::as_str),
         Some("toy.account.fact.v1.PaymentReceived")
     );
-    // Events name no command: empty.
     let letter = super::letter(
         angzarr_dead_letter::Payload::RejectedEvents(crate::v1::EventBook {
             cover: Some(cover("account", 1)),
