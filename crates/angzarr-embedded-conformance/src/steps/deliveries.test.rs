@@ -150,6 +150,19 @@ fn a_nonce(w: &mut Coordinator) {
     assert!(!last(w).conflict_nonce.is_empty());
 }
 
+#[then(regex = r"^business code receives the command with conflict resolution (\w+)$")]
+fn delivered_resolution(w: &mut Coordinator, name: String) {
+    let delivered = last(w)
+        .command
+        .and_then(|book| book.handling)
+        .map(|handling| handling.conflict_resolution())
+        .unwrap_or_default();
+    assert_eq!(
+        delivered.as_str_name(),
+        format!("CONFLICT_RESOLUTION_{name}")
+    );
+}
+
 #[then("business code received no conflict nonce")]
 fn no_nonce(w: &mut Coordinator) {
     assert!(last(w).conflict_nonce.is_empty());

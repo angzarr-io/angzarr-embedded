@@ -136,6 +136,12 @@ fn fails_with_rejection(w: &mut Coordinator, reason: String) {
     assert_refused(w, "FAILED_PRECONDITION", &reason, &BTreeMap::new());
 }
 
+#[then(regex = r"^the command fails (\w+) and nothing is persisted$")]
+fn fails_persisting_nothing(w: &mut Coordinator, status_name: String) {
+    fails_with_status(w, status_name);
+    assert_nothing_persisted(w);
+}
+
 #[then(regex = r"^the command fails (\w+) with reason (\w+)(.*)$")]
 fn fails_with_reason(w: &mut Coordinator, status_name: String, reason: String, rest: String) {
     assert_refused(w, &status_name, &reason, &named(&rest));

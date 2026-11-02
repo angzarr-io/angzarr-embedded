@@ -46,6 +46,8 @@ pub(crate) enum Fault {
     FactOrigin,
     /// An expected sequence.
     Handling(u64),
+    /// An edition of its own.
+    Edition(String),
 }
 
 /// One reaction: on an event of type `on`, a command of type `command` to
@@ -148,11 +150,15 @@ impl Reaction {
             _ => None,
         };
         let fact_origin = matches!(self.fault, Some(Fault::FactOrigin | Fault::IsFact));
+        let edition = match &self.fault {
+            Some(Fault::Edition(edition)) => Some(edition.clone()),
+            _ => None,
+        };
         CommandBook {
             cover: Some(Cover {
                 domain: self.domain.clone(),
                 root,
-                edition: None,
+                edition,
             }),
             page: Some(CommandPage {
                 body: Some(body),

@@ -66,6 +66,43 @@ fn pm_sets_edition(w: &mut Coordinator, edition: String) {
         .every(|a| a.book_edition = Some(edition));
 }
 
+#[given(regex = r#"^the policy handler sets outgoing edition "([\w-]+)"$"#)]
+fn policy_sets_edition(w: &mut Coordinator, edition: String) {
+    let def = w.policies.last().expect("a policy");
+    let output = def.output.clone();
+    locked(&def.script)
+        .reactions
+        .push(crate::tests::policy::Reaction {
+            on: "OrderCreated".to_string(),
+            domain: output,
+            command: "ReserveStock".to_string(),
+            root: crate::tests::policy::Root::Named("inv-1".to_string()),
+            correlation: None,
+            fault: Some(crate::tests::policy::Fault::Edition(edition)),
+        });
+}
+
+#[then(regex = r#"^no command reaches "([\w-]+)"$"#)]
+fn no_command_reaches(w: &mut Coordinator, domain: String) {
+    let delivered = w.business(&domain).delivered();
+    assert!(delivered.is_empty(), "{delivered:?}");
+}
+
+#[when(regex = r#"^a client sends an AddItem command to "([\w-]+)" with edition (unset|"[^"]*")$"#)]
+async fn sends_with_edition(w: &mut Coordinator, name: String, edition: String) {
+    w.begin();
+    let edition = edition
+        .strip_prefix('"')
+        .and_then(|e| e.strip_suffix('"'))
+        .map(str::to_string);
+    let cover = Cover {
+        edition,
+        ..w.cover("order", &name)
+    };
+    let book = w.command(&cover, "AddItem");
+    w.handle(book).await;
+}
+
 #[given(regex = r#"^the (\w+) aggregate refuses (\w+)$"#)]
 fn aggregate_refuses(w: &mut Coordinator, domain: String, command: String) {
     w.business(&domain).rule(crate::tests::business::Rule {

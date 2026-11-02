@@ -44,12 +44,16 @@ Feature: Edition propagation across cross-domain emissions
     Then the emitted event's cover has edition "speculative"
 
   @C-0140
-  Scenario: Coordinator always overrides handler-set edition with source edition
+  Scenario: A policy's command naming another edition than its trigger's is refused
+    # policy.proto, PolicyResponse: no edition is overridden; a command into
+    # any other edition than its trigger's is the policy's bug (decision
+    # 14.66).
     Given a policy "OrderFulfillment" translating from "order" to "inventory"
     And the source event has edition "alpha"
     And the policy handler sets outgoing edition "beta"
     When an OrderCreated event is dispatched to the policy
-    Then the persisted command's cover has edition "alpha"
+    Then the policy's answer is refused INTERNAL with reason COORDINATOR_REASON_POLICY_COMMAND_OUTSIDE_EDITION, expected_edition "alpha", actual_edition "beta"
+    And no command reaches "inventory"
 
   @C-0141
   Scenario: Policy propagates main-timeline (empty) edition unchanged
@@ -95,22 +99,23 @@ Feature: Edition propagation across cross-domain emissions
     Then the refusal fact's cover has edition "speculative"
 
   # ---------------------------------------------------------------
-  # Main timeline: "" , unset and "angzarr" are one timeline
+  # Main timeline: unset, and spelled no other way
   # ---------------------------------------------------------------
 
   @C-0409
-  Scenario Outline: Events written under one main-timeline spelling are read under every other
-    Given an "order" aggregate "order-1" with 2 events written with edition <written>
-    When the coordinator loads "order-1" with edition <read>
-    Then the loaded history has 2 events
-    And next_sequence is 2
+  Scenario Outline: The main timeline is spelled one way: unset
+    # types.proto, Cover.edition: main is unset; an empty edition is
+    # malformed, and "angzarr" names an edition like any other (decision
+    # 14.66).
+    Given an "order" aggregate "order-1" with 2 events on the main timeline
+    When a client sends an AddItem command to "order-1" with edition <edition>
+    Then <outcome>
 
     Examples:
-      | written   | read      |
-      | ""        | "angzarr" |
-      | "angzarr" | ""        |
-      | unset     | "angzarr" |
-      | "angzarr" | unset     |
+      | edition   | outcome                                                                                                              |
+      | unset     | an ItemAdded event is persisted at sequence 2                                                                        |
+      | ""        | the command fails INVALID_ARGUMENT and nothing is persisted                                                          |
+      | "angzarr" | the client is answered FAILED_PRECONDITION with reason COORDINATOR_REASON_EDITION_NOT_FORKED, edition "angzarr" |
 
   @C-0410
   Scenario: The main timeline cannot be deleted

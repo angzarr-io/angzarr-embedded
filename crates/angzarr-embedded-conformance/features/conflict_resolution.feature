@@ -268,11 +268,15 @@ Feature: Conflict resolution - how the coordinator treats a stale command
 
   @commutative
   @C-0149
-  Scenario: Commutative - a command at the head is delivered with an empty window and a nonce
+  Scenario: Commutative - a command at the head is delivered as STRICT, with no window and no nonce
+    # The head-of-stream shortcut (decision 14.66): at the head there is no
+    # window, so nothing for the resolver to compare; the command is handled
+    # as STRICT handles it.
     Given an AddItem command with conflict resolution COMMUTATIVE targeting sequence 3
     When the coordinator processes the command
     Then business code receives an empty window
-    And business code receives a conflict nonce
+    And business code received no conflict nonce
+    And business code receives the command with conflict resolution STRICT
     And an ItemAdded event is persisted at sequence 3
 
   @conflict_resolution

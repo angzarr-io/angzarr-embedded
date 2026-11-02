@@ -77,15 +77,6 @@ const FAILING_FACT_FAILS: Tag = Tag {
     why: "a fact whose handler fails is answered the failure, not OK PARKED",
 };
 
-/// A COMMUTATIVE command at the head has no window, so the kernel hands it
-/// to business code as STRICT, with no nonce: there is nothing for the
-/// resolver to compare (`coordinator::contextual_command`). The spec
-/// delivers it COMMUTATIVE with a nonce, so the handler's path is uniform.
-const COMMUTATIVE_AT_HEAD: Tag = Tag {
-    name: "divergence_commutative_at_head_as_strict",
-    why: "a COMMUTATIVE command at the head is delivered as STRICT, with no nonce",
-};
-
 /// No edition lifecycle. Editions are angzarr's, created by its system
 /// layer (ForkStream, a fork on arrival, ListEditions, DeleteEdition);
 /// angzarr-embedded creates none. An outside input to an edition stream
@@ -97,27 +88,12 @@ const NO_EDITION_LIFECYCLE: Tag = Tag {
     why: "editions are angzarr's system layer's: angzarr-embedded forks, lists and deletes none",
 };
 
-/// Configuration lives on the domain (`CONFLICT_RESOLUTION`,
-/// `CONFLICT_RESOLUTION_BY_COMMAND`, the descriptor), checked at
-/// registration: there is no coordinator configuration to load.
-const CONFIGURATION_ON_DOMAIN: Tag = Tag {
-    name: "divergence_configuration_on_domain",
-    why: "configuration is the domain's, checked at registration: there is no coordinator configuration to load",
-};
-
 /// angzarr-embedded serves no query interface (EventQueryService, a
 /// TemporalQuery, a standalone query server): an application reads its
 /// streams through its store, and the kernel loads them for itself.
 const NO_QUERY: Tag = Tag {
     name: "unsupported_query",
     why: "no query interface: streams are read through the store",
-};
-
-/// The snapshot compatibility rule is the default one only: no domain sets
-/// an accept or reject pattern.
-const NO_SNAPSHOT_PATTERNS: Tag = Tag {
-    name: "unsupported_snapshot_version_patterns",
-    why: "only the default major.minor rule judges a snapshot: no accept or reject pattern",
 };
 
 /// No payload is stored by reference (a claim check), so none can fail to
@@ -145,15 +121,6 @@ const UNBOUND_REMOTE_POLICY: Tag = Tag {
     why: "an in-process callback answers a payload alone: only a remote policy's answer can be more, and no binding runs one",
 };
 
-/// A policy's command naming another edition than its trigger's is a
-/// policy bug, refused (`COORDINATOR_REASON_POLICY_COMMAND_OUTSIDE_EDITION`,
-/// as policy.proto's PolicyResponse says), not overridden with the
-/// trigger's: the spec says both (C-0140 against PolicyResponse).
-const OUTSIDE_EDITION_REFUSED: Tag = Tag {
-    name: "divergence_outside_edition_refused",
-    why: "a policy's command in another edition is refused, as policy.proto says, not overridden as C-0140 says",
-};
-
 /// A policy answers commands alone (`PolicyResponse.reactions`): it emits
 /// no event.
 const POLICY_EMITS_NO_EVENT: Tag = Tag {
@@ -177,14 +144,6 @@ const FAILING_CALLBACK_ANSWERED: Tag = Tag {
 const UNKNOWN_DOMAIN_STEP_HELD: Tag = Tag {
     name: "divergence_unknown_domain_step_held",
     why: "a command for an unroutable domain is dead-lettered as the command, its policy's position held; the spec dead-letters the trigger",
-};
-
-/// The main timeline is spelled one way, unset: an empty edition is
-/// malformed (`Malformed::EmptyEdition`) and `angzarr` is an edition like
-/// any other.
-const MAIN_UNSET_ONLY: Tag = Tag {
-    name: "divergence_main_timeline_unset_only",
-    why: "the main timeline is unset only: an empty edition is malformed and \"angzarr\" is an edition like any other",
 };
 
 /// The fold is business code's: angzarr-router's, which runs the
@@ -222,7 +181,6 @@ const TAGGED: &[(&str, Tag)] = &[
     ("C-0567", UNBOUND_HOST),
     // conflict_resolution.feature
     ("C-0729", IN_PROCESS_CHAIN),
-    ("C-0149", COMMUTATIVE_AT_HEAD),
     ("C-0724", WAITING_CALLER_ANSWERED),
     ("C-0725", WAITING_CALLER_ANSWERED),
     ("C-0459", UNBOUND),
@@ -266,8 +224,6 @@ const TAGGED: &[(&str, Tag)] = &[
     ("C-0663", NO_EDITION_LIFECYCLE),
     // edition_propagation.feature
     ("C-0139", POLICY_EMITS_NO_EVENT),
-    ("C-0140", OUTSIDE_EDITION_REFUSED),
-    ("C-0409", MAIN_UNSET_ONLY),
     ("C-0410", NO_EDITION_LIFECYCLE),
     // fact_flow.feature
     ("C-0609", NO_OUTSIDE_CAUSATION),
@@ -287,10 +243,6 @@ const TAGGED: &[(&str, Tag)] = &[
     ("C-0588", NO_QUERY),
     ("C-0589", NO_QUERY),
     // rules_version.feature
-    ("C-0527", NO_SNAPSHOT_PATTERNS),
-    ("C-0528", NO_SNAPSHOT_PATTERNS),
-    ("C-0529", NO_SNAPSHOT_PATTERNS),
-    ("C-0530", CONFIGURATION_ON_DOMAIN),
     ("C-0554", NO_QUERY),
     ("C-0555", NO_QUERY),
     ("C-0556", NO_QUERY),

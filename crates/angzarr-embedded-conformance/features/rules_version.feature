@@ -13,9 +13,7 @@ Feature: Rules version - recording who decided, and choosing snapshots
   the registered version. By default, versions are compatible when their
   major and minor numbers are equal, ignoring one leading "v" or "V"; a
   version that is not a semantic version is compatible only with exactly
-  the same version. A domain may
-  replace that rule with an accept pattern and an optional reject pattern;
-  a reject match always wins, and a pattern must match the whole version.
+  the same version. Nothing replaces that rule.
   A snapshot that is not offered costs nothing but time: business code gets
   the full history from sequence 0 instead. A query is judged by the same
   rule against the answering coordinator's own registration, and uses no
@@ -155,55 +153,9 @@ Feature: Rules version - recording who decided, and choosing snapshots
   # Choosing a snapshot: a domain's own rule
   # ===========================================================================
 
-  @snapshot_selection
-  @C-0527
-  Scenario Outline: An accept pattern replaces the default rule
-    Given the "order" domain accepts snapshot versions matching "1\.[34]\..*"
-    And order "order-1" has a snapshot at sequence 5 of state type "/orders.v1.OrderState" recorded under rules version "<snapshot version>"
-    When the coordinator delivers an AddItem command for order "order-1"
-    Then the snapshot is <offered>
-
-    Examples:
-      | snapshot version | offered     |
-      | 1.3.7            | offered     |
-      | 1.4.2+build.7    | offered     |
-      | 1.5.0            | not offered |
-
-  @snapshot_selection
-  @C-0528
-  Scenario Outline: A reject match wins over an accept match
-    Given the "order" domain accepts snapshot versions matching "1\..*"
-    And the "order" domain rejects snapshot versions matching "1\.3\.0(\+.*)?"
-    And order "order-1" has a snapshot at sequence 5 of state type "/orders.v1.OrderState" recorded under rules version "<snapshot version>"
-    When the coordinator delivers an AddItem command for order "order-1"
-    Then the snapshot is <offered>
-
-    Examples:
-      | snapshot version | offered     |
-      | 1.3.1            | offered     |
-      | 1.3.0            | not offered |
-      | 1.3.0+build.2    | not offered |
-
-  @snapshot_selection
-  @C-0529
-  Scenario Outline: A pattern must match the whole version
-    Given the "order" domain accepts snapshot versions matching "1\.4"
-    And order "order-1" has a snapshot at sequence 5 of state type "/orders.v1.OrderState" recorded under rules version "<snapshot version>"
-    When the coordinator delivers an AddItem command for order "order-1"
-    Then the snapshot is <offered>
-
-    Examples:
-      | snapshot version | offered     |
-      | 1.4              | offered     |
-      | 1.4.2            | not offered |
-      | 21.4             | not offered |
-
-  @snapshot_selection
-  @C-0530
-  Scenario: A pattern that needs lookaround is refused when the configuration loads
-    Given coordinator configuration where the "order" domain accepts snapshot versions matching "1\.(?!3).*"
-    When the coordinator loads its configuration
-    Then the configuration is refused, naming the "order" domain's accept pattern
+  # C-0527 to C-0530 (a domain's snapshot accept and reject patterns, and
+  # a pattern refused when the configuration loads) are retired: a
+  # snapshot passes the default rule or none (decision 14.66).
 
   # ===========================================================================
   # Queries
