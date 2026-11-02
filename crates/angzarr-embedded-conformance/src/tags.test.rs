@@ -135,15 +135,6 @@ const UNBOUND_FOLD: Tag = Tag {
     why: "the fold is business code's (angzarr-router's); no typed domain binds it here",
 };
 
-/// A policy's handler that fails is dead-lettered on its first failure,
-/// whatever its status: the kernel retries a step's delivery, never the
-/// policy's own call. The spec retries a retryable failure up to the retry
-/// cap first.
-const POLICY_FAILURE_NOT_RETRIED: Tag = Tag {
-    name: "divergence_policy_failure_not_retried",
-    why: "a failing policy handler is dead-lettered at once, never retried, whatever its status",
-};
-
 /// No step binding drives the scenario yet.
 const UNBOUND: Tag = Tag {
     name: "unbound",
@@ -171,7 +162,6 @@ const TAGGED: &[(&str, Tag)] = &[
     ("C-0738", IN_PROCESS_CHAIN),
     ("C-0744", IN_PROCESS_CHAIN),
     ("C-0739", IN_PROCESS_CHAIN),
-    ("C-0444", POLICY_FAILURE_NOT_RETRIED),
     ("C-0445", UNBOUND),
     ("C-0447", NO_CLAIM_CHECK),
     ("C-0730", IN_PROCESS_CHAIN),
