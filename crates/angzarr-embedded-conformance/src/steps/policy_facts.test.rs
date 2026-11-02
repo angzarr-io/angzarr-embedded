@@ -13,6 +13,7 @@ use angzarr_embedded::v1::{
     EventRef, Uuid,
 };
 
+use crate::tests::business::{rejection, Rule};
 use crate::tests::policies::sends_as_fact;
 use crate::tests::policy::bare;
 use crate::tests::world::Coordinator;
@@ -183,16 +184,52 @@ fn answered_duplicate(w: &mut Coordinator, domain: String, name: String) {
     assert!(w.persisted(&cover).is_empty(), "{:?}", w.persisted(&cover));
 }
 
-#[then(regex = r"^the (\w+) fact is dead-lettered as rejected_command, and an alert is raised$")]
+#[then(
+    regex = r"^the (?:(\w+) )?fact is dead-lettered as rejected_command, and an alert is raised$"
+)]
 fn fact_dead_lettered(w: &mut Coordinator, fact: String) {
     let letters = letters(w);
     assert!(
-        letters
-            .iter()
-            .any(|l| rejected(l) == Some((fact.clone(), true))),
+        letters.iter().any(|l| match rejected(l) {
+            Some((name, true)) => fact.is_empty() || name == fact,
+            _ => false,
+        }),
         "{letters:?}"
     );
     assert!(!w.alerts().is_empty(), "an alert");
+}
+
+#[given(
+    regex = r#"^(?:"([\w-]+)"'s business process answers the|the "([\w-]+)" business process answers every) (\w+) fact with a rejection, FAILED_PRECONDITION$"#
+)]
+fn rejects_fact(w: &mut Coordinator, of: String, every: String, fact: String) {
+    let business = w.business(if of.is_empty() { &every } else { &of });
+    business.declare_fact(&fact);
+    business.rule(Rule {
+        input: fact,
+        once: None,
+        error: rejection("FACT_REJECTED"),
+    });
+}
+
+#[then(regex = r#"^no refusal fact is recorded on "([\w-]+)" "([^"]+)"$"#)]
+fn no_refusal_fact(w: &mut Coordinator, domain: String, name: String) {
+    let cover = w.cover(&domain, &name);
+    let pages = w.pages(&cover);
+    assert!(
+        !pages.iter().any(|p| p
+            .payload
+            .as_ref()
+            .is_some_and(|a| bare(a) == "CommandRefused")),
+        "{pages:?}"
+    );
+    let def = w.policies.last().expect("a policy");
+    assert!(
+        crate::tests::policy::locked(&def.script)
+            .refusals
+            .is_empty(),
+        "OnRefused called"
+    );
 }
 
 #[then(regex = r"^the (\w+) trigger is not dead-lettered$")]

@@ -202,6 +202,20 @@ fn letters_of(w: &Coordinator, reason: &str) -> Vec<AngzarrDeadLetter> {
         .collect()
 }
 
+/// A stream as a reason's `stream` arg names it (decision 14.65):
+/// `domain/root`, then `@edition` outside the main timeline.
+fn text(cover: &Cover) -> String {
+    let root = cover
+        .root
+        .as_ref()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    match &cover.edition {
+        Some(edition) => format!("{}/{root}@{edition}", cover.domain),
+        None => format!("{}/{root}", cover.domain),
+    }
+}
+
 /// Whether `value` is the arg a scenario names: a type by its bare name.
 fn names(value: &str, wanted: &str) -> bool {
     value == wanted || value.rsplit(['.', '/']).next() == Some(wanted)
@@ -232,6 +246,13 @@ fn policy_bug(w: &mut Coordinator, reason: String, naming: String) {
     }
     if let Some(field) = word("with field ") {
         wanted.insert("field".to_string(), field);
+    }
+    if naming.contains("the trigger's stream") {
+        let Some(Payload::RejectedEvents(trigger)) = &letters[0].payload else {
+            panic!("the trigger dead-lettered: {:?}", letters[0]);
+        };
+        let cover = trigger.cover.clone().expect("the trigger's stream");
+        wanted.insert("stream".to_string(), text(&cover));
     }
     for (name, value) in wanted {
         let given = args
@@ -313,12 +334,33 @@ fn processing_failed(w: &mut Coordinator, code: String, retries: u32, transient:
     );
 }
 
-/// No domain but the source was delivered anything.
+/// No domain but the source was delivered anything, and the source none
+/// of the outputs a same-domain policy addresses to it, nor recorded one.
 #[then(
     regex = r"^(?:nothing is delivered|neither command is delivered)(?: and nothing is appended to stream .*)?$"
 )]
 fn nothing_delivered(w: &mut Coordinator) {
-    let source = w.policies.last().expect("a policy").input.clone();
+    let def = w.policies.last().expect("a policy");
+    let source = def.input.clone();
+    let outputs: Vec<String> = crate::tests::policy::locked(&def.script)
+        .reactions
+        .iter()
+        .filter(|r| r.domain == source)
+        .map(|r| r.command.clone())
+        .collect();
+    for output in &outputs {
+        assert!(
+            deliveries(w, &source, output).is_empty(),
+            "{output} delivered"
+        );
+        let kept = recorded(output).to_string();
+        assert!(
+            !persisted_in(w, &source)
+                .iter()
+                .any(|p| p.payload.as_ref().is_some_and(|a| bare(a) == kept)),
+            "{kept} recorded on {source}"
+        );
+    }
     let others: Vec<String> = w
         .domains
         .keys()

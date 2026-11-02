@@ -4,6 +4,8 @@
 
 use cucumber::{given, when};
 
+use angzarr_embedded::v1::Cover;
+
 use crate::tests::policy::{locked, Fault, Reaction, Root, Translation};
 use crate::tests::world::Coordinator;
 
@@ -203,10 +205,10 @@ fn answers_with_fault(
 }
 
 #[given(
-    regex = r#"^a policy ("\w+" translating from "[\w-]+" to "[\w-]+") whose business code answers every (\w+) event with an? (\w+) command for the same order$"#
+    regex = r#"^a policy ("\w+" translating from "[\w-]+" to "[\w-]+") whose business code answers every (\w+) event with an? (\w+) command for another order, a new one each time$"#
 )]
-fn answers_the_same_stream(w: &mut Coordinator, header: Header, on: String, command: String) {
-    let reaction = reaction(&on, &header.output, &command, Root::Trigger);
+fn answers_another_stream(w: &mut Coordinator, header: Header, on: String, command: String) {
+    let reaction = reaction(&on, &header.output, &command, Root::Another);
     reacts(w, &header, reaction);
 }
 
@@ -326,16 +328,20 @@ fn callback_fails(w: &mut Coordinator, name: String) {
 }
 
 #[when(
-    regex = r#"^an? (\w+) event (?:with correlation "([^"]+)" )?is recorded for order "([\w-]+)"$"#
+    regex = r#"^an? (\w+) event (?:with correlation "([^"]+)" )?is recorded for order "([\w-]+)"(?: on the main timeline| in edition "([\w-]+)")?$"#
 )]
 async fn recorded_for_order(
     w: &mut Coordinator,
     event: String,
     correlation: String,
     order: String,
+    edition: String,
 ) {
     w.begin();
-    let cover = w.cover("order", &order);
+    let cover = Cover {
+        edition: (!edition.is_empty()).then_some(edition),
+        ..w.cover("order", &order)
+    };
     let correlation = match correlation.is_empty() {
         true => w.order_correlation.clone(),
         false => Some(correlation),

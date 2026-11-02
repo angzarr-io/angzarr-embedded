@@ -106,6 +106,18 @@ Feature: Fact injection
     And the "order" aggregate still has 3 events
     And external_id "refund-R1" is not recorded as processed
 
+  @C-0786
+  Scenario: A fact its business process answers with a rejection is dead-lettered, and its sender answered OK, PARKED
+    # Owner's ruling (decision 14.72): a fact is never refused, so a
+    # rejection its business process answers is that process's bug; the
+    # fact is dead-lettered like any input that cannot be delivered.
+    Given an "order" aggregate with 3 existing events
+    And the "order" business process answers every ShipmentDispatched fact with a rejection, FAILED_PRECONDITION
+    When a ShipmentDispatched fact is injected
+    Then the fact is dead-lettered as rejected_command, and an alert is raised
+    And the client is answered OK with delivery PARKED and no events
+    And the "order" aggregate still has 3 events
+
   @C-0190
   Scenario: Duplicate fact with same external_id is idempotent
     Given a fact with external_id "shipment-S1-dispatched"

@@ -155,9 +155,11 @@ Feature: Who a policy's command addresses, and the correlation it carries
   @C-0737
   Scenario: A chain of reactions deeper than the coordinator's limit stops at the limit
     # A limit a coordinator may enforce, where it follows the chain from
-    # the input a caller sent (that input at depth 0).
+    # the input a caller sent (that input at depth 0). Each reaction
+    # addresses another order: a policy never addresses its trigger's own
+    # stream (C-0784; decision 14.71).
     Given a coordinator whose chain depth limit is 8
-    And a policy "OrderToOrder" translating from "order" to "order" whose business code answers every ItemAdded event with an AddItem command for the same order
+    And a policy "OrderToOrder" translating from "order" to "order" whose business code answers every ItemAdded event with an AddItem command for another order, a new one each time
     When an AddItem command for "order" "order-1" is handled
     Then the reaction at depth 9 is not delivered
     And the ItemAdded event that triggered it is dead-lettered with reason COORDINATOR_REASON_CHAIN_TOO_DEEP and arg limit "8" as rejected_events, and an alert is raised

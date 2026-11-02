@@ -15,7 +15,10 @@ Feature: Policy facts - a policy emits what its destination declares
   causation is the trigger and its correlation the trigger's. A fact whose
   handler fails is dead-lettered at its destination, and the policy's step
   completes. An arm its destination does not declare is a bug, refused at
-  the destination. A policy may address its own domain, at another root.
+  the destination. A policy may address its own domain, at another root,
+  never its trigger's own stream (decision 14.71). A fact whose business
+  process answers it with a rejection is dead-lettered at its destination,
+  as any input that cannot be delivered is (decision 14.72).
   The correlation ids below are UUIDs, as in every scenario (decision
   14.18).
 
@@ -92,3 +95,40 @@ Feature: Policy facts - a policy emits what its destination declares
     When an OrderPlaced event is recorded for order "order-1"
     Then "order" "order-2" handles AddItem
     And nothing is dead-lettered and no alert is raised
+
+  @policy_facts
+  @C-0784
+  Scenario Outline: A policy's output addressed to its trigger's own stream is a policy bug
+    # Owner's ruling (decision 14.71): a same-domain policy is allowed, as
+    # long as it never addresses its trigger's exact stream (its domain,
+    # its root, and its edition, which every output is stamped with). Its
+    # own domain at another root stays allowed (C-0780).
+    Given "order" "order-1" is forked into edition "what-if"
+    And a policy "OrderToOrder" translating from "order" to "order" that sends AddItem as a <arm> to "order" "order-1" on OrderPlaced
+    When an OrderPlaced event is recorded for order "order-1" <timeline>
+    Then the policy's answer is refused INTERNAL with reason COORDINATOR_REASON_POLICY_TARGETS_ITS_TRIGGER, naming the trigger's stream and command type AddItem
+    And nothing is delivered and nothing is appended to stream "order" root "order-1"
+    And the OrderPlaced trigger is dead-lettered with reason COORDINATOR_REASON_POLICY_TARGETS_ITS_TRIGGER as rejected_events, and an alert is raised
+    And the dead letter's processing_failed details have failure code COORDINATOR_REASON_POLICY_TARGETS_ITS_TRIGGER, retry_count 0 and is_transient false
+
+    Examples:
+      | arm     | timeline             |
+      | command | on the main timeline |
+      | fact    | on the main timeline |
+      | command | in edition "what-if" |
+
+  @policy_facts
+  @C-0785
+  Scenario: A policy's fact its destination's business process answers with a rejection is dead-lettered there, and the policy's step completes
+    # Owner's ruling (decision 14.72): a fact is never refused, so a
+    # rejection its business process answers is that process's bug; the
+    # fact is dead-lettered like any input that cannot be delivered, never
+    # taken down the refusal path.
+    Given a policy "OrderToInventory" translating from "order" to "inventory" whose business code answers an OrderPlaced event with a StockHoldRequested fact and then a ReserveStock command for "inventory" "inv-7"
+    And "inventory"'s business process answers the StockHoldRequested fact with a rejection, FAILED_PRECONDITION
+    When an OrderPlaced event is recorded for order "order-1"
+    Then the StockHoldRequested fact is dead-lettered as rejected_command, and an alert is raised
+    And no refusal fact is recorded on "order" "order-1"
+    And "inventory" "inv-7" handles ReserveStock
+    And the OrderPlaced trigger is not dead-lettered
+    And the policy "OrderToInventory"'s position on order "order-1" is past the OrderPlaced event

@@ -2296,13 +2296,9 @@ impl crate::angzarr_router::router::CommandHandler for RefusesAll {
     }
 }
 
-/// A policy's fact its destination answers with a business rejection,
-/// which a fact never is: not the refusal path (no OnRefused, no refusal
-/// fact), and, as nothing dead-lettered it, not parked either: its step
-/// fails as the rejection, and nothing is dead-lettered.
-#[test]
-fn a_policys_fact_answered_with_a_rejection_is_neither_refused_nor_parked() {
-    use crate::v1::{command_page::Body, Fact};
+/// The account toy, and a ledger whose business process refuses every
+/// input ([`RefusesAll`]).
+fn refusing_ledger() -> crate::Registry {
     let mut registry = crate::Registry::new();
     crate::toys::register::<Account>(
         &mut registry,
@@ -2316,6 +2312,41 @@ fn a_policys_fact_answered_with_a_rejection_is_neither_refused_nor_parked() {
             crate::toys::descriptor_of::<Ledger>(crate::v1::ComponentKind::Aggregate, "v2", &[]),
         )
         .unwrap();
+    registry
+}
+
+/// The one dead letter of `log`, a fact rejected as its business process
+/// answered it (`TOY_REFUSED`), as rejected_command.
+fn rejected_fact(log: &MemoryDeadLetters) {
+    use crate::v1::angzarr_dead_letter::Payload;
+    use crate::v1::command_page::Body;
+    let letters = log.letters();
+    assert_eq!(letters.len(), 1, "{letters:?}");
+    assert_eq!(
+        letters[0].reason.as_ref().map(|r| r.code.as_str()),
+        Some("TOY_REFUSED"),
+        "under the key its business process answered"
+    );
+    assert!(
+        matches!(
+            &letters[0].payload,
+            Some(Payload::RejectedCommand(book))
+                if matches!(book.page.as_ref().and_then(|p| p.body.as_ref()), Some(Body::Fact(_)))
+        ),
+        "the fact, as rejected_command: {:?}",
+        letters[0]
+    );
+}
+
+/// A policy's fact its destination's business process answers with a
+/// business rejection, which a fact never is (decision 14.72): its
+/// process's bug, dead-lettered at the destination and parked, so the
+/// policy's step is done and its position past the trigger (C-0785). Not
+/// the refusal path: no OnRefused, no refusal fact.
+#[test]
+fn a_policys_fact_answered_with_a_rejection_is_dead_lettered_and_its_step_done() {
+    use crate::v1::{command_page::Body, Fact};
+    let mut registry = refusing_ledger();
     registry
         .policy_component(
             Unchecked {
@@ -2336,7 +2367,7 @@ fn a_policys_fact_answered_with_a_rejection_is_neither_refused_nor_parked() {
         .unwrap();
     let log = MemoryDeadLetters::new();
     let store = MemoryStore::new();
-    let failure = Kernel::new(&registry)
+    let handled = Kernel::new(&registry)
         .log_with(&log)
         .on_retryable(crate::toys::no_retries())
         .handle::<Account, _>(
@@ -2345,21 +2376,36 @@ fn a_policys_fact_answered_with_a_rejection_is_neither_refused_nor_parked() {
             &at(30),
         )
         .ready()
-        .err()
-        .expect("the step fails");
-    assert!(
-        matches!(
-            failure,
-            Failure::Downstream {
-                error: StepError::Rejected(_),
-                ..
-            }
-        ),
-        "{failure:?}"
-    );
-    assert!(log.letters().is_empty(), "{:?}", log.letters());
+        .expect("a parked fact fails no step");
+    assert_eq!(handled.books().len(), 1, "the account's own events alone");
+    rejected_fact(&log);
     assert_eq!(streams(&store), [cover("account", 1)], "no refusal fact");
-    assert_eq!(position(&store, "unchecked", &cover("account", 1)), 0);
+    assert_eq!(position(&store, "unchecked", &cover("account", 1)), 1);
+}
+
+/// A client's fact its business process answers with a business
+/// rejection (decision 14.72): dead-lettered and answered OK, PARKED, never
+/// refused, and nothing is written (C-0786).
+#[test]
+fn a_clients_fact_answered_with_a_rejection_is_dead_lettered_and_parked() {
+    let registry = refusing_ledger();
+    let log = MemoryDeadLetters::new();
+    let store = MemoryStore::new();
+    let mut fact = record_for(ledger_cover());
+    let page = fact.page.as_mut().unwrap();
+    let Some(crate::v1::command_page::Body::Command(record)) = page.body.take() else {
+        unreachable!()
+    };
+    let fact = crate::toys::fact(ledger_cover(), record.payload.unwrap(), "rec-1");
+    let handled = Kernel::new(&registry)
+        .log_with(&log)
+        .on_retryable(crate::toys::no_retries())
+        .handle::<Ledger, _>(&store, fact, &at(30))
+        .ready()
+        .expect("parked, never refused");
+    assert!(matches!(handled, crate::Handled::Parked(_)), "parked");
+    rejected_fact(&log);
+    assert!(streams(&store).is_empty(), "nothing written");
 }
 
 /// A policy's commands naming exactly the command id and causation their

@@ -298,6 +298,51 @@ fn a_reaction_is_either_arm_and_carries_no_fact_origin() {
     }
 }
 
+/// A policy addressing its own domain (decision 14.71): another root is
+/// allowed, its trigger's own stream never, either arm, on the main
+/// timeline or in its trigger's edition (which an output naming none is
+/// stamped with), refused INTERNAL naming that stream and the output's
+/// type. The edition rule comes first: a named other edition is outside it.
+#[test]
+fn a_reaction_never_addresses_its_triggers_own_stream() {
+    use crate::v1::Uuid;
+    for edition in [None, Some("what-if")] {
+        let trigger = Cover {
+            domain: "ledger".to_string(),
+            root: Some(ledger_root()),
+            edition: edition.map(str::to_string),
+        };
+        let stream = match edition {
+            Some(edition) => format!("ledger/{}@{edition}", ledger_root()),
+            None => format!("ledger/{}", ledger_root()),
+        };
+        for arm in [record(None), as_fact(record(None))] {
+            let error = check_reaction("ledger", &trigger, None, vec![arm])
+                .err()
+                .unwrap();
+            assert_eq!(error.code, "COORDINATOR_REASON_POLICY_TARGETS_ITS_TRIGGER");
+            assert_eq!(error.grpc, crate::angzarr_router::error::GrpcCode::Internal);
+            let extra = |key: &str| error.extras.get(key).cloned();
+            assert_eq!(extra("stream"), Some(stream.clone()));
+            assert_eq!(
+                extra("command_type").as_deref(),
+                Some("toy.ledger.cmd.v1.Record")
+            );
+        }
+        let mut elsewhere = record(None);
+        elsewhere.cover.as_mut().unwrap().root = Some(Uuid::from_bytes([7; 16]));
+        assert!(check_reaction("ledger", &trigger, None, vec![elsewhere]).is_ok());
+        let elsewhen = record(Some("other"));
+        assert_eq!(
+            check_reaction("ledger", &trigger, None, vec![elsewhen])
+                .err()
+                .unwrap()
+                .code,
+            "COORDINATOR_REASON_POLICY_COMMAND_OUTSIDE_EDITION"
+        );
+    }
+}
+
 /// `book` with its command's payload as a Fact.
 fn as_fact(mut book: CommandBook) -> CommandBook {
     use crate::v1::{command_page::Body, Fact};

@@ -27,8 +27,10 @@ pub(crate) enum Root {
     Named(String),
     /// The trigger's correlation, as a policy to a process manager may.
     TriggerCorrelation,
-    /// The trigger's own root: the same stream's domain, its same root.
-    Trigger,
+    /// Another root than the trigger's, a new one for each trigger: its
+    /// root's text with `+`, named. A policy never addresses its trigger's
+    /// own stream (C-0784).
+    Another,
     /// None at all: a policy bug.
     Unnamed,
 }
@@ -123,7 +125,9 @@ impl Reaction {
         let root = match &self.root {
             Root::Named(name) => Some(root_of(name)),
             Root::TriggerCorrelation => meta.correlation_id.clone(),
-            Root::Trigger => source.cover.as_ref().and_then(|c| c.root.clone()),
+            Root::Another => (source.cover.as_ref())
+                .and_then(|c| c.root.as_ref())
+                .map(|trigger| root_of(&format!("{trigger}+"))),
             Root::Unnamed => None,
         };
         let payload = payload(&self.domain, &self.command);
