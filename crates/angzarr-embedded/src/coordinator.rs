@@ -112,6 +112,21 @@ pub(crate) struct History {
 }
 
 impl History {
+    /// Whether `stream`, as this history of it reads, is forked into its
+    /// edition (decision 14.32), as the store's per-stream forks say: main
+    /// always is; an edition stream is once it holds its creation event,
+    /// read here, or a snapshot, which never falls through to main. An
+    /// edition stream never forked reads as main's, with neither.
+    pub(crate) fn forked_in(&self, stream: &Cover) -> bool {
+        stream.edition.is_none()
+            || self.snapshot.is_some()
+            || self.pages.iter().any(|page| {
+                page.payload
+                    .as_ref()
+                    .is_some_and(|p| p.type_url == angzarr_ports::EDITION_CREATED_TYPE_URL)
+            })
+    }
+
     /// The stream this history is, folded as `D`'s under `cover`: resumed
     /// from its snapshot ([`Stream::resume`]), or replayed from its first
     /// event ([`Stream::replay`]), each event checked and upcast as replay
@@ -212,8 +227,9 @@ pub(crate) fn refused(command: &Identified, error: CodedError) -> Failure<Reject
     Failure::Kernel(KernelError::Router(error))
 }
 
-/// Step 3 over `port`: load the stream, look the command up, and
-/// [`admit`] it.
+/// Step 3 over `port`: load the stream, refuse an outside input to an
+/// edition stream not forked there ([`not_forked`]), look the command up,
+/// and [`admit`] it.
 pub(crate) async fn deduplicate<P: Port>(
     port: &mut P,
     registry: &Registry,
@@ -222,6 +238,9 @@ pub(crate) async fn deduplicate<P: Port>(
     let loaded = read(port, registry, &command)
         .await
         .map_err(Failure::Kernel)?;
+    if command.causation_id().is_none() && !loaded.history.forked_in(command.cover()) {
+        return Err(not_forked(&command));
+    }
     let recorded = port
         .find_command(command.cover(), command.command_id())
         .await
@@ -244,6 +263,28 @@ pub(crate) async fn deduplicate<P: Port>(
         Admitted::Skip => Ok(Deduplicated::Skipped),
         Admitted::Dispatch => Ok(Deduplicated::Novel(Box::new(Novel { command, loaded }))),
     }
+}
+
+/// An outside input (a client's command or fact: one with no causation) to
+/// `command`'s stream, in an edition it is not forked into: a business
+/// refusal before its handler runs, `COORDINATOR_REASON_EDITION_NOT_FORKED`
+/// (FAILED_PRECONDITION; C-0633, decision 14.65), naming the stream and the
+/// edition, and nothing is written. The caller forks the stream, or waits for
+/// a policy to propagate into it. A policy's command into an unforked
+/// edition stream is the store's to refuse at the write: angzarr-embedded
+/// forks no stream on arrival.
+fn not_forked(command: &Identified) -> Failure<Rejected> {
+    let cover = command.cover();
+    Failure::Rejected(Rejected::of(&route::spec_coded(
+        CoordinatorReason::EditionNotForked,
+        [
+            (args::STREAM.to_string(), cover_text(cover)),
+            (
+                args::EDITION.to_string(),
+                cover.edition.clone().unwrap_or_default(),
+            ),
+        ],
+    )))
 }
 
 /// What admission decided.

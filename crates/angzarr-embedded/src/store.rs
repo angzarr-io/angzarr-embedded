@@ -27,10 +27,14 @@
 //! [`Slice`] at 0: "no such stream" and "empty" are one answer, so a
 //! snapshot whose stream has no events is never used.
 //!
-//! **Editions** are per-stream forks (14.32), the store's to enforce: a
-//! command to an edition stream that was never forked is refused by the
-//! store at the write ([`StoreError::EditionNotForked`]). The kernel
-//! creates no edition yet.
+//! **Editions** are per-stream forks (14.32), the store's to enforce: an
+//! edition stream never forked reads as main's, and a write to it is
+//! refused ([`StoreError::EditionNotForked`]). The kernel reads the fork
+//! from the stream it loads, and refuses an outside input to an unforked
+//! edition stream before its handler runs
+//! (`COORDINATOR_REASON_EDITION_NOT_FORKED`; C-0633); a policy's command to
+//! one meets the store's refusal at the write. The kernel creates no
+//! edition.
 
 use std::future::Future;
 

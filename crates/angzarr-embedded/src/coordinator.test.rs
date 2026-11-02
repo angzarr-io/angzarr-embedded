@@ -1567,3 +1567,55 @@ mod rules_version {
         }
     }
 }
+
+/// Decision 14.32's per-stream forks, as a loaded history shows them: main
+/// is always its own; an edition stream is forked once it holds its
+/// creation event or a snapshot (which never falls through), and reads as
+/// main's, with neither, until then (C-0633).
+mod forks {
+    use crate::coordinator::History;
+    use crate::toys::{cover, cover_in};
+    use crate::v1::{EventPage, Snapshot};
+
+    fn page(type_url: &str) -> EventPage {
+        EventPage {
+            payload: Some(prost_types::Any {
+                type_url: type_url.to_string(),
+                value: Vec::new(),
+            }),
+            ..EventPage::default()
+        }
+    }
+
+    #[test]
+    fn a_stream_is_forked_by_its_creation_or_a_snapshot_and_main_always_is() {
+        let edition = cover_in("account", 1, "what-if");
+        let main = cover("account", 1);
+        let as_mains = History {
+            pages: vec![page("/toy.account.v1.Opened")],
+            ..History::default()
+        };
+        assert!(as_mains.forked_in(&main));
+        assert!(History::default().forked_in(&main));
+        assert!(!as_mains.forked_in(&edition));
+        assert!(!History::default().forked_in(&edition));
+        let created = History {
+            pages: vec![
+                page("/toy.account.v1.Opened"),
+                page(crate::angzarr_ports::EDITION_CREATED_TYPE_URL),
+            ],
+            ..History::default()
+        };
+        assert!(created.forked_in(&edition));
+        let snapshotted = History {
+            snapshot: Some(Snapshot::default()),
+            ..History::default()
+        };
+        assert!(snapshotted.forked_in(&edition));
+        let untyped = History {
+            pages: vec![EventPage::default()],
+            ..History::default()
+        };
+        assert!(!untyped.forked_in(&edition));
+    }
+}

@@ -370,11 +370,12 @@ async fn a_snapshot_at_or_past_the_head_is_not_used() {
     }
 }
 
-/// A command to a stream not forked into its edition is refused by the
-/// store at the write (`EDITION_NOT_FORKED`), and nothing is written. The
-/// SQLite adapter implements no edition yet, so it never forks a stream
-/// and refuses every such write. (`angzarr-embedded`' own `a_command_to_an_edition_
-/// is_refused_and_writes_nothing` holds `MemoryStore` to the same.)
+/// A command to a stream not forked into its edition is refused before its
+/// handler runs (`COORDINATOR_REASON_EDITION_NOT_FORKED`; C-0633), and
+/// nothing is written: the SQLite adapter reads an unforked edition stream
+/// as main's, as every store does. (`angzarr-embedded`' own
+/// `a_command_to_an_edition_is_refused_and_writes_nothing` holds
+/// `MemoryStore` to the same.)
 #[tokio::test]
 async fn a_command_to_an_edition_is_refused_and_writes_nothing() {
     let registry = registry();
@@ -384,13 +385,16 @@ async fn a_command_to_an_edition_is_refused_and_writes_nothing() {
         .await
         .err()
         .unwrap();
-    assert!(
-        matches!(
-            &failure,
-            Failure::Kernel(KernelError::Store(StoreError::EditionNotForked { stream: s }))
-                if **s == stream
-        ),
-        "{failure:?}"
+    let Failure::Rejected(rejected) = &failure else {
+        panic!("refused before its handler: {failure:?}")
+    };
+    assert_eq!(
+        Diagnostic::code(rejected),
+        "COORDINATOR_REASON_EDITION_NOT_FORKED"
+    );
+    assert_eq!(
+        rejected.status(),
+        angzarr_router::error::BusinessStatus::FailedPrecondition
     );
     assert_eq!(store.covers("tally").await, Ok(vec![]), "nothing written");
 }

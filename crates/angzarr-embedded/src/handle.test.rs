@@ -202,9 +202,9 @@ fn a_chain_deeper_than_its_limit_is_refused() {
 }
 
 /// Editions are per-stream forks (14.32): a command to a stream not forked
-/// into its edition is outside input to it, refused by the store at the
-/// write (`EDITION_NOT_FORKED`), and nothing is written. angzarr-embedded creates no
-/// edition yet.
+/// into its edition is outside input to it, refused before its handler
+/// runs (`COORDINATOR_REASON_EDITION_NOT_FORKED`, FAILED_PRECONDITION;
+/// C-0633), and nothing is written. angzarr-embedded creates no edition.
 #[test]
 fn a_command_to_an_edition_is_refused_and_writes_nothing() {
     let mut registry = registry();
@@ -219,13 +219,17 @@ fn a_command_to_an_edition_is_refused_and_writes_nothing() {
         .ready()
         .err()
         .unwrap();
+    let Failure::Rejected(rejected) = &failure else {
+        panic!("refused before its handler: {failure:?}")
+    };
     assert_eq!(
-        failure,
-        Failure::Kernel(KernelError::Store(crate::StoreError::EditionNotForked {
-            stream: Box::new(stream)
-        }))
+        rejected.to_string(),
+        format!(
+            "COORDINATOR_REASON_EDITION_NOT_FORKED edition=what-if stream={}",
+            crate::error::cover_text(&stream)
+        )
     );
-    assert_eq!(failure.recovery(), Recovery::Invalid);
+    assert_eq!(failure.recovery(), Recovery::Business);
     assert_eq!(streams(&store), [], "nothing written");
 }
 
