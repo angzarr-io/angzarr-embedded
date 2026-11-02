@@ -1166,9 +1166,9 @@ impl OnTheClock {
         self.host.handler("player").unwrap()
     }
 
-    /// Whether its socket directory is empty within a while.
+    /// Whether its socket directory is empty within five seconds.
     fn no_sockets(&self) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(20);
+        let deadline = Instant::now() + Duration::from_secs(5);
         while files_in(&self.sockets) > 0 && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }
