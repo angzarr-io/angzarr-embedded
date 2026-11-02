@@ -427,7 +427,7 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn Diagnostic>> {
         Box::new(HostError::ConfigInvalid {
             path: "angzarr.yaml".to_string(),
             cause: Report::of(
-                &crate::config::HostConfig::from_yaml("schema_version: 2\n", "angzarr.yaml")
+                &crate::config::HostConfig::from_yaml("schema_version: 99\n", "angzarr.yaml")
                     .expect_err("a newer config is refused"),
             ),
         }),

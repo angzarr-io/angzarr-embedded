@@ -7,7 +7,7 @@
 //! generated code to it. Both read it here, through one [`loader`].
 //!
 //! ```yaml
-//! schema_version: 1
+//! schema_version: 2
 //! component:
 //!   - name: table
 //!     kind: domain              # required: domain, policy, projector or upcaster
@@ -38,6 +38,11 @@
 //!     launch: [./bin/dealer]    # the launch command is given
 //! supervision:
 //!   handshake_timeout_ms: 10000
+//!   health_check_interval_ms: 5000  # a grpc.health.v1 Check of each child,
+//!   health_check_deadline_ms: 2000  # answered SERVING within this, or it is
+//!                                   # unhealthy;
+//!   unhealthy_grace_ms: 15000       # unhealthy this long, it is restarted,
+//!   unhealthy_restart_limit: 3      # at most this often, then left down
 //! store:
 //!   path: angzarr.db            # SQLite; `in_memory: true` for none on disk
 //! policy:
@@ -61,10 +66,10 @@
 //!   unsigned integer that only increases; this build reads version
 //!   [`CURRENT`]. A newer file is refused (`angzarr-yaml-too-new`), never
 //!   half-read. A file with no stamp (an empty or comment-only file
-//!   among them) is the oldest generation, and the host config has none
-//!   older than its first versioned shape, version 1: it loads as that
-//!   version. A later version adds a step from the one before it to
-//!   [`loader`], and a fixture of the old version to [`FIXTURES`].
+//!   among them) is the oldest generation, version 0, which has version
+//!   1's shape, and loads through every step. A later version adds a step
+//!   from the one before it to [`loader`], and a fixture of the old version
+//!   to [`FIXTURES`].
 //! - **Strict.** Every mapping refuses a key it does not know, a missing
 //!   required key (a component's `name`, `language` or `kind`) is refused,
 //!   and so is a value outside a closed set (`kind`, `expose`,
@@ -100,15 +105,33 @@ pub const KIND: &str = "angzarr-host-config";
 pub const KEY: &str = angzarr_yaml::versioned::DEFAULT_KEY;
 
 /// The version this build reads and writes.
-pub const CURRENT: u32 = 1;
+pub const CURRENT: u32 = 2;
 
 /// The config's loader: kind [`KIND`], stamped under [`KEY`], at version
-/// [`CURRENT`], with a step from every older version it still reads: none
-/// yet, so a file with no stamp reads as current.
+/// [`CURRENT`], with a step from every older version it still reads:
+///
+/// - **0 to 1**: a file with no stamp, written before the stamp, which
+///   already had version 1's shape: nothing but the stamp, which the loader
+///   writes.
+/// - **1 to 2**: `supervision` gains its health keys
+///   (`health_check_interval_ms`, `health_check_deadline_ms`,
+///   `unhealthy_grace_ms`, `unhealthy_restart_limit`; decision 14.63).
+///   A key left out is its default, so the step writes none: a version-1
+///   file is a version-2 file left at its defaults, and the stamp is what
+///   tells a version-1 reader to refuse a file that may give them (as too
+///   new, never as an unknown key).
 pub fn loader() -> Loader {
     Migrations::new(KIND, CURRENT)
+        .step(0, same_shape)
+        .step(1, same_shape)
         .build()
         .expect("the host config's migration chain is whole")
+}
+
+/// A step that edits nothing: the next version reads the file as it is,
+/// a key it adds left at its default.
+fn same_shape(_: &mut angzarr_yaml::Value) -> Result<(), angzarr_yaml::versioned::MigrationError> {
+    Ok(())
 }
 
 /// A config at every version the [`loader`] reads, and what each must

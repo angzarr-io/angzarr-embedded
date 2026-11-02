@@ -287,11 +287,11 @@ mod strict {
     }
 
     /// A newer file is refused with the reader's code; a file with no
-    /// stamp reads as the current version.
+    /// stamp reads, through every step.
     #[test]
     fn a_newer_file_is_refused_and_an_unstamped_one_reads() {
         assert_eq!(
-            problem(&refused("schema_version: 2\n")).0,
+            problem(&refused("schema_version: 3\n")).0,
             "angzarr-yaml-too-new"
         );
         assert_eq!(
