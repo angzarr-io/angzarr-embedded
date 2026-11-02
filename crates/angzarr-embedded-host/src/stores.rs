@@ -6,7 +6,7 @@
 use std::future::Future;
 use std::sync::Arc;
 
-use angzarr_embedded::{Store, StoreError};
+use angzarr_embedded::{ListStreams, Processed, Store, StoreError};
 
 /// Where an application's streams are kept, by key: [`OneStore`] for one
 /// store (its key `()`), or the application's own resolver for a store per
@@ -18,8 +18,11 @@ pub trait Stores: Send + Sync {
     type Key: Clone + Send + Sync;
     /// A store as a call holds it: opened by [`Stores::store`], dropped
     /// when the call is done. A store that is an angzarr-ports
-    /// `DeadLetterStore` keeps the call's dead letters durably.
-    type Store: Store + Send + Sync;
+    /// `DeadLetterStore` keeps the call's dead letters durably. It keeps
+    /// the policies' record of what they processed and lists its streams,
+    /// so a resume tells a policy of a stream purged since (decision
+    /// 14.68).
+    type Store: Store + Processed + ListStreams + Send + Sync;
 
     /// The store of `key`, opened (and migrated, backed up first, as every
     /// open of a store does) if it is not open already. A store that cannot
@@ -50,7 +53,7 @@ impl<S> OneStore<S> {
     }
 }
 
-impl<S: Store + Send + Sync> Stores for OneStore<S> {
+impl<S: Store + Processed + ListStreams + Send + Sync> Stores for OneStore<S> {
     type Key = ();
     type Store = Arc<S>;
 

@@ -824,7 +824,11 @@ kernel.resume(&store, &sampled).await?;                      // -> Recorded
   translated fact on the wire that is more than a payload (its own cover,
   handling or identity, no page, not a fact) is the policy's bug.
 - **Resumed by position.** A policy's position on a source stream is the
-  next sequence it has yet to handle, in angzarr-ports' `PositionStore`.
+  next sequence it has yet to handle, in angzarr-ports' `PositionStore`:
+  its record of what it processed (`Processed`), which a purge never
+  touches. `Kernel::resume` first tells each policy of every stream of its
+  record the store no longer lists (`Kernel::forget_gone`: its gone book,
+  then its position put back to 0; decision 14.68).
   `Kernel::resume` runs, for every stream of every policy's source, each
   policy on each event from its position on: after a crash, after a failed
   step, or for a policy new to a domain with history. A command owes
@@ -899,19 +903,22 @@ ways:
   across streams: **held** in memory (`CatchUp::new`, for a read model
   held in memory, rebuilt by its first step), or **stored** in the
   store's positions under the projector's name (`CatchUp::stored`, so a
-  durable read model resumes, as a policy does; its first step lists the
-  positions the projector holds, angzarr-ports' `ListPositions`, so a
-  stream it was handed before it started is known, and handed gone once
-  it is purged). A book the projector
+  durable read model resumes, as a policy does). Either way it is the
+  projector's record of what it handled, angzarr-ports' one capability for
+  it, `Processed` (a held catch-up's is a `HeldRecord`), which a purge
+  never touches (decision 14.68): each step compares it with the store's
+  listing (`ListStreams`), and a stream it holds that the store no longer
+  lists is handed gone and forgotten, whether it was purged while a
+  catch-up ran or not. A book the projector
   fails keeps its stream where it was, for the next step; the other
   streams go on.
 
 What a projector is handed, either way: a stream's events after the last
 it was handed of it; a book from sequence 0 starts the stream afresh (one
 purged and written again; held positions tell it by its first event's
-cause and instant, since each stream starts at 0, and a purge removes the
-stored ones); and, caught up, a book with no page at 0 says the stream is
-gone.
+cause and instant, since each stream starts at 0, and stored ones by the
+stream's head below the position, which a purge leaves in place); and,
+caught up, a book with no page at 0 says the stream is gone.
 
 ### Re-runs
 
@@ -999,9 +1006,9 @@ position on it, in one call), `ReadStore` (a read-only unit whose reads
 all see the moment it began, so a reader listing `covers` and reading each
 stream never mixes two moments), `Watch` (a change token: equal tokens
 from one handle mean nothing was committed between), `ReadUntilTime`,
-`ReadByCorrelation`, `ListStreams`, `ListPositions` (one handler's
-positions, per stream: what a stored catch-up reads when it starts) and
-the `Outbox`.
+`ReadByCorrelation`, `ListStreams`, `Processed` (one handler's record,
+its positions per stream, which a purge never touches: what a driver
+compares with `ListStreams` to find a stream gone) and the `Outbox`.
 
 **Editions** are per-stream forks (14.32), their lifecycle angzarr's. An
 outside input to an edition stream never forked is refused before its
@@ -1287,11 +1294,11 @@ impl<D: Domain> Stream<D> {
 impl<P: ProjectorHandler> CatchUp<P> {
     pub fn new(sources: &[&str], projector: P) -> Result<CatchUp<P>, Misconfigured>;    // held in memory
     pub fn stored(sources: &[&str], projector: P) -> Result<CatchUp<P>, Misconfigured>; // in the store
-    pub async fn step<S: ReadStore + Store + ListPositions>(&mut self, store: &S, catalog: &Catalog)
+    pub async fn step<S: ReadStore + Store + Processed + ListStreams>(&mut self, store: &S, catalog: &Catalog)
         -> Result<Caught, KernelError>;
-    pub async fn step_if_changed<S: ReadStore + Store + ListPositions + Watch>(&mut self, store: &S,
+    pub async fn step_if_changed<S: ReadStore + Store + Processed + ListStreams + Watch>(&mut self, store: &S,
         catalog: &Catalog) -> Result<Option<Caught>, KernelError>;
-    pub async fn follow<S: ReadStore + Store + ListPositions + Watch>(&mut self, store: &S, catalog: &Catalog,
+    pub async fn follow<S: ReadStore + Store + Processed + ListStreams + Watch>(&mut self, store: &S, catalog: &Catalog,
         wait: &dyn Wait, every: Duration, more: impl FnMut(Option<&Caught>) -> bool)
         -> Result<(), KernelError>;
 }

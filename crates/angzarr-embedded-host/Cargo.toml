@@ -33,13 +33,13 @@ angzarr-embedded = { path = "../angzarr-embedded" }
 # The config's schema and its versioned loader: angzarr.yaml, which the CLI
 # writes, read strictly.
 angzarr-embedded-host-config = { path = "../angzarr-embedded-host-config" }
-angzarr-diagnostic = { git = "https://github.com/angzarr-io/angzarr", rev = "9745c402cefdaa317bca417934b0dc46f623973f" }
+angzarr-diagnostic = { git = "https://github.com/angzarr-io/angzarr", rev = "42b0bf37ac180b010384b3e08f4444b79967bc95" }
 # The store `run` opens: SQLite, at the config's [store] path or in memory.
 angzarr-store-sqlite = { path = "../angzarr-store-sqlite" }
-angzarr-proto = { git = "https://github.com/angzarr-io/angzarr", rev = "9745c402cefdaa317bca417934b0dc46f623973f" }
-angzarr-proto-component = { git = "https://github.com/angzarr-io/angzarr", rev = "9745c402cefdaa317bca417934b0dc46f623973f" }
-angzarr-proto-transport-embedded = { git = "https://github.com/angzarr-io/angzarr", rev = "9745c402cefdaa317bca417934b0dc46f623973f" }
-angzarr-router = { git = "https://github.com/angzarr-io/angzarr-router", rev = "f72a67dfaf0ea6191cfbbcf47280796514474bf9" }
+angzarr-proto = { git = "https://github.com/angzarr-io/angzarr", rev = "42b0bf37ac180b010384b3e08f4444b79967bc95" }
+angzarr-proto-component = { git = "https://github.com/angzarr-io/angzarr", rev = "42b0bf37ac180b010384b3e08f4444b79967bc95" }
+angzarr-proto-transport-embedded = { git = "https://github.com/angzarr-io/angzarr", rev = "42b0bf37ac180b010384b3e08f4444b79967bc95" }
+angzarr-router = { git = "https://github.com/angzarr-io/angzarr-router", rev = "43e591c077cd63c8f6423c1683247cede37238de" }
 hyper-util = { version = "0.1", features = ["tokio"] }
 # SIGTERM for a child that outlives its stdin at shutdown: tokio's Child
 # sends only SIGKILL. In the graph already, through tokio.
@@ -59,7 +59,7 @@ tower = { version = "0.5", default-features = false, features = ["util"] }
 # The kernel test runs on angzarr-ports' MemoryStore (the kernel's own
 # store contract, at its rev).
 [dev-dependencies]
-angzarr-ports = { git = "https://github.com/angzarr-io/angzarr", rev = "9745c402cefdaa317bca417934b0dc46f623973f", features = ["memory"] }
+angzarr-ports = { git = "https://github.com/angzarr-io/angzarr", rev = "42b0bf37ac180b010384b3e08f4444b79967bc95", features = ["memory"] }
 tonic = { version = "0.14", default-features = false, features = ["router"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 

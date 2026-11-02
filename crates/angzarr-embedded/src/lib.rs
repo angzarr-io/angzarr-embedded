@@ -178,12 +178,12 @@ pub use handle::{
 pub use misconfigured::{validate_descriptor, Misconfigured};
 pub use payload::{decode_as, pack, type_name, Decoder, Payload};
 pub use policy::{target_cover, translated, CommandTarget, EventSource, Order, Policy};
-pub use projector::{CatchUp, Caught};
+pub use projector::{CatchUp, Caught, HeldRecord};
 pub use registry::Registry;
 pub use route::{rejection, spec_coded, Rejected, SpecKey};
 pub use store::{
     Append, ChangeToken, DeadLetter, DeadLetterAt, DeadLetterKey, DeadLetterStore, EventStore,
-    Head, ListPositions, ListStreams, Outbox, OutboxEntry, PositionKey, PositionStore, Purge,
+    Head, ListStreams, Outbox, OutboxEntry, PositionKey, PositionStore, Processed, Purge,
     ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, Slice, SnapshotStore, Store, StoreError,
     StreamRef, Watch, Write, Written,
 };

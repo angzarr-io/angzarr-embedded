@@ -113,6 +113,9 @@ pub(crate) struct Coordinator {
     pub(crate) edition: Option<String>,
     /// What each catch-up of the owed policy steps came to.
     pub(crate) resumed: Vec<Result<Recorded, Failure<Infallible>>>,
+    /// Each catch-up projector a scenario declares, by name: its source
+    /// domain and every book it was handed (processed_state.feature).
+    pub(crate) projectors: BTreeMap<String, crate::tests::processed::Projected>,
 }
 
 /// A policy as registered: its name, source and destination, and its
@@ -213,6 +216,7 @@ impl Coordinator {
             names: BTreeMap::new(),
             order_correlation: None,
             resumed: Vec::new(),
+            projectors: BTreeMap::new(),
             edition: None,
             sidecars: BTreeMap::new(),
             clock: None,
@@ -538,7 +542,7 @@ impl Coordinator {
     }
 
     /// Every domain, registered by its descriptor.
-    fn registry(&self) -> Registry {
+    pub(crate) fn registry(&self) -> Registry {
         let mut registry = Registry::new();
         let present = self
             .domains

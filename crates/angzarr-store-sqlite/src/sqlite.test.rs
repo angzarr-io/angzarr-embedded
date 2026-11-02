@@ -355,10 +355,10 @@ mod list_streams {
     );
 }
 
-mod list_positions {
+mod processed {
     use super::*;
     angzarr_ports::store_contract!(
-        list_positions,
+        processed,
         #[tokio::test],
         SqliteStore::open_in_memory().await.unwrap()
     );

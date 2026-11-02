@@ -353,10 +353,10 @@ fn a_new_stored_catch_up_hands_gone_a_stream_it_was_handed_before() {
 }
 
 /// A purge landing between a step's read and its position's write (forced
-/// here, from the projector's book) leaves that position on a stream that
-/// is gone. The next catch-up, in a new process, hands the stream gone at
-/// its first step and puts the position back to 0, so the stream written
-/// again is handed from its start.
+/// here, from the projector's book) leaves that position, the record, on a
+/// stream that is gone: the same step finds it no longer listed, hands it
+/// gone and puts its position back to 0 (decision 14.68), so the stream
+/// written again is handed from its start.
 #[test]
 fn a_position_left_by_a_racing_purge_is_handed_gone_and_cleared() {
     let registry = Arc::new(registry());
@@ -365,21 +365,15 @@ fn a_position_left_by_a_racing_purge_is_handed_gone_and_cleared() {
     let recorder = Recorder::default();
     let racing = Arc::clone(&store);
     *recorder.meanwhile.lock().unwrap() = Some(Box::new(move || purge(&racing, 1)));
-    step(
-        &mut CatchUp::stored(&["account"], recorder.clone()).unwrap(),
-        &store,
-        &registry,
-    );
-    assert_eq!(recorder.take(), [(cover("account", 1), vec![0, 1], 2)]);
+    let mut stored = CatchUp::stored(&["account"], recorder.clone()).unwrap();
+    step(&mut stored, &store, &registry);
     assert_eq!(
-        position(&store, "recorder", &cover("account", 1)),
-        2,
-        "written past the purge"
+        recorder.take(),
+        [
+            (cover("account", 1), vec![0, 1], 2),
+            (cover("account", 1), vec![], 0)
+        ]
     );
-
-    let mut again = CatchUp::stored(&["account"], recorder.clone()).unwrap();
-    step(&mut again, &store, &registry);
-    assert_eq!(recorder.take(), [(cover("account", 1), vec![], 0)]);
     assert_eq!(position(&store, "recorder", &cover("account", 1)), 0);
     crate::toys::handle::<Account>(
         &*store,
@@ -388,8 +382,88 @@ fn a_position_left_by_a_racing_purge_is_handed_gone_and_cleared() {
         &at(40),
     )
     .unwrap();
-    step(&mut again, &store, &registry);
+    step(&mut stored, &store, &registry);
     assert_eq!(recorder.take(), [(cover("account", 1), vec![0], 1)]);
+}
+
+/// A stream purged while no catch-up ran is found gone by the next: its
+/// position, the projector's record, outlives the purge (decision 14.68),
+/// and the store lists the stream no more (C-0772).
+#[test]
+fn a_stream_purged_while_no_catch_up_ran_is_handed_gone_by_the_next() {
+    let registry = Arc::new(registry());
+    let store = Arc::new(MemoryStore::new());
+    opened(&*store, &registry, 1, 5);
+    let recorder = Recorder::default();
+    step(
+        &mut CatchUp::stored(&["account"], recorder.clone()).unwrap(),
+        &store,
+        &registry,
+    );
+    assert_eq!(recorder.take(), [(cover("account", 1), vec![0, 1], 2)]);
+    purge(&store, 1);
+    assert_eq!(
+        position(&store, "recorder", &cover("account", 1)),
+        2,
+        "the record outlives the purge"
+    );
+    let mut next = CatchUp::stored(&["account"], recorder.clone()).unwrap();
+    step(&mut next, &store, &registry);
+    assert_eq!(recorder.take(), [(cover("account", 1), vec![], 0)]);
+    assert_eq!(
+        position(&store, "recorder", &cover("account", 1)),
+        0,
+        "forgotten"
+    );
+    step(&mut next, &store, &registry);
+    assert_eq!(recorder.take(), [], "handed gone once");
+}
+
+/// A stored position past a stream's head is a stream purged and written
+/// again before the catch-up ran: it is handed from its start.
+#[test]
+fn a_stored_position_past_the_head_is_handed_from_the_start() {
+    let registry = Arc::new(registry());
+    let store = Arc::new(MemoryStore::new());
+    opened(&*store, &registry, 1, 5);
+    let recorder = Recorder::default();
+    step(
+        &mut CatchUp::stored(&["account"], recorder.clone()).unwrap(),
+        &store,
+        &registry,
+    );
+    assert_eq!(recorder.take(), [(cover("account", 1), vec![0, 1], 2)]);
+    purge(&store, 1);
+    crate::toys::handle::<Account>(
+        &*store,
+        &registry,
+        command(cover("account", 1), AccountCmd::Open.to_any()).id(8),
+        &at(40),
+    )
+    .unwrap();
+    step(
+        &mut CatchUp::stored(&["account"], recorder.clone()).unwrap(),
+        &store,
+        &registry,
+    );
+    assert_eq!(recorder.take(), [(cover("account", 1), vec![0], 1)]);
+}
+
+/// A held catch-up's record is the same capability a stored one keeps in
+/// the store: every stream handed, with how far.
+#[test]
+fn a_held_record_is_the_processed_capability() {
+    use crate::Processed as _;
+    let registry = Arc::new(registry());
+    let store = Arc::new(MemoryStore::new());
+    opened(&*store, &registry, 1, 5);
+    let recorder = Recorder::default();
+    let mut held = CatchUp::new(&["account"], recorder.clone()).unwrap();
+    step(&mut held, &store, &registry);
+    assert_eq!(
+        held.record().expect("held").processed("recorder").ready(),
+        Ok(vec![(cover("account", 1), 2)])
+    );
 }
 
 /// A position the projector's name holds outside its sources (another

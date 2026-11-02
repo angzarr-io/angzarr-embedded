@@ -44,6 +44,8 @@ mod outcomes;
 mod policies;
 #[path = "steps/process_managers.test.rs"]
 mod process_managers;
+#[path = "steps/processed.test.rs"]
+pub(crate) mod processed;
 #[path = "steps/refusals.test.rs"]
 mod refusals;
 #[path = "steps/script.test.rs"]

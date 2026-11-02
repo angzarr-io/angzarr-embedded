@@ -21,7 +21,7 @@ use angzarr_ports::angzarr_proto::v1::meta::EditionCreated;
 use angzarr_ports::angzarr_proto::v1::{Cover, EventBook, EventPage, Snapshot};
 use angzarr_ports::{
     Append, AppliedMigration, ChangeToken, DeadLetter, DeadLetterKey, DeadLetterStore, EventStore,
-    Head, ListPositions, ListStreams, Outbox, OutboxEntry, PositionKey, PositionStore, Purge,
+    Head, ListStreams, Outbox, OutboxEntry, PositionKey, PositionStore, Processed, Purge,
     ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, Slice, SnapshotStore, StoreError,
     StreamRef, Uuid, Watch, Write, Written, EDITION_CREATED_TYPE_URL,
 };
@@ -1029,9 +1029,8 @@ impl Purge for SqliteStore {
             .await?;
         ex.built_execute(statements::delete_snapshot::<SqliteDialect>(&cover))
             .await?;
-        let [domain, root, edition] = view_of(stream);
-        ex.execute(statements::DELETE_POSITIONS, [domain, edition, root])
-            .await?;
+        // The positions on it stay: they are its drivers' record of what
+        // their handlers processed, which a purge never touches (14.68).
         ex.delete_letters(stream).await?;
         ex.count();
         ex.conn.commit().await.map_err(unavailable)?;
@@ -1323,8 +1322,8 @@ impl ListStreams for SqliteStore {
     }
 }
 
-impl ListPositions for SqliteStore {
-    async fn list_positions(&self, handler: &str) -> Result<Vec<(Cover, u64)>, StoreError> {
+impl Processed for SqliteStore {
+    async fn processed(&self, handler: &str) -> Result<Vec<(Cover, u64)>, StoreError> {
         let rows = self
             .conn
             .exec()

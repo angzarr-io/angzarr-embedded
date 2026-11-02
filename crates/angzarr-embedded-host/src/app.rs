@@ -647,7 +647,14 @@ impl<R: Stores<Key = ()>> App<R> {
     }
 }
 
-impl<S: angzarr_embedded::Store + Send + Sync> App<OneStore<S>> {
+impl<S> App<OneStore<S>>
+where
+    S: angzarr_embedded::Store
+        + angzarr_embedded::Processed
+        + angzarr_embedded::ListStreams
+        + Send
+        + Sync,
+{
     /// The application's one store.
     pub fn store(&self) -> &S {
         self.stores.get()

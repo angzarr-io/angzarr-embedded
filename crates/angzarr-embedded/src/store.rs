@@ -44,7 +44,7 @@ use super::dead_letter::CallLetters;
 
 pub use angzarr_ports::{
     Append, ChangeToken, DeadLetter, DeadLetterAt, DeadLetterKey, DeadLetterStore, EventStore,
-    Head, ListPositions, ListStreams, Outbox, OutboxEntry, PositionKey, PositionStore, Purge,
+    Head, ListStreams, Outbox, OutboxEntry, PositionKey, PositionStore, Processed, Purge,
     ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, Slice, SnapshotStore, Store, StoreError,
     StreamRef, Watch, Write, Written,
 };

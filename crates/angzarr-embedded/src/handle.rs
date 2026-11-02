@@ -81,7 +81,10 @@ use super::payload::type_name;
 use super::policy::{answered, check_reactions, Order};
 use super::registry::{PolicyEntry, Registry};
 use super::route::Rejected;
-use super::store::{DeadLetter, Port, Store, StoreError, StorePort};
+use super::store::{
+    DeadLetter, ListStreams, Port, PositionKey, Processed, Store, StoreError, StorePort, StreamRef,
+    Write,
+};
 use super::stream::{Envelope, Stream};
 use super::target::Target;
 use super::upcast::upcast_pages;
@@ -774,12 +777,18 @@ impl<'k> Kernel<'k> {
     /// a step that landed before a crash is not repeated; one write each,
     /// its position written with it). What an application runs at start,
     /// after a crash, or after adding a policy to a domain with history.
-    /// Returns what the steps recorded, and the dead letters they wrote.
-    pub async fn resume<S: Store>(
+    /// First, each policy is told of every stream of its record (its
+    /// positions, which a purge never touches) the store no longer lists:
+    /// [`Kernel::forget_gone`]. Returns what the steps recorded, and the
+    /// dead letters they wrote.
+    pub async fn resume<S: Store + Processed + ListStreams>(
         &self,
         store: &S,
         sampled: &Sampled,
     ) -> Result<Recorded, Failure<Infallible>> {
+        self.forget_gone(store)
+            .await
+            .map_err(|e| Failure::Kernel(KernelError::Store(e)))?;
         let letters = CallLetters::new(self.dead_letters, Some(sampled.now));
         let mut port = StorePort::new(store, &letters);
         let resumed = self.resume_on(&mut port, &letters, sampled).await;
@@ -789,6 +798,46 @@ impl<'k> Kernel<'k> {
                 unreachable!("a resume answers what it recorded")
             }
         }
+    }
+
+    /// The saga side of decision 14.68: each policy's driver keeps its
+    /// record of what the policy processed (its positions, [`Processed`]),
+    /// which a purge never touches; a stream of its source domain the record
+    /// holds and the store no longer lists ([`ListStreams`]) is gone. The
+    /// policy is handed the stream's gone book (its cover, no page, at 0),
+    /// what it answers is dropped (no event is there to trigger it), and the
+    /// stream is forgotten: its position put back to 0. Answers the streams
+    /// forgotten, by policy, in registration order; a policy's failure on
+    /// a gone book keeps the stream, to be told again.
+    pub async fn forget_gone<S: Store + Processed + ListStreams>(
+        &self,
+        store: &S,
+    ) -> Result<Vec<(String, Cover)>, StoreError> {
+        let listed = store.list_streams().await?;
+        let mut forgotten = Vec::new();
+        for policy in self.registry.all_policies() {
+            let gone: Vec<Cover> = (store.processed(policy.name()).await?.into_iter())
+                .map(|(cover, _)| cover)
+                .filter(|cover| cover.domain == policy.source() && !listed.contains(cover))
+                .collect();
+            for cover in gone {
+                let book = EventBook {
+                    cover: Some(cover.clone()),
+                    ..EventBook::default()
+                };
+                if policy.dispatch.dispatch(&book).await.is_err() {
+                    continue;
+                }
+                let stream = StreamRef::try_from(&cover)?;
+                let key = PositionKey {
+                    handler: policy.name(),
+                    stream,
+                };
+                store.write(Write::positions(&[(key, 0)])).await?;
+                forgotten.push((policy.name().to_string(), cover));
+            }
+        }
+        Ok(forgotten)
     }
 
     /// [`Kernel::resume`] on `port`.

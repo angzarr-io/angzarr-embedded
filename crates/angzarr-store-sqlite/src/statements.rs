@@ -119,10 +119,6 @@ pub(crate) const PUT_POSITION: &str =
     "INSERT INTO positions (domain, edition, root, handler, next) VALUES (?1, ?2, ?3, ?4, ?5) \
      ON CONFLICT (domain, edition, root, handler) DO UPDATE SET next = excluded.next";
 
-/// Delete every handler's position on a stream.
-pub(crate) const DELETE_POSITIONS: &str =
-    "DELETE FROM positions WHERE domain = ?1 AND edition = ?2 AND root = ?3";
-
 /// Keep an outbox entry, unless its id is pending already, under the
 /// stream its write appended to (`?5` to `?7`: domain, edition, root; an
 /// empty domain for none), that write's first sequence (`?8`) and its
