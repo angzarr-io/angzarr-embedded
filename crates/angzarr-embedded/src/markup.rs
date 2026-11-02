@@ -1687,13 +1687,15 @@ where
 }
 
 /// Fold `event`, the decision's `index`th, into `working`: on the stream
-/// `ctx` is for, at the sequence it will be given, its metadata not
-/// stamped yet.
+/// `ctx` is for, at the sequence it will be given, with the metadata the
+/// kernel will stamp it with ([`event_meta`](crate::event_meta) of `ctx`
+/// under `A`'s rules version), so the state decided is the state replayed.
 fn decided<A: Domain>(working: &mut A::State, event: &A::Event, ctx: &Context, index: usize) {
+    let meta = crate::event_meta(&ctx.command, A::RULES_VERSION);
     let page = PageContext {
         cover: ctx.command.cover.as_ref(),
         sequence: ctx.command.next_sequence + index as u64,
-        meta: None,
+        meta: Some(&meta),
     };
     A::apply(working, event, &page);
 }

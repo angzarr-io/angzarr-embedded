@@ -130,7 +130,7 @@ impl<E> Envelope<E> {
 
     /// Event `sequence` of `event` with `meta`, its required fields checked
     /// present and well-formed: how the kernel stamps a decision's events
-    /// ([`Identified::meta`](super::Identified::meta)) and reads a stored
+    /// ([`event_meta`](crate::event_meta)) and reads a stored
     /// page's.
     pub(crate) fn stamped(
         sequence: u64,
