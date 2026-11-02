@@ -5,6 +5,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use angzarr_ports::faulty::{At, FaultyStore};
 use angzarr_router::error::CodedError;
 use angzarr_router::router::ProjectorHandler;
 
@@ -278,6 +279,48 @@ fn a_write_landing_during_a_step_is_the_next_steps() {
     assert_eq!(recorder.take(), [(cover("account", 2), vec![2], 3)]);
 }
 
+/// One moment, purges included: another process purging a stream and
+/// writing others between the step's listing of streams and its reads
+/// (forced here, before its first stream read) is none of that step's, the
+/// purge no more than the writes, but all of the next's.
+#[test]
+fn a_purge_and_writes_landing_during_a_step_are_all_the_next_steps() {
+    let registry = Arc::new(registry());
+    let store = FaultyStore::<MemoryStore>::default();
+    opened(&store, &registry, 1, 5);
+    opened(&store, &registry, 2, 7);
+    let recorder = Recorder::default();
+    let mut catch_up = CatchUp::new(&["account"], recorder.clone()).unwrap();
+    let caught = catch_up.step(&store, registry.catalog()).ready().unwrap();
+    assert!(caught.failures().is_empty(), "{:?}", caught.failures());
+    recorder.take();
+    let writes = Arc::clone(&registry);
+    store.before(At::UnitRead, move |other: &MemoryStore| {
+        purge(other, 1);
+        deposit(other, &writes, 2, 3, 4);
+        opened(other, &writes, 3, 9);
+    });
+
+    let caught = catch_up.step(&store, registry.catalog()).ready().unwrap();
+    assert!(store.ran(At::UnitRead), "the other process ran mid-step");
+    assert!(caught.failures().is_empty(), "{:?}", caught.failures());
+    assert_eq!(
+        recorder.take(),
+        [],
+        "the store as the step began: nothing purged, written or opened"
+    );
+    let caught = catch_up.step(&store, registry.catalog()).ready().unwrap();
+    assert!(caught.failures().is_empty(), "{:?}", caught.failures());
+    assert_eq!(
+        recorder.take(),
+        [
+            (cover("account", 2), vec![2], 3),
+            (cover("account", 3), vec![0, 1], 2),
+            (cover("account", 1), vec![], 0)
+        ]
+    );
+}
+
 /// Stored positions are the store's: a new catch-up of the same projector
 /// (a new process) resumes where the last left off, handing only what was
 /// written since; they are kept under the projector's name.
@@ -354,9 +397,10 @@ fn a_new_stored_catch_up_hands_gone_a_stream_it_was_handed_before() {
 
 /// A purge landing between a step's read and its position's write (forced
 /// here, from the projector's book) leaves that position, the record, on a
-/// stream that is gone: the same step finds it no longer listed, hands it
-/// gone and puts its position back to 0 (decision 14.68), so the stream
-/// written again is handed from its start.
+/// stream that is gone: the step, reading the store as it began, still
+/// lists it; the next finds it no longer listed, hands it gone and puts its
+/// position back to 0 (decision 14.68), so the stream written again is
+/// handed from its start.
 #[test]
 fn a_position_left_by_a_racing_purge_is_handed_gone_and_cleared() {
     let registry = Arc::new(registry());
@@ -367,13 +411,10 @@ fn a_position_left_by_a_racing_purge_is_handed_gone_and_cleared() {
     *recorder.meanwhile.lock().unwrap() = Some(Box::new(move || purge(&racing, 1)));
     let mut stored = CatchUp::stored(&["account"], recorder.clone()).unwrap();
     step(&mut stored, &store, &registry);
-    assert_eq!(
-        recorder.take(),
-        [
-            (cover("account", 1), vec![0, 1], 2),
-            (cover("account", 1), vec![], 0)
-        ]
-    );
+    assert_eq!(recorder.take(), [(cover("account", 1), vec![0, 1], 2)]);
+    assert_eq!(position(&store, "recorder", &cover("account", 1)), 2);
+    step(&mut stored, &store, &registry);
+    assert_eq!(recorder.take(), [(cover("account", 1), vec![], 0)]);
     assert_eq!(position(&store, "recorder", &cover("account", 1)), 0);
     crate::toys::handle::<Account>(
         &*store,
