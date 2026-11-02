@@ -4,6 +4,7 @@
 use std::time::{Duration, UNIX_EPOCH};
 
 use super::{backup_path, timestamp, utc_stamp, vacuum_into};
+use crate::test_database::database;
 
 #[test]
 fn sqlites_timestamp_reads_as_utc_seconds() {
@@ -38,17 +39,9 @@ fn a_backups_name_is_its_level_and_its_utc_time() {
 #[tokio::test]
 async fn a_backup_that_fails_leaves_nothing_behind() {
     use sqlx::{ConnectOptions, Connection};
-    let dir = std::env::temp_dir().join(format!(
-        "angzarr-store-sqlite-vacuum-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos())
-    ));
-    std::fs::create_dir(&dir).unwrap();
-    let source = dir.join("state.db");
+    let source = database();
     std::fs::write(&source, vec![0x5Au8; 8192]).unwrap();
-    let dest = dir.join("state.db.backup");
+    let dest = source.with_file_name("state.db.backup");
     let mut conn = sqlx::sqlite::SqliteConnectOptions::new()
         .filename(&source)
         .read_only(true)
@@ -57,10 +50,8 @@ async fn a_backup_that_fails_leaves_nothing_behind() {
         .unwrap();
     let copied = vacuum_into(&mut conn, &dest).await;
     conn.close().await.unwrap();
-    let left = dest.exists();
-    std::fs::remove_dir_all(&dir).unwrap();
     assert!(copied.is_err(), "{copied:?}");
-    assert!(!left, "nothing left at the destination");
+    assert!(!dest.exists(), "nothing left at the destination");
 }
 
 /// Days and dates convert both ways, every day of six centuries, the

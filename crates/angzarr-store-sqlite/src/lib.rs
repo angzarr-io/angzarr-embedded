@@ -82,3 +82,7 @@ pub(crate) trait Dialect {
 #[cfg(test)]
 #[path = "lib.test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "test_database.test.rs"]
+mod test_database;
