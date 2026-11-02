@@ -117,6 +117,55 @@ pub struct Host {
     domains: Vec<Supervised>,
 }
 
+/// A component the host launches: its `component` entry's name and kind,
+/// its launch command, and the domain it upcasts (an upcaster's; empty
+/// for any other kind).
+struct Remote {
+    domain: String,
+    kind: ComponentKindConfig,
+    launch: Launch,
+    upcasts: String,
+}
+
+/// The components of `config` the host launches, in its order, each
+/// held to the config's rules first: its languages known
+/// ([`Languages::check`]), names unique, only a domain exposed, an upcaster
+/// naming its domain, and each placed by its language.
+fn remote_components(config: &HostConfig, languages: &Languages) -> Result<Vec<Remote>, HostError> {
+    languages.check(config)?;
+    let mut names = BTreeSet::new();
+    let mut remote = Vec::new();
+    for (index, component) in config.components.iter().enumerate() {
+        if !names.insert(component.name.as_str()) {
+            return Err(HostError::DuplicateDomain {
+                domain: component.name.clone(),
+            });
+        }
+        if component.expose != Expose::None && component.kind != ComponentKindConfig::Domain {
+            return Err(HostError::NotExposable {
+                domain: component.name.clone(),
+                kind: component.kind.as_str().to_string(),
+            });
+        }
+        let upcasts = component.upcasts.clone().unwrap_or_default();
+        if component.kind == ComponentKindConfig::Upcaster && upcasts.is_empty() {
+            return Err(HostError::UpcasterNoDomain {
+                domain: component.name.clone(),
+            });
+        }
+        let language = languages.of(config, index)?;
+        if let Placement::Remote(launch) = language.placement(component)? {
+            remote.push(Remote {
+                domain: component.name.clone(),
+                kind: component.kind,
+                launch,
+                upcasts,
+            });
+        }
+    }
+    Ok(remote)
+}
+
 /// What a remote component is handed back as, by its kind.
 #[derive(Clone)]
 enum Hosted {
@@ -191,32 +240,7 @@ impl Host {
     /// [`Host::start_with_languages`], its supervisors held at `hooks`'
     /// points.
     fn started(config: HostConfig, languages: &Languages, hooks: Hooks) -> Result<Host, HostError> {
-        languages.check(&config)?;
-        let mut names = BTreeSet::new();
-        let mut remote = Vec::new();
-        for (index, component) in config.components.iter().enumerate() {
-            if !names.insert(component.name.as_str()) {
-                return Err(HostError::DuplicateDomain {
-                    domain: component.name.clone(),
-                });
-            }
-            if component.expose != Expose::None && component.kind != ComponentKindConfig::Domain {
-                return Err(HostError::NotExposable {
-                    domain: component.name.clone(),
-                    kind: component.kind.as_str().to_string(),
-                });
-            }
-            let upcasts = component.upcasts.clone().unwrap_or_default();
-            if component.kind == ComponentKindConfig::Upcaster && upcasts.is_empty() {
-                return Err(HostError::UpcasterNoDomain {
-                    domain: component.name.clone(),
-                });
-            }
-            let language = languages.of(&config, index)?;
-            if let Placement::Remote(launch) = language.placement(component)? {
-                remote.push((component.name.clone(), component.kind, launch, upcasts));
-            }
-        }
+        let remote = remote_components(&config, languages)?;
         let socket_dir = socket_dir(
             config.supervision.socket_dir.as_deref(),
             std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from),
@@ -233,7 +257,13 @@ impl Host {
             runtime: None,
             domains: Vec::new(),
         };
-        for (domain, kind, launch, upcasts) in remote {
+        for Remote {
+            domain,
+            kind,
+            launch,
+            upcasts,
+        } in remote
+        {
             let link = Arc::new(Link::default());
             let (stop, stopped) = oneshot::channel();
             let (up, came_up) = mpsc::channel();
