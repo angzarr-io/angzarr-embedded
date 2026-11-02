@@ -3495,6 +3495,51 @@ impl DecliningBuyInWallet {
     }
 }
 
+/// The buy-in's facts as one choice, as angzarr-cli's domain layer
+/// generates it (`<Domain>Fact`): a translation for any source ingesting
+/// each of them.
+#[derive(Clone, Debug)]
+pub enum BuyInFact {
+    HoldLost(HoldLost),
+}
+
+impl<S: markup::Ingests<HoldLost>> markup::Translation<S> for BuyInFact {
+    fn fact(self) -> Option<Any> {
+        match self {
+            BuyInFact::HoldLost(fact) => Some(markup::pack_message(&fact)),
+        }
+    }
+}
+
+/// As [`DecliningBuyInWallet`], answering the choice of the buy-in's facts:
+/// the generated interface's shape.
+pub struct ChoosingBuyInWallet;
+
+#[policy(name = "buyin-wallet", source = BuyIn, target = Wallet)]
+impl ChoosingBuyInWallet {
+    #[on_event(BuyInStarted)]
+    fn started(
+        &self,
+        event: &BuyInStarted,
+        _ctx: &PolicyContext,
+    ) -> Result<Commands<Wallet>, Infallible> {
+        Ok(Commands::none().to(uuid(&event.wallet), Hold { cents: event.cents }))
+    }
+
+    #[on_refused(Hold)]
+    fn hold_refused(
+        &self,
+        refusal: &Refusal<Hold>,
+        _ctx: &CommandContext,
+    ) -> Result<Option<BuyInFact>, Infallible> {
+        Ok(refusal.refusal::<InsufficientFunds>().map(|object| {
+            BuyInFact::HoldLost(HoldLost {
+                short: object.short,
+            })
+        }))
+    }
+}
+
 /// The policy for (wallet, buy-in): a hold on the wallet is recorded on the
 /// buy-in of its correlation. The buy-in's root IS that correlation.
 pub struct WalletBuyIn;
@@ -4595,6 +4640,26 @@ mod policy_refusals {
         let ctx = CommandContext::default();
         assert_eq!(
             DecliningBuyInWallet.on_refused(&refusal, &ctx).unwrap(),
+            BuyInWallet.on_refused(&refusal, &ctx).unwrap()
+        );
+    }
+
+    /// A callback answering a choice of the source's facts translates into
+    /// the one it holds, and declines with `None`.
+    #[test]
+    fn a_callback_answering_a_choice_of_facts_translates_or_declines() {
+        let ctx = CommandContext::default();
+        let refusal = hold_refusal(&correlation(1), 30, insufficient(20));
+        assert_eq!(
+            ChoosingBuyInWallet.on_refused(&refusal, &ctx).unwrap(),
+            any(HoldLost { short: 20 })
+        );
+        let closed = RefusalResponse {
+            reason: Some(refusal_response::Reason::Refusal(any(WalletClosed {}))),
+        };
+        let refusal = hold_refusal(&correlation(1), 30, closed);
+        assert_eq!(
+            ChoosingBuyInWallet.on_refused(&refusal, &ctx).unwrap(),
             BuyInWallet.on_refused(&refusal, &ctx).unwrap()
         );
     }

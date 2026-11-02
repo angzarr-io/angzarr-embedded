@@ -1884,10 +1884,11 @@ pub fn decode_refusal<C: DomainMessage>(
 
 /// What a policy's translating callback (`#[on_refused(C)]`) answers on
 /// success, for its source `S`: a fact `F` the source ingests
-/// ([`Ingests`]), the refusal translated; or `Option<F>`, whose `None`
-/// declines, the refusal passed through as it is for a command the policy
-/// has no callback for. A callback answering anything else does not
-/// compile.
+/// ([`Ingests`]), the refusal translated; a choice of such facts that
+/// implements it (angzarr-cli's generated `<Domain>Fact`); or an `Option`
+/// of either, whose `None` declines, the refusal passed through as it is
+/// for a command the policy has no callback for. A callback answering
+/// anything else does not compile.
 pub trait Translation<S> {
     /// The fact, packed; `None` when the callback declined.
     fn fact(self) -> Option<Any>;
@@ -1899,9 +1900,9 @@ impl<S: Ingests<F>, F: DomainMessage> Translation<S> for F {
     }
 }
 
-impl<S: Ingests<F>, F: DomainMessage> Translation<S> for Option<F> {
+impl<S, T: Translation<S>> Translation<S> for Option<T> {
     fn fact(self) -> Option<Any> {
-        self.map(|fact| pack_message(&fact))
+        self.and_then(Translation::fact)
     }
 }
 
