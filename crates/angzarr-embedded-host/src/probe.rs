@@ -208,14 +208,13 @@ pub fn probe(
             Some(Err(failure)) => {
                 ran(Step::Handle, Err(failure));
                 supervisor.stop_child(&mut up).await;
-                let _ = std::fs::remove_file(&up.socket);
                 return;
             }
             Some(Ok(())) => ran(Step::Handle, Ok(())),
             None => {}
         }
         let exit = supervisor.stop_child(&mut up).await;
-        let _ = std::fs::remove_file(&up.socket);
+        drop(up);
         ran(
             Step::Shutdown,
             match exit {

@@ -11,7 +11,7 @@ use crate::config::ComponentConfig;
 use crate::error::HandshakeError;
 use crate::fake_child::{self, config, domain, mode};
 use crate::remote::is_retryable;
-use crate::test_dir::TestFile;
+use crate::test_dir::{TestDir, TestFile};
 
 fn command(domain: &str, type_url: &str) -> pb::ContextualCommand {
     pb::ContextualCommand {
@@ -321,7 +321,7 @@ fn the_default_socket_dir_is_short() {
     );
     let deep = PathBuf::from(format!("/{}", "d".repeat(80)));
     assert_eq!(socket_dir(None, Some(deep)), Ok(PathBuf::from("/tmp")));
-    let path = socket_path(Path::new("/tmp"));
+    let path = SocketFile::fresh(Path::new("/tmp"));
     assert!(path.as_os_str().len() <= MAX_SOCKET_PATH);
 }
 
@@ -565,6 +565,49 @@ fn dropping_the_host_stops_its_children() {
     // Stopped by its stdin's end, and waited for: not killed, as a
     // dropped runtime would have it (kill_on_drop).
     assert!(mark.exists(), "the child exited on stdin's end");
+}
+
+/// How many files `dir` holds.
+fn files_in(dir: &Path) -> usize {
+    std::fs::read_dir(dir).unwrap().count()
+}
+
+/// A supervisor of the fake child serving as "player", its sockets in
+/// `sockets`.
+fn fake_supervisor(sockets: &Path) -> Supervisor {
+    let mut launch = fake_child::launch();
+    Supervisor {
+        domain: "player".to_string(),
+        kind: ComponentKindConfig::Domain,
+        launch: Launch {
+            program: launch.remove(0),
+            args: launch,
+            env: std::collections::BTreeMap::from([
+                (fake_child::MODE_ENV.to_string(), mode::SERVE.to_string()),
+                (fake_child::NAME_ENV.to_string(), "player".to_string()),
+            ]),
+            dir: None,
+        },
+        supervision: config(Vec::new()).supervision,
+        socket_dir: sockets.to_path_buf(),
+        link: Arc::new(crate::remote::Link::default()),
+        hooks: Hooks::default(),
+    }
+}
+
+/// A child's socket file goes with it however its supervision ends: a
+/// child brought up and dropped (its supervision cancelled, or its
+/// runtime dropped, mid-way) leaves none behind.
+#[test]
+fn a_dropped_child_leaves_no_socket_file() {
+    let sockets = TestDir::new("angzarr-sockets");
+    let up = fake_supervisor(&sockets)
+        .come_up()
+        .awaited()
+        .expect("the child comes up");
+    assert_eq!(files_in(&sockets), 1, "its socket");
+    drop(up);
+    assert_eq!(files_in(&sockets), 0);
 }
 
 /// A variable the tests set on a child to find it again.
@@ -1062,11 +1105,12 @@ const GRACE_MS: u64 = 1_500;
 /// A host of `player` whose supervisor runs on a clock the test moves,
 /// its check interval [`INTERVAL`], its deadline [`DEADLINE`], its grace
 /// [`GRACE_MS`] and its restart limit `limit`, telling the test each
-/// verdict it reaches.
+/// verdict it reaches. Its sockets are in a directory of its own.
 struct OnTheClock {
     host: Host,
     clock: Arc<crate::clock::ManualClock>,
     judged: mpsc::Receiver<crate::vitals::Verdict>,
+    sockets: TestDir,
 }
 
 impl OnTheClock {
@@ -1077,7 +1121,9 @@ impl OnTheClock {
     /// [`OnTheClock::start`], its restart count clearing after `reset`
     /// healthy.
     fn resetting(player: ComponentConfig, limit: u32, reset: Duration) -> OnTheClock {
+        let sockets = TestDir::new("angzarr-sockets");
         let mut config = config(vec![player]);
+        config.supervision.socket_dir = Some(sockets.to_path_buf());
         config.supervision.unhealthy_reset_ms = reset.as_millis() as u64;
         config.supervision.health_check_interval_ms = INTERVAL.as_millis() as u64;
         config.supervision.health_check_deadline_ms = DEADLINE.as_millis() as u64;
@@ -1095,6 +1141,7 @@ impl OnTheClock {
             host,
             clock,
             judged,
+            sockets,
         }
     }
 
@@ -1117,6 +1164,15 @@ impl OnTheClock {
 
     fn handler(&self) -> RemoteCommandHandler {
         self.host.handler("player").unwrap()
+    }
+
+    /// Whether its socket directory is empty within a while.
+    fn no_sockets(&self) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while files_in(&self.sockets) > 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        files_in(&self.sockets) == 0
     }
 
     /// Awaits the `n`th child coming up.
@@ -1278,6 +1334,10 @@ fn past_its_restart_limit_a_child_stays_down() {
     assert_eq!(supervised.check(false), Verdict::Down);
     assert_eq!(supervised.check(false), Verdict::Down);
     assert_eq!(supervised.check(false), Verdict::GiveUp);
+    assert!(
+        supervised.no_sockets(),
+        "the given-up child's socket is gone"
+    );
     let down = supervised.sit().expect_err("given up");
     assert!(is_retryable(&down), "{down:?}");
     assert_eq!(cause(&down), Some(crate::remote::causes::NOT_RUNNING));

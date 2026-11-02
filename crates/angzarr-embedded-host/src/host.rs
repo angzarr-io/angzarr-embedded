@@ -54,6 +54,7 @@
 //! runtime, which must be tokio's, with its timer.
 
 use std::collections::BTreeSet;
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -566,7 +567,7 @@ fn next_backoff(backoff: Duration, max: Duration) -> Duration {
 pub const MAX_SOCKET_PATH: usize =
     angzarr_proto_transport_embedded::child_protocol::MAX_SOCKET_PATH_BYTES;
 
-/// The longest name [`socket_path`] gives, with its leading `/`: a pid
+/// The longest name [`SocketFile::fresh`] gives, with its leading `/`: a pid
 /// (at most 7 digits on Linux) and a counter (at most 20).
 const MAX_SOCKET_NAME: usize = "/angzarr--.sock".len() + 7 + 20;
 
@@ -591,12 +592,37 @@ pub(crate) fn socket_dir(
     }
 }
 
-/// A fresh socket path in `dir`: the host's pid and a counter, kept short
-/// (at most [`MAX_SOCKET_NAME`] bytes after `dir`).
-fn socket_path(dir: &Path) -> PathBuf {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let n = NEXT.fetch_add(1, Ordering::Relaxed);
-    dir.join(format!("angzarr-{}-{n}.sock", std::process::id()))
+/// The socket a child is told to serve on, its file removed when this
+/// drops: however the child's supervision ends, stopped, restarted, given
+/// up, or cancelled with the runtime it ran on, it leaves no socket file
+/// behind (only a host killed outright does).
+struct SocketFile(PathBuf);
+
+impl SocketFile {
+    /// A fresh path in `dir`, the host's pid and a counter, kept short (at
+    /// most [`MAX_SOCKET_NAME`] bytes after `dir`); a leftover file there
+    /// is removed.
+    fn fresh(dir: &Path) -> SocketFile {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let path = dir.join(format!("angzarr-{}-{n}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        SocketFile(path)
+    }
+}
+
+impl Deref for SocketFile {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for SocketFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 /// A child that came up: handshaken, connected, its health watched, and
@@ -606,7 +632,9 @@ pub(crate) struct Up {
     stdin: Option<ChildStdin>,
     pub(crate) channel: tonic::transport::Channel,
     pub(crate) descriptor: pb::ComponentDescriptor,
-    pub(crate) socket: PathBuf,
+    /// The socket it was told to serve on, held for its removal when this
+    /// drops.
+    _socket: SocketFile,
     /// Whether it serves, as its health first said: a described child
     /// does, or it is refused.
     serving: bool,
@@ -770,7 +798,6 @@ impl Supervisor {
                     Ok(()) => Ok(child),
                     Err(error) => {
                         let _ = child.child.kill().await;
-                        let _ = std::fs::remove_file(&child.socket);
                         Err(error)
                     }
                 },
@@ -794,6 +821,7 @@ impl Supervisor {
                         // that fails to come up.
                         Ended::Unhealthy => continue,
                         Ended::GivenUp => {
+                            drop(child);
                             let _ = (&mut stop).await;
                             return ChildExit::NotRunning;
                         }
@@ -833,7 +861,6 @@ impl Supervisor {
             let serving = tokio::select! {
                 _ = child.child.wait() => {
                     self.set_channel(Err(causes::NOT_RUNNING));
-                    let _ = std::fs::remove_file(&child.socket);
                     return Ended::Exited;
                 }
                 _ = &mut *stop => return Ended::Stopped(self.stopped(child).await),
@@ -874,14 +901,12 @@ impl Supervisor {
         check(&channel, deadline, &clock).await
     }
 
-    /// The child withdrawn, stopped ([`Supervisor::stop_child`]) and its
-    /// socket file removed: how it ended. A call in flight on it fails
-    /// retryably, and is never sent again.
+    /// The child withdrawn and stopped ([`Supervisor::stop_child`]): how
+    /// it ended. A call in flight on it fails retryably, and is never sent
+    /// again. Its socket file goes when it is dropped.
     async fn stopped(&self, child: &mut Up) -> ChildExit {
         self.set_channel(Err(causes::NOT_RUNNING));
-        let exit = self.stop_child(child).await;
-        let _ = std::fs::remove_file(&child.socket);
-        exit
+        self.stop_child(child).await
     }
 
     /// Registers a child by `descriptor`, its answer to `Describe` (an
@@ -965,16 +990,16 @@ impl Supervisor {
     }
 
     /// Launches the child and brings it up. On a failure the child, if one
-    /// started, is killed and reaped before the error is returned.
+    /// started, is killed and reaped, and its socket file removed, before
+    /// the error is returned.
     pub(crate) async fn come_up(&self) -> Result<Up, HostError> {
         let domain = || self.domain.clone();
-        let socket = socket_path(&self.socket_dir);
-        let _ = std::fs::remove_file(&socket);
+        let socket = SocketFile::fresh(&self.socket_dir);
         let mut command = Command::new(&self.launch.program);
         command
             .args(&self.launch.args)
             .envs(&self.launch.env)
-            .env(SOCKET_ENV, &socket)
+            .env(SOCKET_ENV, &*socket)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -1017,9 +1042,8 @@ impl Supervisor {
             // An upcaster sidecar has no descriptor (decision 14.39): it
             // is up while its health reports SERVING, from the first.
             if self.kind == ComponentKindConfig::Upcaster {
-                let socket = handshake.socket;
                 let descriptor = pb::ComponentDescriptor::default();
-                return Ok((channel, descriptor, socket, serving, Some(watch)));
+                return Ok((channel, descriptor, serving, Some(watch)));
             }
             // A child handshakes only once SERVING (the child protocol),
             // so one described must be.
@@ -1048,22 +1072,21 @@ impl Supervisor {
                     cause,
                 }
             })?;
-            Ok((channel, descriptor, handshake.socket, true, Some(watch)))
+            Ok((channel, descriptor, true, Some(watch)))
         }
         .await;
         match reached {
-            Ok((channel, descriptor, socket, serving, health)) => Ok(Up {
+            Ok((channel, descriptor, serving, health)) => Ok(Up {
                 child,
                 stdin,
                 channel,
                 descriptor,
-                socket,
+                _socket: socket,
                 serving,
                 health,
             }),
             Err(error) => {
                 let _ = child.kill().await;
-                let _ = std::fs::remove_file(&socket);
                 Err(error)
             }
         }
