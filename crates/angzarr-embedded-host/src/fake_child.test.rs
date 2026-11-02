@@ -151,6 +151,9 @@ pub(crate) mod mode {
     /// Handshake, close stdout, then serve: the host sees stdout's end
     /// while the child lives on.
     pub(crate) const CLOSES_STDOUT: &str = "closes-stdout";
+    /// Serve; on stdin's end, exit only once no health watch is open, as a
+    /// server letting its calls in flight finish does.
+    pub(crate) const GRACEFUL: &str = "graceful";
     /// Handshake, then write more on stdout than a pipe holds
     /// ([`FLOOD_BYTES`](super::FLOOD_BYTES)), then serve: it serves only
     /// once the host drains its stdout.
@@ -239,8 +242,14 @@ fn entry() {
         }
     }
     if mode != mode::STUBBORN && mode != mode::DEAF {
-        std::thread::spawn(|| {
+        let graceful = mode == mode::GRACEFUL;
+        std::thread::spawn(move || {
             let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
+            // A graceful server lets its calls in flight finish: a health
+            // watch the host keeps open holds it up, for good.
+            while graceful && WATCHES.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
             if let Some(mark) = std::env::var_os(EOF_MARK_ENV) {
                 std::fs::write(mark, b"eof").unwrap();
             }
@@ -375,6 +384,10 @@ struct Fake {
     name: String,
 }
 
+/// How many health watches are open on the fake: the graceful fake waits
+/// for none.
+static WATCHES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// A child's gRPC health: the status it holds, for the server as a whole
 /// and for every service.
 struct FakeHealth {
@@ -401,6 +414,7 @@ impl Health for FakeHealth {
     ) -> Result<Response<Self::WatchStream>, Status> {
         let mut status = self.status.clone();
         let (send, sent) = tokio::sync::mpsc::channel(4);
+        WATCHES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         tokio::spawn(async move {
             loop {
                 let now = *status.borrow_and_update();
@@ -409,12 +423,14 @@ impl Health for FakeHealth {
                     .await
                     .is_err()
                 {
-                    return;
+                    break;
                 }
-                if status.changed().await.is_err() {
-                    return;
+                tokio::select! {
+                    changed = status.changed() => if changed.is_err() { break },
+                    _ = send.closed() => break,
                 }
             }
+            WATCHES.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
         });
         Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
             sent,

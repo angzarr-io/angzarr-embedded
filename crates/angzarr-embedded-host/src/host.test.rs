@@ -1028,3 +1028,16 @@ fn a_described_child_is_up_only_while_its_health_reports_serving() {
     assert_eq!(pid_of(&handler), pid, "the same child");
     host.shutdown();
 }
+
+/// Stopping a child ends the host's own health watch first: a child that
+/// lets its calls in flight finish before it exits (the fake, gracefully)
+/// is not held up by the watch, and exits on its stdin's end within the
+/// grace.
+#[test]
+fn a_graceful_child_is_not_held_up_by_the_hosts_health_watch() {
+    let host = started(vec![player(mode::GRACEFUL)]);
+    assert_eq!(
+        host.shutdown(),
+        [("player".to_string(), ChildExit::Exited(Some(0)))]
+    );
+}

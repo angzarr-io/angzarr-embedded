@@ -9,12 +9,18 @@
 //! passes it in `ANGZARR_SOCKET`; the child listens there and names it back.
 //! A child exits when its stdin reaches end of file, or on SIGTERM.
 //!
-//! The protocol is the same for every language. Lines before the handshake
-//! that do not start `angzarr-handshake` (a library's banner, a test
-//! harness's) are skipped; a line that does start so and is not a v1
-//! handshake naming an absolute Unix socket is refused, never skipped.
+//! The protocol is the same for every language: angzarr-project's
+//! `docs/design/child-protocol.md` (decision 14.59). A line is classified
+//! by its first word, as bytes: lines before the handshake whose first
+//! word is not `angzarr-handshake` (a library's banner, a test harness's)
+//! are skipped; a line whose first word is and that is not a v1 handshake
+//! naming an absolute Unix socket is refused, never skipped
+//! (`HOST_REASON_HANDSHAKE_MALFORMED`). Nothing read is decoded lossily: a
+//! handshake naming a path that is not UTF-8 is refused under its own key,
+//! and a refused line that is not UTF-8 is given back with its bytes
+//! escaped.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use tokio::io::{AsyncBufRead, AsyncBufReadExt};
@@ -37,34 +43,42 @@ pub struct Handshake {
     pub socket: PathBuf,
 }
 
-/// One stdout line, its line ending (`\n` or `\r\n`) included or not:
-/// `Ok(Some)` for a handshake, `Ok(None)` for a line that is not one, and
-/// an error for a line that starts `angzarr-handshake` but is not a v1
-/// handshake naming an absolute Unix socket path.
-pub fn parse_line(line: &str) -> Result<Option<Handshake>, HandshakeError> {
-    let line = line.strip_suffix('\n').unwrap_or(line);
-    let line = line.strip_suffix('\r').unwrap_or(line);
-    let Some(rest) = line.strip_prefix(HANDSHAKE_PREFIX) else {
+/// One stdout line, as read, its line ending (`\n` or `\r\n`) included
+/// or not: `Ok(Some)` for a handshake, `Ok(None)` for a line that is not
+/// one, and an error for a line whose first word is `angzarr-handshake`
+/// but is not a v1 handshake naming an absolute Unix socket path, or one
+/// whose path is not UTF-8.
+pub fn parse_line(line: impl AsRef<[u8]>) -> Result<Option<Handshake>, HandshakeError> {
+    let line = line.as_ref();
+    let line = line.strip_suffix(b"\n").unwrap_or(line);
+    let line = line.strip_suffix(b"\r").unwrap_or(line);
+    let Some(rest) = line.strip_prefix(HANDSHAKE_PREFIX.as_bytes()) else {
         return Ok(None);
     };
-    if !rest.is_empty() && !rest.starts_with(' ') {
+    if !rest.is_empty() && !rest.starts_with(b" ") {
         // A longer first word (`angzarr-handshaker`): not a handshake.
         return Ok(None);
     }
-    let malformed = || HandshakeError::Malformed {
-        line: line.to_string(),
-    };
-    let (version, address) = rest
-        .strip_prefix(' ')
-        .and_then(|rest| rest.split_once(' '))
-        .ok_or_else(malformed)?;
-    let path = address.strip_prefix("unix:").ok_or_else(malformed)?;
-    if version != PROTOCOL_VERSION || !Path::new(path).is_absolute() {
+    let malformed = || HandshakeError::Malformed { line: text(line) };
+    let rest = rest.strip_prefix(b" ").ok_or_else(malformed)?;
+    let space = rest.iter().position(|b| *b == b' ').ok_or_else(malformed)?;
+    let (version, address) = (&rest[..space], &rest[space + 1..]);
+    let path = address.strip_prefix(b"unix:").ok_or_else(malformed)?;
+    if version != PROTOCOL_VERSION.as_bytes() || !path.starts_with(b"/") {
         return Err(malformed());
     }
+    let path = std::str::from_utf8(path).map_err(|_| HandshakeError::PathNotUtf8 {
+        path: path.escape_ascii().to_string(),
+    })?;
     Ok(Some(Handshake {
         socket: PathBuf::from(path),
     }))
+}
+
+/// `bytes` as text: as they are when they are UTF-8, else every byte
+/// outside printable ASCII escaped, so nothing is lost.
+fn text(bytes: &[u8]) -> String {
+    String::from_utf8(bytes.to_vec()).unwrap_or_else(|_| bytes.escape_ascii().to_string())
 }
 
 /// Reads `stdout` line by line to its handshake, skipping the lines before
@@ -86,7 +100,7 @@ pub async fn read_handshake<R: AsyncBufRead + Unpin>(
             if line.last() != Some(&b'\n') {
                 return Err(HandshakeError::Closed);
             }
-            if let Some(handshake) = parse_line(&String::from_utf8_lossy(&line))? {
+            if let Some(handshake) = parse_line(&line)? {
                 return Ok(handshake);
             }
         }

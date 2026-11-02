@@ -17,8 +17,8 @@
 //!   ALREADY_EXISTS, OUT_OF_RANGE, PERMISSION_DENIED) is a refusal, and its
 //!   other detail, an `Any`, the typed refusal ([`CodedError::refusal`]);
 //!   any other status carries no typed refusal;
-//! - a child that is not running, a connection that fails, and an
-//!   UNAVAILABLE status with no details are
+//! - a child that is not running or whose health is not SERVING, a
+//!   connection that fails, and an UNAVAILABLE status with no details are
 //!   `COORDINATOR_REASON_HANDLER_UNAVAILABLE`, which [`is_retryable`] says to
 //!   retry: the child is being restarted. A transport's failure carries the
 //!   transport's text verbatim as `ext_err_txt`, a third party's;
@@ -81,10 +81,10 @@ struct Remote {
 }
 
 /// The connection to a component's current child, which its supervisor
-/// sets when a child comes up and clears when it exits (a sidecar's, when
-/// its health turns SERVING and when it turns otherwise).
+/// sets while the child is up (running, its gRPC health SERVING), and
+/// otherwise holds why it is not: one of [`causes`].
 pub(crate) struct Link {
-    pub(crate) channel: RwLock<Option<Channel>>,
+    pub(crate) channel: RwLock<Result<Channel, &'static str>>,
     /// What the component is registered by: its current child's
     /// descriptor, and once [`Host::register`](crate::Host::register) has
     /// registered a domain, its registration's [`Description`]. The
@@ -102,7 +102,7 @@ pub(crate) struct Link {
 impl Default for Link {
     fn default() -> Self {
         Link {
-            channel: RwLock::new(None),
+            channel: RwLock::new(Err(causes::NOT_RUNNING)),
             registered: Mutex::new(Registered::default()),
             generation: tokio::sync::watch::channel(0).0,
         }
@@ -151,9 +151,7 @@ impl Remote {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
-        let Some(channel) = channel else {
-            return Err(unavailable(name, causes::NOT_RUNNING));
-        };
+        let channel = channel.map_err(|cause| unavailable(name, cause))?;
         match tokio::time::timeout(self.call_timeout, rpc(channel)).await {
             Ok(Ok(response)) => Ok(response.into_inner()),
             Ok(Err(status)) => Err(status_to_coded(name, &status)),

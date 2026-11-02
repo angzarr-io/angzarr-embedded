@@ -12,12 +12,14 @@
 //!    to the socket path the host chose;
 //! 2. reads its handshake, the one stdout line
 //!    `angzarr-handshake v1 unix:<absolute-socket-path>` ([`handshake`]),
-//!    within a timeout;
-//! 3. connects to that socket and calls `ComponentService.Describe`,
-//!    refusing a child of another kind than its `kind` says, and one
-//!    whose descriptor fails validation ([`descriptor::validate`]); an
-//!    upcaster sidecar, not described, has its gRPC health watched
-//!    instead, and is up while it reports SERVING;
+//!    within a timeout, and from then on drains its stdout to the host's
+//!    stderr;
+//! 3. connects to that socket and watches its gRPC health
+//!    (`grpc.health.v1`, the server's), which must report SERVING before
+//!    it calls `ComponentService.Describe`, refusing a child of another
+//!    kind than its `kind` says, and one whose descriptor fails
+//!    validation ([`descriptor::validate`]); an upcaster sidecar is not
+//!    described, and may come up not serving;
 //! 4. hands back, by its kind, a [`RemoteCommandHandler`] over
 //!    `CommandHandlerService`, a [`RemotePolicyHandler`] over
 //!    `PolicyService`, a [`RemoteProjectorHandler`] over
@@ -27,11 +29,12 @@
 //!    manager's start rule is the kernel's, from its descriptor's starting
 //!    types;
 //! 5. supervises it: a child that exits is restarted with backoff, and
-//!    while it is down (a sidecar, while it is not SERVING) its dispatch
+//!    while it is down (exited, or its health not SERVING) its dispatch
 //!    fails retryably ([`is_retryable`]).
 //!
 //! A child exits when its stdin reaches end of file, or on SIGTERM; the
-//! host closes its stdin to stop it.
+//! host ends its health watch and closes its stdin to stop it. The launch
+//! contract is angzarr-project's `docs/design/child-protocol.md`.
 //!
 //! [`CommandHandler`]: angzarr_router::router::CommandHandler
 //! [`PolicyComponent`]: angzarr_router::router::PolicyComponent
