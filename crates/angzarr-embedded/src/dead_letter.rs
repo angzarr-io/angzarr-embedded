@@ -86,7 +86,7 @@ use std::sync::Mutex;
 use angzarr_diagnostic::Diagnostic;
 use angzarr_proto::v1::angzarr_dead_letter::{Payload, RejectionDetails};
 use angzarr_proto::v1::{
-    command_page, AngzarrDeadLetter, CommandRefusedDetails, ComponentKind, Cover,
+    command_page, AngzarrDeadLetter, CommandBook, CommandRefusedDetails, ComponentKind, Cover,
     ProcessingFailedDetails, SequenceMismatchDetails,
 };
 use angzarr_router::error::CodedError;
@@ -210,8 +210,15 @@ pub(crate) enum Cause<'a> {
     /// A kernel error: a bug, a conflict, a cap.
     Kernel(&'a KernelError),
     /// A book the kernel built (a policy's command, a refusal fact) that
-    /// its own check refused: a bug.
+    /// its own check refused: a bug. Its letter's payload is the book.
     Malformed(&'a Malformed),
+    /// A policy's reaction `command` its check refused, the answer refused
+    /// with it: a bug, whose letter's payload is the event it answered
+    /// (`rejected_events`), the command never delivered (C-0736).
+    MalformedReaction {
+        malformed: &'a Malformed,
+        command: &'a CommandBook,
+    },
     /// A policy's command its target refused, which no OnRefused answers.
     Refused(&'a Rejected),
     /// A policy's own error: its `on_event`'s, its `on_refused`'s, or its
@@ -353,8 +360,13 @@ fn sequence_mismatch(expected: u64, actual: u64) -> RejectionDetails {
 /// keeps angzarr-embedded's code.
 pub(crate) fn reason(cause: &Cause, payload: &Payload) -> angzarr_proto::v1::Diagnostic {
     match cause {
-        Cause::Kernel(KernelError::Malformed(malformed)) => malformed_reason(malformed, payload),
-        Cause::Malformed(malformed) => malformed_reason(malformed, payload),
+        Cause::Kernel(KernelError::Malformed(malformed)) => {
+            malformed_reason(malformed, rejected_command(payload))
+        }
+        Cause::Malformed(malformed) => malformed_reason(malformed, rejected_command(payload)),
+        Cause::MalformedReaction { malformed, command } => {
+            malformed_reason(malformed, Some(command))
+        }
         Cause::Kernel(KernelError::Router(error)) => coded(error),
         Cause::Kernel(error) => error
             .as_coded()
@@ -379,11 +391,18 @@ pub(crate) fn reason(cause: &Cause, payload: &Payload) -> angzarr_proto::v1::Dia
 /// refusal fact for another stream
 /// (`COORDINATOR_REASON_REFUSAL_FACT_WRONG_STREAM`, its domain); any other
 /// under angzarr-embedded's code.
-fn malformed_reason(malformed: &Malformed, payload: &Payload) -> angzarr_proto::v1::Diagnostic {
-    let book = match payload {
+/// The command a letter's payload holds, if it holds one.
+fn rejected_command(payload: &Payload) -> Option<&CommandBook> {
+    match payload {
         Payload::RejectedCommand(book) => Some(book),
         _ => None,
-    };
+    }
+}
+
+fn malformed_reason(
+    malformed: &Malformed,
+    book: Option<&CommandBook>,
+) -> angzarr_proto::v1::Diagnostic {
     let domain = book
         .and_then(|b| b.cover.as_ref())
         .map(|c| c.domain.clone())

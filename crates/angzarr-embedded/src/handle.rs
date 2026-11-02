@@ -1492,7 +1492,7 @@ impl<'k> Run<'k> {
                 let limit = self.limit;
                 return Err((path, StepError::Kernel(KernelError::ChainTooDeep { limit })));
             }
-            let checked = match order.check_logged(self.registry.catalog(), self.letters) {
+            let checked = match order.check_logged(self.registry.catalog(), self.letters, &event) {
                 Ok(checked) => checked,
                 Err(m) => return Err((path, StepError::Kernel(KernelError::Malformed(m)))),
             };

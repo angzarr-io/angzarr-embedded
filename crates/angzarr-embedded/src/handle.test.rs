@@ -756,8 +756,12 @@ fn a_filtered_policy_reaches_its_target_only_for_the_events_it_targets() {
     );
 }
 
+/// A policy's command for a domain the kernel cannot route is the policy's
+/// bug: never delivered, its triggering event dead-lettered
+/// (`rejected_events`, C-0736) under
+/// `COORDINATOR_REASON_POLICY_COMMAND_UNKNOWN_DOMAIN`, naming the command.
 #[test]
-fn a_policy_book_for_an_unregistered_target_is_a_dead_lettered_bug() {
+fn a_policy_book_for_an_unregistered_target_dead_letters_its_trigger() {
     let mut registry = crate::Registry::new();
     registry.policy(Bookkeeping).unwrap();
     registry
@@ -798,9 +802,20 @@ fn a_policy_book_for_an_unregistered_target_is_a_dead_lettered_bug() {
     assert!(lines[0].starts_with(crate::DEAD_LETTER_PREFIX));
     assert!(
         lines[0]
-            .contains("bookkeeping: COORDINATOR_REASON_POLICY_COMMAND_UNKNOWN_DOMAIN command_type=toy.ledger.cmd.v1.Record domain=ledger"),
+            .contains("bookkeeping: COORDINATOR_REASON_POLICY_COMMAND_UNKNOWN_DOMAIN command_type=toy.ledger.cmd.v1.Record domain=ledger sequence=0 stream=account/"),
         "{}",
         lines[0]
+    );
+    let letters = log.letters();
+    let Some(crate::v1::angzarr_dead_letter::Payload::RejectedEvents(trigger)) =
+        &letters[0].payload
+    else {
+        panic!("the trigger, not the command: {:?}", letters[0].payload);
+    };
+    assert_eq!(trigger.cover.as_ref(), Some(&cover("account", 1)));
+    assert_eq!(
+        trigger.pages.iter().map(|p| p.sequence).collect::<Vec<_>>(),
+        [0]
     );
     assert_eq!(
         streams(&store),

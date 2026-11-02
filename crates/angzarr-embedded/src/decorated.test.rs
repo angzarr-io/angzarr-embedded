@@ -5047,8 +5047,8 @@ mod refusal_flow {
 
     /// A step that fails mid-way keeps the commits before it: no rollback.
     /// The wallet's policy sends to the buy-in, which this registry lacks:
-    /// the call is an error, the hold stays committed, and the policy's
-    /// malformed command is dead-lettered.
+    /// the call is an error, the hold stays committed, and the event the
+    /// policy answered with its malformed command is dead-lettered.
     #[test]
     fn a_failing_step_keeps_the_commits_before_it() {
         let mut registry = registry();

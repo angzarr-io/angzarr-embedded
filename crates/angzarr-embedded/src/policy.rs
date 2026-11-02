@@ -524,19 +524,26 @@ impl Order {
         )
     }
 
-    /// [`Order::check`], writing a dead letter for a malformed book: only a
-    /// bug makes one.
+    /// [`Order::check`], a malformed book being the policy's answer refused:
+    /// only a bug makes one, and the event it answered, `trigger`, is
+    /// dead-lettered with it (`rejected_events`), never the command, which
+    /// was never delivered. A command for a domain the kernel cannot route
+    /// is one (`COORDINATOR_REASON_POLICY_COMMAND_UNKNOWN_DOMAIN`, C-0736).
     pub(crate) fn check_logged(
         &self,
         catalog: &Catalog,
         dead_letters: &dyn DeadLetterLog,
+        trigger: &EventBook,
     ) -> Result<Checked, Malformed> {
         self.check(catalog).inspect_err(|malformed| {
             dead_letter::write(
                 dead_letters,
-                Letter::RejectedCommand(self.book()),
+                Letter::RejectedEvents(trigger.clone()),
                 Component::policy(&self.policy),
-                Cause::Malformed(malformed),
+                Cause::MalformedReaction {
+                    malformed,
+                    command: &self.book(),
+                },
             )
         })
     }
