@@ -397,9 +397,10 @@ fn a_new_stored_catch_up_hands_gone_a_stream_it_was_handed_before() {
 
 /// A purge landing between a step's read and its position's write (forced
 /// here, from the projector's book) leaves that position, the record, on a
-/// stream that is gone: the same step finds it no longer listed, hands it
-/// gone and puts its position back to 0 (decision 14.68), so the stream
-/// written again is handed from its start.
+/// stream that is gone: the step, reading the store as it began, still
+/// lists it; the next finds it no longer listed, hands it gone and puts its
+/// position back to 0 (decision 14.68), so the stream written again is
+/// handed from its start.
 #[test]
 fn a_position_left_by_a_racing_purge_is_handed_gone_and_cleared() {
     let registry = Arc::new(registry());
@@ -410,13 +411,10 @@ fn a_position_left_by_a_racing_purge_is_handed_gone_and_cleared() {
     *recorder.meanwhile.lock().unwrap() = Some(Box::new(move || purge(&racing, 1)));
     let mut stored = CatchUp::stored(&["account"], recorder.clone()).unwrap();
     step(&mut stored, &store, &registry);
-    assert_eq!(
-        recorder.take(),
-        [
-            (cover("account", 1), vec![0, 1], 2),
-            (cover("account", 1), vec![], 0)
-        ]
-    );
+    assert_eq!(recorder.take(), [(cover("account", 1), vec![0, 1], 2)]);
+    assert_eq!(position(&store, "recorder", &cover("account", 1)), 2);
+    step(&mut stored, &store, &registry);
+    assert_eq!(recorder.take(), [(cover("account", 1), vec![], 0)]);
     assert_eq!(position(&store, "recorder", &cover("account", 1)), 0);
     crate::toys::handle::<Account>(
         &*store,

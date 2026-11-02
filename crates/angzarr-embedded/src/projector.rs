@@ -41,8 +41,8 @@ use super::error::KernelError;
 use super::handle::Wait;
 use super::misconfigured::Misconfigured;
 use super::store::{
-    ChangeToken, ListStreams, PositionKey, Processed, ReadStore, ReadUnit, Store, StoreError,
-    StreamRef, Watch, Write,
+    ChangeToken, PositionKey, Processed, ReadStore, ReadUnit, Store, StoreError, StreamRef, Watch,
+    Write,
 };
 use super::upcast::upcast_pages;
 
@@ -68,14 +68,15 @@ use super::upcast::upcast_pages;
 ///   handed again from its start.
 ///
 /// A purge never touches the record. Each step compares it with the
-/// store's listing of streams ([`ListStreams`]): a stream it holds that the
-/// store no longer lists is gone, purged, whether or not a catch-up ran
-/// then. The projector is handed its gone book (its cover, no page, at 0),
-/// and the stream is forgotten (stored, its position put back to 0).
+/// store's listing of the sources' streams, read in the step's own read
+/// unit ([`ReadUnit::covers`]): a stream it holds that the store no longer
+/// lists is gone, purged, whether or not a catch-up ran then. The
+/// projector is handed its gone book (its cover, no page, at 0), and the
+/// stream is forgotten (stored, its position put back to 0).
 ///
-/// A step reads in one read-only unit ([`ReadStore`]): what it hands is
-/// one moment of the store, and a write landing meanwhile is the next
-/// step's. Each page is upcast as a policy's trigger is, through its
+/// A step reads in one read-only unit ([`ReadStore`]), its listing
+/// included: what it hands is one moment of the store, and a write or a
+/// purge landing meanwhile is the next step's. Each page is upcast as a policy's trigger is, through its
 /// domain's upcast port. A book the projector fails (or that does not
 /// upcast) keeps the stream where it was, so the next step hands it again;
 /// the other streams go on. Delivery is at least once: a stored position
@@ -218,24 +219,27 @@ impl<P: ProjectorHandler> CatchUp<P> {
 
     /// One step: every stream of the sources the store holds handed what
     /// it is owed, then every stream of the record the store no longer
-    /// lists handed as gone and forgotten. A store error ends the step;
-    /// what was handed before it stays handed.
-    pub async fn step<S: ReadStore + Store + Processed + ListStreams>(
+    /// lists handed as gone and forgotten, both as one read unit saw the
+    /// store. A store error ends the step; what was handed before it stays
+    /// handed.
+    pub async fn step<S: ReadStore + Store + Processed>(
         &mut self,
         store: &S,
         catalog: &Catalog,
     ) -> Result<Caught, KernelError> {
         let mut caught = Caught::default();
+        let mut listed = BTreeSet::new();
         let mut reads = store.begin_read().await.map_err(KernelError::Store)?;
         for source in self.sources.clone() {
             let covers = reads.covers(&source).await.map_err(KernelError::Store)?;
             for cover in covers.into_iter().filter(|c| c.edition.is_none()) {
+                listed.insert(key(&cover));
                 self.catch_stream(store, &mut reads, catalog, cover, &mut caught)
                     .await?;
             }
         }
         drop(reads);
-        self.hand_gone(store, &mut caught)
+        self.hand_gone(store, &listed, &mut caught)
             .await
             .map_err(KernelError::Store)?;
         Ok(caught)
@@ -245,7 +249,7 @@ impl<P: ProjectorHandler> CatchUp<P> {
     /// that handed everything it owed (the store's [`Watch`] token is
     /// unchanged): then `None`, and nothing is read. Tokens compare only
     /// from one handle, so every call is given the same store handle.
-    pub async fn step_if_changed<S: ReadStore + Store + Processed + ListStreams + Watch>(
+    pub async fn step_if_changed<S: ReadStore + Store + Processed + Watch>(
         &mut self,
         store: &S,
         catalog: &Catalog,
@@ -263,7 +267,7 @@ impl<P: ProjectorHandler> CatchUp<P> {
     /// on `wait` (the caller's timer), again and again while `more`, asked
     /// after each poll with what that step did (`None`: nothing changed),
     /// says so. Returns when it does not, or at a store error.
-    pub async fn follow<S: ReadStore + Store + Processed + ListStreams + Watch>(
+    pub async fn follow<S: ReadStore + Store + Processed + Watch>(
         &mut self,
         store: &S,
         catalog: &Catalog,
@@ -412,13 +416,15 @@ impl<P: ProjectorHandler> CatchUp<P> {
     }
 
     /// Hand every stream of the record, of the sources' main timeline,
-    /// that the store no longer lists ([`ListStreams`]) its gone book (no
-    /// page, at 0), and forget it: held, out of the record; stored, its
-    /// position put back to 0. One the projector fails (or whose position
-    /// is not put back) stays in the record, to be handed again.
-    async fn hand_gone<S: Store + Processed + ListStreams>(
+    /// that the step's read unit did not list (`listed`, by [`key`]) its
+    /// gone book (no page, at 0), and forget it: held, out of the record;
+    /// stored, its position put back to 0. One the projector fails (or
+    /// whose position is not put back) stays in the record, to be handed
+    /// again.
+    async fn hand_gone<S: Store + Processed>(
         &mut self,
         store: &S,
+        listed: &BTreeSet<(String, Vec<u8>)>,
         caught: &mut Caught,
     ) -> Result<(), StoreError> {
         let name = self.projector.name().to_string();
@@ -426,7 +432,6 @@ impl<P: ProjectorHandler> CatchUp<P> {
             Record::Held(held) => held.processed(&name).await?,
             Record::Stored => store.processed(&name).await?,
         };
-        let listed: BTreeSet<_> = store.list_streams().await?.iter().map(key).collect();
         let ours = |cover: &Cover| cover.edition.is_none() && self.sources.contains(&cover.domain);
         let gone: Vec<Cover> = record
             .into_iter()
