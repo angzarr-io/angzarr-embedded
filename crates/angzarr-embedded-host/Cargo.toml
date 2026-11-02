@@ -33,13 +33,13 @@ angzarr-embedded = { path = "../angzarr-embedded" }
 # The config's schema and its versioned loader: angzarr.yaml, which the CLI
 # writes, read strictly.
 angzarr-embedded-host-config = { path = "../angzarr-embedded-host-config" }
-angzarr-diagnostic = { git = "https://github.com/angzarr-io/angzarr", rev = "017d4d2e3d3abecfaea7ef39409ef346824987b8" }
+angzarr-diagnostic = { git = "https://github.com/angzarr-io/angzarr", rev = "b09fe13ad08979f0712fcfc639c48cb70afcc999" }
 # The store `run` opens: SQLite, at the config's [store] path or in memory.
 angzarr-store-sqlite = { path = "../angzarr-store-sqlite" }
-angzarr-proto = { git = "https://github.com/angzarr-io/angzarr", rev = "017d4d2e3d3abecfaea7ef39409ef346824987b8" }
-angzarr-proto-component = { git = "https://github.com/angzarr-io/angzarr", rev = "017d4d2e3d3abecfaea7ef39409ef346824987b8" }
-angzarr-proto-transport-embedded = { git = "https://github.com/angzarr-io/angzarr", rev = "017d4d2e3d3abecfaea7ef39409ef346824987b8" }
-angzarr-router = { git = "https://github.com/angzarr-io/angzarr-router", rev = "638e7b260e8448fb880fb04f2078e94e5907f825" }
+angzarr-proto = { git = "https://github.com/angzarr-io/angzarr", rev = "b09fe13ad08979f0712fcfc639c48cb70afcc999" }
+angzarr-proto-component = { git = "https://github.com/angzarr-io/angzarr", rev = "b09fe13ad08979f0712fcfc639c48cb70afcc999" }
+angzarr-proto-transport-embedded = { git = "https://github.com/angzarr-io/angzarr", rev = "b09fe13ad08979f0712fcfc639c48cb70afcc999" }
+angzarr-router = { git = "https://github.com/angzarr-io/angzarr-router", rev = "d504b2b502468197283efe0dd803a61e4afbeeaf" }
 hyper-util = { version = "0.1", features = ["tokio"] }
 # SIGTERM for a child that outlives its stdin at shutdown: tokio's Child
 # sends only SIGKILL. In the graph already, through tokio.
@@ -59,14 +59,14 @@ tower = { version = "0.5", default-features = false, features = ["util"] }
 # The kernel test runs on angzarr-ports' MemoryStore (the kernel's own
 # store contract, at its rev).
 [dev-dependencies]
-angzarr-ports = { git = "https://github.com/angzarr-io/angzarr", rev = "017d4d2e3d3abecfaea7ef39409ef346824987b8", features = ["memory"] }
+angzarr-ports = { git = "https://github.com/angzarr-io/angzarr", rev = "b09fe13ad08979f0712fcfc639c48cb70afcc999", features = ["memory"] }
 tonic = { version = "0.14", default-features = false, features = ["router"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 
 # The build writes the catalog's source under the crate's name
 # (angzarr_diagnostic::build): no catalog spells its crate's name.
 [build-dependencies]
-angzarr-diagnostic = { git = "https://github.com/angzarr-io/angzarr", rev = "017d4d2e3d3abecfaea7ef39409ef346824987b8", features = ["build"] }
+angzarr-diagnostic = { git = "https://github.com/angzarr-io/angzarr", rev = "b09fe13ad08979f0712fcfc639c48cb70afcc999", features = ["build"] }
 
 [lints]
 workspace = true
