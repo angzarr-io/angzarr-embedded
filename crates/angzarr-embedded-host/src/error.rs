@@ -145,6 +145,16 @@ pub enum HostError {
     /// inputs or another output domain. It is not published; the host
     /// takes such a change only when it starts.
     DescriptorChanged { domain: String },
+    /// A probed child exited on its stdin's end with a status other than
+    /// 0 ([`crate::probe`]).
+    ExitStatus { domain: String, exit_code: i32 },
+    /// A probed child did not exit by itself on its stdin's end within the
+    /// shutdown grace ([`crate::probe`]): `ended` is how it ended
+    /// ([`ChildExit::ended`](crate::ChildExit::ended)).
+    NotExited { domain: String, ended: String },
+    /// The probe was given an input a child of `kind` does not handle (a
+    /// command for a policy, a book of events for a domain).
+    ProbeInput { domain: String, kind: String },
     /// The configured `socket_dir` is too long for a Unix socket path to
     /// hold the host's socket names in it: at most `max_bytes` bytes.
     SocketDirTooLong { dir: String, max_bytes: u64 },
@@ -204,6 +214,9 @@ impl Diagnostic for HostError {
             HostError::DescriptorChanged { .. } => "angzarr-embedded-host-descriptor-changed",
             HostError::UpcasterNoDomain { .. } => "angzarr-embedded-host-upcaster-no-domain",
             HostError::NotExposable { .. } => "angzarr-embedded-host-not-exposable",
+            HostError::ExitStatus { .. } => "angzarr-embedded-host-exit-status",
+            HostError::NotExited { .. } => "angzarr-embedded-host-not-exited",
+            HostError::ProbeInput { .. } => "angzarr-embedded-host-probe-input",
             HostError::SocketDirTooLong { .. } => "angzarr-embedded-host-socket-dir-too-long",
             HostError::ConfigUnreadable { .. } => "angzarr-embedded-host-config-unreadable",
             HostError::ConfigInvalid { .. } => "angzarr-embedded-host-config-invalid",
@@ -247,7 +260,15 @@ impl Diagnostic for HostError {
             HostError::Handshake { domain: d, cause } => {
                 vec![domain(d), ("cause", Arg::nested(cause))]
             }
+            HostError::ExitStatus {
+                domain: d,
+                exit_code,
+            } => vec![domain(d), ("exit_code", (*exit_code).into())],
+            HostError::NotExited { domain: d, ended } => {
+                vec![domain(d), ("ended", ended.as_str().into())]
+            }
             HostError::NotExposable { domain: d, kind }
+            | HostError::ProbeInput { domain: d, kind }
             | HostError::NotRegistered { domain: d, kind }
             | HostError::NotListed { domain: d, kind } => {
                 vec![domain(d), ("kind", kind.as_str().into())]
@@ -380,6 +401,18 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn Diagnostic>> {
             },
         }),
         Box::new(HostError::DescriptorChanged { domain: d() }),
+        Box::new(HostError::ExitStatus {
+            domain: d(),
+            exit_code: 3,
+        }),
+        Box::new(HostError::NotExited {
+            domain: d(),
+            ended: "terminated".to_string(),
+        }),
+        Box::new(HostError::ProbeInput {
+            domain: d(),
+            kind: "policy".to_string(),
+        }),
         Box::new(HostError::SocketDirTooLong {
             dir: "/very/deep/directory".to_string(),
             max_bytes: 65,

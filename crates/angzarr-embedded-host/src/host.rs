@@ -88,6 +88,21 @@ pub enum ChildExit {
     NotRunning,
 }
 
+impl ChildExit {
+    /// How it ended, as an arg: `exited` (with a status), `signalled`
+    /// (exited by itself, a signal its end), `terminated`, `killed` or
+    /// `not-running`.
+    pub fn ended(self) -> &'static str {
+        match self {
+            ChildExit::Exited(Some(_)) => "exited",
+            ChildExit::Exited(None) => "signalled",
+            ChildExit::Terminated => "terminated",
+            ChildExit::Killed => "killed",
+            ChildExit::NotRunning => "not-running",
+        }
+    }
+}
+
 /// The running host: its children and their handlers. Dropping it shuts
 /// them down as [`Host::shutdown`] does.
 pub struct Host {
@@ -546,12 +561,12 @@ fn socket_path(dir: &Path) -> PathBuf {
 
 /// A child that came up: handshaken, connected, its health watched, and
 /// described (a sidecar is not).
-struct Up {
+pub(crate) struct Up {
     child: Child,
     stdin: Option<ChildStdin>,
-    channel: tonic::transport::Channel,
-    descriptor: pb::ComponentDescriptor,
-    socket: PathBuf,
+    pub(crate) channel: tonic::transport::Channel,
+    pub(crate) descriptor: pb::ComponentDescriptor,
+    pub(crate) socket: PathBuf,
     /// Whether it serves, as its health first said: a described child
     /// does, or it is refused.
     serving: bool,
@@ -609,7 +624,7 @@ async fn watch_health(
 /// Where a test holds every supervisor, to force an interleaving rather
 /// than wait for it: none outside the tests.
 #[derive(Clone, Default)]
-struct Hooks {
+pub(crate) struct Hooks {
     /// Awaited by a supervisor once it has told `start` its first child is
     /// up, before it does anything else.
     #[cfg(test)]
@@ -640,14 +655,14 @@ impl Hooks {
 
 /// One remote component's supervisor: it starts the child, restarts it when it
 /// exits, and stops it when told.
-struct Supervisor {
-    domain: String,
-    kind: ComponentKindConfig,
-    launch: Launch,
-    supervision: Supervision,
-    socket_dir: PathBuf,
-    link: Arc<Link>,
-    hooks: Hooks,
+pub(crate) struct Supervisor {
+    pub(crate) domain: String,
+    pub(crate) kind: ComponentKindConfig,
+    pub(crate) launch: Launch,
+    pub(crate) supervision: Supervision,
+    pub(crate) socket_dir: PathBuf,
+    pub(crate) link: Arc<Link>,
+    pub(crate) hooks: Hooks,
 }
 
 impl Supervisor {
@@ -786,7 +801,7 @@ impl Supervisor {
     /// child would otherwise wait out its grace for), closes the child's
     /// stdin and gives it the grace to exit; then sends it SIGTERM and
     /// gives it the terminate grace; then kills it.
-    async fn stop_child(&self, up: &mut Up) -> ChildExit {
+    pub(crate) async fn stop_child(&self, up: &mut Up) -> ChildExit {
         drop(up.health.take());
         drop(up.stdin.take());
         let grace = Duration::from_millis(self.supervision.shutdown_grace_ms);
@@ -806,7 +821,7 @@ impl Supervisor {
 
     /// Launches the child and brings it up. On a failure the child, if one
     /// started, is killed and reaped before the error is returned.
-    async fn come_up(&self) -> Result<Up, HostError> {
+    pub(crate) async fn come_up(&self) -> Result<Up, HostError> {
         let domain = || self.domain.clone();
         let socket = socket_path(&self.socket_dir);
         let _ = std::fs::remove_file(&socket);

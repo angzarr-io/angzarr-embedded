@@ -36,6 +36,11 @@
 //! host ends its health watch and closes its stdin to stop it. The launch
 //! contract is angzarr-project's `docs/design/child-protocol.md`.
 //!
+//! [`probe`] takes one child through that contract a step at a time,
+//! reporting each as passed or as the keyed failure the host would refuse
+//! it with: the conformance check a client library runs against its own
+//! child shim.
+//!
 //! [`CommandHandler`]: angzarr_router::router::CommandHandler
 //! [`PolicyComponent`]: angzarr_router::router::PolicyComponent
 //! [`ProjectorHandler`]: angzarr_router::router::ProjectorHandler
@@ -47,6 +52,7 @@ pub mod error;
 pub mod exposure;
 pub mod handshake;
 pub mod host;
+pub mod probe;
 pub mod remote;
 pub mod rpc;
 pub mod stores;
@@ -62,6 +68,7 @@ pub use descriptor::{validate, DescriptorRefused};
 pub use error::{HandshakeError, HostError};
 pub use exposure::{Arrival, NotExposed, Unserved};
 pub use host::{ChildExit, Host};
+pub use probe::{probe, Input, Outcome, Probed, Step};
 pub use remote::{
     is_retryable, RemoteCommandHandler, RemotePolicyHandler, RemoteProjectorHandler, RemoteUpcaster,
 };
