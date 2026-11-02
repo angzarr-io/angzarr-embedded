@@ -72,7 +72,7 @@ pub use descriptor::{validate, DescriptorRefused};
 pub use error::{HandshakeError, HostError};
 pub use exposure::{Arrival, NotExposed, Unserved};
 pub use host::{ChildExit, Host};
-pub use probe::{probe, Input, Outcome, Probed, Step};
+pub use probe::{probe, Input, Outcome, Probed, Step, PROBE_ROOT};
 pub use remote::{
     is_retryable, RemoteCommandHandler, RemotePolicyHandler, RemoteProjectorHandler, RemoteUpcaster,
 };

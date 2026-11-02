@@ -53,6 +53,16 @@ pub fn parse(text: &str, path: &str) -> Result<HostConfig, HostError> {
     })
 }
 
+/// The config file at `path`, read strictly ([`parse`]): refused as
+/// [`HostError::ConfigUnreadable`] when it cannot be read.
+pub fn read(path: &std::path::Path) -> Result<HostConfig, HostError> {
+    let text = std::fs::read_to_string(path).map_err(|e| HostError::ConfigUnreadable {
+        path: path.display().to_string(),
+        kind: format!("{:?}", e.kind()),
+    })?;
+    parse(&text, &path.display().to_string())
+}
+
 /// `retry` as the kernel's [`OnRetryable`].
 pub fn on_retryable(retry: &RetryConfig) -> OnRetryable {
     OnRetryable {

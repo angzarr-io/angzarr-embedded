@@ -22,43 +22,14 @@ fn any(type_url: &str) -> Any {
     }
 }
 
-fn cover(domain: &str) -> pb::Cover {
-    pb::Cover {
-        domain: domain.to_string(),
-        root: Some(pb::Uuid::from_bytes([7; 16])),
-        ..pb::Cover::default()
-    }
-}
-
 /// A command to `domain`, its payload `payload`.
 fn command(domain: &str, payload: Any) -> Input {
-    Input::Command(Box::new(pb::ContextualCommand {
-        command: Some(pb::CommandBook {
-            cover: Some(cover(domain)),
-            page: Some(pb::CommandPage {
-                body: Some(pb::command_page::Body::Command(pb::Command {
-                    payload: Some(payload),
-                })),
-                ..pb::CommandPage::default()
-            }),
-            ..pb::CommandBook::default()
-        }),
-        ..pb::ContextualCommand::default()
-    }))
+    Input::command(domain, &payload.type_url, payload.value)
 }
 
 /// One event of `domain`, its payload `payload`.
 fn events(domain: &str, payload: Any) -> Input {
-    Input::Events(pb::EventBook {
-        cover: Some(cover(domain)),
-        pages: vec![pb::EventPage {
-            sequence: 0,
-            payload: Some(payload),
-            ..pb::EventPage::default()
-        }],
-        next_sequence: 1,
-        snapshot: None,
-    })
+    Input::event(domain, &payload.type_url, payload.value)
 }
 
 fn with(mut component: ComponentConfig, env: &[(&str, &str)]) -> ComponentConfig {
@@ -384,5 +355,44 @@ fn the_probes_failures_are_spec_keys() {
     assert_eq!(
         probe_input.to_string(),
         "HOST_REASON_PROBE_INPUT component=player kind=policy"
+    );
+}
+
+/// A probe's command and event are on the probe's root, their payload
+/// of the type and bytes given.
+#[test]
+fn a_probes_input_is_on_its_root_of_the_type_given() {
+    let root = Some(pb::Uuid::from_bytes(PROBE_ROOT));
+    let Input::Command(command) = Input::command("player", "/x.SitDown", vec![8, 1]) else {
+        panic!("a command");
+    };
+    let book = command.command.unwrap();
+    let cover = book.cover.unwrap();
+    assert_eq!(
+        (cover.domain.as_str(), cover.root),
+        ("player", root.clone())
+    );
+    let Some(pb::command_page::Body::Command(pb::Command {
+        payload: Some(payload),
+    })) = book.page.unwrap().body
+    else {
+        panic!("a command page");
+    };
+    assert_eq!(
+        (payload.type_url.as_str(), payload.value),
+        ("/x.SitDown", vec![8, 1])
+    );
+    let Input::Events(book) = Input::event("table", "/x.Seated", vec![2]) else {
+        panic!("events");
+    };
+    let cover = book.cover.unwrap();
+    assert_eq!((cover.domain.as_str(), cover.root), ("table", root));
+    assert_eq!(book.next_sequence, 1);
+    let page = &book.pages[0];
+    assert_eq!(page.sequence, 0);
+    let payload = page.payload.as_ref().unwrap();
+    assert_eq!(
+        (payload.type_url.as_str(), payload.value.as_slice()),
+        ("/x.Seated", &[2u8][..])
     );
 }
