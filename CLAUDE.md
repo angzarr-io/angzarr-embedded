@@ -317,9 +317,10 @@ failing gate is a finding: fix the cause and commit again; never
    tip of that ref, or for a new branch from its merge base with the
    default branch, to the commit pushed), in that commit's tree, and holds
    every crate's new code to a 90% kill rate (`mutation_thresholds`; a new
-   crate gets a threshold there before it gets code). Red tests bound for a
-   branch other than the default one are not judged and pass with a
-   warning. The last run's mutants.out is kept in
+   crate gets a threshold there before it gets code). Red tests fail it on
+   every branch (no mutant can be judged against failing tests), as does a
+   run that found mutants and tested fewer: a mutation run that judged
+   nothing has shown nothing. The last run's mutants.out is kept in
    `target/logs/mutants-push/`. `just mutants-staged` makes the same
    judgement over the staged diff, by hand, and `just mutants-all` over the
    whole workspace at HEAD (the full pass; weekly in CI,
