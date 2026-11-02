@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use angzarr_embedded::angzarr_diagnostic::{Arg, Diagnostic};
 use angzarr_embedded::angzarr_router::error::{CodedError, GrpcCode};
 use angzarr_embedded::v1::DeliveryOutcome;
-use angzarr_embedded::{Failure, Handled, KernelError, Recovery, Rejected};
+use angzarr_embedded::{Failure, Handled, KernelError, Recovery, Rejected, StepError};
 
 /// One call's answer.
 #[derive(Clone, Debug, PartialEq)]
@@ -98,6 +98,23 @@ impl Answered {
                 status: by_recovery(failure.recovery()),
                 reason: failure.code().to_string(),
                 args: flat(failure),
+            },
+        }
+    }
+
+    /// A policy step's failure, as the step is answered: its own error.
+    pub(crate) fn of_step(error: &StepError) -> Answered {
+        match error {
+            StepError::Kernel(error) => kernel(error),
+            StepError::Rejected(report) => Answered::Failed {
+                status: GrpcCode::FailedPrecondition,
+                reason: report.code().to_string(),
+                args: flat(report),
+            },
+            StepError::PolicyFailed(report) => Answered::Failed {
+                status: GrpcCode::Internal,
+                reason: report.code().to_string(),
+                args: flat(report),
             },
         }
     }

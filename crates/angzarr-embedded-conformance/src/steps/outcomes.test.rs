@@ -13,7 +13,7 @@ use crate::tests::answer::{status, Answered};
 use crate::tests::world::Coordinator;
 
 /// The `name "value"` args a step lists.
-fn args(text: &str) -> BTreeMap<String, String> {
+pub(crate) fn named(text: &str) -> BTreeMap<String, String> {
     let mut args = BTreeMap::new();
     let mut rest = text;
     while let Some(open) = rest.find(" \"") {
@@ -138,7 +138,7 @@ fn fails_with_rejection(w: &mut Coordinator, reason: String) {
 
 #[then(regex = r"^the command fails (\w+) with reason (\w+)(.*)$")]
 fn fails_with_reason(w: &mut Coordinator, status_name: String, reason: String, rest: String) {
-    assert_refused(w, &status_name, &reason, &args(&rest));
+    assert_refused(w, &status_name, &reason, &named(&rest));
     if says_nothing_persisted(&rest) {
         assert_nothing_persisted(w);
     }
@@ -146,7 +146,7 @@ fn fails_with_reason(w: &mut Coordinator, status_name: String, reason: String, r
 
 #[then(regex = r"^the (?:caller|client) is answered (\w+) with reason (\w+)(.*)$")]
 fn answered_with_reason(w: &mut Coordinator, status_name: String, reason: String, rest: String) {
-    assert_refused(w, &status_name, &reason, &args(&rest));
+    assert_refused(w, &status_name, &reason, &named(&rest));
     if rest.contains("with no wait before it") {
         assert!(w.waits.waited().is_empty(), "{:?}", w.waits.waited());
     }
@@ -240,8 +240,15 @@ fn dead_lettered(w: &mut Coordinator, reason: String, rest: String) {
         .find(|l| l.reason.as_ref().is_some_and(|r| r.code == reason))
         .unwrap_or_else(|| panic!("no dead letter of {reason}: {letters:?}"));
     let given = &letter.reason.as_ref().expect("a reason").args;
-    for (name, value) in args(&rest) {
-        assert_eq!(given.get(&name), Some(&value), "{name} of {letter:?}");
+    for (name, value) in named(&rest) {
+        let arg = given
+            .get(&name)
+            .unwrap_or_else(|| panic!("no {name} in {letter:?}"));
+        // A type is named by its bare name: `AddItem` for orders.v1.AddItem.
+        assert!(
+            arg == &value || arg.ends_with(&format!(".{value}")),
+            "{name} of {letter:?}"
+        );
     }
     assert!(!w.alerts().is_empty(), "an alert");
 }

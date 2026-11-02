@@ -19,6 +19,8 @@ use cucumber::World as _;
 mod answer;
 #[path = "business.test.rs"]
 mod business;
+#[path = "policy.test.rs"]
+mod policy;
 #[path = "tags.test.rs"]
 mod tags;
 #[path = "world.test.rs"]
@@ -26,14 +28,24 @@ mod world;
 
 #[path = "steps/deliveries.test.rs"]
 mod deliveries;
+#[path = "steps/editions.test.rs"]
+mod editions;
 #[path = "steps/history.test.rs"]
 mod history;
 #[path = "steps/inputs.test.rs"]
 mod inputs;
 #[path = "steps/outcomes.test.rs"]
 mod outcomes;
+#[path = "steps/policies.test.rs"]
+mod policies;
+#[path = "steps/process_managers.test.rs"]
+mod process_managers;
+#[path = "steps/refusals.test.rs"]
+mod refusals;
 #[path = "steps/script.test.rs"]
 mod script;
+#[path = "steps/streams.test.rs"]
+mod streams;
 #[path = "steps/versions.test.rs"]
 mod versions;
 

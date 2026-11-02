@@ -4,25 +4,14 @@
 
 use cucumber::{given, then, when};
 
-use angzarr_embedded::testing::Ready as _;
-use angzarr_embedded::v1::Snapshot;
-use angzarr_embedded::SnapshotStore;
-
 use crate::tests::answer::status;
-use crate::tests::world::{sref, Coordinator};
+use crate::tests::policy::Root;
+use crate::tests::world::Coordinator;
 
 /// The order stream `name`, from here on the one the scenario speaks of.
 fn order_named(w: &mut Coordinator, name: &str) -> angzarr_embedded::v1::Cover {
     w.speak_of(name);
     w.order()
-}
-
-/// The stored snapshot of `cover`.
-fn stored_snapshot(w: &Coordinator, cover: &angzarr_embedded::v1::Cover) -> Option<Snapshot> {
-    w.store
-        .read_snapshot(sref(cover))
-        .ready()
-        .expect("the in-memory store reads")
 }
 
 /// `cover` holding events up to `last`: the missing ones written.
@@ -119,12 +108,39 @@ fn answering(w: &mut Coordinator, domain: &str, answered: &str, version: &str) {
     });
 }
 
+/// Every caller waits for the whole chain: one sent "awaiting the
+/// decision", "awaiting the projections" or "without waiting" is handled
+/// alike (the last is tagged: there is no asynchronous send); one "by a
+/// policy" is a policy's reaction to a payment.
 #[when(
-    regex = r#"^business code answers an AddItem command (?:sent [\w ]+? )?with (.+?), reporting rules version "([^"]*)"$"#
+    regex = r#"^business code answers an AddItem command (?:sent ([\w ]+?) )?with (.+?), reporting rules version "([^"]*)"$"#
 )]
-async fn answers_add_item(w: &mut Coordinator, answered: String, version: String) {
+async fn answers_add_item(w: &mut Coordinator, how: String, answered: String, version: String) {
     answering(w, "order", &answered, &version);
-    delivers_add_item(w, "order-1".to_string()).await;
+    if how != "by a policy" {
+        return delivers_add_item(w, "order-1".to_string()).await;
+    }
+    let to = Root::Named("order-1".to_string());
+    crate::tests::policies::reactor(w, "order", "AddItem", to, None);
+    w.begin();
+    let book = crate::tests::policies::payment_received(w);
+    w.handle(book).await;
+}
+
+#[when(
+    regex = r#"^a policy's (\w+) command is answered by the process manager with a (\w+) event, reporting rules version "([^"]*)"$"#
+)]
+async fn policy_command_answered(
+    w: &mut Coordinator,
+    command: String,
+    event: String,
+    version: String,
+) {
+    answering(w, "fulfillment", &format!("a {event} event"), &version);
+    crate::tests::policies::reactor(w, "fulfillment", &command, Root::TriggerCorrelation, None);
+    w.begin();
+    let book = crate::tests::policies::payment_received(w);
+    w.handle(book).await;
 }
 
 #[when(
@@ -196,7 +212,7 @@ fn event_records_version(w: &mut Coordinator, ordinal: String, name: String, ver
 #[then(regex = r#"^the snapshot records (rules version|state type) "([^"]*)"$"#)]
 fn snapshot_records(w: &mut Coordinator, what: String, value: String) {
     let cover = w.order();
-    let snapshot = stored_snapshot(w, &cover).expect("a snapshot stored");
+    let snapshot = w.stored_snapshot(&cover).expect("a snapshot stored");
     match what.as_str() {
         "rules version" => assert_eq!(snapshot.rules_version, value),
         _ => assert_eq!(snapshot.state.expect("a state").type_url, value),
@@ -265,7 +281,7 @@ fn no_event_of(w: &mut Coordinator, name: String) {
 )]
 fn snapshot_stored(w: &mut Coordinator, order: String, sequence: u64, version: String) {
     let cover = order_named(w, &order);
-    let snapshot = stored_snapshot(w, &cover).expect("a snapshot stored");
+    let snapshot = w.stored_snapshot(&cover).expect("a snapshot stored");
     assert_eq!(
         (snapshot.sequence, snapshot.rules_version.as_str()),
         (sequence, version.as_str())
@@ -291,7 +307,7 @@ fn snapshot_bytes(w: &mut Coordinator) {
 fn one_snapshot(w: &mut Coordinator, order: String) {
     let cover = order_named(w, &order);
     assert!(
-        stored_snapshot(w, &cover).is_some(),
+        w.stored_snapshot(&cover).is_some(),
         "the store keeps one snapshot per stream"
     );
 }
@@ -299,7 +315,7 @@ fn one_snapshot(w: &mut Coordinator, order: String) {
 #[then("it is the state returned with the third answer")]
 fn third_answer_state(w: &mut Coordinator) {
     let cover = w.order();
-    let snapshot = stored_snapshot(w, &cover).expect("a snapshot stored");
+    let snapshot = w.stored_snapshot(&cover).expect("a snapshot stored");
     let returned = w.business("order").returned();
     assert_eq!(returned.len(), 3);
     assert_eq!(snapshot.state.as_ref(), Some(&returned[2]));

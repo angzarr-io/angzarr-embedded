@@ -5,24 +5,28 @@
 //! inputs, keeping each answer and what the dead-letter log was told;
 //! thens read the answers, the deliveries and the store.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::convert::Infallible;
 use std::fmt;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use angzarr_embedded::testing::{MemoryStore, Ready as _, Samples};
+use angzarr_embedded::v1::meta::EditionCreated;
 use angzarr_embedded::v1::{
     command_page, Command, CommandBook, CommandPage, ComponentDescriptor, ComponentKind,
     ConflictResolution, Cover, EventPage, Fact, FactOrigin, Handling, Snapshot, StateDescriptor,
     StateOptions, Uuid,
 };
 use angzarr_embedded::{
-    Any, EventStore, Failure, Handled, Kernel, MemoryDeadLetters, OnRetryable, Registry, Rejected,
-    SnapshotStore, StreamRef, Wait, Write, DEAD_LETTER_PREFIX,
+    pack, Any, EventStore, Failure, Handled, Kernel, MemoryDeadLetters, OnRetryable, PositionKey,
+    PositionStore, Recorded, Registry, Rejected, SnapshotStore, StreamRef, Wait, Write,
+    DEAD_LETTER_PREFIX,
 };
 
 use crate::tests::answer::Answered;
 use crate::tests::business::{Business, Process};
+use crate::tests::policy::{Policy, Script};
 
 /// A domain as its descriptor registers it, and the business process
 /// behind it.
@@ -89,6 +93,29 @@ pub(crate) struct Coordinator {
     inputs: u32,
     /// The scenario's outline row, its values by their header.
     pub(crate) row: BTreeMap<String, String>,
+    pub(crate) policies: Vec<PolicyDef>,
+    /// Domains spoken of that no component of is registered.
+    pub(crate) absent: BTreeSet<String>,
+    /// The chain's depth limit, if not the kernel's default.
+    pub(crate) depth: Option<usize>,
+    /// Each component's domain, by the name a scenario gives it.
+    pub(crate) names: BTreeMap<String, String>,
+    /// The correlation an order's events are recorded under when a when
+    /// names none: "the order's correlation".
+    pub(crate) order_correlation: Option<String>,
+    /// The edition the scenario's inputs are sent in, if not main.
+    pub(crate) edition: Option<String>,
+    /// What each catch-up of the owed policy steps came to.
+    pub(crate) resumed: Vec<Result<Recorded, Failure<Infallible>>>,
+}
+
+/// A policy as registered: its name, source and destination, and its
+/// script.
+pub(crate) struct PolicyDef {
+    pub(crate) name: String,
+    pub(crate) input: String,
+    pub(crate) output: String,
+    pub(crate) script: Arc<Mutex<Script>>,
 }
 
 impl fmt::Debug for Coordinator {
@@ -102,7 +129,7 @@ impl fmt::Debug for Coordinator {
 }
 
 /// The type URL package of `domain`'s messages: `orders.v1.` for `order`.
-fn package(domain: &str) -> String {
+pub(crate) fn package(domain: &str) -> String {
     let plural = match domain {
         "order" => "orders",
         other => other,
@@ -168,7 +195,41 @@ impl Coordinator {
             samples: Samples::starting_at(1_700_000_000),
             inputs: 0,
             row: BTreeMap::new(),
+            policies: Vec::new(),
+            absent: BTreeSet::new(),
+            depth: None,
+            names: BTreeMap::new(),
+            order_correlation: None,
+            resumed: Vec::new(),
+            edition: None,
         }
+    }
+
+    /// The policy `name`, from `input` to `output`, registered with its
+    /// script empty if it is not yet: its script.
+    pub(crate) fn policy(&mut self, name: &str, input: &str, output: &str) -> Arc<Mutex<Script>> {
+        if let Some(def) = self.policies.iter().find(|p| p.name == name) {
+            return Arc::clone(&def.script);
+        }
+        self.domain(input);
+        self.domain(output);
+        let script = Arc::new(Mutex::new(Script::default()));
+        self.policies.push(PolicyDef {
+            name: name.to_string(),
+            input: input.to_string(),
+            output: output.to_string(),
+            script: Arc::clone(&script),
+        });
+        script
+    }
+
+    /// The domain of the component a scenario names (`Fulfillment`): its
+    /// own name, lower case, unless a given said otherwise.
+    pub(crate) fn domain_of(&self, name: &str) -> String {
+        self.names
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| name.to_lowercase())
     }
 
     /// `name`'s aggregate, registered at rules version `1.4.2+build.7`
@@ -200,6 +261,7 @@ impl Coordinator {
     pub(crate) fn process_manager(&mut self, name: &str, starting: &[&str]) -> &mut Domain {
         let domain = self.domain(name);
         domain.kind = ComponentKind::ProcessManager;
+        domain.business.takes_every_fact();
         domain
             .starting
             .extend(starting.iter().map(|s| s.to_string()));
@@ -296,6 +358,53 @@ impl Coordinator {
             .ready()
             .expect("the in-memory store reads")
             .pages
+    }
+
+    /// The stored snapshot of `cover`.
+    pub(crate) fn stored_snapshot(&self, cover: &Cover) -> Option<Snapshot> {
+        self.store
+            .read_snapshot(sref(cover))
+            .ready()
+            .expect("the in-memory store reads")
+    }
+
+    /// The policy `name`'s position on `cover`: the next sequence it has
+    /// yet to handle.
+    pub(crate) fn position(&self, name: &str, cover: &Cover) -> u64 {
+        let key = PositionKey {
+            handler: name,
+            stream: sref(cover),
+        };
+        self.store
+            .position(key)
+            .ready()
+            .expect("the in-memory store reads")
+    }
+
+    /// The policy `name`'s position on `cover` written back to its start,
+    /// so its next catch-up runs it over every event again.
+    pub(crate) fn rewind(&self, name: &str, cover: &Cover) {
+        let key = PositionKey {
+            handler: name,
+            stream: sref(cover),
+        };
+        let positions = [(key, 0)];
+        let write = Write {
+            positions: &positions,
+            ..Write::default()
+        };
+        self.store
+            .write(write)
+            .ready()
+            .expect("the position is written");
+    }
+
+    /// Every stream of `domain` the store holds.
+    pub(crate) fn store_covers(&self, domain: &str) -> Vec<Cover> {
+        self.store
+            .covers(domain)
+            .ready()
+            .expect("the in-memory store lists its streams")
     }
 
     /// The pages appended to `cover` since the first when, except the
@@ -397,7 +506,11 @@ impl Coordinator {
     /// Every domain, registered by its descriptor.
     fn registry(&self) -> Registry {
         let mut registry = Registry::new();
-        for (name, domain) in &self.domains {
+        let present = self
+            .domains
+            .iter()
+            .filter(|(name, _)| !self.absent.contains(*name));
+        for (name, domain) in present {
             let package = package(name);
             let descriptor = ComponentDescriptor {
                 name: name.clone(),
@@ -426,6 +539,16 @@ impl Coordinator {
                 .command_handler(name, process, descriptor)
                 .unwrap_or_else(|e| panic!("{name} registers: {e}"));
         }
+        for def in &self.policies {
+            let policy = Policy {
+                name: def.name.clone(),
+                input: def.input.clone(),
+                script: Arc::clone(&def.script),
+            };
+            registry
+                .policy_component(policy, &def.output)
+                .unwrap_or_else(|e| panic!("{} registers: {e}", def.name));
+        }
         registry
     }
 
@@ -445,11 +568,14 @@ impl Coordinator {
             return;
         }
         let covers: Vec<Cover> = self
-            .handled
-            .iter()
-            .filter_map(|(book, _)| book.cover.clone())
-            .chain(self.pending.iter().filter_map(|book| book.cover.clone()))
-            .chain(std::iter::once(self.order()))
+            .domains
+            .keys()
+            .flat_map(|domain| {
+                self.store
+                    .covers(domain)
+                    .ready()
+                    .expect("the in-memory store lists its streams")
+            })
             .collect();
         let baseline = covers
             .iter()
@@ -467,13 +593,66 @@ impl Coordinator {
         let registry = self.registry();
         let sampled = self.samples.next_sample();
         let store = self.store.clone();
-        let result = Kernel::new(&registry)
-            .log_with(&self.log)
-            .on_retryable(self.retry)
-            .wait_with(&self.waits)
+        let result = self
+            .kernel(&registry)
             .handle_any(&store, book.clone(), &sampled)
             .await;
         self.handled.push((book, result));
+    }
+
+    /// The kernel over `registry`, as the scenario configures it.
+    fn kernel<'k>(&'k self, registry: &'k Registry) -> Kernel<'k> {
+        let kernel = Kernel::new(registry)
+            .log_with(&self.log)
+            .on_retryable(self.retry)
+            .wait_with(&self.waits);
+        match self.depth {
+            Some(limit) => kernel.limit(limit),
+            None => kernel,
+        }
+    }
+
+    /// Every policy step still owed, run by position.
+    pub(crate) async fn resume(&mut self) -> Result<Recorded, Failure<Infallible>> {
+        let registry = self.registry();
+        let sampled = self.samples.next_sample();
+        let store = self.store.clone();
+        self.kernel(&registry).resume(&store, &sampled).await
+    }
+
+    /// An event of the type `event` recorded on `cover`, by a command of
+    /// its own (`Record<event>`), under `correlation` if one is named.
+    pub(crate) async fn record(&mut self, cover: &Cover, event: &str, correlation: Option<&str>) {
+        let mut book = self.command(cover, &format!("Record{event}"));
+        if let (Some(page), Some(correlation)) = (book.page.as_mut(), correlation) {
+            page.correlation_id = Some(root(correlation));
+        }
+        self.handle(book).await;
+    }
+
+    /// `cover` forked into its edition at main's head, as angzarr's system
+    /// layer forks a stream: its creation event written there.
+    pub(crate) fn fork(&mut self, cover: &Cover) {
+        let edition = cover.edition.clone().expect("an edition stream");
+        let main = Cover {
+            edition: None,
+            ..cover.clone()
+        };
+        let head = self.pages(&main).len() as u64;
+        let created = EditionCreated {
+            edition,
+            parent_sequence: head,
+            ..EditionCreated::default()
+        };
+        let page = EventPage {
+            sequence: head,
+            payload: Some(pack(&created)),
+            ..EventPage::default()
+        };
+        self.store
+            .write(Write::append(sref(cover), head, &[page]))
+            .ready()
+            .expect("the fork is written");
     }
 
     /// Every pending input, handled in order.

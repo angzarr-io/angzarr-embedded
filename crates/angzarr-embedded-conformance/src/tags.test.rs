@@ -59,12 +59,22 @@ const NO_OUTSIDE_CAUSATION: Tag = Tag {
     why: "a book carrying a causation is refused from outside: only the kernel's own policies send one",
 };
 
-/// A command whose caller waits for its answer, given up at a cap, is
-/// handed back to that caller, never dead-lettered: only work with no caller
-/// left is (owner ruling, 2026-10-31; `OnRetryable`).
+/// What a caller waits for and the kernel gives up on (a command at a
+/// retry or race re-run cap, a chain past its depth limit) is handed back
+/// to that caller, never dead-lettered: only work with no caller left is
+/// (owner ruling, 2026-10-31; `OnRetryable`).
 const WAITING_CALLER_ANSWERED: Tag = Tag {
     name: "divergence_waiting_caller_answered",
-    why: "a command given up at a cap is answered to its waiting caller and not dead-lettered (owner ruling 2026-10-31)",
+    why: "what a waiting caller's call gives up on is answered to it and not dead-lettered (owner ruling 2026-10-31)",
+};
+
+/// A fact whose handler fails with a bug fails the call that sent it: it
+/// is dead-lettered and its sender answered the failure, where the spec
+/// answers it OK, PARKED. The kernel parks only a fact given up at the race
+/// re-run cap (`Handled::Parked`).
+const FAILING_FACT_FAILS: Tag = Tag {
+    name: "divergence_failing_fact_answered_failed",
+    why: "a fact whose handler fails is answered the failure, not OK PARKED",
 };
 
 /// A COMMUTATIVE command at the head has no window, so the kernel hands it
@@ -124,6 +134,76 @@ const UNBOUND_HOST: Tag = Tag {
     why: "the host's child discovery: no binding runs a child process yet",
 };
 
+/// An in-process policy's translating callback answers a payload alone
+/// (angzarr-router's `PolicyComponent::dispatch_refusal`), which the kernel
+/// addresses and identifies; only a remote policy's `OnRefused` answer can
+/// carry more, and no binding runs one here yet.
+const UNBOUND_REMOTE_POLICY: Tag = Tag {
+    name: "unbound_remote_policy",
+    why: "an in-process callback answers a payload alone: only a remote policy's answer can be more, and no binding runs one",
+};
+
+/// A policy's command naming another edition than its trigger's is a
+/// policy bug, refused (`COORDINATOR_REASON_POLICY_COMMAND_OUTSIDE_EDITION`,
+/// as policy.proto's PolicyResponse says), not overridden with the
+/// trigger's: the spec says both (C-0140 against PolicyResponse).
+const OUTSIDE_EDITION_REFUSED: Tag = Tag {
+    name: "divergence_outside_edition_refused",
+    why: "a policy's command in another edition is refused, as policy.proto says, not overridden as C-0140 says",
+};
+
+/// A policy answers commands alone (`PolicyResponse.reactions`): it emits
+/// no event.
+const POLICY_EMITS_NO_EVENT: Tag = Tag {
+    name: "unsupported_policy_event",
+    why: "a policy answers commands alone (PolicyResponse): it emits no event",
+};
+
+/// A failing translating callback fails its policy step, answered to the
+/// call the chain runs in, and is not dead-lettered; a policy's own
+/// failure on an event is dead-lettered as well.
+const FAILING_CALLBACK_ANSWERED: Tag = Tag {
+    name: "divergence_failing_callback_answered",
+    why: "a failing translating callback is answered to the caller and not dead-lettered",
+};
+
+/// A policy's command for a domain the kernel cannot route is its own
+/// malformed step: the command is dead-lettered (`rejected_command`) and
+/// the policy's position held at the trigger, so the step runs once the
+/// domain is registered. The spec dead-letters the trigger
+/// (`rejected_events`).
+const UNKNOWN_DOMAIN_STEP_HELD: Tag = Tag {
+    name: "divergence_unknown_domain_step_held",
+    why: "a command for an unroutable domain is dead-lettered as the command, its policy's position held; the spec dead-letters the trigger",
+};
+
+/// The main timeline is spelled one way, unset: an empty edition is
+/// malformed (`Malformed::EmptyEdition`) and `angzarr` is an edition like
+/// any other.
+const MAIN_UNSET_ONLY: Tag = Tag {
+    name: "divergence_main_timeline_unset_only",
+    why: "the main timeline is unset only: an empty edition is malformed and \"angzarr\" is an edition like any other",
+};
+
+/// What an answer's events book names as its cover is not judged: the
+/// kernel records the answer's events on the input's own stream. The spec
+/// refuses another cover as a handler bug, under no key reasons.proto
+/// holds.
+const ANSWER_COVER_UNJUDGED: Tag = Tag {
+    name: "divergence_answer_cover_unjudged",
+    why: "an answer's events book naming another stream is not refused: its events land on the input's stream",
+};
+
+/// An input to an edition stream not forked is refused by the store at
+/// the write, under angzarr-ports' key
+/// (`angzarr-ports-store-edition-not-forked`, INVALID_ARGUMENT), after
+/// business code ran; the spec answers `EDITION_NOT_FORKED`,
+/// FAILED_PRECONDITION, before it, a key reasons.proto does not hold.
+const EDITION_NOT_FORKED_AT_WRITE: Tag = Tag {
+    name: "divergence_edition_not_forked_at_write",
+    why: "an input to an unforked edition stream is refused at the write, under angzarr-ports' key, INVALID_ARGUMENT",
+};
+
 /// No step binding drives the scenario yet.
 const UNBOUND: Tag = Tag {
     name: "unbound",
@@ -145,9 +225,6 @@ const TAGGED: &[(&str, Tag)] = &[
     ("C-0149", COMMUTATIVE_AT_HEAD),
     ("C-0724", WAITING_CALLER_ANSWERED),
     ("C-0725", WAITING_CALLER_ANSWERED),
-    ("C-0742", UNBOUND),
-    ("C-0458", UNBOUND),
-    ("C-0552", UNBOUND),
     ("C-0459", UNBOUND),
     ("C-0460", UNBOUND),
     // dead_letter_queue.feature
@@ -170,7 +247,7 @@ const TAGGED: &[(&str, Tag)] = &[
     ("C-0629", NO_EDITION_LIFECYCLE),
     ("C-0630", NO_EDITION_LIFECYCLE),
     ("C-0631", NO_EDITION_LIFECYCLE),
-    ("C-0633", UNBOUND),
+    ("C-0633", EDITION_NOT_FORKED_AT_WRITE),
     ("C-0634", NO_QUERY),
     ("C-0635", NO_EDITION_LIFECYCLE),
     ("C-0636", NO_EDITION_LIFECYCLE),
@@ -192,61 +269,29 @@ const TAGGED: &[(&str, Tag)] = &[
     ("C-0662", NO_EDITION_LIFECYCLE),
     ("C-0663", NO_EDITION_LIFECYCLE),
     // edition_propagation.feature
-    ("C-0138", UNBOUND),
-    ("C-0139", UNBOUND),
-    ("C-0140", UNBOUND),
-    ("C-0141", UNBOUND),
-    ("C-0144", UNBOUND),
-    ("C-0590", UNBOUND),
-    ("C-0608", UNBOUND),
-    ("C-0409", UNBOUND),
+    ("C-0139", POLICY_EMITS_NO_EVENT),
+    ("C-0140", OUTSIDE_EDITION_REFUSED),
+    ("C-0590", ANSWER_COVER_UNJUDGED),
+    ("C-0409", MAIN_UNSET_ONLY),
     ("C-0410", NO_EDITION_LIFECYCLE),
     // fact_flow.feature
     ("C-0185", UNBOUND),
     ("C-0186", UNBOUND),
-    ("C-0591", UNBOUND),
     ("C-0609", NO_OUTSIDE_CAUSATION),
     ("C-0610", NO_OUTSIDE_CAUSATION),
     ("C-0492", UNBOUND),
     ("C-0190", UNBOUND),
     // policy_addressing.feature
-    ("C-0656", UNBOUND),
-    ("C-0657", UNBOUND),
-    ("C-0658", UNBOUND),
-    ("C-0659", UNBOUND),
-    ("C-0660", UNBOUND),
-    ("C-0666", UNBOUND),
-    ("C-0583", UNBOUND),
-    ("C-0734", UNBOUND),
     ("C-0735", NO_OUTSIDE_CAUSATION),
-    ("C-0736", UNBOUND),
-    ("C-0737", UNBOUND),
+    ("C-0736", UNKNOWN_DOMAIN_STEP_HELD),
+    ("C-0737", WAITING_CALLER_ANSWERED),
     // policy_refusal.feature
-    ("C-0613", UNBOUND),
-    ("C-0614", UNBOUND),
-    ("C-0615", UNBOUND),
     ("C-0616", NO_OUTBOX),
-    ("C-0617", UNBOUND),
-    ("C-0618", UNBOUND),
-    ("C-0619", UNBOUND),
-    ("C-0621", UNBOUND),
-    ("C-0622", UNBOUND),
-    ("C-0624", UNBOUND),
-    ("C-0674", UNBOUND),
-    ("C-0685", UNBOUND),
+    ("C-0621", UNBOUND_REMOTE_POLICY),
+    ("C-0685", UNBOUND_REMOTE_POLICY),
     // process_manager_delivery.feature
-    ("C-0578", UNBOUND),
-    ("C-0592", UNBOUND),
-    ("C-0593", UNBOUND),
-    ("C-0594", UNBOUND),
-    ("C-0595", UNBOUND),
-    ("C-0596", UNBOUND),
-    ("C-0597", UNBOUND),
-    ("C-0599", UNBOUND),
-    ("C-0600", UNBOUND),
-    ("C-0601", UNBOUND),
-    ("C-0602", UNBOUND),
-    ("C-0603", UNBOUND),
+    ("C-0599", FAILING_FACT_FAILS),
+    ("C-0619", FAILING_CALLBACK_ANSWERED),
     // query_server.feature
     ("C-0588", NO_QUERY),
     ("C-0589", NO_QUERY),
@@ -260,8 +305,6 @@ const TAGGED: &[(&str, Tag)] = &[
     ("C-0556", NO_QUERY),
     ("C-0560", NO_QUERY),
     ("C-0558#4", IN_PROCESS_CHAIN),
-    ("C-0558#5", UNBOUND),
-    ("C-0559", UNBOUND),
     // state_building.feature
     ("C-0281", UNBOUND),
     ("C-0282", UNBOUND),

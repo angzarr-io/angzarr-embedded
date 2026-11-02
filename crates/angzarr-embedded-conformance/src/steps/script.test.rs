@@ -105,7 +105,7 @@ fn ingests(w: &mut Coordinator) {
 }
 
 #[given(
-    regex = r#"^another write to the "order" stream lands (?:at sequence \d+ )?after (the command is loaded|the window is delivered|the fact is loaded|each delivery's window is delivered|each run's load) and before (?:the command|the fact|it) is written$"#
+    regex = r#"^another write to the "order" stream lands (?:at sequence \d+ )?after (the command is loaded|the step's command is loaded|the window is delivered|the fact is loaded|each delivery's window is delivered|each run's load) and before (?:the command|the fact|it) is written$"#
 )]
 fn another_write(w: &mut Coordinator, when: String) {
     let business = w.business("order");

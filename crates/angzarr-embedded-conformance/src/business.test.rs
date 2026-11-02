@@ -16,7 +16,9 @@ use angzarr_embedded::v1::{
     command_page, CommandHandlerResponse, ComponentKind, ConflictReport, ConflictResolution,
     ContextualCommand, Cover, EventBook, EventPage, Snapshot,
 };
-use angzarr_embedded::{type_name, Any, EventStore, StreamRef, Write};
+use angzarr_embedded::{Any, EventStore, StreamRef, Write};
+
+use crate::tests::policy::{bare, command_refused_in};
 
 /// What a handler reports of its conflicts with its events.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -57,6 +59,9 @@ pub(crate) struct Answer {
     /// The types of the events recorded, if not the one named for the
     /// input.
     pub(crate) events: Option<Vec<String>>,
+    /// The edition its answer's events book names, if it names one: a
+    /// handler bug.
+    pub(crate) book_edition: Option<String>,
 }
 
 /// A business refusal under `code`, FAILED_PRECONDITION.
@@ -67,6 +72,17 @@ pub(crate) fn rejection(code: &str) -> CodedError {
         grpc: GrpcCode::FailedPrecondition,
         refusal: None,
     }
+}
+
+/// A refusal of every input of a type, or only once the stream holds an
+/// event of a type.
+#[derive(Clone, Debug)]
+pub(crate) struct Rule {
+    /// The input's type, by bare name.
+    pub(crate) input: String,
+    /// The event the stream must hold for the rule to apply.
+    pub(crate) once: Option<String>,
+    pub(crate) error: CodedError,
 }
 
 /// The script: an answer for every delivery, and for some by number.
@@ -87,6 +103,9 @@ pub(crate) struct Business {
     store: MemoryStore,
     /// The fact types it has a handler for.
     facts: Mutex<BTreeSet<String>>,
+    /// Whether it has a handler for every fact, as a process manager here
+    /// does.
+    every_fact: Mutex<bool>,
     script: Mutex<Script>,
     seen: Mutex<Vec<ContextualCommand>>,
     /// The name a scenario gives the nonce the coordinator delivers.
@@ -95,6 +114,7 @@ pub(crate) struct Business {
     before: Mutex<usize>,
     /// The state returned with each answer, in order.
     returned: Mutex<Vec<(usize, Any)>>,
+    rules: Mutex<Vec<Rule>>,
 }
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -114,12 +134,34 @@ impl Business {
             state_type: state_type.to_string(),
             store: store.clone(),
             facts: Mutex::default(),
+            every_fact: Mutex::default(),
             script: Mutex::default(),
             seen: Mutex::default(),
             alias: Mutex::default(),
             before: Mutex::default(),
             returned: Mutex::default(),
+            rules: Mutex::default(),
         }
+    }
+
+    /// Inputs refused as `rule` says.
+    pub(crate) fn rule(&self, rule: Rule) {
+        locked(&self.rules).push(rule);
+    }
+
+    /// The error a rule refuses `delivered`'s input of type `name` with.
+    fn ruled(&self, name: &str, delivered: &ContextualCommand) -> Option<CodedError> {
+        let held: Vec<String> = delivered.events.as_ref().map_or(Vec::new(), |e| {
+            e.pages
+                .iter()
+                .filter_map(|p| p.payload.as_ref())
+                .map(bare)
+                .collect()
+        });
+        locked(&self.rules)
+            .iter()
+            .find(|r| r.input == name && r.once.as_ref().is_none_or(|e| held.contains(e)))
+            .map(|r| r.error.clone())
     }
 
     /// It is built at `version` from now on: what it reports.
@@ -130,6 +172,11 @@ impl Business {
     /// Its handler for the fact `name` (a bare name: `ShipmentDispatched`).
     pub(crate) fn declare_fact(&self, name: &str) {
         locked(&self.facts).insert(name.to_string());
+    }
+
+    /// Its handler for every fact.
+    pub(crate) fn takes_every_fact(&self) {
+        *locked(&self.every_fact) = true;
     }
 
     /// `name` is what the scenario calls the nonce the coordinator
@@ -241,12 +288,29 @@ impl Business {
             None => (false, None),
         };
         let input = payload.unwrap_or_default();
-        let name = type_name(&input.type_url)
-            .rsplit('.')
-            .next()
-            .unwrap_or_default()
-            .to_string();
-        if is_fact && !locked(&self.facts).contains(&name) {
+        let name = bare(&input);
+        if let Some(error) = self.ruled(&name, delivered) {
+            return Err(error);
+        }
+        let declared = locked(&self.facts).contains(&name);
+        if is_fact && name == "CommandRefused" && !declared {
+            // The router finds no on_refused handler for the refused
+            // command's type.
+            let refused = command_refused_in(&input).and_then(|r| r.command);
+            let command = refused.and_then(|b| b.page).and_then(|p| match p.body {
+                Some(command_page::Body::Command(c)) => c.payload,
+                _ => None,
+            });
+            let command_type = command.map(|c| c.type_url).unwrap_or_default();
+            return Err(CodedError {
+                code: "ROUTER_REASON_NO_REFUSAL_HANDLER".to_string(),
+                extras: BTreeMap::from([("command_type".to_string(), command_type)]),
+                grpc: GrpcCode::Internal,
+                refusal: None,
+            });
+        }
+        let handled = *locked(&self.every_fact) || declared;
+        if is_fact && !handled {
             return Err(CodedError {
                 code: "ROUTER_REASON_NO_FACT_HANDLER".to_string(),
                 extras: BTreeMap::from([("type_url".to_string(), input.type_url.clone())]),
@@ -297,9 +361,12 @@ impl Business {
     }
 }
 
-/// The event an input of `name` records: `AddItem` records `ItemAdded`;
-/// a fact records itself.
-fn recorded(name: &str) -> &str {
+/// The event an input of `name` records: `Record<Event>` records its
+/// event, `AddItem` records `ItemAdded`; a fact records itself.
+pub(crate) fn recorded(name: &str) -> &str {
+    if let Some(event) = name.strip_prefix("Record") {
+        return event;
+    }
     match name {
         "AddItem" => "ItemAdded",
         "CreateOrder" => "OrderCreated",
@@ -356,9 +423,14 @@ impl CommandHandler for Process {
             value: n.to_be_bytes().to_vec(),
         };
         locked(&business.returned).push((n, state.clone()));
+        let cover = answer.book_edition.map(|edition| Cover {
+            edition: Some(edition),
+            ..stream.clone()
+        });
         Ok(CommandHandlerResponse {
             conflict: business.report(&answer.report, delivered),
             events: Some(EventBook {
+                cover,
                 snapshot: Some(Snapshot {
                     state: Some(state),
                     ..Snapshot::default()
