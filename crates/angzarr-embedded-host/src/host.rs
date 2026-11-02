@@ -4,8 +4,9 @@
 //! per policy, a [`RemoteProjectorHandler`] per projector) to register with
 //! the application's registry beside its in-process ones. Then it
 //! supervises: a child that
-//! exits is restarted, after a backoff that grows while restarts fail; while
-//! it is down its handler's dispatch is retryable
+//! exits is restarted, after a backoff that grows while restarts fail, and
+//! one unhealthy past its grace is restarted at once, up to its limit;
+//! while it is down its handler's dispatch is retryable
 //! ([`crate::is_retryable`]). A restarted child is described again, and its
 //! component registered by its new descriptor before it is published
 //! (C-0563): a registered domain's whole descriptor is replaced, and a
@@ -14,15 +15,20 @@
 //!
 //! Every child's gRPC health (`grpc.health.v1`, its server's, service
 //! `""`) is watched from its handshake on, as the child protocol has every
-//! child serve it: a child is up while it is running and its health
-//! reports SERVING, and down (its calls retryable, cause `not-serving`)
-//! while it does not; a watch that ends leaves it down until it is
-//! restarted. A described child must report SERVING once it has
-//! handshaken, before it is described; an upcaster sidecar, which is not
-//! described, may come up down. What the host does with a child that stays
-//! NOT_SERVING (restart it, say) is not the child protocol's, and the host
-//! does nothing more: its calls fail retryably until it turns SERVING
-//! again or exits.
+//! child serve it, and checked every `health_check_interval_ms` with a
+//! `Check` given `health_check_deadline_ms` (the protocol's supervision,
+//! decision 14.63; [`crate::vitals`]): a child is up while it is running
+//! and its health, as last seen by either, is SERVING, and down (its calls
+//! retryable, cause `not-serving`) while it is not, a check unanswered
+//! within its deadline included; a watch that ends reports nothing more.
+//! A described child must report SERVING once it has handshaken, before
+//! it is described; an upcaster sidecar, which is not described, may come
+//! up down. A child down for `unhealthy_grace_ms`, unbroken, is stopped
+//! at the first check (or watch report) past it and launched again at
+//! once, up to `unhealthy_restart_limit` times for its component; past
+//! that, it is stopped and none launched, its calls retryable (cause
+//! `not-running`) until the host ends. A call in flight on a child that
+//! is stopped fails retryably, and is never sent again.
 //!
 //! The generated `main.rs` calls [`crate::run`], which holds the
 //! in-process registrations to the config's listing; by hand, in
@@ -68,6 +74,7 @@ use crate::remote::{
     causes, Link, RemoteCommandHandler, RemotePolicyHandler, RemoteProjectorHandler, RemoteUpcaster,
 };
 use crate::rpc::connect_unix;
+use crate::vitals::{check, Clock, Verdict, Vitals};
 use angzarr_proto::v1::component_service_client::ComponentServiceClient;
 use tonic_health::pb::health_check_response::ServingStatus;
 use tonic_health::pb::health_client::HealthClient;
@@ -634,9 +641,35 @@ pub(crate) struct Hooks {
     /// withdrawn it.
     #[cfg(test)]
     applied: Option<mpsc::Sender<bool>>,
+    /// The clock a supervisor's health checks run on, which the test
+    /// moves; tokio's when unset.
+    #[cfg(test)]
+    clock: Option<Arc<crate::clock::ManualClock>>,
+    /// Told, by a supervisor, each verdict it reaches on its child's health
+    /// once it is up (a check's, or its health watch's), once it has acted
+    /// on it: published or withdrawn the child, or stopped it.
+    #[cfg(test)]
+    judged: Option<mpsc::Sender<crate::vitals::Verdict>>,
 }
 
 impl Hooks {
+    /// The clock the supervisor's health checks run on.
+    fn clock(&self) -> Clock {
+        #[cfg(test)]
+        if let Some(clock) = &self.clock {
+            return Clock::manual(clock.clone());
+        }
+        Clock::tokio()
+    }
+
+    #[cfg_attr(not(test), allow(unused_variables))]
+    fn judged(&self, verdict: Verdict) {
+        #[cfg(test)]
+        if let Some(judged) = &self.judged {
+            let _ = judged.send(verdict);
+        }
+    }
+
     async fn reported_up(&self) {
         #[cfg(test)]
         if let Some(hold) = &self.reported_up {
@@ -653,8 +686,21 @@ impl Hooks {
     }
 }
 
+/// How a running child's supervision ended ([`Supervisor::watch`]).
+enum Ended {
+    /// It exited by itself: it is restarted after the backoff.
+    Exited,
+    /// The host stopped it, ending supervision: how it ended.
+    Stopped(ChildExit),
+    /// It was unhealthy past its grace, and is stopped: it is restarted.
+    Unhealthy,
+    /// It was unhealthy past its grace with its component's restart limit
+    /// spent, and is stopped: none is launched again.
+    GivenUp,
+}
+
 /// One remote component's supervisor: it starts the child, restarts it when it
-/// exits, and stops it when told.
+/// exits or is unhealthy past its grace, and stops it when told.
 pub(crate) struct Supervisor {
     pub(crate) domain: String,
     pub(crate) kind: ComponentKindConfig,
@@ -677,6 +723,8 @@ impl Supervisor {
         let initial = Duration::from_millis(self.supervision.initial_backoff_ms);
         let max = Duration::from_millis(self.supervision.max_backoff_ms);
         let mut backoff = initial;
+        let clock = self.hooks.clock();
+        let mut vitals = Vitals::new(&self.supervision);
         loop {
             let started = tokio::select! {
                 started = self.come_up() => started,
@@ -705,22 +753,16 @@ impl Supervisor {
                         let _ = up.send(Ok(child.descriptor.clone()));
                         self.hooks.reported_up().await;
                     }
-                    loop {
-                        tokio::select! {
-                            _ = child.child.wait() => {
-                                self.set_channel(Err(causes::NOT_RUNNING));
-                                let _ = std::fs::remove_file(&child.socket);
-                                break;
-                            }
-                            _ = &mut stop => {
-                                self.set_channel(Err(causes::NOT_RUNNING));
-                                let exit = self.stop_child(&mut child).await;
-                                let _ = std::fs::remove_file(&child.socket);
-                                return exit;
-                            }
-                            serving = next_health(&mut child.health) => {
-                                self.serve(serving, &child.channel);
-                            }
+                    vitals.launched();
+                    match self.watch(&mut child, &mut stop, &mut vitals, &clock).await {
+                        Ended::Exited => {}
+                        Ended::Stopped(exit) => return exit,
+                        // Restarted at once: the backoff is for a child
+                        // that fails to come up.
+                        Ended::Unhealthy => continue,
+                        Ended::GivenUp => {
+                            let _ = (&mut stop).await;
+                            return ChildExit::NotRunning;
                         }
                     }
                 }
@@ -737,6 +779,76 @@ impl Supervisor {
                 _ = &mut stop => return ChildExit::NotRunning,
             }
         }
+    }
+
+    /// Supervises the running `child` until it ends: it exits, `stop` is
+    /// told (the child is stopped), or its health, from its watch and from
+    /// a check every interval, is unhealthy past its grace (the child is
+    /// stopped, to be restarted or, past the restart limit, given up).
+    /// Meanwhile it is published while it is healthy and withdrawn while it
+    /// is not, each time that changes.
+    async fn watch(
+        &self,
+        child: &mut Up,
+        stop: &mut oneshot::Receiver<()>,
+        vitals: &mut Vitals,
+        clock: &Clock,
+    ) -> Ended {
+        let mut published = child.serving;
+        let mut checking = Box::pin(self.checked(child.channel.clone(), clock.clone()));
+        loop {
+            let serving = tokio::select! {
+                _ = child.child.wait() => {
+                    self.set_channel(Err(causes::NOT_RUNNING));
+                    let _ = std::fs::remove_file(&child.socket);
+                    return Ended::Exited;
+                }
+                _ = &mut *stop => return Ended::Stopped(self.stopped(child).await),
+                serving = next_health(&mut child.health) => serving,
+                serving = &mut checking => {
+                    checking = Box::pin(self.checked(child.channel.clone(), clock.clone()));
+                    serving
+                }
+            };
+            let verdict = vitals.seen(serving, clock.now());
+            let ended = match verdict {
+                Verdict::Up | Verdict::Down => {
+                    if serving != published {
+                        self.serve(serving, &child.channel);
+                        published = serving;
+                    }
+                    None
+                }
+                Verdict::Restart => Some(Ended::Unhealthy),
+                Verdict::GiveUp => Some(Ended::GivenUp),
+            };
+            if ended.is_some() {
+                self.stopped(child).await;
+            }
+            self.hooks.judged(verdict);
+            if let Some(ended) = ended {
+                return ended;
+            }
+        }
+    }
+
+    /// The child's health, by a `Check` once the check interval has passed
+    /// on `clock`, given its deadline: whether it answered SERVING.
+    async fn checked(&self, channel: tonic::transport::Channel, clock: Clock) -> bool {
+        let interval = Duration::from_millis(self.supervision.health_check_interval_ms);
+        let deadline = Duration::from_millis(self.supervision.health_check_deadline_ms);
+        clock.sleep(interval).await;
+        check(&channel, deadline, &clock).await
+    }
+
+    /// The child withdrawn, stopped ([`Supervisor::stop_child`]) and its
+    /// socket file removed: how it ended. A call in flight on it fails
+    /// retryably, and is never sent again.
+    async fn stopped(&self, child: &mut Up) -> ChildExit {
+        self.set_channel(Err(causes::NOT_RUNNING));
+        let exit = self.stop_child(child).await;
+        let _ = std::fs::remove_file(&child.socket);
+        exit
     }
 
     /// Registers a child by `descriptor`, its answer to `Describe` (an

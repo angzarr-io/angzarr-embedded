@@ -28,9 +28,12 @@
 //!    [`Host::register`] registers with the kernel; a remote process
 //!    manager's start rule is the kernel's, from its descriptor's starting
 //!    types;
-//! 5. supervises it: a child that exits is restarted with backoff, and
-//!    while it is down (exited, or its health not SERVING) its dispatch
-//!    fails retryably ([`is_retryable`]).
+//! 5. supervises it: a child that exits is restarted with backoff; its
+//!    health is watched, and checked every interval within a deadline, and
+//!    a child unhealthy past its grace is restarted, up to a restart limit
+//!    past which it stays down (the child protocol's supervision, decision
+//!    14.63); while it is down (exited, unhealthy, or given up) its
+//!    dispatch fails retryably ([`is_retryable`]).
 //!
 //! A child exits when its stdin reaches end of file, or on SIGTERM; the
 //! host ends its health watch and closes its stdin to stop it. The launch
@@ -56,6 +59,7 @@ pub mod probe;
 pub mod remote;
 pub mod rpc;
 pub mod stores;
+pub(crate) mod vitals;
 
 /// The host config's schema crate, whose types [`config`] re-exports.
 pub use angzarr_embedded_host_config;
@@ -94,3 +98,7 @@ pub fn diagnostic_samples() -> Vec<Box<dyn angzarr_diagnostic::Diagnostic>> {
 #[cfg(test)]
 #[path = "fake_child.test.rs"]
 pub(crate) mod fake_child;
+
+#[cfg(test)]
+#[path = "clock.test.rs"]
+pub(crate) mod clock;

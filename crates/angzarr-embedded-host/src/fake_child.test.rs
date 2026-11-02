@@ -53,7 +53,14 @@
 //! SERVING, or `ANGZARR_FAKE_HEALTH`'s ([`health`]: `none` serves no
 //! health at all); given `ANGZARR_FAKE_CONTROL`, a Unix socket's path, it
 //! connects there as it starts, and each byte read sets its status: `1`
-//! SERVING, any other NOT_SERVING.
+//! SERVING, any other NOT_SERVING; and it writes `h` there when a
+//! `...Hang` command reaches it, so a test knows the call is in flight.
+//! Given `ANGZARR_FAKE_CHECK_HANG`, a path, a health `Check` made while a
+//! file is there never answers (a wedged child, its health watch still
+//! answering); one made once it is gone answers as ever.
+//!
+//! An aggregate appends `handle <type URL> pid-<its pid>` to
+//! `ANGZARR_FAKE_LOG` for each command, before it acts on it.
 //!
 //! It exits with code 0 when its stdin reaches end of file.
 
@@ -105,6 +112,17 @@ pub(crate) const LOG_ENV: &str = "ANGZARR_FAKE_LOG";
 pub(crate) const HEALTH_ENV: &str = "ANGZARR_FAKE_HEALTH";
 /// The Unix socket an upcaster reads its health from, byte by byte.
 pub(crate) const CONTROL_ENV: &str = "ANGZARR_FAKE_CONTROL";
+/// A path: while a file is there, a health `Check` never answers.
+pub(crate) const CHECK_HANG_ENV: &str = "ANGZARR_FAKE_CHECK_HANG";
+
+/// What the fake writes on its control socket when a `...Hang` command
+/// reaches it.
+pub(crate) const HUNG: u8 = b'h';
+
+/// The control socket's writing half, once the fake has connected: where
+/// a `...Hang` command says it arrived.
+static CONTROL: std::sync::OnceLock<tokio::sync::Mutex<tokio::net::unix::OwnedWriteHalf>> =
+    std::sync::OnceLock::new();
 
 /// An upcaster's health as it starts, besides SERVING.
 pub(crate) mod health {
@@ -305,7 +323,11 @@ async fn health_status(started: &str) -> tokio::sync::watch::Receiver<i32> {
         std::mem::forget(set);
         return status;
     };
-    let mut control = tokio::net::UnixStream::connect(control).await.unwrap();
+    let (mut control, writer) = tokio::net::UnixStream::connect(control)
+        .await
+        .unwrap()
+        .into_split();
+    let _ = CONTROL.set(tokio::sync::Mutex::new(writer));
     tokio::spawn(async move {
         use tokio::io::AsyncReadExt;
         let mut byte = [0u8];
@@ -408,6 +430,9 @@ impl Health for FakeHealth {
         &self,
         _: Request<HealthCheckRequest>,
     ) -> Result<Response<HealthCheckResponse>, Status> {
+        if std::env::var_os(CHECK_HANG_ENV).is_some_and(|path| PathBuf::from(path).exists()) {
+            std::future::pending::<()>().await;
+        }
         Ok(Response::new(HealthCheckResponse {
             status: *self.status.borrow(),
         }))
@@ -551,6 +576,7 @@ impl CommandHandlerService for Fake {
             .and_then(angzarr_router::command_payload)
             .map(|any| any.type_url.clone())
             .unwrap_or_default();
+        log(&format!("handle {type_url} {}", rules_version()));
         if type_url.ends_with("Refuse") {
             return Err(refused());
         }
@@ -561,6 +587,10 @@ impl CommandHandlerService for Fake {
             return Err(broke());
         }
         if type_url.ends_with("Hang") {
+            if let Some(control) = CONTROL.get() {
+                use tokio::io::AsyncWriteExt;
+                let _ = control.lock().await.write_all(&[HUNG]).await;
+            }
             std::future::pending::<()>().await;
         }
         if type_url.ends_with("Die") {
