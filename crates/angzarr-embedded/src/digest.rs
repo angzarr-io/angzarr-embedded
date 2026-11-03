@@ -40,7 +40,7 @@ impl Kernel<'_> {
         for cover in covers {
             let (stream, head) = self.load::<D, S>(store, &cover).await?;
             folded.push(Folded {
-                state: Some(pack(&stream.state().to_snapshot())),
+                state: <D::State as State>::SNAPSHOTS.then(|| pack(&stream.state().to_snapshot())),
                 cover,
                 head,
             });
