@@ -14,12 +14,14 @@ use crate::payload::pack;
 use crate::v1::Cover;
 
 /// One stream folded: its cover, its head, and its state in its snapshot
-/// form, packed.
+/// form, packed. `None` for a domain that takes no snapshot
+/// ([`State::SNAPSHOTS`] false: a marked-up aggregate with no `snapshot =
+/// ..`), which has no form of its state to show.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Folded {
     pub cover: Cover,
     pub head: u64,
-    pub state: Any,
+    pub state: Option<Any>,
 }
 
 impl Kernel<'_> {
@@ -27,7 +29,7 @@ impl Kernel<'_> {
     /// edition, in the store's order ([`covers`](angzarr_ports::EventStore::covers)), each loaded
     /// as [`Kernel::load`] loads it (its newest usable snapshot, then its
     /// events, each checked and upcast), with its head and its state
-    /// packed as its snapshot form.
+    /// packed as its snapshot form, none where `D` takes no snapshot.
     pub async fn fold_digest<D, S>(&self, store: &S) -> Result<Vec<Folded>, KernelError>
     where
         D: Domain,
@@ -38,7 +40,7 @@ impl Kernel<'_> {
         for cover in covers {
             let (stream, head) = self.load::<D, S>(store, &cover).await?;
             folded.push(Folded {
-                state: pack(&stream.state().to_snapshot()),
+                state: Some(pack(&stream.state().to_snapshot())),
                 cover,
                 head,
             });
