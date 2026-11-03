@@ -190,23 +190,46 @@ fn a_purged_stream_is_handed_as_gone_once() {
     assert_eq!(recorder.take(), [], "forgotten");
 }
 
-/// An edition is a what-if fork, not the timeline: its stream is not
-/// handed, main's is.
+/// An edition's forked stream is a stream of its own (O-9), held or
+/// stored: handed what it reads (main's events below its fork, then its
+/// own), never its fork page, and kept apart from main's, so a later write
+/// to main is main's alone.
 #[test]
-fn an_edition_stream_is_not_handed() {
-    let registry = registry();
-    let store = MemoryStore::new();
-    opened(&store, &registry, 1, 5);
-    let main = cover("account", 1);
-    let fork = cover_in("account", 1, "what-if");
-    crate::toys::fork(&store, &fork);
-    assert!(store.covers("account").ready().unwrap().contains(&fork));
+fn an_edition_stream_is_handed_as_a_stream_of_its_own() {
+    let catch_ups: [fn(Recorder) -> CatchUp<Recorder>; 2] = [
+        |recorder| CatchUp::new(&["account"], recorder).unwrap(),
+        |recorder| CatchUp::stored(&["account"], recorder).unwrap(),
+    ];
+    for catch_up in catch_ups {
+        let registry = registry();
+        let store = MemoryStore::new();
+        opened(&store, &registry, 1, 5);
+        let main = cover("account", 1);
+        let fork = cover_in("account", 1, "what-if");
+        let head = slice(&store, &main).next_sequence;
+        crate::toys::fork(&store, &fork);
+        let book = command(fork.clone(), AccountCmd::Deposit(3).to_any()).id(900);
+        crate::toys::handle::<Account>(&store, &registry, book, &at(90)).unwrap();
 
-    let recorder = Recorder::default();
-    let mut catch_up = CatchUp::new(&["account"], recorder.clone()).unwrap();
-    step(&mut catch_up, &store, &registry);
-    let handed: Vec<Cover> = recorder.take().into_iter().map(|b| b.0).collect();
-    assert_eq!(handed, [main]);
+        let recorder = Recorder::default();
+        let mut catch_up = catch_up(recorder.clone());
+        step(&mut catch_up, &store, &registry);
+        let mut handed = recorder.take();
+        handed.sort_by_key(|(cover, _, _)| cover.edition.clone());
+        let below: Vec<u64> = (0..head).collect();
+        let forked: Vec<u64> = (0..head).chain([head + 1]).collect();
+        assert_eq!(
+            handed,
+            [
+                (main.clone(), below, head),
+                (fork.clone(), forked, head + 2)
+            ]
+        );
+
+        deposit(&store, &registry, 1, 901, 4);
+        step(&mut catch_up, &store, &registry);
+        assert_eq!(recorder.take(), [(main, vec![head], head + 1)]);
+    }
 }
 
 /// A book the projector fails is reported, and keeps its stream where it
