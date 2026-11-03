@@ -21,9 +21,9 @@ use angzarr_ports::angzarr_proto::v1::meta::EditionCreated;
 use angzarr_ports::angzarr_proto::v1::{Cover, EventBook, EventPage, Snapshot};
 use angzarr_ports::{
     Append, AppliedMigration, ChangeToken, DeadLetter, DeadLetterKey, DeadLetterStore, EventStore,
-    Head, ListStreams, Outbox, OutboxEntry, PositionKey, PositionStore, Processed, Purge,
-    ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, Slice, SnapshotStore, StoreError,
-    StreamRef, Uuid, Watch, Write, Written, EDITION_CREATED_TYPE_URL,
+    Export, ExportRow, Head, ListStreams, Outbox, OutboxEntry, PositionKey, PositionStore,
+    Processed, Purge, ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, Slice, SnapshotStore,
+    StoreError, StreamRef, Uuid, Watch, Write, Written, EDITION_CREATED_TYPE_URL,
 };
 use prost::Message;
 use prost_types::Timestamp;
@@ -1343,6 +1343,16 @@ impl Processed for SqliteStore {
             positions.push((cover, next.unsigned_abs()));
         }
         Ok(positions)
+    }
+}
+
+impl Export for SqliteStore {
+    fn backend(&self) -> &str {
+        env!("CARGO_PKG_NAME")
+    }
+
+    async fn export(&self) -> Result<Vec<ExportRow>, StoreError> {
+        todo!("the SQLite store's export")
     }
 }
 
