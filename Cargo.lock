@@ -20,7 +20,7 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 [[package]]
 name = "angzarr-diagnostic"
 version = "0.1.0"
-source = "git+https://github.com/angzarr-io/angzarr?rev=e52800c8fb9a89d2e44b2003442c0fa0f0b231a4#e52800c8fb9a89d2e44b2003442c0fa0f0b231a4"
+source = "git+https://github.com/angzarr-io/angzarr?rev=2681dab885c8a3f138a0964f4d6b628d2480963f#2681dab885c8a3f138a0964f4d6b628d2480963f"
 
 [[package]]
 name = "angzarr-embedded"
@@ -121,7 +121,7 @@ dependencies = [
 [[package]]
 name = "angzarr-ports"
 version = "0.1.0"
-source = "git+https://github.com/angzarr-io/angzarr?rev=e52800c8fb9a89d2e44b2003442c0fa0f0b231a4#e52800c8fb9a89d2e44b2003442c0fa0f0b231a4"
+source = "git+https://github.com/angzarr-io/angzarr?rev=2681dab885c8a3f138a0964f4d6b628d2480963f#2681dab885c8a3f138a0964f4d6b628d2480963f"
 dependencies = [
  "angzarr-diagnostic",
  "angzarr-proto",
@@ -132,7 +132,7 @@ dependencies = [
 [[package]]
 name = "angzarr-proto"
 version = "0.1.0"
-source = "git+https://github.com/angzarr-io/angzarr?rev=e52800c8fb9a89d2e44b2003442c0fa0f0b231a4#e52800c8fb9a89d2e44b2003442c0fa0f0b231a4"
+source = "git+https://github.com/angzarr-io/angzarr?rev=2681dab885c8a3f138a0964f4d6b628d2480963f#2681dab885c8a3f138a0964f4d6b628d2480963f"
 dependencies = [
  "bytes",
  "prost",
@@ -144,7 +144,7 @@ dependencies = [
 [[package]]
 name = "angzarr-proto-component"
 version = "0.1.0"
-source = "git+https://github.com/angzarr-io/angzarr?rev=e52800c8fb9a89d2e44b2003442c0fa0f0b231a4#e52800c8fb9a89d2e44b2003442c0fa0f0b231a4"
+source = "git+https://github.com/angzarr-io/angzarr?rev=2681dab885c8a3f138a0964f4d6b628d2480963f#2681dab885c8a3f138a0964f4d6b628d2480963f"
 dependencies = [
  "angzarr-proto",
  "bytes",
@@ -159,7 +159,7 @@ dependencies = [
 [[package]]
 name = "angzarr-proto-transport-embedded"
 version = "0.1.0"
-source = "git+https://github.com/angzarr-io/angzarr?rev=e52800c8fb9a89d2e44b2003442c0fa0f0b231a4#e52800c8fb9a89d2e44b2003442c0fa0f0b231a4"
+source = "git+https://github.com/angzarr-io/angzarr?rev=2681dab885c8a3f138a0964f4d6b628d2480963f#2681dab885c8a3f138a0964f4d6b628d2480963f"
 dependencies = [
  "angzarr-proto",
  "angzarr-proto-component",
@@ -170,7 +170,7 @@ dependencies = [
 [[package]]
 name = "angzarr-router"
 version = "0.1.0"
-source = "git+https://github.com/angzarr-io/angzarr-router?rev=3ac68d0fef487df26bd6a9d81c25e0677a579667#3ac68d0fef487df26bd6a9d81c25e0677a579667"
+source = "git+https://github.com/angzarr-io/angzarr-router?rev=e7c5cadc012b010c89eca586c921c880eaa38ac0#e7c5cadc012b010c89eca586c921c880eaa38ac0"
 dependencies = [
  "angzarr-ports",
  "angzarr-proto",
@@ -196,12 +196,12 @@ dependencies = [
 [[package]]
 name = "angzarr-test-dir"
 version = "0.1.0"
-source = "git+https://github.com/angzarr-io/angzarr?rev=e52800c8fb9a89d2e44b2003442c0fa0f0b231a4#e52800c8fb9a89d2e44b2003442c0fa0f0b231a4"
+source = "git+https://github.com/angzarr-io/angzarr?rev=2681dab885c8a3f138a0964f4d6b628d2480963f#2681dab885c8a3f138a0964f4d6b628d2480963f"
 
 [[package]]
 name = "angzarr-yaml"
 version = "0.1.0"
-source = "git+https://github.com/angzarr-io/angzarr?rev=e52800c8fb9a89d2e44b2003442c0fa0f0b231a4#e52800c8fb9a89d2e44b2003442c0fa0f0b231a4"
+source = "git+https://github.com/angzarr-io/angzarr?rev=2681dab885c8a3f138a0964f4d6b628d2480963f#2681dab885c8a3f138a0964f4d6b628d2480963f"
 dependencies = [
  "angzarr-diagnostic",
  "serde",
@@ -724,7 +724,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1827,7 +1827,7 @@ version = "0.14.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03da047801ff44bb6a4d407d4860c05fd70bb81714e6b2f3812603d5b145b042"
 dependencies = [
- "heck 0.4.1",
+ "heck 0.5.0",
  "itertools",
  "log",
  "multimap",
@@ -1996,7 +1996,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2544,7 +2544,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2554,7 +2554,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
 dependencies = [
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
