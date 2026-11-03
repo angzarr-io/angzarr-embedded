@@ -101,7 +101,3 @@ pub(crate) mod fake_child;
 #[cfg(test)]
 #[path = "clock.test.rs"]
 pub(crate) mod clock;
-
-#[cfg(test)]
-#[path = "test_dir.test.rs"]
-pub(crate) mod test_dir;

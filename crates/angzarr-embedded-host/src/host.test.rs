@@ -11,7 +11,16 @@ use crate::config::ComponentConfig;
 use crate::error::HandshakeError;
 use crate::fake_child::{self, config, domain, mode};
 use crate::remote::is_retryable;
-use crate::test_dir::{TestDir, TestFile};
+use angzarr_test_dir::{OnPanic, TestDir, TestFile};
+
+/// A [`TestDir`] for a host's sockets: under the host's default socket
+/// directory (`$XDG_RUNTIME_DIR`, else `/tmp`), not the temporary one, so it
+/// is short enough to hold the host's socket names whatever `$TMPDIR` is.
+fn for_sockets(prefix: &str) -> TestDir {
+    let base = socket_dir(None, std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from))
+        .expect("the default socket directory is short");
+    TestDir::under(&base, prefix, OnPanic::from_env())
+}
 
 fn command(domain: &str, type_url: &str) -> pb::ContextualCommand {
     pb::ContextualCommand {
@@ -600,7 +609,7 @@ fn fake_supervisor(sockets: &Path) -> Supervisor {
 /// runtime dropped, mid-way) leaves none behind.
 #[test]
 fn a_dropped_child_leaves_no_socket_file() {
-    let sockets = TestDir::for_sockets("angzarr-sockets");
+    let sockets = for_sockets("angzarr-sockets");
     let up = fake_supervisor(&sockets)
         .come_up()
         .awaited()
@@ -1121,7 +1130,7 @@ impl OnTheClock {
     /// [`OnTheClock::start`], its restart count clearing after `reset`
     /// healthy.
     fn resetting(player: ComponentConfig, limit: u32, reset: Duration) -> OnTheClock {
-        let sockets = TestDir::for_sockets("angzarr-sockets");
+        let sockets = for_sockets("angzarr-sockets");
         let mut config = config(vec![player]);
         config.supervision.socket_dir = Some(sockets.to_path_buf());
         config.supervision.unhealthy_reset_ms = reset.as_millis() as u64;
