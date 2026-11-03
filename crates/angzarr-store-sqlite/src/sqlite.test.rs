@@ -579,30 +579,38 @@ async fn an_export_gives_a_page_as_stored_byte_for_byte() {
 
 /// An export reads a store opened to read and changes nothing of its
 /// file: its bytes and its modification time are as they were (the store
-/// export/import plan, E3).
+/// export/import plan, E3). The source is what the plan exports, a
+/// `VACUUM INTO` copy of the store (section 3.1), whole in its one file:
+/// a live store's file is not the store until its WAL is checkpointed.
 #[tokio::test]
 async fn an_export_never_writes_the_source() {
     let path = database();
+    let store = SqliteStore::open(&path).await.unwrap();
+    append(&store, stream(1), 0, &[page(0, 1), page(1, 2)])
+        .await
+        .unwrap();
+    store
+        .write_snapshot(stream(1), &snapshot(1, "v1"))
+        .await
+        .unwrap();
+    let copy = path.with_file_name("copy.db");
+    let mut conn = raw(&path).await;
+    sqlx::query("VACUUM INTO ?1")
+        .bind(copy.to_string_lossy().into_owned())
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    conn.close().await.unwrap();
+    let before = std::fs::read(&copy).unwrap();
+    let modified = std::fs::metadata(&copy).unwrap().modified().unwrap();
     {
-        let store = SqliteStore::open(&path).await.unwrap();
-        append(&store, stream(1), 0, &[page(0, 1), page(1, 2)])
-            .await
-            .unwrap();
-        store
-            .write_snapshot(stream(1), &snapshot(1, "v1"))
-            .await
-            .unwrap();
-    }
-    let before = std::fs::read(&*path).unwrap();
-    let modified = std::fs::metadata(&*path).unwrap().modified().unwrap();
-    {
-        let store = SqliteStore::open_existing(&path).await.unwrap().unwrap();
-        let rows = store.export().await.unwrap();
+        let source = SqliteStore::open_existing(&copy).await.unwrap().unwrap();
+        let rows = source.export().await.unwrap();
         assert_eq!(rows.len(), 3, "two pages and a snapshot: {rows:?}");
     }
-    assert_eq!(std::fs::read(&*path).unwrap(), before, "the file's bytes");
+    assert_eq!(std::fs::read(&copy).unwrap(), before, "the file's bytes");
     assert_eq!(
-        std::fs::metadata(&*path).unwrap().modified().unwrap(),
+        std::fs::metadata(&copy).unwrap().modified().unwrap(),
         modified,
         "the file's modification time"
     );

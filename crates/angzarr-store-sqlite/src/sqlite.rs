@@ -12,6 +12,7 @@
 //! its `total_changes()`. There is no store-wide position (decision 14.35):
 //! ordering is per stream, by sequence.
 
+use std::collections::BTreeMap;
 use std::ops::DerefMut;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1099,6 +1100,23 @@ impl DeadLetterStore for SqliteStore {
     }
 }
 
+/// `(id, origin, message, edition)` rows as outbox entries.
+fn outbox_entries(rows: Vec<SqliteRow>) -> Result<Vec<OutboxEntry>, StoreError> {
+    let mut entries = Vec::new();
+    for row in rows {
+        let id: Vec<u8> = row.try_get(0).map_err(unavailable)?;
+        let message: Vec<u8> = row.try_get(2).map_err(unavailable)?;
+        entries.push(OutboxEntry {
+            id: rows::stream_root(&id)?,
+            origin: row.try_get(1).map_err(unavailable)?,
+            message: prost_types::Any::decode(message.as_slice())
+                .map_err(|e| StoreError::Unavailable(undecodable(e)))?,
+            edition: row.try_get(3).map_err(unavailable)?,
+        });
+    }
+    Ok(entries)
+}
+
 impl Outbox for SqliteStore {
     async fn pending(&self, limit: usize) -> Result<Vec<OutboxEntry>, StoreError> {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
@@ -1108,19 +1126,7 @@ impl Outbox for SqliteStore {
             .await
             .rows(statements::PENDING, [Value::Int(limit)])
             .await?;
-        let mut entries = Vec::new();
-        for row in rows {
-            let id: Vec<u8> = row.try_get(0).map_err(unavailable)?;
-            let message: Vec<u8> = row.try_get(2).map_err(unavailable)?;
-            entries.push(OutboxEntry {
-                id: rows::stream_root(&id)?,
-                origin: row.try_get(1).map_err(unavailable)?,
-                message: prost_types::Any::decode(message.as_slice())
-                    .map_err(|e| StoreError::Unavailable(undecodable(e)))?,
-                edition: row.try_get(3).map_err(unavailable)?,
-            });
-        }
-        Ok(entries)
+        outbox_entries(rows)
     }
 
     async fn clear(&self, ids: &[Uuid]) -> Result<u64, StoreError> {
@@ -1346,13 +1352,108 @@ impl Processed for SqliteStore {
     }
 }
 
+/// A stream as its rows key it: domain, the edition column (`''` for
+/// main) and the root's bytes. Its order is `StreamRef`'s: by domain, then
+/// main first, then each edition by name, then root.
+type StoredKey = (String, String, Vec<u8>);
+
+/// A row's stream: its key, from its first three columns, and its cover.
+fn stored_stream(row: &SqliteRow) -> Result<(StoredKey, Cover), StoreError> {
+    let domain: String = row.try_get(0).map_err(unavailable)?;
+    let edition: String = row.try_get(1).map_err(unavailable)?;
+    let root: Vec<u8> = row.try_get(2).map_err(unavailable)?;
+    let cover = rows::cover::<SqliteDialect>(&domain, edition.clone(), &root)?;
+    Ok(((domain, edition, root), cover))
+}
+
+/// Each stream's export rows, gathered table by table: a stream's pages
+/// first, then its snapshot, its positions and its letters, as the tables
+/// are read in that order.
+#[derive(Default)]
+struct Gathered(BTreeMap<StoredKey, Vec<ExportRow>>);
+
+impl Gathered {
+    /// Add one row of each of `rows`, its stream from its first columns
+    /// and the rest made by `make`.
+    fn add(
+        &mut self,
+        rows: Vec<SqliteRow>,
+        make: impl Fn(Cover, &SqliteRow) -> Result<ExportRow, StoreError>,
+    ) -> Result<(), StoreError> {
+        for row in rows {
+            let (key, cover) = stored_stream(&row)?;
+            let exported = make(cover, &row)?;
+            self.0.entry(key).or_default().push(exported);
+        }
+        Ok(())
+    }
+}
+
 impl Export for SqliteStore {
     fn backend(&self) -> &str {
         env!("CARGO_PKG_NAME")
     }
 
+    /// Every table's rows in one read transaction, a deferred `BEGIN`
+    /// (under WAL its moment is its first read's, and it waits on no
+    /// writer), so on a store opened by
+    /// [`open_existing`](SqliteStore::open_existing) too; gathered by
+    /// stream in the key's order, then the pending outbox. Pages,
+    /// snapshots and letters are given as their columns hold them.
     async fn export(&self) -> Result<Vec<ExportRow>, StoreError> {
-        todo!("the SQLite store's export")
+        let mut ex = self.conn.exec().await;
+        ex.count();
+        let tx = ex.conn.begin().await.map_err(unavailable)?;
+        let mut moment = Exec {
+            conn: tx,
+            sent: ex.sent,
+        };
+        let mut gathered = Gathered::default();
+        let pages = moment.rows(statements::EXPORT_PAGES, []).await?;
+        gathered.add(pages, |stream, row| {
+            let sequence: i64 = row.try_get(3).map_err(unavailable)?;
+            Ok(ExportRow::Page {
+                stream,
+                sequence: sequence.unsigned_abs(),
+                stored: row.try_get(4).map_err(unavailable)?,
+            })
+        })?;
+        let snapshots = moment.rows(statements::EXPORT_SNAPSHOTS, []).await?;
+        gathered.add(snapshots, |stream, row| {
+            Ok(ExportRow::Snapshot {
+                stream,
+                stored: row.try_get(3).map_err(unavailable)?,
+            })
+        })?;
+        let positions = moment.rows(statements::EXPORT_POSITIONS, []).await?;
+        gathered.add(positions, |stream, row| {
+            let next: i64 = row.try_get(4).map_err(unavailable)?;
+            Ok(ExportRow::Position {
+                stream,
+                handler: row.try_get(3).map_err(unavailable)?,
+                next: next.unsigned_abs(),
+            })
+        })?;
+        let letters = moment.rows(statements::EXPORT_DEAD_LETTERS, []).await?;
+        gathered.add(letters, |stream, row| {
+            let kind: i64 = row.try_get(3).map_err(unavailable)?;
+            let at: Vec<u8> = row.try_get(4).map_err(unavailable)?;
+            Ok(ExportRow::DeadLetter {
+                at: rows::letter_place(&stream, kind, &at)?,
+                stream,
+                component: row.try_get(5).map_err(unavailable)?,
+                stored: row.try_get(6).map_err(unavailable)?,
+            })
+        })?;
+        let pending = moment
+            .rows(statements::PENDING, [Value::Int(i64::MAX)])
+            .await?;
+        let outbox = outbox_entries(pending)?;
+        moment.count();
+        moment.conn.commit().await.map_err(unavailable)?;
+        let mut rows: Vec<ExportRow> = gathered.0.into_values().flatten().collect();
+        rows.extend(outbox.into_iter().map(ExportRow::Outbox));
+        Ok(rows)
     }
 }
 

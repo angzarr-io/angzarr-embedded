@@ -63,22 +63,32 @@ pub(crate) fn dead_letter(
     letter: &[u8],
 ) -> Result<DeadLetter, StoreError> {
     let unreadable = |reason| StoreError::dead_letter_unreadable(cover.clone(), reason);
-    let at = match (kind, at.len()) {
-        (0, 8) => DeadLetterAt::Sequence(u64::from_be_bytes(at.try_into().unwrap_or_default())),
-        (1, 16) => DeadLetterAt::Command(stream_root(at)?),
-        (kind, length) => {
-            return Err(unreadable(
-                SqlError::BadDeadLetterPlace {
-                    kind: kind.unsigned_abs(),
-                    length,
-                }
-                .cause(),
-            ))
-        }
-    };
     Ok(DeadLetter {
         stream: cover.clone(),
-        at,
+        at: letter_place(cover, kind, at)?,
         letter: AngzarrDeadLetter::decode(letter).map_err(|e| unreadable(undecodable(e)))?,
     })
+}
+
+/// A dead letter's stored place about `cover`, its kind and bytes, as
+/// the ports place it ([`place`]'s inverse).
+pub(crate) fn letter_place(
+    cover: &Cover,
+    kind: i64,
+    at: &[u8],
+) -> Result<DeadLetterAt, StoreError> {
+    match (kind, at.len()) {
+        (0, 8) => Ok(DeadLetterAt::Sequence(u64::from_be_bytes(
+            at.try_into().unwrap_or_default(),
+        ))),
+        (1, 16) => Ok(DeadLetterAt::Command(stream_root(at)?)),
+        (kind, length) => Err(StoreError::dead_letter_unreadable(
+            cover.clone(),
+            SqlError::BadDeadLetterPlace {
+                kind: kind.unsigned_abs(),
+                length,
+            }
+            .cause(),
+        )),
+    }
 }

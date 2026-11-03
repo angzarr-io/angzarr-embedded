@@ -134,6 +134,28 @@ pub(crate) const PUT_OUTBOX: &str =
 pub(crate) const PENDING: &str = "SELECT id, origin, message, edition FROM outbox \
      ORDER BY domain, stream_edition, root, sequence, place LIMIT ?1";
 
+/// Rows `(domain, edition, root, sequence, page)`: every stored page, by
+/// stream (the key's order: main's edition `''` first) and sequence. The
+/// export's.
+pub(crate) const EXPORT_PAGES: &str = "SELECT domain, edition, root, sequence, page FROM events \
+     ORDER BY domain, edition, root, sequence";
+
+/// Rows `(domain, edition, root, snapshot)`: every stored snapshot.
+pub(crate) const EXPORT_SNAPSHOTS: &str =
+    "SELECT domain, edition, root, snapshot FROM snapshots ORDER BY domain, edition, root";
+
+/// Rows `(domain, edition, root, handler, next)`: every position above 0,
+/// by stream and handler.
+pub(crate) const EXPORT_POSITIONS: &str =
+    "SELECT domain, edition, root, handler, next FROM positions \
+     WHERE next > 0 ORDER BY domain, edition, root, handler";
+
+/// Rows `(domain, edition, root, at_kind, at, component, letter)`: every
+/// dead letter, by stream and then key (place, component).
+pub(crate) const EXPORT_DEAD_LETTERS: &str =
+    "SELECT domain, edition, root, at_kind, at, component, letter FROM dead_letters \
+     ORDER BY domain, edition, root, at_kind, at, component";
+
 /// Clear one pending entry by its id.
 pub(crate) const CLEAR: &str = "DELETE FROM outbox WHERE id = ?1";
 
