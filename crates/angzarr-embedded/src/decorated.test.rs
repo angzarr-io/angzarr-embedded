@@ -3087,12 +3087,12 @@ mod full_context {
         );
     }
 
-    /// A command whose natural key names another stream is a bug, not a
-    /// refusal: its handler asked the wrong stream, so the router answers
-    /// ANGZARR_REASON_UNHANDLED_HANDLER_ERROR caused by not-its-stream,
-    /// and records nothing.
+    /// A command whose natural key names another stream is the sender's
+    /// mistake, not a typed refusal and not a bug: it is refused
+    /// INVALID_ARGUMENT under not-its-stream before its handler runs, and
+    /// records nothing.
     #[test]
-    fn a_command_whose_key_names_another_stream_is_a_bug() {
+    fn a_command_whose_key_names_another_stream_is_refused_invalid_argument() {
         let mut badge = badge("gold");
         let failed = badge
             .when(Issue {
@@ -3100,20 +3100,21 @@ mod full_context {
             })
             .result();
         let Err(Failure::Kernel(KernelError::Router(error))) = failed else {
-            panic!("a bug, not {failed:?}");
+            panic!("refused, not {failed:?}");
         };
-        assert_eq!(error.code, "ANGZARR_REASON_UNHANDLED_HANDLER_ERROR");
+        assert_eq!(error.code, code!("not-its-stream"));
         assert_eq!(
-            error.extras.get("cause").map(String::as_str),
-            Some(code!("not-its-stream"))
+            error.grpc,
+            ::angzarr_embedded::angzarr_router::error::GrpcCode::InvalidArgument
         );
         assert_eq!(
             (
-                error.extras.get("cause.domain").map(String::as_str),
-                error.extras.get("cause.key").map(String::as_str)
+                error.extras.get("domain").map(String::as_str),
+                error.extras.get("key").map(String::as_str)
             ),
             (Some("badge"), Some("silver"))
         );
+        assert!(error.refusal.is_none());
         assert!(badge.pages().is_empty());
     }
 
