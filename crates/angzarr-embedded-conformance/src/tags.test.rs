@@ -189,7 +189,6 @@ const TAGGED: &[(&str, Tag)] = &[
     ("C-0616", NO_OUTBOX),
     // projector_delivery.feature
     ("C-0838", UNBOUND),
-    ("C-0839", IN_PROCESS_CHAIN),
     ("C-0841", NO_CLOUDEVENTS),
     ("C-0842", NO_CLOUDEVENTS),
     // query_server.feature
@@ -237,8 +236,6 @@ const TAGGED: &[(&str, Tag)] = &[
     ("C-0832", NO_QUERY),
     // sync_modes.feature
     ("C-0425", IN_PROCESS_CHAIN),
-    ("C-0428", IN_PROCESS_CHAIN),
-    ("C-0676", IN_PROCESS_CHAIN),
     ("C-0426", IN_PROCESS_CHAIN),
     ("C-0427", IN_PROCESS_CHAIN),
     ("C-0429", IN_PROCESS_CHAIN),
