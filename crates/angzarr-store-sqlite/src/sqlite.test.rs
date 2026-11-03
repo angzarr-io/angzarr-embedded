@@ -616,6 +616,30 @@ async fn an_export_never_writes_the_source() {
     );
 }
 
+/// The build's migration set, read without a store: the set every open
+/// applies, and the ledger an opened store holds.
+#[tokio::test]
+async fn the_builds_migration_set_is_what_an_open_applies() {
+    let store = SqliteStore::open_in_memory().await.unwrap();
+    let build = SqliteStore::build_migrations();
+    assert_eq!(build, store.migrations());
+    assert_eq!(
+        build.iter().map(|m| m.version).collect::<Vec<_>>(),
+        [1, 2, 3, 4, 5, 6]
+    );
+    let ledger = store.applied().await.unwrap();
+    assert_eq!(
+        ledger
+            .iter()
+            .map(|r| (r.version, r.checksum.clone()))
+            .collect::<Vec<_>>(),
+        build
+            .iter()
+            .map(|m| (m.version, m.checksum.clone()))
+            .collect::<Vec<_>>()
+    );
+}
+
 /// An export says what it was taken from: this crate's package.
 #[tokio::test]
 async fn a_sqlite_store_names_its_backend_by_its_package() {

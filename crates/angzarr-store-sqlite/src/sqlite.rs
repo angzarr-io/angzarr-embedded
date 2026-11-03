@@ -271,6 +271,14 @@ impl SqliteStore {
         })
     }
 
+    /// The build's migration set, in version order: what an open applies,
+    /// and what [`ledger_at`](SqliteStore::ledger_at)'s ledger is judged
+    /// against by a caller that judges a store before an open migrates it
+    /// (an export refuses a store whose ledger is not exactly this).
+    pub fn build_migrations() -> Vec<angzarr_ports::Migration> {
+        todo!("the build's migration set")
+    }
+
     /// A database held only in memory, migrated.
     pub async fn open_in_memory() -> Result<SqliteStore, StoreError> {
         crate::migrations::open_in_memory(&MIGRATOR).await

@@ -88,6 +88,7 @@ mod compensation;
 mod conflict;
 mod coordinator;
 mod dead_letter;
+mod digest;
 mod domain;
 mod error;
 mod fixture;
@@ -166,6 +167,7 @@ pub use catalog::{Catalog, Description};
 pub use check::{check, Body, Checked, Identified, Malformed, Sampled};
 pub use conflict::{Key, UnitPath, Units};
 pub use dead_letter::{dead_letter_line, DeadLetterLog, MemoryDeadLetters, DEAD_LETTER_PREFIX};
+pub use digest::Folded;
 pub use domain::{Domain, State};
 pub use error::{
     class, ChainProblem, Class, Failure, KernelError, PayloadError, Recovery, ReplayError, Step,
