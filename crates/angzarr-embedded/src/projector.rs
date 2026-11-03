@@ -32,7 +32,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use angzarr_proto::v1::event_meta::Causation;
-use angzarr_proto::v1::{Cover, EventBook, EventPage};
+use angzarr_proto::v1::{event_page, Cover, EventBook, EventPage};
 use angzarr_router::router::ProjectorHandler;
 use prost_types::Timestamp;
 
@@ -46,10 +46,12 @@ use super::store::{
 };
 use super::upcast::upcast_pages;
 
-/// A projector caught up from a store: every main-timeline stream of its
-/// sources (an edition is a what-if fork, not the application's timeline)
-/// handed what it has not yet been handed, one book per stream, from where
-/// the projector is on that stream.
+/// A projector caught up from a store: every stream of its sources, an
+/// edition's forked stream as a stream of its own, handed what it has not
+/// yet been handed, one book per stream, from where the projector is on
+/// that stream. An edition's stream reads main's events below its fork,
+/// then its own; its fork page (a meta-event) is the system layer's and is
+/// never handed, though its sequence counts.
 ///
 /// The catch-up is the projector's driver, and keeps its record of what it
 /// processed (decision 14.68): every stream it has handed a book, and where
@@ -102,7 +104,7 @@ enum Record {
 /// stream written again on its cover.
 #[derive(Default)]
 pub struct HeldRecord {
-    seen: BTreeMap<(String, Vec<u8>), Seen>,
+    seen: BTreeMap<(String, Vec<u8>, Option<String>), Seen>,
 }
 
 impl Processed for HeldRecord {
@@ -146,11 +148,15 @@ impl Fingerprint {
     }
 }
 
-/// A stream as a catch-up tells streams apart: its domain and root (it
-/// reads main only).
-fn key(cover: &Cover) -> (String, Vec<u8>) {
+/// A stream as a catch-up tells streams apart: its domain, root and
+/// edition (main's `None`).
+fn key(cover: &Cover) -> (String, Vec<u8>, Option<String>) {
     let root = cover.root.as_ref().map(|r| r.value.to_vec());
-    (cover.domain.clone(), root.unwrap_or_default())
+    (
+        cover.domain.clone(),
+        root.unwrap_or_default(),
+        cover.edition.clone(),
+    )
 }
 
 /// What one catch-up step did.
@@ -235,7 +241,7 @@ impl<P: ProjectorHandler> CatchUp<P> {
         let mut reads = store.begin_read().await.map_err(KernelError::Store)?;
         for source in self.sources.clone() {
             let covers = reads.covers(&source).await.map_err(KernelError::Store)?;
-            for cover in covers.into_iter().filter(|c| c.edition.is_none()) {
+            for cover in covers {
                 listed.insert(key(&cover));
                 self.catch_stream(store, &mut reads, catalog, cover, &mut caught)
                     .await?;
@@ -323,6 +329,11 @@ impl<P: ProjectorHandler> CatchUp<P> {
                 }
             },
         };
+        // The event arm only: a fork page is the system layer's.
+        let pages = pages
+            .into_iter()
+            .filter(|page| matches!(page.body, Some(event_page::Body::Event(_))))
+            .collect();
         let book = EventBook {
             cover: Some(cover.clone()),
             pages,
@@ -419,8 +430,8 @@ impl<P: ProjectorHandler> CatchUp<P> {
             .map(drop)
     }
 
-    /// Hand every stream of the record, of the sources' main timeline,
-    /// that the step's read unit did not list (`listed`, by [`key`]) its
+    /// Hand every stream of the sources the record holds that the step's
+    /// read unit did not list (`listed`, by [`key`]) its
     /// gone book (no page, at 0), and forget it: held, out of the record;
     /// stored, its position put back to 0. One the projector fails (or
     /// whose position is not put back) stays in the record, to be handed
@@ -428,7 +439,7 @@ impl<P: ProjectorHandler> CatchUp<P> {
     async fn hand_gone<S: Store + Processed>(
         &mut self,
         store: &S,
-        listed: &BTreeSet<(String, Vec<u8>)>,
+        listed: &BTreeSet<(String, Vec<u8>, Option<String>)>,
         caught: &mut Caught,
     ) -> Result<(), StoreError> {
         let name = self.projector.name().to_string();
@@ -436,7 +447,7 @@ impl<P: ProjectorHandler> CatchUp<P> {
             Record::Held(held) => held.processed(&name).await?,
             Record::Stored => store.processed(&name).await?,
         };
-        let ours = |cover: &Cover| cover.edition.is_none() && self.sources.contains(&cover.domain);
+        let ours = |cover: &Cover| self.sources.contains(&cover.domain);
         let gone: Vec<Cover> = record
             .into_iter()
             .map(|(cover, _)| cover)
