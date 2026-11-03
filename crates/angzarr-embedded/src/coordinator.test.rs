@@ -24,10 +24,10 @@ mod dedup {
 
         let first =
             handle::<crate::toys::Account>(&store, &registry, deposit(3, 25), &at(20)).unwrap();
-        assert_eq!(first.outcome().delivery, DeliveryOutcome::Applied as i32);
+        assert_eq!(first.delivery(), DeliveryOutcome::Applied);
         let retry =
             handle::<crate::toys::Account>(&store, &registry, deposit(3, 25), &at(21)).unwrap();
-        assert_eq!(retry.outcome().delivery, DeliveryOutcome::Duplicate as i32);
+        assert_eq!(retry.delivery(), DeliveryOutcome::Duplicate);
         assert!(matches!(retry, Handled::Duplicate(..)));
         assert_eq!(
             retry.books(),
@@ -55,7 +55,7 @@ mod dedup {
         // A sweep of an empty account withdraws nothing: applied, no events.
         let sweep = || command(cover("account", 1), AccountCmd::Sweep.to_any()).id(7);
         let first = handle::<crate::toys::Account>(&store, &registry, sweep(), &at(20)).unwrap();
-        assert_eq!(first.outcome().delivery, DeliveryOutcome::Applied as i32);
+        assert_eq!(first.delivery(), DeliveryOutcome::Applied);
         assert!(payloads::<AccountEvent>(&first.books()).is_empty());
 
         // Money arrives; the same sweep is redelivered.
@@ -67,8 +67,8 @@ mod dedup {
         handle::<crate::toys::Account>(&store, &registry, payment, &at(21)).unwrap();
         let again = handle::<crate::toys::Account>(&store, &registry, sweep(), &at(22)).unwrap();
         assert_eq!(
-            again.outcome().delivery,
-            DeliveryOutcome::Applied as i32,
+            again.delivery(),
+            DeliveryOutcome::Applied,
             "the accepted cost: re-decided against the stream as it is now"
         );
         assert_eq!(
@@ -86,13 +86,13 @@ mod dedup {
         let open = || command(stream.clone(), AccountCmd::Open.to_any()).id(5);
         handle::<crate::toys::Account>(&store, &registry, open(), &at(20)).unwrap();
         let retry = handle::<crate::toys::Account>(&store, &registry, open(), &at(21)).unwrap();
-        assert_eq!(retry.outcome().delivery, DeliveryOutcome::Duplicate as i32);
+        assert_eq!(retry.delivery(), DeliveryOutcome::Duplicate);
 
         assert_eq!(store.purge(sref(&stream), 1).ready(), Ok(1));
         let again = handle::<crate::toys::Account>(&store, &registry, open(), &at(22)).unwrap();
         assert_eq!(
-            again.outcome().delivery,
-            DeliveryOutcome::Applied as i32,
+            again.delivery(),
+            DeliveryOutcome::Applied,
             "the accepted cost: nothing left to find, so decided again"
         );
         assert_eq!(
@@ -114,8 +114,8 @@ mod dedup {
         let reused =
             handle::<crate::toys::Account>(&store, &registry, deposit(3, 999), &at(21)).unwrap();
         assert_eq!(
-            reused.outcome().delivery,
-            DeliveryOutcome::Duplicate as i32,
+            reused.delivery(),
+            DeliveryOutcome::Duplicate,
             "the accepted cost: payloads are not fingerprinted"
         );
         assert_eq!(
@@ -134,7 +134,7 @@ mod dedup {
         handle::<crate::toys::Account>(&store, &registry, deposit(3, 25), &at(20)).unwrap();
         let other = command(cover("account", 2), AccountCmd::Deposit(25).to_any()).id(3);
         let applied = handle::<crate::toys::Account>(&store, &registry, other, &at(21)).unwrap();
-        assert_eq!(applied.outcome().delivery, DeliveryOutcome::Applied as i32);
+        assert_eq!(applied.delivery(), DeliveryOutcome::Applied);
     }
 
     #[test]
@@ -152,13 +152,14 @@ mod dedup {
 
         handle::<crate::toys::Account>(&store, &registry, payment(), &at(20)).unwrap();
         let again = handle::<crate::toys::Account>(&store, &registry, payment(), &at(21)).unwrap();
-        assert_eq!(again.outcome().delivery, DeliveryOutcome::Duplicate as i32);
+        assert_eq!(again.delivery(), DeliveryOutcome::Duplicate);
         let meta = again.books()[0].pages[0].meta.clone().unwrap();
+        let Some(crate::v1::event_meta::Causation::Fact(cause)) = meta.causation else {
+            panic!("a fact's cause: {meta:?}");
+        };
         assert_eq!(
-            meta.causation,
-            Some(crate::v1::event_meta::Causation::CommandId(
-                crate::ids::fact_command_id("pi_1234")
-            )),
+            cause.command_id,
+            Some(crate::ids::fact_command_id("pi_1234")),
             "the id is on the event, where the lookup finds it"
         );
     }
@@ -172,13 +173,14 @@ mod dedup {
         let refused = handle::<crate::toys::Account>(&store, &registry, early(), &at(5));
         assert!(matches!(
             refused,
-            Err(Failure::Rejected(r)) if angzarr_diagnostic::Diagnostic::code(r.report()) == "toy-account-not-open"
+            Err(Failure::Rejected(r))
+                if r.rejection::<crate::toys::Refused>() == Some(&crate::toys::Refused::NotOpen)
         ));
         assert!(streams(&store).is_empty());
 
         opened(&store, &registry, 1, 0);
         let retried = handle::<crate::toys::Account>(&store, &registry, early(), &at(20)).unwrap();
-        assert_eq!(retried.outcome().delivery, DeliveryOutcome::Applied as i32);
+        assert_eq!(retried.delivery(), DeliveryOutcome::Applied);
     }
 
     /// A store that plays READ COMMITTED with a concurrent commit: it
@@ -302,53 +304,51 @@ mod pipeline {
     use crate::toys::prelude::*;
 
     use super::super::{steps::Coordinator, Deduplicated};
-    use crate::v1::{ConflictResolution, DeliveryOutcome, EventRef};
+    use crate::v1::DeliveryOutcome;
     use crate::{check, pack, Failure, KernelError, Malformed, Payload, Recovery};
 
     use crate::toys::{
-        account, at, command, cover, handle, opened, registry, Account, AccountCmd, Edit,
+        account, at, command, cover, handle, mismatch_of, opened, registry, Account, AccountCmd,
+        Edit,
     };
+
+    /// The staleness check's expected sequence and head, if `failure` is
+    /// its refusal.
+    fn mismatch(failure: &Failure<crate::Rejected>) -> Option<(u64, u64)> {
+        match failure {
+            Failure::Rejected(rejected) => mismatch_of(rejected),
+            _ => None,
+        }
+    }
 
     fn deposit(n: u128) -> crate::v1::CommandBook {
         command(cover("account", 1), AccountCmd::Deposit(5).to_any()).id(n)
     }
 
     #[test]
-    fn an_applied_strict_retry_is_a_duplicate_never_stale() {
+    fn an_applied_retry_is_a_duplicate_whatever_its_expected_sequence() {
         let registry = registry();
         let store = MemoryStore::new();
         opened(&store, &registry, 1, 100);
 
-        let at_head = || deposit(3).expecting(2, ConflictResolution::Strict);
+        let at_head = || deposit(3).expecting(2);
         handle::<Account>(&store, &registry, at_head(), &at(20)).unwrap();
         handle::<Account>(&store, &registry, deposit(4), &at(21)).unwrap();
 
         // The stream is at 4 now; the retry still expects 2.
         let retry = handle::<Account>(&store, &registry, at_head(), &at(22)).unwrap();
         assert_eq!(
-            retry.outcome().delivery,
-            DeliveryOutcome::Duplicate as i32,
+            retry.delivery(),
+            DeliveryOutcome::Duplicate,
             "the retry's events are found before its sequence is checked"
         );
 
-        // A new command expecting 2 is stale, as STRICT says.
-        let stale = handle::<Account>(
-            &store,
-            &registry,
-            deposit(5).expecting(2, ConflictResolution::Strict),
-            &at(23),
-        )
-        .err()
-        .unwrap();
-        assert_eq!(
-            stale,
-            Failure::Kernel(KernelError::Stale {
-                stream: cover("account", 1),
-                expected: 2,
-                actual: 4
-            })
-        );
-        assert_eq!(stale.recovery(), Recovery::Retry);
+        // A new command expecting 2 is refused: the head is 4.
+        let stale = handle::<Account>(&store, &registry, deposit(5).expecting(2), &at(23))
+            .err()
+            .unwrap();
+        assert_eq!(mismatch(&stale), Some((2, 4)));
+        assert_eq!(stale.recovery(), Recovery::Business);
     }
 
     #[test]
@@ -358,16 +358,18 @@ mod pipeline {
         opened(&store, &registry, 1, 100);
         handle::<Account>(&store, &registry, deposit(3), &at(20)).unwrap();
 
-        let forged = deposit(3).caused_by(EventRef {
-            stream: Some(cover("account", 1)),
-            sequence: 0,
+        let mut forged = deposit(3);
+        forged.page_mut().correlation_id = Some(crate::v1::Uuid {
+            value: vec![1; 3].into(),
         });
         let refused = handle::<Account>(&store, &registry, forged, &at(21))
             .err()
             .unwrap();
         assert_eq!(
             refused,
-            Failure::Kernel(KernelError::Malformed(Malformed::CausationFromOutside)),
+            Failure::Kernel(KernelError::Malformed(Malformed::BadCorrelationId {
+                len: 3
+            })),
             "refused before anything is looked up"
         );
         assert_eq!(refused.recovery(), Recovery::Invalid);
@@ -387,26 +389,21 @@ mod pipeline {
             matches!(
                 &refused,
                 Failure::Kernel(KernelError::Router(e))
-                    if e.code == "ROUTER_REASON_UNKNOWN_COMMAND_TYPE"
+                    if e.code == "ANGZARR_REASON_UNKNOWN_COMMAND_TYPE"
                         && e.extras.get("type_url").map(String::as_str)
                             == Some("/toy.account.v9.Bonus")
             ),
-            "the router's ROUTER_REASON_UNKNOWN_COMMAND_TYPE, named by its type URL: {refused:?}"
+            "ANGZARR_REASON_UNKNOWN_COMMAND_TYPE, named by its type URL: {refused:?}"
         );
         // The router's own error on malformed input is a bug, INTERNAL (the
         // owner's ruling, 2026-10-29), never the sender's to fix.
         assert_eq!(refused.recovery(), Recovery::Bug);
 
-        // Stale and undecodable: STRICT's check comes first.
-        let stale = handle::<Account>(
-            &store,
-            &registry,
-            unknown().id(9).expecting(1, ConflictResolution::Strict),
-            &at(21),
-        )
-        .err()
-        .unwrap();
-        assert!(matches!(stale, Failure::Kernel(KernelError::Stale { .. })));
+        // Stale and undecodable: the staleness check comes first.
+        let stale = handle::<Account>(&store, &registry, unknown().id(9).expecting(1), &at(21))
+            .err()
+            .unwrap();
+        assert_eq!(mismatch(&stale), Some((1, 2)));
 
         // Applied under that id already: the duplicate is found first, the
         // payload never decoded (and never compared: a reused id goes
@@ -418,7 +415,7 @@ mod pipeline {
             &at(22),
         )
         .unwrap();
-        assert_eq!(dup.outcome().delivery, DeliveryOutcome::Duplicate as i32);
+        assert_eq!(dup.delivery(), DeliveryOutcome::Duplicate);
     }
 
     #[test]
@@ -437,7 +434,8 @@ mod pipeline {
             Deduplicated::Duplicate { .. }
         ));
 
-        // A new one goes on: stamped at the head, STRICT, no window, no nonce.
+        // A new one goes on, decided at the head step 3 loaded: no
+        // expected sequence is stamped onto it (decision 14.94).
         let novel = check(deposit(3), registry.catalog())
             .unwrap()
             .identify(&at(30));
@@ -445,64 +443,45 @@ mod pipeline {
             panic!("never applied");
         };
         assert_eq!(novel.head(), 2, "the head as step 3 loaded it");
+        assert_eq!(novel.command().expected_sequence(), None);
         let contextual = coordinator.load(novel).unwrap();
-        assert_eq!(contextual.conflict_resolution(), ConflictResolution::Strict);
-        assert_eq!(contextual.expected_sequence(), 2, "stamped with the head");
         assert_eq!(contextual.head(), 2);
-        assert!(contextual.window().is_empty());
-        assert!(!contextual.has_nonce());
+        assert_eq!(
+            contextual.snapshot().map(|s| s.sequence),
+            Some(1),
+            "the deposit's snapshot"
+        );
+        assert!(contextual.pages().is_empty(), "nothing after it");
 
         let prepared = contextual.decode::<Account>(&registry).unwrap();
         assert_eq!(prepared.stream().state().cents, 100);
     }
 
     #[test]
-    fn the_coordinator_hands_a_windowed_command_its_window_and_a_nonce() {
-        use crate::toys::{set, Shelf};
+    fn the_coordinator_refuses_an_expected_sequence_not_the_head_at_load() {
         let registry = registry();
         let store = MemoryStore::new();
-        for (n, item) in ["a", "b", "c"].into_iter().enumerate() {
-            handle::<Shelf>(
-                &store,
-                &registry,
-                command(cover("shelf", 3), set(item, 1)).id(n as u128 + 1),
-                &at(n as i64),
-            )
-            .unwrap();
-        }
+        opened(&store, &registry, 1, 100);
         let mut coordinator = Coordinator::new(&store, &registry);
-        let book = command(cover("shelf", 3), set("d", 1))
-            .id(9)
-            .expecting(1, ConflictResolution::AggregateHandles);
-        let identified = check(book, registry.catalog()).unwrap().identify(&at(30));
-        let Deduplicated::Novel(novel) = coordinator.deduplicate(identified).unwrap() else {
-            panic!("never applied");
-        };
-        assert_eq!(novel.command().command_id(), &crate::toys::command_id(9));
-        assert_eq!(novel.head(), 3);
-        let contextual = coordinator.load(novel).unwrap();
-        assert_eq!(
-            contextual.conflict_resolution(),
-            ConflictResolution::AggregateHandles
-        );
-        assert_eq!(contextual.expected_sequence(), 1);
-        assert_eq!(contextual.head(), 3);
-        assert_eq!(contextual.pages().len(), 3);
-        assert_eq!(
-            contextual
-                .window()
-                .iter()
-                .map(|p| p.sequence)
-                .collect::<Vec<_>>(),
-            [1, 2],
-            "from the expected sequence to the head"
-        );
-        assert!(contextual.has_nonce());
-        assert!(contextual.snapshot().is_none());
-        assert_eq!(
-            contextual.command().command_id(),
-            &crate::toys::command_id(9)
-        );
+        for (expected, refused) in [(2u64, None), (1, Some((1, 2))), (3, Some((3, 2)))] {
+            let identified = check(
+                deposit(10 + u128::from(expected)).expecting(expected),
+                registry.catalog(),
+            )
+            .unwrap()
+            .identify(&at(30));
+            let Deduplicated::Novel(novel) = coordinator.deduplicate(identified).unwrap() else {
+                panic!("never applied");
+            };
+            assert_eq!(novel.command().expected_sequence(), Some(expected));
+            let loaded = coordinator.load(novel);
+            assert_eq!(
+                loaded.as_ref().err().and_then(mismatch),
+                refused,
+                "expecting {expected}"
+            );
+            assert_eq!(loaded.is_ok(), refused.is_none(), "expecting {expected}");
+        }
     }
 
     #[test]
@@ -574,12 +553,11 @@ mod pipeline {
 
 mod snapshot {
     //! Snapshots: a framework optimisation, never business data. Used only
-    //! under the current rules version and state type, and never one that
-    //! hides part of a conflict window.
+    //! under the current rules version and state type.
     use crate::toys::prelude::*;
 
     use super::super::{steps::Coordinator, Deduplicated};
-    use crate::v1::{ConflictResolution, Snapshot};
+    use crate::v1::Snapshot;
     use crate::{check, pack, Payload, Stream};
     use angzarr_diagnostic::code;
 
@@ -602,16 +580,13 @@ mod snapshot {
         }
     }
 
-    /// Load (steps 2 to 5) a deposit for account 1, expecting `expected` under
-    /// `resolution` if given.
-    fn load(
-        store: &MemoryStore,
-        expected: Option<(u64, ConflictResolution)>,
-    ) -> (Option<u64>, i64) {
+    /// Load (steps 2 to 5) a deposit for account 1, expecting `expected` if
+    /// given.
+    fn load(store: &MemoryStore, expected: Option<u64>) -> (Option<u64>, i64) {
         let registry = registry();
         let mut book = command(cover("account", 1), AccountCmd::Deposit(1).to_any()).id(9);
-        if let Some((sequence, resolution)) = expected {
-            book = book.expecting(sequence, resolution);
+        if let Some(sequence) = expected {
+            book = book.expecting(sequence);
         }
         let mut coordinator = Coordinator::new(store, &registry);
         let identified = check(book, registry.catalog()).unwrap().identify(&at(30));
@@ -666,28 +641,6 @@ mod snapshot {
             .ready()
             .unwrap();
         assert_eq!(load(&store, None), (None, 100));
-    }
-
-    #[test]
-    fn a_snapshot_never_hides_part_of_the_window() {
-        let registry = registry();
-        let store = MemoryStore::new();
-        opened(&store, &registry, 1, 100);
-        store
-            .write_snapshot(sref(&cover("account", 1)), &poisoned("v2", 999))
-            .ready()
-            .unwrap();
-
-        assert_eq!(
-            load(&store, Some((1, ConflictResolution::AggregateHandles))),
-            (None, 100),
-            "the snapshot (at 1) would fold the window (from 1): not used"
-        );
-        assert_eq!(
-            load(&store, Some((2, ConflictResolution::AggregateHandles))),
-            (Some(1), 999),
-            "at or below expected-1, it is"
-        );
     }
 
     /// A snapshot at or past the head claims events the stream does not
@@ -902,10 +855,10 @@ mod upcasting {
         }
         async fn dispatch(
             &self,
-            req: &pb::ContextualCommand,
-        ) -> Result<pb::CommandHandlerResponse, CodedError> {
+            req: &crate::angzarr_router::hpb::HandleRequest,
+        ) -> Result<crate::angzarr_router::hpb::HandleResponse, CodedError> {
             let sent = req
-                .command
+                .input
                 .as_ref()
                 .and_then(|book| book.page.as_ref())
                 .and_then(|page| match &page.body {
@@ -992,10 +945,10 @@ mod upcasting {
     impl crate::UpcastPort for Down {
         fn upcast<'a>(
             &'a self,
-            _: &'a crate::v1::UpcastRequest,
+            _: &'a crate::angzarr_router::hpb::UpcastRequest,
         ) -> crate::angzarr_router::send::BoxFuture<
             'a,
-            Result<crate::v1::UpcastResponse, crate::UpcastError>,
+            Result<crate::angzarr_router::hpb::UpcastResponse, crate::UpcastError>,
         > {
             Box::pin(std::future::ready(Err(crate::UpcastError::Unavailable {
                 cause: angzarr_diagnostic::Report::new("toy-sidecar-down"),
@@ -1044,7 +997,7 @@ mod upcasting {
         let Failure::Kernel(KernelError::Router(error)) = &refused else {
             panic!("the router's refusal: {refused:?}");
         };
-        assert_eq!(error.code, "ROUTER_REASON_UNKNOWN_COMMAND_TYPE");
+        assert_eq!(error.code, "ANGZARR_REASON_UNKNOWN_COMMAND_TYPE");
         let extra = |key: &str| error.extras.get(key).map(String::as_str);
         assert_eq!(
             extra("type_url"),
@@ -1086,11 +1039,11 @@ mod upcasting {
         }
         async fn dispatch(
             &self,
-            req: &pb::ContextualCommand,
-        ) -> Result<pb::CommandHandlerResponse, CodedError> {
-            let types = (req.events.iter())
+            req: &crate::angzarr_router::hpb::HandleRequest,
+        ) -> Result<crate::angzarr_router::hpb::HandleResponse, CodedError> {
+            let types = (req.history.iter())
                 .flat_map(|book| &book.pages)
-                .filter_map(|page| page.payload.as_ref())
+                .filter_map(crate::angzarr_router::page_event)
                 .map(|payload| payload.type_url.clone());
             self.seen.lock().unwrap().extend(types);
             self.inner.dispatch(req).await
@@ -1133,15 +1086,14 @@ mod upcasting {
     fn old_history(store: &MemoryStore) {
         use crate::v1::{event_meta::Causation, EventMeta, EventPage};
         let page = |sequence: u64, payload| EventPage {
-            payload: Some(payload),
+            body: Some(crate::v1::event_page::Body::Event(payload)),
             meta: Some(EventMeta {
-                causation: Some(Causation::CommandId(crate::toys::command_id(
-                    u128::from(sequence) + 1,
-                ))),
+                causation: Some(Causation::Command(crate::v1::CommandCause {
+                    command_id: Some(crate::toys::command_id(u128::from(sequence) + 1)),
+                })),
                 correlation_id: Some(crate::toys::command_id(u128::from(sequence) + 1)),
                 recorded_at: Some(crate::toys::instant(sequence as i64)),
                 rules_version: "v2".to_string(),
-                ..EventMeta::default()
             }),
             sequence,
         };
@@ -1203,7 +1155,7 @@ mod upcasting {
         let recorded: Vec<(u64, i64)> = pages(&store, &ledger)
             .iter()
             .map(|page| {
-                let payload = page.payload.as_ref().unwrap();
+                let payload = crate::angzarr_router::page_event(page).unwrap();
                 let recorded =
                     <ledger::Recorded as prost::Message>::decode(&payload.value[..]).unwrap();
                 (recorded.source_sequence, recorded.cents)
@@ -1214,13 +1166,10 @@ mod upcasting {
 }
 
 mod admission {
-    //! Admission is the kernel's own (decision 14.42): deduplication, the
-    //! refusal fact's stream check and a process manager's start rule, by
-    //! the input's type name after upcasting against the descriptor's
-    //! `starting_types`.
+    //! Admission is the kernel's own (decision 14.42): deduplication and a
+    //! process manager's start rule, by the input's type name after
+    //! upcasting against the descriptor's `starting_types`.
     use std::sync::Arc;
-
-    use angzarr_diagnostic::Diagnostic;
 
     use crate::angzarr_router::error::CodedError;
     use crate::angzarr_router::router::CommandHandler;
@@ -1230,7 +1179,7 @@ mod admission {
         AccountFact, Edit,
     };
     use crate::v1::DeliveryOutcome;
-    use crate::{Failure, Handled, Payload, Registry};
+    use crate::{DeadLetterStore, Failure, Handled, KernelError, Payload, Registry};
     use angzarr_proto::v1 as pb;
 
     /// The account's table, as a process manager: its descriptor (in
@@ -1249,8 +1198,8 @@ mod admission {
         }
         async fn dispatch(
             &self,
-            req: &pb::ContextualCommand,
-        ) -> Result<pb::CommandHandlerResponse, CodedError> {
+            req: &crate::angzarr_router::hpb::HandleRequest,
+        ) -> Result<crate::angzarr_router::hpb::HandleResponse, CodedError> {
             self.0.dispatch(req).await
         }
     }
@@ -1298,31 +1247,42 @@ mod admission {
 
         let deposit = command(stream.clone(), AccountCmd::Deposit(5).to_any()).id(2);
         let refused = any(&store, &registry, deposit, 10).err().unwrap();
-        let Failure::Rejected(rejected) = &refused else {
-            panic!("a business refusal: {refused:?}");
+        let Failure::Kernel(KernelError::Router(error)) = &refused else {
+            panic!("the framework's key, never a typed refusal: {refused:?}");
         };
+        assert_eq!(error.code, "ANGZARR_REASON_PM_NO_INSTANCE");
         assert_eq!(
-            rejected.report().code(),
-            "COORDINATOR_REASON_PM_NO_INSTANCE"
+            error.grpc,
+            crate::angzarr_router::error::GrpcCode::FailedPrecondition
         );
+        assert_eq!(refused.recovery(), crate::Recovery::Business);
         assert!(pages(&store, &stream).is_empty(), "nothing written");
 
-        // A non-starting fact is dead-lettered (decision 14.69), never
-        // refused: parked, with no events, its letter keyed.
+        // A non-starting fact is dead-lettered (decision 14.69, C-0593),
+        // never refused: its sender answered FACT_DEAD_LETTERED, the
+        // letter kept.
         let paid = fact(
             stream.clone(),
             AccountFact::PaymentReceived(5).to_any(),
             "pi_1",
         );
-        let parked = any(&store, &registry, paid, 11).unwrap();
-        assert_eq!(parked.outcome().delivery, DeliveryOutcome::Parked as i32);
-        assert!(parked.books().is_empty());
-        let reasons: Vec<_> = parked
-            .dead_letters()
+        let failure = any(&store, &registry, paid, 11).err().unwrap();
+        assert!(
+            matches!(
+                failure,
+                Failure::Kernel(KernelError::FactDeadLettered { .. })
+            ),
+            "{failure:?}"
+        );
+        let kept = store.dead_letters(sref(&stream)).ready().unwrap();
+        let whys: Vec<_> = kept
             .iter()
-            .filter_map(|l| l.letter.reason.as_ref().map(|r| r.code.clone()))
+            .filter_map(|l| match &l.letter.why {
+                Some(crate::v1::angzarr_dead_letter::Why::Reason(r)) => Some(r.code.clone()),
+                _ => None,
+            })
             .collect();
-        assert_eq!(reasons, ["COORDINATOR_REASON_PM_NO_INSTANCE"]);
+        assert_eq!(whys, ["ANGZARR_REASON_PM_NO_INSTANCE"]);
         assert!(pages(&store, &stream).is_empty(), "nothing written");
 
         // A starting type starts it; then any input is dispatched.
@@ -1337,55 +1297,40 @@ mod admission {
 
         // The kernel deduplicates.
         let retry = any(&store, &registry, open(), 14).unwrap();
-        assert_eq!(retry.outcome().delivery, DeliveryOutcome::Duplicate as i32);
+        assert_eq!(retry.delivery(), DeliveryOutcome::Duplicate);
     }
 
-    /// A refusal fact `paid` for account 1 whose causation names `trigger`'s
-    /// stream, as the chain builds one.
-    fn refusal_fact(registry: &Registry, trigger: u128) -> crate::Identified {
-        use crate::toys::{command_id, correlation};
-        let book = fact(
-            cover("account", 1),
-            AccountFact::PaymentReceived(5).to_any(),
-            "refused",
-        );
-        let mut book = book;
-        book.page.as_mut().unwrap().fact_origin = Some(crate::v1::FactOrigin {
-            external_id: command_id(9).to_string(),
-            description: "refused".to_string(),
-        });
-        let trigger = crate::v1::EventRef {
-            stream: Some(cover("account", trigger)),
-            sequence: 0,
-        };
-        crate::check::check_refusal(
-            book,
-            registry.catalog(),
-            trigger,
-            correlation(1),
-            command_id(9),
-        )
-        .unwrap()
-        .identify(&at(1))
-    }
-
-    /// A fact's causation is not admission's to read (decision 14.69):
-    /// a policy's fact names its trigger in another stream, and a
-    /// refusal fact is held to its trigger's stream by its payload, at the
-    /// check (`Malformed::RefusalMisaddressed`).
+    /// A fact's causation is not admission's to read (decision 14.69): a
+    /// policy's fact names its trigger in another stream, and is admitted
+    /// as any input is, by the start rule alone.
     #[test]
-    fn a_fact_is_admitted_whatever_stream_its_causation_names() {
+    fn a_reactions_fact_is_admitted_whatever_stream_its_causation_names() {
         use super::super::{admit, Admitted};
+        use crate::v1::{reaction_delivery, ReactionDelivery};
         let registry = registry();
         for trigger in [1, 2] {
-            let fact = refusal_fact(&registry, trigger);
+            let trigger = crate::v1::EventRef {
+                stream: Some(cover("account", trigger)),
+                sequence: 0,
+            };
+            let delivery = ReactionDelivery {
+                cover: Some(cover("account", 1)),
+                body: Some(reaction_delivery::Body::Fact(
+                    AccountFact::PaymentReceived(5).to_any(),
+                )),
+                command_id: crate::ids::policy_command_id(&trigger, "refunds", 0).ok(),
+                correlation_id: Some(crate::toys::correlation(1)),
+                causation: Some(trigger),
+                component: "refunds".to_string(),
+            };
+            let fact = crate::check::check_reaction(delivery, registry.catalog())
+                .unwrap()
+                .identify(&at(1));
             let current = Ok(fact.payload().clone());
-            let log = crate::MemoryDeadLetters::new();
             assert_eq!(
-                admit(&registry, &fact, &current, Vec::new(), true, &log).unwrap(),
+                admit(&registry, &fact, &current, Vec::new(), true).unwrap(),
                 Admitted::Dispatch
             );
-            assert!(log.letters().is_empty());
         }
     }
 
@@ -1400,31 +1345,16 @@ mod admission {
             source: "toy.account.cmd.v1.Deposit".to_string(),
             error: angzarr_diagnostic::Report::new("toy-broken"),
         });
-        let refused = admit(
-            &registry,
-            &identified,
-            &failed,
-            Vec::new(),
-            false,
-            &crate::MemoryDeadLetters::new(),
-        )
-        .err()
-        .unwrap();
+        let refused = admit(&registry, &identified, &failed, Vec::new(), false)
+            .err()
+            .unwrap();
         assert!(
             matches!(refused, Failure::Kernel(KernelError::Upcast { .. })),
             "{refused:?}"
         );
         // An instance exists: no start rule, so the type is not read here.
         assert_eq!(
-            admit(
-                &registry,
-                &identified,
-                &failed,
-                Vec::new(),
-                true,
-                &crate::MemoryDeadLetters::new()
-            )
-            .unwrap(),
+            admit(&registry, &identified, &failed, Vec::new(), true).unwrap(),
             Admitted::Dispatch
         );
         // An aggregate has no start rule.
@@ -1436,15 +1366,7 @@ mod admission {
         .unwrap()
         .identify(&at(1));
         assert_eq!(
-            admit(
-                &aggregate,
-                &identified,
-                &failed,
-                Vec::new(),
-                false,
-                &crate::MemoryDeadLetters::new()
-            )
-            .unwrap(),
+            admit(&aggregate, &identified, &failed, Vec::new(), false).unwrap(),
             Admitted::Dispatch
         );
     }
@@ -1461,9 +1383,10 @@ mod rules_version {
     use angzarr_proto::v1 as pb;
 
     /// A hand-written handler answering every command with one event,
-    /// reporting `reported`.
+    /// reporting `reported`, and a state of type `state` if any.
     struct Reporting {
         reported: &'static str,
+        state: Option<&'static str>,
     }
 
     impl crate::angzarr_router::router::CommandHandler for Reporting {
@@ -1477,46 +1400,46 @@ mod rules_version {
 
         async fn dispatch(
             &self,
-            _: &pb::ContextualCommand,
-        ) -> Result<pb::CommandHandlerResponse, CodedError> {
-            Ok(pb::CommandHandlerResponse {
-                conflict: None,
-                events: Some(pb::EventBook {
-                    pages: vec![pb::EventPage {
-                        payload: Some(crate::Any {
-                            type_url: "/orders.v1.ItemAdded".to_string(),
-                            value: Vec::new(),
-                        }),
-                        ..Default::default()
-                    }],
-                    ..Default::default()
+            _: &crate::angzarr_router::hpb::HandleRequest,
+        ) -> Result<crate::angzarr_router::hpb::HandleResponse, CodedError> {
+            Ok(crate::angzarr_router::hpb::HandleResponse {
+                events: vec![crate::Any {
+                    type_url: "/orders.v1.ItemAdded".to_string(),
+                    value: Vec::new(),
+                }],
+                state: self.state.map(|type_url| crate::Any {
+                    type_url: type_url.to_string(),
+                    value: Vec::new(),
                 }),
                 rules_version: self.reported.to_string(),
             })
         }
     }
 
-    /// `order`, registered at "1.4.2+build.7", answering `reported`.
+    /// `order`, registered at "1.4.2+build.7" with its state
+    /// `orders.v1.OrderState`, answering `reported`.
     fn order(reported: &'static str) -> Registry {
+        stating(reported, None)
+    }
+
+    /// [`order`], its answer carrying a state of type `state`.
+    fn stating(reported: &'static str, state: Option<&'static str>) -> Registry {
         let mut registry = Registry::new();
         registry
             .command_handler(
                 "order",
-                Reporting { reported },
+                Reporting { reported, state },
                 pb::ComponentDescriptor {
                     name: "order".to_string(),
-                    kind: pb::ComponentKind::Aggregate as i32,
                     rules_version: "1.4.2+build.7".to_string(),
-                    state: Some(pb::StateDescriptor {
-                        type_url: "/orders.v1.OrderState".to_string(),
-                        options: Some(pb::StateOptions {
-                            conflict_resolutions: vec![
-                                pb::ConflictResolution::Strict as i32,
-                                pb::ConflictResolution::AggregateHandles as i32,
-                            ],
-                        }),
-                    }),
-                    ..Default::default()
+                    kind: Some(pb::component_descriptor::Kind::Aggregate(
+                        pb::AggregateDescriptor {
+                            domain: "order".to_string(),
+                            state: Some(pb::StateDescriptor {
+                                type_name: "orders.v1.OrderState".to_string(),
+                            }),
+                        },
+                    )),
                 },
             )
             .unwrap();
@@ -1572,7 +1495,7 @@ mod rules_version {
                 panic!("a kernel error: {failure:?}");
             };
             let coded = error.as_coded().expect("a spec key");
-            assert_eq!(coded.code, "COORDINATOR_REASON_RULES_VERSION_MISMATCH");
+            assert_eq!(coded.code, "ANGZARR_REASON_RULES_VERSION_MISMATCH");
             assert_eq!(coded.grpc, crate::angzarr_router::error::GrpcCode::Internal);
             assert_eq!(
                 coded.extras.get("registered").map(String::as_str),
@@ -1593,29 +1516,81 @@ mod rules_version {
             assert_eq!(log.letters().len(), 1, "dead-lettered: {:?}", log.lines());
         }
     }
+
+    /// C-0818: an answer whose state is of another type than the registered
+    /// one is a handler bug, refused INTERNAL, nothing persisted and no
+    /// snapshot stored; it is dead-lettered. The registered type, under any
+    /// type URL prefix, is kept.
+    #[test]
+    fn an_answer_stating_another_state_type_is_refused_and_persists_nothing() {
+        let registry = stating("1.4.2+build.7", Some("/orders.v1.LegacyOrderState"));
+        let store = MemoryStore::new();
+        let log = crate::MemoryDeadLetters::new();
+        let failure = crate::Kernel::new(&registry)
+            .log_with(&log)
+            .handle_any(&store, add_item(), &at(10))
+            .ready()
+            .err()
+            .expect("refused");
+        let Failure::Kernel(error) = &failure else {
+            panic!("a kernel error: {failure:?}");
+        };
+        let coded = error.as_coded().expect("a spec key");
+        assert_eq!(coded.code, "ANGZARR_REASON_STATE_TYPE_MISMATCH");
+        assert_eq!(coded.grpc, crate::angzarr_router::error::GrpcCode::Internal);
+        assert_eq!(
+            coded.extras.get("registered").map(String::as_str),
+            Some("orders.v1.OrderState")
+        );
+        assert_eq!(
+            coded.extras.get("state_type").map(String::as_str),
+            Some("orders.v1.LegacyOrderState")
+        );
+        assert_eq!(failure.recovery(), Recovery::Bug);
+        assert!(pages(&store, &cover("order", 1)).is_empty());
+        assert_eq!(
+            store
+                .read_snapshot(sref(&cover("order", 1)))
+                .ready()
+                .unwrap(),
+            None
+        );
+        assert_eq!(log.letters().len(), 1, "dead-lettered: {:?}", log.lines());
+
+        let registry = stating(
+            "1.4.2+build.7",
+            Some("type.googleapis.com/orders.v1.OrderState"),
+        );
+        let store = MemoryStore::new();
+        crate::Kernel::new(&registry)
+            .handle_any(&store, add_item(), &at(10))
+            .ready()
+            .expect("its own state type");
+        assert_eq!(pages(&store, &cover("order", 1)).len(), 1);
+    }
 }
 
-/// Decision 14.32's per-stream forks, as a loaded history shows them: main
-/// is always its own; an edition stream is forked once it holds its
-/// creation event or a snapshot (which never falls through), and reads as
-/// main's, with neither, until then (C-0633).
+/// Decision 14.107's per-stream forks, as a loaded history shows them:
+/// main is always its own; an edition stream is forked once it holds its
+/// fork page (an `EditionCreated` meta-event) or a snapshot (which never
+/// falls through), and reads as main's, with neither, until then (C-0633).
 mod forks {
     use crate::coordinator::History;
-    use crate::toys::{cover, cover_in};
+    use crate::toys::{cover, cover_in, fork_page};
     use crate::v1::{EventPage, Snapshot};
 
     fn page(type_url: &str) -> EventPage {
         EventPage {
-            payload: Some(prost_types::Any {
+            body: Some(crate::v1::event_page::Body::Event(prost_types::Any {
                 type_url: type_url.to_string(),
                 value: Vec::new(),
-            }),
+            })),
             ..EventPage::default()
         }
     }
 
     #[test]
-    fn a_stream_is_forked_by_its_creation_or_a_snapshot_and_main_always_is() {
+    fn a_stream_is_forked_by_its_fork_page_or_a_snapshot_and_main_always_is() {
         let edition = cover_in("account", 1, "what-if");
         let main = cover("account", 1);
         let as_mains = History {
@@ -1627,10 +1602,7 @@ mod forks {
         assert!(!as_mains.forked_in(&edition));
         assert!(!History::default().forked_in(&edition));
         let created = History {
-            pages: vec![
-                page("/toy.account.v1.Opened"),
-                page(crate::angzarr_ports::EDITION_CREATED_TYPE_URL),
-            ],
+            pages: vec![page("/toy.account.v1.Opened"), fork_page(1)],
             ..History::default()
         };
         assert!(created.forked_in(&edition));

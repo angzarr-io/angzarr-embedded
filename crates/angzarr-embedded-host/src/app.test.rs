@@ -47,11 +47,11 @@ fn sit_down(n: u8) -> CommandBook {
                     type_url: "/test.player.v1.SitDown".to_string(),
                     value: Vec::new(),
                 }),
+                handling: None,
             })),
             command_id: Some(Uuid::from_bytes([n; 16])),
             ..CommandPage::default()
         }),
-        handling: None,
     }
 }
 
@@ -85,7 +85,7 @@ async fn run_handles_a_command_for_a_remote_domain() {
         .await
         .unwrap()
         .into_iter()
-        .map(|p| p.payload)
+        .map(|p| angzarr_embedded::angzarr_router::page_event(&p).cloned())
         .collect();
     assert_eq!(events, [Some(noted(0))]);
     assert_eq!(
@@ -103,7 +103,7 @@ async fn run_calls_register_for_the_in_process_domains() {
     let app = run_config(&config, |registry: &mut Registry| {
         assert_eq!(
             registry
-                .command_handler("player", NoHandler, Default::default())
+                .command_handler("player", NoHandler, fixtures::descriptor("player"))
                 .err(),
             Some(Misconfigured::AlreadyRegistered {
                 domain: "player".to_string(),
@@ -140,7 +140,7 @@ async fn the_store_is_the_configured_sqlite_file() {
         .await
         .unwrap()
         .into_iter()
-        .map(|p| p.payload)
+        .map(|p| angzarr_embedded::angzarr_router::page_event(&p).cloned())
         .collect();
     assert_eq!(events, [Some(noted(0)), Some(noted(1))]);
     drop(app);
@@ -184,7 +184,7 @@ async fn the_kernel_follows_the_configs_retry_setting() {
         app.kernel().retryable(),
         OnRetryable {
             max_retries: 5,
-            max_race_runs: 4,
+            max_race_runs: std::num::NonZeroU32::new(4).unwrap(),
             initial_backoff: Duration::from_millis(50),
             multiplier: 3.0,
             max_backoff: Duration::from_millis(1_000),
@@ -314,9 +314,9 @@ impl angzarr_embedded::angzarr_router::router::CommandHandler for NoHandler {
 
     async fn dispatch(
         &self,
-        _: &angzarr_embedded::v1::ContextualCommand,
+        _: &angzarr_embedded::angzarr_router::hpb::HandleRequest,
     ) -> Result<
-        angzarr_proto::v1::CommandHandlerResponse,
+        angzarr_embedded::angzarr_router::hpb::HandleResponse,
         angzarr_embedded::angzarr_router::error::CodedError,
     > {
         unreachable!("never registered")
@@ -338,14 +338,13 @@ mod fixtures {
     use std::time::Duration;
 
     use angzarr_embedded::angzarr_router::error::CodedError;
+    use angzarr_embedded::angzarr_router::hpb::{HandleRequest, HandleResponse};
     use angzarr_embedded::angzarr_router::router::CommandHandler;
     use angzarr_embedded::v1::{
-        command_page, Command, CommandBook, CommandPage, ComponentDescriptor, ComponentKind,
-        ConflictResolution, ContextualCommand, Cover, EventBook, EventPage, StateDescriptor,
-        StateOptions, Uuid,
+        command_page, component_descriptor, AggregateDescriptor, Command, CommandBook, CommandPage,
+        ComponentDescriptor, ComponentKind, Cover, ProcessManagerDescriptor, StateDescriptor, Uuid,
     };
     use angzarr_embedded::Any;
-    use angzarr_proto::v1::CommandHandlerResponse;
 
     /// How long a dispatch waits for what a test is forcing: past it, the
     /// test fails rather than hangs.
@@ -373,11 +372,11 @@ mod fixtures {
             page: Some(CommandPage {
                 body: Some(command_page::Body::Command(Command {
                     payload: Some(any(type_url)),
+                    handling: None,
                 })),
                 command_id: Some(Uuid::from_bytes([n; 16])),
                 ..CommandPage::default()
             }),
-            handling: None,
         }
     }
 
@@ -387,34 +386,42 @@ mod fixtures {
 
     /// An aggregate's descriptor, as angzarr-build generates it.
     pub fn descriptor(name: &str) -> ComponentDescriptor {
+        descriptor_of(name, ComponentKind::Aggregate, &[])
+    }
+
+    /// A domain's descriptor of `kind` (an aggregate, or a process manager
+    /// started by `starting`), as angzarr-build generates it.
+    pub fn descriptor_of(
+        name: &str,
+        kind: ComponentKind,
+        starting: &[&str],
+    ) -> ComponentDescriptor {
+        let state = Some(StateDescriptor {
+            type_name: format!("test.{name}.v1.State"),
+        });
+        let domain = name.to_string();
+        let kind = match kind {
+            ComponentKind::ProcessManager => {
+                component_descriptor::Kind::ProcessManager(ProcessManagerDescriptor {
+                    domain,
+                    state,
+                    starting_types: starting.iter().map(|t| t.to_string()).collect(),
+                })
+            }
+            _ => component_descriptor::Kind::Aggregate(AggregateDescriptor { domain, state }),
+        };
         ComponentDescriptor {
             name: name.to_string(),
-            kind: ComponentKind::Aggregate as i32,
             rules_version: VERSION.to_string(),
-            state: Some(StateDescriptor {
-                type_url: format!("/test.{name}.v1.State"),
-                options: Some(StateOptions {
-                    conflict_resolutions: vec![
-                        ConflictResolution::Strict as i32,
-                        ConflictResolution::AggregateHandles as i32,
-                    ],
-                }),
-            }),
-            ..ComponentDescriptor::default()
+            kind: Some(kind),
         }
     }
 
     /// One event, `type_url`.
-    fn decided(type_url: &str, rules_version: &str) -> CommandHandlerResponse {
-        CommandHandlerResponse {
-            conflict: None,
-            events: Some(EventBook {
-                pages: vec![EventPage {
-                    payload: Some(any(type_url)),
-                    ..EventPage::default()
-                }],
-                ..EventBook::default()
-            }),
+    fn decided(type_url: &str, rules_version: &str) -> HandleResponse {
+        HandleResponse {
+            events: vec![any(type_url)],
+            state: None,
             rules_version: rules_version.to_string(),
         }
     }
@@ -467,10 +474,7 @@ mod fixtures {
             vec!["test.meet.v1.Meet".to_string()]
         }
 
-        async fn dispatch(
-            &self,
-            _: &ContextualCommand,
-        ) -> Result<CommandHandlerResponse, CodedError> {
+        async fn dispatch(&self, _: &HandleRequest) -> Result<HandleResponse, CodedError> {
             let met = self.0.meet();
             Ok(decided(if met { MET } else { ALONE }, VERSION))
         }
@@ -506,7 +510,11 @@ mod concurrency {
             .await
             .unwrap()
             .into_iter()
-            .map(|p| p.payload.map(|a| a.type_url).unwrap_or_default())
+            .map(|p| {
+                angzarr_embedded::angzarr_router::page_event(&p)
+                    .map(|a| a.type_url.clone())
+                    .unwrap_or_default()
+            })
             .collect()
     }
 
@@ -681,12 +689,16 @@ mod exposure {
             let payloads: Vec<_> = events
                 .pages
                 .iter()
-                .map(|p| p.payload.clone().unwrap_or_default().type_url)
+                .map(|p| {
+                    angzarr_embedded::angzarr_router::page_event(p)
+                        .map(|a| a.type_url.clone())
+                        .unwrap_or_default()
+                })
                 .collect();
             assert_eq!(payloads, [MET], "{domain} from {arrived:?}");
             assert_eq!(
-                response.outcome.map(|o| o.delivery),
-                Some(DeliveryOutcome::Applied as i32),
+                response.delivery,
+                DeliveryOutcome::Applied,
                 "{domain} from {arrived:?}"
             );
         }
@@ -759,9 +771,9 @@ mod exposure {
 /// answered with the addressed stream, empty.
 mod exposure_edges {
     use angzarr_embedded::angzarr_router::error::CodedError;
+    use angzarr_embedded::angzarr_router::hpb::{HandleRequest, HandleResponse};
     use angzarr_embedded::angzarr_router::router::CommandHandler;
-    use angzarr_embedded::v1::{ComponentKind, ContextualCommand, DeliveryOutcome, EventBook};
-    use angzarr_proto::v1::CommandHandlerResponse;
+    use angzarr_embedded::v1::{ComponentKind, DeliveryOutcome, EventBook};
 
     use super::fixtures::*;
     use super::*;
@@ -799,13 +811,10 @@ mod exposure_edges {
             vec!["test.meet.v1.Meet".to_string()]
         }
 
-        async fn dispatch(
-            &self,
-            _: &ContextualCommand,
-        ) -> Result<CommandHandlerResponse, CodedError> {
-            Ok(CommandHandlerResponse {
+        async fn dispatch(&self, _: &HandleRequest) -> Result<HandleResponse, CodedError> {
+            Ok(HandleResponse {
                 rules_version: VERSION.to_string(),
-                ..CommandHandlerResponse::default()
+                ..HandleResponse::default()
             })
         }
     }
@@ -829,11 +838,7 @@ mod exposure_edges {
         };
         config.store.in_memory = true;
         run_config(&config, move |registry: &mut Registry| {
-            let mut described = descriptor("quiet");
-            described.kind = kind as i32;
-            if kind == ComponentKind::ProcessManager {
-                described.starting_types = vec!["test.meet.v1.Meet".to_string()];
-            }
+            let described = descriptor_of("quiet", kind, &["test.meet.v1.Meet"]);
             registry.command_handler("quiet", Quiet(kind), described)?;
             Ok(())
         })
@@ -907,10 +912,7 @@ mod exposure_edges {
                 ..EventBook::default()
             })
         );
-        assert_eq!(
-            response.outcome.map(|o| o.delivery),
-            Some(DeliveryOutcome::Applied as i32)
-        );
+        assert_eq!(response.delivery, DeliveryOutcome::Applied);
     }
 }
 
@@ -921,9 +923,9 @@ mod exposure_edges {
 /// listed nowhere; the children started are stopped.
 mod listing {
     use angzarr_embedded::angzarr_router::error::CodedError;
+    use angzarr_embedded::angzarr_router::hpb::{ProjectRequest, ProjectResponse};
     use angzarr_embedded::angzarr_router::policy::PolicyDispatch;
     use angzarr_embedded::angzarr_router::router::ProjectorHandler;
-    use angzarr_embedded::v1::{EventBook, Projection};
 
     use super::fixtures::*;
     use super::*;
@@ -952,8 +954,8 @@ mod listing {
             "left-view"
         }
 
-        async fn dispatch(&self, _: &EventBook) -> Result<Projection, CodedError> {
-            Ok(Projection::default())
+        async fn dispatch(&self, _: &ProjectRequest) -> Result<ProjectResponse, CodedError> {
+            Ok(ProjectResponse::default())
         }
     }
 
@@ -1175,7 +1177,6 @@ mod listing {
 /// before any command, has run the step `left`'s event owes into `right`.
 mod resume {
     use angzarr_embedded::angzarr_router::policy::PolicyDispatch;
-    use angzarr_embedded::v1::{command_page, Command, CommandBook, CommandPage};
     use angzarr_embedded::{EventStore, MemoryDeadLetters, StreamRef};
 
     use super::fixtures::*;
@@ -1213,20 +1214,10 @@ mod resume {
         PolicyDispatch::new("left-right", "left", "right").on_event(
             MET.trim_start_matches('/'),
             |_, source| {
-                Ok(vec![CommandBook {
-                    cover: Some(angzarr_embedded::v1::Cover {
-                        domain: "right".to_string(),
-                        root: source.and_then(|c| c.root.clone()),
-                        edition: None,
-                    }),
-                    page: Some(CommandPage {
-                        body: Some(command_page::Body::Command(Command {
-                            payload: Some(any("/test.meet.v1.Meet")),
-                        })),
-                        ..Default::default()
-                    }),
-                    handling: None,
-                }])
+                Ok(vec![angzarr_embedded::angzarr_router::policy::command(
+                    source.cover.and_then(|c| c.root.clone()),
+                    any("/test.meet.v1.Meet"),
+                )])
             },
         )
     }
@@ -1309,7 +1300,7 @@ mod resume {
             .await
             .unwrap()
             .into_iter()
-            .map(|p| p.payload)
+            .map(|p| angzarr_embedded::angzarr_router::page_event(&p).cloned())
             .collect();
         assert_eq!(right, [Some(any(MET))], "resumed before any command");
         drop(app);
@@ -1352,7 +1343,11 @@ mod parts {
             .unwrap()
             .pages
             .into_iter()
-            .map(|p| p.payload.map(|a| a.type_url).unwrap_or_default())
+            .map(|p| {
+                angzarr_embedded::angzarr_router::page_event(&p)
+                    .map(|a| a.type_url.clone())
+                    .unwrap_or_default()
+            })
             .collect()
     }
 
@@ -1467,10 +1462,10 @@ mod parts {
 
         async fn dispatch(
             &self,
-            _: &EventBook,
-        ) -> Result<angzarr_embedded::v1::Projection, CodedError> {
+            _: &angzarr_embedded::angzarr_router::hpb::ProjectRequest,
+        ) -> Result<angzarr_embedded::angzarr_router::hpb::ProjectResponse, CodedError> {
             *self.0.lock().unwrap() += 1;
-            Ok(angzarr_embedded::v1::Projection::default())
+            Ok(Default::default())
         }
     }
 
@@ -1522,15 +1517,14 @@ mod parts {
             .policy_dispatch(PolicyDispatch::new("left-right", "left", "right").on_event(
                 MET.trim_start_matches('/'),
                 |_, source| {
-                    let root = source.and_then(|c| c.root.clone());
+                    let root = source.cover.and_then(|c| c.root.clone());
                     if root == cover("left", 2).root {
                         return Err(CodedError::bug("toy-left-right-broken", []).into());
                     }
-                    let mut meet = book("right", 1, 9, "/test.meet.v1.Meet");
-                    if let Some(page) = meet.page.as_mut() {
-                        page.command_id = None;
-                    }
-                    Ok(vec![meet])
+                    Ok(vec![angzarr_embedded::angzarr_router::policy::command(
+                        cover("right", 1).root,
+                        any("/test.meet.v1.Meet"),
+                    )])
                 },
             ))
             .unwrap();

@@ -4,7 +4,7 @@
 //! operator.
 //!
 //! Each is a [`Diagnostic`]. A condition the spec keys is coded under its
-//! key, verbatim (`COORDINATOR_REASON_EXPECTED_SEQUENCE_STALE`), its args
+//! key, verbatim (`ANGZARR_REASON_RETRY_CAP_EXHAUSTED`), its args
 //! the key's, and its English is the spec's catalog
 //! (`angzarr_proto::REASONS_EN_US`; decision 14.60); every other is coded
 //! under the crate's name (`code!("...")`), its messages in
@@ -85,12 +85,11 @@ pub enum StepError {
     /// A kernel fault at that step. A malformed policy book is a bug here,
     /// not the caller's: it is also written to the dead-letter log.
     Kernel(KernelError),
-    /// The policy itself failed: its `on_event`, its `on_refused` (a
-    /// translating callback) or its source's `#[on_refused]` handler
-    /// answered an error, or a marked event did not decode. A defect, never a business refusal: policies react to
+    /// The policy itself failed: its `on_event` or its `on_refused` (its
+    /// Translate callback) answered an error, or a marked event did not decode. A defect, never a business refusal: policies react to
     /// events the application's own domains recorded, so an error is a
     /// bug. Its report (code and args) is the `cause` of the dead letter's
-    /// reason, `ROUTER_REASON_UNHANDLED_HANDLER_ERROR`, and the
+    /// reason, `ANGZARR_REASON_UNHANDLED_HANDLER_ERROR`, and the
     /// policy's position moved past the trigger (or stayed at it, under
     /// [`OnPolicyBug::Stay`](super::OnPolicyBug::Stay)).
     PolicyFailed(Report),
@@ -101,60 +100,18 @@ pub enum StepError {
 pub enum KernelError {
     /// The book was refused at step 1, before anything else ran.
     Malformed(Malformed),
-    /// Under STRICT, the stream is past the sequence expected: a book's
-    /// `expected_sequence` behind the head when it is loaded, or a write
-    /// lost to another write to the same stream (decision 14.45). angzarr's
-    /// ABORTED, `COORDINATOR_REASON_EXPECTED_SEQUENCE_STALE`: re-read, then
-    /// re-issue.
-    Stale {
-        stream: Cover,
-        expected: u64,
-        actual: u64,
-    },
-    /// A book's `expected_sequence` ahead of the stream's head, under any
-    /// resolution: it names a state the stream never held, so the command
-    /// is malformed (decision 14.47), refused when it is loaded, before
-    /// business code. angzarr's INVALID_ARGUMENT,
-    /// `COORDINATOR_REASON_EXPECTED_SEQUENCE_AHEAD`: fix the command.
-    ExpectedSequenceAhead {
-        stream: Cover,
-        expected: u64,
-        head: u64,
-    },
-    /// COMMUTATIVE's window and the command changed overlapping units
-    /// (angzarr's ABORTED, `COORDINATOR_REASON_CONFLICT_OVERLAP`; decision 14.42): the
-    /// command's events were discarded. `window_units` and `command_units`
-    /// are the two sets as the metadata carries them, comma-separated unit
-    /// paths. Re-read, then re-issue.
-    Overlap {
-        stream: Cover,
-        expected: u64,
-        actual: u64,
-        window_units: String,
-        command_units: String,
-    },
-    /// A decide under AGGREGATE_HANDLES returned `Ok` without acknowledging
-    /// the window with this delivery's nonce: its events were discarded,
-    /// and the command fails as stale would. A handler bug, logged loudly.
-    Unresolved {
-        stream: Cover,
-        expected: u64,
-        actual: u64,
-    },
-    /// The kernel gave up on a command or fact that lost a race at its
-    /// write to another write to the same stream, every time, until a cap
-    /// (decision 14.46): one stamped with the head it loaded (no expected
-    /// sequence, or a fact), re-run on the new head, at the race re-run cap
-    /// ([`OnRetryable::max_race_runs`](super::OnRetryable::max_race_runs));
-    /// or an AGGREGATE_HANDLES or COMMUTATIVE one re-delivered its widened
-    /// window, at the retry cap (`max_retries + 1` deliveries). `attempts`
-    /// is how many times business code ran, `cap` the limit reached.
-    /// Nothing is persisted; a policy's step is dead-lettered under this
-    /// error, and a command its caller waits for is the caller's (owner
-    /// ruling, 2026-10-31). angzarr's INTERNAL,
-    /// `COORDINATOR_REASON_RETRY_CAP_EXHAUSTED`: the retries are spent, so
-    /// no caller retries it; a fact is answered PARKED instead
-    /// ([`Handled::Parked`](super::Handled::Parked)), and dead-lettered.
+    /// The kernel gave up on a command that lost a race at its write to
+    /// another write to the same stream, every time, until the race re-run
+    /// cap ([`OnRetryable::max_race_runs`](super::OnRetryable::max_race_runs);
+    /// docs/design/pipeline.md §4): each run decided again on the new
+    /// head, and a command with an expected sequence refused on its
+    /// re-run instead. `attempts` is how many times business code ran,
+    /// `cap` the limit reached. Nothing is persisted; a policy's step is
+    /// dead-lettered under this error, and a command its caller waits for
+    /// is the caller's (owner ruling, 2026-10-31). angzarr's INTERNAL,
+    /// `ANGZARR_REASON_RETRY_CAP_EXHAUSTED`: the retries are spent, so no
+    /// caller retries it. A fact at the cap is dead-lettered and answered
+    /// [`KernelError::FactDeadLettered`].
     RetryCapExhausted {
         stream: Cover,
         attempts: u32,
@@ -162,26 +119,36 @@ pub enum KernelError {
     },
     /// The handler of `stream`'s domain answered reporting rules version
     /// `reported`, not `registered`, the version its domain is registered
-    /// at (`CommandHandlerResponse.rules_version`, C-0558): a handler bug,
-    /// refused with nothing persisted, and dead-lettered as every handler
-    /// bug is. angzarr's INTERNAL,
-    /// `COORDINATOR_REASON_RULES_VERSION_MISMATCH` (decision 14.56), its
-    /// `component` the stream's domain, with `registered` and `reported`.
+    /// at (`HandleResponse.rules_version`, C-0558): a handler bug, refused
+    /// with nothing persisted, and dead-lettered as every handler bug is.
+    /// angzarr's INTERNAL, `ANGZARR_REASON_RULES_VERSION_MISMATCH`
+    /// (decision 14.56), its `component` the stream's domain, with
+    /// `registered` and `reported`.
     RulesVersionMismatch {
         stream: Cover,
         registered: String,
         reported: String,
     },
-    /// The handler of `stream`'s domain answered events whose book names
-    /// another stream, `event_stream` (another edition included): a
-    /// domain's or process manager's answer is payloads for its own stream
-    /// alone. A handler bug, refused before any write with nothing
-    /// persisted, and dead-lettered as every handler bug is: angzarr's
-    /// INTERNAL, `COORDINATOR_REASON_EVENTS_NOT_ITS_STREAM` (C-0590;
-    /// decision 14.65).
-    EventsNotItsStream {
+    /// The handler of `stream`'s domain answered a state of type
+    /// `state_type`, not `registered`, the state type its domain is
+    /// registered with (C-0818; decision 14.102): a handler bug, refused
+    /// with nothing persisted, and dead-lettered. angzarr's INTERNAL,
+    /// `ANGZARR_REASON_STATE_TYPE_MISMATCH`, its `component` the stream's
+    /// domain.
+    StateTypeMismatch {
         stream: Cover,
-        event_stream: Cover,
+        registered: String,
+        state_type: String,
+    },
+    /// A fact could not be recorded on `stream`: its handler failed, its
+    /// retryable failure outlasted its retries, it lost its race at the
+    /// write until the cap, or a process manager has no instance for it.
+    /// It is dead-lettered, and its sender, waiting or not, is answered
+    /// angzarr's INTERNAL `ANGZARR_REASON_FACT_DEAD_LETTERED`, `cause` the
+    /// failure's key, non-retryable (decisions 14.100 and 14.109).
+    FactDeadLettered {
+        stream: Cover,
+        cause: Report,
     },
     /// A command's or fact's payload type that the domain does not decode,
     /// after the upcaster: refused naming its type URL (angzarr's
@@ -214,13 +181,6 @@ pub enum KernelError {
     ChainTooDeep {
         limit: usize,
     },
-    /// A decision on `stream` ran more continuation steps than its limit
-    /// ([`STEP_LIMIT`](super::markup::STEP_LIMIT)): a step that always
-    /// continues. Nothing it emitted is kept.
-    TooManySteps {
-        stream: Cover,
-        limit: usize,
-    },
     /// A dispatch from before a resumed stream's snapshot: those events are
     /// not held.
     BeforeSnapshot {
@@ -246,22 +206,22 @@ pub enum KernelError {
     },
     Replay(ReplayError),
     /// The store's own error, angzarr-ports' (codes `angzarr-ports-*`). On
-    /// the wire ([`KernelError::as_coded`]) a conflict is
-    /// `COORDINATOR_REASON_STORE_CONFLICT` and a store that could not
-    /// answer `COORDINATOR_REASON_STORE_UNAVAILABLE`, each UNAVAILABLE
-    /// (decision 14.51).
+    /// the wire ([`KernelError::as_coded`]) a store that could not answer
+    /// is `ANGZARR_REASON_STORE_UNAVAILABLE`, UNAVAILABLE (decision 14.51).
     Store(StoreError),
     /// angzarr-router refused the input or a policy's answer: its
     /// `CodedError`, whose `code` (SCREAMING_SNAKE, angzarr's `ErrorInfo`
-    /// reason) is this error's `reason`. A handler's own code under a
-    /// business status is a refusal ([`Failure::Rejected`], never this),
-    /// under any other status its bug; of the router's codes, INTERNAL is
-    /// a policy's or a handler's bug, ABORTED a stale command, anything
-    /// else the sender's to fix.
+    /// reason) is this error's `reason`; or one of the kernel's own spec
+    /// keys answered in the router's shape (a process manager with no
+    /// instance, `ANGZARR_REASON_PM_NO_INSTANCE`; an edition stream not
+    /// forked, `ANGZARR_REASON_EDITION_NOT_FORKED`). A typed refusal is
+    /// never this ([`Failure::Rejected`]); under a business status it is
+    /// the framework's refusal, answered to a client and never a policy's
+    /// Translate; under INTERNAL a bug; ABORTED a handler's re-run.
     Router(angzarr_router::error::CodedError),
     /// The domain's handler could not be reached (a remote handler whose
     /// process is not running, or whose transport failed: its
-    /// `COORDINATOR_REASON_HANDLER_UNAVAILABLE`, UNAVAILABLE). Nothing ran
+    /// `ANGZARR_REASON_HANDLER_UNAVAILABLE`, UNAVAILABLE). Nothing ran
     /// and nothing was written:
     /// run it again, as [`Kernel::resume`](super::Kernel::resume) does for
     /// a policy's step.
@@ -318,6 +278,11 @@ pub enum UpcastError {
     /// a caller is answered UNAVAILABLE, to retry. `cause` is why, as the
     /// sidecar's port reported it.
     Unavailable { cause: Report },
+    /// The upcaster answered keys that are not exactly the payloads asked:
+    /// for a stream's pages, each page's sequence once; for a lone payload,
+    /// one payload keyed `NoSequence` (docs/design/upcasting.md §5 and §6:
+    /// a rule bug, with no spec key of its own).
+    AnswerKeys,
 }
 
 /// An upcaster whose rules cannot all run, found by
@@ -410,24 +375,17 @@ impl KernelError {
     /// This error as the coordinator answers it on the wire, in the
     /// router's shape: its reason key, its args as metadata, and its
     /// status; `None` for an error that is not one of the coordinator's
-    /// answers. A variant whose code is a spec key (decision 14.60) goes out
-    /// as itself, under the status its key's comment in reasons.proto
-    /// gives: an expected sequence ahead of the head INVALID_ARGUMENT
-    /// (business, fatal; decision 14.47); a stale expected sequence (decision
-    /// 14.45), a COMMUTATIVE overlap and an unacknowledged AGGREGATE_HANDLES
-    /// window ABORTED (business, immediate return; decision 14.37); a
-    /// command given up at a cap (decision 14.46), a response of another
-    /// rules version (decision 14.56), a chain too deep and a decision past
-    /// its step limit INTERNAL; a handler that could not be reached
-    /// UNAVAILABLE (decision 14.49). The store's conflict, a race lost at
-    /// the write handed back at a race re-run cap of 0, is
-    /// `COORDINATOR_REASON_STORE_CONFLICT` (`expected`, the head stamped,
-    /// and `actual`, the head found), the store failing to answer
-    /// `COORDINATOR_REASON_STORE_UNAVAILABLE` (the store's failure its
+    /// answers. A variant whose code is a spec key (decision 14.60) goes
+    /// out as itself, under the status its key's option declares (decision
+    /// 14.65): a command given up at the race re-run cap, a fact
+    /// dead-lettered, a response of another rules version or state type
+    /// and a chain too deep INTERNAL; a handler that could not be reached
+    /// UNAVAILABLE (decision 14.49). The store failing to answer is
+    /// `ANGZARR_REASON_STORE_UNAVAILABLE` (the store's failure its
     /// `cause`), and an upcaster sidecar that could not be reached
-    /// `COORDINATOR_REASON_UPCASTER_UNAVAILABLE` (`domain` and `cause`),
-    /// each UNAVAILABLE, so that when the retries are spent the key is what
-    /// is reported (decision 14.51).
+    /// `ANGZARR_REASON_UPCASTER_UNAVAILABLE` (`domain` and `cause`), each
+    /// UNAVAILABLE, so that when the retries are spent the key is what is
+    /// reported (decision 14.51).
     pub fn as_coded(&self) -> Option<angzarr_router::error::CodedError> {
         if let Some(coded) = self.forwarded() {
             return Some(coded);
@@ -444,29 +402,17 @@ impl KernelError {
     /// coordinator reports.
     fn forwarded(&self) -> Option<angzarr_router::error::CodedError> {
         use angzarr_proto::v1::reason_args as args;
-        use angzarr_proto::v1::CoordinatorReason;
+        use angzarr_proto::v1::AngzarrReason;
         let (reason, extras) = match self {
-            KernelError::Store(StoreError::Conflict {
-                stream,
-                expected,
-                actual,
-            }) => (
-                CoordinatorReason::StoreConflict,
-                vec![
-                    (args::STREAM.to_string(), cover_text(stream)),
-                    (args::EXPECTED.to_string(), expected.to_string()),
-                    (args::ACTUAL.to_string(), actual.to_string()),
-                ],
-            ),
             KernelError::Store(error @ StoreError::Unavailable(_)) => (
-                CoordinatorReason::StoreUnavailable,
+                AngzarrReason::StoreUnavailable,
                 super::route::flat_args(&store_report(error)),
             ),
             KernelError::Upcast {
                 stream,
                 error: error @ UpcastError::Unavailable { .. },
             } => (
-                CoordinatorReason::UpcasterUnavailable,
+                AngzarrReason::UpcasterUnavailable,
                 std::iter::once((args::DOMAIN.to_string(), stream.domain.clone()))
                     .chain(super::route::flat_args(error))
                     .collect(),
@@ -481,29 +427,15 @@ impl KernelError {
     /// (decision 14.65); angzarr-embedded's own code; or the code of the
     /// error it wraps.
     fn coded_as(&self) -> CodedAs<'_> {
-        use angzarr_proto::v1::CoordinatorReason as C;
+        use angzarr_proto::v1::AngzarrReason as K;
         use CodedAs::{Own, Spec, Wrapped};
         match self {
-            KernelError::Stale { .. } => Spec(Keyed::Coordinator(C::ExpectedSequenceStale)),
-            KernelError::ExpectedSequenceAhead { .. } => {
-                Spec(Keyed::Coordinator(C::ExpectedSequenceAhead))
-            }
-            KernelError::Unresolved { .. } => Spec(Keyed::Coordinator(C::ConflictUnresolved)),
-            KernelError::RetryCapExhausted { .. } => Spec(Keyed::Coordinator(C::RetryCapExhausted)),
-            KernelError::RulesVersionMismatch { .. } => {
-                Spec(Keyed::Coordinator(C::RulesVersionMismatch))
-            }
-            KernelError::Overlap { .. } => Spec(Keyed::Coordinator(C::ConflictOverlap)),
-            KernelError::ChainTooDeep { .. } => Spec(Keyed::Coordinator(C::ChainTooDeep)),
-            KernelError::TooManySteps { .. } => {
-                Spec(Keyed::Router(angzarr_proto::v1::RouterReason::TooManySteps))
-            }
-            KernelError::HandlerUnavailable { .. } => {
-                Spec(Keyed::Coordinator(C::HandlerUnavailable))
-            }
-            KernelError::EventsNotItsStream { .. } => {
-                Spec(Keyed::Coordinator(C::EventsNotItsStream))
-            }
+            KernelError::RetryCapExhausted { .. } => Spec(K::RetryCapExhausted),
+            KernelError::RulesVersionMismatch { .. } => Spec(K::RulesVersionMismatch),
+            KernelError::StateTypeMismatch { .. } => Spec(K::StateTypeMismatch),
+            KernelError::FactDeadLettered { .. } => Spec(K::FactDeadLettered),
+            KernelError::ChainTooDeep { .. } => Spec(K::ChainTooDeep),
+            KernelError::HandlerUnavailable { .. } => Spec(K::HandlerUnavailable),
             KernelError::UnknownType { .. } => Own(code!("unknown-type")),
             KernelError::InvalidPayload { .. } => Own(code!("invalid-payload")),
             KernelError::Upcast { .. } => Own(code!("upcast")),
@@ -521,12 +453,8 @@ impl KernelError {
     pub fn recovery(&self) -> Recovery {
         match self {
             KernelError::Malformed(_)
-            | KernelError::ExpectedSequenceAhead { .. }
             | KernelError::UnknownType { .. }
             | KernelError::InvalidPayload { .. } => Recovery::Invalid,
-            KernelError::Stale { .. }
-            | KernelError::Overlap { .. }
-            | KernelError::Unresolved { .. } => Recovery::Retry,
             KernelError::Store(error) => error.recovery(),
             KernelError::Router(error) => router_recovery(error),
             KernelError::HandlerUnavailable { .. }
@@ -537,10 +465,10 @@ impl KernelError {
             KernelError::Upcast { .. }
             | KernelError::RetryCapExhausted { .. }
             | KernelError::RulesVersionMismatch { .. }
-            | KernelError::EventsNotItsStream { .. }
+            | KernelError::StateTypeMismatch { .. }
+            | KernelError::FactDeadLettered { .. }
             | KernelError::WrongDomain { .. }
             | KernelError::ChainTooDeep { .. }
-            | KernelError::TooManySteps { .. }
             | KernelError::BeforeSnapshot { .. }
             | KernelError::UnregisteredDomain { .. }
             | KernelError::Unreadable { .. }
@@ -666,27 +594,22 @@ impl Diagnostic for KernelError {
 impl KernelError {
     /// The stream this error names first among its args: every error that
     /// concerns one stream, coded under a spec key that declares `stream`
-    /// (decision 14.65) or under angzarr-embedded's own code. A router key
-    /// names none, so a decision past its step limit does not.
+    /// (decision 14.65) or under angzarr-embedded's own code.
     fn named_stream(&self) -> Option<&Cover> {
         match self {
-            KernelError::Stale { stream, .. }
-            | KernelError::ExpectedSequenceAhead { stream, .. }
-            | KernelError::Unresolved { stream, .. }
-            | KernelError::Overlap { stream, .. }
-            | KernelError::RetryCapExhausted { stream, .. }
+            KernelError::RetryCapExhausted { stream, .. }
             | KernelError::RulesVersionMismatch { stream, .. }
+            | KernelError::StateTypeMismatch { stream, .. }
+            | KernelError::FactDeadLettered { stream, .. }
             | KernelError::UnknownType { stream, .. }
             | KernelError::InvalidPayload { stream, .. }
             | KernelError::Upcast { stream, .. }
             | KernelError::WrongDomain { stream, .. }
             | KernelError::BeforeSnapshot { stream, .. }
             | KernelError::Unreadable { stream, .. }
-            | KernelError::HandlerUnavailable { stream, .. }
-            | KernelError::EventsNotItsStream { stream, .. } => Some(stream),
+            | KernelError::HandlerUnavailable { stream, .. } => Some(stream),
             KernelError::Malformed(_)
             | KernelError::ChainTooDeep { .. }
-            | KernelError::TooManySteps { .. }
             | KernelError::UnregisteredDomain { .. }
             | KernelError::Replay(_)
             | KernelError::Store(_)
@@ -701,24 +624,6 @@ impl KernelError {
         use angzarr_proto::v1::reason_args as args;
         match self {
             KernelError::Malformed(m) => m.args(),
-            KernelError::Stale {
-                expected, actual, ..
-            } => vec![
-                (args::EXPECTED, (*expected).into()),
-                (args::ACTUAL, (*actual).into()),
-            ],
-            KernelError::ExpectedSequenceAhead { expected, head, .. } => vec![
-                (args::EXPECTED, (*expected).into()),
-                (args::HEAD, (*head).into()),
-            ],
-            KernelError::Overlap {
-                window_units,
-                command_units,
-                ..
-            } => vec![
-                (args::WINDOW_UNITS, window_units.as_str().into()),
-                (args::COMMAND_UNITS, command_units.as_str().into()),
-            ],
             KernelError::RetryCapExhausted { attempts, cap, .. } => vec![
                 (args::ATTEMPTS, (*attempts).into()),
                 (args::CAP, (*cap).into()),
@@ -732,6 +637,16 @@ impl KernelError {
                 (args::REGISTERED, registered.as_str().into()),
                 (args::REPORTED, reported.as_str().into()),
             ],
+            KernelError::StateTypeMismatch {
+                stream: s,
+                registered,
+                state_type,
+            } => vec![
+                (args::COMPONENT, s.domain.as_str().into()),
+                (args::REGISTERED, registered.as_str().into()),
+                (args::STATE_TYPE, state_type.as_str().into()),
+            ],
+            KernelError::FactDeadLettered { cause, .. } => vec![(args::CAUSE, Arg::nested(cause))],
             KernelError::UnknownType { type_url, .. } => {
                 vec![("type_url", type_url.as_str().into())]
             }
@@ -743,9 +658,7 @@ impl KernelError {
             ],
             KernelError::Upcast { error, .. } => vec![("error", Arg::nested(error))],
             KernelError::WrongDomain { expected, .. } => vec![("expected", (*expected).into())],
-            KernelError::ChainTooDeep { limit } | KernelError::TooManySteps { limit, .. } => {
-                vec![(args::LIMIT, (*limit).into())]
-            }
+            KernelError::ChainTooDeep { limit } => vec![(args::LIMIT, (*limit).into())],
             KernelError::BeforeSnapshot { first, .. } => vec![("first", (*first).into())],
             KernelError::UnregisteredDomain { domain } => vec![("domain", domain.as_str().into())],
             KernelError::Replay(error) => error.args(),
@@ -761,10 +674,6 @@ impl KernelError {
                 .iter()
                 .map(|(name, value)| (name.as_str(), Arg::Str(value.clone())))
                 .collect(),
-            KernelError::Unresolved { .. } => vec![],
-            KernelError::EventsNotItsStream { event_stream, .. } => {
-                vec![(args::EVENT_STREAM, stream(event_stream))]
-            }
             KernelError::HandlerUnavailable { stream: s, cause } => vec![
                 (args::DOMAIN, s.domain.as_str().into()),
                 (args::CAUSE, cause.as_str().into()),
@@ -776,33 +685,11 @@ impl KernelError {
 /// What a [`KernelError`] is coded under ([`KernelError::coded_as`]).
 enum CodedAs<'a> {
     /// A spec key, verbatim: the condition the spec keys.
-    Spec(Keyed),
+    Spec(angzarr_proto::v1::AngzarrReason),
     /// angzarr-embedded's own code.
     Own(&'static str),
     /// The code of the error the variant wraps.
     Wrapped(&'a str),
-}
-
-/// A spec key of one of core's key enums a kernel error travels as.
-#[derive(Clone, Copy)]
-enum Keyed {
-    Coordinator(angzarr_proto::v1::CoordinatorReason),
-    Router(angzarr_proto::v1::RouterReason),
-}
-
-impl super::route::SpecKey for Keyed {
-    fn key(self) -> &'static str {
-        match self {
-            Keyed::Coordinator(key) => key.as_str_name(),
-            Keyed::Router(key) => key.as_str_name(),
-        }
-    }
-    fn status(self) -> angzarr_proto::v1::ReasonStatus {
-        match self {
-            Keyed::Coordinator(key) => key.status(),
-            Keyed::Router(key) => key.status(),
-        }
-    }
 }
 
 /// The four classes of error (decision 14.37), decided by gRPC status
@@ -953,6 +840,7 @@ impl Diagnostic for UpcastError {
             UpcastError::Payload(error) => error.code(),
             UpcastError::Rule { .. } => code!("upcast-rule"),
             UpcastError::Unavailable { .. } => code!("upcast-unavailable"),
+            UpcastError::AnswerKeys => code!("upcast-answer-keys"),
         }
     }
 
@@ -964,6 +852,7 @@ impl Diagnostic for UpcastError {
                 ("error", Arg::nested(error)),
             ],
             UpcastError::Unavailable { cause } => vec![("cause", Arg::nested(cause))],
+            UpcastError::AnswerKeys => Vec::new(),
         }
     }
 }

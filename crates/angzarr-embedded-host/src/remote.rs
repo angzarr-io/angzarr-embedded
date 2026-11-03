@@ -19,7 +19,7 @@
 //!   any other status carries no typed refusal;
 //! - a child that is not running or whose health is not SERVING, a
 //!   connection that fails, and an UNAVAILABLE status with no details are
-//!   `COORDINATOR_REASON_HANDLER_UNAVAILABLE`, which [`is_retryable`] says to
+//!   `ANGZARR_REASON_HANDLER_UNAVAILABLE`, which [`is_retryable`] says to
 //!   retry: the child is being restarted. A transport's failure carries the
 //!   transport's text verbatim as `ext_err_txt`, a third party's;
 //! - a status angzarr-router's `GrpcCode` has no variant for (CANCELLED,
@@ -30,8 +30,8 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use angzarr_proto::v1 as pb;
-use angzarr_router::context::CommandContext;
-use angzarr_router::error::{CodedError, GrpcCode, RouterReason};
+use angzarr_router::error::{AngzarrReason, CodedError, GrpcCode};
+use angzarr_router::hpb;
 use angzarr_router::router::{CommandHandler, PolicyComponent, ProjectorHandler};
 use angzarr_router::send::BoxFuture;
 use prost::Message;
@@ -41,14 +41,14 @@ use tonic::Code;
 use crate::rpc::google_rpc::{ErrorInfo, Status as RpcStatus, ERROR_INFO_NAME};
 use angzarr_diagnostic::Report;
 use angzarr_embedded::{Description, KernelError, UpcastError, UpcastPort};
-use angzarr_proto::v1::{reason_args as args, CoordinatorReason};
+use angzarr_proto::v1::reason_args as args;
 use angzarr_proto_component::v1::command_handler_service_client::CommandHandlerServiceClient;
 use angzarr_proto_component::v1::policy_service_client::PolicyServiceClient;
 use angzarr_proto_component::v1::projector_service_client::ProjectorServiceClient;
 use angzarr_proto_component::v1::upcaster_service_client::UpcasterServiceClient;
 
 /// The values of a remote handler's `cause` when it could not be reached
-/// (`COORDINATOR_REASON_HANDLER_UNAVAILABLE`, whose `domain` names the
+/// (`ANGZARR_REASON_HANDLER_UNAVAILABLE`, whose `domain` names the
 /// component's).
 pub mod causes {
     /// No child is up: it exited and is being restarted.
@@ -67,7 +67,7 @@ pub mod causes {
 /// Whether a remote handler's error is worth retrying: the child was
 /// unreachable, and will be back.
 pub fn is_retryable(error: &CodedError) -> bool {
-    error.code == CoordinatorReason::HandlerUnavailable.as_str_name()
+    error.code == AngzarrReason::HandlerUnavailable.as_str_name()
 }
 
 /// One remote component: its configured name, the descriptor `Describe`
@@ -159,13 +159,13 @@ impl Remote {
         }
     }
 
-    /// The domain its descriptor names as its first input: a policy's
-    /// source, its one. Empty for a domain.
+    /// The domain its descriptor names as its input: a policy's source,
+    /// its one. Empty for any other kind.
     fn input(&self) -> &str {
-        self.descriptor
-            .inputs
-            .first()
-            .map_or("", |t| t.domain.as_str())
+        match &self.descriptor.kind {
+            Some(pb::component_descriptor::Kind::Policy(policy)) => &policy.input_domain,
+            _ => "",
+        }
     }
 }
 
@@ -237,7 +237,7 @@ impl CommandHandler for RemoteCommandHandler {
 
     /// The kind its descriptor gives.
     fn kind(&self) -> pb::ComponentKind {
-        self.inner.descriptor.kind()
+        angzarr_embedded::kind_of(&self.inner.descriptor)
     }
 
     /// None: the wire descriptor carries no command types, and the router
@@ -248,10 +248,7 @@ impl CommandHandler for RemoteCommandHandler {
 
     /// `CommandHandlerService.Handle` on the child, awaited until it
     /// answers or the call timeout passes (retryable).
-    async fn dispatch(
-        &self,
-        req: &pb::ContextualCommand,
-    ) -> Result<pb::CommandHandlerResponse, CodedError> {
+    async fn dispatch(&self, req: &hpb::HandleRequest) -> Result<hpb::HandleResponse, CodedError> {
         let req = req.clone();
         self.inner
             .call(move |channel| async move {
@@ -312,41 +309,28 @@ impl PolicyComponent for RemotePolicyHandler {
         self.inner.input()
     }
 
-    /// `PolicyService.Handle` on the child.
-    async fn dispatch(&self, source: &pb::EventBook) -> Result<pb::PolicyResponse, CodedError> {
-        let source = source.clone();
+    /// `PolicyService.React` on the child: its outputs for the one
+    /// trigger event, which the kernel addresses and checks.
+    async fn react(&self, req: &hpb::ReactRequest) -> Result<hpb::ReactResponse, CodedError> {
+        let req = req.clone();
         self.inner
-            .call(move |channel| async move {
-                PolicyServiceClient::new(channel).handle(source).await
-            })
+            .call(move |channel| async move { PolicyServiceClient::new(channel).react(req).await })
             .await
     }
 
-    /// `PolicyService.OnRefused` on the child, with the refusal (`ctx`
-    /// stays here: the child's library rebuilds it from the refused
-    /// command): its translated fact's payload, or `None` for an empty
-    /// answer, no translation (decision 14.42). A translated fact that is
-    /// more than a payload is the policy's bug, refused INTERNAL: one that
-    /// sets its own cover or Handling (`COORDINATOR_REASON_REFUSAL_FACT_ADDRESSED`), has no
-    /// page (`COORDINATOR_REASON_REFUSAL_FACT_NO_PAGE`) or a page that is not a fact
-    /// (`COORDINATOR_REASON_REFUSAL_FACT_NOT_A_FACT`), or sets its own identity
-    /// (`COORDINATOR_REASON_REFUSAL_FACT_IDENTIFIED`).
-    async fn dispatch_refusal(
+    /// `PolicyService.Translate` on the child: the refused command, its
+    /// trigger and the typed refusal in, a fact's payload out, which the
+    /// kernel addresses and identifies (decisions 14.42 and 14.89).
+    async fn translate(
         &self,
-        refusal: &pb::Refusal,
-        _ctx: &CommandContext,
-    ) -> Result<Option<prost_types::Any>, CodedError> {
-        let refusal = refusal.clone();
-        let answer = self
-            .inner
+        req: &hpb::TranslateRequest,
+    ) -> Result<hpb::TranslateResponse, CodedError> {
+        let req = req.clone();
+        self.inner
             .call(move |channel| async move {
-                PolicyServiceClient::new(channel).on_refused(refusal).await
+                PolicyServiceClient::new(channel).translate(req).await
             })
-            .await?;
-        let Some(fact) = answer.fact else {
-            return Ok(None);
-        };
-        angzarr_embedded::translated(fact).map(Some)
+            .await
     }
 }
 
@@ -414,8 +398,8 @@ impl UpcastPort for RemoteUpcaster {
     /// child's reason.
     fn upcast<'a>(
         &'a self,
-        request: &'a pb::UpcastRequest,
-    ) -> BoxFuture<'a, Result<pb::UpcastResponse, UpcastError>> {
+        request: &'a hpb::UpcastRequest,
+    ) -> BoxFuture<'a, Result<hpb::UpcastResponse, UpcastError>> {
         Box::pin(async move {
             let sent = request.clone();
             self.inner
@@ -431,7 +415,7 @@ impl UpcastPort for RemoteUpcaster {
 impl RemoteUpcaster {
     /// The sidecar's failed `Upcast` of `request`, in the kernel's terms
     /// (see [`UpcastPort::upcast`]).
-    fn refused(&self, request: &pb::UpcastRequest, error: CodedError) -> UpcastError {
+    fn refused(&self, request: &hpb::UpcastRequest, error: CodedError) -> UpcastError {
         if is_retryable(&error) {
             let cause = error.extras.get("cause").cloned().unwrap_or_default();
             return UpcastError::Unavailable {
@@ -444,12 +428,15 @@ impl RemoteUpcaster {
                 }),
             };
         }
-        let source = request
-            .events
-            .first()
-            .and_then(|page| page.payload.as_ref())
-            .map(|payload| angzarr_embedded::type_name(&payload.type_url).to_string())
-            .unwrap_or_default();
+        let source = match &request.input {
+            Some(hpb::upcast_request::Input::LonePayload(payload)) => Some(payload),
+            Some(hpb::upcast_request::Input::Pages(pages)) => {
+                pages.events.first().and_then(angzarr_router::page_event)
+            }
+            None => None,
+        }
+        .map(|payload| angzarr_embedded::type_name(&payload.type_url).to_string())
+        .unwrap_or_default();
         UpcastError::Rule {
             source,
             error: Report::of(&KernelError::Router(error)),
@@ -490,12 +477,12 @@ impl RemoteProjectorHandler {
     /// The domains whose events it projects: its descriptor's inputs, in
     /// order.
     pub fn sources(&self) -> Vec<&str> {
-        self.inner
-            .descriptor
-            .inputs
-            .iter()
-            .map(|input| input.domain.as_str())
-            .collect()
+        match &self.inner.descriptor.kind {
+            Some(pb::component_descriptor::Kind::Projector(projector)) => {
+                projector.input_domains.iter().map(String::as_str).collect()
+            }
+            _ => Vec::new(),
+        }
     }
 }
 
@@ -513,12 +500,15 @@ impl ProjectorHandler for RemoteProjectorHandler {
         &self.inner.descriptor.name
     }
 
-    /// `ProjectorService.Handle` on the child.
-    async fn dispatch(&self, events: &pb::EventBook) -> Result<pb::Projection, CodedError> {
-        let events = events.clone();
+    /// `ProjectorService.Project` on the child.
+    async fn dispatch(
+        &self,
+        req: &hpb::ProjectRequest,
+    ) -> Result<hpb::ProjectResponse, CodedError> {
+        let req = req.clone();
         self.inner
             .call(move |channel| async move {
-                ProjectorServiceClient::new(channel).handle(events).await
+                ProjectorServiceClient::new(channel).project(req).await
             })
             .await
     }
@@ -576,7 +566,7 @@ pub(crate) fn status_to_coded(domain: &str, status: &tonic::Status) -> CodedErro
     let (code, extras) = match info {
         Some(info) => (info.reason, info.metadata.into_iter().collect()),
         None => (
-            RouterReason::UnhandledHandlerError
+            AngzarrReason::UnhandledHandlerError
                 .as_str_name()
                 .to_string(),
             Default::default(),
@@ -602,10 +592,10 @@ fn transport_text(status: &tonic::Status) -> String {
     }
 }
 
-/// `COORDINATOR_REASON_HANDLER_UNAVAILABLE` for `domain`, for `cause`.
+/// `ANGZARR_REASON_HANDLER_UNAVAILABLE` for `domain`, for `cause`.
 pub(crate) fn unavailable(domain: &str, cause: &str) -> CodedError {
     angzarr_embedded::spec_coded(
-        CoordinatorReason::HandlerUnavailable,
+        AngzarrReason::HandlerUnavailable,
         [
             (args::DOMAIN.to_string(), domain.to_string()),
             (args::CAUSE.to_string(), cause.to_string()),

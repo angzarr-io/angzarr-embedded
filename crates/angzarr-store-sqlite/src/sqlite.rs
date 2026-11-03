@@ -17,13 +17,12 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use angzarr_ports::angzarr_proto::v1::meta::EditionCreated;
 use angzarr_ports::angzarr_proto::v1::{Cover, EventBook, EventPage, Snapshot};
 use angzarr_ports::{
-    Append, AppliedMigration, ChangeToken, DeadLetter, DeadLetterKey, DeadLetterStore, EventStore,
-    Head, ListStreams, Outbox, OutboxEntry, PositionKey, PositionStore, Processed, Purge,
-    ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, Slice, SnapshotStore, StoreError,
-    StreamRef, Uuid, Watch, Write, Written, EDITION_CREATED_TYPE_URL,
+    is_fork, Append, AppliedMigration, ChangeToken, DeadLetter, DeadLetterKey, DeadLetterStore,
+    EventStore, Head, ListStreams, Outbox, OutboxEntry, PositionKey, PositionStore, Processed,
+    Purge, ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, Slice, SnapshotStore, StoreError,
+    StreamRef, Uuid, Watch, Write, Written,
 };
 use prost::Message;
 use prost_types::Timestamp;
@@ -466,7 +465,7 @@ const SQLITE_NOTADB: i32 = 26;
 //
 // Every port and capability. Editions are per-stream forks only as far as
 // the base ports need them: an edition stream's first own event is its
-// creation (`meta.EditionCreated`), it reads main below its fork, then its
+// fork (an `EditionCreated` meta-event, `is_fork`), it reads main below its fork, then its
 // own; a write of anything else to an unforked one is refused. The
 // administration of editions (the `Editions` port:
 // listing, deletion and removal) is not implemented yet (the owner's
@@ -670,7 +669,7 @@ impl<C: DerefMut<Target = SqliteConnection>> Exec<'_, C> {
             pages,
         } = append;
         let actual = self.head(stream).await?.next_sequence;
-        let creates = pages.first().is_some_and(is_creation);
+        let creates = pages.first().is_some_and(is_fork);
         match stream.edition {
             None if creates => return Err(StoreError::EditionNameRequired),
             None => {}
@@ -693,23 +692,11 @@ impl<C: DerefMut<Target = SqliteConnection>> Exec<'_, C> {
                     (false, false) if !pages.is_empty() => {
                         return Err(StoreError::edition_not_forked(stream))
                     }
-                    // A fork lands at its fork sequence, as stated
-                    // (`EditionCreated.parent_sequence`): main's head or
-                    // any sequence below it. A creation stating another
-                    // sequence than its own is malformed (14.36).
-                    (false, true) => {
-                        let page = &pages[0];
-                        let stated = parent_sequence(page);
-                        if stated != page.sequence {
-                            return Err(StoreError::malformed_creation(
-                                stream,
-                                page.sequence,
-                                stated,
-                            ));
-                        }
-                        if expected <= actual {
-                            return self.insert(stream, expected, pages).await;
-                        }
+                    // A fork lands at its fork sequence, its own page's
+                    // sequence: main's head or any sequence below it
+                    // (14.36, decision 14.107).
+                    (false, true) if expected <= actual => {
+                        return self.insert(stream, expected, pages).await;
                     }
                     _ => {}
                 }
@@ -862,22 +849,6 @@ fn head_after(last: Option<&EventPage>) -> Head {
             .and_then(|page| page.meta.as_ref())
             .and_then(|meta| meta.recorded_at),
     }
-}
-
-/// The sequence a creation page's `EditionCreated` states as its fork
-/// point (0 for one that does not decode, which no fork states).
-fn parent_sequence(page: &EventPage) -> u64 {
-    page.payload
-        .as_ref()
-        .and_then(|p| EditionCreated::decode(p.value.as_slice()).ok())
-        .map_or(0, |created| created.parent_sequence)
-}
-
-/// Whether `page` is a stream's creation in its edition.
-fn is_creation(page: &EventPage) -> bool {
-    page.payload
-        .as_ref()
-        .is_some_and(|payload| payload.type_url == EDITION_CREATED_TYPE_URL)
 }
 
 impl EventStore for SqliteStore {

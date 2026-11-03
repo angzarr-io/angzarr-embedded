@@ -1,5 +1,6 @@
 //! The host: launches every remote component of a [`HostConfig`], waits for
-//! its handshake, connects, describes it, and hands back a handler of its
+//! it to report SERVING on the socket the host chose, describes it, and
+//! hands back a handler of its
 //! kind (a [`RemoteCommandHandler`] per domain, a [`RemotePolicyHandler`]
 //! per policy, a [`RemoteProjectorHandler`] per projector) to register with
 //! the application's registry beside its in-process ones. Then it
@@ -14,16 +15,18 @@
 //! or projector of other inputs or another output domain) is not published.
 //!
 //! Every child's gRPC health (`grpc.health.v1`, its server's, service
-//! `""`) is watched from its handshake on, as the child protocol has every
+//! `""`) is watched from when it is first SERVING on, as the child protocol has every
 //! child serve it, and checked every `health_check_interval_ms` with a
 //! `Check` given `health_check_deadline_ms` (the protocol's supervision,
 //! decision 14.63; [`crate::vitals`]): a child is up while it is running
 //! and its health, as last seen by either, is SERVING, and down (its calls
 //! retryable, cause `not-serving`) while it is not, a check unanswered
 //! within its deadline included; a watch that ends reports nothing more.
-//! A described child must report SERVING once it has handshaken, before
-//! it is described; an upcaster sidecar, which is not described, may come
-//! up down. A child down for `unhealthy_grace_ms`, unbroken, is stopped
+//! A child is ready once its health reports SERVING on the socket path the
+//! host chose (`ANGZARR_SOCKET`), within the start limit, and only then is
+//! it described (decision 14.80: there is no handshake line); an upcaster
+//! sidecar, which is not described, is ready once it answers its health at
+//! all, and may come up down. A child down for `unhealthy_grace_ms`, unbroken, is stopped
 //! at the first check (or watch report) past it and launched again at
 //! once, up to `unhealthy_restart_limit` times for its component, a count
 //! that clears once its child has been healthy for `unhealthy_reset_ms`,
@@ -63,7 +66,6 @@ use std::time::Duration;
 
 use angzarr_embedded::{Misconfigured, Registry};
 use angzarr_proto::v1 as pb;
-use tokio::io::BufReader;
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::oneshot;
 
@@ -71,7 +73,6 @@ use crate::config::{
     ComponentKindConfig, Expose, HostConfig, Languages, Launch, Placement, Supervision,
 };
 use crate::error::HostError;
-use crate::handshake::{read_handshake, SOCKET_ENV};
 use crate::remote::{
     causes, Link, RemoteCommandHandler, RemotePolicyHandler, RemoteProjectorHandler, RemoteUpcaster,
 };
@@ -81,6 +82,11 @@ use angzarr_proto_component::v1::component_service_client::ComponentServiceClien
 use tonic_health::pb::health_check_response::ServingStatus;
 use tonic_health::pb::health_client::HealthClient;
 use tonic_health::pb::{HealthCheckRequest, HealthCheckResponse};
+
+/// The environment variable the host sets to the socket path it chose, the
+/// spec's (angzarr-proto-transport-embedded's `child_protocol`; decision
+/// 14.64): the child serves gRPC there.
+pub const SOCKET_ENV: &str = angzarr_proto_transport_embedded::child_protocol::SOCKET_ENV;
 
 /// How a child ended at shutdown.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -191,16 +197,15 @@ struct Supervised {
 
 impl Host {
     /// Starts every remote component of `config` and waits for each to come
-    /// up: launched, handshaken, connected, its gRPC health watched
-    /// (refused, [`HostError::Health`], when it serves none or answers
-    /// nothing within the call timeout) and reporting SERVING
-    /// ([`HostError::NotServing`]), and described, its descriptor of
-    /// the kind its `kind` says ([`HostError::KindMismatch`]; a policy's
-    /// naming its input, [`HostError::NoInput`], a projector's,
-    /// [`HostError::ProjectorNoInputDomain`]; one that
-    /// fails validation, [`HostError::Descriptor`]; one that does not
-    /// answer within the call timeout, [`HostError::Describe`]). An
-    /// upcaster sidecar is not described, and may come up not SERVING:
+    /// up: launched, its gRPC health watch reporting SERVING on the socket
+    /// the host chose within the start limit ([`HostError::NotServing`],
+    /// whose `status` is the last it reported, or `none`, a child serving
+    /// no health or exiting first included), and described, its descriptor of the kind
+    /// its `kind` says ([`HostError::KindMismatch`]; one that fails
+    /// validation, a policy or projector naming no input domain among
+    /// them, [`HostError::Descriptor`]; one that does not answer within
+    /// the call timeout, [`HostError::Describe`]). An upcaster sidecar is
+    /// not described, and may come up not SERVING:
     /// it is handed back down, its upcasts retryable, until it reports
     /// SERVING. One naming no domain to upcast is refused before
     /// any child starts ([`HostError::UpcasterNoDomain`]), as is a
@@ -412,8 +417,13 @@ impl Host {
                     registered.description = Some(description);
                 }
                 Hosted::Policy(handler) => {
-                    let output_domain = &handler.descriptor().output_domain;
-                    registry.policy_component(handler.clone(), output_domain)?;
+                    let output_domain = match handler.descriptor().kind {
+                        Some(pb::component_descriptor::Kind::Policy(policy)) => {
+                            policy.output_domain
+                        }
+                        _ => String::new(),
+                    };
+                    registry.policy_component(handler.clone(), &output_domain)?;
                 }
                 Hosted::Projector(handler) => {
                     registry.projector_handler(&handler.sources(), handler.clone())?;
@@ -478,15 +488,14 @@ impl Drop for Host {
 
 /// Refuses a child whose descriptor is of another kind than its `kind`
 /// says ([`HostError::KindMismatch`]: a domain is an aggregate or a process
-/// manager), and a policy or projector that names no input domain
-/// ([`HostError::NoInput`], a projector's
-/// [`HostError::ProjectorNoInputDomain`]).
+/// manager). A policy or projector naming no input domain is the kernel's
+/// validation's ([`HostError::Descriptor`]).
 fn check_kind(
     domain: &str,
     kind: ComponentKindConfig,
     descriptor: &pb::ComponentDescriptor,
 ) -> Result<(), HostError> {
-    let described = descriptor.kind();
+    let described = angzarr_embedded::kind_of(descriptor);
     let agrees = match kind {
         ComponentKindConfig::Domain => matches!(
             described,
@@ -496,28 +505,16 @@ fn check_kind(
         ComponentKindConfig::Projector => described == pb::ComponentKind::Projector,
         ComponentKindConfig::Upcaster => false,
     };
-    if !agrees {
-        return Err(HostError::KindMismatch {
+    match agrees {
+        true => Ok(()),
+        false => Err(HostError::KindMismatch {
             domain: domain.to_string(),
             configured: kind.as_str().to_string(),
             described: described
                 .as_str_name()
                 .trim_start_matches("COMPONENT_KIND_")
                 .to_string(),
-        });
-    }
-    let no_input = descriptor
-        .inputs
-        .first()
-        .is_none_or(|t| t.domain.is_empty());
-    match kind {
-        ComponentKindConfig::Projector if no_input => Err(HostError::ProjectorNoInputDomain {
-            component: domain.to_string(),
         }),
-        ComponentKindConfig::Policy if no_input => Err(HostError::NoInput {
-            domain: domain.to_string(),
-        }),
-        _ => Ok(()),
     }
 }
 
@@ -530,17 +527,16 @@ fn same_component(
     registered: &pb::ComponentDescriptor,
     described: &pb::ComponentDescriptor,
 ) -> bool {
-    let inputs = |d: &pb::ComponentDescriptor| -> Vec<String> {
-        d.inputs.iter().map(|t| t.domain.clone()).collect()
-    };
     let routed = match kind {
+        // A reader's whole kind is its routing: its inputs and output.
         ComponentKindConfig::Policy | ComponentKindConfig::Projector => {
-            inputs(registered) == inputs(described)
-                && registered.output_domain == described.output_domain
+            registered.kind == described.kind
         }
         ComponentKindConfig::Domain | ComponentKindConfig::Upcaster => true,
     };
-    routed && registered.name == described.name && registered.kind == described.kind
+    routed
+        && registered.name == described.name
+        && angzarr_embedded::kind_of(registered) == angzarr_embedded::kind_of(described)
 }
 
 /// Sends SIGTERM to the child `pid`.
@@ -562,8 +558,9 @@ fn next_backoff(backoff: Duration, max: Duration) -> Duration {
     (backoff * 2).min(max)
 }
 
-/// The longest Unix socket path, in bytes: `sun_path`'s 108, less the NUL
-/// (the spec's, from its `(child_protocol)` option).
+/// The longest Unix socket path, in bytes: the portable minimum of
+/// `sun_path` (macOS and the BSDs' 104), less the NUL (the spec's 103, from
+/// its `(child_protocol)` option; decision 14.108).
 pub const MAX_SOCKET_PATH: usize =
     angzarr_proto_transport_embedded::child_protocol::MAX_SOCKET_PATH_BYTES;
 
@@ -625,7 +622,7 @@ impl Drop for SocketFile {
     }
 }
 
-/// A child that came up: handshaken, connected, its health watched, and
+/// A child that came up: SERVING on its socket, its health watched, and
 /// described (a sidecar is not).
 pub(crate) struct Up {
     child: Child,
@@ -659,34 +656,107 @@ async fn next_health(health: &mut Option<tonic::Streaming<HealthCheckResponse>>)
     }
 }
 
-/// `component`'s health watched on `channel`: the first status it reports,
-/// within `timeout`, and the watch, for every status after. Refused
-/// ([`HostError::Health`]) when the watch fails or reports nothing in
-/// time (`DEADLINE_EXCEEDED`).
-async fn watch_health(
-    component: &str,
-    channel: &tonic::transport::Channel,
-    timeout: Duration,
-) -> Result<(i32, tonic::Streaming<HealthCheckResponse>), HostError> {
-    let failed = |code: tonic::Code| HostError::Health {
-        domain: component.to_string(),
-        grpc_code: code as i32,
-    };
-    let first = async {
-        let mut watch = HealthClient::new(channel.clone())
+/// How often a starting child's socket is tried, beside its check
+/// interval, while nothing listens there.
+const START_POLL: Duration = Duration::from_millis(20);
+
+/// A child's health watch: its channel, and its statuses.
+type Watched = (
+    tonic::transport::Channel,
+    tonic::Streaming<HealthCheckResponse>,
+);
+
+/// A health watch opened on the child's `socket`, given `deadline` on
+/// `clock`: `None` while nothing listens there or answers a watch.
+async fn open_watch(socket: &Path, deadline: Duration, clock: &Clock) -> Option<Watched> {
+    let opened = async {
+        let channel = connect_unix(socket.to_path_buf()).await.ok()?;
+        let watch = HealthClient::new(channel.clone())
             .watch(HealthCheckRequest::default())
             .await
-            .map_err(|status| failed(status.code()))?
+            .ok()?
             .into_inner();
-        match watch.message().await {
-            Ok(Some(response)) => Ok((response.status, watch)),
-            Ok(None) => Err(failed(tonic::Code::Unavailable)),
-            Err(status) => Err(failed(status.code())),
-        }
+        Some((channel, watch))
     };
-    tokio::time::timeout(timeout, first)
-        .await
-        .unwrap_or(Err(failed(tonic::Code::DeadlineExceeded)))
+    tokio::select! {
+        opened = opened => opened,
+        _ = clock.sleep(deadline) => None,
+    }
+}
+
+/// `component`'s child brought to readiness (docs/design/child-protocol.md
+/// §2; decision 14.80: there is no handshake line): its health watched on
+/// the socket the host chose, `socket`, until it reports SERVING (for a
+/// sidecar, `ready_at_any`, until it reports at all), within the start
+/// limit, as the clock tells it a check interval at a time (and, while
+/// nothing listens there, every [`START_POLL`] meanwhile). Refused
+/// ([`HostError::NotServing`]) when the limit passes first, or `child`
+/// exits first: `status` the last status it reported, `none` for none. The
+/// watch, kept as the supervisor's, and whether it is SERVING.
+async fn ready(
+    component: &str,
+    child: &mut Child,
+    socket: &Path,
+    supervision: &Supervision,
+    (clock, hooks): (&Clock, &Hooks),
+    ready_at_any: bool,
+) -> Result<(Watched, bool), HostError> {
+    let limit = Duration::from_millis(supervision.handshake_timeout_ms);
+    let interval = Duration::from_millis(supervision.health_check_interval_ms);
+    let deadline = Duration::from_millis(supervision.health_check_deadline_ms);
+    let started = clock.now();
+    let mut seen: Option<ServingStatus> = None;
+    let not_serving = |seen: Option<ServingStatus>| HostError::NotServing {
+        component: component.to_string(),
+        status: seen.map_or("none", |s| s.as_str_name()).to_string(),
+        timeout_ms: supervision.handshake_timeout_ms,
+    };
+    let mut watched: Option<Watched> = None;
+    loop {
+        if watched.is_none() {
+            watched = tokio::select! {
+                _ = child.wait() => return Err(not_serving(seen)),
+                opened = open_watch(socket, deadline, clock) => opened,
+            };
+        }
+        let waited = clock.now().saturating_sub(started);
+        if waited >= limit {
+            return Err(not_serving(seen));
+        }
+        let pause = interval.min(limit - waited);
+        match watched.as_mut() {
+            Some((_, watch)) => {
+                let reported = tokio::select! {
+                    _ = child.wait() => return Err(not_serving(seen)),
+                    reported = watch.message() => Some(reported),
+                    _ = clock.sleep(pause) => None,
+                };
+                match reported {
+                    Some(Ok(Some(response))) => {
+                        let status = ServingStatus::try_from(response.status)
+                            .unwrap_or(ServingStatus::Unknown);
+                        let serving = status == ServingStatus::Serving;
+                        if serving || ready_at_any {
+                            let watched = watched.take().expect("a watch is open");
+                            return Ok((watched, serving));
+                        }
+                        seen = Some(status);
+                        hooks.starting(status);
+                    }
+                    // The watch ended: opened again at the next turn.
+                    Some(_) => watched = None,
+                    None => {}
+                }
+            }
+            None => {
+                tokio::select! {
+                    _ = child.wait() => return Err(not_serving(seen)),
+                    _ = clock.sleep(pause) => {}
+                    _ = tokio::time::sleep(START_POLL) => {}
+                }
+            }
+        }
+    }
 }
 
 /// Where a test holds every supervisor, to force an interleaving rather
@@ -711,6 +781,10 @@ pub(crate) struct Hooks {
     /// on it: published or withdrawn the child, or stopped it.
     #[cfg(test)]
     judged: Option<mpsc::Sender<crate::vitals::Verdict>>,
+    /// Told, by a starting child's readiness, each health status its
+    /// watch reports before it is ready.
+    #[cfg(test)]
+    starting: Option<mpsc::Sender<ServingStatus>>,
 }
 
 impl Hooks {
@@ -735,6 +809,14 @@ impl Hooks {
         #[cfg(test)]
         if let Some(hold) = &self.reported_up {
             hold.notified().await;
+        }
+    }
+
+    #[cfg_attr(not(test), allow(unused_variables))]
+    fn starting(&self, status: ServingStatus) {
+        #[cfg(test)]
+        if let Some(starting) = &self.starting {
+            let _ = starting.send(status);
         }
     }
 
@@ -989,9 +1071,13 @@ impl Supervisor {
         ChildExit::Killed
     }
 
-    /// Launches the child and brings it up. On a failure the child, if one
-    /// started, is killed and reaped, and its socket file removed, before
-    /// the error is returned.
+    /// Launches the child and brings it up: [`ready`] on the socket the
+    /// host chose, then its health watched and, but for a sidecar, the
+    /// child described and its descriptor checked. Its stdout is its own
+    /// output, never parsed: passed to the host's stderr from its start,
+    /// and drained so the child never blocks on a full pipe. On a failure
+    /// the child, if one started, is killed and reaped, and its socket file
+    /// removed, before the error is returned.
     pub(crate) async fn come_up(&self) -> Result<Up, HostError> {
         let domain = || self.domain.clone();
         let socket = SocketFile::fresh(&self.socket_dir);
@@ -1013,46 +1099,28 @@ impl Supervisor {
             kind: format!("{:?}", e.kind()),
         })?;
         let stdin = child.stdin.take();
-        let mut stdout = BufReader::new(child.stdout.take().expect("stdout is piped"));
-        let timeout = Duration::from_millis(self.supervision.handshake_timeout_ms);
+        let mut stdout = child.stdout.take().expect("stdout is piped");
+        tokio::spawn(async move {
+            let _ = tokio::io::copy(&mut stdout, &mut tokio::io::stderr()).await;
+        });
         let call_timeout = Duration::from_millis(self.supervision.call_timeout_ms);
+        let clock = self.hooks.clock();
+        let sidecar = self.kind == ComponentKindConfig::Upcaster;
         let reached = async {
-            let handshake = read_handshake(&mut stdout, timeout)
-                .await
-                .map_err(|cause| HostError::Handshake {
-                    domain: domain(),
-                    cause,
-                })?;
-            // The child's stdout after its handshake is its own output,
-            // never parsed: from here on passed to the host's stderr, and
-            // drained so the child never blocks on a full pipe, before it
-            // is checked, described or registered.
-            tokio::spawn(async move {
-                let _ = tokio::io::copy(&mut stdout, &mut tokio::io::stderr()).await;
-            });
-            let channel =
-                connect_unix(handshake.socket.clone())
-                    .await
-                    .map_err(|_| HostError::Connect {
-                        domain: domain(),
-                        socket: handshake.socket.display().to_string(),
-                    })?;
-            let (status, watch) = watch_health(&self.domain, &channel, call_timeout).await?;
-            let serving = status == ServingStatus::Serving as i32;
+            let ((channel, watch), serving) = ready(
+                &self.domain,
+                &mut child,
+                &socket,
+                &self.supervision,
+                (&clock, &self.hooks),
+                sidecar,
+            )
+            .await?;
             // An upcaster sidecar has no descriptor (decision 14.39): it
-            // is up while its health reports SERVING, from the first.
-            if self.kind == ComponentKindConfig::Upcaster {
+            // is up while its health reports SERVING.
+            if sidecar {
                 let descriptor = pb::ComponentDescriptor::default();
                 return Ok((channel, descriptor, serving, Some(watch)));
-            }
-            // A child handshakes only once SERVING (the child protocol),
-            // so one described must be.
-            if !serving {
-                return Err(HostError::NotServing {
-                    component: domain(),
-                    status: ServingStatus::try_from(status)
-                        .map_or_else(|_| status.to_string(), |s| s.as_str_name().to_string()),
-                });
             }
             let mut describe =
                 tonic::Request::new(angzarr_proto_component::v1::DescribeRequest::default());

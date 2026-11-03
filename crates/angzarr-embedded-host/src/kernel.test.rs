@@ -5,19 +5,18 @@
 
 use angzarr_diagnostic::{Arg, Diagnostic};
 use angzarr_embedded::angzarr_router::error::CodedError;
+use angzarr_embedded::angzarr_router::hpb;
 use angzarr_embedded::angzarr_router::policy::PolicyDispatch;
 use angzarr_embedded::angzarr_router::router::CommandHandler;
 use angzarr_embedded::v1::{
-    command_page, Command, CommandBook, CommandPage, ComponentDescriptor, ComponentKind,
-    ConflictResolution, ContextualCommand, Cover, EventBook, EventPage, StateDescriptor,
-    StateOptions, Uuid,
+    command_page, component_descriptor, AggregateDescriptor, Command, CommandBook, CommandPage,
+    ComponentDescriptor, Cover, EventPage, StateDescriptor, Uuid,
 };
 use angzarr_embedded::{
     Any, EventStore, Failure, Handled, Kernel, KernelError, MemoryDeadLetters, Misconfigured,
     Recovery, Registry, Sampled, StreamRef, Timestamp, DEAD_LETTER_PREFIX,
 };
 use angzarr_ports::memory::MemoryStore;
-use angzarr_proto::v1::CommandHandlerResponse;
 
 use super::Host;
 use crate::fake_child::{config, domain, mode, noted};
@@ -48,11 +47,11 @@ fn send(domain: &str, n: u8, payload: Any) -> CommandBook {
         page: Some(CommandPage {
             body: Some(command_page::Body::Command(Command {
                 payload: Some(payload),
+                handling: None,
             })),
             command_id: Some(Uuid::from_bytes([n; 16])),
             ..CommandPage::default()
         }),
-        handling: None,
     }
 }
 
@@ -79,16 +78,17 @@ fn block_on<F: std::future::Future>(future: F) -> F::Output {
         .block_on(future)
 }
 
-fn state(type_url: &str) -> Option<StateDescriptor> {
+fn state(type_name: &str) -> Option<StateDescriptor> {
     Some(StateDescriptor {
-        type_url: type_url.to_string(),
-        options: Some(StateOptions {
-            conflict_resolutions: vec![
-                ConflictResolution::Strict as i32,
-                ConflictResolution::AggregateHandles as i32,
-            ],
-        }),
+        type_name: type_name.to_string(),
     })
+}
+
+/// The domain events of `pages`, in order.
+fn events(pages: &[EventPage]) -> Vec<Option<Any>> {
+    (pages.iter())
+        .map(|p| angzarr_embedded::angzarr_router::page_event(p).cloned())
+        .collect()
 }
 
 /// An in-process Rust domain, `table`, hand-written as the router's
@@ -106,16 +106,10 @@ impl CommandHandler for Table {
         vec!["test.table.v1.Seat".to_string()]
     }
 
-    async fn dispatch(&self, _: &ContextualCommand) -> Result<CommandHandlerResponse, CodedError> {
-        Ok(CommandHandlerResponse {
-            conflict: None,
-            events: Some(EventBook {
-                pages: vec![EventPage {
-                    payload: Some(any(&format!("/{SEATED}"))),
-                    ..Default::default()
-                }],
-                ..Default::default()
-            }),
+    async fn dispatch(&self, _: &hpb::HandleRequest) -> Result<hpb::HandleResponse, CodedError> {
+        Ok(hpb::HandleResponse {
+            events: vec![any(&format!("/{SEATED}"))],
+            state: None,
             rules_version: "table-1".to_string(),
         })
     }
@@ -123,12 +117,18 @@ impl CommandHandler for Table {
 
 /// [`Table`]'s descriptor, as angzarr-build generates it.
 fn table_descriptor() -> ComponentDescriptor {
+    descriptor_in("table")
+}
+
+/// [`Table`]'s descriptor, its domain `domain`.
+fn descriptor_in(domain: &str) -> ComponentDescriptor {
     ComponentDescriptor {
         name: "Table".to_string(),
-        kind: ComponentKind::Aggregate as i32,
         rules_version: "table-1".to_string(),
-        state: state("/test.table.v1.State"),
-        ..Default::default()
+        kind: Some(component_descriptor::Kind::Aggregate(AggregateDescriptor {
+            domain: domain.to_string(),
+            state: state("test.table.v1.State"),
+        })),
     }
 }
 
@@ -174,8 +174,7 @@ fn a_remote_command_round_trips_through_the_kernel_into_the_store() {
     .expect("handled");
 
     let written = pages(&store, &cover("player"));
-    let payloads: Vec<_> = written.iter().map(|p| p.payload.clone()).collect();
-    assert_eq!(payloads, [Some(noted(0)), Some(noted(1))]);
+    assert_eq!(events(&written), [Some(noted(0)), Some(noted(1))]);
     assert_eq!(
         written[0].meta.as_ref().map(|m| m.rules_version.as_str()),
         Some(rules_version.as_str())
@@ -196,21 +195,11 @@ fn a_policy_step_from_an_in_process_domain_reaches_the_remote_one() {
     host.register(&mut registry).unwrap();
     registry
         .policy_dispatch(
-            PolicyDispatch::new("table-player", "table", "player").on_event(SEATED, |_, source| {
-                Ok(vec![CommandBook {
-                    cover: Some(Cover {
-                        domain: "player".to_string(),
-                        root: source.and_then(|c| c.root.clone()),
-                        edition: None,
-                    }),
-                    page: Some(CommandPage {
-                        body: Some(command_page::Body::Command(Command {
-                            payload: Some(any("/test.player.v1.SitDown")),
-                        })),
-                        ..Default::default()
-                    }),
-                    handling: None,
-                }])
+            PolicyDispatch::new("table-player", "table", "player").on_event(SEATED, |_, page| {
+                Ok(vec![angzarr_embedded::angzarr_router::policy::command(
+                    page.cover.and_then(|c| c.root.clone()),
+                    any("/test.player.v1.SitDown"),
+                )])
             }),
         )
         .unwrap();
@@ -230,16 +219,11 @@ fn a_policy_step_from_an_in_process_domain_reaches_the_remote_one() {
         "the table's step and the player's"
     );
 
-    let table: Vec<_> = pages(&store, &cover("table"))
-        .into_iter()
-        .map(|p| p.payload)
-        .collect();
-    assert_eq!(table, [Some(any(&format!("/{SEATED}")))]);
-    let player: Vec<_> = pages(&store, &cover("player"))
-        .into_iter()
-        .map(|p| p.payload)
-        .collect();
-    assert_eq!(player, [Some(noted(0))]);
+    assert_eq!(
+        events(&pages(&store, &cover("table"))),
+        [Some(any(&format!("/{SEATED}")))]
+    );
+    assert_eq!(events(&pages(&store, &cover("player"))), [Some(noted(0))]);
     host.shutdown();
 }
 
@@ -300,7 +284,11 @@ fn a_remote_already_exists_is_a_business_rejection() {
         matches!(rejected.args().as_slice(), [("seat", Arg::Str(v))] if v == "3"),
         "its args: {rejected:?}"
     );
-    assert!(rejected.refusal_object().is_some(), "its typed refusal");
+    assert_eq!(
+        rejected.refusal_object(),
+        &crate::fake_child::refusal(),
+        "its typed refusal"
+    );
     assert_eq!(refused.recovery(), Recovery::Business);
     assert!(log.lines().is_empty(), "{:?}", log.lines());
     host.shutdown();
@@ -338,7 +326,11 @@ fn a_remote_internal_failure_under_its_own_code_is_a_dead_lettered_bug() {
         lines[0]
     );
     let letters = log.letters();
-    let reason = letters[0].reason.clone().expect("a reason");
+    let Some(angzarr_embedded::v1::angzarr_dead_letter::Why::Reason(reason)) =
+        letters[0].why.clone()
+    else {
+        panic!("a reason: {letters:?}");
+    };
     assert_eq!(reason.code, "PLAYER_BROKE");
     assert_eq!(letters[0].source_component, "player");
     assert_eq!(
@@ -346,18 +338,7 @@ fn a_remote_internal_failure_under_its_own_code_is_a_dead_lettered_bug() {
         angzarr_embedded::v1::ComponentKind::Aggregate,
         "the child's kind, as its descriptor says"
     );
-    assert_eq!(
-        letters[0].rejection_details,
-        Some(
-            angzarr_embedded::v1::angzarr_dead_letter::RejectionDetails::ProcessingFailed(
-                angzarr_embedded::v1::ProcessingFailedDetails {
-                    failure: Some(reason),
-                    ..Default::default()
-                }
-            )
-        ),
-        "a fatal bug: never retried, not transient"
-    );
+    assert_eq!(letters[0].retry_count, 0, "a fatal bug: never retried");
     assert!(
         pages(&store, &cover("player")).is_empty(),
         "nothing written"
@@ -377,7 +358,7 @@ fn register_is_refused_for_a_domain_registered_already() {
     let host = host();
     let mut registry = Registry::new();
     registry
-        .command_handler("player", Table, table_descriptor())
+        .command_handler("player", Table, descriptor_in("player"))
         .unwrap();
     assert_eq!(
         host.register(&mut registry),
@@ -407,8 +388,8 @@ fn a_restarted_child_is_registered_at_its_new_version_before_it_gets_work() {
         .map(|v| v.to_string())
         .expect("registered");
     let mut generations = handler.generations();
-    let died = block_on(handler.dispatch(&ContextualCommand {
-        command: Some(send("player", 9, any("/test.player.v1.Die"))),
+    let died = block_on(handler.dispatch(&hpb::HandleRequest {
+        input: Some(send("player", 9, any("/test.player.v1.Die"))),
         ..Default::default()
     }));
     assert!(died.is_err(), "the child died mid-call: {died:?}");

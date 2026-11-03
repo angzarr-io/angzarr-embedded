@@ -73,7 +73,7 @@ impl Waits {
 fn three_runs() -> OnRetryable {
     OnRetryable {
         max_retries: 2,
-        max_race_runs: 3,
+        max_race_runs: std::num::NonZeroU32::new(3).unwrap(),
         initial_backoff: std::time::Duration::from_millis(10),
         multiplier: 2.0,
         max_backoff: std::time::Duration::from_secs(1),
@@ -365,8 +365,13 @@ fn a_domains_refusal_comes_back_typed_as_its_rejection() {
     );
     assert_eq!(
         angzarr_diagnostic::Diagnostic::code(rejected.report()),
-        "toy-account-overdrawn",
-        "its code and args are kept, as a remote refusal's are"
+        "ANGZARR_REASON_COMMAND_REFUSED",
+        "a typed refusal, keyed as the wire keys one"
+    );
+    assert_eq!(
+        rejected.refusal_object(),
+        &crate::toys::toy_refusal(&Refused::Overdrawn { short: 8 }),
+        "its object, as a remote refusal's is"
     );
     assert_eq!(rejected.rejection::<String>(), None, "nothing else");
 }
@@ -377,29 +382,34 @@ fn a_failure_that_is_no_rejection_has_no_typed_one() {
     assert_eq!(failure.rejection::<Refused>(), None);
 }
 
-/// A handler that refuses with code and args alone, as a domain in another
-/// process does, refuses with no typed rejection: its report is the
-/// refusal.
+/// A handler that fails under a business status with its own code and
+/// args alone, as a domain in another process may, has not refused
+/// (decision 14.95: only a typed refusal is one): its failure is the
+/// router's error, its key and status kept, with no typed rejection, and
+/// nothing is dead-lettered.
 #[test]
-fn a_refusal_made_of_code_and_args_alone_has_no_typed_rejection() {
-    use crate::angzarr_router::error::{BusinessStatus, CodedError, HandlerError};
+fn a_business_status_with_no_typed_refusal_is_no_refusal() {
+    use crate::angzarr_router::error::{CodedError, GrpcCode, HandlerError};
     let mut registry = crate::Registry::new();
     registry
         .register::<Account>(
             crate::Upcaster::new("account-upcaster", "account"),
             |table| {
                 table.on_command("toy.account.cmd.v1.Open", |_, _, _| {
-                    Err(HandlerError::Coded(CodedError::rejection(
-                        BusinessStatus::FailedPrecondition,
-                        "REMOTE_REFUSED",
-                        [("why".to_string(), "closed".to_string())],
-                    )))
+                    Err(HandlerError::Coded(CodedError {
+                        code: "REMOTE_REFUSED".to_string(),
+                        extras: [("why".to_string(), "closed".to_string())].into(),
+                        grpc: GrpcCode::FailedPrecondition,
+                        refusal: None,
+                    }))
                 })
             },
         )
         .unwrap();
     let store = MemoryStore::new();
+    let log = MemoryDeadLetters::new();
     let failure = Kernel::new(&registry)
+        .log_with(&log)
         .handle::<Account, _>(
             &store,
             command(cover("account", 1), AccountCmd::Open.to_any()),
@@ -408,14 +418,13 @@ fn a_refusal_made_of_code_and_args_alone_has_no_typed_rejection() {
         .ready()
         .err()
         .unwrap();
-    let Failure::Rejected(rejected) = &failure else {
-        panic!("a rejection: {failure:?}");
+    let Failure::Kernel(KernelError::Router(coded)) = &failure else {
+        panic!("the router's error: {failure:?}");
     };
-    assert_eq!(rejected.rejection::<Refused>(), None);
-    assert_eq!(
-        angzarr_diagnostic::Diagnostic::code(rejected.report()),
-        "REMOTE_REFUSED"
-    );
+    assert_eq!(coded.code, "REMOTE_REFUSED");
+    assert_eq!(coded.grpc, GrpcCode::FailedPrecondition);
+    assert_eq!(failure.rejection::<Refused>(), None);
+    assert!(log.lines().is_empty(), "{:?}", log.lines());
 }
 
 // ---------------------------------------------------------------- shaped
@@ -441,8 +450,10 @@ fn a_shaped_command_is_decided_from_the_state_and_sent_at_its_head() {
     let meta = pages(&store, &cover("account", 1))[2].meta.clone().unwrap();
     assert_eq!(
         meta.causation,
-        Some(crate::v1::event_meta::Causation::CommandId(
-            at(30).command_id
+        Some(crate::v1::event_meta::Causation::Command(
+            crate::v1::CommandCause {
+                command_id: Some(at(30).command_id)
+            }
         )),
         "under the sampled command id"
     );
@@ -541,78 +552,6 @@ fn a_shaped_command_that_keeps_losing_is_given_up_at_the_race_cap() {
             std::time::Duration::from_millis(10),
             std::time::Duration::from_millis(20)
         ]
-    );
-}
-
-/// With race re-runs off, the first lost race goes back to the caller as
-/// the stale head it was shaped at.
-#[test]
-fn a_shaped_command_with_race_reruns_off_hands_back_the_first_stale_head() {
-    let registry = registry();
-    let kernel = Kernel::new(&registry).on_retryable(OnRetryable {
-        max_race_runs: 0,
-        ..no_retries()
-    });
-    let other = Kernel::new(&registry);
-    let store = MemoryStore::new();
-    opened(&store, &registry, 1, 40);
-    let shaped = Cell::new(0);
-    let failure = kernel
-        .handle_shaped::<Account, _, _, _>(&store, &cover("account", 1), &at(30), |_| {
-            shaped.set(shaped.get() + 1);
-            other
-                .handle::<Account, _>(&store, deposit(9, 1), &at(29))
-                .ready()
-                .unwrap();
-            (Some(AccountCmd::Deposit(5)), ())
-        })
-        .ready()
-        .err()
-        .expect("stale");
-    assert_eq!(shaped.get(), 1);
-    assert_eq!(
-        failure,
-        Failure::Kernel(KernelError::Stale {
-            stream: cover("account", 1),
-            expected: 2,
-            actual: 3,
-        })
-    );
-}
-
-/// The shape's command is STRICT whatever the domain's default: a stream
-/// moved since it was shaped is stale, never merged.
-#[test]
-fn a_shaped_command_on_a_commutative_domain_is_still_sent_strict() {
-    use crate::toys::{set, Shelf};
-    let registry = registry();
-    let kernel = Kernel::new(&registry).on_retryable(OnRetryable {
-        max_race_runs: 0,
-        ..no_retries()
-    });
-    let store = MemoryStore::new();
-    let shelf = cover("shelf", 1);
-    let send = |n: u128, item: &str| {
-        Kernel::new(&registry)
-            .handle::<Shelf, _>(&store, command(shelf.clone(), set(item, 1)).id(n), &at(20))
-            .ready()
-            .expect("it lands")
-    };
-    send(1, "apples");
-    let failure = kernel
-        .handle_shaped::<Shelf, _, _, _>(&store, &shelf, &at(30), |_| {
-            send(2, "pears");
-            (
-                Some(crate::toys::ShelfCmd::from_any(&set("plums", 1)).unwrap()),
-                (),
-            )
-        })
-        .ready()
-        .err()
-        .expect("stale, not merged");
-    assert!(
-        matches!(failure, Failure::Kernel(KernelError::Stale { .. })),
-        "{failure:?}"
     );
 }
 
@@ -743,16 +682,22 @@ impl crate::angzarr_router::router::CommandHandler for Suspending {
 
     async fn dispatch(
         &self,
-        command: &crate::v1::ContextualCommand,
-    ) -> Result<crate::v1::CommandHandlerResponse, crate::angzarr_router::error::CodedError> {
+        request: &crate::angzarr_router::hpb::HandleRequest,
+    ) -> Result<crate::angzarr_router::hpb::HandleResponse, crate::angzarr_router::error::CodedError>
+    {
         YieldOnce(false).await;
-        let root = command
-            .events
+        let root = request
+            .history
             .as_ref()
             .and_then(|e| e.cover.as_ref())
             .and_then(|c| c.root.as_ref())
             .map_or(0, |r| r.value[15]);
-        match crate::rejection(Mark(root), None) {
+        let refusal = crate::toys::toy_refusal(&Mark(root));
+        match crate::rejection(
+            Mark(root),
+            crate::angzarr_router::error::BusinessStatus::FailedPrecondition,
+            refusal,
+        ) {
             crate::angzarr_router::error::HandlerError::Coded(coded) => Err(coded),
             other => panic!("a coded refusal: {other:?}"),
         }
@@ -767,21 +712,18 @@ fn interleaved_dispatches_each_keep_their_own_refusal() {
     use std::future::Future;
     use std::task::{Context, Poll, Waker};
     let mut registry = crate::Registry::new();
-    use crate::v1::{ComponentDescriptor, ComponentKind, StateDescriptor, StateOptions};
+    use crate::v1::{
+        component_descriptor, AggregateDescriptor, ComponentDescriptor, StateDescriptor,
+    };
     let descriptor = ComponentDescriptor {
         name: "Till".to_string(),
-        kind: ComponentKind::Aggregate as i32,
         rules_version: "till-1".to_string(),
-        state: Some(StateDescriptor {
-            type_url: "/toy.till.v1.State".to_string(),
-            options: Some(StateOptions {
-                conflict_resolutions: vec![
-                    crate::v1::ConflictResolution::Strict as i32,
-                    crate::v1::ConflictResolution::AggregateHandles as i32,
-                ],
+        kind: Some(component_descriptor::Kind::Aggregate(AggregateDescriptor {
+            domain: "till".to_string(),
+            state: Some(StateDescriptor {
+                type_name: "toy.till.v1.State".to_string(),
             }),
-        }),
-        ..ComponentDescriptor::default()
+        })),
     };
     registry
         .command_handler("till", Suspending, descriptor)

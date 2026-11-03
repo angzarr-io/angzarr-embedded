@@ -2,20 +2,22 @@ Feature: Who a policy's command addresses, and the correlation it carries
   A policy sends commands, and the facts its destination declares
   (decision 14.69), to aggregates directly, and to process managers
   (decision 14.36, as amended); every rule below holds for its facts as for
-  its commands. Every command or fact a policy
-  sends, to any target, carries its trigger's correlation_id unchanged:
-  correlation traces the causal chain, and a command carrying another is a
-  policy bug (COORDINATOR_REASON_POLICY_COMMAND_OTHER_CORRELATION). A policy names its
-  command's root for EVERY target, aggregate or process manager alike:
-  nothing fills one in, the router never knows the target's kind, and a
-  command with no root is a policy bug (COORDINATOR_REASON_POLICY_COMMAND_NO_ROOT). The
-  policy's coordinator makes every one of these checks, per triggering
-  page, on the commands the router returns unchecked (decision 14.42), and
-  refuses a command for any domain but the descriptor's output domain.
-  Setting a
-  process manager's root to the trigger's correlation is a convention a
-  policy may follow by writing it. The correlation ids below are UUIDs, as
-  in every scenario (decision 14.18).
+  its commands. A policy's answer is a list of Outputs, each the
+  destination stream's root and the payload in the arm of its kind
+  (io.angzarr.handler.v1.Output; decisions 14.78 and 14.91), and nothing
+  else: the policy's coordinator addresses and stamps every one as a
+  ReactionDelivery (decision 14.79): the destination domain (the
+  descriptor's one output domain), the trigger's edition, the derived
+  command_id, the trigger's correlation_id, the causation (the trigger's
+  EventRef) and the policy's component name (docs/design/policies.md §2,
+  §6). A policy cannot carry another correlation, address another domain,
+  or set an identity or a fact origin: none of those is representable. A
+  policy names its output's root for EVERY target, aggregate or process
+  manager alike: nothing fills one in, and an output with no root is a
+  policy bug (ANGZARR_REASON_POLICY_COMMAND_NO_ROOT). Setting a process
+  manager's root to the trigger's correlation is a convention a policy may
+  follow by writing it. The correlation ids below are UUIDs, as in every
+  scenario (decision 14.18).
 
   Background:
     Given an "order" aggregate "order-1" on the main timeline
@@ -40,9 +42,9 @@ Feature: Who a policy's command addresses, and the correlation it carries
   Scenario Outline: A policy's command naming no root is a policy bug, whatever its target
     Given a policy "<policy>" translating from "order" to "<domain>" that sends <command> with no root on OrderPlaced
     When an OrderPlaced event with correlation "0192a6b0-0000-7000-8000-000000000041" is recorded for order "order-1"
-    Then the <command> command is refused INTERNAL with reason COORDINATOR_REASON_POLICY_COMMAND_NO_ROOT, naming domain "<domain>" and command type <command>
-    And it is dead-lettered and an alert is raised
-    And no root is filled in for it, and nothing is appended to any "<domain>" stream
+    Then the policy's answer is refused INTERNAL with reason ANGZARR_REASON_POLICY_COMMAND_NO_ROOT, naming domain "<domain>" and command_type <command>
+    And nothing is delivered, no root is filled in, and nothing is appended to any "<domain>" stream
+    And the OrderPlaced trigger is dead-lettered with reason ANGZARR_REASON_POLICY_COMMAND_NO_ROOT as rejected_events, and an alert is raised
 
     Examples:
       | policy             | domain      | command          |
@@ -79,63 +81,53 @@ Feature: Who a policy's command addresses, and the correlation it carries
     When an OrderPlaced event with correlation "0192a6b0-0000-7000-8000-000000000045" is recorded for order "order-1"
     Then "inventory" "inv-7" handles ReserveStock with correlation_id "0192a6b0-0000-7000-8000-000000000045"
     And "Fulfillment" handles StartFulfillment on stream "fulfillment" root "0192a6b0-0000-7000-8000-000000000045" with correlation_id "0192a6b0-0000-7000-8000-000000000045"
-    And each command's causation_id is the OrderPlaced event of "order" "order-1"
+    And each command's ReactionDelivery causation is the OrderPlaced event of "order" "order-1"
+    And no event either command records carries that causation: their causation is the command arm with the command's command_id
 
-  @policy_addressing
-  @C-0666
-  Scenario Outline: A policy's command carrying another correlation is a policy bug, whatever its target
-    Given a policy "<policy>" translating from "order" to "<domain>" that sends <command> to "<domain>" "0192a6b0-0000-7000-8000-0000000000bb" with correlation_id "0192a6b0-0000-7000-8000-000000000099" on OrderPlaced
-    When an OrderPlaced event with correlation "0192a6b0-0000-7000-8000-000000000047" is recorded for order "order-1"
-    Then the <command> command is refused INTERNAL with reason COORDINATOR_REASON_POLICY_COMMAND_OTHER_CORRELATION
-    And it is dead-lettered and an alert is raised
-    And nothing is appended to stream "<domain>" root "0192a6b0-0000-7000-8000-0000000000bb"
+  # C-0666 (a policy's command carrying another correlation refused
+  # under its retired other-correlation key) is retired: an
+  # Output carries no correlation, so the coordinator always stamps the
+  # trigger's (C-0656, C-0660; decision 14.78).
 
-    Examples:
-      | policy             | domain      | command          |
-      | OrderToInventory   | inventory   | ReserveStock     |
-      | OrderToFulfillment | fulfillment | StartFulfillment |
-
-  # Moved from handler-contract (decision 14.42): the coordinator, not the
-  # router, refuses a command outside the policy's one destination.
+  # C-0583 (a command for a domain other than the policy's destination
+  # refused POLICY_COMMAND_OUTSIDE_DESTINATION) keeps its id with its
+  # surviving intent: an Output names no domain, so every output goes to
+  # the descriptor's one output domain (decision 14.78).
   @policy_addressing
   @C-0583
-  Scenario: A policy's command for a domain other than its one destination is refused by its coordinator
+  Scenario: Every output of a policy is addressed to its one destination by its coordinator
     Given a policy "OrderToInventory" translating from "order" to "inventory", whose descriptor names output domain "inventory"
-    And its business code answers an OrderPlaced event with a ReserveStock command for "inventory" "inv-7" and a ShipOrder command for "shipping"
+    And its business code answers an OrderPlaced event with two command Outputs, ReserveStock for root "inv-7" and ReserveStock for root "inv-8"
     When an OrderPlaced event with correlation "0192a6b0-0000-7000-8000-000000000048" is recorded for order "order-1"
-    Then the policy's answer is refused INTERNAL with reason COORDINATOR_REASON_POLICY_COMMAND_OUTSIDE_DESTINATION, naming expected_domain "inventory" and actual_domain "shipping"
-    And neither command is delivered
-    And the OrderPlaced trigger is dead-lettered and an alert is raised
+    Then both ReactionDeliveries are addressed to domain "inventory", roots "inv-7" and "inv-8", on the main timeline
+    And nothing is delivered to any other domain
 
-  # Decision 14.48, amended: every dead letter is keyed, so the identity
-  # and fact-origin checks on a policy's reactions carry keys of their own.
-  # Its coordinator stamps a fact's origin (decision 14.69), so business
-  # code sets it on neither arm.
+  # C-0734 (a reaction that set its own identity or carried a fact origin
+  # refused POLICY_COMMAND_OTHER_IDENTITY or POLICY_COMMAND_FACT_ORIGIN)
+  # keeps its id with its surviving intent: an Output is a root and a
+  # payload only, so the coordinator stamps every identity field (decisions
+  # 14.78, 14.79; docs/design/policies.md §6).
   @policy_addressing
   @C-0734
-  Scenario Outline: A policy's reaction that sets its own identity or carries a fact origin is a policy bug
-    Given a policy "OrderToInventory" translating from "order" to "inventory" whose business code answers an OrderPlaced event with a ReserveStock <reaction> for "inventory" "inv-7" that <fault>
-    When an OrderPlaced event with correlation "0192a6b0-0000-7000-8000-000000000049" is recorded for order "order-1"
-    Then the policy's answer is refused INTERNAL with reason <reason>, naming domain "inventory" and command type ReserveStock<field>
-    And nothing is delivered and nothing is appended to stream "inventory" root "inv-7"
-    And the OrderPlaced trigger is dead-lettered with reason <reason> as rejected_events, and an alert is raised
-    And the dead letter's processing_failed details have failure code <reason>, retry_count 0 and is_transient false
+  Scenario Outline: The coordinator stamps every field of a policy's output but its root and payload
+    Given a policy "OrderToInventory" translating from "order" to "inventory" whose business code answers an OrderPlaced event with one <arm> Output ReserveStock for root "inv-7"
+    When an OrderPlaced event with correlation "0192a6b0-0000-7000-8000-000000000049" is recorded for order "order-1" at sequence 3
+    Then the ReactionDelivery's <field> is <value>
 
     Examples:
-      | reaction | fault                                        | reason                                           | field                     |
-      | command  | sets a command_id other than the stamped one | COORDINATOR_REASON_POLICY_COMMAND_OTHER_IDENTITY | , with field command_id   |
-      | command  | sets a causation_id other than the trigger's | COORDINATOR_REASON_POLICY_COMMAND_OTHER_IDENTITY | , with field causation_id |
-      | fact     | carries a fact_origin                        | COORDINATOR_REASON_POLICY_COMMAND_FACT_ORIGIN    |                           |
-      | command  | carries a fact_origin                        | COORDINATOR_REASON_POLICY_COMMAND_FACT_ORIGIN    |                           |
+      | arm     | field          | value                                                                       |
+      | command | cover          | domain "inventory", root "inv-7", the trigger's edition                     |
+      | command | command_id     | the reaction id derived from (the OrderPlaced EventRef, "OrderToInventory", 0) |
+      | command | correlation_id | "0192a6b0-0000-7000-8000-000000000049"                                      |
+      | command | causation      | the EventRef of "order" "order-1" sequence 3                                |
+      | command | component      | "OrderToInventory"                                                          |
+      | fact    | command_id     | the reaction id derived from (the OrderPlaced EventRef, "OrderToInventory", 0) |
+      | fact    | component      | "OrderToInventory"                                                          |
 
-  @policy_addressing
-  @C-0735
-  Scenario: A reaction command carrying a fact origin that reaches its destination is dead-lettered there as a reactor bug
-    Given a policy-emitted ReserveStock command for "inventory" "inv-7" that carries a fact_origin
-    When the "inventory" coordinator processes the command
-    Then the command is not delivered to business code
-    And the command is dead-lettered with reason COORDINATOR_REASON_POLICY_COMMAND_FACT_ORIGIN, domain "inventory" and command_type "ReserveStock", as rejected_command, and an alert is raised
-    And no events are persisted
+  # C-0735 (a reaction command carrying a fact origin dead-lettered at its
+  # destination) is retired: a ReactionDelivery has no fact origin and no
+  # Handling; the destination derives a fact's origin (decision 14.79;
+  # docs/design/pipeline.md §10).
 
   # Decision 14.49: conditions any coordinator may enforce on a policy's
   # reactions, each keyed.
@@ -146,10 +138,9 @@ Feature: Who a policy's command addresses, and the correlation it carries
     And no component of "inventory" is registered with the policy's coordinator, and it knows no coordinator for "inventory"
     And its business code answers an OrderPlaced event with a ReserveStock command for "inventory" "inv-7"
     When an OrderPlaced event with correlation "0192a6b0-0000-7000-8000-000000000050" is recorded for order "order-1"
-    Then the policy's answer is refused INTERNAL with reason COORDINATOR_REASON_POLICY_COMMAND_UNKNOWN_DOMAIN, naming domain "inventory" and command type ReserveStock
+    Then the policy's answer is refused INTERNAL with reason ANGZARR_REASON_POLICY_COMMAND_UNKNOWN_DOMAIN, naming domain "inventory" and command_type ReserveStock
     And nothing is delivered
-    And the OrderPlaced trigger is dead-lettered with reason COORDINATOR_REASON_POLICY_COMMAND_UNKNOWN_DOMAIN as rejected_events, and an alert is raised
-    And the dead letter's processing_failed details have failure code COORDINATOR_REASON_POLICY_COMMAND_UNKNOWN_DOMAIN, retry_count 0 and is_transient false
+    And the OrderPlaced trigger is dead-lettered with reason ANGZARR_REASON_POLICY_COMMAND_UNKNOWN_DOMAIN as rejected_events, retry_count 0, and an alert is raised
 
   @policy_addressing
   @C-0737
@@ -162,5 +153,4 @@ Feature: Who a policy's command addresses, and the correlation it carries
     And a policy "OrderToOrder" translating from "order" to "order" whose business code answers every ItemAdded event with an AddItem command for another order, a new one each time
     When an AddItem command for "order" "order-1" is handled
     Then the reaction at depth 9 is not delivered
-    And the ItemAdded event that triggered it is dead-lettered with reason COORDINATOR_REASON_CHAIN_TOO_DEEP and arg limit "8" as rejected_events, and an alert is raised
-    And the dead letter's processing_failed details have failure code COORDINATOR_REASON_CHAIN_TOO_DEEP, retry_count 0 and is_transient false
+    And the ItemAdded event that triggered it is dead-lettered with reason ANGZARR_REASON_CHAIN_TOO_DEEP and arg limit "8" as rejected_events, retry_count 0, and an alert is raised

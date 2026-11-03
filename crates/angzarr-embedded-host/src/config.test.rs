@@ -329,7 +329,7 @@ fn the_retry_and_policy_settings_are_the_kernels() {
         }),
         OnRetryable {
             max_retries: 5,
-            max_race_runs: 4,
+            max_race_runs: std::num::NonZeroU32::new(4).unwrap(),
             initial_backoff: Duration::from_millis(50),
             multiplier: 3.0,
             max_backoff: Duration::from_millis(1_000),

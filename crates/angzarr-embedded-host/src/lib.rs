@@ -9,14 +9,13 @@
 //!
 //! 1. launches the child with its launch command (the config's, or its
 //!    language's default: [`Language::launched_by`]), `ANGZARR_SOCKET` set
-//!    to the socket path the host chose;
-//! 2. reads its handshake, the one stdout line
-//!    `angzarr-handshake v1 unix:<absolute-socket-path>` ([`handshake`]),
-//!    within a timeout, and from then on drains its stdout to the host's
-//!    stderr;
-//! 3. connects to that socket and watches its gRPC health
-//!    (`grpc.health.v1`, the server's), which must report SERVING before
-//!    it calls `ComponentService.Describe`, refusing a child of another
+//!    to the socket path the host chose (at most 103 bytes), its stdout
+//!    drained to the host's stderr;
+//! 2. waits for it to be ready: its gRPC health (`grpc.health.v1`, the
+//!    server's) reporting SERVING on that socket within the start limit,
+//!    there being no handshake line (decision 14.80), else
+//!    `EMBEDDED_REASON_CHILD_NOT_SERVING`, a child exiting first included;
+//! 3. watches its health, and calls `ComponentService.Describe`, refusing a child of another
 //!    kind than its `kind` says, and one whose descriptor fails the
 //!    kernel's one validation (`angzarr_embedded::validate_descriptor`,
 //!    the rules a Rust registration meets too); an upcaster sidecar is not
@@ -53,7 +52,6 @@ pub mod app;
 pub mod config;
 pub mod error;
 pub mod exposure;
-pub mod handshake;
 pub mod host;
 pub mod probe;
 pub mod remote;
@@ -68,7 +66,7 @@ pub use config::{
     ComponentConfig, ComponentKindConfig, Expose, HostConfig, Language, Languages, Launch,
     Placement, StoreConfig, Supervision,
 };
-pub use error::{HandshakeError, HostError};
+pub use error::{Embedded, HostError};
 pub use exposure::{Arrival, NotExposed, Unserved};
 pub use host::{ChildExit, Host};
 pub use probe::{probe, Input, Outcome, Probed, Step, PROBE_ROOT};

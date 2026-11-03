@@ -1,84 +1,54 @@
-//! Same-stream concurrency is optimistic (red, design-by-test; the owner's
+//! Same-stream concurrency is optimistic (design-by-test; the owner's
 //! ruling of 2026-10-30): two commands to one stream at once both load and
 //! both decide; the store takes the first write and refuses the second
-//! (`StoreError::Conflict`). What the loser comes to depends on whether it
-//! said what it expected:
+//! (`StoreError::Conflict`). The loser is run again on the new head, under
+//! the race re-run cap (decision 14.84), and what that run comes to
+//! depends on whether it said what it expected:
 //!
-//! - **No expected sequence** (`CommandBook.handling.expected_sequence`
-//!   unset): the kernel stamped the head it loaded, so the loss is the
-//!   kernel's own race. It re-loads and decides again on the new head,
-//!   under the retry policy, and succeeds.
-//! - **An expected sequence**: the caller decided against a head that is
-//!   gone. The loss is the same condition as the early check's stale
-//!   sequence (`KernelError::Stale`, the stream already past it at load),
-//!   and gets the same answer (the owner's ruling, 2026-10-30): ABORTED,
-//!   class BusinessImmediate (decision 14.37: a direct caller gets it at
-//!   once; a policy step is run again under the retry cap), under
-//!   `COORDINATOR_REASON_EXPECTED_SEQUENCE_STALE`, args `expected` and
-//!   `actual`.
+//! - **No expected sequence** (`Command.handling` unset): it is decided
+//!   again on the new head, and succeeds.
+//! - **An expected sequence**: the re-run meets the staleness check
+//!   (decision 14.94), and the head it expected is gone: it is refused
+//!   `ExpectedSequenceMismatch { expected, head }`, FAILED_PRECONDITION
+//!   under `ANGZARR_REASON_COMMAND_REFUSED`, before its handler runs again,
+//!   the same refusal as a command already behind at load.
 //!
 //! Each test forces the race: both commands' handlers wait at a barrier
 //! that only the two of them together can pass, so both have loaded the
 //! same head before either writes. No sleep decides the outcome.
 
-use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Barrier, Mutex};
 
-use angzarr_proto::v1::CommandHandlerResponse;
 use angzarr_router::error::{CodedError, GrpcCode};
+use angzarr_router::hpb::{HandleRequest, HandleResponse};
 use angzarr_router::router::CommandHandler;
 
 use crate::toys::prelude::*;
-use crate::toys::{at, command, command_id, cover};
+use crate::toys::{at, command, command_id, cover, mismatch_of, Edit};
 use crate::v1::{
-    CommandBook, ComponentDescriptor, ComponentKind, ConflictResolution, ContextualCommand,
-    EventBook, EventPage, Handling, StateDescriptor, StateOptions,
+    component_descriptor, AggregateDescriptor, AngzarrReason, CommandBook, ComponentDescriptor,
+    StateDescriptor,
 };
-use crate::{
-    class, Any, Class, Failure, Handled, Kernel, KernelError, MemoryDeadLetters, Recovery,
-    Registry, Rejected,
-};
+use crate::{Any, Failure, Handled, Kernel, MemoryDeadLetters, Recovery, Registry, Rejected};
 
-/// The reason key a stale expected sequence is answered with: the full
-/// name of `CoordinatorReason::ExpectedSequenceStale` (decision 14.45).
-fn expected_sequence_stale() -> &'static str {
-    angzarr_proto::v1::CoordinatorReason::ExpectedSequenceStale.as_str_name()
-}
-
-/// `failure` is the coordinator's stale expected sequence for stream
-/// `cover("till", 1)`, `expected` against `actual`: the kernel's
-/// `Stale`, answered on the wire as ABORTED (BusinessImmediate) under
-/// [`expected_sequence_stale`], its sequences as args; for a direct
-/// caller, a retry (re-read and re-issue).
-fn assert_stale(failure: &Failure<Rejected>, expected: u64, actual: u64) {
-    assert_eq!(
-        failure,
-        &Failure::Kernel(KernelError::Stale {
-            stream: cover("till", 1),
-            expected,
-            actual,
-        })
-    );
-    let Failure::Kernel(error) = failure else {
-        unreachable!()
+/// `failure` is the coordinator's stale refusal, `expected` against the
+/// head `head`: a typed refusal, `ExpectedSequenceMismatch`, answered
+/// FAILED_PRECONDITION under ANGZARR_REASON_COMMAND_REFUSED, the caller's
+/// business (re-read and re-decide).
+fn assert_stale(failure: &Failure<Rejected>, expected: u64, head: u64) {
+    let Failure::Rejected(rejected) = failure else {
+        panic!("refused: {failure:?}");
     };
-    let coded = error.as_coded().expect("one of the coordinator's answers");
-    assert_eq!(coded.code, expected_sequence_stale());
-    assert_eq!(coded.grpc, GrpcCode::Aborted);
-    assert_eq!(class(coded.grpc as i32), Class::BusinessImmediate);
+    assert_eq!(mismatch_of(rejected), Some((expected, head)));
+    let coded = rejected.as_coded();
+    assert_eq!(coded.code, AngzarrReason::CommandRefused.as_str_name());
+    assert_eq!(coded.grpc, GrpcCode::FailedPrecondition);
     assert_eq!(
-        coded.extras,
-        BTreeMap::from([
-            ("actual".to_string(), actual.to_string()),
-            ("expected".to_string(), expected.to_string()),
-            (
-                "stream".to_string(),
-                "till/0a000000-0000-0000-0000-000000000001".to_string(),
-            ),
-        ])
+        coded.extras.get("refusal_type").map(String::as_str),
+        Some("io.angzarr.v1.ExpectedSequenceMismatch")
     );
-    assert_eq!(failure.recovery(), Recovery::Retry);
+    assert_eq!(failure.recovery(), Recovery::Business);
 }
 
 /// How many of the first dispatches meet at the barrier: the two racing
@@ -115,24 +85,15 @@ impl CommandHandler for &'static Racing {
         vec!["toy.till.v1.Ring".to_string()]
     }
 
-    async fn dispatch(
-        &self,
-        command: &ContextualCommand,
-    ) -> Result<CommandHandlerResponse, CodedError> {
+    async fn dispatch(&self, request: &HandleRequest) -> Result<HandleResponse, CodedError> {
         if self.dispatched.fetch_add(1, Ordering::SeqCst) < RACERS {
             self.barrier.wait();
         }
-        let seen = command.events.as_ref().map_or(0, |e| e.pages.len());
+        let seen = request.history.as_ref().map_or(0, |e| e.pages.len());
         self.saw.lock().unwrap().push(seen);
-        Ok(CommandHandlerResponse {
-            conflict: None,
-            events: Some(EventBook {
-                pages: vec![EventPage {
-                    payload: Some(any("/toy.till.v1.Rung")),
-                    ..EventPage::default()
-                }],
-                ..EventBook::default()
-            }),
+        Ok(HandleResponse {
+            events: vec![any("/toy.till.v1.Rung")],
+            state: None,
             rules_version: "till-1".to_string(),
         })
     }
@@ -148,18 +109,13 @@ fn any(type_url: &str) -> Any {
 fn till_descriptor() -> ComponentDescriptor {
     ComponentDescriptor {
         name: "Till".to_string(),
-        kind: ComponentKind::Aggregate as i32,
         rules_version: "till-1".to_string(),
-        state: Some(StateDescriptor {
-            type_url: "/toy.till.v1.State".to_string(),
-            options: Some(StateOptions {
-                conflict_resolutions: vec![
-                    ConflictResolution::Strict as i32,
-                    ConflictResolution::AggregateHandles as i32,
-                ],
+        kind: Some(component_descriptor::Kind::Aggregate(AggregateDescriptor {
+            domain: "till".to_string(),
+            state: Some(StateDescriptor {
+                type_name: "toy.till.v1.State".to_string(),
             }),
-        }),
-        ..ComponentDescriptor::default()
+        })),
     }
 }
 
@@ -169,11 +125,10 @@ fn ring(n: u128, expected: Option<u64>) -> CommandBook {
     if let Some(page) = book.page.as_mut() {
         page.command_id = Some(command_id(n));
     }
-    book.handling = expected.map(|expected| Handling {
-        expected_sequence: Some(expected),
-        conflict_resolution: ConflictResolution::Strict as i32,
-    });
-    book
+    match expected {
+        Some(expected) => book.expecting(expected),
+        None => book,
+    }
 }
 
 /// `books` handled at once, each on a thread of its own with a runtime
@@ -247,13 +202,12 @@ fn a_lost_race_without_an_expected_sequence_is_retried_on_the_new_head() {
 }
 
 /// Both commands expected the empty stream (sequence 0): both pass the
-/// check, both decide, one write wins. The loser decided against a head
-/// that is gone: the coordinator's stale expected sequence, 0 against 1,
-/// returned to this direct caller at once (its handler ran once, it is not
-/// re-decided) and never dead-lettered. The stream holds the winner's
-/// event only.
+/// check, both decide, one write wins. The loser is run again, and its
+/// re-run meets the staleness check: refused ExpectedSequenceMismatch, 0
+/// against the head 1, before its handler runs again, and never
+/// dead-lettered. The stream holds the winner's event only.
 #[test]
-fn a_lost_race_with_an_expected_sequence_is_a_stale_expected_sequence() {
+fn a_lost_race_with_an_expected_sequence_is_refused_on_its_rerun() {
     let racing: &'static Racing = Box::leak(Box::new(Racing::new()));
     let registry = registry_of(racing);
     let log = MemoryDeadLetters::new();
@@ -275,17 +229,17 @@ fn a_lost_race_with_an_expected_sequence_is_a_stale_expected_sequence() {
     assert_eq!(
         racing.dispatched.load(Ordering::SeqCst),
         RACERS,
-        "the loser is not re-decided"
+        "the loser's re-run is refused before its handler"
     );
     assert_eq!(pages(&store, &cover("till", 1)).len(), 1);
     assert!(log.lines().is_empty(), "{:?}", log.lines());
 }
 
-/// The early check: a command expecting sequence 0 of a stream already at
-/// 1 is refused before its handler runs, with the same answer as a lost
-/// race: the coordinator's stale expected sequence, 0 against 1.
+/// The check at load: a command expecting sequence 0 of a stream already
+/// at 1 is refused before its handler runs, with the same refusal as a
+/// lost race's re-run: ExpectedSequenceMismatch, 0 against the head 1.
 #[test]
-fn an_expected_sequence_already_passed_is_a_stale_expected_sequence() {
+fn an_expected_sequence_already_passed_is_refused_before_its_handler() {
     let racing: &'static Racing = Box::leak(Box::new(Racing::new()));
     // Past the barrier: no race here, every dispatch passes.
     racing.dispatched.store(RACERS, Ordering::SeqCst);
@@ -306,7 +260,7 @@ fn an_expected_sequence_already_passed_is_a_stale_expected_sequence() {
     let late = runtime
         .block_on(kernel.handle_any(&store, ring(2, Some(0)), &at(2)))
         .err()
-        .expect("stale");
+        .expect("refused");
     assert_stale(&late, 0, 1);
     assert_eq!(
         racing.dispatched.load(Ordering::SeqCst),

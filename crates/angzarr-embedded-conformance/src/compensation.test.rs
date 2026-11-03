@@ -9,7 +9,7 @@
 use std::fmt;
 
 use angzarr_embedded::markup::{
-    CommandTarget, Compensation, DomainMessage, EventSource, Ingests, TypeName,
+    CommandTarget, Compensation, DomainMessage, EventSource, Ingests, TypeName, UndoTargetsCommand,
 };
 use angzarr_embedded::WireError;
 use cucumber::{given, then, when};
@@ -73,14 +73,12 @@ pub(crate) enum Event {
     ShipmentFailed(String),
     StockReleaseDue,
     RefundDue,
-    CompensationFailed(String),
 }
 
 impl fmt::Display for Event {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Event::ShipmentFailed(reason) => write!(f, "ShipmentFailed {reason:?}"),
-            Event::CompensationFailed(step) => write!(f, "CompensationFailed {step:?}"),
             other => write!(f, "{other:?}"),
         }
     }
@@ -142,19 +140,16 @@ impl EventSource for Payment {
 impl Ingests<RefundPayment> for Payment {}
 
 /// One scenario: the shipment's state, which undo "reserve stock" becomes,
-/// its compensation once registered, and what it recorded.
+/// its compensation once registered (or registration's refusal), and what
+/// it recorded.
 #[derive(Default, cucumber::World)]
 pub(crate) struct Shipment {
     state: ShipmentState,
     /// "reserve stock"'s undo becomes RestockItems, a command, not
     /// ReleaseStock.
     restocks: bool,
-    compensation: Option<Compensation<ShipmentState, Event>>,
+    registered: Option<Result<Compensation<ShipmentState, Event>, UndoTargetsCommand>>,
     recorded: Vec<Event>,
-    /// A refusal's handling recorded nothing, and so is dead-lettered: a
-    /// handling either records events or is dead-lettered, never both
-    /// (decision 38 (a)).
-    dead_lettered: bool,
 }
 
 impl fmt::Debug for Shipment {
@@ -167,12 +162,12 @@ impl fmt::Debug for Shipment {
 }
 
 /// The shipment's steps, in order, with "reserve stock"'s undo becoming
-/// RestockItems where `restocks`, else ReleaseStock.
-fn steps(restocks: bool) -> Compensation<ShipmentState, Event> {
+/// RestockItems where `restocks`, else ReleaseStock; refused at
+/// registration where an undo becomes a command.
+fn steps(restocks: bool) -> Result<Compensation<ShipmentState, Event>, UndoTargetsCommand> {
     let compensation = Compensation::new(
         |_: &ShipmentState, reason: String| Event::ShipmentFailed(reason),
         |state: &ShipmentState| state.failed,
-        |_: &ShipmentState, step: &str| Event::CompensationFailed(step.to_string()),
     );
     let reserved = |state: &ShipmentState| {
         (!state.reservation_id.is_empty()).then(|| StockReserved {
@@ -184,7 +179,7 @@ fn steps(restocks: bool) -> Compensation<ShipmentState, Event> {
         compensation.step::<Inventory, RestockItems, _>("reserve stock", reserved, release)
     } else {
         compensation.step::<Inventory, ReleaseStock, _>("reserve stock", reserved, release)
-    };
+    }?;
     compensation.step::<Payment, RefundPayment, _>(
         "charge payment",
         |state: &ShipmentState| {
@@ -197,10 +192,18 @@ fn steps(restocks: bool) -> Compensation<ShipmentState, Event> {
 }
 
 impl Shipment {
-    /// Its compensation, registered on first use (the shipment starting).
-    fn compensation(&mut self) -> &Compensation<ShipmentState, Event> {
+    /// Its steps' registration, on first use (the shipment starting).
+    fn registration(&mut self) -> &Result<Compensation<ShipmentState, Event>, UndoTargetsCommand> {
         let restocks = self.restocks;
-        self.compensation.get_or_insert_with(|| steps(restocks))
+        self.registered.get_or_insert_with(|| steps(restocks))
+    }
+
+    /// Its compensation, registered.
+    fn compensation(&mut self) -> &Compensation<ShipmentState, Event> {
+        match self.registration() {
+            Ok(compensation) => compensation,
+            Err(refused) => panic!("registration refused: {refused}"),
+        }
     }
 
     /// The step `name` completed in the state.
@@ -259,31 +262,7 @@ fn reply(w: &mut Shipment) {
 
 #[when("the shipment process manager starts")]
 fn starts(w: &mut Shipment) {
-    let _ = w.compensation();
-}
-
-#[when(regex = r#"^the refusal of its "test\.compensation\.RestockItems" reaches the shipment$"#)]
-fn refused(w: &mut Shipment) {
-    let state = w.state.clone();
-    w.recorded = w
-        .compensation()
-        .undo_refused::<RestockItems>(&state)
-        .into_iter()
-        .collect();
-    w.dead_lettered = w.recorded.is_empty();
-}
-
-#[then("the handling succeeds")]
-fn handling_succeeds(w: &mut Shipment) {
-    assert!(
-        !w.recorded.is_empty(),
-        "the handling recorded nothing: {w:?}"
-    );
-}
-
-#[then("nothing is dead-lettered for the refusal")]
-fn nothing_dead_lettered(w: &mut Shipment) {
-    assert!(!w.dead_lettered, "{w:?}");
+    let _ = w.registration();
 }
 
 /// `listed`, "A, B and C" or "A and B" or "A", as each event's text.
@@ -302,23 +281,22 @@ fn records(w: &mut Shipment, events: String) {
     assert_eq!(recorded, listed(&events));
 }
 
-#[then("registration reports no warning")]
-fn no_warning(w: &mut Shipment) {
-    assert!(w.compensation().warnings().is_empty(), "{w:?}");
+#[then("registration succeeds")]
+fn registration_succeeds(w: &mut Shipment) {
+    if let Err(refused) = w.registration() {
+        panic!("registration refused: {refused}");
+    }
 }
 
-#[then(regex = r#"^registration warns that the undo of "([^"]+)" targets the command "([^"]+)"$"#)]
-fn warns(w: &mut Shipment, name: String, command: String) {
-    let warnings: Vec<(String, String)> = w
-        .compensation()
-        .warnings()
-        .iter()
-        .map(|warning| (warning.step.to_string(), warning.command.clone()))
-        .collect();
-    assert_eq!(warnings, [(name, command)]);
-}
-
-#[then(regex = r#"^it records CompensationFailed for "([^"]+)"$"#)]
-fn compensation_failed(w: &mut Shipment, name: String) {
-    assert_eq!(w.recorded, [Event::CompensationFailed(name)]);
+#[then(
+    regex = r#"^registration is refused, naming the step "([^"]+)" and its undo's target, the command "([^"]+)"$"#
+)]
+fn registration_refused(w: &mut Shipment, name: String, command: String) {
+    let Err(refused) = w.registration() else {
+        panic!("registration succeeded: {w:?}");
+    };
+    assert_eq!(
+        (refused.step, refused.command.as_str()),
+        (name.as_str(), command.as_str())
+    );
 }

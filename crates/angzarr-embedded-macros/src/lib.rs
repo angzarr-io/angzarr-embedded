@@ -1,24 +1,24 @@
 //! Decorators over hand-written components. [`aggregate`] and
 //! [`process_manager`] generate, from the impl's [`handles_cmd`],
-//! [`handles_fact`], [`on_refused`] and [`applies`] markers, the runtime
-//! glue that runs a domain on angzarr-embedded (its `angzarr_embedded::Domain` and
+//! [`handles_fact`] and [`applies`] markers, the runtime glue that runs a
+//! domain on angzarr-embedded (its `angzarr_embedded::Domain` and
 //! `angzarr_embedded::State` impls, routing by type URL), a nameable
 //! `<Name>Handler` trait, and its constants. [`policy`] generates a policy's
-//! `angzarr_embedded::markup::Policy`, its refusal pass-through included, and
-//! [`projector`] a projector's `AsyncProjector`. Hand-writing `Domain`
-//! stays first-class; this is a way of writing one, not a layer over it:
-//! the expansion calls only `angzarr_embedded::markup`'s documented,
-//! stable public functions (`run_command`, `decode_message`,
-//! `policy_answer`, ...), so anything it writes can be written by hand
-//! (angzarr-embedded's `src/hand_written.test.rs` does).
+//! `angzarr_embedded::markup::Policy`, its one Translate callback
+//! ([`on_refused`]) included, and [`projector`] a projector's
+//! `AsyncProjector`. Hand-writing `Domain` stays first-class; this is a way
+//! of writing one, not a layer over it: the expansion calls only
+//! `angzarr_embedded::markup`'s documented, stable public functions
+//! (`run_command`, `decode_message`, `policy_answer`, ...), so anything it
+//! writes can be written by hand (angzarr-embedded's
+//! `src/hand_written.test.rs` does).
 //!
 //! Every component written here assumes nothing about distribution: the
 //! same aggregate, process manager, policy or projector runs in angzarr-embedded's
 //! process or as its own service, with no change to its code.
 //!
 //! angzarr-embedded's `src/decorated.test.rs` runs the expansion; the
-//! `compile_fail` examples here pin what it refuses. angzarr-embedded does not run a
-//! policy yet: that comes with the kernel's committed-step dispatch.
+//! `compile_fail` examples here pin what it refuses.
 //!
 //! # Where it sits
 //!
@@ -30,13 +30,12 @@
 //!    `#[handles_cmd(Cmd)]` handler per command typed from its `emits` and
 //!    `refuses` (and marked `starts` where the proto says so), one
 //!    `#[applies(Event)]` per event; and, for a policy, the `#[policy]`
-//!    impl, with an `#[on_refused(Cmd)]` callback per command whose refusal
-//!    it may translate, which declines unless the user's implementation
-//!    translates it. Each delegates to a generated trait; `angzarr scaffold
-//!    rust` writes the user's implementation of it once, `todo!()` bodies,
-//!    and never overwrites it. Every handler returns its events; a
-//!    continuation step (below) is the user's to add, where a later event
-//!    depends on an earlier one's state.
+//!    impl with its one `#[on_refused]` Translate callback over the
+//!    refusals of its target's commands. Each delegates to a generated
+//!    trait; `angzarr scaffold rust` writes the user's implementation of it
+//!    once, `todo!()` bodies, and never overwrites it. Every handler
+//!    returns its events; a continuation step (below) is the user's to add,
+//!    where a later event depends on an earlier one's state.
 //! 3. The user writes the bodies.
 //! 4. This macro generates the glue, the trait and the constants.
 //!
@@ -49,8 +48,8 @@
 //! ```text
 //! #[aggregate(domain = "wallet", snapshot = WalletSnapshot)]
 //! impl Wallet {
-//!     #[handles_cmd(Deposit)]
-//!     fn deposit(&self, cmd: Deposit, ctx: &Context) -> Result<Emit<Self>, Refused> { .. }
+//!     #[handles_cmd(Deposit)] // lists no refusal: it cannot refuse
+//!     fn deposit(&self, cmd: Deposit, ctx: &Context) -> Result<Emit<Self>, Failed<Unrefusable>> { .. }
 //!
 //!     #[handles_cmd(Hold, refuses(InsufficientFunds, WalletClosed))]
 //!     fn hold(&self, cmd: Hold, ctx: &Context) -> Result<Held, Refuses<Self, Hold>> { .. }
@@ -67,10 +66,6 @@
 //!   - `domain`: the `Domain::NAME`, a string literal;
 //!   - `snapshot` (optional): the prost message the aggregate is
 //!     snapshotted as;
-//!   - `rejection` (optional): the domain's own, message-only rejection.
-//!     By default it is inferred from the `Result` types of the command
-//!     handlers without `refuses`, which must agree (`Infallible` when
-//!     there are none);
 //!   - `vis` (optional, default `pub`): the visibility of the generated
 //!     `<Name>Handler` trait. An impl does not carry its type's
 //!     visibility, so the scaffold writes the struct's here.
@@ -88,49 +83,47 @@
 //!     not compile.
 //! - [`process_manager`], on an inherent impl: the same arguments; see
 //!   *Process managers*.
-//! - [`handles_cmd`]`(Cmd)`, one per command (a request: refusable):
+//! - [`handles_cmd`]`(Cmd)`, one per command (a request: it may fail):
 //!   `fn(&self, cmd: Cmd, ctx: &Context) -> Result<R, E>`, where `R` is an
 //!   `Emits` shape: an event `E`, a tuple `(E1, E2, ..)` of up to four,
 //!   `Option<E>`, `Vec<E>`, or an `Emit<Self>` with a continuation whose
 //!   steps are fallible too. A variable list of different types is not a
-//!   shape (deferred). `E` is the domain's own rejection, or, with
-//!   `refuses(T, ..)`, `Refuses<Self, Cmd>` (see *Typed refusals*).
-//!   On a process manager, `starts` marks a starting input.
+//!   shape (deferred). `E` is `Failed<Unrefusable>` for a command that
+//!   lists no refusal, which cannot refuse (decision 14.95), or, with
+//!   `refuses(T, ..)`, `Refuses<Self, Cmd>` (see *Typed refusals*). On a
+//!   process manager, `starts` marks a starting input.
 //! - [`handles_fact`]`(Fact)`, one per fact (a reaction's or the outside
 //!   world's: not refusable; "if it can't be refused, it's a fact"):
 //!   `fn(&self, fact: Fact, ctx: &Context) -> R`, with no `Result`, where
 //!   `R` is a shape or a `Record<Self>`, whose continuation steps return no
 //!   `Result` either. A refusal is an event the handler records. On a
 //!   process manager, `starts` marks a starting input.
-//! - [`on_refused`]`(Cmd)`, one per command of another domain that a policy
-//!   sent on this domain's behalf and whose refusals it handles: a fact
-//!   handler, `fn(&self, refused: CommandRefused<Cmd>, ctx: &Context) ->
-//!   Result<R, E>`, always a `Result`, its `ctx` the router's context of
-//!   the refusal fact: it cannot refuse, but its `Err` (any `Diagnostic`)
-//!   is a bug, dead-lettered as its policy's failure,
-//!   `StepError::PolicyFailed` (see *Refusals*).
 //!
 //!   The marker says which a method is, and the macro holds the signature
-//!   to it: a `#[handles_cmd]` or `#[on_refused]` without a `Result`, a
-//!   `#[handles_fact]` with one, or either fact handler with an `Emit`,
-//!   whose steps may refuse, does not compile.
+//!   to it: a `#[handles_cmd]` without a `Result`, a `#[handles_fact]` with
+//!   one, or a fact handler with an `Emit`, whose steps may refuse, does
+//!   not compile.
 //! - [`applies`]`(Event)`, one per event: `fn(&mut self, event: Event)`,
 //!   or `fn(&mut self, event: Event, page: &PageContext)` to read where
 //!   the event sits, as a handler reads its `&Context`: its stream's cover,
-//!   its sequence and its whole `EventMeta` (`recorded_at`, its cause,
-//!   correlation, fact origin and rules version; for an event of the
+//!   its sequence and its whole `EventMeta` (`recorded_at`, its cause and
+//!   a fact's origin, correlation and rules version; for an event of the
 //!   decision being made, the metadata it is stamped with when it
 //!   commits, so the state decided is the state replayed).
 //! - `rooted_by = field` on a [`handles_cmd`]: the command's `field` (a
 //!   `String`, or anything `AsRef<str>`) is its natural key, and the
 //!   stream's root must be that key's UUIDv5 under the domain
 //!   (`Context::rooted_by`, as `Cover::natural` addresses it); a command
-//!   sent elsewhere is refused `angzarr-embedded-not-its-stream`,
-//!   INVALID_ARGUMENT, before its handler runs.
+//!   sent elsewhere fails before its handler runs, as a bug
+//!   (`angzarr-embedded-not-its-stream` the cause of
+//!   ANGZARR_REASON_UNHANDLED_HANDLER_ERROR): it is no typed refusal of the
+//!   command's.
 //!
-//! There are no other markers on a domain. Stateless rules are not a
-//! marker: refusing has no side effects, because the application creates
-//! what a command needs inside the same unit of work its events commit in.
+//! There are no other markers on a domain: a refusal of a policy's command
+//! reaches that policy's Translate callback, never a domain, so a domain's
+//! `#[on_refused]` does not compile. Stateless rules are not a marker:
+//! refusing has no side effects, because the application creates what a
+//! command needs inside the same unit of work its events commit in.
 //!
 //! ## The instance is the aggregate
 //!
@@ -170,99 +163,94 @@
 //! handler returns `Emit::of(e).then(Self::step)`. A step is a pure
 //! `&self` method, `fn(&self, ctx: &Context) -> Result<R, E>`, with `R`
 //! any `Emits` shape and `E` anything a handler may fail with
-//! (`markup::Fails`: the domain's own rejection or a `Refuses` choice, as
-//! is or as a `Failed`), so a step may chain `.then(..)` again, refuse
-//! under a business status, return at once (`Failed::immediate`), or fail
-//! with a bug, fatal or retryable (`Failed::bug`,
-//! `Failed::retryable_bug`).
+//! (`markup::Fails`: a `Refuses` choice, as is or as a `Failed`, or a
+//! `Failed<Unrefusable>`), so a step may chain `.then(..)` again, refuse
+//! with one of its command's typed refusals, return at once
+//! (`Failed::immediate`), or fail with a bug, fatal or retryable
+//! (`Failed::bug`, `Failed::retryable_bug`).
 //!
 //! The router applies the events, calls the step on the updated instance,
-//! applies what it returns, and repeats until there is no continuation.
-//! All of it is **one decision**: a rejection from the handler or any step
+//! applies what it returns, and repeats until there is no continuation:
+//! the markup's `Emit` runs as angzarr-router's own (decision 14.104). All
+//! of it is **one decision**: a refusal from the handler or any step
 //! refuses it all, a bug from any of them fails it all (dead-lettered as
 //! the handler's bug), and every step's events are committed together, in
-//! order, in one commit. A decision that runs more than
-//! `angzarr_embedded::markup::STEP_LIMIT` steps is a bug (a step that always
-//! continues): the kernel's `TooManySteps`, nothing committed. A step must
-//! be idempotent on its own result (re-run there, it emits nothing);
+//! order, in one commit. There is no step cap: a step that always
+//! continues never ends, so a step must be idempotent on its own result
+//! (re-run there, it emits nothing);
 //! `angzarr_embedded::markup::assert_step_idempotent` is the test helper.
-//!
-//! angzarr's client-side router runs continuations with the same
-//! semantics: events applied, step called on the updated instance, one
-//! decision, one commit, the same cap.
 //!
 //! ## Commands and facts
 //!
 //! If it can't be refused, it is a fact. A **command** (a request: a user,
-//! a CLI, an API, a policy) may be refused, so its handler returns
-//! `Result`, and a refusal goes back to the caller, the domain recording
-//! nothing. A **fact** (a timeout, a webhook, an import, a refusal fact
-//! from a policy) already happened and is never refused: its handler
-//! returns no `Result` and always records an outcome, a refusal included,
-//! as an event (`PayoutRefused`). A fact's step cannot fail; only a bug
-//! can. angzarr-router hands a fact to its fact handler, a command to its
-//! command handler, each registered on the router's table by the
-//! expansion (`markup::Routed`).
+//! a CLI, an API, a policy) may be refused, if it lists its typed refusals,
+//! so its handler returns `Result`, and a refusal goes back to the caller,
+//! the domain recording nothing. A **fact** (a timeout, a webhook, an
+//! import, a refusal fact from a policy) already happened and is never
+//! refused: its handler returns no `Result` and always records an outcome,
+//! a refusal included, as an event (`PayoutRefused`). A fact's step cannot
+//! fail; only a bug can. angzarr-router hands a fact to its fact handler, a
+//! command to its command handler, each registered on the router's table by
+//! the expansion (`markup::Routed`).
 //!
 //! A fact's continuations are infallible too: its handler returns a
 //! `Record<Self>`, `Record::of(e).then(Self::step)`, whose step is
 //! `fn(&self, ctx: &Context) -> R` with no `Result`, `R` a shape or
 //! another `Record`. Same semantics as `Emit`'s (applied, then the step on
-//! the updated instance, one decision, the same cap), but nothing in it
+//! the updated instance, one decision, no step cap), but nothing in it
 //! can refuse.
 //!
 //! ## Typed refusals
 //!
-//! A command's handler may refuse with a business-specific, TYPED refusal
-//! object, the markup's spelling of the proto's `(command).refuses`:
-//! `#[handles_cmd(Hold, refuses(InsufficientFunds, WalletClosed))]`. Each
-//! listed type is a domain type of the command's own domain (a
-//! `DomainMessage`, never an event) and an `angzarr_diagnostic::Diagnostic`,
-//! whose message is the refusal's. The handler's `Err` is then
+//! A command refuses only with a business-specific, TYPED refusal object
+//! (decision 14.95), the markup's spelling of the proto's
+//! `(command).refuses`: `#[handles_cmd(Hold, refuses(InsufficientFunds,
+//! WalletClosed))]`. Each listed type is a domain type of the command's own
+//! domain (a `DomainMessage`, never an event). The handler's `Err` is then
 //! `Refuses<Self, Hold>`, a choice the macro builds of exactly those
 //! types, each `From` its type: `Err(InsufficientFunds { .. }.into())`. An
-//! object not listed does not compile. To refuse under a business status
-//! other than FAILED_PRECONDITION, or to fail with a bug, the `Err` is
-//! `Failed<Refuses<Self, Hold>>` instead:
-//! `Err(Failed::rejected(InsufficientFunds { .. }).with_status(..))`,
-//! `Err(Failed::bug(&broke))`, the list still checked.
+//! object not listed does not compile. It goes out as
+//! `ANGZARR_REASON_COMMAND_REFUSED` (its `refusal_type` the object's type,
+//! the object in the status details) under FAILED_PRECONDITION; to refuse
+//! under the business status the refusal message declares, when it is
+//! another, or to fail with a bug, the `Err` is `Failed<Refuses<Self, Hold>>`
+//! instead: `Err(Failed::rejected(InsufficientFunds { .. }).with_status(..))`,
+//! `Err(Failed::bug(&broke))`, the list still checked. A marked-up domain's
+//! `Domain::Rejection` is `markup::TypedRefusal`: what its caller matches.
+//!
+//! A command that lists no refusal cannot refuse (C-0674): its handler's
+//! `Err` is `Failed<Unrefusable>`, which holds a bug, an immediate return or
+//! a retryable bug only. A domain's own untyped rejection does not
+//! compile.
 //!
 //! ## Four ways to fail
 //!
 //! A command handler's or a step's `Failed` is one of decision 14.37's
 //! four classes, and its status says which:
 //!
-//! - `Failed::rejected(..)` (business, fatal): a refusal under a business
-//!   status (FAILED_PRECONDITION, or another of the six with
-//!   `.with_status(..)`), to the caller or the issuing policy's refusal
-//!   path; never retried.
+//! - `Failed::rejected(..)` (business, fatal): a typed refusal under a
+//!   business status (FAILED_PRECONDITION, or another of the six with
+//!   `.with_status(..)`), to the caller or the issuing policy's Translate
+//!   callback; never retried.
 //! - `Failed::immediate(&why)` (business, immediate): ABORTED under
 //!   `why`'s own code, "re-read and re-decide": back to an outside caller
 //!   at once; a policy's step, whose caller is the kernel, is reloaded and
 //!   run again under the capped backoff, then dead-lettered.
-//! - `Failed::bug(&broke)` (bug, fatal): INTERNAL ROUTER_REASON_UNHANDLED_HANDLER_ERROR,
-//!   `broke`'s code as its `cause`; dead-lettered at once.
+//! - `Failed::bug(&broke)` (bug, fatal): INTERNAL
+//!   ANGZARR_REASON_UNHANDLED_HANDLER_ERROR, `broke`'s code as its `cause`;
+//!   dead-lettered at once.
 //! - `Failed::retryable_bug(status, &down)` (bug, retryable): the
-//!   `markup::RetryableStatus` the handler picks, ROUTER_REASON_UNHANDLED_HANDLER_ERROR,
-//!   `down`'s code as its `cause`; retried with capped backoff, then
-//!   dead-lettered with its `retry_count`. The statuses are not
-//!   interchangeable: `Unavailable` means resend (the dependency is down
-//!   for now); `DeadlineExceeded` means resend only if the call is
-//!   idempotent, since the work may have happened (a command is, by its
-//!   `command_id`); `ResourceExhausted` means wait longer before resending
-//!   (a quota or a capacity limit was hit).
+//!   `markup::RetryableStatus` the handler picks,
+//!   ANGZARR_REASON_UNHANDLED_HANDLER_ERROR, `down`'s code as its `cause`;
+//!   retried with capped backoff, then dead-lettered with its
+//!   `retry_count`. The statuses are not interchangeable: `Unavailable`
+//!   means resend (the dependency is down for now); `DeadlineExceeded`
+//!   means resend only if the call is idempotent, since the work may have
+//!   happened (a command is, by its `command_id`); `ResourceExhausted`
+//!   means wait longer before resending (a quota or a capacity limit was
+//!   hit).
 //!
-//! Neither an immediate return nor a bug ever reaches a policy's refusal
-//! path.
-//!
-//! A command handler without `refuses` refuses with the domain's own
-//! rejection, a message only. Either way the domain's `Domain::Rejection`
-//! is `markup::Rejection<R>`: `Message(R)`, the domain's own rejection as
-//! returned, or `Typed`, the object packed with its diagnostic. A refused
-//! policy receives either as angzarr's `RefusalResponse { refusal, message
-//! }` (`Rejection::response`). On angzarr the glue converts it with
-//! `Into<CommandRejectedError>`, packing the object into the status
-//! details.
+//! Neither an immediate return nor a bug ever reaches a policy's Translate.
 //!
 //! ## Process managers
 //!
@@ -290,16 +278,20 @@
 //!   Only an input marked `starts`
 //!   (`#[handles_cmd(StartBuyIn, starts)]`, `#[handles_fact(F, starts)]`)
 //!   may start an instance; `STARTS` lists them. Any other input for a
-//!   correlation with no instance is not delivered: a fact is skipped
-//!   silently, a command refused (`COORDINATOR_REASON_PM_NO_INSTANCE`), recording nothing.
-//!   `starts` on an aggregate's handler does not compile. A process
-//!   manager that marks no input `starts` can never start an instance,
-//!   yet angzarr-embedded does not refuse it: the check is angzarr-cli's, a
-//!   generator warning, because a proc macro on stable Rust cannot warn,
-//!   and a compile error would be stricter than the spec.
+//!   root with no instance is not delivered, FAILED_PRECONDITION
+//!   `ANGZARR_REASON_PM_NO_INSTANCE`, recording nothing: a command is
+//!   answered so, a fact dead-lettered. `starts` on an aggregate's handler
+//!   does not compile. A process manager that marks no input `starts` can
+//!   never start an instance, yet angzarr-embedded does not refuse it: the
+//!   check is angzarr-cli's, a generator warning, because a proc macro on
+//!   stable Rust cannot warn, and a compile error would be stricter than
+//!   the spec.
 //!
 //! Deduplication is by command id and fact id, before the handler runs,
 //! as for any domain, and it has the one handler context every domain has.
+//! Its rollback is `markup::Compensation`'s (decision 14.74): every undo
+//! becomes a fact of its destination, and a step whose undo becomes a
+//! command is refused at registration (decision 14.83).
 //!
 //! ## Policies
 //!
@@ -309,6 +301,9 @@
 //!     #[on_event(BuyInStarted)]
 //!     fn started(&self, event: &BuyInStarted, ctx: &PolicyContext)
 //!         -> Result<Commands<Wallet>, Infallible> { .. }
+//!
+//!     #[on_refused]
+//!     fn refused(&self, refused: &Refused) -> Result<BuyInRefused, Unhandled> { .. }
 //! }
 //! ```
 //!
@@ -319,10 +314,13 @@
 //!   domain's command set): one source, one target.
 //! - [`on_event`]`(Event)`, one per event of the source it handles:
 //!   `fn(&self, event: &Event, ctx: &PolicyContext) -> Result<Commands<Target>, E>`,
-//!   pure, each command one the target decides, with the root of its
-//!   stream (for a process manager, `ctx.correlation_id()`). It always
-//!   returns `Result`; `E` is any `Diagnostic` (`Infallible` for a handler
-//!   that cannot fail).
+//!   pure, called once per trigger event, each command one the target
+//!   decides and each fact one it ingests, with the root of its stream (for
+//!   a process manager, `ctx.correlation_id()`). It always returns
+//!   `Result`; `E` is any `Diagnostic` (`Infallible` for a handler that
+//!   cannot fail).
+//! - [`on_refused`], on at most one method: the policy's ONE Translate
+//!   callback (decision 14.89), `fn(&self, refused: &Refused) -> Result<F, E>`.
 //!
 //! **Policies should not fail for business reasons**: they react to events
 //! the application's own domains created, so an `Err` is a bug, an event
@@ -336,67 +334,40 @@
 //!
 //! ## Refusals
 //!
-//! When a target refuses a policy's command, it records nothing. The policy
-//! then delivers ONE unrefusable fact of the refusal to its OWN source
-//! domain, at the exact stream of its triggering event, whose id is the
-//! refused command's id; the source decides what the refusal means and
-//! records its own events. By one of two paths, chosen per command:
+//! When a target refuses a policy's command with a typed refusal, it
+//! records nothing, and the refusal takes ONE path (decision 46 #5): the
+//! policy's Translate callback is handed it, a `markup::Refused`: the
+//! refused command as it was delivered (`refused.command::<Hold>()`,
+//! `refused.delivery()`), the target's typed refusal and the status it
+//! travelled as (`refused.refusal::<InsufficientFunds>()`,
+//! `refused.status()`), and the trigger with its metadata
+//! (`refused.trigger()`, `refused.meta()`). It answers `F`, a fact its
+//! source ingests (`markup::Translation`: `Ingests<F>` for the source),
+//! which the kernel delivers to the exact stream of the triggering event
+//! with the refused command's id; the source records its own events, never
+//! referring to the target's types. A callback returning anything else
+//! does not compile. A refusal the callback does not handle is its `Err`,
+//! any `Diagnostic`: a bug, as an `#[on_event]` handler's is, dead-lettered
+//! with the refused command, and the policy's position moves past the
+//! trigger.
 //!
-//! - **Pass-through** (the default). The policy's generated
-//!   `Policy::on_refused` answers angzarr's standard `CommandRefused {
-//!   command, refusal, trigger }`, the typed refusal object still packed.
-//!   The source handles it in `#[on_refused(Cmd)]`, chosen by the refused
-//!   command's type, unpacking the object
-//!   (`refused.refusal::<InsufficientFunds>()`); it imports the target's
-//!   types to do so. Which refusals a domain handles is inferred from its
-//!   `#[on_refused]` handlers (`REFUSALS` lists them): one with no handler
-//!   is caught at run time: the steps before it stay committed, and the
-//!   refusal fact is dead-lettered and alerted. The handler's `Err` is a
-//!   bug, as a policy's own is: the step fails as `StepError::PolicyFailed`,
-//!   is dead-lettered by its code and args, and the policy's position
-//!   moves past the trigger. A `CommandRefused` from outside a policy is
-//!   accepted when its trigger names the receiving stream.
-//! - **Translate**, for each command the policy has a callback for:
-//!   `#[on_refused(Hold)] fn(&self, refusal: &Refusal<Hold>, ctx:
-//!   &CommandContext) -> Result<F, E>` on the policy's impl reads the typed
-//!   object, and the refused command's context, whole, as its target's
-//!   handler was handed it (its cover, sequences, history, resolution,
-//!   conflict and identity), and returns `F`, a fact its source
-//!   ingests, so the source never refers to the target's types. A callback
-//!   returning `Result<Option<F>, E>` may decline: its `None` passes that
-//!   refusal through, as for a command with no callback
-//!   (`markup::Translation`). A callback returning anything else does not
-//!   compile. Its `Err`, any `Diagnostic`,
-//!   is a bug, as an `#[on_event]` handler's is, and so is a refused
-//!   command of the callback's type that does not decode: the step fails as
-//!   `StepError::PolicyFailed`, is dead-lettered by its code and args, and
-//!   the policy's position moves past the trigger. One marker,
-//!   `#[on_refused(Cmd)]`, names both the source's handler and the policy's
-//!   callback.
+//! There is no pass-through and no declining. A policy with no callback
+//! answers every refusal with the bug `ANGZARR_REASON_NO_REFUSAL_HANDLER`
+//! (the `markup::Policy::on_refused` default), and the refused command is
+//! dead-lettered. A framework refusal (a stream not forked in its edition,
+//! a process manager with no instance) is no typed refusal and never
+//! reaches Translate: it is dead-lettered.
 //!
-//! The callback's PRESENCE is the selection: nothing else marks the mode,
-//! and `TRANSLATES` lists the commands the policy has callbacks for. It is
-//! fixed at compile time, but for a callback that declines (answers
-//! `None`), which passes that one refusal through: angzarr-cli's generated
-//! trait gives every refusable command such a callback by default, and the
-//! implementation's override translates. Nothing about it is visible at run
-//! time beyond which fact arrives.
-//!
-//! The trade-off: deleting a policy's callback
-//! silently reverts that command to pass-through. The source then receives
-//! `CommandRefused`, and if it has no `#[on_refused]` handler for that
-//! command, the refusal is a run-time dead letter, not a compile error.
-//!
-//! ## Context, rejections and domain types
+//! ## Context, refusals and domain types
 //!
 //! Every domain handler and step takes the one `Context`: the instant its
 //! events will be recorded at (`ctx.recorded_at()`), and, as its public
 //! field `ctx.command`, angzarr-router's whole `CommandContext` for the
 //! input: the stream it decides (`ctx.command.cover`), the next sequence,
-//! whether the stream has history, the sequence the command was issued
-//! against, its conflict resolution, under AGGREGATE_HANDLES the conflict
-//! to acknowledge (`ctx.command.conflict`), and the input's identity (its
-//! command id, its correlation, and a fact's origin).
+//! whether the stream has history, the input's arm (a command's expected
+//! sequence as sent, a fact's origin), its identity (its command id and
+//! correlation), and, for a policy's input, its causation, the event the
+//! policy reacted to.
 //!
 //! Commands and events are **domain types** (angzarr-codegen's domain
 //! layer), each a `DomainMessage` naming the prost message it travels as.
@@ -418,11 +389,11 @@
 //! With `snapshot = Msg`, the user writes `From<&Wallet> for Msg` and
 //! `fn restore(&mut self, snapshot: Msg) -> Result<(), E>` (`E` a
 //! `Diagnostic`), and the macro generates the `State` impl from them, with
-//! `Msg`'s type URL as the state's and STRICT and AGGREGATE_HANDLES as its
-//! resolutions. Resuming builds a fresh instance from the factory, then
-//! restores it, so the configuration the snapshot does not hold survives.
-//! Without `snapshot`, the state has no snapshot form (`State::SNAPSHOTS`
-//! is `false`), and every load replays from the start.
+//! `Msg`'s full name as the state's type. Resuming builds a fresh instance
+//! from the factory, then restores it, so the configuration the snapshot
+//! does not hold survives. Without `snapshot`, the state has no snapshot
+//! form (`State::SNAPSHOTS` is `false`), and every load replays from the
+//! start.
 //!
 //! # The expansion
 //!
@@ -436,8 +407,7 @@
 //! // `event = ..` name none).
 //! mod __wallet_markup {
 //!     pub enum Command { Deposit(Deposit), .. }
-//!     pub enum Fact { Payout(Payout), .. } // and angzarr's CommandRefused, by
-//!                                          // the refused command's type
+//!     pub enum Fact { Payout(Payout), .. }
 //!     pub enum Event { Deposited(Deposited), .. }
 //!     // impl Payload for each: decode by type URL (the type's
 //!     // DomainMessage::Wire), then DomainMessage::from_wire.
@@ -445,7 +415,7 @@
 //! }
 //!
 //! // For each command with `refuses`: the choice, `From` each listed
-//! // type, `Into` the domain's rejection.
+//! // type, `Into` a TypedRefusal, and its `Fails`.
 //! pub enum __WalletHoldRefuses { InsufficientFunds(InsufficientFunds), .. }
 //! impl Refusing<Hold> for Wallet { type Refuses = __WalletHoldRefuses; const REFUSES = ..; }
 //!
@@ -465,7 +435,7 @@
 //!     type Command = __wallet_markup::Command;
 //!     type Fact = __wallet_markup::Fact;
 //!     type Event = __wallet_markup::Event;
-//!     type Rejection = markup::Rejection<Refused>; // Refused inferred
+//!     type Rejection = markup::TypedRefusal;
 //!     const NAME: &'static str = "wallet";
 //!     // The crate's build version, as angzarr-build's descriptor has it.
 //!     const RULES_VERSION: &'static str = env!("CARGO_PKG_VERSION");
@@ -481,17 +451,16 @@
 //! // Every marked handler, registered on angzarr-router's table for the
 //! // domain (`DomainDispatch<Wallet>`, which the registry builds, folding
 //! // with `apply`): each command handler by its command's full name, run by
-//! // `markup::run_command` (the handler's events, then each continuation on a
-//! // working copy with them applied, up to STEP_LIMIT steps; a refusal as
-//! // the router's business rejection, its typed object packed); each fact
-//! // handler by `markup::run_fact`; each `#[on_refused(C)]` by the router's
-//! // `on_refused`. (A process manager's `starts` inputs are its
+//! // `markup::run_command` (the handler's decision as the router's `Emit`,
+//! // which the router runs to its end; a refusal as the router's typed
+//! // refusal, its object packed); each fact handler by `markup::run_fact`.
+//! // (A process manager's `starts` inputs are its
 //! // `markup::ProcessManager::STARTS`, not routes.)
 //! impl markup::Routed for Wallet {
 //!     fn route(table: DomainDispatch<Wallet>) -> DomainDispatch<Wallet> {
 //!         table
 //!             .on_command("toy.wallet.cmd.v1.Deposit", |any, state, cctx| {
-//!                 markup::run_command::<Wallet, _, Deposit, _, _>(any, &*state, cctx, Wallet::deposit)
+//!                 markup::run_command::<Wallet, Deposit, _, _>(any, state, cctx, Wallet::deposit)
 //!             })
 //!             ..
 //!     }
@@ -502,34 +471,35 @@
 //! /// The domain's handler set, as a type, with the `vis` given: every
 //! /// marked method's signature, implemented by delegating to it.
 //! pub trait WalletHandler {
-//!     fn deposit(&self, cmd: Deposit, ctx: &Context) -> Result<Emit<Wallet>, Refused>;
+//!     fn deposit(&self, cmd: Deposit, ctx: &Context) -> Result<Emit<Wallet>, Failed<Unrefusable>>;
 //!     fn deposited(&mut self, event: Deposited);
 //!     ..
 //! }
 //! impl WalletHandler for Wallet { .. }
 //!
 //! impl Wallet {
-//!     /// The handled commands and facts, the commands whose refusals it
-//!     /// handles, and the applied events, in marker order.
+//!     /// The handled commands and facts, and the applied events, in
+//!     /// marker order.
 //!     pub const HANDLES: &'static [TypeName] = &[TypeName::of::<<Deposit as DomainMessage>::Wire>(), ..];
-//!     pub const REFUSALS: &'static [TypeName] = &[..];
 //!     pub const APPLIES: &'static [TypeName] = &[..];
 //! }
 //! ```
 //!
 //! A policy's expansion is its `markup::Policy` impl: `NAME`, `Source`,
-//! `Target`, `EVENTS`, `TRANSLATES`, and `on_refused`, which unpacks the
-//! refused command and either builds the pass-through `CommandRefused` or
-//! calls the translating callback.
+//! `Target`, `EVENTS`, `on_event`, which decodes the trigger by its marked
+//! types, and, with an `#[on_refused]` callback, `on_refused`, which hands
+//! it the refusal and packs its fact (`markup::translated_fact`).
 //!
 //! **Refused by the macro**, each with a message saying why: a second
-//! handler or applier for one type; a handler taking `&mut self`;
-//! message-only command handlers whose `Result`s disagree on the
-//! rejection; a marker's type that is not its method's parameter type; a
-//! marked method whose shape is not the one above; a `refuses` type that is
-//! not a domain type; `starts` on an aggregate; a policy's `#[on_refused]`
-//! callback returning anything but a fact of its source; a policy handler's
-//! commands for another domain than its target.
+//! handler or applier for one type; a handler taking `&mut self`; a command
+//! handler that lists no refusal and fails with anything but
+//! `Failed<Unrefusable>`; a marker's type that is not its method's parameter
+//! type; a marked method whose shape is not the one above; a `refuses` type
+//! that is not a domain type; `starts` on an aggregate; an `#[on_refused]`
+//! on a domain; a second `#[on_refused]` on a policy, or one naming a
+//! command; a policy's Translate callback returning anything but a fact of
+//! its source; a policy handler's commands for another domain than its
+//! target.
 //!
 //! Which of the messages is a fact is the marker's to say, and the
 //! signature is checked against it. Checking the marker against the
@@ -537,9 +507,9 @@
 //!
 //! **Not on angzarr-embedded.** [`rejected`] and [`state_factory`],
 //! angzarr-macros' rejection handlers and state factories, are a
-//! `compile_error!` here: a refusal reaches the policy's source as a fact,
-//! handled in `#[on_refused]`, and the instance is built by `Default` or
-//! the registry's factory, as above.
+//! `compile_error!` here: a refusal reaches the policy's one Translate
+//! callback, `#[on_refused]`, and the instance is built by `Default` or the
+//! registry's factory, as above.
 //!
 //! # Examples
 //!
@@ -547,7 +517,7 @@
 //!
 //! ```no_run
 //! # use std::convert::Infallible;
-//! # use angzarr_embedded::markup::{Context, DomainMessage};
+//! # use angzarr_embedded::markup::{Context, DomainMessage, Failed, Unrefusable};
 //! # use angzarr_embedded::WireError;
 //! # use angzarr_embedded_macros::{aggregate, applies, handles_cmd, handles_fact};
 //! # // A compile-only fixture: nothing here runs.
@@ -581,12 +551,12 @@
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
 //!     #[handles_cmd(SwitchOn)]
-//!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<Option<SwitchedOn>, Infallible> {
+//!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<Option<SwitchedOn>, Failed<Unrefusable>> {
 //!         Ok((!self.on).then_some(SwitchedOn))
 //!     }
 //!
 //!     #[handles_cmd(SwitchOff)]
-//!     fn switch_off(&self, _cmd: SwitchOff, _ctx: &Context) -> Result<SwitchedOff, Infallible> {
+//!     fn switch_off(&self, _cmd: SwitchOff, _ctx: &Context) -> Result<SwitchedOff, Failed<Unrefusable>> {
 //!         Ok(SwitchedOff)
 //!     }
 //!
@@ -607,7 +577,7 @@
 //!
 //! ```compile_fail
 //! # use std::convert::Infallible;
-//! # use angzarr_embedded::markup::{Context, DomainMessage};
+//! # use angzarr_embedded::markup::{Context, DomainMessage, Failed, Unrefusable};
 //! # use angzarr_embedded::WireError;
 //! # use angzarr_embedded_macros::{aggregate, applies, handles_cmd, handles_fact};
 //! # // A compile-only fixture: nothing here runs.
@@ -641,17 +611,17 @@
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
 //!     #[handles_cmd(SwitchOn)]
-//!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<Option<SwitchedOn>, Infallible> {
+//!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<Option<SwitchedOn>, Failed<Unrefusable>> {
 //!         Ok((!self.on).then_some(SwitchedOn))
 //!     }
 //!
 //!     #[handles_cmd(SwitchOn)]
-//!     fn switch_on_again(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<SwitchedOn, Infallible> {
+//!     fn switch_on_again(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<SwitchedOn, Failed<Unrefusable>> {
 //!         Ok(SwitchedOn)
 //!     }
 //!
 //!     #[handles_cmd(SwitchOff)]
-//!     fn switch_off(&self, _cmd: SwitchOff, _ctx: &Context) -> Result<SwitchedOff, Infallible> {
+//!     fn switch_off(&self, _cmd: SwitchOff, _ctx: &Context) -> Result<SwitchedOff, Failed<Unrefusable>> {
 //!         Ok(SwitchedOff)
 //!     }
 //!
@@ -667,11 +637,14 @@
 //! }
 //! ```
 //!
-//! Nor do handlers that disagree on the rejection: the domain has one.
+//! Nor does a command handler that lists no refusal and refuses with a
+//! rejection of its own: a command refuses only with the typed refusals it
+//! lists (decision 14.95), so one that lists none fails with
+//! `Failed<Unrefusable>`.
 //!
 //! ```compile_fail
 //! # use std::convert::Infallible;
-//! # use angzarr_embedded::markup::{Context, DomainMessage};
+//! # use angzarr_embedded::markup::{Context, DomainMessage, Failed, Unrefusable};
 //! # use angzarr_embedded::WireError;
 //! # use angzarr_embedded_macros::{aggregate, applies, handles_cmd, handles_fact};
 //! # // A compile-only fixture: nothing here runs.
@@ -705,7 +678,7 @@
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
 //!     #[handles_cmd(SwitchOn)]
-//!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<Option<SwitchedOn>, Infallible> {
+//!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<Option<SwitchedOn>, Failed<Unrefusable>> {
 //!         Ok((!self.on).then_some(SwitchedOn))
 //!     }
 //!
@@ -731,7 +704,7 @@
 //!
 //! ```compile_fail
 //! # use std::convert::Infallible;
-//! # use angzarr_embedded::markup::{Context, DomainMessage};
+//! # use angzarr_embedded::markup::{Context, DomainMessage, Failed, Unrefusable};
 //! # use angzarr_embedded::WireError;
 //! # use angzarr_embedded_macros::{aggregate, applies, handles_cmd, handles_fact};
 //! # // A compile-only fixture: nothing here runs.
@@ -765,12 +738,12 @@
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
 //!     #[handles_cmd(SwitchOn)]
-//!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<Option<SwitchedOn>, Infallible> {
+//!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<Option<SwitchedOn>, Failed<Unrefusable>> {
 //!         Ok((!self.on).then_some(SwitchedOn))
 //!     }
 //!
 //!     #[handles_cmd(wire::SwitchOff)]
-//!     fn switch_off(&self, _cmd: wire::SwitchOff, _ctx: &Context) -> Result<SwitchedOff, Infallible> {
+//!     fn switch_off(&self, _cmd: wire::SwitchOff, _ctx: &Context) -> Result<SwitchedOff, Failed<Unrefusable>> {
 //!         Ok(SwitchedOff)
 //!     }
 //!
@@ -790,7 +763,7 @@
 //!
 //! ```compile_fail
 //! # use std::convert::Infallible;
-//! # use angzarr_embedded::markup::{Context, DomainMessage};
+//! # use angzarr_embedded::markup::{Context, DomainMessage, Failed, Unrefusable};
 //! # use angzarr_embedded::WireError;
 //! # use angzarr_embedded_macros::{aggregate, applies, handles_cmd, handles_fact};
 //! # // A compile-only fixture: nothing here runs.
@@ -824,12 +797,12 @@
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
 //!     #[handles_cmd(SwitchOn)]
-//!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<Option<SwitchedOn>, Infallible> {
+//!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<Option<SwitchedOn>, Failed<Unrefusable>> {
 //!         Ok((!self.on).then_some(SwitchedOn))
 //!     }
 //!
 //!     #[handles_cmd(SwitchOff)]
-//!     fn switch_off(&self, _cmd: SwitchOff, _ctx: &Context) -> Result<SwitchedOff, Infallible> {
+//!     fn switch_off(&self, _cmd: SwitchOff, _ctx: &Context) -> Result<SwitchedOff, Failed<Unrefusable>> {
 //!         self.on = false;
 //!         Ok(SwitchedOff)
 //!     }
@@ -850,7 +823,7 @@
 //!
 //! ```compile_fail
 //! # use std::convert::Infallible;
-//! # use angzarr_embedded::markup::{Context, DomainMessage};
+//! # use angzarr_embedded::markup::{Context, DomainMessage, Failed, Unrefusable};
 //! # use angzarr_embedded::WireError;
 //! # use angzarr_embedded_macros::{aggregate, applies, handles_cmd, handles_fact};
 //! # // A compile-only fixture: nothing here runs.
@@ -884,12 +857,12 @@
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
 //!     #[handles_cmd(SwitchOn)]
-//!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<Option<SwitchedOn>, Infallible> {
+//!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<Option<SwitchedOn>, Failed<Unrefusable>> {
 //!         Ok((!self.on).then_some(SwitchedOn))
 //!     }
 //!
 //!     #[handles_cmd(SwitchOff)]
-//!     fn switch_off(&mut self, _cmd: SwitchOff, _ctx: &Context) -> Result<SwitchedOff, Infallible> {
+//!     fn switch_off(&mut self, _cmd: SwitchOff, _ctx: &Context) -> Result<SwitchedOff, Failed<Unrefusable>> {
 //!         self.on = false;
 //!         Ok(SwitchedOff)
 //!     }
@@ -911,7 +884,7 @@
 //!
 //! ```compile_fail
 //! # use std::convert::Infallible;
-//! # use angzarr_embedded::markup::{Context, DomainMessage};
+//! # use angzarr_embedded::markup::{Context, DomainMessage, Failed, Unrefusable};
 //! # use angzarr_embedded::WireError;
 //! # use angzarr_embedded_macros::{aggregate, applies, handles_cmd, handles_fact};
 //! # // A compile-only fixture: nothing here runs.
@@ -951,12 +924,12 @@
 //!     #[aggregate(domain = "lamp", vis = pub(self))]
 //!     impl Lamp {
 //!         #[handles_cmd(SwitchOn)]
-//!         fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<Option<SwitchedOn>, Infallible> {
+//!         fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<Option<SwitchedOn>, Failed<Unrefusable>> {
 //!             Ok((!self.on).then_some(SwitchedOn))
 //!         }
 //!
 //!         #[handles_cmd(SwitchOff)]
-//!         fn switch_off(&self, _cmd: SwitchOff, _ctx: &Context) -> Result<SwitchedOff, Infallible> {
+//!         fn switch_off(&self, _cmd: SwitchOff, _ctx: &Context) -> Result<SwitchedOff, Failed<Unrefusable>> {
 //!             Ok(SwitchedOff)
 //!         }
 //!
@@ -982,7 +955,7 @@
 //!
 //! ```compile_fail
 //! # use std::convert::Infallible;
-//! # use angzarr_embedded::markup::{Context, DomainMessage, Record};
+//! # use angzarr_embedded::markup::{Context, DomainMessage, Failed, Record, Unrefusable};
 //! # use angzarr_embedded::WireError;
 //! # use angzarr_embedded_macros::{aggregate, applies, handles_cmd, handles_fact};
 //! # // A compile-only fixture: nothing here runs.
@@ -1016,12 +989,12 @@
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
 //!     #[handles_cmd(SwitchOn)]
-//!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<Option<SwitchedOn>, Infallible> {
+//!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<Option<SwitchedOn>, Failed<Unrefusable>> {
 //!         Ok((!self.on).then_some(SwitchedOn))
 //!     }
 //!
 //!     #[handles_fact(PowerCut)]
-//!     fn power_cut(&self, _fact: PowerCut, _ctx: &Context) -> Result<WentDark, Infallible> {
+//!     fn power_cut(&self, _fact: PowerCut, _ctx: &Context) -> Result<WentDark, Failed<Unrefusable>> {
 //!         Ok(WentDark)
 //!     }
 //!
@@ -1037,12 +1010,12 @@
 //! }
 //! ```
 //!
-//! Nor does a command handler without one: a command may be refused, so
-//! its handler says how.
+//! Nor does a command handler without one: a command may fail, so its
+//! handler says how.
 //!
 //! ```compile_fail
 //! # use std::convert::Infallible;
-//! # use angzarr_embedded::markup::{Context, DomainMessage, Record};
+//! # use angzarr_embedded::markup::{Context, DomainMessage, Failed, Record, Unrefusable};
 //! # use angzarr_embedded::WireError;
 //! # use angzarr_embedded_macros::{aggregate, applies, handles_cmd, handles_fact};
 //! # // A compile-only fixture: nothing here runs.
@@ -1102,7 +1075,7 @@
 //!
 //! ```compile_fail
 //! # use std::convert::Infallible;
-//! # use angzarr_embedded::markup::{Context, DomainMessage, Emit};
+//! # use angzarr_embedded::markup::{Context, DomainMessage, Emit, Failed, Unrefusable};
 //! # use angzarr_embedded::WireError;
 //! # use angzarr_embedded_macros::{aggregate, applies, handles_cmd, handles_fact};
 //! # // A compile-only fixture: nothing here runs.
@@ -1136,7 +1109,7 @@
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
 //!     #[handles_cmd(SwitchOn)]
-//!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<Option<SwitchedOn>, Infallible> {
+//!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<Option<SwitchedOn>, Failed<Unrefusable>> {
 //!         Ok((!self.on).then_some(SwitchedOn))
 //!     }
 //!
@@ -1161,7 +1134,7 @@
 //!
 //! ```compile_fail
 //! # use std::convert::Infallible;
-//! # use angzarr_embedded::markup::{Context, DomainMessage, Record};
+//! # use angzarr_embedded::markup::{Context, DomainMessage, Failed, Record, Unrefusable};
 //! # use angzarr_embedded::WireError;
 //! # use angzarr_embedded_macros::{aggregate, applies, handles};
 //! # // A compile-only fixture: nothing here runs.
@@ -1195,7 +1168,7 @@
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
 //!     #[handles(SwitchOn)]
-//!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<Option<SwitchedOn>, Infallible> {
+//!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<Option<SwitchedOn>, Failed<Unrefusable>> {
 //!         Ok((!self.on).then_some(SwitchedOn))
 //!     }
 //!
@@ -1215,7 +1188,7 @@
 //!
 //! ```compile_fail
 //! # use std::convert::Infallible;
-//! # use angzarr_embedded::markup::{Context, DomainMessage};
+//! # use angzarr_embedded::markup::{Context, DomainMessage, Failed, Unrefusable};
 //! # use angzarr_embedded::WireError;
 //! # use angzarr_embedded_macros::{aggregate, applies, handles_cmd, handles_fact};
 //! # // A compile-only fixture: nothing here runs.
@@ -1254,12 +1227,12 @@
 //!     }
 //!
 //!     #[handles_cmd(SwitchOn)]
-//!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<Option<SwitchedOn>, Infallible> {
+//!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<Option<SwitchedOn>, Failed<Unrefusable>> {
 //!         Ok((!self.on).then_some(SwitchedOn))
 //!     }
 //!
 //!     #[handles_cmd(SwitchOff)]
-//!     fn switch_off(&self, _cmd: SwitchOff, _ctx: &Context) -> Result<SwitchedOff, Infallible> {
+//!     fn switch_off(&self, _cmd: SwitchOff, _ctx: &Context) -> Result<SwitchedOff, Failed<Unrefusable>> {
 //!         Ok(SwitchedOff)
 //!     }
 //!
@@ -1275,12 +1248,12 @@
 //! }
 //! ```
 //!
-//! Nor does a `#[rejected]` handler: a refusal reaches the policy's source
-//! as a fact, handled in `#[on_refused]`.
+//! Nor does a `#[rejected]` handler: a refusal reaches the policy's one
+//! Translate callback, `#[on_refused]`.
 //!
 //! ```compile_fail
 //! # use std::convert::Infallible;
-//! # use angzarr_embedded::markup::{Context, DomainMessage};
+//! # use angzarr_embedded::markup::{Context, DomainMessage, Failed, Unrefusable};
 //! # use angzarr_embedded::WireError;
 //! # use angzarr_embedded_macros::{aggregate, applies, handles_cmd, handles_fact};
 //! # // A compile-only fixture: nothing here runs.
@@ -1316,12 +1289,12 @@
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
 //!     #[handles_cmd(SwitchOn)]
-//!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<Option<SwitchedOn>, Infallible> {
+//!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<Option<SwitchedOn>, Failed<Unrefusable>> {
 //!         Ok((!self.on).then_some(SwitchedOn))
 //!     }
 //!
 //!     #[handles_cmd(SwitchOff)]
-//!     fn switch_off(&self, _cmd: SwitchOff, _ctx: &Context) -> Result<SwitchedOff, Infallible> {
+//!     fn switch_off(&self, _cmd: SwitchOff, _ctx: &Context) -> Result<SwitchedOff, Failed<Unrefusable>> {
 //!         Ok(SwitchedOff)
 //!     }
 //!
@@ -1344,7 +1317,7 @@
 //!
 //! ```compile_fail
 //! # use std::convert::Infallible;
-//! # use angzarr_embedded::markup::{Context, DomainMessage};
+//! # use angzarr_embedded::markup::{Context, DomainMessage, Failed, Unrefusable};
 //! # use angzarr_embedded::WireError;
 //! # use angzarr_embedded_macros::{aggregate, applies, handles_cmd, handles_fact};
 //! # // A compile-only fixture: nothing here runs.
@@ -1380,12 +1353,12 @@
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
 //!     #[handles_cmd(SwitchOn)]
-//!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<Option<SwitchedOn>, Infallible> {
+//!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<Option<SwitchedOn>, Failed<Unrefusable>> {
 //!         Ok((!self.on).then_some(SwitchedOn))
 //!     }
 //!
 //!     #[handles_cmd(SwitchOff)]
-//!     fn switch_off(&self, _cmd: SwitchOff, _ctx: &Context) -> Result<SwitchedOff, Infallible> {
+//!     fn switch_off(&self, _cmd: SwitchOff, _ctx: &Context) -> Result<SwitchedOff, Failed<Unrefusable>> {
 //!         Ok(SwitchedOff)
 //!     }
 //!
@@ -1407,14 +1380,14 @@
 //! ```
 //!
 //! A domain, a process manager and a policy that compile (the control for the
-//! examples below): typed refusals, a starting input, a refusal handler and
-//! a pass-through policy.
+//! examples below): typed refusals, a starting input, and a policy with no
+//! Translate callback (every refusal of its command a bug).
 //!
 //! ```no_run
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::markup::{
-//! #     CommandContext, CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record,
-//! #     Refusal, Refuses,
+//! #     Commands, Context, DomainMessage, Failed, PolicyContext, Record, Refused, Refuses,
+//! #     Unrefusable,
 //! # };
 //! # use angzarr_embedded::WireError;
 //! # use angzarr_embedded_macros::{
@@ -1496,7 +1469,7 @@
 //! #[process_manager(domain = "timer")]
 //! impl Timer {
 //!     #[handles_cmd(StartTimer, starts)]
-//!     fn start(&self, _cmd: StartTimer, _ctx: &Context) -> Result<TimerStarted, Infallible> {
+//!     fn start(&self, _cmd: StartTimer, _ctx: &Context) -> Result<TimerStarted, Failed<Unrefusable>> {
 //!         Ok(TimerStarted)
 //!     }
 //!
@@ -1508,15 +1481,6 @@
 //!     #[handles_fact(LampLost)]
 //!     fn lamp_lost(&self, _fact: LampLost, _ctx: &Context) -> Record<Self> {
 //!         Record::of(Lost)
-//!     }
-//!
-//!     #[on_refused(SwitchOn)]
-//!     fn switch_on_refused(
-//!         &self,
-//!         _refused: CommandRefused<SwitchOn>,
-//!         _ctx: &Context,
-//!     ) -> Result<Record<Self>, Infallible> {
-//!         Ok(Record::of(Lost))
 //!     }
 //!
 //!     #[applies(TimerStarted)]
@@ -1546,8 +1510,8 @@
 //! ```compile_fail
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::markup::{
-//! #     CommandContext, CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record,
-//! #     Refusal, Refuses,
+//! #     Commands, Context, DomainMessage, Failed, PolicyContext, Record, Refused, Refuses,
+//! #     Unrefusable,
 //! # };
 //! # use angzarr_embedded::WireError;
 //! # use angzarr_embedded_macros::{
@@ -1633,8 +1597,8 @@
 //! ```compile_fail
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::markup::{
-//! #     CommandContext, CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record,
-//! #     Refusal, Refuses,
+//! #     Commands, Context, DomainMessage, Failed, PolicyContext, Record, Refused, Refuses,
+//! #     Unrefusable,
 //! # };
 //! # use angzarr_embedded::WireError;
 //! # use angzarr_embedded_macros::{
@@ -1720,8 +1684,8 @@
 //! ```compile_fail
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::markup::{
-//! #     CommandContext, CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record,
-//! #     Refusal, Refuses,
+//! #     Commands, Context, DomainMessage, Failed, PolicyContext, Record, Refused, Refuses,
+//! #     Unrefusable,
 //! # };
 //! # use angzarr_embedded::WireError;
 //! # use angzarr_embedded_macros::{
@@ -1807,8 +1771,8 @@
 //! ```compile_fail
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::markup::{
-//! #     CommandContext, CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record,
-//! #     Refusal, Refuses,
+//! #     Commands, Context, DomainMessage, Failed, PolicyContext, Record, Refused, Refuses,
+//! #     Unrefusable,
 //! # };
 //! # use angzarr_embedded::WireError;
 //! # use angzarr_embedded_macros::{
@@ -1894,8 +1858,8 @@
 //! ```compile_fail
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::markup::{
-//! #     CommandContext, CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record,
-//! #     Refusal, Refuses,
+//! #     Commands, Context, DomainMessage, Failed, PolicyContext, Record, Refused, Refuses,
+//! #     Unrefusable,
 //! # };
 //! # use angzarr_embedded::WireError;
 //! # use angzarr_embedded_macros::{
@@ -1951,7 +1915,7 @@
 //! #[process_manager(name = "timer")]
 //! impl Timer {
 //!     #[handles_cmd(StartTimer, starts)]
-//!     fn start(&self, _cmd: StartTimer, _ctx: &Context) -> Result<TimerStarted, Infallible> {
+//!     fn start(&self, _cmd: StartTimer, _ctx: &Context) -> Result<TimerStarted, Failed<Unrefusable>> {
 //!         Ok(TimerStarted)
 //!     }
 //!
@@ -1963,15 +1927,6 @@
 //!     #[handles_fact(LampLost)]
 //!     fn lamp_lost(&self, _fact: LampLost, _ctx: &Context) -> Record<Self> {
 //!         Record::of(Lost)
-//!     }
-//!
-//!     #[on_refused(SwitchOn)]
-//!     fn switch_on_refused(
-//!         &self,
-//!         _refused: CommandRefused<SwitchOn>,
-//!         _ctx: &Context,
-//!     ) -> Result<Record<Self>, Infallible> {
-//!         Ok(Record::of(Lost))
 //!     }
 //!
 //!     #[applies(TimerStarted)]
@@ -1993,8 +1948,8 @@
 //! ```compile_fail
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::markup::{
-//! #     CommandContext, CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record,
-//! #     Refusal, Refuses,
+//! #     Commands, Context, DomainMessage, Failed, PolicyContext, Record, Refused, Refuses,
+//! #     Unrefusable,
 //! # };
 //! # use angzarr_embedded::WireError;
 //! # use angzarr_embedded_macros::{
@@ -2052,7 +2007,7 @@
 //! #[process_manager(domain = "timer")]
 //! impl Timer {
 //!     #[handles_cmd(StartTimer, starts)]
-//!     fn start(&self, _cmd: StartTimer, _ctx: &Context) -> Result<TimerStarted, Infallible> {
+//!     fn start(&self, _cmd: StartTimer, _ctx: &Context) -> Result<TimerStarted, Failed<Unrefusable>> {
 //!         Ok(TimerStarted)
 //!     }
 //!
@@ -2064,15 +2019,6 @@
 //!     #[handles_fact(LampLost)]
 //!     fn lamp_lost(&self, _fact: LampLost, _ctx: &Context) -> Record<Self> {
 //!         Record::of(Lost)
-//!     }
-//!
-//!     #[on_refused(SwitchOn)]
-//!     fn switch_on_refused(
-//!         &self,
-//!         _refused: CommandRefused<SwitchOn>,
-//!         _ctx: &Context,
-//!     ) -> Result<Record<Self>, Infallible> {
-//!         Ok(Record::of(Lost))
 //!     }
 //!
 //!     #[applies(TimerStarted)]
@@ -2094,8 +2040,8 @@
 //! ```compile_fail
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::markup::{
-//! #     CommandContext, CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record,
-//! #     Refusal, Refuses,
+//! #     Commands, Context, DomainMessage, Failed, PolicyContext, Record, Refused, Refuses,
+//! #     Unrefusable,
 //! # };
 //! # use angzarr_embedded::WireError;
 //! # use angzarr_embedded_macros::{
@@ -2151,15 +2097,14 @@
 //! use angzarr_embedded::markup::process_manager_root;
 //! ```
 //!
-//! A refusal handler (`#[on_refused]` on a domain) is a fact handler that
-//! always returns `Result`: it cannot refuse, but its `Err` is a bug, its
-//! policy's failure. One returning a bare record does not compile.
+//! A domain takes no `#[on_refused]`: a refusal of a policy's command
+//! reaches that policy's Translate callback, never a domain.
 //!
 //! ```compile_fail
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::markup::{
-//! #     CommandContext, CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record,
-//! #     Refusal, Refuses,
+//! #     Commands, Context, DomainMessage, Failed, PolicyContext, Record, Refused, Refuses,
+//! #     Unrefusable,
 //! # };
 //! # use angzarr_embedded::WireError;
 //! # use angzarr_embedded_macros::{
@@ -2215,7 +2160,7 @@
 //! #[process_manager(domain = "timer")]
 //! impl Timer {
 //!     #[handles_cmd(StartTimer, starts)]
-//!     fn start(&self, _cmd: StartTimer, _ctx: &Context) -> Result<TimerStarted, Infallible> {
+//!     fn start(&self, _cmd: StartTimer, _ctx: &Context) -> Result<TimerStarted, Failed<Unrefusable>> {
 //!         Ok(TimerStarted)
 //!     }
 //!
@@ -2229,9 +2174,9 @@
 //!         Record::of(Lost)
 //!     }
 //!
-//!     #[on_refused(SwitchOn)]
-//!     fn switch_on_refused(&self, _refused: CommandRefused<SwitchOn>, _ctx: &Context) -> Record<Self> {
-//!         Record::of(Lost)
+//!     #[on_refused]
+//!     fn switch_on_refused(&self, _refused: &Refused) -> Result<Lost, Infallible> {
+//!         Ok(Lost)
 //!     }
 //!
 //!     #[applies(TimerStarted)]
@@ -2247,15 +2192,15 @@
 //! }
 //! ```
 //!
-//! A policy translating a command's refusals: its `#[on_refused(SwitchOn)]`
-//! callback is the selection, and returns the source's own fact (the control
-//! for the two below).
+//! A policy translating its commands' refusals: its one `#[on_refused]`
+//! Translate callback returns the source's own fact (the control for the
+//! examples below).
 //!
 //! ```no_run
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::markup::{
-//! #     CommandContext, CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record,
-//! #     Refusal, Refuses,
+//! #     Commands, Context, DomainMessage, Failed, PolicyContext, Record, Refused, Refuses,
+//! #     Unrefusable,
 //! # };
 //! # use angzarr_embedded::WireError;
 //! # use angzarr_embedded_macros::{
@@ -2337,7 +2282,7 @@
 //! #[process_manager(domain = "timer")]
 //! impl Timer {
 //!     #[handles_cmd(StartTimer, starts)]
-//!     fn start(&self, _cmd: StartTimer, _ctx: &Context) -> Result<TimerStarted, Infallible> {
+//!     fn start(&self, _cmd: StartTimer, _ctx: &Context) -> Result<TimerStarted, Failed<Unrefusable>> {
 //!         Ok(TimerStarted)
 //!     }
 //!
@@ -2351,13 +2296,267 @@
 //!         Record::of(Lost)
 //!     }
 //!
-//!     #[on_refused(SwitchOn)]
-//!     fn switch_on_refused(
-//!         &self,
-//!         _refused: CommandRefused<SwitchOn>,
-//!         _ctx: &Context,
-//!     ) -> Result<Record<Self>, Infallible> {
-//!         Ok(Record::of(Lost))
+//!     #[applies(TimerStarted)]
+//!     fn started(&mut self, _event: TimerStarted) {}
+//!
+//!     #[applies(Rang)]
+//!     fn rang(&mut self, _event: Rang) {
+//!         self.rang = true;
+//!     }
+//!
+//!     #[applies(Lost)]
+//!     fn lost(&mut self, _event: Lost) {}
+//! }
+//!
+//! #[policy(name = "timer-lamp", source = Timer, target = Lamp)]
+//! impl TimerLamp {
+//!     #[on_event(Rang)]
+//!     fn rang(&self, _event: &Rang, ctx: &PolicyContext) -> Result<Commands<Lamp>, Infallible> {
+//!         Ok(Commands::none().to(ctx.correlation_id().clone(), SwitchOn))
+//!     }
+//!
+//!     #[on_refused]
+//!     fn switch_on_refused(&self, _refused: &Refused) -> Result<LampLost, Infallible> {
+//!         Ok(LampLost)
+//!     }
+//! }
+//! ```
+//!
+//! A policy has ONE Translate callback (decision 14.89): a second does not
+//! compile.
+//!
+//! ```compile_fail
+//! # use std::convert::Infallible;
+//! # use angzarr_embedded::markup::{
+//! #     Commands, Context, DomainMessage, Failed, PolicyContext, Record, Refused, Refuses,
+//! #     Unrefusable,
+//! # };
+//! # use angzarr_embedded::WireError;
+//! # use angzarr_embedded_macros::{
+//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, policy,
+//! # };
+//! # // A compile-only fixture: nothing here runs.
+//! # pub mod wire {
+//! #     macro_rules! wire {
+//! #         ($($name:ident),*) => {$(
+//! #             #[derive(Clone, PartialEq, ::prost::Message)]
+//! #             pub struct $name {}
+//! #             impl ::prost::Name for $name {
+//! #                 const NAME: &'static str = stringify!($name);
+//! #                 const PACKAGE: &'static str = "lamp.v1";
+//! #             }
+//! #         )*};
+//! #     }
+//! #     wire!(SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
+//! #     wire!(StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
+//! # }
+//! # macro_rules! domain {
+//! #     ($($name:ident),*) => {$(
+//! #         #[derive(Clone, Debug)]
+//! #         pub struct $name;
+//! #         impl DomainMessage for $name {
+//! #             type Wire = wire::$name;
+//! #             fn to_wire(&self) -> wire::$name { unimplemented!() }
+//! #             fn from_wire(_: wire::$name) -> Result<Self, WireError> { unimplemented!() }
+//! #         }
+//! #     )*};
+//! # }
+//! # domain!(SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
+//! # domain!(StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
+//! # macro_rules! refusal {
+//! #     ($($name:ident),*) => {$(
+//! #         impl std::fmt::Display for $name {
+//! #             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+//! #                 f.write_str(stringify!($name))
+//! #             }
+//! #         }
+//! #         impl angzarr_diagnostic::Diagnostic for $name {
+//! #             fn code(&self) -> &str { "lamp-refused" }
+//! #             fn args(&self) -> Vec<(&'static str, angzarr_diagnostic::Arg)> { vec![] }
+//! #         }
+//! #     )*};
+//! # }
+//! # refusal!(Burnt, Fused);
+//! # #[derive(Clone, Default)]
+//! # pub struct Lamp { on: bool }
+//! # #[derive(Clone, Default)]
+//! # pub struct Timer { rang: bool }
+//! # pub struct TimerLamp;
+//! #[aggregate(domain = "lamp")]
+//! impl Lamp {
+//!     #[handles_cmd(SwitchOn, refuses(Burnt))]
+//!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<SwitchedOn, Refuses<Self, SwitchOn>> {
+//!         match self.on {
+//!             true => Err(Burnt.into()),
+//!             false => Ok(SwitchedOn),
+//!         }
+//!     }
+//!
+//!     #[handles_fact(PowerCut)]
+//!     fn power_cut(&self, _fact: PowerCut, _ctx: &Context) -> Record<Self> {
+//!         Record::of(WentDark)
+//!     }
+//!
+//!     #[applies(SwitchedOn)]
+//!     fn on(&mut self, _event: SwitchedOn) {
+//!         self.on = true;
+//!     }
+//!
+//!     #[applies(WentDark)]
+//!     fn dark(&mut self, _event: WentDark) {
+//!         self.on = false;
+//!     }
+//! }
+//!
+//! #[process_manager(domain = "timer")]
+//! impl Timer {
+//!     #[handles_cmd(StartTimer, starts)]
+//!     fn start(&self, _cmd: StartTimer, _ctx: &Context) -> Result<TimerStarted, Failed<Unrefusable>> {
+//!         Ok(TimerStarted)
+//!     }
+//!
+//!     #[handles_fact(Ring)]
+//!     fn ring(&self, _fact: Ring, _ctx: &Context) -> Record<Self> {
+//!         Record::of(Rang)
+//!     }
+//!
+//!     #[handles_fact(LampLost)]
+//!     fn lamp_lost(&self, _fact: LampLost, _ctx: &Context) -> Record<Self> {
+//!         Record::of(Lost)
+//!     }
+//!
+//!     #[applies(TimerStarted)]
+//!     fn started(&mut self, _event: TimerStarted) {}
+//!
+//!     #[applies(Rang)]
+//!     fn rang(&mut self, _event: Rang) {
+//!         self.rang = true;
+//!     }
+//!
+//!     #[applies(Lost)]
+//!     fn lost(&mut self, _event: Lost) {}
+//! }
+//!
+//! #[policy(name = "timer-lamp", source = Timer, target = Lamp)]
+//! impl TimerLamp {
+//!     #[on_event(Rang)]
+//!     fn rang(&self, _event: &Rang, ctx: &PolicyContext) -> Result<Commands<Lamp>, Infallible> {
+//!         Ok(Commands::none().to(ctx.correlation_id().clone(), SwitchOn))
+//!     }
+//!
+//!     #[on_refused]
+//!     fn switch_on_refused(&self, _refused: &Refused) -> Result<LampLost, Infallible> {
+//!         Ok(LampLost)
+//!     }
+//!
+//!     #[on_refused]
+//!     fn refused_again(&self, _refused: &Refused) -> Result<LampLost, Infallible> {
+//!         Ok(LampLost)
+//!     }
+//! }
+//! ```
+//!
+//! Nor one naming a command: every refusal of a command it sent reaches
+//! the one callback.
+//!
+//! ```compile_fail
+//! # use std::convert::Infallible;
+//! # use angzarr_embedded::markup::{
+//! #     Commands, Context, DomainMessage, Failed, PolicyContext, Record, Refused, Refuses,
+//! #     Unrefusable,
+//! # };
+//! # use angzarr_embedded::WireError;
+//! # use angzarr_embedded_macros::{
+//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, policy,
+//! # };
+//! # // A compile-only fixture: nothing here runs.
+//! # pub mod wire {
+//! #     macro_rules! wire {
+//! #         ($($name:ident),*) => {$(
+//! #             #[derive(Clone, PartialEq, ::prost::Message)]
+//! #             pub struct $name {}
+//! #             impl ::prost::Name for $name {
+//! #                 const NAME: &'static str = stringify!($name);
+//! #                 const PACKAGE: &'static str = "lamp.v1";
+//! #             }
+//! #         )*};
+//! #     }
+//! #     wire!(SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
+//! #     wire!(StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
+//! # }
+//! # macro_rules! domain {
+//! #     ($($name:ident),*) => {$(
+//! #         #[derive(Clone, Debug)]
+//! #         pub struct $name;
+//! #         impl DomainMessage for $name {
+//! #             type Wire = wire::$name;
+//! #             fn to_wire(&self) -> wire::$name { unimplemented!() }
+//! #             fn from_wire(_: wire::$name) -> Result<Self, WireError> { unimplemented!() }
+//! #         }
+//! #     )*};
+//! # }
+//! # domain!(SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
+//! # domain!(StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
+//! # macro_rules! refusal {
+//! #     ($($name:ident),*) => {$(
+//! #         impl std::fmt::Display for $name {
+//! #             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+//! #                 f.write_str(stringify!($name))
+//! #             }
+//! #         }
+//! #         impl angzarr_diagnostic::Diagnostic for $name {
+//! #             fn code(&self) -> &str { "lamp-refused" }
+//! #             fn args(&self) -> Vec<(&'static str, angzarr_diagnostic::Arg)> { vec![] }
+//! #         }
+//! #     )*};
+//! # }
+//! # refusal!(Burnt, Fused);
+//! # #[derive(Clone, Default)]
+//! # pub struct Lamp { on: bool }
+//! # #[derive(Clone, Default)]
+//! # pub struct Timer { rang: bool }
+//! # pub struct TimerLamp;
+//! #[aggregate(domain = "lamp")]
+//! impl Lamp {
+//!     #[handles_cmd(SwitchOn, refuses(Burnt))]
+//!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<SwitchedOn, Refuses<Self, SwitchOn>> {
+//!         match self.on {
+//!             true => Err(Burnt.into()),
+//!             false => Ok(SwitchedOn),
+//!         }
+//!     }
+//!
+//!     #[handles_fact(PowerCut)]
+//!     fn power_cut(&self, _fact: PowerCut, _ctx: &Context) -> Record<Self> {
+//!         Record::of(WentDark)
+//!     }
+//!
+//!     #[applies(SwitchedOn)]
+//!     fn on(&mut self, _event: SwitchedOn) {
+//!         self.on = true;
+//!     }
+//!
+//!     #[applies(WentDark)]
+//!     fn dark(&mut self, _event: WentDark) {
+//!         self.on = false;
+//!     }
+//! }
+//!
+//! #[process_manager(domain = "timer")]
+//! impl Timer {
+//!     #[handles_cmd(StartTimer, starts)]
+//!     fn start(&self, _cmd: StartTimer, _ctx: &Context) -> Result<TimerStarted, Failed<Unrefusable>> {
+//!         Ok(TimerStarted)
+//!     }
+//!
+//!     #[handles_fact(Ring)]
+//!     fn ring(&self, _fact: Ring, _ctx: &Context) -> Record<Self> {
+//!         Record::of(Rang)
+//!     }
+//!
+//!     #[handles_fact(LampLost)]
+//!     fn lamp_lost(&self, _fact: LampLost, _ctx: &Context) -> Record<Self> {
+//!         Record::of(Lost)
 //!     }
 //!
 //!     #[applies(TimerStarted)]
@@ -2380,11 +2579,7 @@
 //!     }
 //!
 //!     #[on_refused(SwitchOn)]
-//!     fn switch_on_refused(
-//!         &self,
-//!         _refusal: &Refusal<SwitchOn>,
-//!         _ctx: &CommandContext,
-//!     ) -> Result<LampLost, Infallible> {
+//!     fn switch_on_refused(&self, _refused: &Refused) -> Result<LampLost, Infallible> {
 //!         Ok(LampLost)
 //!     }
 //! }
@@ -2396,8 +2591,8 @@
 //! ```compile_fail
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::markup::{
-//! #     CommandContext, CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record,
-//! #     Refusal, Refuses,
+//! #     Commands, Context, DomainMessage, Failed, PolicyContext, Record, Refused, Refuses,
+//! #     Unrefusable,
 //! # };
 //! # use angzarr_embedded::WireError;
 //! # use angzarr_embedded_macros::{
@@ -2479,7 +2674,7 @@
 //! #[process_manager(domain = "timer")]
 //! impl Timer {
 //!     #[handles_cmd(StartTimer, starts)]
-//!     fn start(&self, _cmd: StartTimer, _ctx: &Context) -> Result<TimerStarted, Infallible> {
+//!     fn start(&self, _cmd: StartTimer, _ctx: &Context) -> Result<TimerStarted, Failed<Unrefusable>> {
 //!         Ok(TimerStarted)
 //!     }
 //!
@@ -2491,15 +2686,6 @@
 //!     #[handles_fact(LampLost)]
 //!     fn lamp_lost(&self, _fact: LampLost, _ctx: &Context) -> Record<Self> {
 //!         Record::of(Lost)
-//!     }
-//!
-//!     #[on_refused(SwitchOn)]
-//!     fn switch_on_refused(
-//!         &self,
-//!         _refused: CommandRefused<SwitchOn>,
-//!         _ctx: &Context,
-//!     ) -> Result<Record<Self>, Infallible> {
-//!         Ok(Record::of(Lost))
 //!     }
 //!
 //!     #[applies(TimerStarted)]
@@ -2521,25 +2707,21 @@
 //!         Ok(Commands::none().to(ctx.correlation_id().clone(), SwitchOn))
 //!     }
 //!
-//!     #[on_refused(SwitchOn)]
-//!     fn switch_on_refused(
-//!         &self,
-//!         _refusal: &Refusal<SwitchOn>,
-//!         _ctx: &CommandContext,
-//!     ) -> Result<Lost, Infallible> {
+//!     #[on_refused]
+//!     fn switch_on_refused(&self, _refused: &Refused) -> Result<Lost, Infallible> {
 //!         Ok(Lost)
 //!     }
 //! }
 //! ```
 //!
-//! Nor a `translate(..)` argument: the callback's presence is the
-//! selection, and nothing else marks the mode.
+//! Nor a `translate(..)` argument: a policy's one Translate callback is its
+//! `#[on_refused]`, and nothing else marks it.
 //!
 //! ```compile_fail
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::markup::{
-//! #     CommandContext, CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record,
-//! #     Refusal, Refuses,
+//! #     Commands, Context, DomainMessage, Failed, PolicyContext, Record, Refused, Refuses,
+//! #     Unrefusable,
 //! # };
 //! # use angzarr_embedded::WireError;
 //! # use angzarr_embedded_macros::{
@@ -2621,7 +2803,7 @@
 //! #[process_manager(domain = "timer")]
 //! impl Timer {
 //!     #[handles_cmd(StartTimer, starts)]
-//!     fn start(&self, _cmd: StartTimer, _ctx: &Context) -> Result<TimerStarted, Infallible> {
+//!     fn start(&self, _cmd: StartTimer, _ctx: &Context) -> Result<TimerStarted, Failed<Unrefusable>> {
 //!         Ok(TimerStarted)
 //!     }
 //!
@@ -2633,15 +2815,6 @@
 //!     #[handles_fact(LampLost)]
 //!     fn lamp_lost(&self, _fact: LampLost, _ctx: &Context) -> Record<Self> {
 //!         Record::of(Lost)
-//!     }
-//!
-//!     #[on_refused(SwitchOn)]
-//!     fn switch_on_refused(
-//!         &self,
-//!         _refused: CommandRefused<SwitchOn>,
-//!         _ctx: &Context,
-//!     ) -> Result<Record<Self>, Infallible> {
-//!         Ok(Record::of(Lost))
 //!     }
 //!
 //!     #[applies(TimerStarted)]
@@ -2663,12 +2836,8 @@
 //!         Ok(Commands::none().to(ctx.correlation_id().clone(), SwitchOn))
 //!     }
 //!
-//!     #[on_refused(SwitchOn)]
-//!     fn switch_on_refused(
-//!         &self,
-//!         _refusal: &Refusal<SwitchOn>,
-//!         _ctx: &CommandContext,
-//!     ) -> Result<LampLost, Infallible> {
+//!     #[on_refused]
+//!     fn switch_on_refused(&self, _refused: &Refused) -> Result<LampLost, Infallible> {
 //!         Ok(LampLost)
 //!     }
 //! }
@@ -2680,8 +2849,8 @@
 //! ```compile_fail
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::markup::{
-//! #     CommandContext, CommandRefused, Commands, Context, DomainMessage, PolicyContext, Record,
-//! #     Refusal, Refuses,
+//! #     Commands, Context, DomainMessage, Failed, PolicyContext, Record, Refused, Refuses,
+//! #     Unrefusable,
 //! # };
 //! # use angzarr_embedded::WireError;
 //! # use angzarr_embedded_macros::{
@@ -2763,7 +2932,7 @@
 //! #[process_manager(domain = "timer")]
 //! impl Timer {
 //!     #[handles_cmd(StartTimer, starts)]
-//!     fn start(&self, _cmd: StartTimer, _ctx: &Context) -> Result<TimerStarted, Infallible> {
+//!     fn start(&self, _cmd: StartTimer, _ctx: &Context) -> Result<TimerStarted, Failed<Unrefusable>> {
 //!         Ok(TimerStarted)
 //!     }
 //!
@@ -2775,15 +2944,6 @@
 //!     #[handles_fact(LampLost)]
 //!     fn lamp_lost(&self, _fact: LampLost, _ctx: &Context) -> Record<Self> {
 //!         Record::of(Lost)
-//!     }
-//!
-//!     #[on_refused(SwitchOn)]
-//!     fn switch_on_refused(
-//!         &self,
-//!         _refused: CommandRefused<SwitchOn>,
-//!         _ctx: &Context,
-//!     ) -> Result<Record<Self>, Infallible> {
-//!         Ok(Record::of(Lost))
 //!     }
 //!
 //!     #[applies(TimerStarted)]
@@ -2870,12 +3030,15 @@ pub fn handles_fact(_attr: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 
-/// On a domain: the handler of the refusal of the policy command `Cmd` it
-/// caused, passed through (`#[on_refused(Cmd)]`, a fact handler of
-/// `markup::CommandRefused<Cmd>` that always returns `Result`, its `Err` a
-/// bug, its policy's failure). On a policy: the translating
-/// callback for `Cmd`, returning a fact of the source. Inert: the
-/// component's macro reads it.
+/// Marks a policy's ONE Translate callback (decision 14.89):
+/// `#[on_refused]`, no arguments, on at most one method,
+/// `fn(&self, refused: &Refused) -> Result<F, E>`, every refusal of a
+/// command the policy sent handed to it, its `Ok` a fact `F` of the
+/// policy's source (`markup::Translation`), its `Err` (any `Diagnostic`)
+/// a bug. A policy without one answers every refusal with the bug
+/// `ANGZARR_REASON_NO_REFUSAL_HANDLER`. On a domain it is refused: a
+/// refusal reaches the policy's Translate, never a domain. Inert:
+/// [`policy`] reads it.
 #[proc_macro_attribute]
 pub fn on_refused(_attr: TokenStream, item: TokenStream) -> TokenStream {
     item
@@ -2889,13 +3052,13 @@ pub fn applies(_attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 /// angzarr-macros' rejection handler, which angzarr-embedded refuses: a refusal
-/// reaches its policy's source as a fact, handled in `#[on_refused]`.
+/// reaches its policy's one Translate callback, `#[on_refused]`.
 #[proc_macro_attribute]
 pub fn rejected(_attr: TokenStream, _item: TokenStream) -> TokenStream {
     Error::new(
         Span::call_site(),
-        "angzarr-embedded has no #[rejected]: a refusal reaches the policy's source as a fact, \
-         handled in #[on_refused(Cmd)]",
+        "angzarr-embedded has no #[rejected]: a refusal reaches the policy's one Translate \
+         callback, #[on_refused]",
     )
     .into_compile_error()
     .into()
@@ -2919,9 +3082,9 @@ pub fn state_factory(_attr: TokenStream, _item: TokenStream) -> TokenStream {
 /// `markup::EventSource` (a domain here, by its type, or a child-hosted
 /// domain's event set) and its target any `markup::CommandTarget` (a
 /// domain here, by its type, or a remote domain's command set), with no
-/// stand-in aggregate for either. Generates `markup::Policy`:
-/// its refusal pass-through, and translate for each command its
-/// `#[on_refused]` callbacks name.
+/// stand-in aggregate for either. Generates `markup::Policy`: its events
+/// routed to their `#[on_event]` handlers, and its one Translate callback,
+/// `#[on_refused]`, if it has one (a bug for every refusal otherwise).
 ///
 /// Policies should not fail for business reasons: they react to events the
 /// application's own domains created, so an `Err` from an `#[on_event]`
@@ -3002,8 +3165,7 @@ impl Parse for FlowArg {
         if !input.peek(Token![=]) {
             return Err(Error::new_spanned(
                 key,
-                "#[policy] and #[projector] take `key = value` arguments only; a policy's \
-                 translate mode is its `#[on_refused(Cmd)]` callback's presence",
+                "#[policy] and #[projector] take `key = value` arguments only",
             ));
         }
         input.parse::<Token![=]>()?;
@@ -3139,52 +3301,44 @@ fn flow(attr: Tokens, item: Tokens, flow: Flow) -> syn::Result<Tokens> {
 }
 
 /// A policy's `markup::Policy`: its events routed to their `#[on_event]`
-/// handlers, and each refusal to its `#[on_refused]` callback, or passed
-/// through.
+/// handlers, and every refusal to its one `#[on_refused]` callback, if it
+/// has one (the trait's default, a bug, otherwise; decision 14.89).
 fn policy_impl(imp: &ItemImpl, args: FlowArgs) -> syn::Result<Tokens> {
     let FlowArgs { name, source, .. } = args;
     let target = args
         .target
         .ok_or_else(|| Error::new(Span::call_site(), usage(Flow::Policy)))?;
-    let methods = marked(imp, &["on_event", "on_refused"])?;
+    let methods = marked(imp, &["on_event"])?;
     for x in methods.iter() {
         refuse_extras(x, false)?;
     }
+    let translate = translate_callback(imp)?.map(|method| {
+        let m = markup();
+        let self_ty = &imp.self_ty;
+        quote! {
+            fn on_refused(
+                &self,
+                refused: &#m::Refused,
+            ) -> ::core::result::Result<::angzarr_embedded::Any, #m::Report> {
+                #m::translated_fact::<<Self as #m::Policy>::Source, _, _>(
+                    <#self_ty>::#method(self, refused),
+                )
+            }
+        }
+    });
     let self_ty = &imp.self_ty;
     let m = markup();
     let event_types: Vec<_> = methods.types(&["on_event"]).collect();
     let event_methods = methods.of(&["on_event"]).map(|x| &x.method.sig.ident);
-    let commands: Vec<_> = methods.types(&["on_refused"]).collect();
-    let callback_methods = methods.of(&["on_refused"]).map(|x| &x.method.sig.ident);
     let events_constant = type_names(event_types.iter().copied());
-    let translates_constant = type_names(commands.iter().copied());
     Ok(quote! {
         impl #m::Policy for #self_ty {
             const NAME: &'static str = #name;
             type Source = #source;
             type Target = #target;
             const EVENTS: &'static [#m::TypeName] = #events_constant;
-            const TRANSLATES: &'static [#m::TypeName] = #translates_constant;
-            const ANSWERS_REFUSALS: bool = true;
 
-            fn on_refused(
-                &self,
-                refusal: &#m::v1::Refusal,
-                ctx: &#m::CommandContext,
-            ) -> ::core::result::Result<::angzarr_embedded::Any, #m::Report> {
-                #(
-                    if let ::core::option::Option::Some(typed) =
-                        #m::decode_refusal::<#commands>(refusal)?
-                    {
-                        return #m::translated_fact::<<Self as #m::Policy>::Source, _, _>(
-                            <#self_ty>::#callback_methods(self, &typed, ctx),
-                            refusal,
-                        );
-                    }
-                )*
-                let _ = ctx;
-                ::core::result::Result::Ok(#m::pass_through(refusal))
-            }
+            #translate
 
             fn on_event(
                 &self,
@@ -3212,6 +3366,62 @@ fn policy_impl(imp: &ItemImpl, args: FlowArgs) -> syn::Result<Tokens> {
             }
         }
     })
+}
+
+/// A policy's one Translate callback (decision 14.89): the one method
+/// marked `#[on_refused]`, with no arguments, taking `&self` and the
+/// refusal and returning a `Result`; `None` when there is none. A second
+/// one, one naming a command, or one also an `#[on_event]` handler, is
+/// refused.
+fn translate_callback(imp: &ItemImpl) -> syn::Result<Option<&Ident>> {
+    let mut found: Option<&ImplItemFn> = None;
+    for item in &imp.items {
+        let ImplItem::Fn(method) = item else {
+            continue;
+        };
+        let Some(attr) = method
+            .attrs
+            .iter()
+            .find(|a| a.path().is_ident("on_refused"))
+        else {
+            continue;
+        };
+        if !matches!(attr.meta, syn::Meta::Path(_)) {
+            return Err(Error::new_spanned(
+                attr,
+                "a policy has one Translate callback, `#[on_refused]`, with no arguments: \
+                 every refusal of a command it sent reaches it",
+            ));
+        }
+        if method.attrs.iter().any(|a| a.path().is_ident("on_event")) {
+            return Err(Error::new_spanned(attr, "a method takes one marker"));
+        }
+        if let Some(first) = found {
+            return Err(Error::new_spanned(
+                &method.sig,
+                format!(
+                    "a second Translate callback: `{}` is the policy's one `#[on_refused]`",
+                    first.sig.ident
+                ),
+            ));
+        }
+        let sig = &method.sig;
+        if receiver(sig) != Some(false) || sig.inputs.len() != 2 {
+            return Err(Error::new_spanned(
+                sig,
+                "the Translate callback takes `&self` and the refusal, `&Refused`",
+            ));
+        }
+        if returned(sig).is_none_or(|(name, _)| name != "Result") {
+            return Err(Error::new_spanned(
+                sig,
+                "the Translate callback returns `Result<Fact, E>`: a fact of the policy's \
+                 source, or a bug",
+            ));
+        }
+        found = Some(method);
+    }
+    Ok(found.map(|method| &method.sig.ident))
 }
 
 /// A projector's `markup::AsyncProjector`: its events routed to their
@@ -3298,7 +3508,6 @@ enum Kind {
 enum Arg {
     Domain(Expr),
     Snapshot(Type),
-    Rejection(Type),
     Vis(Visibility),
     Command(Type),
     Event(Type),
@@ -3311,15 +3520,13 @@ impl Parse for Arg {
         match key.to_string().as_str() {
             "domain" => Ok(Arg::Domain(input.parse()?)),
             "snapshot" => Ok(Arg::Snapshot(input.parse()?)),
-            "rejection" => Ok(Arg::Rejection(input.parse()?)),
             "vis" => Ok(Arg::Vis(input.parse()?)),
             "command" => Ok(Arg::Command(input.parse()?)),
             "event" => Ok(Arg::Event(input.parse()?)),
             _ => Err(Error::new_spanned(
                 key,
                 "takes `domain = \"..\"`, and optionally `snapshot = <message>`, \
-                 `rejection = <type>`, `vis = <visibility>`, `command = <enum>` and \
-                 `event = <enum>`",
+                 `vis = <visibility>`, `command = <enum>` and `event = <enum>`",
             )),
         }
     }
@@ -3442,23 +3649,24 @@ fn returned(sig: &Signature) -> Option<(String, Vec<Type>)> {
     Some((last.ident.to_string(), args))
 }
 
-/// The domain's own rejection a handler's `Err` names: `R` of a
-/// `Failed<R>`, else the type itself.
-fn own_rejection(error: Type) -> Type {
-    let Type::Path(path) = &error else {
-        return error;
+/// What a command handler's `Err` refuses with, by its last name: `R` of
+/// a `Failed<R>`, else the type itself.
+fn refused_with(error: &Type) -> String {
+    let named = |ty: &Type| last_ident(ty).map(ToString::to_string).unwrap_or_default();
+    let Type::Path(path) = error else {
+        return String::new();
     };
     let Some(last) = path.path.segments.last() else {
-        return error;
+        return String::new();
     };
     match (&last.arguments, last.ident == "Failed") {
         (PathArguments::AngleBracketed(args), true) if args.args.len() == 1 => {
             match args.args.first() {
-                Some(GenericArgument::Type(own)) => own.clone(),
-                _ => error,
+                Some(GenericArgument::Type(own)) => named(own),
+                _ => String::new(),
             }
         }
-        _ => error,
+        _ => named(error),
     }
 }
 
@@ -3503,38 +3711,22 @@ fn check_signature(x: &Marked<'_>) -> syn::Result<()> {
         "handles_cmd" => {
             let Some((_, args)) = output.as_ref().filter(|(name, _)| name == "Result") else {
                 return fail(
-                    "a command handler returns `Result<_, Rejection>`: a command may be refused",
+                    "a command handler returns `Result<_, Failed<Unrefusable>>`, or with \
+                     `refuses(..)` `Result<_, Refuses<Self, Cmd>>`: it may fail",
                 );
             };
-            if !x.args.refuses.is_empty()
-                && args
-                    .get(1)
-                    .cloned()
-                    .map(own_rejection)
-                    .as_ref()
-                    .and_then(last_ident)
-                    .is_none_or(|e| e != "Refuses")
-            {
-                return fail(
+            let refused = args.get(1).map(refused_with);
+            match (x.args.refuses.is_empty(), refused.as_deref()) {
+                (false, Some("Refuses")) | (true, Some("Unrefusable")) => Ok(()),
+                (false, _) => fail(
                     "a command handler with `refuses(..)` returns `Result<_, Refuses<Self, Cmd>>` \
                      or `Result<_, Failed<Refuses<Self, Cmd>>>`",
-                );
-            }
-            Ok(())
-        }
-        "on_refused" => {
-            let Some((_, args)) = output.as_ref().filter(|(name, _)| name == "Result") else {
-                return fail(
-                    "an `#[on_refused]` handler returns `Result<Record<Self>, E>`: its `Err`, \
-                     a bug, is dead-lettered as its policy's failure",
-                );
-            };
-            match args.first().and_then(last_ident) {
-                Some(ok) if ok == "Emit" => fail(
-                    "an `#[on_refused]` handler records a `Record`, not an `Emit`, whose \
-                     steps may refuse",
                 ),
-                _ => Ok(()),
+                (true, _) => fail(
+                    "a command that lists no refusal cannot refuse (decision 14.95): its \
+                     handler returns `Result<_, Failed<Unrefusable>>`, or lists its typed \
+                     refusals with `refuses(..)`",
+                ),
             }
         }
         _ if outer == Some("Result") => {
@@ -3579,13 +3771,10 @@ fn renamed(sig: &Signature) -> (Signature, Vec<Ident>) {
     (sig, names)
 }
 
-/// A payload enum: one variant per type, and one per refused command (a
-/// refusal handler's), each its `CommandRefused` with the refusal as it
-/// came.
+/// A payload enum: one variant per type.
 struct PayloadSet<'s> {
     name: &'s Ident,
     variants: &'s [(Ident, Type)],
-    refused: &'s [(Ident, Type)],
 }
 
 impl PayloadSet<'_> {
@@ -3593,18 +3782,20 @@ impl PayloadSet<'_> {
     fn written(&self, vis: &Visibility) -> Tokens {
         let (m, name) = (markup(), self.name);
         let (idents, types): (Vec<_>, Vec<_>) = self.variants.iter().cloned().unzip();
-        let (refused_idents, refused_types): (Vec<_>, Vec<_>) =
-            self.refused.iter().cloned().unzip();
-        let refusal_url =
-            (!self.refused.is_empty()).then(|| quote!(#m::command_refused_type_url(),));
-        let (packing, reading) = (self.packing(), self.reading());
+        let packing = match self.variants.is_empty() {
+            true => quote!(match *self {}),
+            false => quote! {
+                match self {
+                    #(#name::#idents(value) => #m::pack_message(value),)*
+                }
+            },
+        };
         quote! {
             #[doc(hidden)]
             #[derive(Clone, Debug)]
             #[allow(non_camel_case_types)]
             #vis enum #name {
                 #(#idents(#types),)*
-                #(#refused_idents(#m::CommandRefused<#refused_types>, ::angzarr_embedded::Any),)*
             }
 
             impl ::angzarr_embedded::Payload for #name {
@@ -3615,60 +3806,22 @@ impl PayloadSet<'_> {
                 fn from_any(
                     any: &::angzarr_embedded::Any,
                 ) -> ::core::result::Result<Self, ::angzarr_embedded::PayloadError> {
-                    #reading
+                    #(
+                        if let ::core::option::Option::Some(value) =
+                            #m::decode_message::<#types>(any)?
+                        {
+                            return ::core::result::Result::Ok(#name::#idents(value));
+                        }
+                    )*
+                    ::core::result::Result::Err(::angzarr_embedded::PayloadError::UnknownType {
+                        type_url: ::core::clone::Clone::clone(&any.type_url),
+                    })
                 }
 
                 fn type_urls() -> ::std::vec::Vec<::std::string::String> {
-                    ::std::vec![#(#m::type_url_of::<#types>(),)* #refusal_url]
+                    ::std::vec![#(#m::type_url_of::<#types>(),)*]
                 }
             }
-        }
-    }
-
-    /// How a value is packed: a type's as its message, a refusal as it
-    /// came.
-    fn packing(&self) -> Tokens {
-        if self.variants.is_empty() && self.refused.is_empty() {
-            return quote!(match *self {});
-        }
-        let (m, name) = (markup(), self.name);
-        let idents = self.variants.iter().map(|(ident, _)| ident);
-        let refused_idents = self.refused.iter().map(|(ident, _)| ident);
-        quote! {
-            match self {
-                #(#name::#idents(value) => #m::pack_message(value),)*
-                #(#name::#refused_idents(_, any) => ::core::clone::Clone::clone(any),)*
-            }
-        }
-    }
-
-    /// How an `Any` is read: as each type in turn, then as the refusal of
-    /// each refused command; a type it has none of is unknown, named as the
-    /// refused command's type where it is a refusal.
-    fn reading(&self) -> Tokens {
-        let (m, name) = (markup(), self.name);
-        let (idents, types): (Vec<_>, Vec<_>) = self.variants.iter().cloned().unzip();
-        let (refused_idents, refused_types): (Vec<_>, Vec<_>) =
-            self.refused.iter().cloned().unzip();
-        quote! {
-            #(
-                if let ::core::option::Option::Some(value) = #m::decode_message::<#types>(any)? {
-                    return ::core::result::Result::Ok(#name::#idents(value));
-                }
-            )*
-            #(
-                if let ::core::option::Option::Some(refused) =
-                    #m::decode_command_refused::<#refused_types>(any)?
-                {
-                    return ::core::result::Result::Ok(
-                        #name::#refused_idents(refused, ::core::clone::Clone::clone(any)),
-                    );
-                }
-            )*
-            ::core::result::Result::Err(::angzarr_embedded::PayloadError::UnknownType {
-                type_url: #m::refused_command_type_url(any)
-                    .unwrap_or_else(|| ::core::clone::Clone::clone(&any.type_url)),
-            })
         }
     }
 }
@@ -3684,7 +3837,6 @@ fn variant(ty: &Type, prefix: &str) -> syn::Result<Ident> {
 struct DomainArgs {
     domain: Expr,
     snapshot: Option<Type>,
-    rejection: Option<Type>,
     vis: Visibility,
     command: Option<Type>,
     event: Option<Type>,
@@ -3694,13 +3846,12 @@ impl DomainArgs {
     /// The arguments, `domain` given; `vis` is `pub` when absent.
     fn parse(attr: Tokens) -> syn::Result<Self> {
         let args = Punctuated::<Arg, Token![,]>::parse_terminated.parse2(attr)?;
-        let (mut domain, mut snapshot, mut rejection) = (None, None, None);
+        let (mut domain, mut snapshot) = (None, None);
         let (mut command, mut event) = (None, None);
         let mut vis: Visibility = syn::parse_quote!(pub);
         for arg in args {
             match arg {
                 Arg::Domain(value) => domain = Some(value),
-                Arg::Rejection(value) => rejection = Some(value),
                 Arg::Snapshot(value) => snapshot = Some(value),
                 Arg::Vis(value) => vis = value,
                 Arg::Command(value) => command = Some(value),
@@ -3711,7 +3862,6 @@ impl DomainArgs {
             domain: domain
                 .ok_or_else(|| Error::new(Span::call_site(), "needs `domain = \"..\"`"))?,
             snapshot,
-            rejection,
             vis,
             command,
             event,
@@ -3745,10 +3895,20 @@ impl<'a> Decorated<'a> {
         let name = last_ident(self_ty)
             .ok_or_else(|| Error::new_spanned(self_ty, "goes on `impl <Type>`"))?
             .clone();
-        let methods = marked(
-            imp,
-            &["handles_cmd", "handles_fact", "on_refused", "applies"],
-        )?;
+        if let Some(refused) = imp.items.iter().find_map(|item| match item {
+            ImplItem::Fn(method) => method
+                .attrs
+                .iter()
+                .find(|a| a.path().is_ident("on_refused")),
+            _ => None,
+        }) {
+            return Err(Error::new_spanned(
+                refused,
+                "a domain has no `#[on_refused]`: a refusal of a policy's command reaches that \
+                 policy's one Translate callback, which answers a fact of this domain",
+            ));
+        }
+        let methods = marked(imp, &["handles_cmd", "handles_fact", "applies"])?;
         let decorated = Decorated {
             kind,
             self_ty,
@@ -3783,43 +3943,6 @@ impl<'a> Decorated<'a> {
         Ok(())
     }
 
-    /// The domain's own rejection: `given`, or the message-only command
-    /// handlers', which must agree (`Infallible` when there are none).
-    fn rejection(&self, given: Option<Type>) -> syn::Result<Type> {
-        if let Some(given) = given {
-            return Ok(given);
-        }
-        let mut found: Option<Type> = None;
-        for x in self
-            .methods
-            .of(&["handles_cmd"])
-            .filter(|x| x.args.refuses.is_empty())
-        {
-            let Some(error) = returned(&x.method.sig)
-                .and_then(|(_, args)| args.get(1).cloned())
-                .map(own_rejection)
-            else {
-                continue;
-            };
-            let Some(first) = &found else {
-                found = Some(error);
-                continue;
-            };
-            if first.to_token_stream().to_string() != error.to_token_stream().to_string() {
-                return Err(Error::new_spanned(
-                    &x.method.sig.output,
-                    format!(
-                        "the command handlers disagree on the rejection: `{}` here, `{}` \
-                         before; the domain has one (or give `rejection = ..`)",
-                        error.to_token_stream(),
-                        first.to_token_stream()
-                    ),
-                ));
-            }
-        }
-        Ok(found.unwrap_or_else(|| syn::parse_quote!(::core::convert::Infallible)))
-    }
-
     /// The variants for the methods marked `marker`: each type, named as
     /// [`variant`] names it after `prefix`.
     fn variants(&self, marker: &str, prefix: &str) -> syn::Result<Vec<(Ident, Type)>> {
@@ -3836,13 +3959,11 @@ impl<'a> Decorated<'a> {
     fn payloads(&self, command: Option<Type>, event: Option<Type>) -> syn::Result<Payloads> {
         let commands = self.variants("handles_cmd", "")?;
         let facts = self.variants("handles_fact", "")?;
-        let refusals = self.variants("on_refused", "Refused")?;
         let events = self.variants("applies", "")?;
         let fact = format_ident!("__{}Fact", self.name);
         let mut written = vec![PayloadSet {
             name: &fact,
             variants: &facts,
-            refused: &refusals,
         }
         .written(&self.vis)];
         let command = self.payload_enum(command, "Command", &commands, &mut written);
@@ -3872,7 +3993,6 @@ impl<'a> Decorated<'a> {
             PayloadSet {
                 name: &name,
                 variants,
-                refused: &[],
             }
             .written(&self.vis),
         );
@@ -3888,8 +4008,8 @@ impl<'a> Decorated<'a> {
         syn::parse_quote!(#name)
     }
 
-    /// `markup::Routed`: each command, fact and refusal on the router's
-    /// table, run by its handler.
+    /// `markup::Routed`: each command and fact on the router's table, run
+    /// by its handler.
     fn routed(&self) -> Tokens {
         let (m, self_ty) = (markup(), self.self_ty);
         let route = |x: &Marked<'_>| {
@@ -3899,34 +4019,29 @@ impl<'a> Decorated<'a> {
             match (x.marker, &x.args.rooted_by) {
                 ("handles_cmd", None) => quote! {
                     .on_command(#name, |any, state, cctx| {
-                        #m::run_command::<#self_ty, _, #ty, _, _>(any, &*state, cctx, #handler)
+                        #m::run_command::<#self_ty, #ty, _, _>(any, state, cctx, #handler)
                     })
                 },
                 ("handles_cmd", Some(field)) => quote! {
                     .on_command(#name, |any, state, cctx| {
-                        #m::run_rooted_command::<#self_ty, _, #ty, _, _>(
+                        #m::run_rooted_command::<#self_ty, #ty, _, _>(
                             any,
-                            &*state,
+                            state,
                             cctx,
                             |cmd: &#ty| ::core::convert::AsRef::<str>::as_ref(&cmd.#field),
                             #handler,
                         )
                     })
                 },
-                ("handles_fact", _) => quote! {
-                    .on_fact_with_context(#name, |any, state, cctx| {
-                        #m::run_fact::<#self_ty, #ty, _>(any, state, cctx, #handler)
-                    })
-                },
                 _ => quote! {
-                    .on_refused(#name, |refused, state, cctx| {
-                        #m::run_on_refused::<#self_ty, #ty, _, _>(refused, state, cctx, #handler)
+                    .on_fact(#name, |any, state, cctx| {
+                        #m::run_fact::<#self_ty, #ty, _>(any, state, cctx, #handler)
                     })
                 },
             }
         };
-        // Commands, then facts, then refusals.
-        let routes = ["handles_cmd", "handles_fact", "on_refused"]
+        // Commands, then facts.
+        let routes = ["handles_cmd", "handles_fact"]
             .iter()
             .flat_map(|marker| self.methods.of(std::slice::from_ref(marker)))
             .map(route);
@@ -3942,9 +4057,10 @@ impl<'a> Decorated<'a> {
         }
     }
 
-    /// `Domain` itself: its payload and rejection types, its name, and its
-    /// fold, each event handed to its applier.
-    fn domain_impl(&self, domain: &Expr, payloads: &Payloads, rejection: &Tokens) -> Tokens {
+    /// `Domain` itself: its payload types, its rejection (a typed refusal),
+    /// its name, and its fold, each event handed to its applier.
+    fn domain_impl(&self, domain: &Expr, payloads: &Payloads) -> Tokens {
+        let m = markup();
         let self_ty = self.self_ty;
         let Payloads {
             command,
@@ -3971,7 +4087,7 @@ impl<'a> Decorated<'a> {
                 type Command = #command;
                 type Fact = #fact;
                 type Event = #event;
-                type Rejection = #rejection;
+                type Rejection = #m::TypedRefusal;
 
                 const NAME: &'static str = #domain;
                 const RULES_VERSION: &'static str = ::core::env!("CARGO_PKG_VERSION");
@@ -4023,18 +4139,18 @@ impl<'a> Decorated<'a> {
 
     /// Each refusing command handler's typed refusal choice (see *Typed
     /// refusals*).
-    fn refusal_choices(&self, rejection: &Tokens) -> syn::Result<Vec<Tokens>> {
+    fn refusal_choices(&self) -> syn::Result<Vec<Tokens>> {
         self.methods
             .of(&["handles_cmd"])
             .filter(|x| !x.args.refuses.is_empty())
-            .map(|x| self.refusal_choice(x, rejection))
+            .map(|x| self.refusal_choice(x))
             .collect()
     }
 
     /// `x`'s choice, `__<Name><Cmd>Refuses`: one variant per refusal
-    /// object, each `From` its object, and the choice a `TypedRefusal`, a
-    /// rejection of the domain's and its `Fails`.
-    fn refusal_choice(&self, x: &Marked<'_>, rejection: &Tokens) -> syn::Result<Tokens> {
+    /// object, each `From` its object, and the choice a `TypedRefusal`
+    /// and its `Fails`.
+    fn refusal_choice(&self, x: &Marked<'_>) -> syn::Result<Tokens> {
         let (m, self_ty, vis) = (markup(), self.self_ty, &self.vis);
         let command = &x.args.ty;
         let choice = format_ident!("__{}{}Refuses", self.name, variant(command, "")?);
@@ -4069,14 +4185,8 @@ impl<'a> Decorated<'a> {
                 }
             }
 
-            impl ::core::convert::From<#choice> for #rejection {
-                fn from(choice: #choice) -> Self {
-                    #m::Rejection::Typed(::core::convert::Into::into(choice))
-                }
-            }
-
             impl #m::Fails<#self_ty> for #choice {
-                fn into_failed(self) -> #m::Failed<#rejection> {
+                fn into_failed(self) -> #m::Failed<#m::TypedRefusal> {
                     #m::Failed::rejected(self)
                 }
             }
@@ -4115,20 +4225,16 @@ impl<'a> Decorated<'a> {
         }
     }
 
-    /// The type-list constants: `HANDLES`, `REFUSALS` and `APPLIES`.
+    /// The type-list constants: `HANDLES` and `APPLIES`.
     fn constants(&self) -> Tokens {
         let m = markup();
         let self_ty = self.self_ty;
         let handles = type_names(self.methods.types(&["handles_cmd", "handles_fact"]));
-        let refusals = type_names(self.methods.types(&["on_refused"]));
         let applies = type_names(self.methods.types(&["applies"]));
         quote! {
             impl #self_ty {
                 /// The handled commands and facts, in marker order.
                 pub const HANDLES: &'static [#m::TypeName] = #handles;
-                /// The commands whose refusals it handles (`#[on_refused]`),
-                /// in marker order.
-                pub const REFUSALS: &'static [#m::TypeName] = #refusals;
                 /// The applied events, in marker order.
                 pub const APPLIES: &'static [#m::TypeName] = #applies;
             }
@@ -4207,15 +4313,12 @@ fn domain(attr: Tokens, item: Tokens, kind: Kind) -> syn::Result<Tokens> {
     let imp: ItemImpl = syn::parse2(item)?;
     let decorated = Decorated::new(&imp, kind, args.vis)?;
     let self_ty = decorated.self_ty;
-    let m = markup();
-    let rejection = decorated.rejection(args.rejection)?;
-    let rejection_ty = quote!(#m::Rejection<#rejection>);
     let payloads = decorated.payloads(args.command, args.event)?;
-    let refusing = decorated.refusal_choices(&rejection_ty)?;
+    let refusing = decorated.refusal_choices()?;
     let written = &payloads.written;
     let state = state_impl(self_ty, args.snapshot);
     let handles = decorated.handles();
-    let domain_impl = decorated.domain_impl(&args.domain, &payloads, &rejection_ty);
+    let domain_impl = decorated.domain_impl(&args.domain, &payloads);
     let routed = decorated.routed();
     let starts = decorated.starts();
     let handler_trait = decorated.handler_trait();
@@ -4231,12 +4334,6 @@ fn domain(attr: Tokens, item: Tokens, kind: Kind) -> syn::Result<Tokens> {
         #(#refusing)*
 
         #domain_impl
-
-        impl #m::Fails<#self_ty> for #rejection {
-            fn into_failed(self) -> #m::Failed<#rejection_ty> {
-                #m::Failed::rejected(self)
-            }
-        }
 
         #routed
 

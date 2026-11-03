@@ -6,13 +6,13 @@
 use cucumber::{given, then, when};
 
 use angzarr_embedded::angzarr_router::error::GrpcCode;
-use angzarr_embedded::v1::event_meta::Causation;
-use angzarr_embedded::v1::{command_page, ContextualCommand};
+use angzarr_embedded::angzarr_router::hpb::HandleRequest;
+use angzarr_embedded::v1::command_page;
 use angzarr_embedded::Handled;
 
 use crate::tests::business::{rejection, Rule};
 use crate::tests::policy::{bare, internal, locked, Reaction, Root};
-use crate::tests::world::{camel, root, Coordinator};
+use crate::tests::world::{camel, cause_of, origin_of, root, Coordinator};
 
 /// `name`'s process manager owning `domain`, starting from `starting` (by
 /// default `Start<Name>`).
@@ -36,14 +36,20 @@ fn aggregate_on_main(w: &mut Coordinator, domain: String, _root: String) {
 }
 
 #[given(
-    regex = r#"^a process manager "(\w+)" owning domain "([\w-]+)"(?: whose (\w+) command is a starting input)?$"#
+    regex = r#"^a process manager "(\w+)" owning domain "([\w-]+)"(?: whose (?:(\w+) command is a starting input|starting_types lists (\w+)))?$"#
 )]
-fn owning_domain(w: &mut Coordinator, name: String, domain: String, starting: String) {
-    process_manager(w, &name, &domain, &starting);
+fn owning_domain(
+    w: &mut Coordinator,
+    name: String,
+    domain: String,
+    starting: String,
+    listed: String,
+) {
+    process_manager(w, &name, &domain, &(starting + &listed));
 }
 
 #[given(
-    regex = r#"^a process manager "(\w+)" owning domain "([\w-]+)" with an instance for correlation "([^"]+)"( that is completed)?$"#
+    regex = r#"^a process manager "(\w+)" owning domain "([\w-]+)" with an instance (?:for correlation|at root) "([^"]+)"( that is completed)?$"#
 )]
 fn with_instance(
     w: &mut Coordinator,
@@ -76,7 +82,9 @@ fn records_on(w: &mut Coordinator, name: String, domain: String, event: String, 
     w.business(&domain).every(|a| a.events = Some(vec![event]));
 }
 
-#[given(regex = r#"^"(\w+)" also takes an? (\w+) (command|fact), which is not a starting input$"#)]
+#[given(
+    regex = r#"^"(\w+)" also takes an? (\w+) (command|fact), which (?:is not a starting input|its starting_types does not list)$"#
+)]
 fn also_takes(w: &mut Coordinator, name: String, input: String, kind: String) {
     let domain = w.domain_of(&name);
     if kind == "fact" {
@@ -84,14 +92,16 @@ fn also_takes(w: &mut Coordinator, name: String, input: String, kind: String) {
     }
 }
 
-#[given(regex = r#"^"(\w+)" has no instance for correlation "([^"]+)"$"#)]
+#[given(regex = r#"^"(\w+)" has no instance (?:for correlation|at root) "([^"]+)"$"#)]
 fn no_instance(w: &mut Coordinator, name: String, correlation: String) {
     let domain = w.domain_of(&name);
     let cover = w.cover(&domain, &correlation);
     assert!(w.pages(&cover).is_empty());
 }
 
-#[given(regex = r#"^"(\w+)" has an instance for correlation "([^"]+)" with state "([^"]+)"$"#)]
+#[given(
+    regex = r#"^"(\w+)" has an instance (?:for correlation|at root) "([^"]+)" with state "([^"]+)"$"#
+)]
 fn instance_with_state(w: &mut Coordinator, name: String, correlation: String, state: String) {
     let domain = w.domain_of(&name);
     let cover = w.cover(&domain, &correlation);
@@ -99,7 +109,7 @@ fn instance_with_state(w: &mut Coordinator, name: String, correlation: String, s
 }
 
 #[given(
-    regex = r#"^"(\w+)" has state "([^"]+)" and "(\w+)" has state "([^"]+)" for the order's correlation$"#
+    regex = r#"^"(\w+)" has state "([^"]+)" and "(\w+)" has state "([^"]+)" (?:for the order's correlation|at the order's root)$"#
 )]
 fn states_for_correlation(
     w: &mut Coordinator,
@@ -126,21 +136,22 @@ fn policy_to_each(w: &mut Coordinator, input: String, first: String, second: Str
             on: on.clone(),
             domain: domain.clone(),
             command: format!("Start{name}"),
-            fact: false,
+            arm: crate::tests::policy::Arm::Command,
             root: Root::TriggerCorrelation,
-            correlation: None,
-            fault: None,
         });
     }
 }
 
-#[given(regex = r#"^"(\w+)" refuses (\w+) once completed$"#)]
-fn refuses_once_completed(w: &mut Coordinator, name: String, input: String) {
+#[given(
+    regex = r#"^"(\w+)"(?: refuses (\w+)|'s (\w+) lists the refusal AlreadyCompleted, declared FAILED_PRECONDITION, and refuses with it) once completed$"#
+)]
+fn refuses_once_completed(w: &mut Coordinator, name: String, input: String, listed: String) {
+    let input = input + &listed;
     let domain = w.domain_of(&name);
     w.business(&domain).rule(Rule {
         input,
         once: Some(format!("{name}Completed")),
-        error: rejection("FULFILLMENT_COMPLETED"),
+        error: rejection(&crate::tests::world::package(&domain), "AlreadyCompleted"),
     });
 }
 
@@ -157,7 +168,7 @@ fn handler_fails(w: &mut Coordinator, name: String, input: String) {
 }
 
 #[given(
-    regex = r#"^a (\w+) command with command_id "([^"]+)" has been applied by "(\w+)" for correlation "([^"]+)"$"#
+    regex = r#"^a (\w+) command with command_id "([^"]+)" has been applied by "(\w+)" (?:for correlation|at root) "([^"]+)"$"#
 )]
 async fn applied_by(
     w: &mut Coordinator,
@@ -244,7 +255,7 @@ async fn run_again(w: &mut Coordinator, _event: String) {
 }
 
 /// The deliveries to the component `name`.
-fn delivered_to(w: &mut Coordinator, name: &str) -> Vec<ContextualCommand> {
+fn delivered_to(w: &mut Coordinator, name: &str) -> Vec<HandleRequest> {
     let domain = w.domain_of(name);
     w.business(&domain).delivered()
 }
@@ -267,11 +278,11 @@ fn delivers_with_state(w: &mut Coordinator, coordinator: String, name: String, s
         "a process manager behind its own coordinator"
     );
     let delivered = delivered_to(w, &name).pop().expect("delivered");
-    let events = delivered.events.unwrap_or_default();
+    let events = delivered.history.unwrap_or_default();
     let held: Vec<String> = events
         .pages
         .iter()
-        .filter_map(|p| p.payload.as_ref().map(bare))
+        .filter_map(|p| angzarr_embedded::angzarr_router::page_event(p).map(bare))
         .collect();
     match state.is_empty() {
         true => assert!(held.is_empty() && events.snapshot.is_none(), "{held:?}"),
@@ -321,7 +332,9 @@ fn appended_to_instance(w: &mut Coordinator) {
     assert!(!w.persisted(&cover).is_empty());
 }
 
-#[then("each of those events records the fact's command_id as its causation and the fact's origin")]
+#[then(
+    regex = r"^each of those events records (?:the fact's command_id as its causation and the fact's origin|the fact cause: the fact's command_id and its origin)$"
+)]
 fn fact_causation(w: &mut Coordinator) {
     let book = w.last_book();
     let cover = book.cover.clone().expect("a stream");
@@ -330,15 +343,17 @@ fn fact_causation(w: &mut Coordinator) {
         .delivered()
         .pop()
         .expect("delivered");
-    let page = delivered.command.and_then(|b| b.page).expect("a page");
+    let page = delivered.input.and_then(|b| b.page).expect("a page");
     let command_id = page.command_id.clone().expect("the fact's derived id");
     for event in w.persisted(&cover) {
         let meta = event.meta.expect("stamped");
+        let (cause, origin) = cause_of(&meta);
+        assert_eq!(cause, Some(command_id.clone()));
         assert_eq!(
-            meta.causation,
-            Some(Causation::CommandId(command_id.clone()))
+            origin,
+            origin_of(&page),
+            "the fact cause, its origin copied"
         );
-        assert_eq!(meta.fact.as_ref(), page.fact_origin.as_ref());
     }
 }
 
@@ -383,21 +398,18 @@ fn derived_causation(w: &mut Coordinator) {
     let domain = w.policies.last().expect("a policy").output.clone();
     let delivered = w.business(&domain).delivered().pop().expect("delivered");
     let cover = delivered
-        .command
+        .input
         .as_ref()
         .and_then(|b| b.cover.clone())
         .expect("a stream");
     let command_id = delivered
-        .command
+        .input
         .and_then(|b| b.page)
         .and_then(|p| p.command_id)
         .expect("an id");
     for event in w.persisted(&cover) {
         let meta = event.meta.expect("stamped");
-        assert_eq!(
-            meta.causation,
-            Some(Causation::CommandId(command_id.clone()))
-        );
+        assert_eq!(cause_of(&meta).0, Some(command_id.clone()));
     }
 }
 
@@ -429,7 +441,7 @@ fn policy_delivers(
     correlated: String,
 ) {
     let delivered = w.business(&domain).delivered().pop().expect("delivered");
-    let page = delivered.command.and_then(|b| b.page).expect("a page");
+    let page = delivered.input.and_then(|b| b.page).expect("a page");
     let body = page.body.as_ref().and_then(|b| match b {
         command_page::Body::Command(c) => c.payload.as_ref(),
         command_page::Body::Fact(_) => None,
@@ -442,4 +454,27 @@ fn policy_delivers(
 fn fact_dead_lettered(w: &mut Coordinator) {
     assert!(!w.log.letters().is_empty(), "dead-lettered");
     assert!(!w.alerts().is_empty(), "alerted");
+}
+
+#[then("the events record the command cause with the reaction's derived command_id")]
+fn caused_by_derived_id(w: &mut Coordinator) {
+    let def = w.policies.last().expect("a policy");
+    let (policy, output) = (def.name.clone(), def.output.clone());
+    let trigger = delivered_to_domain(w, &output)
+        .last()
+        .and_then(|d| d.causation.clone())
+        .expect("the reaction's trigger");
+    let derived = angzarr_embedded::ids::policy_command_id(&trigger, &policy, 0).ok();
+    let covers = w.store_covers(&output);
+    let pages: Vec<_> = covers.iter().flat_map(|c| w.persisted(c)).collect();
+    assert!(!pages.is_empty());
+    for page in pages {
+        let meta = page.meta.expect("stamped");
+        assert_eq!(cause_of(&meta).0, derived, "{meta:?}");
+    }
+}
+
+/// Every delivery to `domain`'s business code.
+fn delivered_to_domain(w: &mut Coordinator, domain: &str) -> Vec<HandleRequest> {
+    w.business(domain).delivered()
 }

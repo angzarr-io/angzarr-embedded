@@ -1,22 +1,21 @@
 //! A policy's business process, as its coordinator sees it: a scripted
 //! angzarr-router `PolicyComponent`, registered with
 //! `Registry::policy_component` as a child's would be. It answers each
-//! source book with the commands its reactions name, as business code
-//! returns them, unchecked and unstamped, and answers a refusal with the
-//! fact its translating callback makes, or none (pass-through).
+//! trigger with the outputs its reactions name, as business code returns
+//! them (a root and a payload in the arm of its kind, decision 14.78), and
+//! answers a refusal with the fact its Translate callback makes (decision
+//! 14.89), or, with no callback, ANGZARR_REASON_NO_REFUSAL_HANDLER.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use angzarr_embedded::angzarr_router::context::CommandContext;
-use angzarr_embedded::angzarr_router::error::{CodedError, GrpcCode};
-use angzarr_embedded::angzarr_router::router::PolicyComponent;
-use angzarr_embedded::markup::{decode_message, DomainMessage};
-use angzarr_embedded::v1::{
-    command_page, Command, CommandBook, CommandPage, CommandRefused, Cover, EventBook, EventRef,
-    Fact, FactOrigin, Handling, PolicyReaction, PolicyResponse, Refusal, Uuid,
+use angzarr_embedded::angzarr_router::error::{AngzarrReason, CodedError, GrpcCode};
+use angzarr_embedded::angzarr_router::hpb::{
+    self, ReactRequest, ReactResponse, TranslateRequest, TranslateResponse,
 };
-use angzarr_embedded::{type_name, Any, WireError};
+use angzarr_embedded::angzarr_router::router::PolicyComponent;
+use angzarr_embedded::v1::{reaction_delivery, EventBook};
+use angzarr_embedded::{type_name, Any};
 
 use crate::tests::world::{package, root as root_of};
 
@@ -35,42 +34,33 @@ pub(crate) enum Root {
     Unnamed,
 }
 
-/// What a reaction's command carries that the coordinator forbids.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) enum Fault {
-    /// A command id other than the stamped one.
-    CommandId,
-    /// A causation other than the trigger.
-    CausationId,
-    /// A fact origin of its own, on either arm: the coordinator stamps a
-    /// fact's.
-    FactOrigin,
-    /// An expected sequence.
-    Handling(u64),
-    /// An edition of its own.
-    Edition(String),
+/// An output's arm (decisions 14.78 and 14.91): a command, which its
+/// destination may refuse, or a fact, which it records.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Arm {
+    Command,
+    Fact,
 }
 
-/// One reaction: on an event of type `on`, a command (or, `fact`, a fact)
-/// of type `command` to `domain`, at `root`.
+/// One reaction: on an event of type `on`, an output of `arm` of type
+/// `command` for the policy's destination, at `root`. `domain` names the
+/// destination's package the type is in.
 #[derive(Clone, Debug)]
 pub(crate) struct Reaction {
     pub(crate) on: String,
     pub(crate) domain: String,
     pub(crate) command: String,
-    /// The Fact arm, for a type its destination declares a fact.
-    pub(crate) fact: bool,
+    pub(crate) arm: Arm,
     pub(crate) root: Root,
-    /// A correlation of its own, unlike the trigger's.
-    pub(crate) correlation: Option<String>,
-    pub(crate) fault: Option<Fault>,
 }
 
-/// What the policy's translating callback answers.
+/// What the policy's Translate callback answers.
 #[derive(Clone, Debug)]
 pub(crate) enum Translation {
     /// The fact of this type in the source domain, payload only.
     Fact(String),
+    /// A fact with no payload (C-0834).
+    Empty,
     /// A failure.
     Fails(CodedError),
 }
@@ -79,14 +69,14 @@ pub(crate) enum Translation {
 #[derive(Default)]
 pub(crate) struct Script {
     pub(crate) reactions: Vec<Reaction>,
-    /// Its translating callback; none: pass-through.
+    /// Its Translate callback; none: a policy with no callback.
     pub(crate) translation: Option<Translation>,
     /// Every handled source failing so.
     pub(crate) fails: Option<CodedError>,
-    /// Every source book it was handed.
+    /// Every trigger it was handed, one event each.
     pub(crate) sources: Vec<EventBook>,
     /// Every refusal it was handed.
-    pub(crate) refusals: Vec<Refusal>,
+    pub(crate) refusals: Vec<TranslateRequest>,
 }
 
 /// One policy.
@@ -119,8 +109,8 @@ pub(crate) fn payload(domain: &str, name: &str) -> Any {
 }
 
 impl Reaction {
-    /// The command business code returns for `page` of `source`.
-    fn command(&self, source: &EventBook, page: &angzarr_embedded::v1::EventPage) -> CommandBook {
+    /// The output business code returns for `page` of `source`.
+    fn output(&self, source: &EventBook, page: &angzarr_embedded::v1::EventPage) -> hpb::Output {
         let meta = page.meta.clone().unwrap_or_default();
         let root = match &self.root {
             Root::Named(name) => Some(root_of(name)),
@@ -131,52 +121,12 @@ impl Reaction {
             Root::Unnamed => None,
         };
         let payload = payload(&self.domain, &self.command);
-        let body = match self.fact {
-            true => command_page::Body::Fact(Fact {
-                payload: Some(payload),
+        hpb::Output {
+            root,
+            body: Some(match self.arm {
+                Arm::Fact => hpb::output::Body::Fact(payload),
+                Arm::Command => hpb::output::Body::Command(payload),
             }),
-            false => command_page::Body::Command(Command {
-                payload: Some(payload),
-            }),
-        };
-        let causation = (self.fault == Some(Fault::CausationId)).then(|| EventRef {
-            stream: Some(Cover {
-                domain: "elsewhere".to_string(),
-                root: Some(Uuid::from_bytes([0x22; 16])),
-                edition: None,
-            }),
-            sequence: 0,
-        });
-        let handling = match self.fault {
-            Some(Fault::Handling(expected)) => Some(Handling {
-                expected_sequence: Some(expected),
-                conflict_resolution: 0,
-            }),
-            _ => None,
-        };
-        let fact_origin = self.fault == Some(Fault::FactOrigin);
-        let edition = match &self.fault {
-            Some(Fault::Edition(edition)) => Some(edition.clone()),
-            _ => None,
-        };
-        CommandBook {
-            cover: Some(Cover {
-                domain: self.domain.clone(),
-                root,
-                edition,
-            }),
-            page: Some(CommandPage {
-                body: Some(body),
-                correlation_id: self.correlation.as_deref().map(root_of),
-                command_id: (self.fault == Some(Fault::CommandId))
-                    .then(|| Uuid::from_bytes([0x11; 16])),
-                causation_id: causation,
-                fact_origin: fact_origin.then(|| FactOrigin {
-                    external_id: "e-1".to_string(),
-                    description: "a policy's".to_string(),
-                }),
-            }),
-            handling,
         }
     }
 }
@@ -190,64 +140,54 @@ impl PolicyComponent for Policy {
         &self.input
     }
 
-    async fn dispatch(&self, source: &EventBook) -> Result<PolicyResponse, CodedError> {
+    async fn react(&self, request: &ReactRequest) -> Result<ReactResponse, CodedError> {
         let mut script = locked(&self.script);
+        let source = request.trigger.clone().unwrap_or_default();
         script.sources.push(source.clone());
         if let Some(fails) = &script.fails {
             return Err(fails.clone());
         }
-        let reactions = source
+        let outputs = source
             .pages
             .iter()
             .filter_map(|page| {
-                let name = bare(page.payload.as_ref()?);
-                let outputs: Vec<CommandBook> = (script.reactions.iter())
+                let name = bare(angzarr_embedded::angzarr_router::page_event(page)?);
+                let outputs: Vec<hpb::Output> = (script.reactions.iter())
                     .filter(|r| r.on == name)
-                    .map(|r| r.command(source, page))
+                    .map(|r| r.output(&source, page))
                     .collect();
-                (!outputs.is_empty()).then_some(PolicyReaction {
-                    trigger_sequence: page.sequence,
-                    outputs,
-                })
+                Some(outputs)
             })
+            .flatten()
             .collect();
-        Ok(PolicyResponse { reactions })
+        Ok(ReactResponse { outputs })
     }
 
-    async fn dispatch_refusal(
-        &self,
-        refusal: &Refusal,
-        _ctx: &CommandContext,
-    ) -> Result<Option<Any>, CodedError> {
+    async fn translate(&self, request: &TranslateRequest) -> Result<TranslateResponse, CodedError> {
         let mut script = locked(&self.script);
-        script.refusals.push(refusal.clone());
+        script.refusals.push(request.clone());
         match &script.translation {
-            None => Ok(None),
-            Some(Translation::Fact(name)) => Ok(Some(payload(&self.input, name))),
+            None => {
+                let command_type = match request.command.as_ref().and_then(|c| c.body.as_ref()) {
+                    Some(
+                        reaction_delivery::Body::Command(any) | reaction_delivery::Body::Fact(any),
+                    ) => any.type_url.clone(),
+                    None => String::new(),
+                };
+                Err(angzarr_embedded::spec_coded(
+                    AngzarrReason::NoRefusalHandler,
+                    [("command_type".to_string(), command_type)],
+                ))
+            }
+            Some(Translation::Fact(name)) => Ok(TranslateResponse {
+                fact: Some(payload(&self.input, name)),
+            }),
+            Some(Translation::Empty) => Ok(TranslateResponse {
+                fact: Some(Any::default()),
+            }),
             Some(Translation::Fails(error)) => Err(error.clone()),
         }
     }
-}
-
-/// A CommandRefused, as a refusal fact's payload decodes.
-#[derive(Clone)]
-struct Refused(CommandRefused);
-
-impl DomainMessage for Refused {
-    type Wire = CommandRefused;
-
-    fn to_wire(&self) -> CommandRefused {
-        self.0.clone()
-    }
-
-    fn from_wire(wire: CommandRefused) -> Result<Refused, WireError> {
-        Ok(Refused(wire))
-    }
-}
-
-/// `any` decoded as the CommandRefused it is, if it is one.
-pub(crate) fn command_refused_in(any: &Any) -> Option<CommandRefused> {
-    decode_message::<Refused>(any).ok().flatten().map(|r| r.0)
 }
 
 /// A policy bug of `code`, INTERNAL.

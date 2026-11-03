@@ -20,10 +20,10 @@ fn failing(n: usize, fault: Fault) -> Vec<Fault> {
 }
 use crate::toys::prelude::*;
 use crate::v1::angzarr_dead_letter::Payload;
-use crate::v1::{CommandBook, Cover, EventBook};
+use crate::v1::{CommandBook, Cover};
 use crate::{
-    DeadLetterAt, DeadLetterStore, Failure, Handled, Kernel, MemoryDeadLetters, OnPolicyBug,
-    Payload as _, StepError,
+    DeadLetterAt, DeadLetterStore, Failure, Kernel, MemoryDeadLetters, OnPolicyBug, Payload as _,
+    StepError,
 };
 use angzarr_router::error::CodedError;
 
@@ -114,9 +114,9 @@ fn a_policys_bug_is_kept_in_the_write_that_moves_its_position_past_it() {
     assert_eq!(kept(&store, &account), failure.dead_letters());
 }
 
-/// A refused command of a policy that answers no refusals is kept, keyed
-/// by its target's stream and its derived command id, in the write that
-/// moves the policy past its trigger.
+/// A refused reaction of a policy that translates no refusals is kept,
+/// keyed by its target's stream and its derived command id, in the write
+/// that moves the policy past its trigger.
 #[test]
 fn a_refused_policy_command_is_kept_with_the_position_it_moves_past() {
     let plain = registry();
@@ -135,17 +135,13 @@ fn a_refused_policy_command_is_kept_with_the_position_it_moves_past() {
         .expect("the step is refused");
     let letters = failure.dead_letters();
     assert_eq!(letters.len(), 1, "{letters:?}");
-    let Some(Payload::RejectedCommand(book)) = &letters[0].letter.payload else {
-        panic!("the refused command: {letters:?}");
+    let Some(Payload::RejectedReaction(delivery)) = &letters[0].letter.payload else {
+        panic!("the refused reaction: {letters:?}");
     };
-    let id = book
-        .page
-        .as_ref()
-        .and_then(|p| p.command_id.clone())
-        .unwrap();
+    let id = delivery.command_id.clone().unwrap();
     assert_eq!(
         letters[0].stream,
-        book.cover.clone().unwrap(),
+        delivery.cover.clone().unwrap(),
         "its target's stream"
     );
     assert_eq!(
@@ -208,11 +204,12 @@ fn under_stay_a_policys_bug_is_kept_alone_and_once_across_resumes() {
     assert_eq!(log.lines().len(), 2, "logged each time");
 }
 
-/// A fact whose handler fails is parked (C-0599): no caller holds it, so
-/// its letter is kept, keyed by its stream and command id, the call
-/// answered OK, PARKED with it, and nothing else is written.
+/// A fact whose handler fails is dead-lettered (C-0599; decision 14.109):
+/// its letter is kept, keyed by its stream and command id, even with its
+/// sender waiting, the sender answered FACT_DEAD_LETTERED, and nothing else
+/// is written.
 #[test]
-fn a_fact_whose_handler_fails_is_parked_and_its_letter_kept() {
+fn a_fact_whose_handler_fails_is_dead_lettered_and_its_letter_kept() {
     let registry = registry();
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry).log_with(&log);
@@ -222,26 +219,33 @@ fn a_fact_whose_handler_fails_is_parked_and_its_letter_kept() {
         crate::pack(&crate::toys::account::fact::PaymentReceived { cents: -1 }),
         "pi_bad",
     );
-    let handled = kernel
+    let failure = kernel
         .handle::<Account, _>(&store, bad, &at(30))
         .ready()
-        .expect("parked, not failed");
-    assert!(matches!(handled, crate::Handled::Parked(_)), "parked");
-    let letters = places(handled.dead_letters());
+        .err()
+        .expect("its sender is answered");
+    assert!(
+        matches!(
+            &failure,
+            Failure::Kernel(crate::KernelError::FactDeadLettered { stream, .. })
+                if *stream == cover("account", 1)
+        ),
+        "{failure:?}"
+    );
+    let letters = places(&kept(&store, &cover("account", 1)));
     assert_eq!(letters.len(), 1, "{letters:?}");
-    assert_eq!(letters[0].0, cover("account", 1));
     assert!(
         matches!(letters[0].1, DeadLetterAt::Command(_)),
         "{letters:?}"
     );
     assert_eq!(log.lines().len(), 1, "logged");
-    let kept: Vec<_> = store
+    let written: Vec<_> = store
         .writes()
         .into_iter()
         .filter(|w| !w.letters.is_empty())
         .collect();
-    assert_eq!(kept.len(), 1, "one write keeps it: {kept:?}");
-    assert_eq!(kept[0].wrote, None, "and nothing else: {kept:?}");
+    assert_eq!(written.len(), 1, "one write keeps it: {written:?}");
+    assert_eq!(written[0].wrote, None, "and nothing else: {written:?}");
 }
 
 /// A projector (a `ProjectorHandler`) that fails with a bug.
@@ -252,7 +256,10 @@ impl angzarr_router::router::ProjectorHandler for Broken {
         "broken-view"
     }
 
-    async fn dispatch(&self, _: &EventBook) -> Result<crate::v1::Projection, CodedError> {
+    async fn dispatch(
+        &self,
+        _: &crate::angzarr_router::hpb::ProjectRequest,
+    ) -> Result<crate::angzarr_router::hpb::ProjectResponse, CodedError> {
         Err(CodedError::bug("toy-view-broken", []))
     }
 }
@@ -287,17 +294,16 @@ fn a_projectors_bug_is_kept_and_answered() {
     assert_eq!(kept(&store, &account), failure.dead_letters());
 }
 
-/// A fact given up at the race re-run cap is parked: it has no caller to
-/// hold it, so its letter is kept and the answer carries it.
+/// A fact given up at the race re-run cap is dead-lettered (decision
+/// 14.109): its letter is kept, and its sender answered FACT_DEAD_LETTERED.
 #[test]
-fn a_parked_facts_letter_is_kept_and_answered() {
-    // The race fixture is races.test.rs's; here, the fact's own: a fact
-    // that panics is the caller's (above), so park one by a store that
-    // loses every race.
+fn a_fact_given_up_at_the_race_cap_is_dead_lettered_and_kept() {
+    // The race fixture is races.test.rs's; here, the fact's own: a store
+    // that loses its one race.
     let registry = registry();
     let log = MemoryDeadLetters::new();
     let retry = crate::OnRetryable {
-        max_race_runs: 1,
+        max_race_runs: std::num::NonZeroU32::MIN,
         ..crate::OnRetryable::default()
     };
     let kernel = Kernel::new(&registry).log_with(&log).on_retryable(retry);
@@ -318,19 +324,24 @@ fn a_parked_facts_letter_is_kept_and_answered() {
         crate::pack(&crate::toys::account::fact::PaymentReceived { cents: 4 }),
         "pi_lost",
     );
-    let handled = kernel
+    let failure = kernel
         .handle::<Account, _>(&store, paid, &at(30))
         .ready()
-        .expect("a fact is never refused");
-    assert!(matches!(handled, Handled::Parked(_)), "parked");
-    let letters = handled.dead_letters();
+        .err()
+        .expect("its sender is answered");
+    assert!(
+        matches!(
+            &failure,
+            Failure::Kernel(crate::KernelError::FactDeadLettered { stream, .. }) if *stream == account
+        ),
+        "{failure:?}"
+    );
+    let letters = kept(&store, &account);
     assert_eq!(letters.len(), 1, "{letters:?}");
-    assert_eq!(letters[0].stream, account);
     assert!(
         matches!(letters[0].at, DeadLetterAt::Command(_)),
         "{letters:?}"
     );
-    assert_eq!(kept(&store, &account), letters);
 }
 
 /// A call's letters reach the kernel's log as they are raised, a bare
@@ -379,17 +390,16 @@ fn a_dead_letter_occurs_at_the_calls_sampled_instant() {
         "pi_bad",
     );
     let sampled = at(1_700_000_123);
-    let handled = kernel
-        .handle::<Account, _>(&store, bad, &sampled)
-        .ready()
-        .expect("parked");
+    assert!(
+        kernel
+            .handle::<Account, _>(&store, bad, &sampled)
+            .ready()
+            .is_err(),
+        "dead-lettered, its sender answered"
+    );
     let logged = log.letters();
     assert_eq!(logged.len(), 1);
     assert_eq!(logged[0].occurred_at, Some(sampled.now));
-    assert_eq!(
-        handled.dead_letters()[0].letter.occurred_at,
-        Some(sampled.now)
-    );
     let kept = kept(&store, &cover("account", 1));
     assert_eq!(kept[0].letter.occurred_at, Some(sampled.now));
 }

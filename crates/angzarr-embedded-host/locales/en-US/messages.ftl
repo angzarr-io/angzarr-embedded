@@ -6,18 +6,13 @@
 # English is the spec's catalog (angzarr_proto::REASONS_EN_US; decision
 # 14.60), never here.
 
-handshake-unreadable = stdout could not be read ({ $kind })
 duplicate-domain = component "{ $domain }" is configured twice
 no-launch = component "{ $domain }": language "{ $language }" has no default launch command; give one
 unknown-language = the config's "{ $key }" names language "{ $language }", which is not loaded; the languages loaded are { $loaded }
 empty-launch = component "{ $domain }": the launch command is empty
 spawn = component "{ $domain }": could not start "{ $program }" ({ $kind })
-handshake = component "{ $domain }": { $cause }
-connect = component "{ $domain }": could not connect to { $socket }
 describe = component "{ $domain }": Describe failed with gRPC code { $grpc_code }
-health = component "{ $domain }": its gRPC health watch failed with gRPC code { $grpc_code }
 kind-mismatch = component "{ $domain }" is configured as a { $configured } but describes itself as { $described }
-no-input = policy "{ $domain }" names no input domain in its descriptor
 upcaster-no-domain = component "{ $domain }" is an upcaster that names no domain to upcast: give it `upcasts`
 not-exposable = component "{ $domain }" is a { $kind }: only an aggregate may be exposed
 not-exposed = a request for "{ $domain }" from { $arrival } was answered as an unknown domain: its component is exposed { $expose }

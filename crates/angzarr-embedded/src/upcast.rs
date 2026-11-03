@@ -30,7 +30,8 @@
 //! order, a dead end) before anything is read.
 
 use angzarr_diagnostic::Report;
-use angzarr_proto::v1::{EventPage, UpcastRequest, UpcastResponse};
+use angzarr_proto::v1::{event_page, EventPage};
+use angzarr_router::hpb::{self, upcast_request, upcasted, UpcastRequest, UpcastResponse};
 use angzarr_router::send::BoxFuture;
 use prost::{Message, Name};
 use prost_types::Any;
@@ -66,9 +67,10 @@ impl UpcastPort for Upcaster {
 }
 
 /// `payload`, an incoming command's or fact's, upcast through `port` for
-/// `domain` (decision 14.39): sent as a one-page request whose page carries
-/// only the payload, the payload of the page returned taken. A port that
-/// answers no page leaves it as sent.
+/// `domain` (decision 14.39): sent alone, as a lone payload with no page
+/// and no sequence, and answered as one payload keyed `NoSequence`
+/// (C-0820; decision 14.97). Any other answer is the rule's bug
+/// ([`UpcastError::AnswerKeys`]).
 pub(crate) async fn upcast_input(
     port: &dyn UpcastPort,
     domain: &str,
@@ -76,37 +78,75 @@ pub(crate) async fn upcast_input(
 ) -> Result<Any, UpcastError> {
     let request = UpcastRequest {
         domain: domain.to_string(),
-        events: vec![EventPage {
-            payload: Some(payload.clone()),
-            ..EventPage::default()
-        }],
+        input: Some(upcast_request::Input::LonePayload(payload.clone())),
     };
-    Ok(port
-        .upcast(&request)
-        .await?
-        .events
-        .into_iter()
-        .next()
-        .and_then(|page| page.payload)
-        .unwrap_or_else(|| payload.clone()))
+    let mut answered = port.upcast(&request).await?.pages.into_iter();
+    match (answered.next(), answered.next()) {
+        (
+            Some(hpb::Upcasted {
+                key: Some(upcasted::Key::NoSequence(_)),
+                payload: Some(payload),
+            }),
+            None,
+        ) => Ok(payload),
+        _ => Err(UpcastError::AnswerKeys),
+    }
 }
 
 /// `pages` of a `domain` stream, read from the store, upcast through
-/// `port` (decision 14.39): sent as one request, the pages it answers
-/// taken in their place. No pages, no request.
+/// `port` (decision 14.39): sent as one request, the answer keyed by
+/// sequence, never by position (C-0819; decision 14.96). Each page keeps
+/// its sequence and its `EventMeta`, its event replaced by the payload its
+/// sequence is answered with; an answer whose keys are not exactly the
+/// pages' sequences, each once, is the rule's bug (C-0821,
+/// [`UpcastError::AnswerKeys`]). A page holding no event (a meta-event) is
+/// not sent, and kept. No pages to send, no request.
 pub(crate) async fn upcast_pages(
     port: &dyn UpcastPort,
     domain: &str,
     pages: &[EventPage],
 ) -> Result<Vec<EventPage>, UpcastError> {
-    if pages.is_empty() {
-        return Ok(Vec::new());
+    let sent: Vec<EventPage> = pages
+        .iter()
+        .filter(|page| angzarr_router::page_event(page).is_some())
+        .cloned()
+        .collect();
+    if sent.is_empty() {
+        return Ok(pages.to_vec());
     }
     let request = UpcastRequest {
         domain: domain.to_string(),
-        events: pages.to_vec(),
+        input: Some(upcast_request::Input::Pages(hpb::UpcastPages {
+            events: sent.clone(),
+        })),
     };
-    Ok(port.upcast(&request).await?.events)
+    let mut by_sequence = std::collections::BTreeMap::new();
+    for answer in port.upcast(&request).await?.pages {
+        let (Some(upcasted::Key::Sequence(sequence)), Some(payload)) = (answer.key, answer.payload)
+        else {
+            return Err(UpcastError::AnswerKeys);
+        };
+        if by_sequence.insert(sequence, payload).is_some() {
+            return Err(UpcastError::AnswerKeys);
+        }
+    }
+    if by_sequence.len() != sent.len()
+        || !sent
+            .iter()
+            .all(|page| by_sequence.contains_key(&page.sequence))
+    {
+        return Err(UpcastError::AnswerKeys);
+    }
+    Ok(pages
+        .iter()
+        .map(|page| match by_sequence.remove(&page.sequence) {
+            Some(event) if angzarr_router::page_event(page).is_some() => EventPage {
+                body: Some(event_page::Body::Event(event)),
+                ..page.clone()
+            },
+            _ => page.clone(),
+        })
+        .collect())
 }
 
 /// One rule: its source type's full name, its target's when known (typed
@@ -212,32 +252,51 @@ impl Upcaster {
         Ok(current)
     }
 
-    /// One page with its payload (if any) run through the rule chain; its
+    /// One page with its event (if any) run through the rule chain; its
     /// `sequence` and `meta` kept.
     pub fn upcast_page(&self, page: &EventPage) -> Result<EventPage, UpcastError> {
+        let body = match &page.body {
+            Some(event_page::Body::Event(event)) => {
+                Some(event_page::Body::Event(self.upcast_event(event)?))
+            }
+            other => other.clone(),
+        };
         Ok(EventPage {
-            payload: page
-                .payload
-                .as_ref()
-                .map(|p| self.upcast_event(p))
-                .transpose()?,
+            body,
             ..page.clone()
         })
     }
 
-    /// `UpcasterService.Upcast`'s body: every page's event through the rule
-    /// chain; a request for another domain unchanged.
+    /// `UpcasterService.Upcast`'s body: each page's event through the rule
+    /// chain, answered keyed by its sequence, or a lone payload keyed
+    /// `NoSequence` (decisions 14.96 and 14.97); a request for another
+    /// domain unchanged.
     pub fn dispatch(&self, request: &UpcastRequest) -> Result<UpcastResponse, UpcastError> {
-        let events = if request.domain == self.domain {
-            request
+        let mine = request.domain == self.domain;
+        let upcast = |payload: &Any| match mine {
+            true => self.upcast_event(payload),
+            false => Ok(payload.clone()),
+        };
+        let pages = match &request.input {
+            None => Vec::new(),
+            Some(upcast_request::Input::LonePayload(payload)) => vec![hpb::Upcasted {
+                key: Some(upcasted::Key::NoSequence(hpb::NoSequence {})),
+                payload: Some(upcast(payload)?),
+            }],
+            Some(upcast_request::Input::Pages(pages)) => pages
                 .events
                 .iter()
-                .map(|p| self.upcast_page(p))
-                .collect::<Result<_, _>>()?
-        } else {
-            request.events.clone()
+                .filter_map(|page| {
+                    angzarr_router::page_event(page).map(|event| {
+                        Ok(hpb::Upcasted {
+                            key: Some(upcasted::Key::Sequence(page.sequence)),
+                            payload: Some(upcast(event)?),
+                        })
+                    })
+                })
+                .collect::<Result<_, UpcastError>>()?,
         };
-        Ok(UpcastResponse { events })
+        Ok(UpcastResponse { pages })
     }
 
     /// Check the typed rules can all run, given the type URLs the domain

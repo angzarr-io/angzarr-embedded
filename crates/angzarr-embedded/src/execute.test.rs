@@ -4,9 +4,7 @@
 //! loop, with a store and a chain.
 
 use crate::check::{check, Sampled};
-use crate::coordinator::{
-    admit, decide, expect, resolution, unknown_domain, upcast, Admitted, Contextual, Nonces,
-};
+use crate::coordinator::{admit, decide, unknown_domain, upcast, Admitted, Contextual};
 use crate::dead_letter::DeadLetterLog;
 use crate::domain::{Domain, State};
 use crate::error::{Failure, KernelError};
@@ -28,10 +26,11 @@ pub enum Executed<'a, E> {
 
 impl<D: Domain> Stream<D> {
     /// [`check`], identify, admit `book` against this stream's own events
-    /// (deduplication, a process manager's start rule), resolve the
-    /// handling, dispatch it through the router (awaited), and fold what it
-    /// decided on. A book for another stream is
-    /// [`KernelError::WrongDomain`] or [`KernelError::Stale`].
+    /// (deduplication, a process manager's start rule), check its expected
+    /// sequence, dispatch it through the router (awaited), and fold what it
+    /// decided on. A book for another domain is
+    /// [`KernelError::WrongDomain`]; one for another stream of it, or at
+    /// another head, is refused `ExpectedSequenceMismatch`.
     pub async fn execute(
         &mut self,
         book: CommandBook,
@@ -51,11 +50,8 @@ impl<D: Domain> Stream<D> {
         let command = checked.identify(sampled);
         let head = self.len();
         if command.cover() != &self.cover {
-            return Err(kernel(KernelError::Stale {
-                stream: command.cover().clone(),
-                expected: command.expected_sequence().unwrap_or(head),
-                actual: head,
-            }));
+            let expected = command.expected_sequence().unwrap_or(head);
+            return Err(Failure::Rejected(Rejected::mismatch(expected, head)));
         }
         registry
             .handler(D::NAME)
@@ -66,26 +62,14 @@ impl<D: Domain> Stream<D> {
             .map(Envelope::page)
             .collect();
         let current = upcast(registry, &command).await;
-        match admit(
-            registry,
-            &command,
-            &current,
-            recorded,
-            head > 0,
-            dead_letters,
-        )? {
+        match admit(registry, &command, &current, recorded, head > 0)? {
             Admitted::Duplicate(_) => return Ok(Executed::Duplicate(&self.events[found])),
             Admitted::Dispatch => {}
         }
-        let resolution = resolution(registry.catalog(), &command, &current).map_err(kernel)?;
-        let mut nonces = Nonces::of(sampled);
-        let (expected, nonce) = expect(&command, resolution, head, &mut nonces).map_err(kernel)?;
-        if nonce.is_some() && expected < self.first {
-            // The window starts inside the snapshot: its events are not held.
-            return Err(kernel(KernelError::BeforeSnapshot {
-                stream: self.cover.clone(),
-                first: self.first,
-            }));
+        if let Some(expected) = command.expected_sequence() {
+            if expected != head {
+                return Err(Failure::Rejected(Rejected::mismatch(expected, head)));
+            }
         }
         let snapshot = (self.first > 0).then(|| Snapshot {
             sequence: self.first - 1,
@@ -104,13 +88,10 @@ impl<D: Domain> Stream<D> {
         let contextual = Contextual {
             command,
             current,
-            resolution,
-            expected,
             snapshot,
             pages: self.events.iter().map(Envelope::page).collect(),
             head,
             last_recorded_at: self.last_recorded_at,
-            nonce,
         };
         let pages = decide(&contextual, sampled, registry, dead_letters)
             .await?

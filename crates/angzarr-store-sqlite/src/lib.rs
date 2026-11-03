@@ -26,7 +26,7 @@
 //! runs on it.
 //!
 //! Editions are per-stream forks as far as the base ports need them: an
-//! edition stream's first own event is its creation (`meta.EditionCreated`,
+//! edition stream's first own event is its fork (an `EditionCreated` meta-event,
 //! at main's head or below it), and it reads main's events below that, then
 //! its own; an edition stream with none of its own reads as main's, and
 //! anything else written to it first is refused

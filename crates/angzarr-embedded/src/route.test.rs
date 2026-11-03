@@ -1,23 +1,7 @@
 use prost_types::Any;
 
-use super::{is_nothing, NOTHING};
 use crate::v1::EventPage;
 use angzarr_diagnostic::code;
-
-/// A fact's record of nothing is known by its type URL alone.
-#[test]
-fn a_record_of_nothing_is_known_by_its_type_url() {
-    let page = |type_url: &str| EventPage {
-        payload: Some(Any {
-            type_url: type_url.to_string(),
-            value: Vec::new(),
-        }),
-        ..EventPage::default()
-    };
-    assert!(is_nothing(&page(NOTHING)));
-    assert!(!is_nothing(&page("/toy.account.v1.Opened")));
-    assert!(!is_nothing(&EventPage::default()));
-}
 
 /// A fold that fails on a persisted event says why as its cause, a key and
 /// args (decision 14.37: `FoldFailure.cause`, flattened as `cause` and
@@ -26,30 +10,30 @@ fn a_record_of_nothing_is_known_by_its_type_url() {
 #[test]
 fn a_fold_that_fails_carries_its_cause_as_a_key_and_args() {
     use crate::toys::{account, command, cover, registry, Ready};
-    use angzarr_proto::v1::ContextualCommand;
-    use angzarr_router::error::RouterReason;
+    use angzarr_proto::v1::AngzarrReason;
+    use angzarr_router::hpb::HandleRequest;
 
     let registry = registry();
     let stream = cover("account", 1);
     let mut corrupt = crate::pack(&account::Deposited { cents: 1 });
     corrupt.value = vec![0xff, 0xff, 0xff];
     let type_url = corrupt.type_url.clone();
-    let request = ContextualCommand {
-        events: Some(crate::v1::EventBook {
+    let request = HandleRequest {
+        history: Some(crate::v1::EventBook {
             cover: Some(stream.clone()),
             pages: vec![EventPage {
                 sequence: 0,
-                payload: Some(corrupt),
+                body: Some(crate::v1::event_page::Body::Event(corrupt)),
                 meta: None,
             }],
             snapshot: None,
             next_sequence: 1,
         }),
-        command: Some(command(
+        input: Some(command(
             stream,
             crate::pack(&account::cmd::Deposit { cents: 1 }),
         )),
-        ..ContextualCommand::default()
+        ..HandleRequest::default()
     };
     let error = registry
         .handler("account")
@@ -57,7 +41,7 @@ fn a_fold_that_fails_carries_its_cause_as_a_key_and_args() {
         .dispatch(&request)
         .ready()
         .expect_err("the persisted event does not fold");
-    assert_eq!(error.code, RouterReason::FoldFailed.as_str_name());
+    assert_eq!(error.code, AngzarrReason::FoldFailed.as_str_name());
     let extra = |key: &str| error.extras.get(key).map(String::as_str);
     assert_eq!(extra("cause"), Some(code!("payload-decode")), "{error:?}");
     assert_eq!(
@@ -67,21 +51,18 @@ fn a_fold_that_fails_carries_its_cause_as_a_key_and_args() {
     );
 }
 
-/// A handler's refusal goes out under whichever of the six business
-/// statuses it gave, typed or not, and `Rejected::status` reads that same
-/// status back: an untyped refusal under its own code and args, a typed
-/// one keyed ROUTER_REASON_COMMAND_REFUSED with its object beside.
+/// A handler's typed refusal goes out under whichever of the six business
+/// statuses it gave, keyed ANGZARR_REASON_COMMAND_REFUSED with its object
+/// beside, and `Rejected` reads that same status and object back. A
+/// handler's own key under a business status is no refusal (decision
+/// 14.95): no `Rejected` reads it.
 #[test]
 fn a_refusal_goes_out_and_reads_back_under_each_business_status() {
-    use angzarr_diagnostic::{Diagnostic, Report};
-    use angzarr_router::error::{BusinessStatus, GrpcCode, HandlerError};
+    use angzarr_diagnostic::Diagnostic;
+    use angzarr_router::error::{BusinessStatus, CodedError, GrpcCode, HandlerError};
 
-    use super::{refused, Rejected};
+    use super::{rejection, Rejected};
 
-    let coded = |error: HandlerError| match error {
-        HandlerError::Coded(coded) => coded,
-        other => panic!("coded, not {other:?}"),
-    };
     let object = Any {
         type_url: "type.googleapis.com/toy.meter.v1.MeterSealed".to_string(),
         value: Vec::new(),
@@ -94,112 +75,34 @@ fn a_refusal_goes_out_and_reads_back_under_each_business_status() {
         BusinessStatus::OutOfRange,
         BusinessStatus::PermissionDenied,
     ] {
-        let report = Report::new("toy-meter-low").arg("reading", 3i64);
-
-        let untyped = coded(refused(&report, None, status));
-        assert_eq!(untyped.grpc, GrpcCode::from(status), "{status:?}");
-        assert_eq!(untyped.code, "toy-meter-low", "{status:?}");
-        assert_eq!(
-            untyped.extras.get("reading").map(String::as_str),
-            Some("3"),
-            "{status:?}"
-        );
-        let read = Rejected::of(&untyped);
-        assert_eq!(read.status(), status);
-        assert_eq!(read.code(), "toy-meter-low");
-        assert_eq!(read.refusal_object(), None);
-
-        let typed = coded(refused(&report, Some(object.clone()), status));
+        let HandlerError::Coded(typed) = rejection((), status, object.clone()) else {
+            panic!("a rejection is coded");
+        };
         assert_eq!(typed.grpc, GrpcCode::from(status), "{status:?}");
-        assert_eq!(typed.code, "ROUTER_REASON_COMMAND_REFUSED", "{status:?}");
-        let read = Rejected::of(&typed);
+        assert_eq!(typed.code, "ANGZARR_REASON_COMMAND_REFUSED", "{status:?}");
+        assert_eq!(
+            typed.extras.get("refusal_type").map(String::as_str),
+            Some("toy.meter.v1.MeterSealed")
+        );
+        let read = Rejected::of(&typed).expect("a typed refusal");
         assert_eq!(read.status(), status);
-        assert_eq!(read.code(), "ROUTER_REASON_COMMAND_REFUSED");
-        assert_eq!(read.refusal_object(), Some(&object));
+        assert_eq!(read.code(), "ANGZARR_REASON_COMMAND_REFUSED");
+        assert_eq!(read.refusal_object(), &object);
+        assert_eq!(read.as_coded(), typed, "read back as it went out");
+        assert_eq!(
+            read.as_refusal(),
+            typed.as_refusal().expect("Translate's form"),
+            "what a refused policy's Translate is handed"
+        );
+
+        let untyped = CodedError {
+            refusal: None,
+            ..typed
+        };
+        assert_eq!(Rejected::of(&untyped), None, "{status:?}");
     }
-}
-
-/// An untyped refusal reaches a refused policy's OnRefused as
-/// `RefusalResponse.diagnostic`, the rejection's ErrorInfo reason as its
-/// code: the key it went out under, the handler's own or the spec's (a
-/// process manager's `COORDINATOR_REASON_PM_NO_INSTANCE`), never
-/// angzarr-embedded's code for it; its metadata the args.
-#[test]
-fn an_untyped_refusal_reaches_on_refused_under_the_key_it_went_out_under() {
-    use angzarr_proto::v1::refusal_response::Reason;
-    use angzarr_proto::v1::Diagnostic;
-    use angzarr_router::error::{BusinessStatus, CodedError};
-
-    use super::Rejected;
-
-    for (key, arg) in [
-        ("COORDINATOR_REASON_PM_NO_INSTANCE", "type_url"),
-        ("toy-meter-low", "reading"),
-    ] {
-        let rejected = Rejected::of(&CodedError::rejection(
-            BusinessStatus::FailedPrecondition,
-            key,
-            [(arg.to_string(), "3".to_string())],
-        ));
-        assert_eq!(
-            rejected.response().reason,
-            Some(Reason::Diagnostic(Diagnostic {
-                code: key.to_string(),
-                args: [(arg.to_string(), "3".to_string())].into(),
-            })),
-            "{key}"
-        );
-    }
-}
-
-/// A marked-up handler's retryable bug goes out under exactly the status
-/// it picked, ROUTER_REASON_UNHANDLED_HANDLER_ERROR, its report as the cause; its
-/// immediate return as ABORTED under the report's own code and args.
-#[test]
-fn a_retryable_bug_and_an_immediate_return_go_out_under_their_status() {
-    use angzarr_diagnostic::Report;
-    use angzarr_router::error::{GrpcCode, HandlerError, RetryableStatus};
-
-    use super::failed;
-    use crate::markup::{Failed, Rejection};
-
-    let coded = |error: HandlerError| match error {
-        HandlerError::Coded(coded) => coded,
-        other => panic!("coded, not {other:?}"),
-    };
-    let report = || Report::new("toy-meter-offline").arg("seat", 3i64);
-    for status in [
-        RetryableStatus::Unavailable,
-        RetryableStatus::DeadlineExceeded,
-        RetryableStatus::ResourceExhausted,
-    ] {
-        let out = coded(failed::<Report>(
-            Failed::<Rejection<Report>>::retryable_bug(status, &report()),
-        ));
-        assert_eq!(out.grpc, GrpcCode::from(status), "{status:?}");
-        assert_eq!(
-            out.code, "ROUTER_REASON_UNHANDLED_HANDLER_ERROR",
-            "{status:?}"
-        );
-        assert_eq!(
-            out.extras.get("cause").map(String::as_str),
-            Some("toy-meter-offline"),
-            "{status:?}"
-        );
-        assert_eq!(
-            out.extras.get("cause.seat").map(String::as_str),
-            Some("3"),
-            "{status:?}"
-        );
-    }
-
-    let out = coded(failed::<Report>(Failed::<Rejection<Report>>::immediate(
-        &report(),
-    )));
-    assert_eq!(out.grpc, GrpcCode::Aborted);
-    assert_eq!(out.code, "toy-meter-offline");
-    assert_eq!(out.extras.get("seat").map(String::as_str), Some("3"));
-    assert_eq!(out.extras.get("cause"), None);
+    let bug = CodedError::bug("toy-meter-low", []);
+    assert_eq!(Rejected::of(&bug), None);
 }
 
 /// What this thread holds allocated, net: every allocation counted against
@@ -265,12 +168,14 @@ fn a_stream_of_distinct_child_codes_leaks_nothing() {
     use angzarr_router::error::{BusinessStatus, CodedError};
 
     let answered = |n: usize| {
-        let refusal = CodedError::rejection(
+        let refusal = CodedError::refused(
             BusinessStatus::FailedPrecondition,
-            &format!("CHILD_REFUSED_{n}"),
-            [(format!("seat_{n}"), n.to_string())],
+            Any {
+                type_url: format!("type.googleapis.com/child.v1.Refused{n}"),
+                value: n.to_string().into_bytes(),
+            },
         );
-        let rejected = super::Rejected::of(&refusal);
+        let rejected = super::Rejected::of(&refusal).expect("a typed refusal");
         let shown = (
             rejected.to_string(),
             rejected.code().len(),
@@ -282,17 +187,12 @@ fn a_stream_of_distinct_child_codes_leaks_nothing() {
         );
         let routed = crate::KernelError::Router(bug.clone());
         let routed = (routed.to_string(), routed.code().len(), routed.args().len());
-        let failure = super::policy_failed(&angzarr_diagnostic::Report::new("toy-policy-broke"));
-        drop((shown, routed, failure));
-        let failed = super::internal(
-            super::POLICY_FAILED,
-            [
-                ("policy-reason".to_string(), format!("CHILD_POLICY_{n}")),
-                (format!("hand_{n}"), n.to_string()),
-            ],
+        let handler_bug = CodedError::bug(
+            &format!("CHILD_BUG_{n}"),
+            [(format!("hand_{n}"), n.to_string())],
         );
-        let reported = super::policy_failure(&failed).map(|r| r.to_string());
-        drop(reported);
+        let reported = super::report(&handler_bug).to_string();
+        drop((shown, routed, reported));
     };
     // Whatever is built once, on first use, is built before counting.
     answered(0);
@@ -316,17 +216,19 @@ fn a_rejection_is_compared_and_shown_by_its_report_not_its_kept_value() {
     use std::sync::Arc;
 
     let coded = |code: &str| {
-        CodedError::rejection(
+        CodedError::refused(
             BusinessStatus::FailedPrecondition,
-            code,
-            [("short".to_string(), "8".to_string())],
+            crate::pack(&crate::toys::ToyRefusal {
+                code: code.to_string(),
+            }),
         )
     };
-    let bare = super::Rejected::of(&coded("toy-account-overdrawn"));
-    let kept = super::Rejected::of(&coded("toy-account-overdrawn"))
+    let of = |code: &str| super::Rejected::of(&coded(code)).expect("a typed refusal");
+    let bare = of("toy-account-overdrawn");
+    let kept = of("toy-account-overdrawn")
         .kept(Some(Arc::new(crate::toys::Refused::Overdrawn { short: 8 })));
     assert_eq!(bare, kept, "kept or not, the same refusal");
-    assert_ne!(bare, super::Rejected::of(&coded("toy-account-not-open")));
+    assert_ne!(bare, of("toy-account-not-open"));
     assert_eq!(bare.rejection::<crate::toys::Refused>(), None);
     assert_eq!(
         kept.rejection::<crate::toys::Refused>(),
@@ -341,13 +243,13 @@ fn a_rejection_is_compared_and_shown_by_its_report_not_its_kept_value() {
 // as a status, is INTERNAL where the kernel would answer it.
 #[test]
 fn a_spec_key_is_coded_under_its_declared_status() {
-    use angzarr_proto::v1::{CoordinatorReason, HostReason, RouterReason};
+    use angzarr_proto::v1::AngzarrReason;
     use angzarr_router::error::GrpcCode;
     let coded = super::spec_coded(
-        CoordinatorReason::PmNoInstance,
+        AngzarrReason::PmNoInstance,
         [("type_url".to_string(), "/a.B".to_string())],
     );
-    assert_eq!(coded.code, "COORDINATOR_REASON_PM_NO_INSTANCE");
+    assert_eq!(coded.code, "ANGZARR_REASON_PM_NO_INSTANCE");
     assert_eq!(coded.grpc, GrpcCode::FailedPrecondition);
     assert_eq!(
         coded.extras.get("type_url").map(String::as_str),
@@ -356,36 +258,32 @@ fn a_spec_key_is_coded_under_its_declared_status() {
     assert_eq!(coded.refusal, None);
     for (grpc, expected) in [
         (
-            super::spec_coded(CoordinatorReason::ConflictOverlap, []).grpc,
-            GrpcCode::Aborted,
+            super::spec_coded(AngzarrReason::EditionNotForked, []).grpc,
+            GrpcCode::FailedPrecondition,
         ),
         (
-            super::spec_coded(CoordinatorReason::HandlerUnavailable, []).grpc,
+            super::spec_coded(AngzarrReason::HandlerUnavailable, []).grpc,
             GrpcCode::Unavailable,
         ),
         (
-            super::spec_coded(RouterReason::PersistedEventCorrupt, []).grpc,
+            super::spec_coded(AngzarrReason::PersistedEventCorrupt, []).grpc,
             GrpcCode::DataLoss,
         ),
         (
-            super::spec_coded(HostReason::NoComponentsRegistered, []).grpc,
-            GrpcCode::Internal,
-        ),
-        (
-            super::spec_coded(CoordinatorReason::MissingRulesVersion, []).grpc,
+            super::spec_coded(AngzarrReason::MissingRulesVersion, []).grpc,
             GrpcCode::Internal,
         ),
     ] {
         assert_eq!(grpc, expected);
     }
     use super::SpecKey;
-    assert_eq!(CoordinatorReason::MissingRulesVersion.grpc(), None);
+    assert_eq!(AngzarrReason::MissingRulesVersion.grpc(), None);
     assert_eq!(
-        CoordinatorReason::EditionNotForked.grpc(),
+        AngzarrReason::EditionNotForked.grpc(),
         Some(GrpcCode::FailedPrecondition)
     );
     assert_eq!(
-        RouterReason::TooManySteps.key(),
-        "ROUTER_REASON_TOO_MANY_STEPS"
+        AngzarrReason::FactDeadLettered.key(),
+        "ANGZARR_REASON_FACT_DEAD_LETTERED"
     );
 }

@@ -24,7 +24,7 @@ fn a_second_handler_for_one_type_is_refused() {
     let error = lamp(quote! {
         impl Lamp {
             #[handles_cmd(On)]
-            fn on(&self, cmd: On, ctx: &Context) -> Result<Lit, Infallible> { todo!() }
+            fn on(&self, cmd: On, ctx: &Context) -> Result<Lit, Failed<Unrefusable>> { todo!() }
             #[handles_fact(On)]
             fn on_again(&self, fact: On, ctx: &Context) -> Record<Self> { todo!() }
         }
@@ -32,51 +32,34 @@ fn a_second_handler_for_one_type_is_refused() {
     assert!(error.contains("a second handler for this type"), "{error}");
 }
 
+/// A command that lists no refusal cannot refuse (decision 14.95): a
+/// handler of it failing with a rejection of its own is refused.
 #[test]
-fn handlers_that_disagree_on_the_rejection_are_refused() {
+fn a_command_listing_no_refusal_that_refuses_is_refused() {
     let error = lamp(quote! {
         impl Lamp {
             #[handles_cmd(On)]
-            fn on(&self, cmd: On, ctx: &Context) -> Result<Lit, Infallible> { todo!() }
+            fn on(&self, cmd: On, ctx: &Context) -> Result<Lit, Failed<Unrefusable>> { todo!() }
             #[handles_cmd(Off)]
             fn off(&self, cmd: Off, ctx: &Context) -> Result<Dark, WireError> { todo!() }
         }
     });
     assert!(
-        error.contains("disagree on the rejection: `WireError` here, `Infallible` before"),
+        error.contains("a command that lists no refusal cannot refuse"),
         "{error}"
     );
 }
 
+/// A command that lists no refusal fails with `Failed<Unrefusable>`, and
+/// the domain's rejection is a typed refusal.
 #[test]
-fn handlers_that_agree_on_the_rejection_expand() {
+fn a_command_listing_no_refusal_fails_unrefusable() {
     let expanded = domain(
         quote!(domain = "lamp"),
         quote! {
             impl Lamp {
                 #[handles_cmd(On)]
-                fn on(&self, cmd: On, ctx: &Context) -> Result<Lit, Refused> { todo!() }
-                #[handles_cmd(Off)]
-                fn off(&self, cmd: Off, ctx: &Context) -> Result<Dark, Refused> { todo!() }
-            }
-        },
-        Kind::Aggregate,
-    )
-    .expect("expands")
-    .to_string();
-    assert!(expanded.contains("Rejection < Refused >"), "{expanded}");
-}
-
-#[test]
-fn the_rejection_is_inferred_through_failed() {
-    let expanded = domain(
-        quote!(domain = "lamp"),
-        quote! {
-            impl Lamp {
-                #[handles_cmd(On)]
-                fn on(&self, cmd: On, ctx: &Context) -> Result<Lit, Failed<Refused>> { todo!() }
-                #[handles_cmd(Off)]
-                fn off(&self, cmd: Off, ctx: &Context) -> Result<Dark, Refused> { todo!() }
+                fn on(&self, cmd: On, ctx: &Context) -> Result<Lit, Failed<Unrefusable>> { todo!() }
             }
         },
         Kind::Aggregate,
@@ -84,42 +67,30 @@ fn the_rejection_is_inferred_through_failed() {
     .expect("expands")
     .to_string();
     assert!(
-        expanded
-            .contains("type Rejection = :: angzarr_embedded :: markup :: Rejection < Refused >"),
+        expanded.contains("type Rejection = :: angzarr_embedded :: markup :: TypedRefusal"),
         "{expanded}"
     );
 }
 
+/// Only a `Failed` of one argument is looked through: another wrapper, or
+/// a `Failed` of two, is the refusal it names, and refused.
 #[test]
-fn failed_of_another_name_is_not_unwrapped() {
-    let error = lamp(quote! {
-        impl Lamp {
-            #[handles_cmd(On)]
-            fn on(&self, cmd: On, ctx: &Context) -> Result<Lit, Failed<Refused>> { todo!() }
-            #[handles_cmd(Off)]
-            fn off(&self, cmd: Off, ctx: &Context) -> Result<Dark, Unfailed<Refused>> { todo!() }
-        }
-    });
-    assert!(
-        error.contains("disagree on the rejection: `Unfailed < Refused >` here, `Refused` before"),
-        "{error}"
-    );
-}
-
-#[test]
-fn a_failed_of_two_arguments_is_not_unwrapped() {
-    let error = lamp(quote! {
-        impl Lamp {
-            #[handles_cmd(On)]
-            fn on(&self, cmd: On, ctx: &Context) -> Result<Lit, Refused> { todo!() }
-            #[handles_cmd(Off)]
-            fn off(&self, cmd: Off, ctx: &Context) -> Result<Dark, Failed<Refused, Other>> { todo!() }
-        }
-    });
-    assert!(
-        error.contains("disagree on the rejection: `Failed < Refused , Other >` here"),
-        "{error}"
-    );
+fn only_a_failed_of_one_argument_is_looked_through() {
+    for error_type in [
+        quote!(Unfailed<Unrefusable>),
+        quote!(Failed<Unrefusable, Other>),
+    ] {
+        let error = lamp(quote! {
+            impl Lamp {
+                #[handles_cmd(On)]
+                fn on(&self, cmd: On, ctx: &Context) -> Result<Lit, #error_type> { todo!() }
+            }
+        });
+        assert!(
+            error.contains("a command that lists no refusal cannot refuse"),
+            "{error_type}: {error}"
+        );
+    }
 }
 
 #[test]
@@ -156,7 +127,7 @@ fn a_handler_taking_mut_self_is_refused() {
     let error = lamp(quote! {
         impl Lamp {
             #[handles_cmd(On)]
-            fn on(&mut self, cmd: On, ctx: &Context) -> Result<Lit, Infallible> { todo!() }
+            fn on(&mut self, cmd: On, ctx: &Context) -> Result<Lit, Failed<Unrefusable>> { todo!() }
         }
     });
     assert!(error.contains("a handler takes `&self`"), "{error}");
@@ -167,7 +138,7 @@ fn a_handler_taking_self_by_value_is_refused() {
     let error = lamp(quote! {
         impl Lamp {
             #[handles_cmd(On)]
-            fn on(self, cmd: On, ctx: &Context) -> Result<Lit, Infallible> { todo!() }
+            fn on(self, cmd: On, ctx: &Context) -> Result<Lit, Failed<Unrefusable>> { todo!() }
         }
     });
     assert!(error.contains("a handler takes `&self`"), "{error}");
@@ -193,7 +164,7 @@ fn a_command_handler_without_a_result_is_refused() {
         }
     });
     assert!(
-        error.contains("a command handler returns `Result<_, Rejection>`"),
+        error.contains("a command handler returns `Result<_, Failed<Unrefusable>>`"),
         "{error}"
     );
 }
@@ -234,32 +205,19 @@ fn a_fact_handler_returning_an_emit_is_refused() {
     assert!(error.contains("not an `Emit`"), "{error}");
 }
 
+/// A domain takes no `#[on_refused]`: a refusal reaches the policy's
+/// Translate callback, never a domain.
 #[test]
-fn an_on_refused_handler_returning_no_result_is_refused() {
-    let error = lamp(quote! {
-        impl Lamp {
-            #[on_refused(On)]
-            fn on_refused(&self, refused: CommandRefused<On>, ctx: &Context) -> Record<Self> { todo!() }
-        }
-    });
-    assert!(
-        error.contains("an `#[on_refused]` handler returns `Result<Record<Self>, E>`"),
-        "{error}"
-    );
-}
-
-#[test]
-fn an_on_refused_handler_returning_an_emit_is_refused() {
-    let error = lamp(quote! {
-        impl Lamp {
-            #[on_refused(On)]
-            fn on_refused(&self, refused: CommandRefused<On>, ctx: &Context) -> Result<Emit<Self>, Report> { todo!() }
-        }
-    });
-    assert!(
-        error.contains("an `#[on_refused]` handler records a `Record`, not an `Emit`"),
-        "{error}"
-    );
+fn an_on_refused_on_a_domain_is_refused() {
+    for marker in [quote!(#[on_refused]), quote!(#[on_refused(On)])] {
+        let error = lamp(quote! {
+            impl Lamp {
+                #marker
+                fn on_refused(&self, refused: &Refused) -> Result<Dark, Infallible> { todo!() }
+            }
+        });
+        assert!(error.contains("a domain has no `#[on_refused]`"), "{error}");
+    }
 }
 
 #[test]
@@ -267,7 +225,7 @@ fn starts_on_an_aggregate_is_refused() {
     let error = lamp(quote! {
         impl Lamp {
             #[handles_cmd(On, starts)]
-            fn on(&self, cmd: On, ctx: &Context) -> Result<Lit, Infallible> { todo!() }
+            fn on(&self, cmd: On, ctx: &Context) -> Result<Lit, Failed<Unrefusable>> { todo!() }
         }
     });
     assert!(error.contains("`starts` is a process manager's"), "{error}");
@@ -303,29 +261,120 @@ fn refuses_on_a_fact_handler_is_refused() {
 }
 
 #[test]
-fn a_process_manager_with_only_refusal_handlers_still_skips_for_no_instance() {
+fn a_process_manager_marking_no_input_starts_declares_no_starting_type() {
     let expanded = domain(
         quote!(domain = "timer"),
         quote! {
             impl Timer {
-                #[on_refused(On)]
-                fn on_refused(&self, refused: CommandRefused<On>, ctx: &Context) -> Result<Record<Self>, Infallible> { todo!() }
+                #[handles_fact(Ring)]
+                fn ring(&self, fact: Ring, ctx: &Context) -> Record<Self> { todo!() }
             }
         },
         Kind::ProcessManager,
     )
     .expect("expands")
     .to_string();
-    // The kernel skips a fact for a stream with no instance, of a type that
-    // starts none: the expansion routes the refusal and declares no starting
-    // input.
-    assert!(expanded.contains(". on_refused ("), "{expanded}");
+    // The kernel's start rule refuses every input for a stream with no
+    // instance, of a type that starts none: the expansion routes the fact
+    // and declares no starting input.
+    assert!(expanded.contains(". on_fact ("), "{expanded}");
     assert!(
         expanded.contains(
             "const STARTS : & 'static [:: angzarr_embedded :: markup :: TypeName] = & [] ;"
         ),
         "{expanded}"
     );
+}
+
+/// The policy whose impl is `item`, expanded, or why not.
+fn policy(item: Tokens) -> Result<String, String> {
+    flow(
+        quote!(name = "s", source = A, target = B),
+        item,
+        Flow::Policy,
+    )
+    .map(|expanded| expanded.to_string())
+    .map_err(|error| error.to_string())
+}
+
+/// A policy's one Translate callback is its `on_refused` (decision 14.89);
+/// with none, the trait's default answers every refusal a bug.
+#[test]
+fn a_policys_one_translate_callback_is_its_on_refused() {
+    let translating = policy(quote! {
+        impl S {
+            #[on_refused]
+            fn refused(&self, refused: &Refused) -> Result<Lost, Infallible> { todo!() }
+        }
+    })
+    .expect("expands");
+    assert!(translating.contains("fn on_refused"), "{translating}");
+    assert!(
+        translating.contains("< S > :: refused (self , refused)"),
+        "{translating}"
+    );
+    let silent = policy(quote!(impl S {})).expect("expands");
+    assert!(!silent.contains("fn on_refused"), "{silent}");
+}
+
+/// A second callback, one naming a command, one also an `#[on_event]`, and
+/// one of another shape are refused.
+#[test]
+fn a_policys_translate_callback_is_one_of_its_shape() {
+    let cases = [
+        (
+            quote! {
+                impl S {
+                    #[on_refused]
+                    fn refused(&self, refused: &Refused) -> Result<Lost, Infallible> { todo!() }
+                    #[on_refused]
+                    fn again(&self, refused: &Refused) -> Result<Lost, Infallible> { todo!() }
+                }
+            },
+            "a second Translate callback: `refused`",
+        ),
+        (
+            quote! {
+                impl S {
+                    #[on_refused(On)]
+                    fn refused(&self, refused: &Refused) -> Result<Lost, Infallible> { todo!() }
+                }
+            },
+            "`#[on_refused]`, with no arguments",
+        ),
+        (
+            quote! {
+                impl S {
+                    #[on_event(Rang)]
+                    #[on_refused]
+                    fn refused(&self, refused: &Refused) -> Result<Lost, Infallible> { todo!() }
+                }
+            },
+            "a method takes one marker",
+        ),
+        (
+            quote! {
+                impl S {
+                    #[on_refused]
+                    fn refused(&self) -> Result<Lost, Infallible> { todo!() }
+                }
+            },
+            "takes `&self` and the refusal",
+        ),
+        (
+            quote! {
+                impl S {
+                    #[on_refused]
+                    fn refused(&self, refused: &Refused) -> Lost { todo!() }
+                }
+            },
+            "returns `Result<Fact, E>`",
+        ),
+    ];
+    for (item, why) in cases {
+        let error = policy(item).expect_err("refused");
+        assert!(error.contains(why), "{why}: {error}");
+    }
 }
 
 #[test]
@@ -338,7 +387,7 @@ fn a_flow_argument_that_is_not_key_value_is_refused() {
     .expect_err("refused")
     .to_string();
     assert!(
-        error.contains("translate mode is its `#[on_refused(Cmd)]`"),
+        error.contains("take `key = value` arguments only"),
         "{error}"
     );
 }

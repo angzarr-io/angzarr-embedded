@@ -3,12 +3,12 @@ use std::time::{Duration, Instant};
 
 use angzarr_proto::v1 as pb;
 use angzarr_router::error::GrpcCode;
+use angzarr_router::hpb;
 use angzarr_router::router::CommandHandler;
 use prost_types::Any;
 
 use super::*;
 use crate::config::ComponentConfig;
-use crate::error::HandshakeError;
 use crate::fake_child::{self, config, domain, mode};
 use crate::remote::is_retryable;
 use angzarr_test_dir::{OnPanic, TestDir, TestFile};
@@ -22,9 +22,9 @@ fn for_sockets(prefix: &str) -> TestDir {
     TestDir::under(&base, prefix, OnPanic::from_env())
 }
 
-fn command(domain: &str, type_url: &str) -> pb::ContextualCommand {
-    pb::ContextualCommand {
-        command: Some(pb::CommandBook {
+fn command(domain: &str, type_url: &str) -> hpb::HandleRequest {
+    hpb::HandleRequest {
+        input: Some(pb::CommandBook {
             cover: Some(pb::Cover {
                 domain: domain.to_string(),
                 ..Default::default()
@@ -35,10 +35,10 @@ fn command(domain: &str, type_url: &str) -> pb::ContextualCommand {
                         type_url: type_url.to_string(),
                         value: Vec::new(),
                     }),
+                    handling: None,
                 })),
                 ..Default::default()
             }),
-            ..Default::default()
         }),
         ..Default::default()
     }
@@ -91,7 +91,10 @@ fn start_describes_each_remote_domain() {
     assert_eq!(handler.kind(), pb::ComponentKind::Aggregate);
     let descriptor = handler.descriptor();
     assert_eq!(descriptor.name, "player");
-    assert_eq!(descriptor.kind, pb::ComponentKind::Aggregate as i32);
+    assert_eq!(
+        angzarr_embedded::kind_of(&descriptor),
+        pb::ComponentKind::Aggregate
+    );
     assert!(descriptor.rules_version.starts_with("pid-"));
     assert_eq!(handler.command_types(), Vec::<String>::new());
     assert_eq!(
@@ -147,8 +150,7 @@ fn a_command_round_trips_through_the_child() {
         .dispatch(&command("player", "/examples.blackjack.SitDown"))
         .awaited()
         .expect("dispatched");
-    let events = response.events.expect("events");
-    assert_eq!(events.cover.unwrap().domain, "player");
+    assert_eq!(response.events, [fake_child::noted(0)]);
     assert_eq!(response.rules_version, pid_of(&handler));
     host.shutdown();
 }
@@ -297,11 +299,11 @@ fn the_backoff_doubles_up_to_its_most() {
     assert_eq!(next_backoff(ms(5_000), ms(5_000)), ms(5_000));
 }
 
-/// Stdout ending after the handshake is not the child ending: it keeps
-/// serving, the same process. The fake closes stdout before it serves its
-/// first call, so the end is already there when the call is made.
+/// Stdout ending is not the child ending: it keeps serving, the same
+/// process. The fake closes stdout before it serves its first call, so the
+/// end is already there when the call is made.
 #[test]
-fn stdout_ending_after_the_handshake_is_not_the_child_ending() {
+fn stdout_ending_is_not_the_child_ending() {
     let host = started(vec![player(mode::CLOSES_STDOUT)]);
     let handler = host.handler("player").unwrap();
     for _ in 0..3 {
@@ -406,9 +408,10 @@ fn the_python_player_comes_up_by_its_default_launch() {
     );
 }
 
-/// Chatter on stdout before the handshake is skipped.
+/// A child's stdout is its own output, never read: chatter there, before
+/// it serves or after, changes nothing.
 #[test]
-fn stdout_before_the_handshake_is_skipped() {
+fn stdout_is_never_read() {
     let host = started(vec![player(mode::NOISY)]);
     assert!(host
         .handler("player")
@@ -417,34 +420,6 @@ fn stdout_before_the_handshake_is_skipped() {
         .awaited()
         .is_ok());
     host.shutdown();
-}
-
-#[test]
-fn a_child_that_never_handshakes_fails_start() {
-    let mut config = config(vec![player(mode::SILENT)]);
-    config.supervision.handshake_timeout_ms = 500;
-    let started = Instant::now();
-    assert_eq!(
-        Host::start(config).err(),
-        Some(HostError::Handshake {
-            domain: "player".to_string(),
-            cause: HandshakeError::Timeout { timeout_ms: 500 },
-        })
-    );
-    assert!(started.elapsed() >= Duration::from_millis(500));
-}
-
-#[test]
-fn a_malformed_handshake_fails_start() {
-    assert_eq!(
-        Host::start(config(vec![player(mode::MALFORMED)])).err(),
-        Some(HostError::Handshake {
-            domain: "player".to_string(),
-            cause: HandshakeError::Malformed {
-                line: fake_child::MALFORMED_LINE.to_string(),
-            },
-        })
-    );
 }
 
 /// The config's launch is what runs: a program that does not exist fails
@@ -496,7 +471,7 @@ fn a_failed_start_stops_the_children_it_started() {
     let tag = format!("failed-start-{}", std::process::id());
     let mut config = config(vec![
         domain("dealer", "dealer", mode::SERVE),
-        player(mode::MALFORMED),
+        player(mode::EXITS),
     ]);
     for domain in &mut config.components {
         domain.env.insert(TAG_ENV.to_string(), tag.clone());
@@ -645,56 +620,57 @@ fn running_with_tag(tag: &str) -> usize {
 
 /// A valid descriptor of `kind` named "order": what angzarr-cli generates.
 fn described(kind: pb::ComponentKind) -> pb::ComponentDescriptor {
-    let stateful = matches!(
-        kind,
-        pb::ComponentKind::Aggregate | pb::ComponentKind::ProcessManager
-    );
-    let policy = kind == pb::ComponentKind::Policy;
+    use pb::component_descriptor::Kind;
+    let state = || {
+        Some(pb::StateDescriptor {
+            type_name: "orders.v1.OrderState".to_string(),
+        })
+    };
+    let kind = match kind {
+        pb::ComponentKind::ProcessManager => Kind::ProcessManager(pb::ProcessManagerDescriptor {
+            domain: "order".to_string(),
+            state: state(),
+            starting_types: vec!["orders.v1.Place".to_string()],
+        }),
+        pb::ComponentKind::Policy => Kind::Policy(pb::PolicyDescriptor {
+            input_domain: "order".to_string(),
+            output_domain: "inventory".to_string(),
+        }),
+        pb::ComponentKind::Projector => Kind::Projector(pb::ProjectorDescriptor {
+            input_domains: vec!["order".to_string()],
+        }),
+        _ => Kind::Aggregate(pb::AggregateDescriptor {
+            domain: "order".to_string(),
+            state: state(),
+        }),
+    };
     pb::ComponentDescriptor {
         name: "order".to_string(),
-        kind: kind as i32,
         rules_version: "1.4.2+build.7".to_string(),
-        state: stateful.then(|| pb::StateDescriptor {
-            type_url: "/orders.v1.OrderState".to_string(),
-            // The implicit base every state supports (decision 14.42).
-            options: Some(pb::StateOptions {
-                conflict_resolutions: vec![
-                    pb::ConflictResolution::Strict as i32,
-                    pb::ConflictResolution::AggregateHandles as i32,
-                ],
-            }),
-        }),
-        inputs: policy
-            .then(|| pb::Target {
-                domain: "order".to_string(),
-            })
-            .into_iter()
-            .collect(),
-        output_domain: if policy {
-            "inventory".to_string()
-        } else {
-            String::new()
-        },
-        starting_types: if kind == pb::ComponentKind::ProcessManager {
-            vec!["orders.v1.Place".to_string()]
-        } else {
-            Vec::new()
-        },
+        kind: Some(kind),
+    }
+}
+
+/// `descriptor`'s policy part, for a test to change.
+fn policy_of(descriptor: &mut pb::ComponentDescriptor) -> &mut pb::PolicyDescriptor {
+    match descriptor.kind.as_mut() {
+        Some(pb::component_descriptor::Kind::Policy(policy)) => policy,
+        _ => panic!("a policy's descriptor"),
     }
 }
 
 /// C-0687: the host refuses a policy's descriptor with no output domain,
-/// naming the component, under COORDINATOR_REASON_POLICY_NO_OUTPUT_DOMAIN.
+/// naming the component, under ANGZARR_REASON_POLICY_NO_OUTPUT_DOMAIN.
 #[test]
 fn a_policy_descriptor_without_an_output_domain_is_refused() {
     use angzarr_diagnostic::Diagnostic;
     let mut descriptor = described(pb::ComponentKind::Policy);
     assert_eq!(angzarr_embedded::validate_descriptor(&descriptor), Ok(()));
-    descriptor.output_domain = String::new();
+    policy_of(&mut descriptor).output_domain = String::new();
     let refused = angzarr_embedded::validate_descriptor(&descriptor)
         .err()
         .unwrap();
-    assert_eq!(refused.code(), "COORDINATOR_REASON_POLICY_NO_OUTPUT_DOMAIN");
+    assert_eq!(refused.code(), "ANGZARR_REASON_POLICY_NO_OUTPUT_DOMAIN");
     assert_eq!(
         refused,
         angzarr_embedded::Misconfigured::PolicyNoOutputDomain {
@@ -707,6 +683,7 @@ fn a_policy_descriptor_without_an_output_domain_is_refused() {
 /// descriptor of every kind accepted.
 #[test]
 fn a_descriptor_that_fails_its_validation_is_refused_for_its_reason() {
+    use pb::component_descriptor::Kind;
     use pb::ComponentKind::{Aggregate, Policy, ProcessManager, Projector};
     for kind in [Aggregate, Policy, ProcessManager, Projector] {
         assert_eq!(
@@ -727,65 +704,68 @@ fn a_descriptor_that_fails_its_validation_is_refused_for_its_reason() {
         (
             Aggregate,
             |d| d.rules_version.clear(),
-            "COORDINATOR_REASON_MISSING_RULES_VERSION",
+            "ANGZARR_REASON_MISSING_RULES_VERSION",
         ),
         (
             Policy,
             |d| d.rules_version.clear(),
-            "COORDINATOR_REASON_MISSING_RULES_VERSION",
+            "ANGZARR_REASON_MISSING_RULES_VERSION",
         ),
         (
             Aggregate,
-            |d| d.state = None,
-            "COORDINATOR_REASON_MISSING_STATE_TYPE",
+            |d| d.kind = None,
+            "ANGZARR_REASON_DESCRIPTOR_NO_KIND",
+        ),
+        (
+            Aggregate,
+            |d| {
+                if let Some(Kind::Aggregate(a)) = d.kind.as_mut() {
+                    a.state = None;
+                }
+            },
+            "ANGZARR_REASON_MISSING_STATE_TYPE",
         ),
         (
             ProcessManager,
-            |d| d.state = None,
-            "COORDINATOR_REASON_MISSING_STATE_TYPE",
+            |d| {
+                if let Some(Kind::ProcessManager(pm)) = d.kind.as_mut() {
+                    pm.state = None;
+                }
+            },
+            "ANGZARR_REASON_MISSING_STATE_TYPE",
+        ),
+        (
+            ProcessManager,
+            |d| {
+                if let Some(Kind::ProcessManager(pm)) = d.kind.as_mut() {
+                    pm.domain.clear();
+                }
+            },
+            "ANGZARR_REASON_DESCRIPTOR_NO_DOMAIN",
+        ),
+        (
+            Policy,
+            |d| policy_of(d).output_domain.clear(),
+            "ANGZARR_REASON_POLICY_NO_OUTPUT_DOMAIN",
+        ),
+        (
+            Policy,
+            |d| policy_of(d).input_domain.clear(),
+            "ANGZARR_REASON_NO_INPUT_DOMAIN",
         ),
         (
             Projector,
-            |d| d.state = Some(Default::default()),
-            "COORDINATOR_REASON_STATE_ON_STATELESS_KIND",
-        ),
-        (
-            Aggregate,
-            |d| d.starting_types = vec!["orders.v1.Place".to_string()],
-            "COORDINATOR_REASON_STARTING_TYPES_ON_NON_PM",
-        ),
-        (
-            Policy,
-            |d| d.output_domain.clear(),
-            "COORDINATOR_REASON_POLICY_NO_OUTPUT_DOMAIN",
-        ),
-        (
-            Policy,
             |d| {
-                d.inputs.push(pb::Target {
-                    domain: "payment".to_string(),
-                })
+                if let Some(Kind::Projector(p)) = d.kind.as_mut() {
+                    p.input_domains.clear();
+                }
             },
-            "COORDINATOR_REASON_POLICY_INPUT_COUNT",
-        ),
-        (
-            ProcessManager,
-            |d| d.output_domain = "inventory".to_string(),
-            "COORDINATOR_REASON_OUTPUT_DOMAIN_ON_NON_POLICY",
+            "ANGZARR_REASON_NO_INPUT_DOMAIN",
         ),
     ];
     for (kind, fault, expected) in cases {
         assert_eq!(reason(kind, fault).as_deref(), Some(expected), "{kind:?}");
     }
-    let mut none = described(Policy);
-    none.inputs.clear();
-    assert_eq!(
-        angzarr_embedded::validate_descriptor(&none),
-        Err(angzarr_embedded::Misconfigured::PolicyInputCount {
-            component: "order".to_string(),
-            input_count: 0
-        })
-    );
 }
 
 /// A host dropped inside a current-thread runtime stops its children
@@ -810,15 +790,16 @@ fn a_host_dropped_on_a_current_thread_runtime_stops_its_children() {
 /// starting types).
 #[test]
 fn a_restarted_child_must_describe_the_same_component() {
-    use pb::ComponentKind::{Aggregate, Policy, Projector};
+    use pb::component_descriptor::Kind;
+    use pb::ComponentKind::{Aggregate, Policy, ProcessManager, Projector};
     use ComponentKindConfig::{Domain, Policy as PolicyKind, Projector as ProjectorKind};
     let aggregate = described(Aggregate);
     let rebuilt = pb::ComponentDescriptor {
         rules_version: "1.5.0".to_string(),
-        state: None,
-        inputs: vec![pb::Target {
-            domain: "elsewhere".to_string(),
-        }],
+        kind: Some(Kind::Aggregate(pb::AggregateDescriptor {
+            domain: "order".to_string(),
+            state: None,
+        })),
         ..aggregate.clone()
     };
     assert!(same_component(Domain, &aggregate, &rebuilt));
@@ -827,10 +808,7 @@ fn a_restarted_child_must_describe_the_same_component() {
         ..aggregate.clone()
     };
     assert!(!same_component(Domain, &aggregate, &renamed));
-    let rekinded = pb::ComponentDescriptor {
-        kind: pb::ComponentKind::ProcessManager as i32,
-        ..aggregate.clone()
-    };
+    let rekinded = described(ProcessManager);
     assert!(!same_component(Domain, &aggregate, &rekinded));
 
     let policy = described(Policy);
@@ -839,34 +817,18 @@ fn a_restarted_child_must_describe_the_same_component() {
         ..policy.clone()
     };
     assert!(same_component(PolicyKind, &policy, &rebuilt));
-    let rerouted = pb::ComponentDescriptor {
-        output_domain: "billing".to_string(),
-        ..policy.clone()
-    };
+    let mut rerouted = policy.clone();
+    policy_of(&mut rerouted).output_domain = "billing".to_string();
     assert!(!same_component(PolicyKind, &policy, &rerouted));
-    let resourced = pb::ComponentDescriptor {
-        inputs: vec![pb::Target {
-            domain: "cart".to_string(),
-        }],
-        ..policy.clone()
-    };
+    let mut resourced = policy.clone();
+    policy_of(&mut resourced).input_domain = "cart".to_string();
     assert!(!same_component(PolicyKind, &policy, &resourced));
 
-    let projector = pb::ComponentDescriptor {
-        inputs: vec![pb::Target {
-            domain: "order".to_string(),
-        }],
-        ..described(Projector)
-    };
+    let projector = described(Projector);
     let more = pb::ComponentDescriptor {
-        inputs: vec![
-            pb::Target {
-                domain: "order".to_string(),
-            },
-            pb::Target {
-                domain: "cart".to_string(),
-            },
-        ],
+        kind: Some(Kind::Projector(pb::ProjectorDescriptor {
+            input_domains: vec!["order".to_string(), "cart".to_string()],
+        })),
         ..projector.clone()
     };
     assert!(same_component(
@@ -898,18 +860,7 @@ fn a_child_described_again_is_refused_unless_the_registry_takes_it() {
         hooks: Hooks::default(),
     };
     let order = supervisor(ComponentKindConfig::Domain);
-    let first = pb::ComponentDescriptor {
-        state: Some(pb::StateDescriptor {
-            type_url: "/orders.v1.OrderState".to_string(),
-            options: Some(pb::StateOptions {
-                conflict_resolutions: vec![
-                    pb::ConflictResolution::Strict as i32,
-                    pb::ConflictResolution::AggregateHandles as i32,
-                ],
-            }),
-        }),
-        ..described(pb::ComponentKind::Aggregate)
-    };
+    let first = described(pb::ComponentKind::Aggregate);
     assert_eq!(order.registered_by(&first, true), Ok(()));
     assert_eq!(order.link.registered().descriptor, first);
     let renamed = pb::ComponentDescriptor {
@@ -944,7 +895,7 @@ fn a_child_described_again_is_refused_unless_the_registry_takes_it() {
     };
     let refused = order.registered_by(&unversioned, false);
     assert!(
-        matches!(&refused, Err(HostError::Register { cause }) if angzarr_diagnostic::Diagnostic::code(cause) == "COORDINATOR_REASON_MISSING_RULES_VERSION"),
+        matches!(&refused, Err(HostError::Register { cause }) if angzarr_diagnostic::Diagnostic::code(cause) == "ANGZARR_REASON_MISSING_RULES_VERSION"),
         "{refused:?}"
     );
     assert_eq!(order.link.registered().descriptor, first, "the old kept");
@@ -976,14 +927,13 @@ fn with(mut component: ComponentConfig, env: &[(&str, &str)]) -> ComponentConfig
     component
 }
 
-/// The child's stdout after its handshake is drained from the moment the
-/// handshake is read, before the child is checked, described and
-/// registered: a child writing more there than a pipe holds before it
-/// serves (the fake's flood) comes up, where one left undrained would
-/// block on its write and never answer. Bounded: a host that never
+/// The child's stdout is drained from its launch, before it is ready,
+/// described and registered: a child writing more there than a pipe holds
+/// before it serves (the fake's flood) comes up, where one left undrained
+/// would block on its write and never answer. Bounded: a host that never
 /// starts fails the test, never hangs it.
 #[test]
-fn stdout_after_the_handshake_is_drained_before_the_child_is_described() {
+fn stdout_is_drained_from_the_launch() {
     let mut config = config(vec![player(mode::FLOOD)]);
     config.supervision.call_timeout_ms = 5_000;
     let (started, start) = std::sync::mpsc::channel();
@@ -995,38 +945,6 @@ fn stdout_after_the_handshake_is_drained_before_the_child_is_described() {
         .expect("start returns")
         .expect("the flooding child comes up");
     assert_eq!(exits, [("player".to_string(), ChildExit::Exited(Some(0)))]);
-}
-
-/// A described child's health is checked once it has handshaken, before
-/// it is described: one that reports its server other than SERVING then
-/// is refused at start, naming the status (the child protocol: a child
-/// handshakes only once SERVING); one that serves no health at all is
-/// refused as a sidecar serving none is.
-#[test]
-fn a_described_child_is_checked_serving_before_it_is_described() {
-    use fake_child::{health, HEALTH_ENV};
-    assert_eq!(
-        Host::start(config(vec![with(
-            player(mode::SERVE),
-            &[(HEALTH_ENV, health::NOT_SERVING)]
-        )]))
-        .err(),
-        Some(HostError::NotServing {
-            component: "player".to_string(),
-            status: "NOT_SERVING".to_string(),
-        })
-    );
-    assert_eq!(
-        Host::start(config(vec![with(
-            player(mode::SERVE),
-            &[(HEALTH_ENV, health::NONE)]
-        )]))
-        .err(),
-        Some(HostError::Health {
-            domain: "player".to_string(),
-            grpc_code: tonic::Code::Unimplemented as i32,
-        })
-    );
 }
 
 /// Every child's health is watched, not a sidecar's alone: a described
@@ -1199,7 +1117,7 @@ impl OnTheClock {
         assert_eq!(up, Ok(true), "child {n} came up");
     }
 
-    fn sit(&self) -> Result<pb::CommandHandlerResponse, angzarr_router::error::CodedError> {
+    fn sit(&self) -> Result<hpb::HandleResponse, angzarr_router::error::CodedError> {
         self.handler()
             .dispatch(&command("player", "/examples.blackjack.SitDown"))
             .awaited()
@@ -1450,4 +1368,147 @@ fn a_command_in_flight_on_a_restarted_child_fails_retryably_once() {
     );
     assert!(logged.contains(&format!("handle /examples.blackjack.SitDown {second}")));
     supervised.host.shutdown();
+}
+
+// ---------------------------------------------------------------------
+// Readiness: health SERVING on the host's path within the start limit
+// (the child protocol's section 2; decision 14.80; C-0869 and C-0870).
+// The start limit runs on the supervisor's clock, which the test moves a
+// check interval at a time: never a wait.
+
+/// The start limit the scenarios' fixture gives.
+const START_LIMIT_MS: u64 = 5_000;
+
+/// `player` started on a clock the test moves, its start limit
+/// [`START_LIMIT_MS`] and its check interval [`INTERVAL`], in a socket
+/// directory of its own: the start's answer, once the test has moved the
+/// clock on `checks` check intervals (a start that answers before is
+/// answered at once).
+fn start_on_the_clock(player: ComponentConfig, checks: u64) -> (Result<Host, HostError>, TestDir) {
+    start_seeing(player, checks, None)
+}
+
+/// [`start_on_the_clock`], the clock moved on only once the starting
+/// child's watch has reported `first` (when given): forced, never raced.
+fn start_seeing(
+    player: ComponentConfig,
+    checks: u64,
+    first: Option<ServingStatus>,
+) -> (Result<Host, HostError>, TestDir) {
+    let sockets = for_sockets("angzarr-start");
+    let mut config = config(vec![player]);
+    config.supervision.socket_dir = Some(sockets.to_path_buf());
+    config.supervision.handshake_timeout_ms = START_LIMIT_MS;
+    config.supervision.health_check_interval_ms = INTERVAL.as_millis() as u64;
+    config.supervision.health_check_deadline_ms = DEADLINE.as_millis() as u64;
+    let clock = crate::clock::ManualClock::new();
+    let (saw, seen) = mpsc::channel();
+    let hooks = Hooks {
+        clock: Some(clock.clone()),
+        starting: Some(saw),
+        ..Hooks::default()
+    };
+    let (answer, answered) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = answer.send(Host::start_with(config, hooks));
+    });
+    if let Some(first) = first {
+        assert_eq!(seen.recv_timeout(Duration::from_secs(20)), Ok(first));
+    }
+    for _ in 0..checks {
+        if let Ok(started) = answered.try_recv() {
+            return (started, sockets);
+        }
+        clock.advance(INTERVAL);
+    }
+    let started = answered
+        .recv_timeout(Duration::from_secs(20))
+        .expect("start answers");
+    (started, sockets)
+}
+
+/// The check intervals the start limit holds: the clock moved on by each,
+/// the limit has passed.
+const START_CHECKS: u64 = START_LIMIT_MS / INTERVAL.as_millis() as u64;
+
+/// C-0869, both rows: a child not SERVING on the host's path within the
+/// start limit fails its start, `EMBEDDED_REASON_CHILD_NOT_SERVING` naming
+/// the component, the last status it reported (`NOT_SERVING`, or `none` for
+/// a child that never listens) and the limit; the child is stopped and
+/// the socket file at the path the host chose removed.
+#[test]
+fn a_child_not_serving_within_the_start_limit_fails_its_start() {
+    use angzarr_diagnostic::Diagnostic;
+    use fake_child::{health, HEALTH_ENV};
+    let tag = format!("not-serving-{}", std::process::id());
+    let rows = [
+        (
+            with(player(mode::SERVE), &[(HEALTH_ENV, health::NOT_SERVING)]),
+            "NOT_SERVING",
+            Some(ServingStatus::NotServing),
+        ),
+        (player(mode::SILENT), "none", None),
+    ];
+    for (child, status, first) in rows {
+        let child = with(child, &[(TAG_ENV, &tag)]);
+        let (started, sockets) = start_seeing(child, START_CHECKS, first);
+        let refused = started.err().expect("the start fails");
+        assert_eq!(
+            refused,
+            HostError::NotServing {
+                component: "player".to_string(),
+                status: status.to_string(),
+                timeout_ms: START_LIMIT_MS,
+            }
+        );
+        assert_eq!(refused.code(), "EMBEDDED_REASON_CHILD_NOT_SERVING");
+        assert_eq!(running_with_tag(&tag), 0, "the child is stopped: {status}");
+        assert_eq!(
+            files_in(&sockets),
+            0,
+            "the socket file is removed: {status}"
+        );
+    }
+}
+
+/// C-0870: a child that exits before it reports SERVING fails its start at
+/// once, its status `none`, and leaves no socket file.
+#[test]
+fn a_child_exiting_before_it_serves_fails_its_start() {
+    let (started, sockets) = start_on_the_clock(player(mode::EXITS), 0);
+    assert_eq!(
+        started.err(),
+        Some(HostError::NotServing {
+            component: "player".to_string(),
+            status: "none".to_string(),
+            timeout_ms: START_LIMIT_MS,
+        })
+    );
+    assert_eq!(files_in(&sockets), 0);
+}
+
+/// Readiness waits for SERVING: a child NOT_SERVING when it starts, turned
+/// SERVING within the start limit, comes up then, the same child.
+#[test]
+fn a_child_serving_within_the_start_limit_comes_up() {
+    use fake_child::{health, CONTROL_ENV, HEALTH_ENV};
+    let socket = scratch("rdyctl.sock");
+    let control = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let child = with(
+        player(mode::SERVE),
+        &[
+            (HEALTH_ENV, health::NOT_SERVING),
+            (CONTROL_ENV, socket.to_str().unwrap()),
+        ],
+    );
+    let accepting = std::thread::spawn(move || {
+        let (mut fake, _) = control.accept().unwrap();
+        std::io::Write::write_all(&mut fake, b"1").unwrap();
+        fake
+    });
+    let (started, _sockets) = start_on_the_clock(child, 0);
+    let _fake = accepting.join().unwrap();
+    let host = started.expect("the child came up");
+    assert!(host.handler("player").is_some());
+    host.shutdown();
 }

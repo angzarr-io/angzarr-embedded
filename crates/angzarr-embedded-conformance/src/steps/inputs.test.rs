@@ -5,42 +5,25 @@
 
 use cucumber::{given, when};
 
-use crate::tests::world::{resolution, Coordinator};
+use crate::tests::world::Coordinator;
 
 #[given(
-    regex = r"^an? (\w+) command with conflict resolution (\w+) targeting sequence (\d+)(?:, sent through Handle by a caller waiting for the answer)?$"
+    regex = r"^an? (\w+) command with expected sequence (\d+)(?:, sent through \w+ by a caller waiting for the answer)?$"
 )]
-fn command_resolved(w: &mut Coordinator, name: String, resolved_by: String, expected: u64) {
-    let cover = w.order();
-    let book = w.command(&cover, &name);
-    let book = Coordinator::handled_as(book, Some(expected), Some(resolution(&resolved_by)));
-    w.pending.push(book);
-}
-
-#[given(regex = r"^an? (\w+) command with no conflict resolution targeting sequence (\d+)$")]
-fn command_unresolved(w: &mut Coordinator, name: String, expected: u64) {
+fn command_expecting(w: &mut Coordinator, name: String, expected: u64) {
     let cover = w.order();
     let book = w.command(&cover, &name);
     w.pending
-        .push(Coordinator::handled_as(book, Some(expected), None));
+        .push(Coordinator::handled_as(book, Some(expected)));
 }
 
 #[given(
-    regex = r"^an? (\w+) command with no expected sequence and no conflict resolution(?:, sent through Handle by a caller waiting for the answer)?$"
+    regex = r"^an? (\w+) command (?:with no expected sequence|with no expected sequence and no Handling)(?:, sent through \w+ by a caller waiting for the answer)?$"
 )]
 fn command_unhandled(w: &mut Coordinator, name: String) {
     let cover = w.order();
     let book = w.command(&cover, &name);
     w.pending.push(book);
-}
-
-#[given(
-    regex = r"^two (\w+) commands with conflict resolution (\w+) both targeting sequence (\d+)$"
-)]
-fn two_commands(w: &mut Coordinator, name: String, resolved_by: String, expected: u64) {
-    for _ in 0..2 {
-        command_resolved(w, name.clone(), resolved_by.clone(), expected);
-    }
 }
 
 #[given(
@@ -55,34 +38,33 @@ async fn applied_with_id(w: &mut Coordinator, command_id: String, sequence: u64)
     w.handle(book).await;
     let pages = w.pages(&cover);
     let page = pages.get(sequence as usize).expect("persisted");
-    assert!(page
-        .payload
-        .as_ref()
+    assert!(angzarr_embedded::angzarr_router::page_event(page)
         .is_some_and(|p| p.type_url.ends_with(".ItemAdded")));
 }
 
 #[given(
-    regex = r"^a retry of that AddItem command, with the same command_id, conflict resolution (\w+) targeting sequence (\d+)$"
+    regex = r"^a retry of that AddItem command, with the same command_id and expected sequence (\d+)$"
 )]
-fn retry_of_applied(w: &mut Coordinator, resolved_by: String, expected: u64) {
-    let book = Coordinator::handled_as(
-        w.last_book(),
-        Some(expected),
-        Some(resolution(&resolved_by)),
-    );
+fn retry_of_applied(w: &mut Coordinator, expected: u64) {
+    let book = Coordinator::handled_as(w.last_book(), Some(expected));
     w.pending.push(book);
 }
 
 #[given(
-    regex = r#"^a (\w+) fact for the "order" stream, sent through Handle by a client waiting for the answer$"#
+    regex = r#"^an? (\w+) (fact|command) for the "order" stream, sent through \w+ by a (?:client|caller) waiting for the answer$"#
 )]
-fn fact_for_order(w: &mut Coordinator, name: String) {
+fn input_for_order(w: &mut Coordinator, name: String, kind: String) {
     let cover = w.order();
-    let book = w.fact(&cover, &name, "shipment-S1");
+    let book = match kind.as_str() {
+        "fact" => w.fact(&cover, &name, "shipment-S1"),
+        _ => w.command(&cover, &name),
+    };
     w.pending.push(book);
 }
 
-#[when(regex = r"^the coordinator processes (?:the command|the fact|both commands)$")]
+#[when(
+    regex = r"^the coordinator processes (?:the command|the fact|the input|the reaction|both commands)$"
+)]
 async fn processes(w: &mut Coordinator) {
     w.handle_pending().await;
 }
@@ -99,4 +81,12 @@ async fn sends_twice(w: &mut Coordinator) {
 async fn processes_again(w: &mut Coordinator) {
     let book = w.last_book();
     w.handle(book).await;
+}
+
+#[given(
+    regex = r"^(?:AddItem's \(command\) declaration names (?:no refuses type|the refusal \w+ in its refuses, declared FAILED_PRECONDITION)|the order aggregate declares command AddItem)$"
+)]
+fn declared(_w: &mut Coordinator) {
+    // What a command declares is its generated code's: the coordinator
+    // never reads it, so its refusals are the business code's to answer.
 }

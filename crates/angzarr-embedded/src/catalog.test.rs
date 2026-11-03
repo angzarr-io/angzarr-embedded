@@ -5,8 +5,9 @@
 use angzarr_diagnostic::Diagnostic;
 use angzarr_router::policy::PolicyDispatch;
 
+use crate::angzarr_router::hpb::{ProjectRequest, ProjectResponse};
 use crate::toys::registry;
-use crate::v1::{ComponentKind, EventBook, Projection};
+use crate::v1::ComponentKind;
 use crate::{Misconfigured, Registry, Upcaster};
 
 /// A projector that projects nothing, named `name`.
@@ -19,9 +20,9 @@ impl angzarr_router::router::ProjectorHandler for Named {
 
     async fn dispatch(
         &self,
-        _: &EventBook,
-    ) -> Result<Projection, angzarr_router::error::CodedError> {
-        Ok(Projection::default())
+        _: &ProjectRequest,
+    ) -> Result<ProjectResponse, angzarr_router::error::CodedError> {
+        Ok(ProjectResponse::default())
     }
 }
 
@@ -30,6 +31,10 @@ struct Elsewhere;
 
 impl crate::CoordinatorPort for Elsewhere {
     fn handle(&self, _: crate::v1::CommandBook) -> crate::Coordinated<'_> {
+        unreachable!("never called")
+    }
+
+    fn deliver(&self, _: crate::v1::ReactionDelivery) -> crate::Coordinated<'_> {
         unreachable!("never called")
     }
 }
@@ -69,7 +74,7 @@ fn a_policy_or_projector_registered_twice_is_refused() {
     );
     assert_eq!(registry.policies("z").count(), 0, "nothing kept");
     assert_eq!(registry.projectors().len(), 1);
-    assert_eq!(twice().code(), "ROUTER_REASON_DUPLICATE_COMPONENT");
+    assert_eq!(twice().code(), "ANGZARR_REASON_DUPLICATE_COMPONENT");
 }
 
 /// A projector naming no domain it reads is refused under the spec's key
@@ -80,15 +85,16 @@ fn a_projector_with_no_source_is_refused_under_the_spec_key() {
     let refused = registry.projector_handler(&[], Named("no-view")).err();
     assert_eq!(
         refused,
-        Some(Misconfigured::ProjectorNoInputDomain {
-            component: "no-view".to_string()
+        Some(Misconfigured::NoInputDomain {
+            component: "no-view".to_string(),
+            kind: "COMPONENT_KIND_PROJECTOR".to_string(),
         })
     );
     let refused = refused.unwrap();
-    assert_eq!(refused.code(), "HOST_REASON_PROJECTOR_NO_INPUT_DOMAIN");
+    assert_eq!(refused.code(), "ANGZARR_REASON_NO_INPUT_DOMAIN");
     assert_eq!(
         refused.to_string(),
-        "HOST_REASON_PROJECTOR_NO_INPUT_DOMAIN component=no-view"
+        "ANGZARR_REASON_NO_INPUT_DOMAIN component=no-view component_kind=COMPONENT_KIND_PROJECTOR"
     );
     assert_eq!(registry.catalog().projector_names().count(), 0);
     assert!(registry.projectors().is_empty());
@@ -165,35 +171,35 @@ fn a_remote_domain_is_listed_apart_and_keeps_its_readers_out() {
 
 /// Decision 14.65 (the owner's ruling on decision 21 of the 2026-10-31
 /// run): every misconfiguration, a Rust registration's or a child's
-/// descriptor's, is refused under a spec key, its args exactly the key's.
+/// descriptor's, is refused under a spec key, its args exactly the key's;
+/// the one a child's descriptor cannot make, a hand-written state whose
+/// snapshot form is another type, is angzarr-embedded's own.
 #[test]
 fn every_misconfiguration_is_a_spec_key_with_its_declared_args() {
     use angzarr_diagnostic::Diagnostic as _;
     let samples = crate::misconfigured_samples();
-    let mut keys: Vec<&str> = samples.iter().map(|m| m.code()).collect();
+    let (own, spec): (Vec<_>, Vec<_>) = samples
+        .iter()
+        .partition(|m| matches!(m, Misconfigured::StateTypeMismatch { .. }));
+    let mut keys: Vec<&str> = spec.iter().map(|m| m.code()).collect();
     keys.sort_unstable();
     keys.dedup();
     assert_eq!(
         keys,
         [
-            "COORDINATOR_REASON_MISSING_RULES_VERSION",
-            "COORDINATOR_REASON_MISSING_STATE_TYPE",
-            "COORDINATOR_REASON_OUTPUT_DOMAIN_ON_NON_POLICY",
-            "COORDINATOR_REASON_POLICY_INPUT_COUNT",
-            "COORDINATOR_REASON_POLICY_NO_OUTPUT_DOMAIN",
-            "COORDINATOR_REASON_STARTING_TYPES_ON_NON_PM",
-            "COORDINATOR_REASON_STATE_ON_STATELESS_KIND",
-            "COORDINATOR_REASON_STATE_RESOLUTIONS_INVALID",
-            "HOST_REASON_PROJECTOR_NO_INPUT_DOMAIN",
-            "HOST_REASON_REMOTE_SOURCE",
-            "HOST_REASON_RESOLUTION_UNSUPPORTED",
-            "HOST_REASON_STATE_TYPE_MISMATCH",
-            "HOST_REASON_UPCASTER_OTHER_DOMAIN",
-            "HOST_REASON_UPCASTER_UNKNOWN_DOMAIN",
-            "ROUTER_REASON_DUPLICATE_COMPONENT",
+            "ANGZARR_REASON_DESCRIPTOR_NO_DOMAIN",
+            "ANGZARR_REASON_DESCRIPTOR_NO_KIND",
+            "ANGZARR_REASON_DUPLICATE_COMPONENT",
+            "ANGZARR_REASON_MISSING_RULES_VERSION",
+            "ANGZARR_REASON_MISSING_STATE_TYPE",
+            "ANGZARR_REASON_NO_INPUT_DOMAIN",
+            "ANGZARR_REASON_POLICY_NO_OUTPUT_DOMAIN",
+            "ANGZARR_REASON_REMOTE_SOURCE",
+            "ANGZARR_REASON_UPCASTER_OTHER_DOMAIN",
+            "ANGZARR_REASON_UPCASTER_UNKNOWN_DOMAIN",
         ]
     );
-    for misconfigured in samples {
+    for misconfigured in spec {
         let declared = angzarr_proto::reason_key_args(misconfigured.code())
             .unwrap_or_else(|| panic!("{} is no spec key", misconfigured.code()));
         let given: Vec<&str> = misconfigured.args().iter().map(|(n, _)| *n).collect();
@@ -201,4 +207,11 @@ fn every_misconfiguration_is_a_spec_key_with_its_declared_args() {
             assert!(declared.contains(name), "{misconfigured:?}: {name}");
         }
     }
+    assert_eq!(own.len(), 1);
+    assert!(
+        angzarr_proto::reason_key_args(own[0].code()).is_none(),
+        "{} is embedded's own",
+        own[0].code()
+    );
+    assert!(own[0].code().ends_with("state-type-mismatch"));
 }

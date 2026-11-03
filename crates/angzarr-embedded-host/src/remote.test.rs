@@ -2,7 +2,8 @@ use std::collections::BTreeMap;
 
 use crate::rpc::google_rpc::{ErrorInfo, Status as RpcStatus, ERROR_INFO_TYPE_URL};
 use angzarr_embedded::{class, Class};
-use angzarr_proto::v1::{reason_args as args, CoordinatorReason};
+use angzarr_proto::v1::reason_args as args;
+use angzarr_router::error::AngzarrReason;
 use angzarr_router::error::GrpcCode;
 use prost::Message;
 use prost_types::Any;
@@ -85,7 +86,7 @@ fn an_unavailable_status_is_retryable() {
     let coded = status_to_coded("player", &tonic::Status::unavailable("connection refused"));
     assert_eq!(
         coded.code,
-        angzarr_proto::v1::CoordinatorReason::HandlerUnavailable.as_str_name()
+        angzarr_proto::v1::AngzarrReason::HandlerUnavailable.as_str_name()
     );
     assert_eq!(
         coded.extras,
@@ -111,7 +112,7 @@ fn a_child_not_running_is_retryable() {
     assert_eq!(
         coded,
         CodedError {
-            code: angzarr_proto::v1::CoordinatorReason::HandlerUnavailable
+            code: angzarr_proto::v1::AngzarrReason::HandlerUnavailable
                 .as_str_name()
                 .to_string(),
             extras: BTreeMap::from([
@@ -129,14 +130,13 @@ fn a_child_not_running_is_retryable() {
 }
 
 /// An unreachable remote handler is answered under the spec's key
-/// (decision 14.49): COORDINATOR_REASON_HANDLER_UNAVAILABLE, UNAVAILABLE, a
+/// (decision 14.49): ANGZARR_REASON_HANDLER_UNAVAILABLE, UNAVAILABLE, a
 /// retryable bug.
 #[test]
 fn unavailability_is_the_specs_key() {
-    use angzarr_proto::v1::CoordinatorReason;
     assert_eq!(
-        angzarr_proto::v1::CoordinatorReason::HandlerUnavailable.as_str_name(),
-        CoordinatorReason::HandlerUnavailable.as_str_name()
+        unavailable("player", causes::TIMEOUT).code,
+        "ANGZARR_REASON_HANDLER_UNAVAILABLE"
     );
     assert_eq!(
         unavailable("player", causes::TIMEOUT).grpc,
@@ -152,14 +152,14 @@ fn unavailability_is_the_specs_key() {
 fn another_status_keeps_its_code() {
     let status = status_with_details(
         Code::Internal,
-        "ROUTER_REASON_UNKNOWN_COMMAND_TYPE",
+        "ANGZARR_REASON_UNKNOWN_COMMAND_TYPE",
         vec![error_info(
-            RouterReason::UnknownCommandType.as_str_name(),
+            AngzarrReason::UnknownCommandType.as_str_name(),
             &[("type_url", "/x.Y")],
         )],
     );
     let coded = status_to_coded("player", &status);
-    assert_eq!(coded.code, RouterReason::UnknownCommandType.as_str_name());
+    assert_eq!(coded.code, AngzarrReason::UnknownCommandType.as_str_name());
     assert_eq!(
         coded.extras,
         BTreeMap::from([("type_url".to_string(), "/x.Y".to_string())])
@@ -175,7 +175,7 @@ fn a_status_without_error_info_is_unhandled() {
     let coded = status_to_coded("player", &tonic::Status::internal("boom"));
     assert_eq!(
         coded.code,
-        RouterReason::UnhandledHandlerError.as_str_name()
+        AngzarrReason::UnhandledHandlerError.as_str_name()
     );
     assert_eq!(coded.grpc, GrpcCode::Internal);
     assert!(!is_retryable(&coded));
@@ -318,7 +318,7 @@ fn a_childs_retryable_status_keeps_its_class() {
     let bare = status_to_coded("player", &tonic::Status::unavailable("gone"));
     assert_eq!(
         bare.code,
-        angzarr_proto::v1::CoordinatorReason::HandlerUnavailable.as_str_name()
+        angzarr_proto::v1::AngzarrReason::HandlerUnavailable.as_str_name()
     );
     assert!(is_retryable(&bare));
     for code in [
@@ -348,7 +348,7 @@ fn a_childs_own_unknown_is_unhandled() {
     let coded = status_to_coded("player", &tonic::Status::unknown("what"));
     assert_eq!(
         coded.code,
-        RouterReason::UnhandledHandlerError.as_str_name()
+        AngzarrReason::UnhandledHandlerError.as_str_name()
     );
     assert!(!is_retryable(&coded));
 }
@@ -366,87 +366,11 @@ fn only_a_business_status_carries_a_refusal() {
 
 #[test]
 fn only_unavailability_is_retryable() {
-    let other = CodedError::rejection(
+    let other = CodedError::refused(
         angzarr_router::error::BusinessStatus::InvalidArgument,
-        "REMOTE_HANDLER_UNAVAILABLE_NOT",
-        [],
+        refusal(),
     );
     assert!(!is_retryable(&other));
-    let stale = CodedError::immediate(CoordinatorReason::ConflictOverlap.as_str_name(), []);
+    let stale = CodedError::immediate("SEAT_MOVED", []);
     assert!(!is_retryable(&stale));
-}
-
-/// A remote policy's translated refusal fact is a bare payload; anything
-/// more is the policy's bug, refused INTERNAL under the coordinator's keys.
-#[test]
-fn a_translated_fact_is_a_bare_payload() {
-    use angzarr_embedded::translated;
-    let payload = Any {
-        type_url: "/test.table.v1.SeatReleased".to_string(),
-        value: vec![1],
-    };
-    let bare = || pb::CommandBook {
-        page: Some(pb::CommandPage {
-            body: Some(pb::command_page::Body::Fact(pb::Fact {
-                payload: Some(payload.clone()),
-            })),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-    assert_eq!(translated(bare()), Ok(payload.clone()));
-    let refused = |fact: pb::CommandBook| {
-        let error = translated(fact).expect_err("refused");
-        assert_eq!(error.grpc, GrpcCode::Internal);
-        error.code
-    };
-    let with = |change: &dyn Fn(&mut pb::CommandBook)| {
-        let mut fact = bare();
-        change(&mut fact);
-        refused(fact)
-    };
-    let page = |change: &dyn Fn(&mut pb::CommandPage)| {
-        with(&|fact: &mut pb::CommandBook| change(fact.page.as_mut().unwrap()))
-    };
-    assert_eq!(
-        with(&|f| f.cover = Some(pb::Cover::default())),
-        CoordinatorReason::RefusalFactAddressed.as_str_name()
-    );
-    assert_eq!(
-        with(&|f| f.handling = Some(pb::Handling::default())),
-        CoordinatorReason::RefusalFactAddressed.as_str_name()
-    );
-    assert_eq!(
-        with(&|f| f.page = None),
-        CoordinatorReason::RefusalFactNoPage.as_str_name()
-    );
-    let id = || Some(angzarr_proto::v1::Uuid::from_bytes([1; 16]));
-    assert_eq!(
-        page(&|p| p.command_id = id()),
-        CoordinatorReason::RefusalFactIdentified.as_str_name()
-    );
-    assert_eq!(
-        page(&|p| p.correlation_id = id()),
-        CoordinatorReason::RefusalFactIdentified.as_str_name()
-    );
-    assert_eq!(
-        page(&|p| p.causation_id = Some(pb::EventRef::default())),
-        CoordinatorReason::RefusalFactIdentified.as_str_name()
-    );
-    assert_eq!(
-        page(&|p| p.fact_origin = Some(pb::FactOrigin::default())),
-        CoordinatorReason::RefusalFactIdentified.as_str_name()
-    );
-    assert_eq!(
-        page(&|p| {
-            p.body = Some(pb::command_page::Body::Command(pb::Command {
-                payload: Some(payload.clone()),
-            }))
-        }),
-        CoordinatorReason::RefusalFactNotAFact.as_str_name()
-    );
-    assert_eq!(
-        page(&|p| p.body = Some(pb::command_page::Body::Fact(pb::Fact { payload: None }))),
-        CoordinatorReason::RefusalFactNotAFact.as_str_name()
-    );
 }

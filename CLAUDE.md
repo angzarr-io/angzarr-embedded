@@ -51,15 +51,16 @@ the `Diagnostic` trait every error here implements, re-exported as
 angzarr-embedded also depends on `angzarr-router`, a git dependency pinned by
 rev: angzarr's shared client router, through which the kernel dispatches
 business (routing by type, folding the state it is given, the handlers,
-typed refusals and the conflict report), so those rules are implemented
+typed refusals), so those rules are implemented
 once for every runtime. Everything else is coordinator work, and the
 kernel's (decisions 14.39 to 14.42): the check, identification, upcasting
 through the domain's upcaster port, snapshots, admission (deduplication,
 the refusal fact's stream, a process manager's start rule from its
-descriptor's starting types), conflict judgement, a policy's output checks,
-the pass-through refusal fact and its address, a projector's failure
-classes, classification, the coordinator's reason keys (`angzarr_embedded::reasons`,
-angzarr-project's `CoordinatorReason` in `reasons.proto`), the store writes,
+descriptor's starting types), the staleness check (an expected sequence
+against the head), a policy's output checks, a refusal's Translate and
+the refusal fact's address, a projector's failure classes,
+classification, the spec's reason keys (angzarr-project's
+`AngzarrReason` in `reasons.proto`), the store writes,
 positions and resume. Policies reach it as the router's
 `PolicyComponent`, so a policy in another process runs as an in-process
 one does.
@@ -176,7 +177,7 @@ angzarr-ports' own catalog, `angzarr_ports::EN_US` (re-exported as
   crate's name (`angzarr-embedded-host-spawn`), and a valid Fluent message id. A code
   whose meaning changes gets a new code; a retired code is not given to
   anything else. A condition the spec keys is the exception: its code is
-  the key, verbatim (`HOST_REASON_HANDSHAKE_MALFORMED`), its args the
+  the key, verbatim (`EMBEDDED_REASON_CHILD_NOT_SERVING`), its args the
   key's `(io.angzarr.v1.reason)` option's (`reason_args` of the key's
   package), and its English the spec's catalog of that package
   (`angzarr_proto::REASONS_EN_US` for core's keys,

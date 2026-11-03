@@ -18,14 +18,14 @@
 //!
 //! **The kernel shapes again what was shaped.** A command that depends on
 //! the stream as it is is shaped from the stream as the kernel loads it
-//! and sent at that head, STRICT ([`Runner::shaped`],
-//! [`Kernel::handle_shaped`]): a write landing between is stale, and the
+//! and sent at that head ([`Runner::shaped`], [`Kernel::handle_shaped`]):
+//! a write landing between is refused `ExpectedSequenceMismatch`, and the
 //! kernel loads and shapes it again, under its race re-run cap. What the
 //! kernel never runs (a purge at the head read) the use case retries
 //! itself, waiting as the kernel waits ([`Runner::again`]).
 //!
-//! **A refusal is typed.** The domain's own rejection comes back as its
-//! handler made it ([`Refusal`]), matched as a value, never by its code;
+//! **A refusal is typed.** The domain's typed refusal comes back as its
+//! object, decoded ([`Refusal`]), matched as a value, never by its code;
 //! what kept a command from being decided at all is [`Unrun`], for each
 //! use case to report as its own error.
 //!
@@ -40,7 +40,7 @@ use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use angzarr_diagnostic::Report;
-use angzarr_embedded::markup::Rejection;
+use angzarr_embedded::markup::DomainMessage;
 use angzarr_embedded::v1::{CommandBook, Cover, Uuid};
 use angzarr_embedded::{
     DeadLetter, Domain, Failure, Handled, Kernel, OnRetryable, Payload, Recovery, Registry,
@@ -54,7 +54,7 @@ pub use ports::{Clock, Delay, Jitter};
 /// The kernel's retry, as an application runs every command:
 /// `backoff(10ms, 1s, 10)`. A command stamped with the head it loaded that
 /// loses the race at its write is re-run on the new head up to the
-/// kernel's default race re-run cap, 10 runs (angzarr decision 14.46), and
+/// kernel's default race re-run cap, 10 runs (angzarr decision 14.84), and
 /// a store that could not say is tried up to 10 times; each wait's ceiling
 /// 10ms doubling to 1s (about 3.3s in all, on top of the store's own lock
 /// wait per attempt). At either cap the kernel gives it up and answers its
@@ -66,13 +66,18 @@ pub const KERNEL_RETRY: OnRetryable =
 
 /// The kernel's retry in this shape: `attempts` tries of a store that
 /// could not say (the first included) and `attempts` runs of a command that
-/// keeps losing its race, the wait after the `n`th failure (from 1) drawn
+/// keeps losing its race (at least one: the race re-run cap has no
+/// zero, decision 14.84), the wait after the `n`th failure (from 1) drawn
 /// by full jitter (from zero to its ceiling) under a ceiling of
 /// `base * 2^(n - 1)`, at most `cap`.
 pub const fn backoff(base: Duration, cap: Duration, attempts: u32) -> OnRetryable {
+    let runs = match std::num::NonZeroU32::new(attempts) {
+        Some(runs) => runs,
+        None => std::num::NonZeroU32::MIN,
+    };
     OnRetryable {
         max_retries: attempts.saturating_sub(1),
-        max_race_runs: attempts,
+        max_race_runs: runs,
         initial_backoff: base,
         multiplier: 2.0,
         max_backoff: cap,
@@ -131,9 +136,9 @@ impl<D: Delay + Jitter + Send> Wait for Ported<'_, D> {
     }
 }
 
-/// A domain's refusal of a command, as the use case reads it: its own
-/// rejection, typed, as its handler made it (`None` for one the router
-/// made on its behalf), and as reported.
+/// A domain's refusal of a command, as the use case reads it: its typed
+/// refusal object, decoded as `R` (`None` for one of another type, the
+/// coordinator's `ExpectedSequenceMismatch` among them), and as reported.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Refusal<R> {
     pub rejection: Option<R>,
@@ -166,8 +171,9 @@ pub struct Runner<'a, C, D> {
 impl<C: Clock, D: Delay + Jitter + Send> Runner<'_, C, D> {
     /// Run `book`, a command to a stream of the marked-up aggregate `A`,
     /// under `command_id` on `store`, the kernel retrying it: what it came
-    /// to, committed (or a duplicate of what did) or refused; or why it was
-    /// not decided, a retryable failure given up on at the kernel's cap.
+    /// to, committed (or a duplicate of what did) or refused with a typed
+    /// refusal, read as `R`; or why it was not decided, a retryable failure
+    /// given up on at the kernel's cap.
     pub async fn run<A, R, S>(
         &mut self,
         store: &S,
@@ -175,8 +181,8 @@ impl<C: Clock, D: Delay + Jitter + Send> Runner<'_, C, D> {
         command_id: &Uuid,
     ) -> Result<Result<Handled, Refusal<R>>, Unrun>
     where
-        A: Domain<Rejection = Rejection<R>>,
-        R: Clone + Send + Sync + 'static,
+        A: Domain,
+        R: DomainMessage,
         S: Store,
     {
         let sampled = self.sampled(command_id);
@@ -205,8 +211,8 @@ impl<C: Clock, D: Delay + Jitter + Send> Runner<'_, C, D> {
         shape: impl FnMut(&A::State) -> (Option<P>, T),
     ) -> Result<Result<(Option<Handled>, T), Refusal<R>>, Unrun>
     where
-        A: Domain<Rejection = Rejection<R>>,
-        R: Clone + Send + Sync + 'static,
+        A: Domain,
+        R: DomainMessage,
         S: Store,
         P: Payload,
     {
@@ -261,20 +267,17 @@ impl<C: Clock, D: Delay + Jitter + Send> Runner<'_, C, D> {
     }
 
     /// What the kernel answered, as the use case reads it: its answer, or
-    /// the domain's refusal; a retryable failure, which has had the
+    /// the domain's typed refusal; a retryable failure, which has had the
     /// kernel's retries, given up on at once ([`Unrun::GaveUp`]); any
     /// other failure, [`Unrun::Failed`].
-    fn settled<H, R: Clone + 'static>(
+    fn settled<H, R: DomainMessage>(
         &self,
         handled: Result<H, Failure<Rejected>>,
     ) -> Result<Result<H, Refusal<R>>, Unrun> {
         match handled {
             Ok(handled) => Ok(Ok(handled)),
             Err(Failure::Rejected(rejected)) => Ok(Err(Refusal {
-                rejection: rejected
-                    .rejection::<Rejection<R>>()
-                    .and_then(Rejection::message)
-                    .cloned(),
+                rejection: rejected.refusal::<R>(),
                 report: rejected.report().clone(),
             })),
             Err(failure) if failure.recovery() == Recovery::Retry => Err(Unrun::GaveUp {

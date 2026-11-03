@@ -1,7 +1,7 @@
 //! A stream addressed by its natural key, and a command wrapped for it.
 
 use crate::toys::{command_id, registry, Account, AccountCmd};
-use crate::v1::{command_page, CommandBook, ConflictResolution, Cover, Handling};
+use crate::v1::{command_page, CommandBook, Cover, Handling};
 use crate::{check, ids, CommandBookExt, CoverExt, Payload};
 
 #[test]
@@ -37,14 +37,14 @@ fn a_command_book_carries_the_payload_to_the_cover_with_no_ids_and_no_handling()
     let payload = AccountCmd::Deposit(5).to_any();
     let book = CommandBook::command(crate::toys::cover("account", 1), payload.clone());
     assert_eq!(book.cover, Some(crate::toys::cover("account", 1)));
-    assert_eq!(book.handling, None);
     let page = book.page.expect("a page");
     assert_eq!(page.command_id, None);
     assert_eq!(page.correlation_id, None);
     assert_eq!(
         page.body,
         Some(command_page::Body::Command(crate::v1::Command {
-            payload: Some(payload)
+            payload: Some(payload),
+            handling: None,
         }))
     );
     // The book the kernel checks, as a hand-built one would be.
@@ -56,30 +56,40 @@ fn a_command_book_carries_the_payload_to_the_cover_with_no_ids_and_no_handling()
     assert_eq!(checked.domain(), <Account as crate::Domain>::NAME);
 }
 
+/// The command's Handling, if its page holds a command.
+fn handling(book: &CommandBook) -> Option<Handling> {
+    match book.page.as_ref().and_then(|page| page.body.as_ref()) {
+        Some(command_page::Body::Command(command)) => command.handling,
+        _ => None,
+    }
+}
+
 #[test]
-fn at_sets_the_expected_sequence_and_keeps_the_resolution() {
+fn at_sets_the_commands_expected_sequence() {
     let book = CommandBook::command(crate::toys::cover("account", 1), AccountCmd::Open.to_any());
     assert_eq!(
-        book.clone().at(7).handling,
+        handling(&book.clone().at(7)),
         Some(Handling {
             expected_sequence: Some(7),
-            conflict_resolution: ConflictResolution::Unspecified as i32,
         })
     );
-    let strict = CommandBook {
-        handling: Some(Handling {
-            expected_sequence: None,
-            conflict_resolution: ConflictResolution::Strict as i32,
-        }),
-        ..book
-    };
     assert_eq!(
-        strict.at(3).handling,
+        handling(&book.at(7).at(3)),
         Some(Handling {
             expected_sequence: Some(3),
-            conflict_resolution: ConflictResolution::Strict as i32,
-        })
+        }),
+        "the last head sent is the one named"
     );
+}
+
+#[test]
+fn at_leaves_a_fact_unchanged() {
+    let fact = crate::toys::fact(
+        crate::toys::cover("account", 1),
+        AccountCmd::Open.to_any(),
+        "ext-1",
+    );
+    assert_eq!(fact.clone().at(7), fact);
 }
 
 #[test]

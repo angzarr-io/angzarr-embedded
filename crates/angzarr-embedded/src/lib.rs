@@ -25,7 +25,7 @@
 //! One command, end to end, in angzarr's normative order:
 //!
 //! 1. **Validate** ([`check`]): the one place a [`CommandBook`](v1::CommandBook)
-//!    is checked, domain-blind, with the [`Catalog`] for capabilities.
+//!    is checked, domain-blind, with the [`Catalog`] for what is registered.
 //!    What comes out is a [`Checked`], whose accessors are never optional
 //!    where the book was required to say something. Nothing downstream
 //!    unwraps a prost `Option`.
@@ -33,27 +33,25 @@
 //!    else the application's minted UUIDv7 from [`Sampled`]; a fact's
 //!    UUIDv5 of its external id; a reaction's UUIDv5 of its trigger), the
 //!    correlation (given, else the command id; a reaction's trigger's) and,
-//!    for a reaction, the command's own causation (its trigger: transport
-//!    and trace metadata, never stamped on its events). An [`Identified`].
+//!    for a reaction, its causation (its trigger: handed to business code
+//!    and tracing, never stamped on its events). An [`Identified`].
 //! 3. **Load, then admit**: the snapshot and newer events are loaded
-//!    first; then the command id is looked up on the addressed stream, and
-//!    the kernel admits the input (a refusal fact's address, deduplication
-//!    by the events found, a process manager's start rule by its type after
-//!    upcasting).
+//!    first; an input to an edition stream not forked there is refused
+//!    (decision 14.107); then the command id is looked up on the addressed
+//!    stream, and the kernel admits the input (deduplication by the events
+//!    found, a process manager's start rule by its type after upcasting).
 //!    Events found are answered [`Handled::Duplicate`], and nothing below
 //!    runs. (Loading first closes the race in which a retry's lookup misses
 //!    an original that commits before the retry loads.)
-//! 4. **Resolve**: the expected sequence stamped or
-//!    checked, against the head step 3 loaded, under the resolved
-//!    [`ConflictResolution`](v1::ConflictResolution) (STRICT refuses a stale
-//!    one here); the window and a nonce otherwise.
+//! 4. **Check**: a command whose expected sequence is not the head step 3
+//!    loaded is refused `ExpectedSequenceMismatch` (decision 14.94). There
+//!    is no conflict concept (decision 14.92).
 //! 5. **Dispatch**: angzarr-router's `CommandHandler` for the domain gets
-//!    the `ContextualCommand` (the snapshot, the events, upcast, and the
-//!    command, its handling resolved) and runs its handler: a command's,
-//!    which may refuse ([`Rejected`]), or a fact's, which may not. The
-//!    kernel awaits it; business code stays synchronous. Business
-//!    output is payloads only: the kernel stamps every event's
-//!    [`EventMeta`](v1::EventMeta).
+//!    the `HandleRequest` (the snapshot, the events, upcast, and the input)
+//!    and runs its handler: a command's, which may refuse with a typed
+//!    refusal ([`Rejected`]), or a fact's, which may not. The kernel awaits
+//!    it; business code stays synchronous. Business output is payloads
+//!    only: the kernel stamps every event's [`EventMeta`](v1::EventMeta).
 //!
 //! A domain whose streams another coordinator owns ([`Registry::remote`],
 //! [`Target::Remote`]) takes steps 1 and 2 only: its command, identified,
@@ -67,14 +65,15 @@
 //! stream's events at the length it was loaded at, with the step's
 //! positions. Then every [`Policy`] for the source's domain runs, through
 //! angzarr-router's `PolicyComponent` (a `PolicyDispatch`, or a policy in
-//! another process), on the written events, each of its commands and facts a step of its own in its target,
-//! depth first, with the policy's position written with it; a step that
+//! another process), once per written event, each of its commands and facts
+//! a step of its own in its target, with the policy's position written
+//! with it; a step that
 //! fails keeps every write before it ([`Failure`], with the path to the
 //! failing [`Step`]), and what is owed is resumed by position
 //! ([`Kernel::resume`]). Projectors run on written events only, inline
 //! ([`Registry::projector_handler`]) or caught up from the store
-//! ([`CatchUp`]). A policy command's trigger edge, which no event records, is the
-//! command's own causation, for tracing.
+//! ([`CatchUp`]). A reaction's trigger edge, which no event records, is the
+//! reaction's own causation, for tracing.
 
 // A failure names the path to the step that failed and carries reports, so
 // it is large; failures are the cold path, and unboxed variants keep them
@@ -85,7 +84,6 @@ mod book;
 mod catalog;
 mod check;
 mod compensation;
-mod conflict;
 mod coordinator;
 mod dead_letter;
 mod domain;
@@ -163,8 +161,7 @@ pub use angzarr_router::PageContext;
 pub use angzarr_store_sqlite;
 pub use book::{CommandBookExt, CoverExt};
 pub use catalog::{Catalog, Description};
-pub use check::{check, Body, Checked, Identified, Malformed, Sampled};
-pub use conflict::{Key, UnitPath, Units};
+pub use check::{check, Arm, Body, Checked, Identified, Malformed, Sampled};
 pub use dead_letter::{dead_letter_line, DeadLetterLog, MemoryDeadLetters, DEAD_LETTER_PREFIX};
 pub use domain::{Domain, State};
 pub use error::{
@@ -176,9 +173,11 @@ pub use handle::{
     Handled, Kernel, OnPolicyBug, OnRetryable, Recorded, Wait, DEFAULT_DEPTH_LIMIT,
     DEFAULT_RACE_RUNS,
 };
-pub use misconfigured::{validate_descriptor, Misconfigured};
+pub use misconfigured::{kind_of, validate_descriptor, Misconfigured};
 pub use payload::{decode_as, pack, type_name, Decoder, Payload};
-pub use policy::{target_cover, translated, CommandTarget, EventSource, Order, Policy};
+pub use policy::{
+    no_refusal_handler, target_cover, CommandTarget, EventSource, Order, Policy, Refused,
+};
 pub use projector::{CatchUp, Caught, HeldRecord};
 pub use registry::Registry;
 pub use route::{rejection, spec_coded, Rejected, SpecKey};
@@ -249,6 +248,7 @@ pub fn diagnostic_samples() -> Vec<Box<dyn angzarr_diagnostic::Diagnostic>> {
         domain: sample_domain(),
         key: "swift-amber-falcon".to_string(),
     }));
+    samples.push(Box::new(policy::OutputNoBody));
     samples.push(Box::new(markup::UndoTargetsCommand {
         step: "reserve stock",
         command: "toy.v1.Restock".to_string(),
@@ -284,7 +284,6 @@ fn sample_report() -> angzarr_diagnostic::Report {
 
 /// Each [`Malformed`] variant.
 fn malformed_samples() -> Vec<Malformed> {
-    use v1::ConflictResolution;
     vec![
         Malformed::NoCover,
         Malformed::UnknownDomain {
@@ -298,23 +297,10 @@ fn malformed_samples() -> Vec<Malformed> {
         Malformed::NoPayload,
         Malformed::BadCommandId { len: 1 },
         Malformed::BadCorrelationId { len: 17 },
-        Malformed::CausationFromOutside,
-        Malformed::IdOnPolicyCommand {
-            field: "command_id",
-        },
-        Malformed::HandlingOnPolicyCommand,
         Malformed::BadTrigger(ids::UuidError::MissingTrigger),
         Malformed::FactWithoutOrigin,
         Malformed::EmptyExternalId,
-        Malformed::CommandWithFactOrigin,
         Malformed::FactCommandIdNotDerived,
-        Malformed::HandlingOnFact,
-        Malformed::UnknownConflictResolution { value: 9 },
-        Malformed::RefusalMisaddressed,
-        Malformed::UnsupportedConflictResolution {
-            domain: sample_domain(),
-            requested: ConflictResolution::Commutative,
-        },
     ]
 }
 
@@ -323,44 +309,26 @@ fn malformed_samples() -> Vec<Malformed> {
 fn kernel_samples() -> Vec<KernelError> {
     use angzarr_diagnostic::Report;
     vec![
-        KernelError::Stale {
-            stream: sample_stream(),
-            expected: 2,
-            actual: 4,
-        },
-        KernelError::ExpectedSequenceAhead {
-            stream: sample_stream(),
-            expected: 7,
-            head: 3,
-        },
         KernelError::RetryCapExhausted {
             stream: sample_stream(),
             attempts: 3,
             cap: 3,
-        },
-        KernelError::Unresolved {
-            stream: sample_stream(),
-            expected: 2,
-            actual: 4,
         },
         KernelError::RulesVersionMismatch {
             stream: sample_stream(),
             registered: "1.4.2+build.7".to_string(),
             reported: "1.5.0+build.9".to_string(),
         },
-        KernelError::EventsNotItsStream {
+        KernelError::StateTypeMismatch {
             stream: sample_stream(),
-            event_stream: v1::Cover {
-                edition: Some("beta".to_string()),
-                ..sample_stream()
-            },
+            registered: "toy.account.v1.Account".to_string(),
+            state_type: "toy.account.v1.Ledger".to_string(),
         },
-        KernelError::Overlap {
+        KernelError::FactDeadLettered {
             stream: sample_stream(),
-            expected: 2,
-            actual: 4,
-            window_units: "items[a],items[b]".to_string(),
-            command_units: "items[b].count".to_string(),
+            cause: Report::new("ANGZARR_REASON_PM_NO_INSTANCE")
+                .arg("stream", "toy/0")
+                .arg("type_url", "/toy.v1.Deposit"),
         },
         KernelError::UnknownType {
             stream: sample_stream(),
@@ -383,10 +351,6 @@ fn kernel_samples() -> Vec<KernelError> {
             expected: "ledger",
         },
         KernelError::ChainTooDeep { limit: 8 },
-        KernelError::TooManySteps {
-            stream: sample_stream(),
-            limit: 16,
-        },
         KernelError::BeforeSnapshot {
             stream: sample_stream(),
             first: 10,
@@ -426,8 +390,7 @@ fn replay_samples() -> Vec<ReplayError> {
 
 /// The store's errors, angzarr-ports': forwarded under their own codes,
 /// every one a step's reads and write, or an open migrating the store, can
-/// meet (an edition's creation, deletion and removal are the
-/// application's).
+/// meet (an edition's fork and removal are the application's).
 fn store_samples() -> Vec<StoreError> {
     use angzarr_ports::Cause;
     vec![
@@ -526,10 +489,8 @@ fn chain_samples() -> Vec<UpcastChainError> {
     .into()
 }
 
-/// Each [`Misconfigured`] variant, `UnsupportedResolution` for a domain and
-/// for one command type.
+/// Each [`Misconfigured`] variant.
 pub(crate) fn misconfigured_samples() -> Vec<Misconfigured> {
-    use v1::ConflictResolution;
     let component = || sample_domain();
     let kind = |k: v1::ComponentKind| k.as_str_name().to_string();
     vec![
@@ -542,9 +503,6 @@ pub(crate) fn misconfigured_samples() -> Vec<Misconfigured> {
         Misconfigured::UpcasterUnknownDomain {
             domain: component(),
         },
-        Misconfigured::ProjectorNoInputDomain {
-            component: "balances".to_string(),
-        },
         Misconfigured::UpcasterForAnotherDomain {
             domain: component(),
             upcaster: "ledger".to_string(),
@@ -552,7 +510,10 @@ pub(crate) fn misconfigured_samples() -> Vec<Misconfigured> {
         Misconfigured::MissingRulesVersion {
             component: component(),
         },
-        Misconfigured::StartingTypesOnNonPm {
+        Misconfigured::DescriptorNoKind {
+            component: component(),
+        },
+        Misconfigured::DescriptorNoDomain {
             component: component(),
             kind: kind(v1::ComponentKind::Aggregate),
         },
@@ -560,38 +521,17 @@ pub(crate) fn misconfigured_samples() -> Vec<Misconfigured> {
             component: component(),
             kind: kind(v1::ComponentKind::Aggregate),
         },
-        Misconfigured::StateOnStatelessKind {
+        Misconfigured::NoInputDomain {
             component: "balances".to_string(),
             kind: kind(v1::ComponentKind::Projector),
-        },
-        Misconfigured::PolicyInputCount {
-            component: "bookkeeping".to_string(),
-            input_count: 2,
         },
         Misconfigured::PolicyNoOutputDomain {
             component: "bookkeeping".to_string(),
         },
-        Misconfigured::OutputDomainOnNonPolicy {
-            component: component(),
-            kind: kind(v1::ComponentKind::ProcessManager),
-        },
-        Misconfigured::StateResolutionsInvalid {
-            component: component(),
-        },
         Misconfigured::StateTypeMismatch {
             component: component(),
-            type_url: "/toy.account.v1.Account".to_string(),
-            state_type_url: "/toy.account.v1.Snapshot".to_string(),
-        },
-        Misconfigured::UnsupportedResolution {
-            domain: component(),
-            command_type: None,
-            resolution: ConflictResolution::Commutative,
-        },
-        Misconfigured::UnsupportedResolution {
-            domain: component(),
-            command_type: Some("toy.cmd.v1.Note".to_string()),
-            resolution: ConflictResolution::Commutative,
+            type_name: "toy.account.v1.Account".to_string(),
+            snapshot_type_name: "toy.account.v1.Snapshot".to_string(),
         },
         Misconfigured::RemoteSource {
             domain: component(),
@@ -613,6 +553,7 @@ fn upcast_samples() -> Vec<UpcastError> {
             source: "toy.v0.Credited".to_string(),
             error: sample_report(),
         },
+        UpcastError::AnswerKeys,
     ]
 }
 
@@ -632,10 +573,11 @@ fn failure_samples() -> Vec<Failure<WireError>> {
     ]
 }
 
-/// The router's answer under each of its keys, every declared arg given:
-/// forwarded under the key, verbatim (decision 14.60).
+/// The router's (and the kernel's own) answer under each of core's keys,
+/// every declared arg given: forwarded under the key, verbatim (decision
+/// 14.60).
 fn router_samples() -> impl Iterator<Item = KernelError> {
-    let router = (1..).map_while(|n| angzarr_proto::v1::RouterReason::try_from(n).ok());
+    let router = (1..).map_while(|n| angzarr_proto::v1::AngzarrReason::try_from(n).ok());
     router.map(|reason| {
         let args = reason
             .args()

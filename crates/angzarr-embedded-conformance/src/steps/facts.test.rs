@@ -4,6 +4,7 @@
 
 use cucumber::{given, then, when};
 
+use angzarr_embedded::v1::event_meta::Causation;
 use angzarr_embedded::v1::DeliveryOutcome;
 use angzarr_embedded::{Handled, Timestamp};
 
@@ -121,7 +122,10 @@ fn still_has(w: &mut Coordinator, count: usize) {
 fn not_processed(w: &mut Coordinator, external_id: String) {
     let cover = w.order();
     for page in w.pages(&cover) {
-        let origin = page.meta.and_then(|m| m.fact).map(|f| f.external_id);
+        let origin = match page.meta.and_then(|m| m.causation) {
+            Some(Causation::Fact(cause)) => cause.origin.map(|f| f.external_id),
+            _ => None,
+        };
         assert_ne!(origin.as_deref(), Some(external_id.as_str()));
     }
 }
@@ -132,7 +136,9 @@ fn only_one(w: &mut Coordinator) {
     assert_eq!(w.persisted(&cover).len(), 1);
 }
 
-#[then("the second injection reports already_processed")]
+#[then(
+    regex = r"^the second injection (?:reports already_processed|is answered with delivery DUPLICATE and the stored events)$"
+)]
 fn already_processed(w: &mut Coordinator) {
     assert!(
         matches!(w.handled.last(), Some((_, Ok(Handled::Duplicate(..))))),
@@ -160,7 +166,9 @@ async fn accepted_for_order(w: &mut Coordinator, name: String, kind: String) {
     w.handle(book).await;
 }
 
-#[then(regex = r#"^the ContextualCommand delivered to business code has recorded_at "([^"]+)"$"#)]
+#[then(
+    regex = r#"^the (?:ContextualCommand|HandleRequest) delivered to business code has recorded_at "([^"]+)"$"#
+)]
 fn delivered_recorded_at(w: &mut Coordinator, at: String) {
     let delivered = w.business("order").delivered().pop().expect("delivered");
     assert_eq!(delivered.recorded_at, Some(instant(&at)));
@@ -174,7 +182,10 @@ fn stream_with_snapshot(w: &mut Coordinator, snapshot: u64) {
     w.write(&cover, &["ItemAdded"; 8]);
     let (state_type, version) = {
         let order = w.domain("order");
-        (order.state_type.clone(), order.rules_version.clone())
+        (
+            format!("/{}", order.state_type),
+            order.rules_version.clone(),
+        )
     };
     w.snapshot(&cover, snapshot, &state_type, &version);
 }
@@ -191,7 +202,7 @@ async fn delivers_a_command(w: &mut Coordinator) {
 fn carries_snapshot(w: &mut Coordinator, sequence: u64) {
     let delivered = w.business("order").delivered().pop().expect("delivered");
     let snapshot = delivered
-        .events
+        .history
         .and_then(|e| e.snapshot)
         .expect("a snapshot");
     assert_eq!(snapshot.sequence, sequence);
@@ -201,7 +212,7 @@ fn carries_snapshot(w: &mut Coordinator, sequence: u64) {
 fn carries_only(w: &mut Coordinator, first: u64, second: u64) {
     let delivered = w.business("order").delivered().pop().expect("delivered");
     let sequences: Vec<u64> = delivered
-        .events
+        .history
         .map_or(Vec::new(), |e| e.pages.iter().map(|p| p.sequence).collect());
     assert_eq!(sequences, [first, second]);
 }
@@ -211,12 +222,12 @@ fn carries_only(w: &mut Coordinator, first: u64, second: u64) {
 #[then("business code folds both of them onto the snapshot state")]
 fn folds_both(w: &mut Coordinator) {
     let delivered = w.business("order").delivered().pop().expect("delivered");
-    let events = delivered.events.expect("its history");
+    let events = delivered.history.expect("its history");
     assert!(
         events.snapshot.is_some()
-            && events
-                .pages
-                .iter()
-                .all(|p| p.payload.as_ref().is_some_and(|a| bare(a) == "ItemAdded"))
+            && events.pages.iter().all(|p| {
+                angzarr_embedded::angzarr_router::page_event(p)
+                    .is_some_and(|a| bare(a) == "ItemAdded")
+            })
     );
 }

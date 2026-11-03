@@ -1,41 +1,21 @@
 //! The business process behind a domain, as the coordinator sees it: a
 //! scripted angzarr-router `CommandHandler`, registered with
 //! `Registry::command_handler` as a child's would be. It keeps every
-//! `ContextualCommand` it is delivered and answers each as its script says:
-//! by default as a well-behaved client library would, one event per input,
-//! the state returned with it, the conflict report of a handler that
-//! examined its window.
+//! `HandleRequest` it is delivered and answers each as its script says: by
+//! default as a well-behaved client library would, one event per input,
+//! the state returned with it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use angzarr_embedded::angzarr_router::error::{CodedError, GrpcCode};
+use angzarr_embedded::angzarr_router::error::{BusinessStatus, CodedError, GrpcCode};
+use angzarr_embedded::angzarr_router::hpb::{HandleRequest, HandleResponse};
 use angzarr_embedded::angzarr_router::router::CommandHandler;
 use angzarr_embedded::testing::MemoryStore;
-use angzarr_embedded::v1::{
-    command_page, CommandHandlerResponse, ComponentKind, ConflictReport, ConflictResolution,
-    ContextualCommand, Cover, EventBook, EventPage, Snapshot,
-};
+use angzarr_embedded::v1::{command_page, event_page, ComponentKind, Cover, EventPage};
 use angzarr_embedded::{Any, EventStore, StreamRef, Write};
 
-use crate::tests::policy::{bare, command_refused_in};
-
-/// What a handler reports of its conflicts with its events.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) enum Report {
-    /// As a handler that examined its window does: under AGGREGATE_HANDLES
-    /// the nonce it was delivered, under COMMUTATIVE no unit changed.
-    #[default]
-    Examined,
-    /// No report at all.
-    Nothing,
-    /// AGGREGATE_HANDLES: this nonce, as text the scenario named.
-    Nonce(String),
-    /// AGGREGATE_HANDLES: the first delivery's nonce.
-    FirstNonce,
-    /// COMMUTATIVE: the units the window changed and the command changed.
-    Units(Vec<String>, Vec<String>),
-}
+use crate::tests::policy::bare;
 
 /// Another write that lands while a delivery is decided: after the
 /// stream was loaded, before the command is written.
@@ -50,28 +30,44 @@ pub(crate) enum Race {
 /// How one delivery is answered.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Answer {
-    pub(crate) report: Report,
     /// Refused, with this error, instead of answered.
     pub(crate) refuse: Option<CodedError>,
     pub(crate) race: Option<Race>,
     /// The rules version reported, if not the registered one.
     pub(crate) rules_version: Option<String>,
+    /// The state type answered, if not the registered one.
+    pub(crate) state_type: Option<String>,
     /// The types of the events recorded, if not the one named for the
     /// input.
     pub(crate) events: Option<Vec<String>>,
-    /// The edition its answer's events book names, if it names one: a
-    /// handler bug.
-    pub(crate) book_edition: Option<String>,
 }
 
-/// A business refusal under `code`, FAILED_PRECONDITION.
-pub(crate) fn rejection(code: &str) -> CodedError {
+/// A typed refusal (decision 14.95): the refusal message `name` of
+/// `package` (`/orders.v1.`), refused under `status`.
+pub(crate) fn typed_refusal(package: &str, name: &str, status: BusinessStatus) -> CodedError {
+    CodedError::refused(
+        status,
+        Any {
+            type_url: format!("/{package}{name}"),
+            value: Vec::new(),
+        },
+    )
+}
+
+/// The router's refusal of a command of a type no handler takes:
+/// `ANGZARR_REASON_UNKNOWN_COMMAND_TYPE`, INTERNAL, naming `type_url`.
+pub(crate) fn unknown_command_type(type_url: &str) -> CodedError {
     CodedError {
-        code: code.to_string(),
-        extras: BTreeMap::new(),
-        grpc: GrpcCode::FailedPrecondition,
+        code: "ANGZARR_REASON_UNKNOWN_COMMAND_TYPE".to_string(),
+        extras: BTreeMap::from([("type_url".to_string(), type_url.to_string())]),
+        grpc: GrpcCode::Internal,
         refusal: None,
     }
+}
+
+/// A typed refusal `name` of `package`, FAILED_PRECONDITION.
+pub(crate) fn rejection(package: &str, name: &str) -> CodedError {
+    typed_refusal(package, name, BusinessStatus::FailedPrecondition)
 }
 
 /// A refusal of every input of a type, or only once the stream holds an
@@ -107,9 +103,7 @@ pub(crate) struct Business {
     /// does.
     every_fact: Mutex<bool>,
     script: Mutex<Script>,
-    seen: Mutex<Vec<ContextualCommand>>,
-    /// The name a scenario gives the nonce the coordinator delivers.
-    alias: Mutex<Option<String>>,
+    seen: Mutex<Vec<HandleRequest>>,
     /// The deliveries made before the scenario's first when.
     before: Mutex<usize>,
     /// The state returned with each answer, in order.
@@ -137,7 +131,6 @@ impl Business {
             every_fact: Mutex::default(),
             script: Mutex::default(),
             seen: Mutex::default(),
-            alias: Mutex::default(),
             before: Mutex::default(),
             returned: Mutex::default(),
             rules: Mutex::default(),
@@ -150,11 +143,11 @@ impl Business {
     }
 
     /// The error a rule refuses `delivered`'s input of type `name` with.
-    fn ruled(&self, name: &str, delivered: &ContextualCommand) -> Option<CodedError> {
-        let held: Vec<String> = delivered.events.as_ref().map_or(Vec::new(), |e| {
+    fn ruled(&self, name: &str, delivered: &HandleRequest) -> Option<CodedError> {
+        let held: Vec<String> = delivered.history.as_ref().map_or(Vec::new(), |e| {
             e.pages
                 .iter()
-                .filter_map(|p| p.payload.as_ref())
+                .filter_map(angzarr_embedded::angzarr_router::page_event)
                 .map(bare)
                 .collect()
         });
@@ -177,12 +170,6 @@ impl Business {
     /// Its handler for every fact.
     pub(crate) fn takes_every_fact(&self) {
         *locked(&self.every_fact) = true;
-    }
-
-    /// `name` is what the scenario calls the nonce the coordinator
-    /// delivers: a report of it is a report of the nonce delivered.
-    pub(crate) fn name_nonce(&self, name: &str) {
-        *locked(&self.alias) = Some(name.to_string());
     }
 
     /// Every delivery answered as `edit` makes `answer`.
@@ -210,7 +197,7 @@ impl Business {
     }
 
     /// Every delivery since the first when, in order.
-    pub(crate) fn delivered(&self) -> Vec<ContextualCommand> {
+    pub(crate) fn delivered(&self) -> Vec<HandleRequest> {
         let before = *locked(&self.before);
         locked(&self.seen)[before..].to_vec()
     }
@@ -259,11 +246,11 @@ impl Business {
             .next_sequence;
         let page = EventPage {
             sequence: head,
-            payload: Some(Any {
+            body: Some(event_page::Body::Event(Any {
                 type_url: self.type_url("OrderNoteAdded"),
                 value: Vec::new(),
-            }),
-            ..EventPage::default()
+            })),
+            meta: None,
         };
         self.store
             .write(Write::append(at, head, &[page]))
@@ -273,15 +260,8 @@ impl Business {
 
     /// What `delivered`'s handler records: the events `answer` names, else
     /// one named for its input.
-    fn events(
-        &self,
-        delivered: &ContextualCommand,
-        answer: &Answer,
-    ) -> Result<Vec<Any>, CodedError> {
-        let page = delivered
-            .command
-            .as_ref()
-            .and_then(|book| book.page.as_ref());
+    fn events(&self, delivered: &HandleRequest, answer: &Answer) -> Result<Vec<Any>, CodedError> {
+        let page = delivered.input.as_ref().and_then(|book| book.page.as_ref());
         let (is_fact, payload) = match page.and_then(|page| page.body.as_ref()) {
             Some(command_page::Body::Fact(fact)) => (true, fact.payload.clone()),
             Some(command_page::Body::Command(command)) => (false, command.payload.clone()),
@@ -293,36 +273,21 @@ impl Business {
             return Err(error);
         }
         let declared = locked(&self.facts).contains(&name);
-        if is_fact && name == "CommandRefused" && !declared {
-            // The router finds no on_refused handler for the refused
-            // command's type.
-            let refused = command_refused_in(&input).and_then(|r| r.command);
-            let command = refused.and_then(|b| b.page).and_then(|p| match p.body {
-                Some(command_page::Body::Command(c)) => c.payload,
-                _ => None,
-            });
-            let command_type = command.map(|c| c.type_url).unwrap_or_default();
-            return Err(CodedError {
-                code: "ROUTER_REASON_NO_REFUSAL_HANDLER".to_string(),
-                extras: BTreeMap::from([("command_type".to_string(), command_type)]),
-                grpc: GrpcCode::Internal,
-                refusal: None,
-            });
-        }
         if !is_fact && declared {
             // Its handler for the type is a fact handler: the router finds
             // no command handler for it.
             return Err(CodedError {
-                code: "ROUTER_REASON_UNKNOWN_COMMAND_TYPE".to_string(),
+                code: "ANGZARR_REASON_UNKNOWN_COMMAND_TYPE".to_string(),
                 extras: BTreeMap::from([("type_url".to_string(), input.type_url.clone())]),
                 grpc: GrpcCode::Internal,
                 refusal: None,
             });
         }
-        let handled = *locked(&self.every_fact) || declared;
+        // A payload with no type URL is of no type a handler is for.
+        let handled = !input.type_url.is_empty() && (*locked(&self.every_fact) || declared);
         if is_fact && !handled {
             return Err(CodedError {
-                code: "ROUTER_REASON_NO_FACT_HANDLER".to_string(),
+                code: "ANGZARR_REASON_NO_FACT_HANDLER".to_string(),
                 extras: BTreeMap::from([("type_url".to_string(), input.type_url.clone())]),
                 grpc: GrpcCode::Internal,
                 refusal: None,
@@ -339,35 +304,6 @@ impl Business {
                 value: Vec::new(),
             })
             .collect())
-    }
-
-    /// The report `report` makes for `delivered`.
-    fn report(&self, report: &Report, delivered: &ContextualCommand) -> Option<ConflictReport> {
-        let resolution = delivered
-            .command
-            .as_ref()
-            .and_then(|book| book.handling.as_ref())
-            .map_or(ConflictResolution::Strict, |h| h.conflict_resolution());
-        let nonce = |nonce: &[u8]| ConflictReport {
-            resolved_nonce: nonce.to_vec().into(),
-            ..ConflictReport::default()
-        };
-        match report {
-            Report::Examined if resolution == ConflictResolution::AggregateHandles => {
-                Some(nonce(&delivered.conflict_nonce))
-            }
-            Report::Examined | Report::Nothing => None,
-            Report::Nonce(name) if locked(&self.alias).as_ref() == Some(name) => {
-                Some(nonce(&delivered.conflict_nonce))
-            }
-            Report::Nonce(name) => Some(nonce(name.as_bytes())),
-            Report::FirstNonce => Some(nonce(&self.delivered()[0].conflict_nonce)),
-            Report::Units(window, command) => Some(ConflictReport {
-                window_units: window.clone(),
-                command_units: command.clone(),
-                ..ConflictReport::default()
-            }),
-        }
     }
 }
 
@@ -405,10 +341,7 @@ impl CommandHandler for Process {
         Vec::new()
     }
 
-    async fn dispatch(
-        &self,
-        delivered: &ContextualCommand,
-    ) -> Result<CommandHandlerResponse, CodedError> {
+    async fn dispatch(&self, delivered: &HandleRequest) -> Result<HandleResponse, CodedError> {
         let business = &self.business;
         let n = {
             let mut seen = locked(&business.seen);
@@ -417,7 +350,7 @@ impl CommandHandler for Process {
         };
         let answer = business.answer(n);
         let stream = delivered
-            .events
+            .history
             .as_ref()
             .and_then(|events| events.cover.clone())
             .unwrap_or_default();
@@ -429,31 +362,16 @@ impl CommandHandler for Process {
         }
         let events = business.events(delivered, &answer)?;
         let state = Any {
-            type_url: business.state_type.clone(),
+            type_url: answer
+                .state_type
+                .clone()
+                .unwrap_or_else(|| business.state_type.clone()),
             value: n.to_be_bytes().to_vec(),
         };
         locked(&business.returned).push((n, state.clone()));
-        let cover = answer.book_edition.map(|edition| Cover {
-            edition: Some(edition),
-            ..stream.clone()
-        });
-        Ok(CommandHandlerResponse {
-            conflict: business.report(&answer.report, delivered),
-            events: Some(EventBook {
-                cover,
-                snapshot: Some(Snapshot {
-                    state: Some(state),
-                    ..Snapshot::default()
-                }),
-                pages: events
-                    .into_iter()
-                    .map(|event| EventPage {
-                        payload: Some(event),
-                        ..EventPage::default()
-                    })
-                    .collect(),
-                ..EventBook::default()
-            }),
+        Ok(HandleResponse {
+            events,
+            state: Some(state),
             rules_version: answer
                 .rules_version
                 .unwrap_or_else(|| locked(&business.rules_version).clone()),

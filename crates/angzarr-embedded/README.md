@@ -36,6 +36,7 @@ itself.
 
 One command, end to end, in angzarr's normative order: validate
 (`check`), identify, load then deduplicate (by command id, on the
-stream's events), resolve (the expected sequence, under the resolved
-conflict resolution), decode (upcast by type URL) and decide or ingest.
+stream's events), check the expected sequence against the head (a
+command's, refused `ExpectedSequenceMismatch` when it is not the head),
+decode (upcast by type URL) and decide or ingest.
 See `docs/design/audit.md`.

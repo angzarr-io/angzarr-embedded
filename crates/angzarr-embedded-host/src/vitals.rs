@@ -4,7 +4,7 @@
 //!
 //! Every check interval the supervisor sends the child a grpc.health.v1
 //! `Check` of its overall server, within a deadline ([`check`]), beside the
-//! health watch it holds from the handshake on: a child wedged with its
+//! health watch it holds from when it was first ready on: a child wedged with its
 //! watch still SERVING answers no check. Each time it sees the child's
 //! health, by a check or its watch, it asks [`Vitals::seen`] what to do:
 //! publish it (up), withdraw it (down: unhealthy, its calls failing

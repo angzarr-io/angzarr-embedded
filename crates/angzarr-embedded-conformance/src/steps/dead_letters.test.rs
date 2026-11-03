@@ -1,19 +1,17 @@
 //! A policy's failure on an event it reacts to, dead-lettered: what the
-//! dead letter carries (the trigger, the reason and its details, the
+//! dead letter carries (the trigger, its one why, its retries, the
 //! component), never rendered text. A dead letter is kept by the store and
 //! told to the dead-letter log; "published to angzarr.dlq.{domain}" is its
 //! stream's domain.
 
-use std::collections::BTreeMap;
-
 use cucumber::{given, then, when};
 
-use angzarr_embedded::v1::angzarr_dead_letter::{Payload, RejectionDetails};
+use angzarr_embedded::v1::angzarr_dead_letter::Payload;
 use angzarr_embedded::v1::{AngzarrDeadLetter, ComponentKind};
 use angzarr_embedded::OnRetryable;
 
 use crate::tests::answer::status;
-use crate::tests::outcomes::named;
+use crate::tests::outcomes::{named, reason_of};
 use crate::tests::policy::{bare, internal, locked};
 use crate::tests::world::Coordinator;
 
@@ -24,39 +22,35 @@ fn the_letter(w: &Coordinator) -> AngzarrDeadLetter {
     letters[0].clone()
 }
 
-/// The dead letter's processing failed details.
-fn processing_failed(w: &Coordinator) -> angzarr_embedded::v1::ProcessingFailedDetails {
-    match the_letter(w).rejection_details {
-        Some(RejectionDetails::ProcessingFailed(details)) => details,
-        other => panic!("processing failed details, not {other:?}"),
-    }
-}
-
 #[given(
-    regex = r#"^a policy "(\w+)" subscribed to "([\w-]+)" whose handler (succeeds|fails(?: permanently)? with code (\w+)(.*))$"#
+    regex = r#"^a policy "(\w+)" subscribed to "([\w-]+)" whose handler (?:succeeds|fails (\w+) with reason (\w+), its cause (\w+)(.*))$"#
 )]
 fn subscribed(
     w: &mut Coordinator,
     name: String,
     input: String,
-    how: String,
-    code: String,
+    grpc: String,
+    reason: String,
+    cause: String,
     rest: String,
 ) {
     let script = w.policy(&name, &input, "inventory");
-    if code.is_empty() {
+    if reason.is_empty() {
         return;
     }
-    let mut error = internal(&code);
-    error.grpc = match how.contains("permanently") {
-        true => status("INTERNAL"),
-        false => status("UNAVAILABLE"),
-    };
-    error.extras = named(rest.split(", and logs").next().unwrap_or_default());
+    let mut error = internal(&reason);
+    error.grpc = status(&grpc);
+    error.extras = std::iter::once(("cause".to_string(), cause))
+        .chain(
+            named(rest.split(", and logs").next().unwrap_or_default())
+                .into_iter()
+                .map(|(name, value)| (format!("cause.{name}"), value)),
+        )
+        .collect();
     locked(&script).fails = Some(error);
 }
 
-#[given(regex = r"^the policy's retry budget is (\d+) attempts?$")]
+#[given(regex = r"^the policy's (?:retry budget|retry cap) is (\d+) attempts?$")]
 fn retry_budget(w: &mut Coordinator, attempts: u32) {
     w.retry = OnRetryable {
         max_retries: attempts - 1,
@@ -108,74 +102,66 @@ fn carries_event(w: &mut Coordinator, event: String) {
     let names: Vec<String> = book
         .pages
         .iter()
-        .filter_map(|p| p.payload.as_ref().map(bare))
+        .filter_map(|p| angzarr_embedded::angzarr_router::page_event(p).map(bare))
         .collect();
     assert_eq!(names, [event]);
 }
 
-#[then(
-    regex = r"^the dead letter's processing_failed details have failure code (\w+) and retry_count (\d+)$"
-)]
-fn failure_and_retries(w: &mut Coordinator, code: String, retries: u32) {
-    let details = processing_failed(w);
-    assert_eq!(details.failure.map(|f| f.code), Some(code));
-    assert_eq!(details.retry_count, retries);
+#[then(regex = r"^the dead letter's retry_count is (\d+)$")]
+fn retry_count(w: &mut Coordinator, retries: u32) {
+    assert_eq!(the_letter(w).retry_count, retries);
 }
 
 #[then(
-    regex = r"^the dead letter's processing_failed details have is_transient (true|false) and retry_count (\d+)$"
-)]
-fn transient_and_retries(w: &mut Coordinator, transient: bool, retries: u32) {
-    let details = processing_failed(w);
-    assert_eq!(
-        (details.is_transient, details.retry_count),
-        (transient, retries)
-    );
-}
-
-#[then(
-    regex = r#"^the dead letter's source_component is "(\w+)" with source_component_type "(\w+)"$"#
+    regex = r#"^the dead letter's source_component is "(\w+)" with source_component_kind (\w+)$"#
 )]
 fn source_component(w: &mut Coordinator, component: String, kind: String) {
     let letter = the_letter(w);
     assert_eq!(letter.source_component, component);
-    let expected = match kind.as_str() {
-        "policy" => ComponentKind::Policy,
-        "projector" => ComponentKind::Projector,
-        "process_manager" => ComponentKind::ProcessManager,
-        _ => ComponentKind::Aggregate,
-    };
+    let expected = ComponentKind::from_str_name(&kind).expect("a component kind");
     assert_eq!(letter.source_component_kind(), expected);
 }
 
-/// `diagnostic` has `code` and at least the args `rest` names.
-fn has(diagnostic: Option<&angzarr_embedded::v1::Diagnostic>, code: &str, rest: &str) {
-    let diagnostic = diagnostic.expect("a diagnostic");
-    assert_eq!(diagnostic.code, code);
-    let wanted: BTreeMap<String, String> = named(rest);
-    for (name, value) in wanted {
-        assert_eq!(
-            diagnostic.args.get(&name),
-            Some(&value),
-            "{name} of {diagnostic:?}"
-        );
+/// The args a step lists after a code: `arg name "value"` (quoted, checked
+/// equal), `arg name VALUE` (bare, checked equal) and `arg name` (present).
+fn listed_args(text: &str) -> Vec<(String, Option<String>)> {
+    let mut args = Vec::new();
+    for part in text.split("arg ").skip(1) {
+        let part = part
+            .trim()
+            .trim_end_matches(',')
+            .trim_end_matches(" and")
+            .trim();
+        let mut words = part.splitn(2, ' ');
+        let name = words.next().unwrap_or_default().trim_end_matches(',');
+        let value = words
+            .next()
+            .map(|v| v.trim().trim_end_matches(',').trim_end_matches(" and"))
+            .map(|v| v.trim().trim_matches('"').to_string())
+            .filter(|v| !v.is_empty());
+        args.push((name.to_string(), value));
+    }
+    args
+}
+
+/// `diagnostic` has `code` and the args `rest` lists.
+pub(crate) fn has(diagnostic: Option<&angzarr_embedded::v1::Diagnostic>, code: &str, rest: &str) {
+    let diagnostic = diagnostic.expect("a reason");
+    assert_eq!(diagnostic.code, code, "{diagnostic:?}");
+    for (name, value) in listed_args(rest) {
+        let given = diagnostic
+            .args
+            .get(&name)
+            .unwrap_or_else(|| panic!("no {name} in {diagnostic:?}"));
+        if let Some(value) = value {
+            assert_eq!(given, &value, "{name} of {diagnostic:?}");
+        }
     }
 }
 
-#[then(regex = r"^the dead letter's reason has code (\w+)(.*)$")]
+#[then(regex = r"^the dead letter's why is the reason arm, code (\w+)(.*)$")]
 fn reason_has(w: &mut Coordinator, code: String, rest: String) {
-    has(the_letter(w).reason.as_ref(), &code, &rest);
-}
-
-#[then(
-    regex = r"^the dead letter's processing_failed details have failure code (\w+) and arg (.*)$"
-)]
-fn failure_has(w: &mut Coordinator, code: String, rest: String) {
-    has(
-        processing_failed(w).failure.as_ref(),
-        &code,
-        &format!(" {rest}"),
-    );
+    has(reason_of(&the_letter(w)), &code, &rest);
 }
 
 #[then(regex = r#"^no field of the dead letter carries the text "([^"]+)"$"#)]

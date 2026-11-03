@@ -15,8 +15,7 @@ use angzarr_store_sqlite::SqliteStore;
 
 use crate::toys::{self, cover, cover_in, ledger, ledger_root, AccountCmd, Bookkeeping, Edit};
 use crate::v1::{
-    command_page, Command, CommandBook, CommandPage, ConflictResolution, Cover, Snapshot,
-    StateDescriptor, StateOptions, Uuid,
+    command_page, Command, CommandBook, CommandPage, Cover, Snapshot, StateDescriptor, Uuid,
 };
 use crate::{
     pack, Any, Domain, EventStore, Failure, Handled, Kernel, KernelError, MemoryDeadLetters,
@@ -57,13 +56,7 @@ impl State for Count {
 
     fn descriptor() -> StateDescriptor {
         StateDescriptor {
-            type_url: "/tally.v1.Count".to_string(),
-            options: Some(StateOptions {
-                conflict_resolutions: vec![
-                    ConflictResolution::Strict as i32,
-                    ConflictResolution::AggregateHandles as i32,
-                ],
-            }),
+            type_name: "tally.v1.Count".to_string(),
         }
     }
 }
@@ -146,13 +139,10 @@ fn tally_handlers(
     table.on_command("tally.v1.Add", |any, _, _| {
         let cmd = Add::from_any(any).expect("routed by type");
         assert!(cmd.n >= 0, "a tally never adds a negative");
-        Ok(Some(crate::v1::EventBook {
-            pages: vec![crate::v1::EventPage {
-                payload: Some(Added { n: cmd.n }.to_any()),
-                ..Default::default()
-            }],
-            ..Default::default()
-        }))
+        Ok(crate::angzarr_router::domain::Emit::of([Added {
+            n: cmd.n,
+        }
+        .to_any()]))
     })
 }
 
@@ -172,10 +162,10 @@ fn add(stream: Cover, id: u8, n: i64) -> CommandBook {
             command_id: Some(Uuid::from_bytes([id; 16])),
             body: Some(command_page::Body::Command(Command {
                 payload: Some(Add { n }.to_any()),
+                handling: None,
             })),
             ..CommandPage::default()
         }),
-        handling: None,
     }
 }
 
@@ -372,7 +362,7 @@ async fn a_snapshot_at_or_past_the_head_is_not_used() {
 }
 
 /// A command to a stream not forked into its edition is refused before its
-/// handler runs (`COORDINATOR_REASON_EDITION_NOT_FORKED`; C-0633), and
+/// handler runs (`ANGZARR_REASON_EDITION_NOT_FORKED`; C-0633), and
 /// nothing is written: the SQLite adapter reads an unforked edition stream
 /// as main's, as every store does. (`angzarr-embedded`' own
 /// `a_command_to_an_edition_is_refused_and_writes_nothing` holds
@@ -386,17 +376,15 @@ async fn a_command_to_an_edition_is_refused_and_writes_nothing() {
         .await
         .err()
         .unwrap();
-    let Failure::Rejected(rejected) = &failure else {
+    let Failure::Kernel(KernelError::Router(refused)) = &failure else {
         panic!("refused before its handler: {failure:?}")
     };
+    assert_eq!(refused.code, "ANGZARR_REASON_EDITION_NOT_FORKED");
     assert_eq!(
-        Diagnostic::code(rejected),
-        "COORDINATOR_REASON_EDITION_NOT_FORKED"
+        refused.grpc,
+        angzarr_router::error::GrpcCode::FailedPrecondition
     );
-    assert_eq!(
-        rejected.status(),
-        angzarr_router::error::BusinessStatus::FailedPrecondition
-    );
+    assert_eq!(failure.recovery(), Recovery::Business);
     assert_eq!(store.covers("tally").await, Ok(vec![]), "nothing written");
 }
 
@@ -429,8 +417,9 @@ async fn a_command_and_its_policy_step_each_commit_and_survive_reopening() {
     assert_eq!(store.position(key).await, Ok(2));
 }
 
-/// On a file: a policy step its target rejects rolls nothing back; the
-/// command's commit stands on disk, and nothing of the step landed.
+/// On a file: a policy step its target refuses, which its policy does not
+/// translate (a bug), rolls nothing back; the command's commit stands on
+/// disk, and nothing of the step landed.
 #[tokio::test]
 async fn a_rejected_policy_step_on_a_file_keeps_the_commands_commit() {
     let mut registry = toys::registry();
@@ -446,7 +435,7 @@ async fn a_rejected_policy_step_on_a_file_keeps_the_commands_commit() {
                 .await
                 .err()
                 .unwrap();
-        assert_eq!(failure.recovery(), Recovery::Business);
+        assert_eq!(failure.recovery(), Recovery::Bug);
     }
     let store = SqliteStore::open(&path).await.unwrap();
     assert_eq!(pages(&store, &cover("account", 1)).await.len(), 2);
@@ -496,7 +485,7 @@ async fn resume_after_reopening_runs_what_a_crash_left_owed() {
 // ------------------------------------------------------ one handle
 
 /// A decide that panics is a bug the router answers (decision 14.37:
-/// ROUTER_REASON_UNHANDLED_HANDLER_ERROR, its cause ROUTER_REASON_HANDLER_PANICKED), never an unwind
+/// ANGZARR_REASON_UNHANDLED_HANDLER_ERROR, its cause ANGZARR_REASON_HANDLER_PANICKED), never an unwind
 /// through the kernel: nothing is written, and the handle serves the next
 /// command (no transaction left open, no lock held).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -513,7 +502,7 @@ async fn a_panicking_decide_writes_nothing_and_frees_the_handle() {
         matches!(
             &refused,
             Failure::Kernel(KernelError::Router(e))
-                if e.extras.get("cause").map(String::as_str) == Some("ROUTER_REASON_HANDLER_PANICKED")
+                if e.extras.get("cause").map(String::as_str) == Some("ANGZARR_REASON_HANDLER_PANICKED")
         ),
         "{refused:?}"
     );

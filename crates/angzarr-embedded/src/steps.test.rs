@@ -3,7 +3,7 @@
 //! The chain ([`Kernel::handle`](crate::Kernel::handle)) runs the
 //! same functions.
 
-use angzarr_proto::v1::{ConflictResolution, EventPage, Snapshot};
+use angzarr_proto::v1::{EventPage, Snapshot};
 
 use crate::check::{Identified, Sampled};
 use crate::dead_letter::DeadLetterLog;
@@ -15,22 +15,17 @@ use crate::store::{Store, StorePort};
 use crate::stream::Stream;
 use crate::toys::ready;
 
-use super::{decide, deduplicate, load, Contextual, Deduplicated, Nonces, Novel};
+use super::{decide, deduplicate, load, Contextual, Deduplicated, Novel};
 
 /// Steps 3 and 4 over a store.
 pub struct Coordinator<'s, S> {
     store: &'s S,
     registry: &'s Registry,
-    nonces: Nonces,
 }
 
 impl<'s, S: Store> Coordinator<'s, S> {
     pub fn new(store: &'s S, registry: &'s Registry) -> Coordinator<'s, S> {
-        Coordinator {
-            store,
-            registry,
-            nonces: Nonces::of(&crate::toys::at(0)),
-        }
+        Coordinator { store, registry }
     }
 
     /// Step 3: load, then look the command id up.
@@ -41,13 +36,12 @@ impl<'s, S: Store> Coordinator<'s, S> {
             &mut StorePort::new(self.store, &letters),
             self.registry,
             command,
-            &letters,
         ))
     }
 
-    /// Step 4: stamp or check the expected sequence.
-    pub fn load(&mut self, command: Box<Novel>) -> Result<Contextual, KernelError> {
-        load(*command, &mut self.nonces)
+    /// Step 4: check the expected sequence against the head.
+    pub fn load(&mut self, command: Box<Novel>) -> Result<Contextual, Failure<Rejected>> {
+        load(*command)
     }
 }
 
@@ -63,34 +57,12 @@ impl Novel {
 }
 
 impl Contextual {
-    pub fn command(&self) -> &Identified {
-        &self.command
-    }
-
-    pub fn conflict_resolution(&self) -> ConflictResolution {
-        self.resolution
-    }
-
-    pub fn expected_sequence(&self) -> u64 {
-        self.expected
-    }
-
     pub fn snapshot(&self) -> Option<&Snapshot> {
         self.snapshot.as_ref()
     }
 
     pub fn pages(&self) -> &[EventPage] {
         &self.pages
-    }
-
-    /// The events from the expected sequence to the head.
-    pub fn window(&self) -> &[EventPage] {
-        let start = self.pages.partition_point(|p| p.sequence < self.expected);
-        &self.pages[start..]
-    }
-
-    pub fn has_nonce(&self) -> bool {
-        self.nonce.is_some()
     }
 
     /// The stream as step 3 loaded it, typed, beside the command.

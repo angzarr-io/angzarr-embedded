@@ -606,7 +606,7 @@ impl<R: Stores> App<R> {
             });
         Ok(Answered {
             events: Some(events),
-            outcome: Some(handled.outcome()),
+            delivery: handled.delivery(),
         })
     }
 

@@ -1,8 +1,9 @@
 //! The compensation tooling's edges, beside the handler-contract tier's
 //! `compensation.feature` (the conformance crate's): a reply of no step's,
-//! an undo no step becomes, several warnings, and the warning as a
-//! diagnostic. A toy order process manager with two steps, each undone by
-//! a fact of its destination's or, for `Ship`, a command.
+//! a step whose undo becomes a command refused at registration (decision
+//! 14.83), and the refusal as a diagnostic. A toy order process manager
+//! with two steps, each undone by a fact of its destination's; `Ship` is
+//! the destination's command.
 
 use angzarr_diagnostic::Diagnostic as _;
 
@@ -62,7 +63,6 @@ enum Event {
     Failed(&'static str),
     ReleaseDue,
     RefundDue,
-    CompensationFailed(String),
 }
 
 impl From<Charged> for Event {
@@ -87,18 +87,20 @@ fn order() -> Compensation<State, Event, &'static str> {
     Compensation::new(
         |_: &State, reason| Event::Failed(reason),
         |state: &State| state.failed,
-        |_: &State, step: &str| Event::CompensationFailed(step.to_string()),
     )
     .step::<Warehouse, Release, _>(
         "reserve",
         |s: &State| s.reserved.then_some(Reserved {}),
         |_| Event::ReleaseDue,
     )
-    .step::<Warehouse, Refund, _>(
-        "charge",
-        |s: &State| s.charged.then_some(Charged {}),
-        |_| Event::RefundDue,
-    )
+    .and_then(|order| {
+        order.step::<Warehouse, Refund, _>(
+            "charge",
+            |s: &State| s.charged.then_some(Charged {}),
+            |_| Event::RefundDue,
+        )
+    })
+    .expect("both undos become facts")
 }
 
 #[test]
@@ -142,43 +144,22 @@ fn a_reply_is_undone_only_once_rolled_back_and_only_for_its_step() {
     assert_eq!(order().reply(&failed, Unrelated {}), [Event::Unrelated]);
 }
 
+/// A step whose undo becomes one of its destination's commands is refused
+/// at registration, naming the step and the command (decision 14.83): no
+/// undo is ever refused.
 #[test]
-fn a_refused_undo_is_its_steps_compensation_failure() {
-    let state = State::default();
-    assert_eq!(
-        order().undo_refused::<Refund>(&state),
-        Some(Event::CompensationFailed("charge".to_string()))
-    );
-    assert_eq!(
-        order().undo_refused::<Release>(&state),
-        Some(Event::CompensationFailed("reserve".to_string()))
-    );
-    assert_eq!(order().undo_refused::<Ship>(&state), None);
-}
-
-#[test]
-fn registering_warns_of_each_undo_that_becomes_a_command_and_no_other() {
-    assert!(order().warnings().is_empty());
-    let shipping = order()
+fn registering_a_step_whose_undo_becomes_a_command_is_refused() {
+    let refused = order()
         .step::<Warehouse, Ship, _>("ship", |_: &State| None::<Unrelated>, |_| Event::ReleaseDue)
-        .step::<Warehouse, Ship, _>(
-            "ship again",
-            |_: &State| None::<Unrelated>,
-            |_| Event::ReleaseDue,
-        );
-    let warned: Vec<(&str, &str)> = shipping
-        .warnings()
-        .iter()
-        .map(|w| (w.step, w.command.as_str()))
-        .collect();
+        .expect_err("Ship is the warehouse's command");
     assert_eq!(
-        warned,
-        [("ship", "toy.v1.Ship"), ("ship again", "toy.v1.Ship")]
+        (refused.step, refused.command.as_str()),
+        ("ship", "toy.v1.Ship")
     );
 }
 
 #[test]
-fn the_warning_is_a_diagnostic_naming_its_step_and_command() {
+fn the_refusal_is_a_diagnostic_naming_its_step_and_command() {
     let warning = UndoTargetsCommand {
         step: "ship",
         command: "toy.v1.Ship".to_string(),
@@ -203,8 +184,7 @@ fn the_warning_is_a_diagnostic_naming_its_step_and_command() {
 }
 
 #[test]
-fn a_compensation_shows_its_steps_and_warnings() {
+fn a_compensation_shows_its_steps() {
     let shown = format!("{:?}", order());
     assert!(shown.contains("[\"reserve\", \"charge\"]"), "{shown}");
-    assert!(shown.contains("warnings: []"), "{shown}");
 }

@@ -8,7 +8,7 @@
 use std::fmt;
 use std::time::Duration;
 
-use ::angzarr_embedded::markup::{self, Context, DomainMessage, Failed};
+use ::angzarr_embedded::markup::{self, Context, DomainMessage, Refuses};
 use ::angzarr_embedded::{Any, Payload, PayloadError, Timestamp, WireError};
 use angzarr_diagnostic::{code, Arg, Diagnostic};
 use angzarr_embedded_macros::{aggregate, applies, handles_cmd};
@@ -66,6 +66,16 @@ mod wire {
         }
     );
     message!("toy.note.v1", Erased {});
+    // The note's typed refusal object: why, and the text it holds.
+    message!(
+        "toy.note.v1",
+        NoteRefused {
+            #[prost(string, tag = "1")]
+            kind: String,
+            #[prost(string, tag = "2")]
+            text: String,
+        }
+    );
 }
 
 // ---------------------------------------------------------------- the types
@@ -151,7 +161,8 @@ payload!(NoteEvent {
 
 // ---------------------------------------------------------------- the rejection
 
-/// Why the note refused a command.
+/// Why the note refused a command: its typed refusal object, travelling as
+/// `toy.note.v1.NoteRefused`.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum NoteRejection {
     /// A write to a note already written: `text`, what it holds.
@@ -182,6 +193,32 @@ impl Diagnostic for NoteRejection {
     }
 }
 
+impl DomainMessage for NoteRejection {
+    type Wire = wire::NoteRefused;
+
+    fn to_wire(&self) -> wire::NoteRefused {
+        let text = match self {
+            NoteRejection::Written { text } => text.clone(),
+            NoteRejection::Erased => String::new(),
+        };
+        wire::NoteRefused {
+            kind: self.code().to_string(),
+            text,
+        }
+    }
+
+    fn from_wire(wire: wire::NoteRefused) -> Result<Self, WireError> {
+        match wire.kind.as_str() {
+            code!("note-written") => Ok(NoteRejection::Written { text: wire.text }),
+            code!("note-erased") => Ok(NoteRejection::Erased),
+            _ => Err(WireError::Missing {
+                message: "toy.note.v1.NoteRefused",
+                field: "kind",
+            }),
+        }
+    }
+}
+
 // ---------------------------------------------------------------- the note
 
 /// One note, folded from its stream.
@@ -193,9 +230,9 @@ pub struct Note {
 
 impl Note {
     /// Refused once erased.
-    fn open(&self) -> Result<(), Failed<NoteRejection>> {
+    fn open(&self) -> Result<(), NoteRejection> {
         match self.erased {
-            true => Err(NoteRejection::Erased.into()),
+            true => Err(NoteRejection::Erased),
             false => Ok(()),
         }
     }
@@ -204,8 +241,8 @@ impl Note {
 #[aggregate(domain = "note", command = NoteCommand, event = NoteEvent)]
 impl Note {
     /// Write the note: refused on a stream with history.
-    #[handles_cmd(Write)]
-    fn write(&self, cmd: Write, ctx: &Context) -> Result<Written, Failed<NoteRejection>> {
+    #[handles_cmd(Write, refuses(NoteRejection))]
+    fn write(&self, cmd: Write, ctx: &Context) -> Result<Written, Refuses<Self, Write>> {
         match ctx.command.had_prior_events {
             true => Err(NoteRejection::Written {
                 text: self.text.clone(),
@@ -215,15 +252,15 @@ impl Note {
         }
     }
 
-    #[handles_cmd(Rewrite)]
-    fn rewrite(&self, cmd: Rewrite, ctx: &Context) -> Result<Rewritten, Failed<NoteRejection>> {
+    #[handles_cmd(Rewrite, refuses(NoteRejection))]
+    fn rewrite(&self, cmd: Rewrite, ctx: &Context) -> Result<Rewritten, Refuses<Self, Rewrite>> {
         let _ = ctx;
         self.open()?;
         Ok(Rewritten { text: cmd.text })
     }
 
-    #[handles_cmd(Erase)]
-    fn erase(&self, cmd: Erase, ctx: &Context) -> Result<Erased, Failed<NoteRejection>> {
+    #[handles_cmd(Erase, refuses(NoteRejection))]
+    fn erase(&self, cmd: Erase, ctx: &Context) -> Result<Erased, Refuses<Self, Erase>> {
         let _ = (cmd, ctx);
         self.open()?;
         Ok(Erased {})

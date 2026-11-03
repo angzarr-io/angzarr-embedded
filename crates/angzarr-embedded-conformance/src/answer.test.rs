@@ -11,18 +11,20 @@ use std::collections::BTreeMap;
 use angzarr_embedded::angzarr_diagnostic::{Arg, Diagnostic};
 use angzarr_embedded::angzarr_router::error::{CodedError, GrpcCode};
 use angzarr_embedded::v1::DeliveryOutcome;
-use angzarr_embedded::{Failure, Handled, KernelError, Recovery, Rejected, StepError};
+use angzarr_embedded::{Any, Failure, Handled, KernelError, Recovery, Rejected, StepError};
 
 /// One call's answer.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Answered {
     /// OK, delivered so.
     Ok(DeliveryOutcome),
-    /// Refused.
+    /// Refused: a status, its reason key and args, and, for a typed
+    /// refusal, its object in the status details (decision 14.95).
     Failed {
         status: GrpcCode,
         reason: String,
         args: BTreeMap<String, String>,
+        refusal: Option<Any>,
     },
 }
 
@@ -51,6 +53,7 @@ fn coded(error: CodedError) -> Answered {
         status: error.grpc,
         reason: error.code,
         args: error.extras,
+        refusal: error.refusal.map(|refusal| *refusal),
     }
 }
 
@@ -75,22 +78,19 @@ fn kernel(error: &KernelError) -> Answered {
         status: by_recovery(error.recovery()),
         reason: error.code().to_string(),
         args: flat(error),
+        refusal: None,
     }
 }
 
 fn rejected(rejected: &Rejected) -> Answered {
-    Answered::Failed {
-        status: rejected.status().into(),
-        reason: rejected.report().code().to_string(),
-        args: flat(rejected.report()),
-    }
+    coded(rejected.as_coded())
 }
 
 impl Answered {
     /// `result`, as its caller is answered.
     pub(crate) fn of(result: &Result<Handled, Failure<Rejected>>) -> Answered {
         match result {
-            Ok(handled) => Answered::Ok(handled.outcome().delivery()),
+            Ok(handled) => Answered::Ok(handled.delivery()),
             Err(Failure::Rejected(r)) => rejected(r),
             Err(Failure::Kernel(error)) => kernel(error),
             Err(failure @ Failure::Downstream { .. })
@@ -98,6 +98,7 @@ impl Answered {
                 status: by_recovery(failure.recovery()),
                 reason: failure.code().to_string(),
                 args: flat(failure),
+                refusal: None,
             },
         }
     }
@@ -110,11 +111,13 @@ impl Answered {
                 status: GrpcCode::FailedPrecondition,
                 reason: report.code().to_string(),
                 args: flat(report),
+                refusal: None,
             },
             StepError::PolicyFailed(report) => Answered::Failed {
                 status: GrpcCode::Internal,
                 reason: report.code().to_string(),
                 args: flat(report),
+                refusal: None,
             },
         }
     }
@@ -132,6 +135,14 @@ impl Answered {
         match self {
             Answered::Ok(_) => None,
             Answered::Failed { reason, .. } => Some(reason),
+        }
+    }
+
+    /// The typed refusal object, if refused with one.
+    pub(crate) fn refusal(&self) -> Option<&Any> {
+        match self {
+            Answered::Ok(_) => None,
+            Answered::Failed { refusal, .. } => refusal.as_ref(),
         }
     }
 

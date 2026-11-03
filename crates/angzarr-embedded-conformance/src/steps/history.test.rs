@@ -4,23 +4,7 @@
 use cucumber::gherkin::Step;
 use cucumber::given;
 
-use angzarr_embedded::v1::ConflictResolution;
-
 use crate::tests::world::Coordinator;
-
-#[given(
-    regex = r#"^an? "([\w-]+)" aggregate whose registered state (supports|does not support) COMMUTATIVE$"#
-)]
-fn registered_state(w: &mut Coordinator, domain: String, supports: String) {
-    let mut resolutions = vec![
-        ConflictResolution::Strict,
-        ConflictResolution::AggregateHandles,
-    ];
-    if supports == "supports" {
-        resolutions.push(ConflictResolution::Commutative);
-    }
-    w.domain(&domain).resolutions = resolutions;
-}
 
 /// The order stream's events, by sequence and type, from 0.
 #[given("the aggregate has events:")]
@@ -38,9 +22,17 @@ fn snapshot_at(w: &mut Coordinator, sequence: u64) {
     let cover = w.order();
     let (state_type, version) = {
         let order = w.domain("order");
-        (order.state_type.clone(), order.rules_version.clone())
+        (
+            format!("/{}", order.state_type),
+            order.rules_version.clone(),
+        )
     };
     w.snapshot(&cover, sequence, &state_type, &version);
+}
+
+#[given(regex = r#"^an "(\w+)" aggregate$"#)]
+fn aggregate(w: &mut Coordinator, domain: String) {
+    w.domain(&domain);
 }
 
 #[given(regex = r#"^a new "order" aggregate with no events$"#)]
@@ -62,7 +54,10 @@ fn snapshot_and_events(w: &mut Coordinator, snapshot: u64, first: u64, second: u
     w.write(&cover, &names);
     let (state_type, version) = {
         let order = w.domain("order");
-        (order.state_type.clone(), order.rules_version.clone())
+        (
+            format!("/{}", order.state_type),
+            order.rules_version.clone(),
+        )
     };
     w.snapshot(&cover, snapshot, &state_type, &version);
 }

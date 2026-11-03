@@ -39,13 +39,11 @@ mod ingest {
             "the context's recorded_at, source and rules version, copied by the toy"
         );
         let meta = handled.books()[0].pages[0].meta.clone().unwrap();
-        assert_eq!(
-            meta.causation,
-            Some(crate::v1::event_meta::Causation::CommandId(
-                ids::fact_command_id("pi_7")
-            ))
-        );
-        assert_eq!(meta.fact.unwrap().external_id, "pi_7");
+        let Some(crate::v1::event_meta::Causation::Fact(cause)) = meta.causation else {
+            panic!("a fact's cause: {:?}", meta.causation);
+        };
+        assert_eq!(cause.command_id, Some(ids::fact_command_id("pi_7")));
+        assert_eq!(cause.origin.unwrap().external_id, "pi_7");
     }
 
     #[test]
@@ -91,7 +89,7 @@ mod tx {
     use std::convert::Infallible;
 
     use crate::toys::{Toy, ToyCtx};
-    use crate::v1::{ConflictResolution, StateDescriptor, StateOptions, Uuid};
+    use crate::v1::{StateDescriptor, Uuid};
     use crate::{
         ids, pack, Decoder, Domain, Kernel, MemoryDeadLetters, Payload, PayloadError, Policy,
         Registry, State, Upcaster,
@@ -135,8 +133,6 @@ mod tx {
         pub bumps_seen: u32,
         #[prost(uint32, tag = "11")]
         pub bumps_committed: u32,
-        #[prost(bool, tag = "12")]
-        pub conflicts: bool,
         #[prost(uint64, tag = "13")]
         pub emitted_before: u64,
     }
@@ -154,18 +150,9 @@ mod tx {
         const PACKAGE: &'static str = "toy.probe.v1";
     }
 
-    /// `stash`: 0 acknowledges any window with its own nonce; 1 keeps the
-    /// nonce in [`STASHED`] and acknowledges nothing; 2 acknowledges the window
-    /// with the stashed nonce instead of its own: a decide smuggling a nonce
-    /// from one delivery into another.
+    /// The probe's one command.
     #[derive(Clone, PartialEq, prost::Message)]
-    pub struct Probe {
-        #[prost(uint32, tag = "1")]
-        pub stash: u32,
-    }
-
-    /// The nonce a probe kept from an earlier delivery.
-    static STASHED: std::sync::Mutex<Option<Vec<u8>>> = std::sync::Mutex::new(None);
+    pub struct Probe {}
 
     impl prost::Name for Probe {
         const NAME: &'static str = "Probe";
@@ -185,13 +172,7 @@ mod tx {
 
         fn descriptor() -> StateDescriptor {
             StateDescriptor {
-                type_url: "/toy.probe.v1.ProbeState".to_string(),
-                options: Some(StateOptions {
-                    conflict_resolutions: vec![
-                        ConflictResolution::Strict as i32,
-                        ConflictResolution::AggregateHandles as i32,
-                    ],
-                }),
+                type_name: "toy.probe.v1.ProbeState".to_string(),
             }
         }
     }
@@ -260,23 +241,10 @@ mod tx {
 
     impl Toy for ProbeDomain {
         fn decide(
-            probe: &Probe,
+            _: &Probe,
             state: &ProbeState,
             ctx: &ToyCtx<'_, Self>,
         ) -> Result<Vec<ProbeEvent>, Infallible> {
-            let conflicts = ctx.conflict.is_some();
-            if let Some(c) = &ctx.conflict {
-                let mut stashed = STASHED.lock().unwrap();
-                match probe.stash {
-                    1 => *stashed = Some(c.nonce().to_vec()),
-                    2 => {
-                        if let Some(nonce) = stashed.take() {
-                            c.resolve_conflicts(c.window(), &nonce);
-                        }
-                    }
-                    _ => c.resolve_conflicts(c.window(), c.nonce()),
-                }
-            }
             let probed = Probed {
                 rules_version: ctx.rules_version.to_string(),
                 domain: ctx.stream.domain.clone(),
@@ -289,7 +257,6 @@ mod tx {
                 emitted: 1,
                 bumps_seen: state.bumps + 1,
                 bumps_committed: state.bumps,
-                conflicts,
                 emitted_before: 0,
             };
             Ok(vec![ProbeEvent::Bumped, ProbeEvent::Probed(probed)])
@@ -314,7 +281,7 @@ mod tx {
             _: &crate::markup::PolicyContext,
         ) -> Result<Option<crate::markup::Commands<ProbeDomain>>, crate::markup::Report> {
             Ok(Some(
-                crate::markup::Commands::none().send(probe_root(), &Probe { stash: 0 }),
+                crate::markup::Commands::none().send(probe_root(), &Probe {}),
             ))
         }
     }
@@ -388,7 +355,6 @@ mod tx {
                 emitted: 1,
                 bumps_seen: 1,
                 bumps_committed: 0,
-                conflicts: false,
                 emitted_before: 0,
             }]
         );
@@ -506,55 +472,5 @@ mod tx {
             "the account's and the probe's commits stand; no ledger step ran"
         );
         assert_eq!(shallow.registry().catalog().domains().count(), 3);
-    }
-
-    #[test]
-    fn a_nonce_acknowledges_only_the_delivery_it_was_issued_for() {
-        use crate::coordinator::{steps::Coordinator, Deduplicated};
-        use crate::v1::ConflictResolution;
-        use crate::{check, Failure, KernelError};
-
-        let registry = registry();
-        let log = MemoryDeadLetters::new();
-        let store = MemoryStore::new();
-        let mut coordinator = Coordinator::new(&store, &registry);
-        let mut probe = |n: u128, stash: u32| {
-            let book = command(cover("probe", 1), Probe { stash }.to_any())
-                .id(n)
-                .resolved_by(ConflictResolution::AggregateHandles);
-            let identified = check(book, registry.catalog()).unwrap().identify(&at(60));
-            let Deduplicated::Novel(novel) = coordinator.deduplicate(identified).unwrap() else {
-                panic!("new");
-            };
-            coordinator
-                .load(novel)
-                .unwrap()
-                .decode::<ProbeDomain>(&registry)
-                .unwrap()
-        };
-        // Two deliveries by one coordinator: the first's decide keeps its nonce,
-        // the second's presents it instead of its own.
-        let first = probe(1, 1);
-        let second = probe(2, 2);
-        let unresolved = || {
-            Failure::Kernel(KernelError::Unresolved {
-                stream: cover("probe", 1),
-                expected: 0,
-                actual: 0,
-            })
-        };
-        assert_eq!(
-            first.decide(&at(60), &registry, &log).err(),
-            Some(unresolved()),
-            "kept, not acknowledged"
-        );
-        assert_eq!(
-            second.decide(&at(60), &registry, &log).err(),
-            Some(unresolved()),
-            "another delivery's nonce acknowledges nothing"
-        );
-        assert_eq!(log.lines().len(), 2, "each a dead-lettered handler bug");
-        let honest = probe(3, 0);
-        assert!(honest.decide(&at(60), &registry, &log).is_ok());
     }
 }

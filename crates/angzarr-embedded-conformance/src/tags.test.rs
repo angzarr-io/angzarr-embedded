@@ -48,43 +48,56 @@ const NO_OUTBOX: Tag = Tag {
     why: "each step is delivered in process, so no outbox entry is written; positions say what is owed",
 };
 
-/// Causation is never accepted from outside. A book from the application,
-/// or through the host's listener (`App::serve`), is a client's, and
-/// angzarr-embedded has no framework component outside its process to take
-/// one from; angzarr needs mTLS-identified framework components for the
-/// same guarantee. (This is the command's `causation_id`; it is never
-/// persisted on events, in either runtime.)
-const NO_OUTSIDE_CAUSATION: Tag = Tag {
-    name: "divergence_no_outside_causation",
-    why: "a book carrying a causation is refused from outside: only the kernel's own policies send one",
+/// No Deliver. A policy's output and a refusal fact reach a destination as
+/// a `ReactionDelivery` only from the kernel's own chain (decision 14.79):
+/// angzarr-embedded serves no framework-only `Deliver` RPC, so nothing
+/// outside its process delivers one, and a scenario that has a policy's
+/// coordinator outside deliver a refusal fact has nothing to drive.
+const NO_DELIVER: Tag = Tag {
+    name: "unsupported_deliver",
+    why: "no Deliver RPC: a ReactionDelivery is only the kernel's own chain's",
 };
 
-/// What a caller waits for and the kernel gives up on (a command at a
-/// retry or race re-run cap, a chain past its depth limit) is handed back
-/// to that caller, never dead-lettered: only work with no caller left is
-/// (owner ruling, 2026-10-31; `OnRetryable`).
+/// What a caller waits for and the kernel gives up on (a chain past its
+/// depth limit) is handed back to that caller, never dead-lettered: only
+/// work with no caller left is (owner ruling, 2026-10-31; `OnRetryable`).
 const WAITING_CALLER_ANSWERED: Tag = Tag {
     name: "divergence_waiting_caller_answered",
     why: "what a waiting caller's call gives up on is answered to it and not dead-lettered (owner ruling 2026-10-31)",
 };
 
-/// No edition lifecycle. Editions are angzarr's, created by its system
-/// layer (ForkStream, a fork on arrival, ListEditions, DeleteEdition);
-/// angzarr-embedded creates none. An outside input to an edition stream
-/// never forked is refused before its handler runs
-/// (`COORDINATOR_REASON_EDITION_NOT_FORKED`), and a policy's command to one
-/// by the store at the write, with nothing written.
-const NO_EDITION_LIFECYCLE: Tag = Tag {
-    name: "divergence_no_edition_lifecycle",
-    why: "editions are angzarr's system layer's: angzarr-embedded forks, lists and deletes none",
+/// No edition administration. Editions are core (the kernel reads and
+/// writes them, and refuses an input to a stream not forked), but their
+/// administration RPCs (ForkStream, ListEditions, DeleteEdition) are the
+/// distributed transport's (docs/design/edition-meta-events.md):
+/// angzarr-embedded serves none. An application forks a stream through its
+/// store, and deletes an edition by removing each forked stream there.
+const NO_EDITION_ADMIN: Tag = Tag {
+    name: "unsupported_edition_admin",
+    why: "the edition administration RPCs (ForkStream, ListEditions, DeleteEdition) are the distributed transport's: angzarr-embedded serves none",
 };
 
-/// angzarr-embedded serves no query interface (EventQueryService, a
-/// TemporalQuery, a standalone query server): an application reads its
-/// streams through its store, and the kernel loads them for itself.
+/// No query interface. angzarr-embedded serves no query RPC
+/// (EventQueryService, ListStreams, a TemporalQuery) and no Subscribe: an
+/// application reads its streams through its store, and the kernel loads
+/// them for itself.
 const NO_QUERY: Tag = Tag {
     name: "unsupported_query",
-    why: "no query interface: streams are read through the store",
+    why: "no query interface (queries, ListStreams, Subscribe): streams are read through the store",
+};
+
+/// No dead letter administration. Dead letters are written to the store's
+/// dead letter table; the administration RPCs (list, replay, discard) are
+/// the distributed transport's, and angzarr-embedded serves none.
+const NO_DLQ_ADMIN: Tag = Tag {
+    name: "unsupported_dlq_admin",
+    why: "the dead letter administration RPCs are the distributed transport's: angzarr-embedded serves none",
+};
+
+/// No CloudEvents output: angzarr-embedded publishes nothing to a sink.
+const NO_CLOUDEVENTS: Tag = Tag {
+    name: "unsupported_cloudevents",
+    why: "no CloudEvents sink: nothing is published outside the process",
 };
 
 /// No payload is stored by reference (a claim check), so none can fail to
@@ -94,22 +107,12 @@ const NO_CLAIM_CHECK: Tag = Tag {
     why: "no payload is stored by reference",
 };
 
-/// The host's component discovery (a child described on connect, its
-/// readiness, its descriptor validated) and a component's serving status
-/// drive a child process: no binding runs one here yet. The host's own
-/// tests pin C-0563, C-0681 and C-0687.
+/// The host's component discovery (a child described once serving, its
+/// descriptor validated) and a component's serving status drive a child
+/// process: no binding runs one here yet. The host's own tests pin them.
 const UNBOUND_HOST: Tag = Tag {
     name: "unbound_host",
     why: "the host's: a child's discovery and serving status; no binding runs a child process yet",
-};
-
-/// An in-process policy's translating callback answers a payload alone
-/// (angzarr-router's `PolicyComponent::dispatch_refusal`), which the kernel
-/// addresses and identifies; only a remote policy's `OnRefused` answer can
-/// carry more, and no binding runs one here yet.
-const UNBOUND_REMOTE_POLICY: Tag = Tag {
-    name: "unbound_remote_policy",
-    why: "an in-process callback answers a payload alone: only a remote policy's answer can be more, and no binding runs one",
 };
 
 /// The fold is business code's: angzarr-router's, which runs the
@@ -134,64 +137,61 @@ const TAGGED: &[(&str, Tag)] = &[
     ("C-0563", UNBOUND_HOST),
     ("C-0564", UNBOUND_HOST),
     ("C-0687", UNBOUND_HOST),
+    ("C-0836", UNBOUND_HOST),
     ("C-0566", UNBOUND_HOST),
     ("C-0567", UNBOUND_HOST),
-    // conflict_resolution.feature
+    // concurrency.feature
     ("C-0729", IN_PROCESS_CHAIN),
-    ("C-0724", WAITING_CALLER_ANSWERED),
-    ("C-0725", WAITING_CALLER_ANSWERED),
-    ("C-0459", UNBOUND),
     ("C-0460", UNBOUND),
     // dead_letter_queue.feature
     ("C-0443", IN_PROCESS_CHAIN),
     ("C-0738", IN_PROCESS_CHAIN),
     ("C-0744", IN_PROCESS_CHAIN),
-    ("C-0739", IN_PROCESS_CHAIN),
     ("C-0445", UNBOUND),
     ("C-0447", NO_CLAIM_CHECK),
     ("C-0730", IN_PROCESS_CHAIN),
     ("C-0731", IN_PROCESS_CHAIN),
     ("C-0732", IN_PROCESS_CHAIN),
     ("C-0733", IN_PROCESS_CHAIN),
+    // dlq_admin.feature
+    ("C-0802", NO_DLQ_ADMIN),
+    ("C-0803", NO_DLQ_ADMIN),
+    ("C-0804", NO_DLQ_ADMIN),
+    ("C-0805", NO_DLQ_ADMIN),
+    ("C-0806", NO_DLQ_ADMIN),
+    ("C-0807", NO_DLQ_ADMIN),
     // edition_forks.feature
-    ("C-0628", NO_EDITION_LIFECYCLE),
-    ("C-0629", NO_EDITION_LIFECYCLE),
-    ("C-0630", NO_EDITION_LIFECYCLE),
-    ("C-0631", NO_EDITION_LIFECYCLE),
+    ("C-0628", NO_EDITION_ADMIN),
+    ("C-0631", NO_EDITION_ADMIN),
+    ("C-0812", NO_EDITION_ADMIN),
     ("C-0634", NO_QUERY),
-    ("C-0635", NO_EDITION_LIFECYCLE),
-    ("C-0636", NO_EDITION_LIFECYCLE),
-    ("C-0637", NO_EDITION_LIFECYCLE),
-    ("C-0640", NO_EDITION_LIFECYCLE),
-    ("C-0641", NO_EDITION_LIFECYCLE),
-    ("C-0642", NO_EDITION_LIFECYCLE),
-    ("C-0643", NO_EDITION_LIFECYCLE),
-    ("C-0639", NO_EDITION_LIFECYCLE),
-    ("C-0647", NO_EDITION_LIFECYCLE),
-    ("C-0644", NO_EDITION_LIFECYCLE),
-    ("C-0645", NO_EDITION_LIFECYCLE),
-    ("C-0646", NO_EDITION_LIFECYCLE),
-    ("C-0652", NO_EDITION_LIFECYCLE),
-    ("C-0653", NO_EDITION_LIFECYCLE),
-    ("C-0654", NO_EDITION_LIFECYCLE),
-    ("C-0655", NO_EDITION_LIFECYCLE),
-    ("C-0661", NO_EDITION_LIFECYCLE),
-    ("C-0662", NO_EDITION_LIFECYCLE),
-    ("C-0663", NO_EDITION_LIFECYCLE),
-    ("C-0781", NO_EDITION_LIFECYCLE),
+    ("C-0817", NO_QUERY),
+    ("C-0814", NO_EDITION_ADMIN),
+    ("C-0636", NO_EDITION_ADMIN),
+    ("C-0644", NO_EDITION_ADMIN),
+    ("C-0646", NO_EDITION_ADMIN),
+    ("C-0640", NO_EDITION_ADMIN),
+    ("C-0816", NO_EDITION_ADMIN),
+    ("C-0641", NO_EDITION_ADMIN),
+    ("C-0647", NO_OUTBOX),
+    ("C-0642", NO_EDITION_ADMIN),
+    ("C-0643", NO_EDITION_ADMIN),
+    ("C-0661", NO_EDITION_ADMIN),
+    ("C-0662", NO_EDITION_ADMIN),
     // edition_propagation.feature
-    ("C-0410", NO_EDITION_LIFECYCLE),
+    ("C-0410", NO_EDITION_ADMIN),
     // fact_flow.feature
-    ("C-0609", NO_OUTSIDE_CAUSATION),
-    ("C-0610", NO_OUTSIDE_CAUSATION),
-    ("C-0782", NO_OUTSIDE_CAUSATION),
+    ("C-0609", NO_DELIVER),
+    ("C-0782", NO_DELIVER),
     // policy_addressing.feature
-    ("C-0735", NO_OUTSIDE_CAUSATION),
     ("C-0737", WAITING_CALLER_ANSWERED),
     // policy_refusal.feature
     ("C-0616", NO_OUTBOX),
-    ("C-0621", UNBOUND_REMOTE_POLICY),
-    ("C-0685", UNBOUND_REMOTE_POLICY),
+    // projector_delivery.feature
+    ("C-0838", UNBOUND),
+    ("C-0839", IN_PROCESS_CHAIN),
+    ("C-0841", NO_CLOUDEVENTS),
+    ("C-0842", NO_CLOUDEVENTS),
     // query_server.feature
     ("C-0588", NO_QUERY),
     ("C-0589", NO_QUERY),
@@ -223,21 +223,36 @@ const TAGGED: &[(&str, Tag)] = &[
     ("C-0300", UNBOUND_FOLD),
     ("C-0301", UNBOUND_FOLD),
     ("C-0302", UNBOUND_FOLD),
+    // subscriptions.feature
+    ("C-0822", NO_QUERY),
+    ("C-0823", NO_QUERY),
+    ("C-0824", NO_QUERY),
+    ("C-0825", NO_QUERY),
+    ("C-0826", NO_QUERY),
+    ("C-0827", NO_QUERY),
+    ("C-0828", NO_QUERY),
+    ("C-0829", NO_QUERY),
+    ("C-0830", NO_QUERY),
+    ("C-0831", NO_QUERY),
+    ("C-0832", NO_QUERY),
     // sync_modes.feature
     ("C-0425", IN_PROCESS_CHAIN),
+    ("C-0428", IN_PROCESS_CHAIN),
+    ("C-0676", IN_PROCESS_CHAIN),
     ("C-0426", IN_PROCESS_CHAIN),
     ("C-0427", IN_PROCESS_CHAIN),
-    ("C-0428", IN_PROCESS_CHAIN),
     ("C-0429", IN_PROCESS_CHAIN),
-    ("C-0676", IN_PROCESS_CHAIN),
+    ("C-0808", IN_PROCESS_CHAIN),
+    ("C-0809", IN_PROCESS_CHAIN),
+    ("C-0810", IN_PROCESS_CHAIN),
     ("C-0677", IN_PROCESS_CHAIN),
+    ("C-0811", IN_PROCESS_CHAIN),
     // temporal_query.feature
     ("C-0402", NO_QUERY),
     ("C-0403", NO_QUERY),
     ("C-0404", NO_QUERY),
     ("C-0405", NO_QUERY),
     ("C-0406", NO_QUERY),
-    ("C-0407", NO_QUERY),
     ("C-0408", NO_QUERY),
     // upcasting.feature
     ("C-0585", NO_QUERY),

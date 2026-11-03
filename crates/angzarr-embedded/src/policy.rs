@@ -14,17 +14,19 @@
 //!   systems) is a policy whose target records the change in its own
 //!   events.
 //!
-//! A policy's output is a `CommandBook` the kernel builds: the target's
-//! cover, a `Command` or `Fact` page whose payload is the policy's output
-//! packed as `Any`, and **no ids and no handling**. The kernel checks it
-//! like any book, then identifies it from its trigger, either arm alike:
-//! command id [`ids::policy_command_id`](super::ids::policy_command_id)(trigger,
+//! A policy's output is a root and a payload in the arm of its kind
+//! (`io.angzarr.handler.v1.Output`; decision 14.78). The kernel addresses
+//! it (the policy's one output domain, at the root, in the trigger's
+//! edition), stamps its identity from its trigger, either arm alike
+//! (command id [`ids::policy_command_id`](super::ids::policy_command_id)(trigger,
 //! [`Policy::NAME`], index), commands and facts counted in one index space,
-//! the trigger's correlation, and the trigger as its `causation_id`; a
-//! fact's origin is the kernel's too, its external id that command id's
-//! canonical text. Nothing outside the kernel can build one. Its events
-//! name it as their causation (`EventMeta.causation.command_id`), never the
-//! trigger: the trigger edge is the output's, for tracing.
+//! the trigger's correlation, the trigger as its causation, the policy as
+//! its component), as angzarr's `ReactionDelivery` (decision 14.79), and
+//! checks it like any input; a fact's origin is the destination's to
+//! derive, its external id that command id's canonical text. Nothing
+//! outside the kernel can build one. Its events name it as their causation
+//! (`EventMeta.causation`'s command id), never the trigger: the trigger
+//! edge is the reaction's, for tracing.
 //!
 //! A target's cover is the target domain's, in **the source's edition**: a
 //! policy never crosses timelines.
@@ -39,276 +41,119 @@ use std::sync::Arc;
 
 use angzarr_diagnostic::Report;
 use angzarr_proto::v1::angzarr_dead_letter::Payload as Letter;
-use angzarr_proto::v1::PolicyReaction;
 use angzarr_proto::v1::{
-    command_page, Command, CommandBook, CommandPage, Cover, EventBook, EventRef, Fact, FactOrigin,
-    Handling, Uuid,
+    reaction_delivery, Cover, EventBook, EventMeta, EventRef, ReactionDelivery, Uuid,
 };
-use angzarr_router::error::CodedError;
-use angzarr_router::policy::PolicyDispatch;
+use angzarr_router::error::{AngzarrReason, BusinessStatus, CodedError};
+use angzarr_router::hpb;
+use angzarr_router::policy::{PolicyDispatch, RefusalContext};
 use prost_types::Any;
 
 use super::catalog::Catalog;
-use super::check::{check_policy_command, Checked, Malformed};
+use super::check::{check_reaction, Arm, Checked, Malformed};
 use super::dead_letter::{self, Cause, Component, DeadLetterLog};
 use super::domain::Domain;
-use super::markup::{self, CommandContext, Commands, PolicyContext, TypeName};
+use super::markup::{Commands, DomainMessage, PolicyContext, TypeName};
 use super::payload::{type_name, Payload};
 
 // ---------------------------------------------------------------- policies
 
-/// A policy's translated refusal fact on the wire (`OnRefusedResponse.fact`,
-/// set), as the kernel takes it (decision 14.42): its payload alone. A fact
-/// that is more than a payload is the policy's bug, refused INTERNAL: one
-/// that sets its own cover or handling (`COORDINATOR_REASON_REFUSAL_FACT_ADDRESSED`), with no
-/// page (`COORDINATOR_REASON_REFUSAL_FACT_NO_PAGE`), that sets its own identity
-/// (`COORDINATOR_REASON_REFUSAL_FACT_IDENTIFIED`), or whose page is not a fact with a payload
-/// (`COORDINATOR_REASON_REFUSAL_FACT_NOT_A_FACT`). An unset fact is no translation, and the
-/// kernel passes the refusal through. The kernel addresses and identifies
-/// every refusal fact itself.
-pub fn translated(fact: CommandBook) -> Result<Any, CodedError> {
-    use angzarr_proto::v1::CoordinatorReason;
-    let refused = |key: CoordinatorReason| super::route::spec_coded(key, []);
-    if fact.cover.is_some() || fact.handling.is_some() {
-        return Err(refused(CoordinatorReason::RefusalFactAddressed));
-    }
-    let page = fact
-        .page
-        .ok_or_else(|| refused(CoordinatorReason::RefusalFactNoPage))?;
-    if page.command_id.is_some()
-        || page.correlation_id.is_some()
-        || page.causation_id.is_some()
-        || page.fact_origin.is_some()
-    {
-        return Err(refused(CoordinatorReason::RefusalFactIdentified));
-    }
-    match page.body {
-        Some(command_page::Body::Fact(angzarr_proto::v1::Fact {
-            payload: Some(payload),
-        })) => Ok(payload),
-        _ => Err(refused(CoordinatorReason::RefusalFactNotAFact)),
+/// A policy's output with neither a command nor a fact: the policy's bug,
+/// the cause of its ANGZARR_REASON_UNHANDLED_HANDLER_ERROR.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct OutputNoBody;
+
+impl std::fmt::Display for OutputNoBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        angzarr_diagnostic::display(self, f)
     }
 }
 
-/// A policy's `reactions` to `source`, checked and stamped by the kernel
-/// per triggering page ([`check_reaction`], the page the reaction's
-/// `trigger_sequence` names giving the correlation), its outputs, commands
-/// and facts alike, in reaction order then output order. A reaction naming no page of
-/// `source` is checked against no correlation.
-///
-/// Then each output's **identity**: its own `command_id` and
-/// `causation_id`, where set, are the ones the kernel stamps on it, the id
-/// derived from `trigger`, the policy `component` and the output's index
-/// in the whole answer ([`ids::policy_command_id`](super::ids::policy_command_id)),
-/// and `trigger`; any other is
-/// `COORDINATOR_REASON_POLICY_COMMAND_OTHER_IDENTITY`, naming its domain,
-/// type and the `field` (decision 14.48, amended), INTERNAL.
-pub(crate) fn check_reactions(
-    output_domain: &str,
-    source: &EventBook,
-    reactions: Vec<PolicyReaction>,
-    component: &str,
-    trigger: &EventRef,
-) -> Result<Vec<CommandBook>, CodedError> {
-    use angzarr_proto::v1::{reason_args as args, CoordinatorReason};
-    let stream = source.cover.clone().unwrap_or_default();
-    let mut commands = Vec::new();
-    for reaction in reactions {
-        let correlation = source
-            .pages
-            .iter()
-            .find(|page| page.sequence == reaction.trigger_sequence)
-            .and_then(|page| page.meta.as_ref())
-            .and_then(|meta| meta.correlation_id.as_ref());
-        commands.extend(check_reaction(
-            output_domain,
-            &stream,
-            correlation,
-            reaction.outputs,
-        )?);
+impl angzarr_diagnostic::Diagnostic for OutputNoBody {
+    fn code(&self) -> &str {
+        angzarr_diagnostic::code!("policy-output-no-body")
     }
-    for (index, command) in (0..).zip(&commands) {
-        let Some(page) = &command.page else {
-            continue;
-        };
-        let other_id = page.command_id.as_ref().is_some_and(|id| {
-            super::ids::policy_command_id(trigger, component, index).as_ref() != Ok(id)
-        });
-        let other_cause = page.causation_id.as_ref().is_some_and(|c| c != trigger);
-        let field = match (other_id, other_cause) {
-            (true, _) => "command_id",
-            (false, true) => "causation_id",
-            (false, false) => continue,
-        };
-        return Err(super::route::spec_coded(
-            CoordinatorReason::PolicyCommandOtherIdentity,
-            named(command)
-                .into_iter()
-                .chain([(args::FIELD.to_string(), field.to_string())]),
-        ));
+
+    fn args(&self) -> Vec<(&str, angzarr_diagnostic::Arg)> {
+        Vec::new()
     }
-    Ok(commands)
 }
 
-/// A policy's command as its refusal names it: its domain and its
-/// payload's type.
-fn named(command: &CommandBook) -> [(String, String); 2] {
-    use angzarr_proto::v1::reason_args as args;
-    let domain = command.cover.as_ref().map_or("", |c| c.domain.as_str());
-    [
-        (args::DOMAIN.to_string(), domain.to_string()),
-        typed(command),
-    ]
+/// [`OutputNoBody`], as the bug the policy's answer is refused with.
+fn output_no_body() -> CodedError {
+    use angzarr_diagnostic::Diagnostic as _;
+    CodedError::bug(OutputNoBody.code(), [])
 }
 
-/// A policy's output's `command_type` arg: its payload's type, either arm.
-fn typed(command: &CommandBook) -> (String, String) {
-    use angzarr_proto::v1::reason_args as args;
-    let command_type = command
-        .page
-        .as_ref()
-        .and_then(|p| match &p.body {
-            Some(command_page::Body::Command(c)) => c.payload.as_ref(),
-            Some(command_page::Body::Fact(f)) => f.payload.as_ref(),
-            None => None,
-        })
-        .map_or("", |p| type_name(&p.type_url));
-    (args::COMMAND_TYPE.to_string(), command_type.to_string())
-}
-
-/// One triggering event's outputs, commands and facts (decision 14.69), as
-/// a policy answered them, checked and stamped by the kernel (decision
-/// 14.42), every output against these rules; one failure refuses the whole
-/// answer as the policy's bug, INTERNAL:
-/// - **destination**: its cover's domain is `output_domain`
-///   (`COORDINATOR_REASON_POLICY_COMMAND_OUTSIDE_DESTINATION`, naming both domains);
-/// - **edition**: unset, or the `trigger` stream's; an unset one is stamped
-///   with the trigger's (`COORDINATOR_REASON_POLICY_COMMAND_OUTSIDE_EDITION`, naming both);
-/// - **root**: named, with bytes (`COORDINATOR_REASON_POLICY_COMMAND_NO_ROOT`);
-/// - **handling**: none, an empty one being none: a reaction command's
-///   target stamps its own head (`COORDINATOR_REASON_POLICY_COMMAND_WITH_HANDLING`,
-///   naming its domain and type; decision 14.48);
-/// - **no fact origin**, on either arm: the kernel stamps a fact's
-///   (`COORDINATOR_REASON_POLICY_COMMAND_FACT_ORIGIN`, naming its domain
-///   and type; decision 14.48, amended);
-/// - **correlation**: unset, or the trigger's, `correlation`
-///   (`COORDINATOR_REASON_POLICY_COMMAND_OTHER_CORRELATION`);
+/// A policy's outputs for one trigger event (`ReactResponse.outputs`),
+/// checked and addressed by the kernel (decision 14.42), every output
+/// against these rules; one failure refuses the whole answer as the
+/// policy's bug, INTERNAL:
+/// - **root**: named, 16 bytes (`ANGZARR_REASON_POLICY_COMMAND_NO_ROOT`,
+///   naming the destination domain and the output's type; decision 14.36,
+///   as amended);
+/// - **body**: a command or a fact, with its payload (a body-less output is
+///   the same bug, `ANGZARR_REASON_POLICY_COMMAND_NO_ROOT` cannot name its
+///   type, so it is refused as a handler's bug);
 /// - **not the trigger's own stream**: its own domain at another root is
 ///   allowed, the trigger's root never, its edition being the trigger's
-///   by the edition rule (`COORDINATOR_REASON_POLICY_TARGETS_ITS_TRIGGER`,
-///   naming the stream and its type; decision 14.71).
+///   (`ANGZARR_REASON_POLICY_TARGETS_ITS_TRIGGER`, naming the stream and its
+///   type; decision 14.71).
 ///
-/// Its identity is held to its stamp by [`check_reactions`], which knows
-/// its index in the whole answer.
-pub(crate) fn check_reaction(
+/// Each passes as the stream it is for: `output_domain` at its root, in
+/// the `trigger` stream's edition (an Output names none, decision 14.78),
+/// with its body.
+pub(crate) fn check_outputs(
     output_domain: &str,
     trigger: &Cover,
-    correlation: Option<&Uuid>,
-    mut commands: Vec<CommandBook>,
-) -> Result<Vec<CommandBook>, CodedError> {
-    use angzarr_proto::v1::{reason_args as args, CoordinatorReason};
-    let domain = |c: &CommandBook| {
-        c.cover
-            .as_ref()
-            .map_or("", |c| c.domain.as_str())
-            .to_string()
-    };
-    if let Some(stray) = commands.iter().find(|c| domain(c) != output_domain) {
-        return Err(super::route::spec_coded(
-            CoordinatorReason::PolicyCommandOutsideDestination,
-            [
-                (args::EXPECTED_DOMAIN.to_string(), output_domain.to_string()),
-                (args::ACTUAL_DOMAIN.to_string(), domain(stray)),
-            ],
-        ));
-    }
-    let edition = trigger.edition.clone().filter(|e| !e.is_empty());
-    for command in &mut commands {
-        let naming = || named(command);
-        let named = command
-            .cover
-            .as_ref()
-            .and_then(|c| c.root.as_ref())
-            .is_some_and(|r| !r.value.is_empty());
-        if !named {
-            return Err(super::route::spec_coded(
-                CoordinatorReason::PolicyCommandNoRoot,
-                naming(),
-            ));
-        }
-        if command
-            .handling
-            .as_ref()
-            .is_some_and(|h| *h != Handling::default())
-        {
-            return Err(super::route::spec_coded(
-                CoordinatorReason::PolicyCommandWithHandling,
-                naming(),
-            ));
-        }
-        if command
-            .page
-            .as_ref()
-            .is_some_and(|p| p.fact_origin.is_some())
-        {
-            return Err(super::route::spec_coded(
-                CoordinatorReason::PolicyCommandFactOrigin,
-                naming(),
-            ));
-        }
-        let carried = command
-            .page
-            .as_ref()
-            .and_then(|p| p.correlation_id.as_ref());
-        if let (Some(carried), Some(trigger)) = (carried, correlation) {
-            if carried != trigger {
-                return Err(super::route::spec_coded(
-                    CoordinatorReason::PolicyCommandOtherCorrelation,
-                    naming(),
-                ));
+    outputs: Vec<hpb::Output>,
+) -> Result<Vec<(Cover, reaction_delivery::Body)>, CodedError> {
+    use angzarr_proto::v1::reason_args as args;
+    let mut addressed = Vec::with_capacity(outputs.len());
+    for output in outputs {
+        let body = match output.body {
+            Some(hpb::output::Body::Command(any)) => reaction_delivery::Body::Command(any),
+            Some(hpb::output::Body::Fact(any)) => reaction_delivery::Body::Fact(any),
+            None => return Err(output_no_body()),
+        };
+        let command_type = match &body {
+            reaction_delivery::Body::Command(any) | reaction_delivery::Body::Fact(any) => {
+                type_name(&any.type_url).to_string()
             }
-        }
-        let cover = command.cover.get_or_insert_with(Cover::default);
-        match cover.edition.as_deref().filter(|e| !e.is_empty()) {
-            None => cover.edition = edition.clone(),
-            Some(named) if Some(named) != edition.as_deref() => {
-                return Err(super::route::spec_coded(
-                    CoordinatorReason::PolicyCommandOutsideEdition,
+        };
+        let root = output
+            .root
+            .filter(|root| root.is_well_formed())
+            .ok_or_else(|| {
+                super::route::spec_coded(
+                    AngzarrReason::PolicyCommandNoRoot,
                     [
-                        (
-                            args::EXPECTED_EDITION.to_string(),
-                            edition.clone().unwrap_or_default(),
-                        ),
-                        (args::ACTUAL_EDITION.to_string(), named.to_string()),
+                        (args::DOMAIN.to_string(), output_domain.to_string()),
+                        (args::COMMAND_TYPE.to_string(), command_type.clone()),
                     ],
-                ));
-            }
-            Some(_) => {}
-        }
-        // The edition rule stamped or matched the trigger's edition, so the
-        // same domain and root are the trigger's own stream (decision 14.71).
-        if let Some(cover) = (command.cover.as_ref())
-            .filter(|c| c.domain == trigger.domain && c.root == trigger.root)
-        {
+                )
+            })?;
+        let cover = cover_in(output_domain, trigger, &root);
+        if cover.domain == trigger.domain && cover.root == trigger.root {
             return Err(super::route::spec_coded(
-                CoordinatorReason::PolicyTargetsItsTrigger,
+                AngzarrReason::PolicyTargetsItsTrigger,
                 [
-                    (args::STREAM.to_string(), super::error::cover_text(cover)),
-                    typed(command),
+                    (args::STREAM.to_string(), super::error::cover_text(&cover)),
+                    (args::COMMAND_TYPE.to_string(), command_type),
                 ],
             ));
         }
+        addressed.push((cover, body));
     }
-    Ok(commands)
+    Ok(addressed)
 }
 
 /// What a policy sends commands to ([`Policy::Target`]): a domain known by
-/// its name and the commands it decides alone, wherever it is decided.
-/// Every [`Domain`] is one, so a policy targets a domain registered here
-/// by its own type; a domain a coordinator elsewhere owns
-/// ([`Registry::remote`](super::Registry::remote)), or one served by a
-/// child process, is targeted by a command set written for it, with no
-/// stand-in aggregate:
+/// its name and the commands it decides, wherever it is decided. Every [`Domain`] is one, so a policy
+/// targets a domain registered here by its own type; a domain a coordinator
+/// elsewhere owns ([`Registry::remote`](super::Registry::remote)), or one
+/// served by a child process, is targeted by a command set written for it,
+/// with no stand-in aggregate:
 ///
 /// ```ignore
 /// pub struct Bank;
@@ -328,9 +173,9 @@ pub trait CommandTarget: 'static {
     /// ambiguous where both traits are in scope.
     const DOMAIN: &'static str;
 
-    /// The full names (`"pkg.v1.Deposit"`) of the commands it decides: the
-    /// refused commands a policy that answers refusals and names no
-    /// [`Policy::TRANSLATES`] answers.
+    /// The full names (`"pkg.v1.Deposit"`) of the commands it decides:
+    /// what a compensation's undo is held to, never one of them (decision
+    /// 14.83).
     fn command_types() -> Vec<String>;
 }
 
@@ -365,7 +210,7 @@ impl<D: Domain> CommandTarget for D {
 ///     }
 /// }
 ///
-/// impl Ingests<Seated> for Player {} // what an `#[on_refused]` may answer
+/// impl Ingests<Seated> for Player {} // what a policy's refusal fact may be
 /// ```
 ///
 /// A remote domain ([`Registry::remote`](super::Registry::remote)) is
@@ -399,6 +244,123 @@ impl<D: Domain> EventSource for D {
     }
 }
 
+/// A refusal of a command a policy sent, as its ONE Translate callback
+/// reads it ([`Policy::on_refused`]; decision 14.89): the refused command
+/// as it was delivered (`ReactionDelivery`, decision 14.79), the target's
+/// typed refusal with the business status it travelled as, and the
+/// trigger the command was the policy's reaction to, with its metadata
+/// (`io.angzarr.handler.v1.TranslateRequest`).
+#[derive(Clone, PartialEq, Debug)]
+pub struct Refused {
+    delivery: ReactionDelivery,
+    refusal: hpb::Refusal,
+    trigger: EventRef,
+    meta: EventMeta,
+}
+
+impl Refused {
+    /// A refusal for a callback's own unit tests: `delivery`, refused with
+    /// `refusal` under `status`, the reaction to `trigger`, recorded with
+    /// `meta`. The kernel builds the real one from the Translate request.
+    pub fn new(
+        delivery: ReactionDelivery,
+        status: BusinessStatus,
+        refusal: Any,
+        trigger: EventRef,
+        meta: EventMeta,
+    ) -> Refused {
+        Refused {
+            delivery,
+            refusal: hpb::Refusal {
+                status: angzarr_proto::v1::RefusalStatus::from(status) as i32,
+                typed: Some(refusal),
+            },
+            trigger,
+            meta,
+        }
+    }
+
+    /// What the router hands a Translate callback, as a [`Refused`].
+    pub(crate) fn of(command: &Any, refusal: &hpb::Refusal, ctx: &RefusalContext<'_>) -> Refused {
+        let mut delivery = ctx.delivery.clone();
+        if delivery.body.is_none() {
+            delivery.body = Some(reaction_delivery::Body::Command(command.clone()));
+        }
+        Refused {
+            delivery,
+            refusal: refusal.clone(),
+            trigger: EventRef {
+                stream: ctx.trigger.cover.cloned(),
+                sequence: ctx.trigger.sequence,
+            },
+            meta: ctx.trigger.meta.cloned().unwrap_or_default(),
+        }
+    }
+
+    /// The refused command, packed, as delivered.
+    pub fn command_payload(&self) -> &Any {
+        static NONE: std::sync::OnceLock<Any> = std::sync::OnceLock::new();
+        match &self.delivery.body {
+            Some(reaction_delivery::Body::Command(any) | reaction_delivery::Body::Fact(any)) => any,
+            None => NONE.get_or_init(Any::default),
+        }
+    }
+
+    /// The refused command, as `C`, if it is one.
+    pub fn command<C: DomainMessage>(&self) -> Option<C> {
+        super::markup::decode_message(self.command_payload())
+            .ok()
+            .flatten()
+    }
+
+    /// The refused command as it was delivered: its destination stream and
+    /// the identity the kernel stamped.
+    pub fn delivery(&self) -> &ReactionDelivery {
+        &self.delivery
+    }
+
+    /// The target's typed refusal object, packed.
+    pub fn refusal_object(&self) -> Option<&Any> {
+        self.refusal.typed.as_ref()
+    }
+
+    /// The target's typed refusal, as `T`, if it is one.
+    pub fn refusal<T: DomainMessage>(&self) -> Option<T> {
+        super::markup::decode_message(self.refusal_object()?)
+            .ok()
+            .flatten()
+    }
+
+    /// The business status the refusal travelled as.
+    pub fn status(&self) -> Option<BusinessStatus> {
+        angzarr_proto::v1::RefusalStatus::try_from(self.refusal.status)
+            .ok()
+            .and_then(|status| BusinessStatus::try_from(status).ok())
+    }
+
+    /// The event the policy reacted to: the refused command's causation, a
+    /// page of the policy's source.
+    pub fn trigger(&self) -> &EventRef {
+        &self.trigger
+    }
+
+    /// The trigger's metadata, as delivered.
+    pub fn meta(&self) -> &EventMeta {
+        &self.meta
+    }
+}
+
+/// The refusal a policy without a Translate callback answers (decision
+/// 14.89: a bug by default): `ANGZARR_REASON_NO_REFUSAL_HANDLER`, naming the
+/// refused command's type. What [`Policy::on_refused`] answers unless a
+/// policy translates.
+pub fn no_refusal_handler(refused: &Refused) -> Report {
+    Report::new(AngzarrReason::NoRefusalHandler.as_str_name()).arg(
+        angzarr_proto::v1::reason_args::COMMAND_TYPE,
+        refused.command_payload().type_url.as_str(),
+    )
+}
+
 /// Event → commands and facts: one source domain, one target domain, and
 /// what each source event is owed, each with the root of the target
 /// stream it is for. Stateless: what it owes is a function of the event.
@@ -409,16 +371,14 @@ impl<D: Domain> EventSource for D {
 /// [`StepError::PolicyFailed`](super::StepError::PolicyFailed), a defect,
 /// dead-lettered by its code and args, its position moved past the
 /// trigger (unless the kernel says to stay:
-/// [`Kernel::on_policy_bug`](super::Kernel::on_policy_bug)).
-/// A fact is recorded by its target and never refused: one whose handler
-/// fails is dead-lettered there, and its step is done. Each command is
-/// decided by its target and may be refused: a policy that answers
-/// refusals ([`Policy::ANSWERS_REFUSALS`], every marked-up one)
-/// delivers its refusal fact to the source ([`Policy::on_refused`]);
-/// another's refused command fails its step
-/// ([`Failure::Downstream`](super::Failure::Downstream) with
-/// [`StepError::Rejected`](super::StepError::Rejected)), the step
-/// dead-lettered and its position moved past it.
+/// [`Kernel::on_policy_bug`](super::Kernel::on_policy_bug)). A fact is
+/// recorded by its target and never refused: one whose handler fails is
+/// dead-lettered there, and its step is done. Each command is decided by
+/// its target and may be refused with a typed refusal: the policy's ONE
+/// Translate callback ([`Policy::on_refused`]) turns it into a fact of its
+/// source, which the kernel delivers to the trigger's stream; a policy that
+/// does not translate answers a bug, and the refused command is
+/// dead-lettered.
 pub trait Policy: Send + Sync + 'static {
     /// The policy's name, stable across releases and never empty: the
     /// `component` its commands' ids are derived from, and its position's
@@ -436,134 +396,89 @@ pub trait Policy: Send + Sync + 'static {
     /// ([`EventSource`]): a domain here, by its own type, or a
     /// child-hosted one's event set.
     type Source: EventSource;
-    /// The one domain it sends commands and facts to, known by its name and its
-    /// commands ([`CommandTarget`]): a domain here, by its own type, or a
-    /// remote one's command set.
+    /// The one domain it sends commands and facts to, known by its name
+    /// ([`CommandTarget`]): a domain here, by its own type, or a remote
+    /// one's command set.
     type Target: CommandTarget;
     /// The events it handles, in marker order (a marked-up policy's); empty
     /// for a hand-written one, which reads every event of its source.
     const EVENTS: &'static [TypeName] = &[];
-    /// The commands whose refusals it translates: those its
-    /// `#[on_refused]` callbacks name, in marker order.
-    const TRANSLATES: &'static [TypeName] = &[];
-    /// Whether a refusal of its command is answered by its refusal fact to
-    /// the source ([`Policy::on_refused`]): angzarr's refusal flow, every
-    /// marked-up policy's. A policy that does not has its refused command
-    /// fail the step.
-    const ANSWERS_REFUSALS: bool = false;
 
     /// The commands and facts this policy sends for `event` (an event of
-    /// its source, packed), each with its target stream's root; `None` for an event it
-    /// does not handle; or why it cannot answer the event, a bug (an event
-    /// that cannot happen, or one of a type it handles that does not
-    /// decode): its step fails as
+    /// its source, packed, the one trigger it is called for: decision 46,
+    /// Q3), each with its target stream's root; `None` for an event it does
+    /// not handle; or why it cannot answer the event, a bug (an event that
+    /// cannot happen, or one of a type it handles that does not decode):
+    /// its step fails as
     /// [`StepError::PolicyFailed`](super::StepError::PolicyFailed), is
     /// dead-lettered as a handler's bug (its reason
-    /// `ROUTER_REASON_UNHANDLED_HANDLER_ERROR`, the error's code and args
+    /// `ANGZARR_REASON_UNHANDLED_HANDLER_ERROR`, the error's code and args
     /// its `cause`), and its position moves past the event.
-    /// Policies should not fail for business reasons: they react to events
-    /// the application's own domains created, so an `Err` is a bug.
     fn on_event(
         &self,
         event: &Any,
         ctx: &PolicyContext,
     ) -> Result<Option<Commands<Self::Target>>, Report>;
 
-    /// angzarr's `PolicyService.OnRefused`: the refusal fact's payload for
-    /// the policy's source, packed. Pass-through by default: angzarr's
-    /// `CommandRefused { command, refusal, trigger }`, `refusal` the
-    /// response's object still packed, `trigger` the triggering event's
-    /// `EventRef`. A marked-up policy's `#[on_refused]` callback translates
-    /// instead. The chain addresses it to the trigger's stream and stamps
-    /// its identity.
-    ///
-    /// `ctx` is the refused command's context, whole, as its target's
-    /// handler was handed it (angzarr-router's `command_context` of the
-    /// delivery): the target's cover, its next sequence and whether it had
-    /// history, the sequence and resolution the command was decided under,
-    /// the conflict under AGGREGATE_HANDLES, and the command's identity. A
-    /// refused command of a type a marked-up policy translates that does
-    /// not decode is its error too. An error is a bug, as `on_event`'s is: the step fails as
-    /// [`StepError::PolicyFailed`](super::StepError::PolicyFailed), is
-    /// dead-lettered by the error's code and args, and the policy's
-    /// position moves past the trigger.
-    fn on_refused(
-        &self,
-        refusal: &markup::v1::Refusal,
-        ctx: &CommandContext,
-    ) -> Result<Any, Report> {
-        let _ = ctx;
-        Ok(markup::pass_through(refusal))
+    /// angzarr's `PolicyService.Translate`, the policy's ONE refusal
+    /// callback (decision 14.89): a fact of the policy's source domain,
+    /// packed, for the refusal of a command it sent, which the kernel
+    /// addresses to the trigger's exact stream and identifies with the
+    /// refused command's id. There is no pass-through: by default a policy
+    /// translates nothing, a bug ([`no_refusal_handler`],
+    /// `ANGZARR_REASON_NO_REFUSAL_HANDLER`), and the refused command is
+    /// dead-lettered. A refusal the callback does not handle is its bug,
+    /// as `on_event`'s error is.
+    fn on_refused(&self, refused: &Refused) -> Result<Any, Report> {
+        Err(no_refusal_handler(refused))
     }
 }
 
 // ---------------------------------------------------------------- dispatch
 
-/// One command or fact a policy owes one target, before the kernel books
-/// it. Built only by the kernel, from a committed event.
+/// One command or fact a policy owes one target, addressed and stamped by
+/// the kernel: angzarr's `ReactionDelivery` before its check. Built only by
+/// the kernel, from a committed event.
 pub struct Order {
-    pub(crate) policy: String,
-    pub(crate) cover: Cover,
-    pub(crate) command: Any,
-    /// The Fact arm: a type its target declares a fact (decision 14.69).
-    pub(crate) fact: bool,
+    pub(crate) delivery: ReactionDelivery,
     pub(crate) trigger: EventRef,
-    pub(crate) index: u32,
-    pub(crate) correlation_id: Uuid,
 }
 
 impl Order {
     /// The target's stream.
     pub fn cover(&self) -> &Cover {
-        &self.cover
+        static NONE: std::sync::OnceLock<Cover> = std::sync::OnceLock::new();
+        self.delivery
+            .cover
+            .as_ref()
+            .unwrap_or_else(|| NONE.get_or_init(Cover::default))
     }
 
-    /// The command or fact, packed.
-    pub fn command(&self) -> &Any {
-        &self.command
+    /// Its arm: a command, which its target may refuse, or a fact, which it
+    /// records and never refuses.
+    pub fn arm(&self) -> Arm {
+        match self.delivery.body {
+            Some(reaction_delivery::Body::Fact(_)) => Arm::Fact,
+            _ => Arm::Command,
+        }
     }
 
-    /// Whether it is a fact, which its target records and never refuses;
-    /// else a command.
-    pub fn is_fact(&self) -> bool {
-        self.fact
-    }
-
-    /// The source event: the command's causation (not its events').
+    /// The source event: the reaction's causation (not its events').
     pub fn trigger(&self) -> &EventRef {
         &self.trigger
     }
 
-    /// Its index among the commands and facts the trigger set off for this
-    /// policy, in order: one index space for both.
-    pub fn index(&self) -> u32 {
-        self.index
-    }
-
-    /// The trigger's correlation, which the command keeps.
-    pub fn correlation_id(&self) -> &Uuid {
-        &self.correlation_id
-    }
-
-    /// The order as a book, checked through the kernel's policy entry:
-    /// the target's cover, the command packed as `Any`, no ids, no
-    /// handling. Malformed only by a bug (a policy or kernel one).
+    /// The order as the kernel's reaction entry checks it. Malformed only by
+    /// a bug (a policy or kernel one).
     pub(crate) fn check(&self, catalog: &Catalog) -> Result<Checked, Malformed> {
-        check_policy_command(
-            self.book(),
-            catalog,
-            self.trigger.clone(),
-            &self.policy,
-            self.index,
-            self.correlation_id.clone(),
-        )
+        check_reaction(self.delivery.clone(), catalog)
     }
 
-    /// [`Order::check`], a malformed book being the policy's answer refused:
-    /// only a bug makes one, and the event it answered, `trigger`, is
-    /// dead-lettered with it (`rejected_events`), never the command, which
-    /// was never delivered. A command for a domain the kernel cannot route
-    /// is one (`COORDINATOR_REASON_POLICY_COMMAND_UNKNOWN_DOMAIN`, C-0736).
+    /// [`Order::check`], a malformed reaction being the policy's answer
+    /// refused: only a bug makes one, and the event it answered, `trigger`,
+    /// is dead-lettered with it (`rejected_events`), never the reaction,
+    /// which was never delivered. One for a domain the kernel cannot route
+    /// is one (`ANGZARR_REASON_POLICY_COMMAND_UNKNOWN_DOMAIN`, C-0736).
     pub(crate) fn check_logged(
         &self,
         catalog: &Catalog,
@@ -571,50 +486,22 @@ impl Order {
         trigger: &EventBook,
     ) -> Result<Checked, Malformed> {
         self.check(catalog).inspect_err(|malformed| {
+            let command_type = match &self.delivery.body {
+                Some(
+                    reaction_delivery::Body::Command(any) | reaction_delivery::Body::Fact(any),
+                ) => type_name(&any.type_url),
+                None => "",
+            };
             dead_letter::write(
                 dead_letters,
                 Letter::RejectedEvents(trigger.clone()),
-                Component::policy(&self.policy),
+                Component::policy(&self.delivery.component),
                 Cause::MalformedReaction {
                     malformed,
-                    command: &self.book(),
+                    named: (self.cover().domain.as_str(), command_type),
                 },
             )
         })
-    }
-
-    /// The order as the kernel books it: the target's cover, the command
-    /// or fact packed as `Any`, no ids, no handling; a fact with the origin
-    /// the kernel stamps (decision 14.69), its external id the canonical
-    /// text of the id [`Order::check`] derives, and its description naming
-    /// its type and the policy.
-    pub(crate) fn book(&self) -> CommandBook {
-        let payload = Some(self.command.clone());
-        let (body, fact_origin) = match self.fact {
-            false => (command_page::Body::Command(Command { payload }), None),
-            true => (
-                command_page::Body::Fact(Fact { payload }),
-                super::ids::policy_command_id(&self.trigger, &self.policy, self.index)
-                    .ok()
-                    .map(|id| FactOrigin {
-                        external_id: id.to_string(),
-                        description: format!(
-                            "{} from {}",
-                            type_name(&self.command.type_url),
-                            self.policy
-                        ),
-                    }),
-            ),
-        };
-        CommandBook {
-            cover: Some(self.cover.clone()),
-            page: Some(CommandPage {
-                body: Some(body),
-                fact_origin,
-                ..CommandPage::default()
-            }),
-            handling: None,
-        }
     }
 }
 
@@ -634,50 +521,42 @@ pub(crate) fn cover_in(domain: &str, source: &Cover, root: &Uuid) -> Cover {
 }
 
 /// The orders policy `policy` owes for `trigger` (in `correlation_id`):
-/// the answer, `books`, each the target's stream (the kernel held it to
-/// the trigger's edition, a named root and the trigger's correlation,
-/// [`check_reaction`]) and its command or fact, in order, each keeping its
-/// arm.
+/// each addressed output, in order, stamped as angzarr's `ReactionDelivery`
+/// (decision 14.79): its command id derived from (trigger, policy, index),
+/// commands and facts in one index space (decision 14.69), the trigger's
+/// correlation, the trigger as its causation, the policy as its component.
 pub(crate) fn answered(
     policy: &str,
     trigger: &EventRef,
     correlation_id: &Uuid,
-    books: Vec<CommandBook>,
+    outputs: Vec<(Cover, reaction_delivery::Body)>,
 ) -> Vec<Order> {
     (0..)
-        .zip(books)
-        .map(|(index, book)| {
-            let (command, fact) = match book.page.and_then(|p| p.body) {
-                Some(command_page::Body::Command(command)) => {
-                    (command.payload.unwrap_or_default(), false)
-                }
-                Some(command_page::Body::Fact(fact)) => (fact.payload.unwrap_or_default(), true),
-                None => (Any::default(), false),
-            };
-            Order {
-                policy: policy.to_string(),
-                cover: book.cover.unwrap_or_default(),
-                command,
-                fact,
-                trigger: trigger.clone(),
-                index,
-                correlation_id: correlation_id.clone(),
-            }
+        .zip(outputs)
+        .map(|(index, (cover, body))| Order {
+            delivery: ReactionDelivery {
+                cover: Some(cover),
+                body: Some(body),
+                command_id: super::ids::policy_command_id(trigger, policy, index).ok(),
+                correlation_id: Some(correlation_id.clone()),
+                causation: Some(trigger.clone()),
+                component: policy.to_string(),
+            },
+            trigger: trigger.clone(),
         })
         .collect()
 }
 
 /// `policy` as angzarr-router's table: each event type it handles (its
 /// `EVENTS`, or every event of its source for a hand-written one) runs
-/// [`Policy::on_event`] with the trigger's place and its whole metadata, each command
-/// for the target's stream at the root it names; and, for a policy that
-/// answers refusals, each command type it translates (its `TRANSLATES`, or
-/// every command of its target for a hand-written one) is answered by
-/// [`Policy::on_refused`], with the refused command's context; either's
-/// error is carried as the policy's failure. The kernel holds the answer
-/// to the policy's one destination, the trigger's edition, a named root,
-/// no fact origin of its own and the trigger's correlation and identity
-/// ([`check_reactions`]).
+/// [`Policy::on_event`] with the trigger's place and its whole metadata,
+/// each output for the target's stream at the root it names; and its one
+/// Translate callback runs [`Policy::on_refused`]. Either's error is
+/// carried as a handler's bug (`ANGZARR_REASON_UNHANDLED_HANDLER_ERROR`,
+/// its code and args the cause), but for the default translation, which is
+/// answered as the router answers a policy with no callback,
+/// `ANGZARR_REASON_NO_REFUSAL_HANDLER`. The kernel addresses and checks the
+/// outputs ([`check_outputs`]).
 pub(crate) fn dispatch<P: Policy>(policy: P) -> PolicyDispatch {
     let policy = Arc::new(policy);
     let target = <P::Target as CommandTarget>::DOMAIN;
@@ -688,7 +567,7 @@ pub(crate) fn dispatch<P: Policy>(policy: P) -> PolicyDispatch {
     };
     for event_type in events {
         let policy = Arc::clone(&policy);
-        table = table.on_event_with_context(&event_type, move |event, page| {
+        table = table.on_event(&event_type, move |event, page| {
             let trigger = EventRef {
                 stream: page.cover.cloned(),
                 sequence: page.sequence,
@@ -696,40 +575,25 @@ pub(crate) fn dispatch<P: Policy>(policy: P) -> PolicyDispatch {
             let ctx = PolicyContext::of(trigger, page.meta.cloned().unwrap_or_default());
             let outputs = policy
                 .on_event(event, &ctx)
-                .map_err(|failure| super::route::policy_failed(&failure))?
-                .map_or_else(Vec::new, Commands::into_orders);
-            Ok(outputs
-                .into_iter()
-                .map(|(root, body)| CommandBook {
-                    cover: Some(Cover {
-                        domain: target.to_string(),
-                        root: Some(root),
-                        edition: None,
-                    }),
-                    page: Some(CommandPage {
-                        body: Some(body),
-                        ..CommandPage::default()
-                    }),
-                    handling: None,
-                })
-                .collect())
+                .map_err(|failure| super::route::bug(&failure))?
+                .map_or_else(Vec::new, Commands::into_outputs);
+            Ok(outputs)
         });
     }
-    if P::ANSWERS_REFUSALS {
-        let translated: Vec<String> = match P::TRANSLATES.is_empty() {
-            true => <P::Target as CommandTarget>::command_types(),
-            false => P::TRANSLATES.iter().map(TypeName::full_name).collect(),
-        };
-        for command_type in translated {
-            let policy = Arc::clone(&policy);
-            table = table.on_refused(&command_type, move |refusal, ctx| {
-                policy
-                    .on_refused(refusal, ctx)
-                    .map_err(|failure| super::route::policy_failed(&failure))
-            });
-        }
-    }
-    table
+    let translating = Arc::clone(&policy);
+    table.on_refused(move |command, refusal, ctx| {
+        let refused = Refused::of(command, refusal, ctx);
+        translating.on_refused(&refused).map_err(|failure| {
+            use angzarr_diagnostic::Diagnostic;
+            match failure.code() == AngzarrReason::NoRefusalHandler.as_str_name() {
+                true => angzarr_router::error::HandlerError::Coded(super::route::spec_coded(
+                    AngzarrReason::NoRefusalHandler,
+                    super::route::flat_args(&failure),
+                )),
+                false => super::route::bug(&failure),
+            }
+        })
+    })
 }
 
 #[cfg(test)]

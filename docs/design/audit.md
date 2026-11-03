@@ -4,22 +4,25 @@ Status: **implemented** in `crates/angzarr-embedded/src/`, pinned by the tests
 beside it (`*.test.rs`). It is angzarr-embedded's one kernel.
 
 The wire contract is angzarr's protos on angzarr-project's spec line
-(`spec/20261019-draft`, the crate pinned at **a06c8ec**): `EventMeta.causation`
-is the event's direct cause, with one arm, `command_id` (a process manager
-is a domain whose inputs are commands and facts, so no event is caused by
-another event); one `command_id` per command, deduplication on the events,
-no actor, `StateOptions`/`StateDescriptor`, commands may be upcast;
-and the record in angzarr's `docs/design/audit-meta/` (`decision-log.md`,
-`idempotency.md`) and `docs/guide/state-and-conflicts.md`. Where the kernel
-and the coordinator contract part is recorded as tags, not here: see
+(`spec/20261102-draft`, vendored at **c4b87ed**; the core crates pinned at
+**36e59279**): a `CommandBook` is a cover and ONE `CommandPage`, whose body
+is a `Command` (its payload and its optional `Handling`) or a `Fact` (its
+payload and its `FactOrigin`); `EventMeta.causation` is the event's direct
+cause, a command (`CommandCause`) or a fact (`FactCause`, which carries the
+fact's origin), so no event is caused by another event; one `command_id`
+per input, deduplication on the events, no actor; a state is described by
+its message's full name (`StateDescriptor.type_name`); a policy's output
+reaches its destination as a `ReactionDelivery`; and the record in angzarr's
+`docs/design/audit-meta/` (`decision-log.md`, `idempotency.md`). Where the
+kernel and the coordinator contract part is recorded as tags, not here: see
 [Where angzarr-embedded and angzarr part](#where-angzarr-embedded-and-angzarr-part).
 
 **Causation is the direct cause** (angzarr decisions 13.1 and 13.3). An
 event's `EventMeta.causation` names what produced it: its command
-(`command_id`, every command's event, a policy's and a fact's included).
-A policy's command still names its trigger in
-`CommandPage.causation_id`, the command's own causation (transport and
-trace metadata, and the input its derived id hashes), but that is never
+(`CommandCause.command_id`, a policy's included) or its fact
+(`FactCause`: the fact's derived command id and its origin). A policy's
+output still names its trigger in `ReactionDelivery.causation` (transport
+and trace metadata, and the input its derived id hashes), but that is never
 copied onto its events: the trigger-to-command edge belongs in tracing and
 logs. There is no re-run switch: a policy command's id never names a rules
 version, so a re-run deduplicates, and repairs are new commands (decision
@@ -38,7 +41,7 @@ places:
 | ID | Finding | Resolution here |
 |---|---|---|
 | A1 | `Envelope` holds only seq, cause and event: no when, no why. Consumers put metadata in the payload (hatpick's `Stamp`). | Every event carries angzarr's `EventMeta`, stamped by the kernel. Business code emits payloads only. [Metadata](#metadata) |
-| A2 | `cause` is only within a stream; there is no correlation id. | Every event names its direct cause, its command; a policy command names its trigger as its own `causation_id`; correlation is always set and kept through every policy step. [Identification](#step-2-identification), [Metadata](#metadata) |
+| A2 | `cause` is only within a stream; there is no correlation id. | Every event names its direct cause, its command or fact; a reaction names its trigger as its own causation; correlation is always set and kept through every policy step. [Identification](#step-2-identification), [Metadata](#metadata) |
 | A3 | `Header.rules` is a free string replay never checks. | The rules version is the build's full version: registered, checked against every answer, stamped per event, and read only to choose which snapshots to offer. [Rules versions](#rules-versions) |
 | A5 | `Header.schema` is unused; there is no upcasting. | A payload's type URL is its version. Old types are upcast by type URL, strictly, events at read and (discouraged) commands before decode. [Dispatch](#step-5-dispatch-through-angzarr-router) |
 | A6 | Events emitted before a rejection stay in the `Stream`. | Decide is pure and stages its events; a rejection leaves nothing. |
@@ -52,12 +55,12 @@ places:
 ```mermaid
 flowchart TB
   subgraph angzarr-project
-    P["io.angzarr.v1 protos<br/>(Cover, CommandBook, Handling, EventPage,<br/>EventMeta, EventRef, Snapshot, StateDescriptor, Outcome)"]
+    P["io.angzarr.v1 protos<br/>(Cover, CommandBook, Handling, EventPage,<br/>EventMeta, EventRef, Snapshot, StateDescriptor, ReactionDelivery)"]
     AP["angzarr-proto<br/>(prost types, prost::Name, ids)"]
     P --> AP
   end
   subgraph angzarr-embedded
-    K["angzarr_embedded<br/>(kernel: parse, coordinator, chain, upcaster, registry)"]
+    K["angzarr_embedded<br/>(kernel: check, coordinator, chain, upcaster, registry)"]
   end
   AP --> K
   subgraph hatpick
@@ -73,28 +76,24 @@ flowchart TB
   own for the kernel's events: its types are angzarr-proto's.
 - **angzarr-embedded operates on the proto types directly.** The kernel depends on
   angzarr-proto and handles `v1::Cover`, `CommandBook`, `EventPage`,
-  `EventMeta`, `EventRef`, `Snapshot`, `Uuid`, `ConflictResolution`,
-  `StateDescriptor` and `AngzarrDeadLetter` as generated. There is no
+  `EventMeta`, `EventRef`, `Snapshot`, `Uuid`, `StateDescriptor`,
+  `ReactionDelivery` and `AngzarrDeadLetter` as generated. There is no
   parallel stream key, event id, book, metadata, provenance, origin or UUID
   type, and so no mapping layer. Dependency-freeness was given up for this,
   deliberately: a mapping layer is a second home for every value, and every
   second home is a place for the two to disagree.
-- **annals-angzarr is folded into the kernel.** What it held that was more
-  than mapping lives on in `angzarr_embedded`: the `Payload` trait, `pack`,
-  `type_name` and `Decoder`; the `Upcaster` (the in-process `UpcastPort`),
-  for events and commands; the `Catalog`, the
-  mirror of the `ComponentDescriptor`s registered, beside the `Registry`'s
-  handlers; and the golden replay fixtures. The
-  opaque-row store adapter (`Opaque`, `Stored`) is gone: the store port
-  itself is opaque now. The id helpers are angzarr-proto's own
-  (`angzarr_proto::ids`, re-exported as `angzarr_embedded::ids`). One crate, not
-  two, because with no mapping left the adapter would be a crate of
-  re-exports.
+- **The kernel is one crate.** Beside the pipeline it holds the `Payload`
+  trait, `pack`, `type_name` and `Decoder`; the `Upcaster` (the in-process
+  `UpcastPort`), for events and commands; the `Catalog`, the mirror of the
+  `ComponentDescriptor`s registered, beside the `Registry`'s handlers; and
+  the golden replay fixtures. The store port is opaque. The id helpers are
+  angzarr-proto's own (`angzarr_proto::ids`, re-exported as
+  `angzarr_embedded::ids`).
 - **angzarr-embedded is the in-process runtime**, embedded in hatpick's server. Each
   step of a chain is one atomic write: one stream's events with the step's
   policy positions.
   hatpick calls angzarr-embedded directly, in process: there is no HTTP or gRPC layer
-  into angzarr-embedded, so no caller outside the process can deliver a policy command.
+  into angzarr-embedded, so no caller outside the process can deliver a reaction.
 - **angzarr-embedded is not angzarr.** They share the protos, some code and their
   intents. Where the execution models differ, angzarr-embedded's choice is deliberate,
   and tagged on the contract scenario that shows it
@@ -116,7 +115,6 @@ flowchart TB
   since prost types have no ordering). The application samples the instant
   and mints the UUIDv7 a client's command without an id is given
   (`Sampled { now, command_id }`). UUIDv5 derivations are angzarr-proto's.
-  The conflict nonce is a counter.
 - **The kernel stays synchronous.** The only async parts are the async store
   port and the handler over it, with native `impl Future` in traits.
 - **MSRV 1.89** (uuid 1.28, through angzarr-proto). **angzarr-embedded builds for
@@ -127,42 +125,41 @@ flowchart TB
 
 ## The pipeline
 
-One command, end to end, in angzarr's normative order (`types.proto`, the
-`handling` region). Each step's output type is the next step's only input,
-so the order cannot be skipped or reordered:
+One input, end to end, in angzarr's normative order
+(docs/design/pipeline.md). Each step's output type is the next step's only
+input, so the order cannot be skipped or reordered:
 
 ```text
-CommandBook ─check──▶ Checked ─identify──▶ Identified ─deduplicate (admit)──▶ Deduplicated
+CommandBook ─check──▶ Checked ─identify──▶ Identified ─load, deduplicate (admit)──▶ Deduplicated
                                                          ├─ Duplicate { events }            (answer: DUPLICATE)
-                                                         ├─ Skipped                         (a PM's non-starting fact)
-                                                         └─ Novel ─load──▶ Contextual
-                                                                     ─dispatch (router)──▶ stamped pages
+                                                         └─ Novel ─check the expected sequence──▶ Contextual
+                                                                     ─decide (router)──▶ stamped pages
 ```
 
 1. **Validate** (`check`): domain-blind, everything at once.
 2. **Identify** (`Checked::identify`): command id, correlation, causation.
-3. **Load, then admit** (`deduplicate`): the conflict
-   resolution, the snapshot and events are loaded **first**; then the
-   command id is looked up (`find_command`) and the kernel admits the
-   input (decision 14.42; the router admits nothing): a refusal
-   fact's address, deduplication by the events found (they are the
-   answer), a process manager's start rule (below).
-4. **Resolve** (`load`): the expected sequence stamped or
-   checked against the head step 3 loaded (STRICT's stale refusal is
-   here), the window and nonce.
-5. **Dispatch** (`dispatch`): the `ContextualCommand` through the domain's
-   router (its `CommandHandler`), whose handler decides a command or
-   records a fact; the kernel stamps the events it answers.
+3. **Load, then admit** (`deduplicate`): the snapshot and events are
+   loaded **first**, and an input to an edition stream not forked there is
+   refused (`ANGZARR_REASON_EDITION_NOT_FORKED`); then the command id is
+   looked up (`find_command`) and the kernel admits the input (decision
+   14.42; the router admits nothing): deduplication by the events found
+   (they are the answer), a process manager's start rule (below).
+4. **Check the expected sequence** (`load`): a command's expected
+   sequence, when it names one, against the head step 3 loaded: behind or
+   ahead, it is refused `ExpectedSequenceMismatch` before business code.
+5. **Decide** (`decide`): a `HandleRequest` through the domain's router
+   (its `CommandHandler`), whose handler decides a command or records a
+   fact; the kernel stamps the events it answers.
 
 Steps 3 to 5 are the kernel's own (`pub(crate)`): the chain runs them, and
 `Kernel::handle` is the one entry.
 
 **The load comes before the lookup**, so a concurrent commit of the same
 command cannot slip between them (see *Races* below). **Deduplication
-comes before the sequence check**, so a retry of an applied
-command whose expected sequence is now stale is answered DUPLICATE, never
-stale. **Validation comes before deduplication**, so a malformed retry of an
-applied command is still malformed. **Decoding comes after both**, so an
+comes before the sequence check**, so a retry of an applied command whose
+expected sequence is no longer the head is answered DUPLICATE, never
+refused. **Validation comes before deduplication**, so a malformed retry of
+an applied command is still malformed. **Decoding comes after both**, so an
 unknown command type is refused only for a command that is new and current.
 
 ## Step 1: one check
@@ -174,13 +171,12 @@ impl Checked {
     pub fn cover(&self) -> &Cover;            pub fn domain(&self) -> &str;
     pub fn root(&self) -> &Uuid;              // present, 16 bytes
     pub fn edition(&self) -> Option<&str>;    // None: main; never Some("")
-    pub fn body(&self) -> &Body;              // Command { payload } | Fact { payload, source }
+    pub fn body(&self) -> &Body;              // Command { payload, expected_sequence } | Fact { payload, source }
     pub fn payload(&self) -> &Any;
     pub fn command_id(&self) -> Option<&Uuid>;       // the sender's, 16 bytes if set
     pub fn correlation_id(&self) -> Option<&Uuid>;
-    pub fn expected_sequence(&self) -> Option<u64>;
-    pub fn conflict_resolution(&self) -> Option<ConflictResolution>;   // supported if set
-    pub fn is_policy_command(&self) -> bool;
+    pub fn expected_sequence(&self) -> Option<u64>;  // a command's Handling; a fact has none
+    pub fn is_reaction(&self) -> bool;
     pub fn identify(self, sampled: &Sampled) -> Identified;
 }
 ```
@@ -188,32 +184,30 @@ impl Checked {
 `check` is **the one place a `CommandBook` is checked**. It takes the book
 apart once; what it returns holds the required parts outside their prost
 `Option`s, so nothing downstream unwraps one. The accessors that stay
-`Option` are the sender's genuine choices. `Body` attaches `fact_origin` to
-the fact arm, so a fact's source is never optional.
+`Option` are the sender's genuine choices. `Body` carries the fact's origin
+in the fact arm, so a fact's source is never optional, and the expected
+sequence in the command arm, so a fact can never name one: the proto has
+no place for it.
 
 **Domain-blind.** `check` knows no domain's types. It asks the `Catalog`
-only what angzarr's coordinator reads off a `StateDescriptor`: is
-`cover.domain` registered, and which resolutions does its state support.
+only whether `cover.domain` is registered (here or remote) and whether it
+is a process manager.
 
 **Malformed**, in the order tried (the first that applies is the answer):
 no cover; an unregistered domain; no root; a root that is not 16 bytes; a
 set empty edition; no page; no body; no payload; a set command or
-correlation id that is not 16 bytes; a causation from a client
-(`CausationFromOutside`); for a policy's book, ids of its own
-(`IdOnPolicyCommand`) or handling
-(`HandlingOnPolicyCommand`), or a trigger that cannot name an id (`BadTrigger`);
-a fact without `fact_origin`; an empty `external_id`; a command with a
-`fact_origin`; a fact whose `command_id` is not its derivation; a fact with
-**any** handling field (`HandlingOnFact`); a `conflict_resolution` value the
-build does not know; a resolution the domain's state does not support
-(COMMUTATIVE on a state without conflict units, above all). **An empty
-`Handling` is unset**: the same as none.
+correlation id that is not 16 bytes; a fact without its origin; an empty
+`external_id`; a fact whose `command_id` is set to anything but its
+derivation. **An empty `Handling` is unset**: the same as none.
 
-**No causation from outside.** `check` is the client entry. The kernel's
-chain builds its policies' books itself and checks them through a
-crate-private entry (`check_policy_command`) that applies the same checks plus
-the policy-command rules and derives the command id from the trigger. angzarr-embedded
-needs no authentication for this: no one outside the process can call it.
+**A reaction is the kernel's own.** `check` is the client entry, and a
+`CommandPage` has no causation to carry. The kernel's chain builds its
+policies' outputs and refusal facts as `ReactionDelivery`s itself and
+checks them through a crate-private entry (`check_reaction`): the same
+cover and id checks, a trigger able to name a command id (`BadTrigger`),
+and, for a fact, the origin the destination derives (its external id the
+command id's text). angzarr-embedded needs no authentication for this: no one
+outside the process can call it.
 
 ## Step 2: identification
 
@@ -223,31 +217,33 @@ pub struct Sampled { pub now: Timestamp, pub command_id: Uuid }   // the applica
 impl Identified {
     pub fn command_id(&self) -> &Uuid;            // never absent
     pub fn correlation_id(&self) -> &Uuid;        // never absent
-    pub fn causation_id(&self) -> Option<&EventRef>; // the command's (CommandPage), never its events'
-    pub fn meta(&self, recorded_at: Timestamp, rules_version: &str) -> EventMeta;
+    pub fn causation(&self) -> Option<&EventRef>; // a reaction's trigger, never its events'
+    pub fn component(&self) -> Option<&str>;      // a reaction's policy
+    pub fn arm(&self) -> Arm;                     // Command | Fact
     pub fn to_book(&self) -> CommandBook;         // ids filled: for a dead letter or an audit line
+    pub fn to_delivery(&self) -> Option<ReactionDelivery>;   // a reaction's, for its dead letter
     // and the Checked accessors
 }
 ```
 
-| Kind | `command_id` | `correlation_id` | `causation_id` |
+| Kind | `command_id` | `correlation_id` | causation |
 |---|---|---|---|
-| a client's command | as sent, else `Sampled::command_id` (a UUIDv7 the application minted) | as sent, else the command id | none |
-| a fact | `ids::fact_command_id(external_id)` (UUIDv5; a sent one must equal it) | as sent, else the same value (`ids::fact_correlation`) | none |
-| a policy's command | `ids::policy_command_id(trigger, component, index)` (UUIDv5) | the trigger's | the trigger's `EventRef` |
+| a client's command | as sent, else `Sampled::command_id` (a UUIDv7 the application minted) | as sent, else the command id (a process manager's root) | none |
+| a client's fact | `ids::fact_command_id(external_id)` (UUIDv5; a sent one must equal it) | as sent, else `ids::fact_correlation` (a process manager's root) | none |
+| a reaction | `ids::policy_command_id(trigger, component, index)` (UUIDv5) | the trigger's | the trigger's `EventRef` |
 
-`component` is `Policy::NAME`; `index` is the order's place among those
-the trigger set off for that policy. The `causation_id` column is the
-command's own (`CommandPage.causation_id`); `CommandContext::event_meta` stamps the
-events with `causation.command_id` only. Identification is infallible: the
-check refused everything that could make it fail. Text forms of ids exist
-only at display and input (`Display`/`FromStr` on `v1::Uuid`).
+`component` is `Policy::NAME`; `index` is the output's place among those
+the trigger set off for that policy. The causation column is the
+reaction's own (`ReactionDelivery.causation`); its events are stamped with
+their command (or fact) only. Identification is infallible: the check
+refused everything that could make it fail. Text forms of ids exist only
+at display and input (`Display`/`FromStr` on `v1::Uuid`).
 
 ## Step 3: deduplication
 
 **By `command_id`, on the events.** There is no key store, no claim, no
 fingerprint and no commands table. "Already applied?" means "the addressed
-stream holds events whose `EventMeta.command_id` is this one":
+stream holds events whose causation's `command_id` is this one":
 `EventStore::find_command(stream, command_id)`, over a non-unique index on
 (stream, command_id). On a hit the answer is `Handled::Duplicate` with those
 events, in sequence order (angzarr's DUPLICATE), and nothing below runs.
@@ -278,9 +274,9 @@ purged where its store opts in, [the store port](#the-store-port)):
   `a_creating_command_redelivered_after_a_purge_creates_its_stream_again`.
 
 Rejections leave nothing, so a rejected command's retry runs again. Each
-policy command takes step 3 too (cheap, and uniform): a step run again
-after a crash finds its own events and writes only its position, so a
-chain never applies one command twice.
+reaction takes step 3 too (cheap, and uniform): a step run again after a
+crash finds its own events and writes only its position, so a chain never
+applies one command twice.
 
 **Races.** Two deliveries of one command race on the append's sequence
 check: one commits; the other's commit fails `StoreError::Conflict`
@@ -294,142 +290,83 @@ either seen by the lookup or makes this delivery's append fail its expected
 head. Pinned by `a_retry_racing_its_original_commit_is_never_applied_twice`
 (a store that lets a commit land after the first read).
 
-**Same-stream concurrency is optimistic** (decision 14.45). Two commands
+**Same-stream concurrency is optimistic** (decision 14.45). Two inputs
 to one stream at once both load and both decide; the store takes the
 first write and refuses the second (`StoreError::Conflict`). Nothing
 orders or locks streams: ordering is per stream only, and a write to
-another stream is never a conflict. The loser:
+another stream is never a conflict. The loser is loaded and decided again
+on the new head, for an outside caller as for a policy's step, under the
+race re-run cap (`OnRetryable::max_race_runs`, a `NonZeroU32`: at least one
+run, default 10, the first included; decision 14.84), with the retry
+policy's backoff and jitter between runs, whatever `max_retries` says; its
+handler runs once per run. There is no mode that hands a lost race back
+unrun.
 
-- **set no expected sequence** (or is a fact): the kernel stamped the
-  head it loaded, so the race is the kernel's own. It is loaded and
-  decided again on the new head, for an outside caller as for a policy's
-  step, under the race re-run cap (`OnRetryable::max_race_runs`, default
-  10 runs, the first included; decision 14.46), with the retry policy's
-  backoff and jitter between runs, whatever `max_retries` says; its
-  handler runs once per run. A race re-run cap of 0 turns this off, for a
-  caller that owns its retry loop: the first lost race goes back to the
-  caller as the store's `Conflict` (retryable), not dead-lettered; a
-  policy's step that loses it holds the policy's position at the
-  trigger (nothing was dead-lettered, so nothing moves past it), and
-  the next catch-up runs the step again.
-- **set one, under STRICT**: it decided against a head that is gone, the
-  early check's condition found late: `KernelError::Stale`, `expected`
-  its sequence and `actual` the head the store found, ABORTED under
-  `COORDINATOR_REASON_EXPECTED_SEQUENCE_STALE` (`KernelError::as_coded`),
-  back to an outside caller at once and never run again by the kernel.
-- **set one, under AGGREGATE_HANDLES or COMMUTATIVE**: never that key (it
-  is STRICT's alone). The widened window (its expected sequence to the
-  new head) is re-delivered with a fresh nonce, and the resolution's rule
-  decides again on it (the nonce, or unit overlap), under the retry cap:
-  at most `max_retries + 1` deliveries, the first included, the retry
-  policy's backoff between them.
+- **No expected sequence** (or a fact, or a reaction): the re-run decides
+  on the current state, and commits if it wins.
+- **An expected sequence**: the re-run's step 4 finds the head moved past
+  it and refuses it `ExpectedSequenceMismatch`, the head the new one
+  (decision 14.94): the caller decided against a version that is gone.
 
-At either cap the kernel gives up: the command is dead-lettered under
-`KernelError::RetryCapExhausted` (args `attempts`, how many times business
-code ran, and `cap`), nothing is persisted, and its caller is answered
-INTERNAL, `COORDINATOR_REASON_RETRY_CAP_EXHAUSTED` (`KernelError::as_coded`):
-the dead letter holds it, so no caller retries it, and a policy's step
-moves its position as `on_policy_bug` says. A fact is never refused: at the
-race re-run cap it is dead-lettered the same way and answered
-`Handled::Parked` (OK, PARKED, no events), as is a fact whose handler
-fails.
+At the cap the kernel gives up, `KernelError::RetryCapExhausted` (args
+`attempts`, how many times business code ran, and `cap`), and nothing is
+persisted: a command its caller waits for is answered INTERNAL
+`ANGZARR_REASON_RETRY_CAP_EXHAUSTED` and is not dead-lettered (the caller
+holds it); a policy's step is dead-lettered, and its position moves as
+`on_policy_bug` says; a fact is dead-lettered and its sender answered
+`KernelError::FactDeadLettered` (INTERNAL
+`ANGZARR_REASON_FACT_DEAD_LETTERED`, never retryable), as is a fact whose
+handler fails.
 
 Pinned by `src/concurrency.test.rs`, which forces the race with a barrier
 only the two first dispatches pass; by `src/races.test.rs`, whose
-business code lands the other write through the store while it decides
-(conflict_resolution.feature's C-0718, C-0719 and C-0722 to C-0726); and by
-the injected conflicts of `an_outside_callers_lost_race_*` and
-`outside_strict_a_lost_write_is_never_the_stale_key`.
+business code lands the other write through the store while it decides;
+and by the injected conflicts of `an_outside_callers_lost_race_*`.
 
-## Step 4: load and conflict resolution
+## Step 4: the expected sequence
 
 ```rust
-pub(crate) struct Contextual {          // angzarr's ContextualCommand, in process
-    resolution: ConflictResolution,     // never UNSPECIFIED
-    expected: u64,                      // the book's, or the head
-    head: u64,
+pub(crate) struct Contextual {          // what the HandleRequest is built from
+    command: Identified,
+    current: Any,                       // the input's payload, upcast
     snapshot: Option<Snapshot>,
-    pages: Vec<EventPage>,              // the window is expected .. head
-    nonce: Option<Vec<u8>>,             // ContextualCommand.conflict_nonce
-    /* the command, the last recorded_at */
+    pages: Vec<EventPage>,              // after the snapshot, to the head
+    head: u64,
+    last_recorded_at: Option<Timestamp>,
 }
 ```
 
 The **in-process coordinator** is the chain's steps 3 and 4, over the
-store, domain-blind like angzarr's: they see covers,
-pages and the registry. There is no service and nothing is sent.
+store, domain-blind like angzarr's: they see covers, pages and the
+registry. There is no service and nothing is sent.
 
-**The resolution** (`Catalog::resolve`, angzarr's precedence, highest
-first): the book's `Handling.conflict_resolution`; the domain's
-configuration for the command's type (`Domain::CONFLICT_RESOLUTION_BY_COMMAND`,
-by full type name, looked up by the command's current type after upcasting,
-so an old command type has its current type's setting; a payload whose
-upcast fails is looked up as sent, and decoding reports the failure); the
-domain's own (`Domain::CONFLICT_RESOLUTION`); the
-built-in default, **COMMUTATIVE where the state declares conflict units,
-otherwise STRICT**. Configuration a state does not support is refused at
-registration (`Misconfigured::UnsupportedResolution`); a book's request, at
-step 1.
-
-**The load.** The newest snapshot, if usable (its state's type URL is the
+**The load.** The newest snapshot, if usable (its state's type is the
 registered state's and its rules version compatible with the registered
 one, [Snapshots](#snapshots); otherwise it is not offered and the stream
-is replayed from 0, never migrated), then the events
-after it to the head. Under AGGREGATE_HANDLES and COMMUTATIVE the snapshot
-used is **at or below expected−1**, so no part of the window is hidden in
-snapshot state; a newer one is not used.
+is replayed from 0, never migrated), then the events after it to the head.
 
-**The expected sequence.** Absent: stamped with the head, and the command
-can never be stale (a race lost at its write is run again on the new head;
-*Races*, above). Present:
+**The staleness check** (decisions 14.93 and 14.94). A command with no
+expected sequence, a fact and a reaction are decided on the current state.
+A command whose `Handling.expected_sequence` is set and is not the head,
+behind it or ahead of it alike, is refused before anything is decoded and
+before business code: `ExpectedSequenceMismatch { expected, head }`, the
+framework's one typed refusal, FAILED_PRECONDITION under
+`ANGZARR_REASON_COMMAND_REFUSED`, the object in the status details
+(`Rejected::mismatch`). It is the coordinator's, listed in no command's
+refusals, and never reaches business code. There is no conflict concept:
+no resolution, no window, no nonce (decision 14.92).
 
-- **STRICT**: it must equal the head, else `KernelError::Stale` (angzarr's
-  ABORTED, `COORDINATOR_REASON_EXPECTED_SEQUENCE_STALE`, args `expected`
-  and `actual`), before anything is decoded; a race lost at its write is
-  the same `Stale`.
-- **AGGREGATE_HANDLES**: the events from it to the head are the window;
-  the handler receives them with the nonce (the router's
-  `CommandContext.conflict`) and must give the nonce back
-  (`Conflict::resolve_conflicts`). The router reports the nonce handed
-  back (`CommandHandlerResponse.conflict`), and the kernel keeps the
-  events only if it is the one delivered, else the command fails
-  (COORDINATOR_REASON_CONFLICT_UNRESOLVED, the kernel's `KernelError::Unresolved`) and
-  nothing is persisted.
-- **COMMUTATIVE**: the same window and nonce; the router computes the unit
-  sets and the kernel judges them (below).
-  At the head there is no window, and the command is handed over as
-  STRICT.
-- **Past the head**, under every resolution: malformed, never stale
-  (decision 14.47): `KernelError::ExpectedSequenceAhead`, angzarr's
-  INVALID_ARGUMENT `COORDINATOR_REASON_EXPECTED_SEQUENCE_AHEAD`, args
-  `expected` and `head`, before business code (C-0727).
-
-**COMMUTATIVE**, angzarr-router's (`DomainDispatch::with_commutative`,
-which the registry configures for a state that lists it). The handler runs
-on the head, so every invariant it checks holds against the window's
-effects. Then `window = changed(state at expected, head)` and `mine =
-changed(head, head with the command's events)`, both by the state's
-generated `State::changed`, reported to the kernel in the router's
-`ConflictReport`. The kernel judges (decision 14.42, `conflict::judge`):
-the events are kept iff the two do not overlap (options.proto's rule:
-equal units or a prefix at a `.`/`[` boundary; a wildcard overlaps any
-non-empty set; an empty set nothing), else the command is stale
-(COORDINATOR_REASON_CONFLICT_OVERLAP, the kernel's `KernelError::Overlap`, naming both unit
-sets as `window_units` and `command_units`) and nothing is persisted. Unmarked fields conflict with
-everything (the fail-safe wildcard), so an unmarked change only makes
-COMMUTATIVE stricter.
-
-**The `State` trait** is what angzarr's generator emits for a state message
-from its `(io.angzarr.v1.state)` option and `(io.angzarr.v1.conflict)` field
-markers:
+**The `State` trait** is what angzarr's generator emits for a state
+message:
 
 ```rust
 pub trait State: Default + Clone + Send + 'static {
     type Snapshot: prost::Message + prost::Name + Default;   // the wire form a snapshot carries
     fn to_snapshot(&self) -> Self::Snapshot;
     fn from_snapshot(snapshot: Self::Snapshot) -> Result<Self, Report>;  // a wire value need not be a valid state
-    fn descriptor() -> StateDescriptor;     // type URL (the snapshot form's) + the full resolved list of resolutions
-    fn changed(before: &Self, after: &Self) -> Units { Units::everything() }
+    fn restore(&mut self, snapshot: Self::Snapshot) -> Result<(), Report>; // onto a fresh instance
+    fn descriptor() -> StateDescriptor;     // the state message's full name
+    const SNAPSHOTS: bool = true;           // false: no snapshot form
 }
 ```
 
@@ -437,19 +374,11 @@ The state is a domain type and its snapshot form the prost message: a
 snapshot that decodes but is not a valid state (`from_snapshot` refuses it)
 is unreadable, `PayloadError::Invalid`. A state that is itself a prost
 message is its own snapshot form. `Registry::register::<D>` lists it in the
-catalog by the descriptor `D` generates, its state `D::State::descriptor()`, as angzarr's `registry.register::<D>()` fills
-`ComponentDescriptor.state`, and refuses a descriptor whose type URL is not
-the snapshot form's. angzarr's generator (backlog CR-1, CR-4) emits the impl;
+catalog by the descriptor `D` generates, its state `D::State::descriptor()`,
+as angzarr's `registry.register::<D>()` fills `ComponentDescriptor.state`,
+and refuses a descriptor naming another type than the snapshot form's
+(`Misconfigured::StateTypeMismatch`). angzarr's generator emits the impl;
 the test fixtures write it by hand (`src/toys.test.rs`).
-
-**The risk of COMMUTATIVE.** No structural diff sees a value derived from,
-or meaningful only together with, another unit: a total over items, two
-fields that must change together. A stale caller's intent can then merge
-when it should not. That is a modelling failure: put dependent data in one
-unit (mark the containing message without `descend`), derive the value in
-decide or a projection rather than storing it, or configure that command
-type STRICT. angzarr's `docs/guide/state-and-conflicts.md` shows the
-failures and their fixes; it applies to angzarr-embedded unchanged.
 
 ## Step 5: dispatch through angzarr-router
 
@@ -459,11 +388,9 @@ pub trait Domain: Sized + 'static {
     type Command: Payload + Send + 'static;
     type Fact: Payload + Send + 'static;           // Infallible: none
     type Event: Payload + Clone + Send + Sync + 'static;
-    type Rejection: Diagnostic + Send + 'static;   // what its handlers refuse with
+    type Rejection: Diagnostic + Send + Sync + 'static;  // what its handlers refuse with
     const NAME: &'static str;                      // the Cover.domain; the registry key
     const RULES_VERSION: &'static str;             // the build's version: env!("CARGO_PKG_VERSION")
-    const CONFLICT_RESOLUTION: Option<ConflictResolution> = None;
-    const CONFLICT_RESOLUTION_BY_COMMAND: &'static [(&'static str, ConflictResolution)] = &[];
     // The event, and where it sits: its cover, sequence and whole EventMeta
     // (for the decision's own event, the event_meta it will be stamped with).
     fn apply(state: &mut Self::State, event: &Self::Event, page: &PageContext<'_>);
@@ -485,26 +412,25 @@ impl Registry {
 **The registry is two things.** Its `Catalog` is what is registered: every
 component listed by its `ComponentDescriptor` (generated for a Rust
 component, answered to `Describe` by a child, held to the same rules
-either way), with its configured resolutions and what its payloads are
-upcast through; the domain-blind steps (`check`, the coordinator's
-resolution, snapshot and start rule) and a `CatchUp` read only it. The
-`Registry` holds the catalog and the handler behind each entry: a domain's
-`CommandHandler` (and a typed domain's factory and upcaster), a policy's
-`PolicyComponent`, a projector's `ProjectorHandler`, a remote domain's
-`CoordinatorPort`. Every registration answers `Result<_, Misconfigured>`,
-the same way for every kind; a refused one lists and keeps nothing, and
-none panics. One validator decides it (decision 14.65):
-`validate_descriptor` holds every domain's descriptor, a Rust
+either way: its kind, a domain's state and rules version, a process
+manager's starting types, a policy's input and output domains, a
+projector's input domains), with what its payloads are upcast through; the
+domain-blind steps (`check`, the coordinator's snapshot choice and start
+rule) and a `CatchUp` read only it. The `Registry` holds the catalog and
+the handler behind each entry: a domain's `CommandHandler` (and a typed
+domain's factory and upcaster), a policy's `PolicyComponent`, a projector's
+`ProjectorHandler`, a remote domain's `CoordinatorPort`. Every registration
+answers `Result<_, Misconfigured>`, the same way for every kind; a refused
+one lists and keeps nothing, and none panics. One validator decides it
+(decision 14.65): `validate_descriptor` holds every descriptor, a Rust
 registration's and a child's alike (the host calls it on every Describe),
-to 14.42's rules, and the catalog adds its own (a name registered twice, an
-upcaster for another domain or none, a resolution its state does not
-support, a remote source, a projector of nothing). Each refusal is a spec
-key, verbatim: the descriptor rules' `COORDINATOR_REASON_*` readiness keys,
-`ROUTER_REASON_DUPLICATE_COMPONENT`, and the host's `HOST_REASON_*`
-composition keys.
-
-```rust
-```
+to 14.42's rules (a rules version, a state type, an input domain, a
+policy's output domain), and the catalog adds its own (a name registered
+twice, an upcaster for another domain or none, a remote source, a state
+type that is not the snapshot form's). Each refusal of the spec's is its
+key, verbatim (the descriptor rules' `ANGZARR_REASON_*` readiness keys,
+`ANGZARR_REASON_DUPLICATE_COMPONENT`); the rest are angzarr-embedded's own
+codes.
 
 The kernel awaits each dispatch (angzarr-router's `CommandHandler`,
 `PolicyComponent` and `ProjectorHandler` return futures; it holds them as
@@ -515,62 +441,43 @@ is awaited.
 **The routing seam** (the `target` module). The registry resolves a domain name
 to a `Target`: `Local`, the pipeline above over the kernel's store,
 through its handler (in this process or a child's); or `Remote`, a
-`CoordinatorPort`, a coordinator elsewhere that owns the domain's streams
-(`CommandHandlerCoordinatorService.Handle`). A domain is one or the other,
-never both (`Misconfigured::AlreadyRegistered`). A command for a remote
-domain, the application's or a policy's step, is checked and identified
-here, its command id fixed before it leaves so a retry is deduplicated
-there, then handed to the port; nothing of its stream is loaded or written
-here. **Remote stays remote** (owner rulings, 2026-10-30): a correlation
-its sender left unset is forwarded unset, so the remote coordinator
-applies its own defaults (a process manager's root, decision 14.31); and
-a policy or projector here whose source is a remote domain is refused at
-registration, in either order (`Misconfigured::RemoteSource`), since that
-domain's events are never here. Its answer comes back as a local domain's: its events (in the
-chain's books, not among the steps written here), DUPLICATE, or a refusal
+`CoordinatorPort`, a coordinator elsewhere that owns the domain's streams:
+a client's book goes to its `handle`, a reaction to its `deliver` (as a
+`ReactionDelivery`). A domain is one or the other, never both
+(`Misconfigured::AlreadyRegistered`). An input for a remote domain, the
+application's or a policy's step, is checked and identified here, its
+command id fixed before it leaves so a retry is deduplicated there, then
+handed to the port; nothing of its stream is loaded or written here.
+**Remote stays remote** (owner rulings, 2026-10-30): a correlation its
+sender left unset is forwarded unset, so the remote coordinator applies its
+own defaults (a process manager's root, decision 14.31); and a policy or
+projector here whose source is a remote domain is refused at registration,
+in either order (`Misconfigured::RemoteSource`), since that domain's events
+are never here. Its answer (`Answered`: its events and its
+`DeliveryOutcome`) comes back as a local domain's: its events (in the
+chain's books, not among the steps written here), DUPLICATE, or a failure
 by its status's class. A policy's position is written here as ever. Only
 the seam is the kernel's: a transport behind the port is the composition
 root's.
 
 **Business dispatch is angzarr-router's**, implemented once for every
-runtime: handlers and typed refusals. The kernel keeps the check,
-identification, upcasting, admission, snapshots, a policy's output checks,
-the store reads and writes, positions, resume and the edition-not-forked
-refusal.
-
-**A policy's answer is the kernel's to check** (decision 14.42). The
-kernel runs a policy through angzarr-router's `PolicyComponent` (a
-`PolicyDispatch`, or one in another process: `Registry::policy_component`,
-given the output domain its descriptor names),
-one triggering event at a time, and holds every command and fact of each reaction
-(`PolicyResponse.reactions`, by triggering page) to these rules
-(`check_reactions`): the policy's one destination
-(`COORDINATOR_REASON_POLICY_COMMAND_OUTSIDE_DESTINATION`), the trigger's edition, an unset one
-stamped with it (`COORDINATOR_REASON_POLICY_COMMAND_OUTSIDE_EDITION`), a named root
-(`COORDINATOR_REASON_POLICY_COMMAND_NO_ROOT`), no Handling, which only the target stamps
-(`COORDINATOR_REASON_POLICY_COMMAND_WITH_HANDLING`), no `fact_origin` of its own on
-either arm, the kernel stamping a fact's
-(`COORDINATOR_REASON_POLICY_COMMAND_FACT_ORIGIN`), the trigger's correlation, if any
-(`COORDINATOR_REASON_POLICY_COMMAND_OTHER_CORRELATION`), and no command id or causation
-other than the one the kernel stamps (`COORDINATOR_REASON_POLICY_COMMAND_OTHER_IDENTITY`,
-naming the `field`). One failure refuses the whole answer
-as the policy's bug: nothing is delivered, the trigger is dead-lettered
-and the position stays.
+runtime: handlers, the fold and typed refusals. The kernel keeps the check,
+identification, upcasting, admission, the staleness check, snapshots, a
+policy's output checks, the store reads and writes, positions, resume and
+the edition-not-forked refusal.
 
 **A domain is a router table.** `Registry::register` builds angzarr-router's
 `DomainDispatch` over `D::State`: it folds each event, upcast by the kernel
 before it is handed over, through `D::apply`, and answers
-`D::RULES_VERSION` with every decision; a state with a snapshot form has the state's codec (`with_state_codec`: a
-delivered starting state restored onto a fresh state, and the state every
-answer carries); and it resolves COMMUTATIVE by `State::changed`. The
-domain's handlers are registered on it: `#[aggregate]` and
-`#[process_manager]` generate them (`markup::Routed`); a hand-written
-domain registers its own (`on_command`, `on_fact`, `on_refused`).
-`Registry::command_handler` registers any `CommandHandler` (a
-`DomainDispatch` built by hand, or a handler in another process behind
-one) with its `ComponentDescriptor`: its state descriptor, rules version
-and a process manager's starting types. `Kernel::handle_any` handles books
-for such a domain.
+`D::RULES_VERSION` with every decision; a state with a snapshot form has
+the state's codec (`with_state_codec`: a delivered starting state restored
+onto a fresh state, and the state every answer carries). The domain's
+handlers are registered on it: `#[aggregate]` and `#[process_manager]`
+generate them (`markup::Routed`); a hand-written domain registers its own
+(`on_command`, `on_fact`). `Registry::command_handler` registers any
+`CommandHandler` (a `DomainDispatch` built by hand, or a handler in another
+process behind one) with its `ComponentDescriptor`. `Kernel::handle_any`
+handles books for such a domain.
 
 **Where a descriptor comes from** (decision 14.42: no component carries
 one; they are generated). A marked-up process manager's starting types are
@@ -589,66 +496,79 @@ a dependency of the kernel and of its tests, and the markup already holds
 every fact the descriptor has.
 
 **The kernel upcasts every incoming payload** (decision 14.39) before it
-decides anything by its type (the resolution per command type, a process
-manager's start rule) and before dispatch, through the domain's
-`UpcastPort`: a typed domain's `Upcaster`, or the port
-`Registry::upcast_with` gives a domain registered as a bare
-`CommandHandler` (its upcaster sidecar). The payload goes as a one-page
-`UpcastRequest`; the router is handed the current type only. A payload
-whose upcast fails is `KernelError::Upcast`, reported after the sequence
-check. The stored events it hands on go through the same port (C-0584,
-C-0586): a load's for the router, as one request, and each event a policy
-reads, one page at a time; the router upcasts nothing.
+decides anything by its type (a process manager's start rule) and before
+dispatch, through the domain's `UpcastPort`: a typed domain's `Upcaster`,
+or the port `Registry::upcast_with` gives a domain registered as a bare
+`CommandHandler` (its upcaster sidecar). A lone payload goes as one
+`UpcastRequest` and comes back as one answer with no sequence; a stream's
+pages go as one request and come back keyed by sequence, each page's
+exactly once (a meta-event page is kept as it is and never sent): any other
+keys are the rule's bug (`UpcastError::AnswerKeys`). The router is handed
+the current type only. A payload whose upcast fails is
+`KernelError::Upcast`, reported after the sequence check. The stored
+events it hands on go through the same port: a load's for the router, as
+one request, and each event a policy reads; the router upcasts nothing.
 
-**Dispatch.** The kernel hands the router the `ContextualCommand`: the
-usable snapshot and the events after it (upcast), the command with its ids
-and its handling resolved, the nonce, and the instant the input is
-accepted at (`ContextualCommand.recorded_at`). An unknown command type is
-the router's ROUTER_REASON_UNKNOWN_COMMAND_TYPE, an unknown fact type ROUTER_REASON_NO_FACT_HANDLER, a
-refusal its source has no handler for ROUTER_REASON_NO_REFUSAL_HANDLER: the router's own
-errors on malformed input, INTERNAL, bugs. The kernel answers the first two
-with `type_url` the type as sent and `upcast_type_url` the type the router
-was handed (the same when no rule applied).
+**Dispatch.** The kernel hands the router a `HandleRequest`: the input
+(its payload upcast, its ids), the history (the usable snapshot and the
+events after it, upcast, its next sequence the head), the instant the
+input is accepted at (`recorded_at`) and a reaction's causation. An
+unknown command type is the router's ANGZARR_REASON_UNKNOWN_COMMAND_TYPE,
+an unknown fact type ANGZARR_REASON_NO_FACT_HANDLER: the router's own
+errors on malformed input, INTERNAL, bugs. The kernel answers both with
+`type_url` the type as sent and `upcast_type_url` the type the router was
+handed (the same when no rule applied). The answer (`HandleResponse`) is
+the events, the state and the rules version; an answer reporting another
+rules version than the registered one (`KernelError::RulesVersionMismatch`)
+or a state of another type than the registered state
+(`KernelError::StateTypeMismatch`) is the handler's bug: nothing kept,
+dead-lettered.
 
 **Four classes of error, by gRPC status** (decision 14.37 and the owner's
 rulings of 2026-10-29), decided by the kernel itself in one place
 (`angzarr_embedded::class`, decision 14.42; the router answers a status and a key and
-never classifies):
+never classifies). Every failure is a status (AIP-193): there is no
+in-band refusal.
 
 | Class | Statuses | What the kernel does |
 |---|---|---|
-| business, fatal | FAILED_PRECONDITION, INVALID_ARGUMENT, NOT_FOUND, ALREADY_EXISTS, OUT_OF_RANGE, PERMISSION_DENIED | a rejection, `Failure::Rejected(Rejected)`, `Recovery::Business`: to the caller, or the issuing policy's refusal path; never retried, never dead-lettered |
-| business, immediate | ABORTED (a stale or overlapping command, a STRICT command's lost race with its sender's expected sequence, or a handler's own choice) | back to an outside caller at once, to reload (`Recovery::Retry`), never dead-lettered; a policy's step, whose caller is the kernel, is reloaded and run again under the capped backoff, then dead-lettered. Any other race lost at the write is run again for any caller, under its cap (*Same-stream concurrency*) |
+| business, fatal | FAILED_PRECONDITION, INVALID_ARGUMENT, NOT_FOUND, ALREADY_EXISTS, OUT_OF_RANGE, PERMISSION_DENIED | a typed refusal, `Failure::Rejected(Rejected)`, `Recovery::Business`: to the caller, or the issuing policy's Translate; never retried |
+| business, immediate | ABORTED (a handler's own choice) | back to an outside caller at once, to reload (`Recovery::Retry`), never dead-lettered; a policy's step, whose caller is the kernel, is reloaded and run again under the capped backoff, then dead-lettered. A race lost at the write is run again for any caller, under its cap (*Same-stream concurrency*) |
 | bug, fatal | INTERNAL, UNKNOWN, DATA_LOSS | `KernelError::Router`, `Recovery::Bug`, dead-lettered at once |
 | bug, retryable | every other status (UNAVAILABLE, DEADLINE_EXCEEDED and RESOURCE_EXHAUSTED, a handler's in process or a remote child's as it picked them; UNIMPLEMENTED; a remote child's CANCELLED or UNAUTHENTICATED, and a call that failed on the way, arrive UNAVAILABLE) | retried under the capped backoff, then dead-lettered; `Recovery::Retry` |
 
-A handler's refusal carries its code and args (a typed refusal is keyed
-ROUTER_REASON_COMMAND_REFUSED, its object's type as `refusal_type`, the object beside).
-A handler the kernel dispatches in this process also keeps the refusal it
-made, its `Domain::Rejection`, beside them: the caller matches it as a
-value (`Rejected::rejection::<D::Rejection>()`), never by its code, and
-decides nothing twice. The kernel keeps it for the dispatch being polled
-alone, so concurrent dispatches never see each other's. A refusal from
-another process, and the router's on a domain's behalf, is its code and
-args alone.
-A marked-up command handler, typed-refusal handler or continuation step
-fails with `markup::Failed`, one variant per class:
+**A refusal is typed** (decision 14.95). A command refuses only with a
+typed refusal object its `(command).refuses` lists, keyed
+ANGZARR_REASON_COMMAND_REFUSED, its object's type as `refusal_type`, the
+object in the status details. A caller reads it from `Rejected`: its
+business status (`status`), the object (`refusal_object`, or decoded,
+`refusal::<T>()`), its report (`report`); and, from a handler the kernel
+dispatched in this process, the refusal as its handler made it
+(`rejection::<R>()`), matched as a value, never by its code. The kernel
+keeps that for the dispatch being polled alone, so concurrent dispatches
+never see each other's. A failure under a business status with no typed
+object is not a refusal: it is `KernelError::Router`, keeping its code,
+status and args.
 
-- `Failed::Rejected` (business, fatal): a refusal under its business
+A marked-up command handler or continuation step fails with
+`markup::Failed`, one variant per class:
+
+- `Failed::Rejected` (business, fatal): a typed refusal under its business
   status (FAILED_PRECONDITION by default; any of the six with
-  `Failed::with_status`, a typed refusal still keyed ROUTER_REASON_COMMAND_REFUSED, and
-  `Rejected::status` reads it back).
+  `Failed::with_status`, still keyed ANGZARR_REASON_COMMAND_REFUSED, and
+  `Rejected::status` reads it back). A command that lists no refusal
+  cannot refuse: its `Err` is `Failed<Unrefusable>`.
 - `Failed::Immediate` (business, immediate; `Failed::immediate(&why)`):
   ABORTED under `why`'s own code and args, angzarr-router's
   `CodedError::immediate`: back to an outside caller at once, nothing
   written; a policy's step reloaded and run again under the cap, then
   dead-lettered.
 - `Failed::Bug` (bug, fatal; `Failed::bug(&broke)`): angzarr-router's
-  `CodedError::bug`, INTERNAL ROUTER_REASON_UNHANDLED_HANDLER_ERROR, dead-lettered at
-  once.
+  `CodedError::bug`, INTERNAL ANGZARR_REASON_UNHANDLED_HANDLER_ERROR,
+  dead-lettered at once.
 - `Failed::RetryableBug` (bug, retryable;
   `Failed::retryable_bug(status, &down)`): angzarr-router's
-  `CodedError::retryable_bug`, ROUTER_REASON_UNHANDLED_HANDLER_ERROR under the
+  `CodedError::retryable_bug`, ANGZARR_REASON_UNHANDLED_HANDLER_ERROR under the
   `markup::RetryableStatus` the handler picks, its cause as a fatal bug's;
   retried under the cap ([below](#retrying-capped-then-dead-lettered)),
   then dead-lettered with its `retry_count`.
@@ -662,42 +582,40 @@ RESOURCE_EXHAUSTED (`ResourceExhausted`) means wait longer before
 resending: a quota or a capacity limit was hit. Each goes out exactly as
 the handler picked it.
 A handler fails deliberately as a bug with angzarr-router's
-`CodedError::bug`, which answers ROUTER_REASON_UNHANDLED_HANDLER_ERROR with the
+`CodedError::bug`, which answers ANGZARR_REASON_UNHANDLED_HANDLER_ERROR with the
 handler's own code and args as its cause (`cause=<code>`,
 `cause.<arg>=<value>`); the router catches a handler's panic, its cause
-ROUTER_REASON_HANDLER_PANICKED, and an error without a code of its own is
-ROUTER_REASON_UNHANDLED_HANDLER_ERROR too. Every router reason is forwarded under
-itself, verbatim, with the router's args (`KernelError::Router`), its English
-the spec's catalog (decision 14.60); a handler's own code is forwarded the
-same way, its English the application's. A remote handler that cannot be reached
-(`COORDINATOR_REASON_HANDLER_UNAVAILABLE`, UNAVAILABLE) is
+ANGZARR_REASON_HANDLER_PANICKED, and an error without a code of its own is
+ANGZARR_REASON_UNHANDLED_HANDLER_ERROR too. Every key the router answers is
+forwarded under itself, verbatim, with the router's args
+(`KernelError::Router`), its English the spec's catalog (decision 14.60); a
+handler's own code is forwarded the same way, its English the
+application's. A remote handler that cannot be reached
+(`ANGZARR_REASON_HANDLER_UNAVAILABLE`, UNAVAILABLE) is
 `KernelError::HandlerUnavailable`, a retryable bug. The kernel's limits
 travel under the spec's keys too (decision 14.49): a chain deeper than its
-limit is `COORDINATOR_REASON_CHAIN_TOO_DEEP`, a decision past its step limit
-`ROUTER_REASON_TOO_MANY_STEPS`, each INTERNAL with its `limit`; a policy's
-command for a domain the kernel cannot route is
-`COORDINATOR_REASON_POLICY_COMMAND_UNKNOWN_DOMAIN`, never delivered: its
-triggering event is dead-lettered (`rejected_events`, C-0736), the letter
-naming the command's domain and type, and the policy's position holds at
-the trigger.
+limit is `ANGZARR_REASON_CHAIN_TOO_DEEP`, INTERNAL with its `limit`. A
+decision with continuation steps runs as many steps as it takes: there is
+no step limit.
 
 **What a handler reads.** The router's `CommandContext`: the stream, the
-input's command id, correlation and fact origin, the conflict under
-AGGREGATE_HANDLES, and the instant the input was accepted at, its
-`recorded_at` (`max(Sampled::now, the stream's last)`): the kernel stamps
-it on the `ContextualCommand`, the events are recorded at it, and a
-marked-up handler's `Context` reads it there.
+input's arm (a command's expected sequence, or a fact's origin), its
+command id and correlation, a reaction's causation, and the instant the
+input was accepted at, its `recorded_at` (`max(Sampled::now, the stream's
+last)`): the kernel stamps it on the `HandleRequest`, the events are
+recorded at it, and a marked-up handler's `Context` reads it there.
 
-**Facts** are recorded, never refused: a fact handler returns its events
-(the router's `FactRecord`: the first as the record, the rest as its flags).
-A panicking fact handler is a bug: the router catches it
-(ROUTER_REASON_UNHANDLED_HANDLER_ERROR, cause ROUTER_REASON_HANDLER_PANICKED), the chain fails
-(`KernelError::Router`, `Recovery::Bug`), nothing is written, and the
-kernel logs a [dead letter](#dead-letters-durable-logged-and-answered).
+**Facts** are recorded, never refused: a fact handler returns its events.
+A fact's failure is never a refusal: whatever its handler answers is its
+business process's bug (decision 14.72). A fact the kernel cannot record
+(its handler's bug, a retryable failure at its retries, a race at its cap)
+is dead-lettered, and its sender is answered
+`KernelError::FactDeadLettered` (INTERNAL
+`ANGZARR_REASON_FACT_DEAD_LETTERED`, never retryable).
 
 **Business output is payloads only.** The kernel builds the pages: their
 sequences and their `EventMeta` (angzarr-router's `CommandContext::event_meta`,
-of the router's context of the `ContextualCommand` it handed the handler:
+of the router's context of the `HandleRequest` it handed the handler:
 the one builder, which the markup and the router's own decide path also fold
 a decision's own events with, so an applier reads at decide time the
 metadata replay hands it).
@@ -708,16 +626,16 @@ Every event carries angzarr's `EventMeta`, the same in both runtimes:
 
 | Field | angzarr-embedded stamps |
 |---|---|
-| `causation` | the event's direct cause, `command_id`: the producing command's (step 2: a client's, a fact's or a policy's), its deduplication key |
-| `fact` | the fact's `FactOrigin`, for a fact; unset otherwise |
-| `correlation_id` | the producing command's; never unset |
+| `causation` | the event's direct cause, its deduplication key: `command { command_id }`, the producing command's (a client's or a reaction's), or `fact { command_id, origin }`, the producing fact's derived id and its `FactOrigin` |
+| `correlation_id` | the producing input's; never unset |
 | `recorded_at` | `max(Sampled::now, the stream's last recorded_at)`: non-decreasing per stream, one instant per chain, so as-of-time reads are prefixes |
 | `rules_version` | the version the answer reports, in full, which must be the registered one (an answer reporting another is refused, `KernelError::RulesVersionMismatch`, with nothing kept) |
 
-**No trigger on a policy command's events**: a policy's command names its trigger
-(`CommandPage.causation_id`), its events name the command. The edge from
-trigger to command is the command's own causation, for tracing. Readers find a policy command's events by
-correlation and group them by `command_id`.
+**No trigger on a reaction's events**: a reaction names its trigger
+(`ReactionDelivery.causation`), its events name the command or fact. The
+edge from trigger to reaction is the reaction's own causation, for tracing.
+Readers find a reaction's events by correlation and group them by
+`command_id`.
 
 **No actor**, anywhere: who did it belongs in the deployment's separate
 security log, written by the application with the command id, so erasing
@@ -730,26 +648,32 @@ metadata, for the decision's own events as at replay.
 
 A decoded event is an `Envelope<E>`: a checked `EventPage`, its metadata's
 required fields outside their `Option`s (`causation()`, the generated
-`v1::event_meta::Causation`; `correlation_id()`, `recorded_at()`,
-`rules_version()`; `command_id()`, the one arm of `causation()`), its
-payload decoded. A stored page
-whose meta lacks one is `ReplayError::IncompleteMeta`.
+`v1::event_meta::Causation`; `command_id()`, its id on either arm;
+`fact()`, a fact's origin; `correlation_id()`, `recorded_at()`,
+`rules_version()`), its payload decoded. A stored page whose meta lacks
+one is `ReplayError::IncompleteMeta`. A page holding a meta-event (an
+edition's creation) is the stream's, never a domain event: it is counted
+in the stream's length and folded by no domain.
 
 ## Process managers
 
 A process manager is a domain (angzarr decision 14.31). Its inputs are
-commands, which policies send it, and facts (timeouts, webhooks); it never
-subscribes to another domain's events. So angzarr-embedded needs nothing of its own
-for one: its commands and facts take the five steps like any domain's, its
-events name the command or the fact's derived id as their cause, and its
-deduplication is `find_command`'s, by command id and fact id. Its start
-rule is the kernel's: for a stream with no instance, an input whose type
-name after upcasting is not one of its descriptor's `starting_types` is
-refused `COORDINATOR_REASON_PM_NO_INSTANCE` if a command and skipped if a fact (decisions
-14.41 and 14.42), a remote process manager's as an in-process one's. Its root is
-the one its input names, whatever the input's correlation (decision 14.36):
-one instance may take inputs of several correlations, its events carrying
-each input's; a correlation left unset is given the root.
+commands, which policies send it, and facts (timeouts, webhooks, refusal
+facts); it never subscribes to another domain's events. So
+angzarr-embedded needs nothing of its own for one: its inputs take the five
+steps like any domain's, its events name the command or the fact as their
+cause, and its deduplication is `find_command`'s, by command id and fact
+id. Its start rule is the kernel's: for a stream with no instance, an
+input whose type name after upcasting is not one of its descriptor's
+`starting_types` is refused FAILED_PRECONDITION
+`ANGZARR_REASON_PM_NO_INSTANCE` (naming the stream and the type), and
+never delivered (decisions 14.41 and 14.42), a remote process manager's as
+an in-process one's: a client's command is answered so, and a fact, which
+is never refused, fails so too, dead-lettered (C-0593), as is a reaction
+so refused. Its root is the one its input names, whatever the input's
+correlation (decision 14.36): one instance may take inputs of several
+correlations, its events carrying each input's; a correlation left unset
+is given the root.
 
 ## Rules versions
 
@@ -770,14 +694,13 @@ never needs a snapshot migration: the next load replays.
 
 ```rust
 pub trait Policy: Send + Sync + 'static {
-    const NAME: &'static str;            // its commands' component; its position's handler
+    const NAME: &'static str;            // its outputs' component; its position's handler
     type Source: EventSource;            // a Domain, or a child-hosted domain's name and events
     type Target: CommandTarget;          // a Domain, or a remote domain's name and commands
-    const ANSWERS_REFUSALS: bool = false; // every marked-up policy answers them
     fn on_event(&self, event: &Any, ctx: &PolicyContext)
         -> Result<Option<Commands<Self::Target>>, Report>;
-    fn on_refused(&self, refusal: &Refusal, ctx: &CommandContext)    // the refused command's, whole
-        -> Result<Any, Report> { /* CommandRefused, passed through */ }
+    fn on_refused(&self, refused: &Refused) -> Result<Any, Report>   // its ONE Translate callback
+        { /* ANGZARR_REASON_NO_REFUSAL_HANDLER: a bug */ }
 }
 registry.policy(ListToDrawSystems);                          // ONE list, in registration order
 let kernel = Kernel::new(&registry);                          // .limit(n), default 8; .log_with(&log)
@@ -786,82 +709,88 @@ kernel.resume(&store, &sampled).await?;                      // -> Recorded
 ```
 
 - **One policy trait, one list.** A hand-written policy implements
-  `Policy`; `#[policy]` generates the same impl (answering refusals). Every
-  policy is registered in the registry's one list, and for each event of a
-  source, every policy of that source runs in the order registered.
-- **A policy emits what its target declares** (angzarr decision 14.69): a
-  command for a type its target decides, which it may refuse, and a fact
-  for a type it ingests, which it records and never refuses
-  (`Commands::to`, `Commands::fact`). Either is a `CommandBook` the kernel
-  builds (the target's cover, the payload packed as `Any`, no ids, no
-  handling; a fact with the origin the kernel stamps), checked and
-  identified from its trigger (the reaction id, commands and facts in one
-  index space), then taken through steps 3 to 5 in its target. A fact
-  whose handler fails is dead-lettered there and parked, and its step is
-  done.
+  `Policy`; `#[policy]` generates the same impl. Every policy is registered
+  in the registry's one list, and for each event of a source, every policy
+  of that source runs in the order registered.
+- **React once per trigger.** The kernel calls a policy once per triggering
+  event (the router's `ReactRequest`), and the policy answers its outputs
+  (`ReactResponse.outputs`): each a root and a body, a command for a type
+  its target decides, which it may refuse, or a fact for a type it ingests,
+  which it records and never refuses (angzarr decision 14.69;
+  `Commands::to`, `Commands::fact`).
+- **A policy's outputs are the kernel's to check and address** (decision
+  14.42; `check_outputs`). Every output names its root, 16 bytes
+  (`ANGZARR_REASON_POLICY_COMMAND_NO_ROOT`, naming the destination domain
+  and the type); has a body (a body-less output is the policy's bug); and
+  is not the trigger's own stream (`ANGZARR_REASON_POLICY_TARGETS_ITS_TRIGGER`);
+  an output for a domain the kernel cannot route is
+  `ANGZARR_REASON_POLICY_COMMAND_UNKNOWN_DOMAIN`. The kernel addresses each
+  to the policy's output domain at its root, in the trigger's edition (an
+  output names none, decision 14.78), and builds its `ReactionDelivery`:
+  its body, its derived command id, the trigger's correlation, the trigger
+  as its causation and the policy as its component. One failure refuses the
+  whole answer as the policy's bug: nothing is delivered, the trigger is
+  dead-lettered (`rejected_events`) and the position stays.
 - **Every step is committed on its own.** Atomicity covers ONE handling
   step, never a chain: a step is one atomic write to the store (see *The
   store port*), one stream's events at the length the step loaded, with
   the step's positions. The command's write comes first; then each policy
-  of its domain runs on those events, each of its commands a step of its
+  of its domain runs on those events, each of its outputs a step of its
   own in its target, the policy's position on the source written with the
   trigger's last target's step (or alone, when no step writes it). A step
   that writes events sets off its stream's policies in turn: the chain
   settles stream by stream in the order written, and the call waits for it.
 - **A failing step keeps every write before it.** Nothing is rolled back.
   The call fails with the path to the step (`Failure::Downstream { path,
-  error }`, the path a list of `Step { stream, cause }`). A refused command
-  of a policy that does not answer refusals is dead-lettered and its
-  position moves past it. A policy's own error and a handler's bug in the
-  step are dead-lettered and move it past too, unless the kernel says to
-  stay ([below](#a-policys-bug-and-its-position)). Any other bug (a
-  malformed policy book, the depth limit, the kernel refusing the policy's
-  answer) or a store failure writes nothing more: the position stays where
-  the last committed step put it, and `resume` runs the step again.
-- **A refusal is a fact.** A policy that answers refusals (every marked-up
-  one) is not failed by its target's refusal: its `on_refused` answer goes
-  to the stream of the triggering event as a fact, a step of its own,
-  whose id is the refused command's and whose cause the trigger; a refusal
-  its source has no handler for is dead-lettered. The target recorded
-  nothing. The kernel builds and addresses every refusal fact (decision
-  14.42): the policy answers a translated payload, or none, and with none
-  the kernel passes the refusal through as angzarr's `CommandRefused`. A
-  translated fact on the wire that is more than a payload (its own cover,
-  handling or identity, no page, not a fact) is the policy's bug.
+  error }`, the path a list of `Step { stream, cause }`). A policy's own
+  error and a handler's bug in the step are dead-lettered and move its
+  position past it, unless the kernel says to stay
+  ([below](#a-policys-bug-and-its-position)). Any other bug (a malformed
+  reaction, the depth limit) or a store failure writes nothing more: the
+  position stays where the last committed step put it, and `resume` runs
+  the step again.
+- **A refusal is Translated into a fact** (decision 14.89). A command its
+  target refuses with a typed refusal reaches its policy's ONE Translate
+  callback (`Policy::on_refused`, the router's `TranslateRequest`: the
+  trigger, the refused `ReactionDelivery` and the refusal, its status and
+  typed object; `Refused` in Rust). The fact it answers
+  (`TranslateResponse.fact`, a payload) goes to the stream of the
+  triggering event as a step of its own, whose id is the refused command's
+  and whose cause the trigger. A policy that does not translate answers a
+  bug (`ANGZARR_REASON_NO_REFUSAL_HANDLER`), and the refused command is
+  dead-lettered with its refusal. The target recorded nothing. A reaction
+  the framework refuses (its edition stream not forked, a process manager
+  with no instance) is dead-lettered and never translated.
 - **Resumed by position.** A policy's position on a source stream is the
   next sequence it has yet to handle, in angzarr-ports' `PositionStore`:
   its record of what it processed (`Processed`), which a purge never
-  touches. `Kernel::resume` first tells each policy of every stream of its
-  record the store no longer lists (`Kernel::forget_gone`: its gone book,
-  then its position put back to 0; decision 14.68).
-  `Kernel::resume` runs, for every stream of every policy's source, each
-  policy on each event from its position on: after a crash, after a failed
-  step, or for a policy new to a domain with history. A command owes
-  steps for its own events only: a fresh command runs its policies on its
-  events, moving each position past them and past any history before
-  them, and a retried command answered DUPLICATE settles what its own
-  events still owe, so a client's retry after a crash finishes the chain.
-  A step run again is deduplicated by its derived command id. So a policy
-  new to a domain with history runs over it only through `resume` before
-  the stream's next command. The host's `run` calls `resume` once at start,
-  before it hands back its `App`, so what a crash left owed is run first.
+  touches. `Kernel::resume` first forgets, for each policy, every stream of
+  its record the store no longer lists (`Kernel::forget_gone`: its
+  position put back to 0; decision 14.68). `Kernel::resume` runs, for
+  every stream of every policy's source, each policy on each event from its
+  position on: after a crash, after a failed step, or for a policy new to a
+  domain with history. A command owes steps for its own events only: a
+  fresh command runs its policies on its events, moving each position past
+  them and past any history before them, and a retried command answered
+  DUPLICATE settles what its own events still owe, so a client's retry
+  after a crash finishes the chain. A step run again is deduplicated by its
+  derived command id. So a policy new to a domain with history runs over it
+  only through `resume` before the stream's next command. The host's `run`
+  calls `resume` once at start, before it hands back its `App`, so what a
+  crash left owed is run first.
 - **Depth limit** (`Kernel::limit`, default 8): `KernelError::ChainTooDeep`,
   the cycle check for a chain that may legitimately revisit a stream.
 - **Targeting from the event**: `on_event` receives the event with its
   trigger and correlation, so a policy may forward only some events.
 - **A policy's error is a bug.** Policies should not fail for business
   reasons: they react to events the application's own domains created, so
-  an `Err` is a bug. `on_event`'s error (a marked-up policy's handler's,
-  or a marked event that does not decode), `on_refused`'s (a translating
-  callback's, which reads the refused command's whole context; or a
-  refused command of a type it translates that does not decode) and an error of
-  the source's `#[on_refused]` handler fail the step as `StepError::PolicyFailed`, a
-  defect (`Recovery::Bug`), never a business `Rejected`: the step is
-  dead-lettered as a handler's bug, the error's code and args its
-  `cause`, never English, and the policy's position moves past the trigger, so nothing
-  runs it again. A translating callback answering the router's error (a
-  remote policy's `OnRefused`) is dead-lettered the same way, under that
-  error's key, with the refused command (C-0619).
+  an `Err` is a bug. `on_event`'s error (a marked-up policy's handler's, or
+  a marked event that does not decode) and `on_refused`'s (its Translate
+  callback's) fail the step as `StepError::PolicyFailed`, a defect
+  (`Recovery::Bug`), never a business `Rejected`: the step is dead-lettered
+  as a handler's bug, the error's code and args its `cause`, never English.
+  A translated fact its source fails to record is dead-lettered at the
+  source, and the step completes.
 - <a id="a-policys-bug-and-its-position"></a>**A policy's bug and its
   position** are a setting: `Kernel::on_policy_bug(OnPolicyBug)`, one for
   every policy. A policy step that hits a bug (the policy's own error,
@@ -885,13 +814,13 @@ kernel.resume(&store, &sampled).await?;                      // -> Recorded
 ### Projectors
 
 A projector is ONE port, angzarr-router's `ProjectorHandler`: handed a
-book of one stream's events, it answers a `Projection`. A hand-written
-one, a marked-up one (`#[projector]`, through `markup::Projected`, its one
-instance handed each page it marks) and a remote one (a child's
-`ProjectorService`) are the same port, with one rule for failures
-(decision 14.41: a bug dead-lettered at once; a retryable failure or an
-ABORTED retried under `OnRetryable`, then dead-lettered). It runs two
-ways:
+book of one stream's events (`ProjectRequest`), it answers a
+`Projection`. A hand-written one, a marked-up one (`#[projector]`, through
+`markup::Projected`, its one instance handed each page it marks) and a
+remote one (a child's `ProjectorService`) are the same port, with one rule
+for failures (decision 14.41: a bug dead-lettered at once; a retryable
+failure or an ABORTED retried under `OnRetryable`, then dead-lettered). It
+runs two ways:
 
 - **Inline**, registered (`Registry::projector_handler`, or
   `Registry::projector` for a marked-up one): after each step, it is handed
@@ -902,8 +831,8 @@ ways:
   (`step`, `step_if_changed`, which reads nothing while the store's
   change token is unchanged) or as a loop (`follow`, on the caller's
   timer), on the caller's runtime and no thread of its own. Each step
-  reads one moment of the store (a read unit) and hands every
-  main-timeline stream of the sources what it is owed, from where the
+  reads one moment of the store (a read unit) and hands every stream of
+  the sources, an edition's as main's, what it is owed, from where the
   projector is on that stream. Where it is is kept per stream, never
   across streams: **held** in memory (`CatchUp::new`, for a read model
   held in memory, rebuilt by its first step), or **stored** in the
@@ -911,12 +840,11 @@ ways:
   durable read model resumes, as a policy does). Either way it is the
   projector's record of what it handled, angzarr-ports' one capability for
   it, `Processed` (a held catch-up's is a `HeldRecord`), which a purge
-  never touches (decision 14.68): each step compares it with the store's
-  listing (`ListStreams`), and a stream it holds that the store no longer
-  lists is handed gone and forgotten, whether it was purged while a
-  catch-up ran or not. A book the projector
-  fails keeps its stream where it was, for the next step; the other
-  streams go on.
+  never touches (decision 14.68): each step compares it with the read
+  unit's listing of the sources' streams, and a stream it holds that the
+  store no longer lists is handed gone and forgotten, whether it was
+  purged while a catch-up ran or not. A book the projector fails keeps its
+  stream where it was, for the next step; the other streams go on.
 
 What a projector is handed, either way: a stream's events after the last
 it was handed of it; a book from sequence 0 starts the stream afresh (one
@@ -958,7 +886,8 @@ pub trait EventStore {
     fn find_command(&self, stream: StreamRef<'_>, command_id: Uuid) -> impl Future<Output = Result<Vec<EventPage>, StoreError>>;
     fn covers(&self, domain: &str) -> impl Future<Output = Result<Vec<Cover>, StoreError>>;
 }
-pub struct Write<'a> { events: Option<Append<'a>>, positions: &'a [(PositionKey<'a>, u64)], outbox: &'a [OutboxEntry] }
+pub struct Write<'a> { events: Option<Append<'a>>, positions: &'a [(PositionKey<'a>, u64)],
+    outbox: &'a [OutboxEntry], dead_letters: .. }
 pub trait SnapshotStore { /* read_snapshot, write_snapshot: its own call, never in a write */ }
 pub trait PositionStore { fn position(&self, key: PositionKey<'_>) -> impl Future<Output = Result<u64, StoreError>>; }
 pub trait Store: EventStore + SnapshotStore + PositionStore {}
@@ -966,11 +895,12 @@ pub trait Store: EventStore + SnapshotStore + PositionStore {}
 
 **There is no unit of work.** A handling step makes ONE atomic `write`:
 optionally one stream's pages at the length the step loaded, with the
-step's positions (and, in angzarr, its outbox entries), landing together or
-not at all. Nothing is held open between a step's reads and its write; a
-race is caught by the expected length (`StoreError::Conflict`: the step
-runs again under its cap, and its dedup lookup finds the winner's events
-if it was the same command). Stores take `&self`, so one handle is shared.
+step's positions and dead letters (and, in angzarr, its outbox entries),
+landing together or not at all. Nothing is held open between a step's
+reads and its write; a race is caught by the expected length
+(`StoreError::Conflict`: the step runs again under its cap, and its dedup
+lookup finds the winner's events if it was the same command). Stores take
+`&self`, so one handle is shared.
 
 **Absent is empty.** A stream with no events reads as an empty `Slice` at
 0, so a snapshot whose stream has no events is never used.
@@ -985,7 +915,7 @@ replay is the kernel's `KernelError::Unreadable`; the store's
 | `domain`, `edition`, `root` | the cover; main's edition `''` on SQLite |
 | `sequence` | `EventPage.sequence` |
 | `page` | the `EventPage` bytes as written |
-| `command_id` | `EventMeta.causation.command_id` |
+| `command_id` | `EventMeta.causation`'s command id, on either arm |
 | `correlation_id`, `recorded_at` | the rest of `EventMeta`, for `ReadByCorrelation` and `ReadUntilTime` |
 
 Unique on (`domain`, `edition`, `root`, `sequence`); a **non-unique index on
@@ -1013,17 +943,22 @@ stream never mixes two moments), `Watch` (a change token: equal tokens
 from one handle mean nothing was committed between), `ReadUntilTime`,
 `ReadByCorrelation`, `ListStreams`, `Processed` (one handler's record,
 its positions per stream, which a purge never touches: what a driver
-compares with `ListStreams` to find a stream gone) and the `Outbox`.
+compares with the store's listing to find a stream gone), `Editions`,
+`DeadLetterStore` and the `Outbox`.
 
-**Editions** are per-stream forks (14.32), their lifecycle angzarr's. An
-outside input to an edition stream never forked is refused before its
-handler runs (`COORDINATOR_REASON_EDITION_NOT_FORKED`, FAILED_PRECONDITION,
-C-0633), the fork read off the stream step 3 loads (its creation event, or
-a snapshot, which never falls through); a policy's command to one is
-refused by the store at the write (`angzarr-ports-store-edition-not-forked`).
-angzarr-embedded creates no edition. A handler's answer whose events book
-names another stream is refused before any write and dead-lettered
-(`COORDINATOR_REASON_EVENTS_NOT_ITS_STREAM`, C-0590).
+**Editions** are per-stream forks, forked explicitly only (decisions 14.32,
+14.106 and 14.107). A stream is forked into an edition by a write whose
+first page is the framework's meta-event `EditionCreated`
+(`MetaEvent.created`, an empty message: the fork names nothing, and main
+has no concept of forks); an edition stream never forked reads as main's.
+The kernel reads the fork off the stream step 3 loads, and refuses every
+input to an unforked edition stream, a client's or a reaction's, before
+business code (`ANGZARR_REASON_EDITION_NOT_FORKED`, FAILED_PRECONDITION):
+a client is answered, a reaction is dead-lettered and never translated.
+The kernel never forks. An edition is deleted by enumeration: each of its
+streams removed through the store's `Editions::remove_edition_stream`
+(nothing appended, nothing propagated), after which it reads as main's
+again.
 
 On SQLite (angzarr-store-sqlite) a write is one `BEGIN IMMEDIATE`, begun
 and committed inside the call; the file is kept in WAL, so a reader waits
@@ -1038,9 +973,10 @@ outbox sequence and no order across streams (owner ruling 2026-10-31). A
 write that appends no events (a policy's step) orders its entries on its
 trigger's stream, at the triggering event's sequence (owner ruling
 2026-10-31 on angzarr-ports' FLAG(O7)); one with neither events nor
-positions keeps them under no stream, at 0. An edition stream there is forked by a creation event
-as its first own event and reads main below the fork; the edition
-administration (the `Editions` port) is not implemented.
+positions keeps them under no stream, at 0. An edition stream there is
+forked by its `EditionCreated` page as its first own event and reads main
+below the fork; the edition administration (the `Editions` port) is not
+implemented.
 
 ## Snapshots
 
@@ -1054,16 +990,15 @@ step's write, and a cache: its failure fails nothing. A state with no
 snapshot form returns none, and none is written. `Stream::snapshot` makes
 one from a stream run in memory, for the application to write. On
 load the coordinator uses it only if `Catalog::snapshot_usable` (the
-state's type URL is the registered one, and its rules version passes
-types.proto's default rule against the registered version: one leading
-`v` or `V` stripped from each, equal SemVer major and minor, or, when
-either is not SemVer, the versions equal as recorded), its
-sequence is below the head (one at or past it claims events the stream
-does not hold: a purge left it, or it was written ahead of them) and,
-under AGGREGATE_HANDLES and COMMUTATIVE, its sequence is at or below
-expected−1. Otherwise it is discarded and the stream replayed from 0. The
-floor for the next `recorded_at` comes from the store
-(`Slice::last_recorded_at`), not the snapshot.
+state's type, by the full name its type URL ends in, is the registered
+state's, decision 14.101; and its rules version passes types.proto's
+default rule against the registered version: one leading `v` or `V`
+stripped from each, equal SemVer major and minor, or, when either is not
+SemVer, the versions equal as recorded) and its sequence is below the
+head (one at or past it claims events the stream does not hold: a purge
+left it, or it was written ahead of them). Otherwise it is discarded and
+the stream replayed from 0. The floor for the next `recorded_at` comes from
+the store (`Slice::last_recorded_at`), not the snapshot.
 
 ## Dead letters: durable, logged and answered
 
@@ -1076,9 +1011,9 @@ time; decision 14.66):
 
 - to the application's `DeadLetterLog`, at once, as one line;
 - into the store, durably, when the step that raised it has no caller
-  left (a policy's step, a projector's, a parked fact's): in the SAME
-  atomic write as the position the step moves past, or in a write of its
-  own when the position stays. A store keeps them when it is an
+  left (a policy's step, a projector's, a dead-lettered fact's): in the
+  SAME atomic write as the position the step moves past, or in a write of
+  its own when the position stays. A store keeps them when it is an
   angzarr-ports `DeadLetterStore` (SQLite's is, migration 0006), keyed by
   the stream the letter is about, its place there (its events' first
   sequence, its command's id, or else its step's trigger) and its
@@ -1088,7 +1023,9 @@ time; decision 14.66):
   (`Handled::dead_letters`, `Failure::dead_letters`).
 
 A command its caller waits for is the caller's: its own failure is
-answered and its line logged, never kept. The line:
+answered and its line logged, never kept. A fact is the exception: one the
+kernel cannot record is dead-lettered and kept, and its sender is answered
+INTERNAL `ANGZARR_REASON_FACT_DEAD_LETTERED`, never retryable. The line:
 
 ```rust
 pub const DEAD_LETTER_PREFIX: &str = "DEAD_LETTER";
@@ -1096,34 +1033,35 @@ pub trait DeadLetterLog: Send + Sync {
     fn write(&self, line: &str);
     fn letter(&self, letter: &AngzarrDeadLetter) { self.write(&dead_letter_line(letter)) }
 }
-pub fn dead_letter_line(letter: &AngzarrDeadLetter) -> String;   // prefix, component, reason's code and args, retry_count, command or event
+pub fn dead_letter_line(letter: &AngzarrDeadLetter) -> String;   // prefix, component, why, retry_count, its payload
 ```
 
-A letter's reason (`AngzarrDeadLetter.reason`) is the key the spec spells
-and its args, as they were answered, never angzarr-embedded's own code
-and never English (decisions 14.37 and 14.48); the line is keys and
-values only. It carries the one `rejection_details` variant its reason
-chooses, by the mapping on `AngzarrDeadLetter.rejection_details` in
-angzarr's `types.proto`:
+A letter's payload is what could not be taken: a client's
+`rejected_command`, a reaction's `rejected_reaction` (its
+`ReactionDelivery`), or the `rejected_events` that set off a failed policy
+step or projector. Its why (`AngzarrDeadLetter.why`, decision 14.101) is
+exactly one of:
 
-- `sequence_mismatch`: `COORDINATOR_REASON_CONFLICT_UNRESOLVED`, a decide
-  under AGGREGATE_HANDLES that never acknowledged its window, with the
-  command's expected sequence and the head;
-- `command_refused`: `ROUTER_REASON_COMMAND_REFUSED` with its
-  `refusal_type`, a policy's command refused by a typed refusal that no
-  OnRefused answers, the refusal object kept whole;
-- `processing_failed`, its failure the reason: an untyped refusal of
-  such a command, under the handler's own key; a command or fact given up
-  at a write-race cap, `COORDINATOR_REASON_RETRY_CAP_EXHAUSTED`
-  (`retry_count` its retries, the attempts after the first, transient); a fatal bug, never retried and
-  not transient (a handler's, `ROUTER_REASON_UNHANDLED_HANDLER_ERROR`
-  with its code and args the `cause`, a panic included; whatever key a
-  remote handler answered; the router's own error on malformed input; a
-  policy's own error, keyed as a handler's bug; the kernel's refusal of a
-  policy's answer, `COORDINATOR_REASON_POLICY_COMMAND_*`; a projector's
-  failure; a book the kernel built malformed); and a step whose retryable
-  failure outlasted its retries, under its own key as last answered, never
-  the retry cap's (`retry_count` its retries, transient).
+- `refusal`: a reaction its destination refused with a typed refusal that
+  did not reach a Translate answer, the refusal object whole (its key
+  implied, `ANGZARR_REASON_COMMAND_REFUSED`);
+- `reason`: every other failure, the key the spec spells and its args as
+  they were answered (decisions 14.37 and 14.48), never angzarr-embedded's
+  own code where the spec has one and never English: a step or fact given
+  up at the race re-run cap, `ANGZARR_REASON_RETRY_CAP_EXHAUSTED`
+  (`retry_count` its retries, the runs after the first); a fatal bug (a
+  handler's, `ANGZARR_REASON_UNHANDLED_HANDLER_ERROR` with its code and
+  args the `cause`, a panic included; whatever key a remote handler
+  answered; the router's own error on malformed input; a policy's own
+  error, keyed as a handler's bug; the kernel's refusal of a policy's
+  outputs, `ANGZARR_REASON_POLICY_COMMAND_NO_ROOT`,
+  `ANGZARR_REASON_POLICY_COMMAND_UNKNOWN_DOMAIN` or
+  `ANGZARR_REASON_POLICY_TARGETS_ITS_TRIGGER`; a chain past its depth; a
+  projector's failure); the framework's own refusals of a reaction
+  (`ANGZARR_REASON_EDITION_NOT_FORKED`, `ANGZARR_REASON_PM_NO_INSTANCE`);
+  and a step whose retryable failure outlasted its retries, under its own
+  key as last answered (`retry_count` its retries);
+- `transport`: a transport's own why, which the kernel never sets.
 
 Every letter names the component that could not take its payload and
 its kind (`source_component`, `source_component_kind`): a policy, a
@@ -1135,54 +1073,57 @@ here.
 certainly indicates a problem, so an operator alerts on it. The line is
 built from angzarr's own `AngzarrDeadLetter`, so it says what an angzarr
 DLQ entry would.
-A fact the kernel dead-letters (its handler's bug, a retryable failure at
-its retries, a race at its cap) is parked: its letter kept, answered
-`Handled::Parked` (OK, PARKED, no events; C-0599). A fact of a type no
-handler takes is its sender's, answered, never parked.
 
 ## Retrying, capped, then dead-lettered
 
 A step's retryable failure (a retryable bug, a handler's
 `Failed::retryable_bug` included; as a policy's step, ABORTED too, a
-handler's `Failed::immediate` included) is run again by the kernel, from its load and deduplication, after a
-backoff, up to a cap; then it is given up. Only work with no caller left
-is dead-lettered (owner ruling, 2026-10-31): a policy's step, with its
-retry count, its position doing what `OnPolicyBug` says, and a fact,
-parked. A command its caller waits for is handed back (as last answered;
-at a race cap, `COORDINATOR_REASON_RETRY_CAP_EXHAUSTED`) and is not
-dead-lettered: the caller holds it. A policy's own call failing
-retryably (its dispatch answering a retryable status, or ABORTED) is run
-again the same way, and at its retries its trigger is dead-lettered with
-them (C-0444). `Kernel::on_retryable(OnRetryable { max_retries, initial_backoff,
-multiplier, max_backoff, jitter })`: retry `n` (from 0) waits
-`initial_backoff * multiplier^n`, at most `max_backoff`, less up to
-`jitter` of it at random. On by default (3 retries, from 100 ms,
-doubling, at most 5 s, a fifth at random); `max_retries = 0` turns it
-off. `Kernel::wait_with(&dyn Wait)` sets the timer and the jitter's draw:
-the kernel's own sleeps on a thread of its own, and on wasm32, which has
-no threads, waits not at all (a retry runs at once; an application there
-injects its timer to wait out the backoff); a test injects its own.
-The host reads `angzarr.yaml`'s `retry` (`max_retries`, `initial_backoff_ms`,
-`multiplier`, `max_backoff_ms`, `jitter`).
+handler's `Failed::immediate` included) is run again by the kernel, from
+its load and deduplication, after a backoff, up to a cap; then it is given
+up. Only work with no caller left is dead-lettered (owner ruling,
+2026-10-31): a policy's step, with its retry count, its position doing what
+`OnPolicyBug` says; and a fact, its sender answered
+`ANGZARR_REASON_FACT_DEAD_LETTERED`. A command its caller waits for is
+handed back (as last answered; at a race cap,
+`ANGZARR_REASON_RETRY_CAP_EXHAUSTED`) and is not dead-lettered: the caller
+holds it. A policy's own call failing retryably (its dispatch answering a
+retryable status, or ABORTED) is run again the same way, and at its
+retries its trigger is dead-lettered with them. `Kernel::on_retryable(OnRetryable
+{ max_retries, max_race_runs, initial_backoff, multiplier, max_backoff,
+jitter })`: retry `n` (from 0) waits `initial_backoff * multiplier^n`, at
+most `max_backoff`, less up to `jitter` of it at random. On by default (3
+retries, from 100 ms, doubling, at most 5 s, a fifth at random; 10 race
+runs); `max_retries = 0` turns retrying off, and the race re-run cap is at
+least one run. `Kernel::wait_with(&dyn Wait)` sets the timer and the
+jitter's draw: the kernel's own sleeps on a thread of its own, and on
+wasm32, which has no threads, waits not at all (a retry runs at once; an
+application there injects its timer to wait out the backoff); a test
+injects its own. The host reads `angzarr.yaml`'s `retry` (`max_retries`,
+`max_race_runs`, `initial_backoff_ms`, `multiplier`, `max_backoff_ms`,
+`jitter`).
 
 **Trigger edges are tracing.** No event records the edge from a trigger
-to the policy command it set off (angzarr decision 13.3; angzarr sends it
-to OpenTelemetry, its backlog PS-6). In angzarr-embedded the edge is the policy
-command's own causation (`Identified::causation_id`), and its derived id
-names the trigger; angzarr-embedded has no tracing dependency and reports it nowhere.
+to the reaction it set off (angzarr decision 13.3; angzarr sends it to
+OpenTelemetry, its backlog PS-6). In angzarr-embedded the edge is the
+reaction's own causation (`Identified::causation`), and its derived id
+names the trigger; angzarr-embedded has no tracing dependency and reports
+it nowhere.
 
 ## Errors and recovery
 
 | Error | Meaning | `Recovery` |
 |---|---|---|
-| `Failure::Rejected(R)` | the domain refused the command | `Business` |
-| `Failure::Downstream { path, error }` | a step down the chain failed; nothing appended anywhere | by `StepError`: a rejection `Business`, a malformed policy book `Bug`, else by `KernelError` |
+| `Failure::Rejected(R)` | a typed refusal: the domain's, or the coordinator's `ExpectedSequenceMismatch` | `Business` |
+| `Failure::Downstream { path, error }` | a step down the chain failed; what was committed before it stands | by `StepError`: a rejection `Business`, a malformed reaction `Bug`, else by `KernelError` |
+| `Failure::Projection` | the command committed, then an inline projector failed | `Retry` |
 | `KernelError::Malformed` | step 1 refused the book | `Invalid` |
 | `KernelError::UnknownType` | a command or fact type the domain does not decode, after upcasting | `Invalid` |
 | `KernelError::InvalidPayload` | a command or fact that decodes but is not a valid domain value (`WireError`: a required field absent, an undefined enum value) | `Invalid` |
-| `KernelError::Stale`, `Overlap`, `Unresolved` | re-read and re-issue | `Retry` |
-| `KernelError::Router` | the router's error, or a handler's failure (never under a business status: that is `Rejected`) | by its status's class: a fatal bug `Bug` (dead-lettered), ABORTED and a retryable bug `Retry` |
+| `KernelError::Router` | the router's error, or a handler's failure that is no typed refusal | by its status's class: a fatal bug `Bug` (dead-lettered), ABORTED and a retryable bug `Retry` |
 | `KernelError::HandlerUnavailable` | a remote handler that could not be reached | `Retry` |
+| `KernelError::RetryCapExhausted` | a command that lost its race at every run the cap allows | `Bug` |
+| `KernelError::FactDeadLettered` | a fact that could not be recorded: dead-lettered, never retried | `Bug` |
+| `KernelError::RulesVersionMismatch`, `StateTypeMismatch` | an answer of another rules version or another state type than the registered one | `Bug` |
 | `StoreError::Conflict`, `Unavailable` | run again with the same command id (step 3 makes it safe) | `Retry` |
 | `Upcast`, `WrongDomain`, `ChainTooDeep`, `BeforeSnapshot`, `UnregisteredDomain` (a stored stream of a domain the application did not register; an incoming book for one is `Malformed`), `Replay(..)`, `StoreError::Discontinuous`, `Unreadable` | a bug or a misconfiguration | `Bug` |
 
@@ -1191,34 +1132,22 @@ a `Diagnostic` with the implementation (codes under `angzarr-embedded-*`,
 messages in `locales/en-US/messages.ftl`, each id the code without the
 crate's name, which the build prefixes).
 
-**The renames of the kernel's codes (2026-10-31).** The kernel's codes
-were `angzarr-embedded-next-*`, after the `next` module the kernel lived in;
-the kernel moved to the crate root and its codes lost `next-`. The module
-path went with it: `angzarr_embedded::next` is gone, with no alias. The rule, for
-every one of them: strip `next-` (`angzarr-embedded-next-wire-missing` is
-`angzarr-embedded-wire-missing`). No new code is a code anything else had,
-and none falls under another crate's name (`angzarr-embedded-host-*`); the
-catalog check holds both.
+**The renames of the kernel's codes.** The kernel's codes are
+`angzarr-embedded-*`, the rule from their earlier `angzarr-embedded-next-*`
+form being "strip `next-`" (`angzarr-embedded-next-wire-missing` is
+`angzarr-embedded-wire-missing`); `angzarr_embedded::next` does not exist.
+No code is a code anything else had, and none falls under another crate's
+name (`angzarr-embedded-host-*`); the catalog check holds both.
 
-Then a condition the spec keys took its key as its code, verbatim (decision
-14.60, architecture-fixes C2): the forwarded router and coordinator codes
-(`angzarr-embedded-pm-no-instance` is `COORDINATOR_REASON_PM_NO_INSTANCE`),
-the kernel's own spec conditions (`angzarr-embedded-stale` is
-`COORDINATOR_REASON_EXPECTED_SEQUENCE_STALE`, `-overlap`
-`COORDINATOR_REASON_CONFLICT_OVERLAP`, `-unresolved`
-`COORDINATOR_REASON_CONFLICT_UNRESOLVED`, `-expected-sequence-ahead`,
-`-retry-cap-exhausted`, `-chain-too-deep` and `-handler-unavailable` their
-keys, `-step-limit` `ROUTER_REASON_TOO_MANY_STEPS`, and
-`-rules-version-mismatch` `COORDINATOR_REASON_RULES_VERSION_MISMATCH`,
-decision 14.56), and the host's (`angzarr-embedded-host-handshake-malformed`
-is `HOST_REASON_HANDSHAKE_MALFORMED`, decision 14.59, the
-`angzarr-embedded-host-descriptor-*` refusals their readiness keys, and a
-projector naming no input domain `HOST_REASON_PROJECTOR_NO_INPUT_DOMAIN`,
-decision 14.55, where a policy's stays `angzarr-embedded-host-no-input`).
-Each carries exactly its key's args, so the `stream` those kernel errors
-named is gone from them (the caller holds its command's cover); their
-English is the spec's. These are the only exceptions to "codes are stable
-and never reused": no old code means anything now.
+The other: **a condition the spec keys has its key as its code**, verbatim (decision
+14.60): the forwarded router and coordinator keys
+(`ANGZARR_REASON_PM_NO_INSTANCE`, `ANGZARR_REASON_RETRY_CAP_EXHAUSTED`,
+`ANGZARR_REASON_CHAIN_TOO_DEEP`, `ANGZARR_REASON_HANDLER_UNAVAILABLE`,
+`ANGZARR_REASON_RULES_VERSION_MISMATCH`, `ANGZARR_REASON_STATE_TYPE_MISMATCH`,
+`ANGZARR_REASON_FACT_DEAD_LETTERED` and the rest), and the host's
+(`EMBEDDED_REASON_*`, the descriptor refusals their readiness keys). Each
+carries exactly its key's args; its English is the spec's. These are the
+only exceptions to "codes are stable and never reused".
 
 ## Mapping: identity
 
@@ -1228,24 +1157,25 @@ type itself:
 | Concept | Type |
 |---|---|
 | stream identity | `v1::Cover { domain, root: Uuid, optional edition }`; main is the unset edition |
-| an event's identity; a policy command's causation | `v1::EventRef { stream: Cover, sequence }` |
-| a command or a fact | `v1::CommandBook { cover, page: CommandPage { body: Command \| Fact, command_id, correlation_id, causation_id, fact_origin }, handling }` |
-| how to handle it | `v1::Handling { optional expected_sequence, conflict_resolution }` |
-| a conflict resolution | `v1::ConflictResolution` |
-| a state's capabilities | `v1::StateDescriptor { type_url, StateOptions { conflict_resolutions } }` |
-| an event, stored | `v1::EventPage { sequence, meta: EventMeta, payload: Any }` |
-| an event's metadata | `v1::EventMeta { oneof causation { command_id }, fact, correlation_id, recorded_at, rules_version }` |
-| an event's direct cause | `v1::event_meta::Causation::{CommandId(Uuid), TriggeringEvent(EventRef)}` (`Envelope::causation()`) |
+| an event's identity; a reaction's causation | `v1::EventRef { stream: Cover, sequence }` |
+| a client's command or fact | `v1::CommandBook { cover, page: CommandPage { body: Command { payload, handling } \| Fact { payload, origin }, command_id, correlation_id } }` |
+| a reaction (a policy's output, a refusal fact) | `v1::ReactionDelivery { cover, body: command \| fact, command_id, correlation_id, causation: EventRef, component }` |
+| how to handle a command | `v1::Handling { optional expected_sequence }` |
+| a stale command's refusal | `v1::ExpectedSequenceMismatch { expected, head }` |
+| a state's type | `v1::StateDescriptor { type_name }` |
+| an event, stored | `v1::EventPage { sequence, meta: EventMeta, body: event: Any \| meta_event: MetaEvent }` |
+| an edition's fork | `v1::MetaEvent { created: EditionCreated {} }`, the fork's first page |
+| an event's metadata | `v1::EventMeta { oneof causation { command: CommandCause, fact: FactCause }, correlation_id, recorded_at, rules_version }` |
 | every id | `v1::Uuid` (16 bytes); text through `ids` at the boundary |
 | derived ids | `ids::{compute_root, policy_command_id, fact_command_id, fact_correlation}` |
 | a snapshot | `v1::Snapshot { sequence, state: Any, rules_version }` |
-| the answer | `Handled::outcome() -> v1::Outcome { delivery: APPLIED \| DUPLICATE \| PARKED }`; `Handled::books() -> Vec<EventBook>` |
+| the answer | `Handled::delivery() -> v1::DeliveryOutcome { APPLIED \| DUPLICATE }`; `Handled::books() -> Vec<EventBook>` |
 | a dead letter | `v1::AngzarrDeadLetter`, as a log line |
 | a payload's version | its type URL (`pkg.v1.Foo` then `pkg.v2.Foo`) |
 
 angzarr-embedded's own types are the ones angzarr has no message for, because they
-are execution, not wire: `Checked`, `Identified`, `Contextual`, `Prepared`,
-`Envelope` (a checked, decoded page), `Stream`, `Rejected`,
+are execution, not wire: `Checked`, `Identified`, `Contextual`,
+`Envelope` (a checked, decoded page), `Stream`, `Rejected`, `Refused`,
 `Catalog`, `Registry`, `Order`, `Kernel`.
 
 ## Key signatures
@@ -1255,8 +1185,8 @@ are execution, not wire: `Checked`, `Identified`, `Contextual`, `Prepared`,
 pub fn check(book: CommandBook, catalog: &Catalog) -> Result<Checked, Malformed>;
 impl Checked { pub fn identify(self, sampled: &Sampled) -> Identified; }
 // step 3-5: the chain's own, pub(crate)
-async fn deduplicate<P: Port>(port: &mut P, registry, command: Identified) -> Result<Deduplicated, Failure<Rejected>>;
-fn load(novel: Novel, nonces: &mut u64) -> Result<Contextual, KernelError>;
+async fn deduplicate<P: Port>(port: &mut P, registry: &Registry, command: Identified) -> Result<Deduplicated, Failure<Rejected>>;
+fn load(novel: Novel) -> Result<Contextual, Failure<Rejected>>;   // the staleness check
 async fn decide(command: &Contextual, sampled, registry, dead_letters) -> Result<Decided, Failure<Rejected>>;
 // the whole loop: one write per step, the chain settled before it returns
 impl Kernel<'_> {
@@ -1267,14 +1197,14 @@ impl Kernel<'_> {
     // a stream as step 3 loads it: the newest usable snapshot, the events after it
     pub async fn load<D: Domain, S: Store>(&self, store: &S, stream: &Cover)
         -> Result<(Stream<D>, u64), KernelError>;
-    // shape from the loaded state, send at that head STRICT; a stale send is
-    // loaded and shaped again, under the race re-run cap
+    // shape from the loaded state, send at that head; a send the head moved
+    // past is loaded and shaped again, under the race re-run cap
     pub async fn handle_shaped<D: Domain, S: Store, P: Payload, T>(&self, store: &S,
         stream: &Cover, sampled: &Sampled, shape: impl FnMut(&D::State) -> (Option<P>, T))
         -> Result<(Option<Handled>, T), Failure<Rejected>>;
     pub async fn handle_any<S: Store>(&self, store: &S, book: CommandBook,
         sampled: &Sampled) -> Result<Handled, Failure<Rejected>>;
-    pub async fn resume<S: Store>(&self, store: &S, sampled: &Sampled)
+    pub async fn resume<S: Store + Processed + ListStreams>(&self, store: &S, sampled: &Sampled)
         -> Result<Recorded, Failure<Infallible>>;
 }
 // what a chain recorded, typed only when asked
@@ -1285,9 +1215,13 @@ impl Recorded {
     pub fn state<D: Domain>(&self, stream: &Cover, registry: &Registry)
         -> Result<Option<D::State>, KernelError>;   // Handled::state: none for a duplicate
 }
-// a domain's own refusal, from its handler in this process, matched as a value
-impl Rejected { pub fn rejection<R: Any>(&self) -> Option<&R>; }   // D::Rejection
-impl Failure<Rejected> { pub fn rejection<R: Any>(&self) -> Option<&R>; }
+// a refusal, as its caller reads it
+impl Rejected {
+    pub fn status(&self) -> BusinessStatus;
+    pub fn refusal_object(&self) -> &Any;
+    pub fn refusal<T: DomainMessage>(&self) -> Option<T>;          // the typed object, decoded
+    pub fn rejection<R: Any>(&self) -> Option<&R>;                 // the handler's own, in process
+}
 // addressing and wrapping, on the wire types
 Cover::natural(domain, key)                          // CoverExt: root = compute_root(domain, key)
 CommandBook::command(cover, payload).at(head).with_id(id)   // CommandBookExt
@@ -1300,11 +1234,11 @@ impl<D: Domain> Stream<D> {
 impl<P: ProjectorHandler> CatchUp<P> {
     pub fn new(sources: &[&str], projector: P) -> Result<CatchUp<P>, Misconfigured>;    // held in memory
     pub fn stored(sources: &[&str], projector: P) -> Result<CatchUp<P>, Misconfigured>; // in the store
-    pub async fn step<S: ReadStore + Store + Processed + ListStreams>(&mut self, store: &S, catalog: &Catalog)
+    pub async fn step<S: ReadStore + Store + Processed>(&mut self, store: &S, catalog: &Catalog)
         -> Result<Caught, KernelError>;
-    pub async fn step_if_changed<S: ReadStore + Store + Processed + ListStreams + Watch>(&mut self, store: &S,
+    pub async fn step_if_changed<S: ReadStore + Store + Processed + Watch>(&mut self, store: &S,
         catalog: &Catalog) -> Result<Option<Caught>, KernelError>;
-    pub async fn follow<S: ReadStore + Store + Processed + ListStreams + Watch>(&mut self, store: &S, catalog: &Catalog,
+    pub async fn follow<S: ReadStore + Store + Processed + Watch>(&mut self, store: &S, catalog: &Catalog,
         wait: &dyn Wait, every: Duration, more: impl FnMut(Option<&Caught>) -> bool)
         -> Result<(), KernelError>;
 }
@@ -1320,8 +1254,6 @@ impl Registry {
 }
 // what is registered, read-only
 impl Catalog {
-    pub fn resolve(&self, domain: &str, command_type_url: &str, requested: Option<ConflictResolution>)
-        -> Option<ConflictResolution>;
     pub fn snapshot_usable(&self, domain: &str, snapshot: &Snapshot) -> bool;
     pub fn domains(&self) -> impl Iterator<Item = &str>;    // and remotes, policy_names, projector_names
 }
@@ -1355,15 +1287,12 @@ re-runs deduplicate in both, with no switch.
   server to its security log, keyed by the command id; events record no
   person. `Stamp.at` becomes `EventMeta.recorded_at`, which a fold reads
   from its event's page (`Domain::apply`'s `PageContext`).
-- **`ListState` becomes a prost message** with `option (io.angzarr.v1.state)
-  = { conflict_resolutions: [CONFLICT_RESOLUTION_COMMUTATIVE] }` and
-  `(io.angzarr.v1.conflict)` markers on every field (items per key, columns
-  whole or keyed and ordered, settings whole), so content edits default to
-  COMMUTATIVE. Until angzarr's generator exists, its `State` impl is written
-  by hand, against the same markers, with a test that names it a stand-in.
-  Draws are STRICT, via `CONFLICT_RESOLUTION_BY_COMMAND` (or the draw-system
-  state lists no COMMUTATIVE). Every map field is a `btree_map`, so encoding
-  is deterministic.
+- **`ListState` becomes a prost message** with its `State` impl, written by
+  hand until angzarr's generator exists, with a test that names it a
+  stand-in. Every map field is a `btree_map`, so encoding is
+  deterministic. A content edit is decided on the current state; a client
+  that must not overwrite a newer version sends its expected sequence and
+  is refused `ExpectedSequenceMismatch` when the list moved.
 - `policy.rs`'s `ListToDrawSystems` becomes a **`Policy`**; `Instantiate` and
   `Inject` become the commands `Instantiate { source_seq, list }` and
   `ApplyListChange { source_seq, change }`, recorded by the draw system as
@@ -1384,18 +1313,18 @@ re-runs deduplicate in both, with no switch.
 - Per request: build the `CommandBook` (the cover, the command packed with
   `Payload::to_any`, the client's `command_id` if it sent one, parsed at the
   boundary with `Uuid::from_str` and refused 400 otherwise, its correlation
-  if any, `Handling` from `If-Match`-style headers if any); sample the
-  instant and mint a UUIDv7 (`uuid` with `v7`, in the server only) into
-  `Sampled { now, command_id }`; call `kernel.handle::<D, _, _>`, and
-  `kernel.resume` at start.
+  if any, its expected sequence from an `If-Match`-style header if any);
+  sample the instant and mint a UUIDv7 (`uuid` with `v7`, in the server
+  only) into `Sampled { now, command_id }`; call `kernel.handle::<D, _, _>`,
+  and `kernel.resume` at start.
   `Handled::Duplicate` is answered as the original response. A client
   sending several commands gives each its own command id and one shared
   correlation.
-- `Malformed` and `UnknownType` (`Recovery::Invalid`) are 400s; `Stale`, `Overlap` and
-  `Unresolved` 409/412; `Rejected` 422; `Retry` store failures are retried
-  once with the same book; `Bug` is a 500 and is already in the
-  dead-letter log, which the server routes to `tracing` at error level and
-  alerts on by its prefix.
+- `Malformed` and `UnknownType` (`Recovery::Invalid`) are 400s; an
+  `ExpectedSequenceMismatch` refusal is 412; any other `Rejected` 422;
+  `Retry` store failures are retried once with the same book; `Bug` is a
+  500 and is already in the dead-letter log, which the server routes to
+  `tracing` at error level and alerts on by its prefix.
 - The `Registry` (its policies included) and the `Kernel` are built once
   at start-up.
 
@@ -1406,51 +1335,45 @@ re-runs deduplicate in both, with no switch.
    whatever angzarr ships as ordinary commands, and hand-build any it needs
    before then.
 2. **Snapshot validity in the coordinator**, not the typed step. The
-   registry holds the state's type URL and the rules version, so the
+   registry holds the state's type and the rules version, so the
    domain-blind coordinator can discard early and load from 0 in one read.
    I recommend keeping it there, as the spec puts it (types.proto, the
    Snapshot region: the coordinator decides).
-3. **Dedup for policy commands inside a chain.** Uniform with the origin,
+3. **Dedup for reactions inside a chain.** Uniform with the origin,
    cheap with the index, and it makes a chain that revisits a stream
    idempotent by construction. I recommend keeping it.
-4. **Configuration on the domain as consts** (by command full name),
-   checked at registration, rather than registration options. The compiler
-   keeps it beside the types it names. I recommend consts; revisit if
-   hatpick needs per-deployment configuration.
-5. **`Envelope` holds the checked metadata fields**, not the `EventMeta`,
+4. **`Envelope` holds the checked metadata fields**, not the `EventMeta`,
    so its accessors need no unwrap (`meta()` rebuilds the message). I
    recommend it: it is the read-side twin of `Checked`.
-6. **A panicking ingest on `panic = "abort"` targets** (wasm32 by default)
+5. **A panicking ingest on `panic = "abort"` targets** (wasm32 by default)
    aborts the process instead of failing the chain. Nothing is written
    either way. I recommend documenting it and not adding unwind
    requirements.
-7. **`Recovery::Invalid`** is new: a malformed book or an unknown command
-   type is the caller's to fix, not a bug. I recommend keeping it distinct
-   from `Bug` so the server can answer 400 without alerting.
-8. **`Stream::execute`** runs the whole pipeline in memory with no store:
+6. **`Recovery::Invalid`**: a malformed book or an unknown command type is
+   the caller's to fix, not a bug. I recommend keeping it distinct from
+   `Bug` so the server can answer 400 without alerting.
+7. **`Stream::execute`** runs the whole pipeline in memory with no store:
    a test fixture, behind the `test-support` feature. An application runs
    `Kernel::handle`, so the pipeline is assembled once.
-9. **The upcaster is the kernel's.** The router has none (decision
-    14.39); the kernel's `Upcaster` is the in-process `UpcastPort`.
-10. **Old `annals.log.v1` logs.** I recommend leaving them: hatpick stores
-    none.
-11. **The default depth limit of 8.** I recommend 8; hatpick's deepest
+8. **The upcaster is the kernel's.** The router has none (decision
+   14.39); the kernel's `Upcaster` is the in-process `UpcastPort`.
+9. **Old `annals.log.v1` logs.** I recommend leaving them: hatpick stores
+   none.
+10. **The default depth limit of 8.** I recommend 8; hatpick's deepest
     chain is two levels.
 
 Decided: every angzarr-embedded user builds angzarr-proto (no feature gate; the
 workspace `CLAUDE.md` says so); there is no re-run switch; a trigger edge
-is the policy command's own causation, for tracing.
+is the reaction's own causation, for tracing.
 
 ## Not now
 
 | Deferred | Why | What revives it |
 |---|---|---|
 | Hash chaining | Not asked for. Kept possible: immutable pages, upcast on read, deterministic meta, no personal data. | A tamper-evidence requirement. |
-| Generated `State` impls, and angzarr's golden conflict-unit parity suite run here | The generator is angzarr's backlog CR-1; until then a hand-written fixture stands in. | CR-1 landing: angzarr-embedded generates from the same markers and runs every fixture pair through `Units::overlaps`. |
+| Generated `State` impls | The generator is angzarr's backlog CR-1; until then a hand-written fixture stands in. | CR-1 landing. |
 | Snapshot frequency and retention configuration | The newest only, written after every step with events; the load and discard rules are specified. | Replay latency or write cost that matters. |
-| Persisted projections | Replay on read. | Read latency: a projector's position goes to angzarr-ports' `PositionStore`. |
-| Edition lifecycle, branching, read-through (EA-1 to EA-3) | angzarr's system layer owns the edition lifecycle; angzarr-embedded only meets an edition through the store's refusal. | That layer landing. |
-| Configuration that forbids a `Handling` override | No hatpick command needs it. | A command type whose resolution a client must not choose. |
+| Edition administration RPCs (ForkStream, ListEditions, DeleteEdition) | They are the distributed transport's; an application forks and deletes through its store. | An embedded transport that serves them. |
 | A `!Send` async store port | No browser store exists. | A wasm adapter over IndexedDB. |
 | Reading angzarr `EventBook`s into angzarr-embedded | angzarr-embedded writes books; nothing feeds it angzarr's. | An angzarr runtime delivering to angzarr-embedded. |
 
@@ -1462,83 +1385,81 @@ in-memory store (`angzarr_ports::MemoryStore`). The store's own contract is
 angzarr-ports' conformance suite, run by each adapter (angzarr-store-sqlite
 runs it in full); angzarr-embedded tests the kernel over it, not the store.
 
-- **check.test.rs**: a checked command's accessors are non-optional where
+- **check.test.rs**: a checked input's accessors are non-optional where
   the book had to say something; a fact carries its source in its body; the
-  sender's ids and handling are kept; an empty handling is unset; a fact
-  may name its derived id and nothing else; COMMUTATIVE is accepted where
-  the state declares units; **every malformed case is refused, the first
-  malformation the answer**. Identification: a client's command without
-  ids gets the minted v7 as both; sent ids are kept; a fact's ids are the
-  UUIDv5 of its external id; every event carries its command as causation
-  and no actor; an identified book checks again the same; `recorded_at` is
-  raised, never lowered. A policy's book is checked through the policy
-  entry (no ids, no fact, no handling) and identified from its trigger,
-  and its events carry `causation.command_id` and nothing of the trigger.
+  sender's ids and expected sequence are kept; an empty handling is unset;
+  a fact may name its derived id and nothing else; **every malformed case
+  is refused, the first malformation the answer**. Identification: a
+  client's command without ids gets the minted v7 as both; sent ids are
+  kept; a fact's ids are the UUIDv5 of its external id; every event carries
+  its command or fact as causation and no actor; an identified book checks
+  again the same; `recorded_at` is raised, never lowered. A reaction is
+  checked through the reaction entry and identified from its trigger, and
+  its events carry their command or fact and nothing of the trigger.
 - **registry.test.rs**: registration fills the state descriptor;
-  **COMMUTATIVE is the default where the state declares units, else
-  STRICT**; misconfiguration is refused at registration; a snapshot is
-  usable only under the current rules and state type.
+  misconfiguration is refused at registration; a snapshot is usable only
+  under the current rules and state type.
 - **payload.test.rs**: payloads are `Any` packed by `prost::Name`; the
   type URL is the version; a wire form its domain type cannot hold is
   refused.
-- **conflict.test.rs**: the default resolutions; a command type configured
-  STRICT; an unmarked field conflicts with everything; AGGREGATE_HANDLES
-  demands the nonce back; an expected sequence past the head is stale;
-  unit-path syntax and the overlap rule.
 - **coordinator.test.rs**: deduplication (**a retry is DUPLICATE with its
   events**, a zero-event decision is decided again, a creating command
   redelivered after a purge creates its stream again, dedup is per stream,
   a redelivered fact is found by its derived id, a rejection leaves
   nothing, a retry racing its original is never applied twice, **an
-  applied STRICT retry is DUPLICATE, never stale**); the coordinator's
-  order (dedup, load, decode) and its window and nonce; the rules version
-  an answer reports (stamped in full, refused when it is not the registered
-  one); snapshots (one under an incompatible rules version or another state
-  type is not offered, one never hides
-  part of the window, one at or past the head is not used).
+  applied retry is DUPLICATE whatever its expected sequence**); the
+  coordinator's order (dedup, load, the staleness check, decode); a command
+  whose expected sequence is not the head is refused
+  `ExpectedSequenceMismatch` before business code; the rules version and
+  state type an answer reports (stamped in full, refused when not the
+  registered one); snapshots (one under an incompatible rules version or
+  another state type is not offered, one at or past the head is not used).
 - **domain.test.rs**: ingest reads a read-only context; a fact is never
   refused and is stamped at the head; decide reads the rules version,
-  stream, instant and ids; a nonce acknowledges only its own delivery.
+  stream, instant and ids.
 - **upcast.test.rs**: upcasting runs the chain in registration order; old
   events replay through the upcaster and are never rewritten; an old
-  command is upcast then decided; an upcaster is checked whole.
+  command is upcast then decided; an upcaster is checked whole; an answer
+  keyed otherwise than the pages asked is the rule's bug.
 - **stream.test.rs**: replay folds each event with the rules it names and
   refuses a log that does not hold together; a stream resumes from a
   snapshot; a decision commits only to its own stream and head; golden
   fixtures replay through the upcaster; every failure says how to recover;
   a store error keeps its angzarr-ports code and args.
-- **handle.test.rs**: the chain as committed steps. A policy's events
-  carry its derived command id as causation and no trigger; **a rejected
-  policy step keeps the command's commit and is dead-lettered**; **a
-  policy's error is dead-lettered as `PolicyFailed`, by its code and args,
-  and its position moves past the trigger, or under `OnPolicyBug::Stay`
-  stays at it**; a chain
-  deeper than its limit is refused; a command to an edition never forked
-  is refused and writes nothing; a policy's target is in its source's
-  edition; each step loads what the steps before it committed; **every
-  policy on a source runs for each of its events, in registration
-  order**; **a policy step commits its position with its events**; a step
-  the store failed is resumed by position; a retry after a crash settles
-  what its stream still owes; `resume` runs a new policy over its source's
-  history; a resumed step that already landed is a duplicate; projections
+- **concurrency.test.rs, races.test.rs**: a race lost at the write is run
+  again on the new head, under the race re-run cap; one with an expected
+  sequence is refused `ExpectedSequenceMismatch` on its re-run; at the cap
+  a command is answered, a policy's step and a fact dead-lettered.
+- **handle.test.rs**: the chain as committed steps. A reaction's events
+  carry its derived command id as causation and no trigger; **a refused
+  reaction keeps the command's commit and is Translated, or dead-lettered**;
+  **a policy's error is dead-lettered as `PolicyFailed`, by its code and
+  args, and its position moves past the trigger, or under
+  `OnPolicyBug::Stay` stays at it**; a chain deeper than its limit is
+  refused; an input to an edition never forked is refused before business
+  code and writes nothing; a policy's target is in its source's edition;
+  each step loads what the steps before it committed; **every policy on a
+  source runs for each of its events, in registration order**; **a policy
+  step commits its position with its events**; a step the store failed is
+  resumed by position; a retry after a crash settles what its stream still
+  owes; `resume` runs a new policy over its source's history; a resumed
+  step that already landed is a duplicate; a fact that cannot be recorded
+  is dead-lettered and its sender answered `FactDeadLettered`; projections
   run after commit and a duplicate runs none; `handle` is a `Send` future.
 - **decorated.test.rs**: the markup (`#[aggregate]`, `#[process_manager]`,
   `#[policy]`, `#[projector]`) end to end: dispatch by type URL, returned
-  events applied in order, step limits, typed refusals, the refusal flow
-  (pass-through `CommandRefused` or a translated fact to the source, a
-  refusal no handler takes dead-lettered), a failing step keeping the
-  commits before it, and **a handler's own code is a rejection under each
-  status of the business set (FAILED_PRECONDITION, INVALID_ARGUMENT,
-  NOT_FOUND here; ALREADY_EXISTS, OUT_OF_RANGE, PERMISSION_DENIED in the
-  host's remote tests, which arrive FAILED_PRECONDITION); under any other
-  status it is a dead-lettered bug,
-  as is a code of the router's failed INTERNAL, and as a policy's step
-  its position moves past the trigger, or under `OnPolicyBug::Stay` stays
-  at it**.
+  events applied in order, continuations of as many steps as they take,
+  typed refusals, the refusal flow (a refusal Translated into a fact to the
+  source, a refusal with no Translate dead-lettered), a failing step
+  keeping the commits before it, and **a typed refusal under each status
+  of the business set; a failure under a business status with no typed
+  object, or under any other status, is no refusal: a bug, dead-lettered,
+  and as a policy's step its position moves past the trigger, or under
+  `OnPolicyBug::Stay` stays at it**.
 - **sqlite.test.rs**: the kernel over angzarr-store-sqlite on a file: a
   command and its policy step each commit and survive reopening; resume
   after reopening runs what a crash left owed; **a command's round trips
   to SQLite are measured**, not budgeted.
 - **dead_letter.test.rs**: a dead-letter line starts with the warning
-  prefix and names the command, or the event, and its metadata; a
-  panicking ingest aborts and is logged.
+  prefix and names its payload, its why and its metadata; a panicking
+  ingest aborts and is logged.

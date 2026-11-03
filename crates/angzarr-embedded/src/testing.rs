@@ -23,7 +23,7 @@ pub use angzarr_ports::faulty::{At, Fault, FaultyStore, Meanwhile, WriteRecord, 
 pub use angzarr_ports::memory::MemoryStore;
 
 use crate::v1::event_meta::Causation;
-use crate::v1::{CommandBook, Cover, EventMeta, EventPage, Uuid};
+use crate::v1::{event_page, CommandBook, CommandCause, Cover, EventMeta, EventPage, Uuid};
 use crate::{
     CommandBookExt, Domain, EventStore, Failure, Handled, Kernel, OnRetryable, Payload, Registry,
     Rejected, Sampled, Stream, StreamRef, Timestamp, Write,
@@ -122,17 +122,18 @@ impl<D: Domain> Harness<D> {
         let head = self.store.inner().read(stream, 0, None).ready();
         let head = head.expect("the in-memory store reads").next_sequence;
         let meta = EventMeta {
-            causation: Some(Causation::CommandId(sampled.command_id.clone())),
+            causation: Some(Causation::Command(CommandCause {
+                command_id: Some(sampled.command_id.clone()),
+            })),
             correlation_id: Some(sampled.command_id),
             recorded_at: Some(sampled.now),
             rules_version: D::RULES_VERSION.to_string(),
-            ..EventMeta::default()
         };
         let pages: Vec<EventPage> = (head..)
             .zip(events)
             .map(|(sequence, event)| EventPage {
                 sequence,
-                payload: Some(event.to_any()),
+                body: Some(event_page::Body::Event(event.to_any())),
                 meta: Some(meta.clone()),
             })
             .collect();
@@ -227,7 +228,7 @@ impl<D: Domain> Then<D> {
     }
 
     /// The events the decision recorded on the stream, or the failure.
-    /// Panics on a duplicate or a parked fact.
+    /// Panics on a duplicate.
     #[track_caller]
     pub fn result(self) -> Result<Vec<D::Event>, Failure<Rejected>> {
         let recorded = match self.handled? {
@@ -240,10 +241,8 @@ impl<D: Domain> Then<D> {
             .filter(|book| book.cover.as_ref() == Some(&self.cover))
             .flat_map(|book| &book.pages);
         Ok(pages
-            .map(|page| {
-                let any = page.payload.clone().unwrap_or_default();
-                D::Event::from_any(&any).expect("a recorded event decodes")
-            })
+            .filter_map(angzarr_router::page_event)
+            .map(|any| D::Event::from_any(any).expect("a recorded event decodes"))
             .collect())
     }
 
@@ -258,7 +257,6 @@ fn outcome(handled: &Handled) -> &'static str {
     match handled {
         Handled::Applied(_) => "an applied command",
         Handled::Duplicate(..) => "a duplicate",
-        Handled::Parked(_) => "a parked fact",
     }
 }
 

@@ -1,50 +1,50 @@
 //! Steps 1 and 2 of the pipeline: **validate** a [`CommandBook`] once, then
 //! **identify** it.
 //!
-//! [`check`] is the one place a book is checked. It is domain-blind: it
-//! knows no domain's types, only the [`Catalog`]'s entry for
-//! `cover.domain` (is it registered, and which conflict resolutions does
-//! its state support, as angzarr's coordinator reads them off the
-//! `StateDescriptor`). Everything it refuses is [`Malformed`], before any
-//! id is minted, anything is looked up or any business code runs. What it
-//! accepts is a [`Checked`]: the same book, its required parts taken out of
-//! their prost `Option`s, so nothing downstream unwraps one.
+//! [`check`] is the one place a client's book is checked. It is
+//! domain-blind: it knows no domain's types, only the [`Catalog`]'s entry
+//! for `cover.domain` (is it registered here or remote, is it a process
+//! manager). Everything it refuses is [`Malformed`], before any id is
+//! minted, anything is looked up or any business code runs
+//! (docs/design/pipeline.md §3). What it accepts is a [`Checked`]: the same
+//! book, its required parts taken out of their prost `Option`s, so nothing
+//! downstream unwraps one.
 //!
 //! [`Checked::identify`] then assigns the ids, as angzarr's
 //! `command_identity` region says, and yields an [`Identified`], whose
 //! command and correlation ids are never absent. The order is in the
 //! types: only a `Checked` can be identified, and only an `Identified`
-//! deduplicated ([`Coordinator::deduplicate`](super::Coordinator::deduplicate)).
+//! deduplicated.
 //!
-//! **No causation from outside.** [`check`] is the client entry: a book
-//! that sets `causation_id` is refused ([`Malformed::CausationFromOutside`]).
-//! angzarr-embedded is in process, so no caller outside it can deliver a reaction;
-//! the kernel's own chain builds its policies' books and checks them through
-//! a crate-private entry that derives their ids from the trigger.
+//! **A reaction is the kernel's own.** A client's book carries no
+//! causation (a `CommandPage` has none to carry): only the kernel's own
+//! chain builds a policy's output or a refusal fact, as angzarr's
+//! `ReactionDelivery` (decision 14.79), stamped with the identity derived
+//! from its trigger, and checks it through [`check_reaction`].
 
 use std::fmt;
 
 use angzarr_diagnostic::{code, Arg, Diagnostic};
 use angzarr_proto::ids::{self, UuidError};
 use angzarr_proto::v1::{
-    command_page, CommandBook, CommandPage, ConflictResolution, Cover, EventRef, FactOrigin,
-    Handling, Uuid,
+    command_page, reaction_delivery, CommandBook, CommandPage, Cover, EventRef, FactOrigin,
+    Handling, ReactionDelivery, Uuid,
 };
 use prost_types::{Any, Timestamp};
 
 use super::catalog::Catalog;
 
 /// Why a book was refused before anything was minted, looked up or decided:
-/// angzarr's INVALID_ARGUMENT for a client's book. For a policy's book,
-/// built by the kernel, it is a bug: the chain fails and the dead-letter
-/// log says so ([`DeadLetterLog`](super::DeadLetterLog)). Listed in the
-/// order [`check`] tries them; the first that applies is the answer.
+/// angzarr's INVALID_ARGUMENT for a client's book. For a reaction, built by
+/// the kernel, it is a bug: the chain fails and the dead-letter log says so
+/// ([`DeadLetterLog`](super::DeadLetterLog)). Listed in the order [`check`]
+/// tries them; the first that applies is the answer.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Malformed {
     /// The book has no cover.
     NoCover,
-    /// `cover.domain` is not registered: angzarr-embedded cannot say which conflict
-    /// resolutions it supports, nor decode anything for it.
+    /// `cover.domain` is not registered: angzarr-embedded can decode
+    /// nothing for it.
     UnknownDomain { domain: String },
     /// The cover has no root.
     NoRoot,
@@ -63,46 +63,18 @@ pub enum Malformed {
     BadCommandId { len: usize },
     /// A set `correlation_id` that is not 16 bytes.
     BadCorrelationId { len: usize },
-    /// A client's book with a `causation_id`: only the kernel's own chain
-    /// issues reactions (angzarr's PERMISSION_DENIED for a client).
-    CausationFromOutside,
-    /// A policy's book that names its own command, correlation or causation
-    /// id (`field`, the first set, by its `CommandPage` name): the kernel
-    /// derives all three from the trigger.
-    IdOnPolicyCommand { field: &'static str },
-    /// A policy's book with handling: the target stamps its own head.
-    HandlingOnPolicyCommand,
     /// The reaction's trigger cannot name a command id
     /// ([`ids::policy_command_id`]): no stream or root, a bad root, an
     /// empty edition or component.
     BadTrigger(UuidError),
-    /// A fact without `fact_origin`.
+    /// A client's fact without its origin.
     FactWithoutOrigin,
-    /// A `fact_origin` whose `external_id` is empty: it is the fact's
+    /// A fact origin whose `external_id` is empty: it is the fact's
     /// identity.
     EmptyExternalId,
-    /// A command with a `fact_origin`.
-    CommandWithFactOrigin,
-    /// A fact whose `command_id` is set to anything but its derivation,
-    /// [`ids::fact_command_id`] of its external id.
+    /// A client's fact whose `command_id` is set to anything but its
+    /// derivation, [`ids::fact_command_id`] of its external id.
     FactCommandIdNotDerived,
-    /// A fact with any handling field: a fact is never checked against a
-    /// sequence nor conflict-resolved. An empty handling is unset, and fine.
-    HandlingOnFact,
-    /// A `conflict_resolution` value this build does not know.
-    UnknownConflictResolution { value: i32 },
-    /// A `conflict_resolution` the domain's state does not support (its
-    /// registered `StateDescriptor`): COMMUTATIVE on a state with no
-    /// conflict units, above all.
-    UnsupportedConflictResolution {
-        domain: String,
-        requested: ConflictResolution,
-    },
-    /// A refusal fact (angzarr's `CommandRefused`) for a stream other than
-    /// the one its trigger names, domain, root and edition: a refusal fact
-    /// is accepted only by the exact stream of the policy's triggering
-    /// event.
-    RefusalMisaddressed,
 }
 
 impl fmt::Display for Malformed {
@@ -124,30 +96,12 @@ impl Diagnostic for Malformed {
             Malformed::NoPayload => code!("malformed-no-payload"),
             Malformed::BadCommandId { .. } => code!("malformed-bad-command-id"),
             Malformed::BadCorrelationId { .. } => code!("malformed-bad-correlation-id"),
-            Malformed::CausationFromOutside => code!("malformed-causation-from-outside"),
-            Malformed::IdOnPolicyCommand { .. } => {
-                code!("malformed-id-on-policy-command")
-            }
-            Malformed::HandlingOnPolicyCommand => {
-                code!("malformed-handling-on-policy-command")
-            }
             Malformed::BadTrigger(_) => code!("malformed-bad-trigger"),
             Malformed::FactWithoutOrigin => code!("malformed-fact-without-origin"),
             Malformed::EmptyExternalId => code!("malformed-empty-external-id"),
-            Malformed::CommandWithFactOrigin => {
-                code!("malformed-command-with-fact-origin")
-            }
             Malformed::FactCommandIdNotDerived => {
                 code!("malformed-fact-command-id-not-derived")
             }
-            Malformed::HandlingOnFact => code!("malformed-handling-on-fact"),
-            Malformed::UnknownConflictResolution { .. } => {
-                code!("malformed-unknown-conflict-resolution")
-            }
-            Malformed::UnsupportedConflictResolution { .. } => {
-                code!("malformed-unsupported-conflict-resolution")
-            }
-            Malformed::RefusalMisaddressed => code!("malformed-refusal-misaddressed"),
         }
     }
 
@@ -168,12 +122,6 @@ impl Diagnostic for Malformed {
                 };
                 vec![("reason", reason.into())]
             }
-            Malformed::IdOnPolicyCommand { field } => vec![("field", (*field).into())],
-            Malformed::UnknownConflictResolution { value } => vec![("value", (*value).into())],
-            Malformed::UnsupportedConflictResolution { domain, requested } => vec![
-                ("domain", domain.as_str().into()),
-                ("requested", requested.as_str_name().into()),
-            ],
             _ => Vec::new(),
         }
     }
@@ -192,14 +140,19 @@ pub struct Sampled {
     pub command_id: Uuid,
 }
 
-/// What a command's page carries, checked: a command, or a fact with its
-/// source. A view of `CommandPage.body` with `fact_origin` attached where
-/// it belongs, so a fact's source is never optional.
+/// What a command's page carries, checked: a command with its expected
+/// sequence as sent, or a fact with its origin (decision 14.79: each arm
+/// carries what is its alone), so a fact's origin is never optional and a
+/// fact has no expected sequence.
 #[derive(Clone, PartialEq, Debug)]
 pub enum Body {
-    /// Asks the aggregate to decide; may be rejected.
-    Command { payload: Any },
-    /// Records something that already happened; never rejected.
+    /// Asks the aggregate to decide; may be refused. `expected_sequence` is
+    /// the client's `Handling.expected_sequence` (unset for a reaction).
+    Command {
+        payload: Any,
+        expected_sequence: Option<u64>,
+    },
+    /// Records something that already happened; never refused.
     Fact { payload: Any, source: FactOrigin },
 }
 
@@ -207,49 +160,68 @@ impl Body {
     /// The payload, either arm.
     pub fn payload(&self) -> &Any {
         match self {
-            Body::Command { payload } | Body::Fact { payload, .. } => payload,
+            Body::Command { payload, .. } | Body::Fact { payload, .. } => payload,
         }
     }
 
-    pub fn is_fact(&self) -> bool {
-        matches!(self, Body::Fact { .. })
-    }
-
-    /// A fact's source; `None` for a command.
+    /// A fact's origin; `None` for a command.
     pub fn source(&self) -> Option<&FactOrigin> {
         match self {
             Body::Fact { source, .. } => Some(source),
             Body::Command { .. } => None,
         }
     }
+
+    /// The body's arm, by itself.
+    pub fn arm(&self) -> Arm {
+        match self {
+            Body::Command { .. } => Arm::Command,
+            Body::Fact { .. } => Arm::Fact,
+        }
+    }
+
+    /// This body carrying `payload` in its own's place, its arm kept.
+    pub(crate) fn with_payload(&self, payload: Any) -> Body {
+        match self {
+            Body::Command {
+                expected_sequence, ..
+            } => Body::Command {
+                payload,
+                expected_sequence: *expected_sequence,
+            },
+            Body::Fact { source, .. } => Body::Fact {
+                payload,
+                source: source.clone(),
+            },
+        }
+    }
+}
+
+/// An input's kind, by its body's arm: a command (refusable) or a fact
+/// (never refused).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum Arm {
+    Command,
+    Fact,
 }
 
 /// Who handed the kernel a book.
 #[derive(Clone, PartialEq, Debug)]
-enum Entry {
+pub(crate) enum Entry {
     /// The application, on a caller's behalf.
     Client,
-    /// A policy in the kernel's own chain, reacting to `trigger`. The ids
-    /// are derived at check time, so identifying cannot fail.
-    Policy {
+    /// The kernel's own chain: a policy's output or a refusal fact, as
+    /// angzarr's `ReactionDelivery` carries it: `trigger` is its causation,
+    /// the event the policy reacted to, and `component` the policy.
+    Reaction {
         trigger: EventRef,
-        correlation_id: Uuid,
-        command_id: Uuid,
-    },
-    /// A policy's refusal fact, built by the chain: its id is the refused
-    /// command's, its correlation that command's, and its causation the
-    /// policy's trigger.
-    Refusal {
-        trigger: EventRef,
-        correlation_id: Uuid,
-        command_id: Uuid,
+        component: String,
     },
 }
 
-/// A [`CommandBook`] that passed [`check`]. Every accessor that the book
-/// had to provide is non-optional; the ones that stay `Option` are the
-/// sender's genuine choices (an id to be assigned, handling left to
-/// configuration).
+/// A book that passed [`check`] (or a reaction [`check_reaction`]). Every
+/// accessor that the book had to provide is non-optional; the ones that
+/// stay `Option` are the sender's genuine choices (an id to be assigned).
 #[derive(Clone, PartialEq, Debug)]
 pub struct Checked {
     cover: Cover,
@@ -257,135 +229,40 @@ pub struct Checked {
     body: Body,
     command_id: Option<Uuid>,
     correlation_id: Option<Uuid>,
-    expected_sequence: Option<u64>,
-    conflict_resolution: Option<ConflictResolution>,
     entry: Entry,
     /// Whether the cover is a process manager's: an absent correlation is
     /// its root.
     process_manager: bool,
 }
 
-/// Validate a client's `book`: step 1, the client entry. Domain-blind; the
-/// catalog answers only whether `cover.domain` is registered and what its
-/// state supports. Refuses, in [`Malformed`]'s order, every case angzarr's
-/// `Handling` region lists as malformed, plus a causation (only the
-/// kernel's chain issues policy commands).
+/// Validate a client's `book`: step 1. Domain-blind; the catalog answers
+/// only whether `cover.domain` is registered (here or remote) and whether
+/// it is a process manager. Refuses, in [`Malformed`]'s order, every case
+/// docs/design/pipeline.md §3 lists as malformed.
 pub fn check(book: CommandBook, catalog: &Catalog) -> Result<Checked, Malformed> {
-    parse(book, catalog, None)
-}
-
-/// Validate a policy's `book`, built by the kernel for the `index`-th
-/// command or fact `component` issued reacting to `trigger` (whose
-/// correlation is `correlation_id`): the same checks as [`check`], except
-/// that the book must name no ids of its own and no handling, and its
-/// command id, either arm's, is derived here ([`ids::policy_command_id`]),
-/// a fact's never from its external id (angzarr decision 14.69).
-///
-/// The id never names the reactor's rules version or code, so a re-run over
-/// a handled trigger (catch-up, redelivery) re-derives the same id and
-/// deduplicates (angzarr decision 13.4). Repairs are new commands.
-pub(crate) fn check_policy_command(
-    book: CommandBook,
-    catalog: &Catalog,
-    trigger: EventRef,
-    component: &str,
-    index: u32,
-    correlation_id: Uuid,
-) -> Result<Checked, Malformed> {
-    let command_id =
-        ids::policy_command_id(&trigger, component, index).map_err(Malformed::BadTrigger)?;
-    parse(
-        book,
-        catalog,
-        Some(Entry::Policy {
-            trigger,
-            correlation_id,
-            command_id,
-        }),
-    )
-}
-
-/// The chain's entry for a policy's refusal fact: a fact whose command id
-/// is the refused command's (`command_id`), with that command's
-/// correlation, caused by the policy's `trigger`, addressed to the
-/// trigger's stream.
-pub(crate) fn check_refusal(
-    book: CommandBook,
-    catalog: &Catalog,
-    trigger: EventRef,
-    correlation_id: Uuid,
-    command_id: Uuid,
-) -> Result<Checked, Malformed> {
-    parse(
-        book,
-        catalog,
-        Some(Entry::Refusal {
-            trigger,
-            correlation_id,
-            command_id,
-        }),
-    )
-}
-
-/// The one parse: `policy` is `None` for a client's book.
-fn parse(
-    book: CommandBook,
-    catalog: &Catalog,
-    policy: Option<Entry>,
-) -> Result<Checked, Malformed> {
-    let CommandBook {
-        cover,
-        page,
-        handling,
-    } = book;
-
+    let CommandBook { cover, page } = book;
     let (cover, root) = checked_cover(cover, catalog)?;
-
     let CommandPage {
         body,
         command_id,
         correlation_id,
-        causation_id,
-        fact_origin,
     } = page.ok_or(Malformed::NoPage)?;
-    let (is_fact, payload) = match body.ok_or(Malformed::NoBody)? {
-        command_page::Body::Command(command) => (false, command.payload),
-        command_page::Body::Fact(fact) => (true, fact.payload),
+    let body = match body.ok_or(Malformed::NoBody)? {
+        command_page::Body::Command(command) => Body::Command {
+            payload: command.payload.ok_or(Malformed::NoPayload)?,
+            expected_sequence: command.handling.and_then(|h| h.expected_sequence),
+        },
+        command_page::Body::Fact(fact) => {
+            let payload = fact.payload.ok_or(Malformed::NoPayload)?;
+            let source = fact.origin.ok_or(Malformed::FactWithoutOrigin)?;
+            Body::Fact { payload, source }
+        }
     };
-    let payload = payload.ok_or(Malformed::NoPayload)?;
-
     well_formed(command_id.as_ref(), |len| Malformed::BadCommandId { len })?;
     well_formed(correlation_id.as_ref(), |len| Malformed::BadCorrelationId {
         len,
     })?;
-
-    let handling = handling.unwrap_or_default();
-    let handled = handling != Handling::default();
-    let entry = match policy {
-        None if causation_id.is_some() => return Err(Malformed::CausationFromOutside),
-        None => Entry::Client,
-        Some(_) if command_id.is_some() => {
-            return Err(Malformed::IdOnPolicyCommand {
-                field: "command_id",
-            })
-        }
-        Some(_) if correlation_id.is_some() => {
-            return Err(Malformed::IdOnPolicyCommand {
-                field: "correlation_id",
-            })
-        }
-        Some(_) if causation_id.is_some() => {
-            return Err(Malformed::IdOnPolicyCommand {
-                field: "causation_id",
-            })
-        }
-        Some(entry @ Entry::Refusal { .. }) => entry,
-        Some(_) if handled => return Err(Malformed::HandlingOnPolicyCommand),
-        Some(entry) => entry,
-    };
-
-    let body = if is_fact {
-        let source = fact_origin.ok_or(Malformed::FactWithoutOrigin)?;
+    if let Body::Fact { source, .. } = &body {
         if source.external_id.is_empty() {
             return Err(Malformed::EmptyExternalId);
         }
@@ -394,39 +271,73 @@ fn parse(
                 return Err(Malformed::FactCommandIdNotDerived);
             }
         }
-        if handled {
-            return Err(Malformed::HandlingOnFact);
-        }
-        Body::Fact { payload, source }
-    } else {
-        if fact_origin.is_some() {
-            return Err(Malformed::CommandWithFactOrigin);
-        }
-        Body::Command { payload }
-    };
-
+    }
     // An input to a process manager whose correlation is unset is given
     // its cover's root (decision 14.31); a set one is kept, whatever it is
     // (decision 14.36).
     let process_manager = catalog.is_process_manager(&cover.domain);
-    if let Body::Fact { payload, .. } = &body {
-        if !refusal_addressed(payload, &cover) {
-            return Err(Malformed::RefusalMisaddressed);
-        }
-    }
-
-    let conflict_resolution =
-        conflict_resolution(handling.conflict_resolution, &cover.domain, catalog)?;
-
     Ok(Checked {
         cover,
         root,
         body,
         command_id,
         correlation_id,
-        expected_sequence: handling.expected_sequence,
-        conflict_resolution,
-        entry,
+        entry: Entry::Client,
+        process_manager,
+    })
+}
+
+/// Validate a reaction the kernel's own chain built (`delivery`, angzarr's
+/// `ReactionDelivery`: a policy's output, or a refusal fact), its identity
+/// stamped already: its cover, a body of either arm with a payload, its
+/// ids well formed, and its causation able to name a command id. A fact's
+/// origin is the destination's to derive (docs/design/identity-and-streams.md
+/// §6.1): its external id the command id's canonical text, its
+/// description naming the type and the component. Malformed only by a bug.
+pub(crate) fn check_reaction(
+    delivery: ReactionDelivery,
+    catalog: &Catalog,
+) -> Result<Checked, Malformed> {
+    let ReactionDelivery {
+        cover,
+        body,
+        command_id,
+        correlation_id,
+        causation,
+        component,
+    } = delivery;
+    let (cover, root) = checked_cover(cover, catalog)?;
+    let trigger = causation.ok_or(Malformed::BadTrigger(UuidError::MissingTrigger))?;
+    let command_id = command_id.ok_or(Malformed::BadCommandId { len: 0 })?;
+    well_formed(Some(&command_id), |len| Malformed::BadCommandId { len })?;
+    let correlation_id = correlation_id.ok_or(Malformed::BadCorrelationId { len: 0 })?;
+    well_formed(Some(&correlation_id), |len| Malformed::BadCorrelationId {
+        len,
+    })?;
+    let body = match body.ok_or(Malformed::NoBody)? {
+        reaction_delivery::Body::Command(payload) => Body::Command {
+            payload,
+            expected_sequence: None,
+        },
+        reaction_delivery::Body::Fact(payload) => Body::Fact {
+            source: FactOrigin {
+                external_id: command_id.to_string(),
+                description: format!(
+                    "{} from {component}",
+                    crate::payload::type_name(&payload.type_url)
+                ),
+            },
+            payload,
+        },
+    };
+    let process_manager = catalog.is_process_manager(&cover.domain);
+    Ok(Checked {
+        cover,
+        root,
+        body,
+        command_id: Some(command_id),
+        correlation_id: Some(correlation_id),
+        entry: Entry::Reaction { trigger, component },
         process_manager,
     })
 }
@@ -455,43 +366,6 @@ fn well_formed(id: Option<&Uuid>, malformed: fn(usize) -> Malformed) -> Result<(
         Some(id) if !id.is_well_formed() => Err(malformed(id.value.len())),
         _ => Ok(()),
     }
-}
-
-/// The handling's conflict resolution (`value`, 0 for none): one
-/// angzarr defines, and, for a domain here, one its state supports. A
-/// remote domain's capabilities are its coordinator's to judge.
-fn conflict_resolution(
-    value: i32,
-    domain: &str,
-    catalog: &Catalog,
-) -> Result<Option<ConflictResolution>, Malformed> {
-    if value == 0 {
-        return Ok(None);
-    }
-    let requested = ConflictResolution::try_from(value)
-        .map_err(|_| Malformed::UnknownConflictResolution { value })?;
-    if catalog.is_here(domain) && !catalog.supports(domain, requested) {
-        return Err(Malformed::UnsupportedConflictResolution {
-            domain: domain.to_string(),
-            requested,
-        });
-    }
-    Ok(Some(requested))
-}
-
-/// Whether `payload`, if it is angzarr's `CommandRefused`, is for `cover`:
-/// its trigger names exactly that stream. Any other payload is.
-fn refusal_addressed(payload: &Any, cover: &Cover) -> bool {
-    use prost::Message;
-    let refused = <crate::markup::v1::CommandRefused as prost::Name>::full_name();
-    if crate::payload::type_name(&payload.type_url) != refused {
-        return true;
-    }
-    crate::markup::v1::CommandRefused::decode(&payload.value[..])
-        .ok()
-        .and_then(|refusal| refusal.trigger)
-        .and_then(|trigger| trigger.stream)
-        .is_some_and(|stream| stream == *cover)
 }
 
 impl Checked {
@@ -536,35 +410,31 @@ impl Checked {
         self.correlation_id.as_ref()
     }
 
-    /// `None`: stamped with the head at load. Never set on a fact or a
-    /// reaction.
+    /// A command's expected sequence as its client sent it; `None` for a
+    /// command that states none, a reaction and a fact.
     pub fn expected_sequence(&self) -> Option<u64> {
-        self.expected_sequence
-    }
-
-    /// The requested resolution, supported by the domain's state when set.
-    /// `None` (UNSPECIFIED, or no handling): resolved from configuration at
-    /// load ([`Catalog::resolve`]).
-    pub fn conflict_resolution(&self) -> Option<ConflictResolution> {
-        self.conflict_resolution
+        match &self.body {
+            Body::Command {
+                expected_sequence, ..
+            } => *expected_sequence,
+            Body::Fact { .. } => None,
+        }
     }
 
     /// Whether the kernel's own chain issued it.
-    pub fn is_policy_command(&self) -> bool {
-        matches!(self.entry, Entry::Policy { .. })
+    pub fn is_reaction(&self) -> bool {
+        matches!(self.entry, Entry::Reaction { .. })
     }
 
     /// Step 2: assign the ids (angzarr's `command_identity` region).
     ///
     /// - A client's command: `command_id` as sent, else `sampled.command_id`
     ///   (the application's UUIDv7); correlation as sent, else the command
-    ///   id.
-    /// - A fact: `command_id` = [`ids::fact_command_id`] of its external id
-    ///   (a sent one was checked equal); correlation as sent, else
-    ///   [`ids::fact_correlation`] (the same value).
-    /// - A reaction: the command id derived from its trigger, the trigger's
-    ///   correlation, and the trigger as the command's own causation
-    ///   (`CommandPage.causation_id`; never copied onto its events).
+    ///   id (a process manager's root).
+    /// - A client's fact: `command_id` = [`ids::fact_command_id`] of its
+    ///   external id (a sent one was checked equal); correlation as sent,
+    ///   else [`ids::fact_correlation`] (a process manager's root).
+    /// - A reaction: its stamped command id, correlation and causation.
     ///
     /// Infallible: everything that could make it fail was refused by the
     /// check.
@@ -575,37 +445,21 @@ impl Checked {
             body,
             command_id,
             correlation_id,
-            expected_sequence,
-            conflict_resolution,
             entry,
             process_manager,
         } = self;
-        // A reaction's correlation is its trigger's: the kernel's, set.
-        let correlation_sent = correlation_id.is_some() || !matches!(entry, Entry::Client);
-        let (command_id, correlation_id, causation_id) = match (entry, &body) {
-            (
-                Entry::Policy {
-                    trigger,
-                    correlation_id,
-                    command_id,
-                },
-                _,
-            )
-            | (
-                Entry::Refusal {
-                    trigger,
-                    correlation_id,
-                    command_id,
-                },
-                _,
-            ) => (command_id, correlation_id, Some(trigger)),
+        let correlation_sent = correlation_id.is_some();
+        let (command_id, correlation_id) = match (&entry, &body) {
+            (Entry::Reaction { .. }, _) => (
+                command_id.unwrap_or_default(),
+                correlation_id.unwrap_or_default(),
+            ),
             (Entry::Client, Body::Fact { source, .. }) => (
                 ids::fact_command_id(&source.external_id),
                 correlation_id.unwrap_or_else(|| match process_manager {
                     true => root.clone(),
                     false => ids::fact_correlation(&source.external_id),
                 }),
-                None,
             ),
             (Entry::Client, Body::Command { .. }) => {
                 let id = command_id.unwrap_or_else(|| sampled.command_id.clone());
@@ -613,7 +467,7 @@ impl Checked {
                     true => root.clone(),
                     false => id.clone(),
                 });
-                (id, correlation, None)
+                (id, correlation)
             }
         };
         Identified {
@@ -623,16 +477,15 @@ impl Checked {
             command_id,
             correlation_id,
             correlation_sent,
-            causation_id,
-            expected_sequence,
-            conflict_resolution,
+            entry,
         }
     }
 }
 
 /// A [`Checked`] book with its ids assigned: what deduplication looks up
 /// and what every event it produces is stamped with
-/// ([`CommandContext::event_meta`](angzarr_router::domain::CommandContext::event_meta) of its book's context).
+/// ([`CommandContext::event_meta`](angzarr_router::domain::CommandContext::event_meta)
+/// of its request's context).
 #[derive(Clone, PartialEq, Debug)]
 pub struct Identified {
     cover: Cover,
@@ -643,9 +496,7 @@ pub struct Identified {
     /// Whether the correlation was the sender's (or a reaction's
     /// trigger's), not a default filled in here.
     correlation_sent: bool,
-    causation_id: Option<EventRef>,
-    expected_sequence: Option<u64>,
-    conflict_resolution: Option<ConflictResolution>,
+    entry: Entry,
 }
 
 impl Identified {
@@ -673,6 +524,11 @@ impl Identified {
         self.body.payload()
     }
 
+    /// The input's arm: a command or a fact.
+    pub fn arm(&self) -> Arm {
+        self.body.arm()
+    }
+
     /// Always assigned: the deduplication key on the addressed stream.
     pub fn command_id(&self) -> &Uuid {
         &self.command_id
@@ -683,38 +539,70 @@ impl Identified {
         &self.correlation_id
     }
 
-    /// The command's own causation (`CommandPage.causation_id`): the
-    /// trigger, for a reaction; `None` otherwise. Transport and trace
-    /// metadata, and the input its derived command id hashes. It is **not**
-    /// stamped on the command's events ([`CommandContext::event_meta`](angzarr_router::domain::CommandContext::event_meta)), whose
-    /// causation is the command itself (angzarr decision 13.3): the
-    /// trigger-to-command edge belongs in tracing and logs.
-    pub fn causation_id(&self) -> Option<&EventRef> {
-        self.causation_id.as_ref()
+    /// A reaction's causation (`ReactionDelivery.causation`): the event the
+    /// policy reacted to; `None` for a client's input. Handed to business
+    /// code as `HandleRequest.causation`, and **not** stamped on the
+    /// input's events, whose causation is the input itself (angzarr decision
+    /// 13.3).
+    pub fn causation(&self) -> Option<&EventRef> {
+        match &self.entry {
+            Entry::Reaction { trigger, .. } => Some(trigger),
+            Entry::Client => None,
+        }
     }
 
+    /// A reaction's policy (`ReactionDelivery.component`); `None` for a
+    /// client's input.
+    pub fn component(&self) -> Option<&str> {
+        match &self.entry {
+            Entry::Reaction { component, .. } => Some(component),
+            Entry::Client => None,
+        }
+    }
+
+    /// Whether the kernel's own chain issued it.
+    pub fn is_reaction(&self) -> bool {
+        matches!(self.entry, Entry::Reaction { .. })
+    }
+
+    /// A command's expected sequence as its client sent it; `None` for a
+    /// command that states none, a reaction and a fact.
     pub fn expected_sequence(&self) -> Option<u64> {
-        self.expected_sequence
+        match &self.body {
+            Body::Command {
+                expected_sequence, ..
+            } => *expected_sequence,
+            Body::Fact { .. } => None,
+        }
     }
 
-    pub fn conflict_resolution(&self) -> Option<ConflictResolution> {
-        self.conflict_resolution
+    /// This input carrying `payload` in its own's place (its upcast), its
+    /// arm, identity and handling kept.
+    pub(crate) fn with_payload(&self, payload: Any) -> Identified {
+        Identified {
+            body: self.body.with_payload(payload),
+            ..self.clone()
+        }
     }
 
-    /// The book with its ids filled in, handling as sent: what a dead
-    /// letter or an audit line carries.
+    /// The book with its ids filled in, handling as sent: what business
+    /// code is handed (`HandleRequest.input`), a client's dead letter
+    /// carries and an audit line names.
     pub fn to_book(&self) -> CommandBook {
         let body = match &self.body {
-            Body::Command { payload } => command_page::Body::Command(angzarr_proto::v1::Command {
+            Body::Command {
+                payload,
+                expected_sequence,
+            } => command_page::Body::Command(angzarr_proto::v1::Command {
                 payload: Some(payload.clone()),
+                handling: expected_sequence.map(|expected| Handling {
+                    expected_sequence: Some(expected),
+                }),
             }),
-            Body::Fact { payload, .. } => command_page::Body::Fact(angzarr_proto::v1::Fact {
+            Body::Fact { payload, source } => command_page::Body::Fact(angzarr_proto::v1::Fact {
                 payload: Some(payload.clone()),
+                origin: Some(source.clone()),
             }),
-        };
-        let handling = Handling {
-            expected_sequence: self.expected_sequence,
-            conflict_resolution: self.conflict_resolution.map_or(0, |r| r as i32),
         };
         CommandBook {
             cover: Some(self.cover.clone()),
@@ -722,11 +610,29 @@ impl Identified {
                 body: Some(body),
                 command_id: Some(self.command_id.clone()),
                 correlation_id: Some(self.correlation_id.clone()),
-                causation_id: self.causation_id.clone(),
-                fact_origin: self.body.source().cloned(),
             }),
-            handling: (handling != Handling::default()).then_some(handling),
         }
+    }
+
+    /// A reaction as angzarr's `ReactionDelivery` (decision 14.79): what a
+    /// reaction's dead letter carries (`rejected_reaction`) and a refused
+    /// policy's Translate is handed. `None` for a client's input.
+    pub fn to_delivery(&self) -> Option<ReactionDelivery> {
+        let Entry::Reaction { trigger, component } = &self.entry else {
+            return None;
+        };
+        let body = match &self.body {
+            Body::Command { payload, .. } => reaction_delivery::Body::Command(payload.clone()),
+            Body::Fact { payload, .. } => reaction_delivery::Body::Fact(payload.clone()),
+        };
+        Some(ReactionDelivery {
+            cover: Some(self.cover.clone()),
+            body: Some(body),
+            command_id: Some(self.command_id.clone()),
+            correlation_id: Some(self.correlation_id.clone()),
+            causation: Some(trigger.clone()),
+            component: component.clone(),
+        })
     }
 
     /// The book handed to a remote domain's coordinator: as
@@ -737,7 +643,7 @@ impl Identified {
     /// remote's.
     pub fn to_remote_book(&self) -> CommandBook {
         let mut book = self.to_book();
-        if !self.correlation_sent {
+        if !self.correlation_sent && !self.is_reaction() {
             if let Some(page) = book.page.as_mut() {
                 page.correlation_id = None;
             }

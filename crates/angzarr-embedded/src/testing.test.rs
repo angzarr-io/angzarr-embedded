@@ -77,11 +77,13 @@ fn given_events_are_stored_as_recorded_pages() {
     );
     assert_eq!(
         meta(1).causation,
-        Some(Causation::CommandId(Samples::command_id(1)))
+        Some(Causation::Command(crate::v1::CommandCause {
+            command_id: Some(Samples::command_id(1))
+        }))
     );
     assert_eq!(meta(2).correlation_id, Some(Samples::command_id(2)));
     assert_eq!(
-        AccountEvent::from_any(pages[1].payload.as_ref().unwrap()).unwrap(),
+        AccountEvent::from_any(crate::angzarr_router::page_event(&pages[1]).unwrap()).unwrap(),
         AccountEvent::Deposited(30)
     );
     assert_eq!(harness.state().cents, 35);
@@ -112,8 +114,12 @@ fn a_refusal_is_answered_and_records_nothing() {
     let mut harness = account();
     let refused = harness.when(AccountCmd::Deposit(25)).refused();
     assert_eq!(
+        refused.rejection::<crate::toys::Refused>(),
+        Some(&crate::toys::Refused::NotOpen)
+    );
+    assert_eq!(
         angzarr_diagnostic::Diagnostic::code(&refused),
-        "toy-account-not-open"
+        "ANGZARR_REASON_COMMAND_REFUSED"
     );
     assert!(harness.pages().is_empty());
 }

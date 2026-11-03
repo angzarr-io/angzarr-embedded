@@ -37,17 +37,17 @@
 use std::convert::Infallible;
 use std::fmt;
 
-use ::angzarr_embedded::markup::v1::{refusal_response, RefusalResponse};
+use ::angzarr_embedded::angzarr_router::domain::Emit as RouterEmit;
 use ::angzarr_embedded::markup::{
-    self, assert_step_idempotent, BusinessStatus, CommandContext, CommandRefused, Commands,
-    Context, DomainMessage, Emit, Failed, PageContext, Policy, PolicyContext, ProcessManager,
-    ProjectionContext, Record, Refusal, Refuses, Refusing, Rejection, RetryableStatus, TypeName,
-    STEP_LIMIT,
+    self, assert_step_idempotent, BusinessStatus, CommandContext, Commands, Context, DomainMessage,
+    Emit, Failed, PageContext, Policy, PolicyContext, ProcessManager, ProjectionContext, Record,
+    Refused as Translating, Refuses, Refusing, RetryableStatus, TypeName, TypedRefusal,
+    Unrefusable,
 };
 use ::angzarr_embedded::v1::event_meta::Causation;
 use ::angzarr_embedded::v1::{
-    command_page, Command, CommandBook, CommandPage, ConflictResolution, Cover, EventBook,
-    EventPage, EventRef, Fact, FactOrigin, StateDescriptor, StateOptions, Uuid,
+    command_page, Command, CommandBook, CommandPage, Cover, EventBook, EventPage, EventRef, Fact,
+    FactOrigin, StateDescriptor, Uuid,
 };
 use ::angzarr_embedded::{
     pack, type_name, Any, Decoder, Domain, Envelope, Executed, Failure, Handled, KernelError,
@@ -81,6 +81,22 @@ mod wire {
         };
     }
     pub(super) use message;
+
+    // The wallet's typed refusal object: one message for every reason a
+    // wallet refuses, its kind and the amounts it names.
+    message!(
+        "toy.wallet.v1",
+        Refused {
+            #[prost(string, tag = "1")]
+            kind: String,
+            #[prost(int64, tag = "2")]
+            cents: i64,
+            #[prost(int64, tag = "3")]
+            short: i64,
+            #[prost(int64, tag = "4")]
+            limit: i64,
+        }
+    );
 
     message!(
         "toy.wallet.v1",
@@ -128,7 +144,6 @@ mod wire {
     );
     message!("toy.wallet.cmd.v1", Close {});
     message!("toy.wallet.cmd.v1", Note {});
-    message!("toy.wallet.cmd.v1", Spin {});
 
     message!("toy.wallet.v1", Opened {});
     message!(
@@ -166,7 +181,6 @@ mod wire {
             correlation_id: Vec<u8>,
         }
     );
-    message!("toy.wallet.v1", Spun {});
 
     message!(
         "toy.wallet.fact.v1",
@@ -322,6 +336,7 @@ mod wire {
         }
     );
     message!("toy.buyin.cmd.v1", BuyInExpired {});
+    message!("toy.buyin.v1", AlreadyStarted {});
     message!(
         "toy.buyin.cmd.v1",
         HoldLost {
@@ -350,15 +365,6 @@ mod wire {
         Expired {
             #[prost(string, tag = "1")]
             external_id: String,
-        }
-    );
-    message!(
-        "toy.buyin.v1",
-        BuyInFailed {
-            #[prost(int64, tag = "1")]
-            short: i64,
-            #[prost(bool, tag = "2")]
-            had_history: bool,
         }
     );
     message!(
@@ -447,7 +453,6 @@ domain_type!(Withdraw { cents: i64 });
 domain_type!(Sweep { chunk: i64 });
 domain_type!(Close {});
 domain_type!(Note {});
-domain_type!(Spin {});
 domain_type!(Opened {});
 domain_type!(Rewarded { cents: i64 });
 domain_type!(Withdrew { cents: i64 });
@@ -457,7 +462,6 @@ domain_type!(Noted {
     command_id: Vec<u8>,
     correlation_id: Vec<u8>,
 });
-domain_type!(Spun {});
 domain_type!(Payout { cents: i64 });
 domain_type!(Gift { cents: i64 });
 domain_type!(PaidOut { cents: i64 });
@@ -481,6 +485,7 @@ domain_type!(StartBuyIn {
 });
 domain_type!(RecordHeld { cents: i64 });
 domain_type!(BuyInExpired {});
+domain_type!(AlreadyStarted {});
 domain_type!(HoldLost { short: i64 });
 domain_type!(BuyInStarted {
     wallet: Vec<u8>,
@@ -489,10 +494,6 @@ domain_type!(BuyInStarted {
 domain_type!(BuyInHeld { cents: i64 });
 domain_type!(Expired {
     external_id: String
-});
-domain_type!(BuyInFailed {
-    short: i64,
-    had_history: bool
 });
 domain_type!(HoldWasLost { short: i64 });
 domain_type!(Stake {
@@ -602,6 +603,63 @@ impl fmt::Display for Refused {
                 write!(f, "{cents} cents is over the limit of {limit}")
             }
         }
+    }
+}
+
+/// The wallet's refusal travels as its one typed refusal object,
+/// `toy.wallet.v1.Refused` (decision 14.95: typed refusals only).
+impl DomainMessage for Refused {
+    type Wire = wire::Refused;
+
+    fn to_wire(&self) -> wire::Refused {
+        let kind = self.code().to_string();
+        let (cents, short, limit) = match *self {
+            Refused::NotPositive { cents } | Refused::NotEmpty { cents } => (cents, 0, 0),
+            Refused::Overdrawn { short } => (0, short, 0),
+            Refused::OverLimit { cents, limit } => (cents, 0, limit),
+            Refused::AlreadyOpen | Refused::NotOpen => (0, 0, 0),
+        };
+        wire::Refused {
+            kind,
+            cents,
+            short,
+            limit,
+        }
+    }
+
+    fn from_wire(wire: wire::Refused) -> Result<Self, WireError> {
+        Ok(match wire.kind.as_str() {
+            "toy-wallet-not-positive" => Refused::NotPositive { cents: wire.cents },
+            "toy-wallet-already-open" => Refused::AlreadyOpen,
+            "toy-wallet-not-open" => Refused::NotOpen,
+            "toy-wallet-overdrawn" => Refused::Overdrawn { short: wire.short },
+            "toy-wallet-not-empty" => Refused::NotEmpty { cents: wire.cents },
+            "toy-wallet-over-limit" => Refused::OverLimit {
+                cents: wire.cents,
+                limit: wire.limit,
+            },
+            _ => {
+                return Err(WireError::Missing {
+                    message: "toy.wallet.v1.Refused",
+                    field: "kind",
+                })
+            }
+        })
+    }
+}
+
+/// A wallet's refusal, packed as its typed object.
+impl From<Refused> for TypedRefusal {
+    fn from(refused: Refused) -> TypedRefusal {
+        TypedRefusal::of(&refused)
+    }
+}
+
+/// A refusal as is, from a continuation step or `?`: the typed refusal it
+/// travels as, FAILED_PRECONDITION.
+impl<A: Domain> markup::Fails<A> for Refused {
+    fn into_failed(self) -> Failed<TypedRefusal> {
+        Failed::rejected(self)
     }
 }
 
@@ -750,10 +808,10 @@ impl Wallet {
 #[aggregate(domain = "wallet", snapshot = wire::WalletSnapshot)]
 impl Wallet {
     /// Two events, a tuple: the router applies them in order.
-    #[handles_cmd(Open)]
-    fn open(&self, cmd: Open, ctx: &Context) -> Result<(Opened, Deposited), Refused> {
+    #[handles_cmd(Open, refuses(Refused))]
+    fn open(&self, cmd: Open, ctx: &Context) -> Result<(Opened, Deposited), Refuses<Self, Open>> {
         if self.open {
-            return Err(Refused::AlreadyOpen);
+            return Err(Refused::AlreadyOpen.into());
         }
         Ok((
             Opened {},
@@ -767,10 +825,10 @@ impl Wallet {
     /// One event, stamped with the context's instant (the handler has no
     /// clock), then a continuation: whether the deposit is allowed, or
     /// earns the reward, depends on the balance after it.
-    #[handles_cmd(Deposit)]
-    fn deposit(&self, cmd: Deposit, ctx: &Context) -> Result<Emit<Self>, Refused> {
+    #[handles_cmd(Deposit, refuses(Refused))]
+    fn deposit(&self, cmd: Deposit, ctx: &Context) -> Result<Emit<Self>, Refuses<Self, Deposit>> {
         if !self.open {
-            return Err(Refused::NotOpen);
+            return Err(Refused::NotOpen.into());
         }
         positive(cmd.cents)?;
         Ok(Emit::of(Deposited {
@@ -795,8 +853,8 @@ impl Wallet {
         Ok((cents >= REWARD_AT && !self.rewarded).then_some(Rewarded { cents: cents / 10 }))
     }
 
-    #[handles_cmd(Withdraw)]
-    fn withdraw(&self, cmd: Withdraw, _ctx: &Context) -> Result<Withdrew, Refused> {
+    #[handles_cmd(Withdraw, refuses(Refused))]
+    fn withdraw(&self, cmd: Withdraw, _ctx: &Context) -> Result<Withdrew, Refuses<Self, Withdraw>> {
         positive(cmd.cents)?;
         self.ledger.covers(cmd.cents)?;
         Ok(Withdrew { cents: cmd.cents })
@@ -820,8 +878,8 @@ impl Wallet {
 
     /// Any number of one event, a `Vec`, each decided from the state before
     /// any of them.
-    #[handles_cmd(Sweep)]
-    fn sweep(&self, cmd: Sweep, _ctx: &Context) -> Result<Vec<Withdrew>, Refused> {
+    #[handles_cmd(Sweep, refuses(Refused))]
+    fn sweep(&self, cmd: Sweep, _ctx: &Context) -> Result<Vec<Withdrew>, Refuses<Self, Sweep>> {
         positive(cmd.chunk)?;
         Ok(self
             .ledger
@@ -832,18 +890,18 @@ impl Wallet {
     }
 
     /// One event or none, an `Option`: closing a closed wallet is nothing.
-    #[handles_cmd(Close)]
-    fn close(&self, _cmd: Close, _ctx: &Context) -> Result<Option<Closed>, Refused> {
+    #[handles_cmd(Close, refuses(Refused))]
+    fn close(&self, _cmd: Close, _ctx: &Context) -> Result<Option<Closed>, Refuses<Self, Close>> {
         match self.ledger.balance() {
             0 => Ok((!self.closed).then_some(Closed {})),
-            cents => Err(Refused::NotEmpty { cents }),
+            cents => Err(Refused::NotEmpty { cents }.into()),
         }
     }
 
     /// Records what the context says about the command: its stream, its id
     /// and its correlation.
-    #[handles_cmd(Note)]
-    fn note(&self, _cmd: Note, ctx: &Context) -> Result<Noted, Refused> {
+    #[handles_cmd(Note, refuses(Refused))]
+    fn note(&self, _cmd: Note, ctx: &Context) -> Result<Noted, Refuses<Self, Note>> {
         Ok(Noted {
             root: ctx
                 .command
@@ -869,17 +927,6 @@ impl Wallet {
                 .value
                 .to_vec(),
         })
-    }
-
-    /// A deliberate bug: a step that always continues, so the decision
-    /// runs into the step limit.
-    #[handles_cmd(Spin)]
-    fn spin(&self, _cmd: Spin, _ctx: &Context) -> Result<Emit<Self>, Refused> {
-        Ok(Emit::of(Spun {}).then(Self::spin_again))
-    }
-
-    fn spin_again(&self, _ctx: &Context) -> Result<Emit<Self>, Refused> {
-        Ok(Emit::of(Spun {}).then(Self::spin_again))
     }
 
     /// A fact (sent by a policy): no `Result`. A payout the wallet cannot
@@ -947,9 +994,6 @@ impl Wallet {
     #[applies(Noted)]
     fn noted(&mut self, _event: Noted) {}
 
-    #[applies(Spun)]
-    fn spun(&mut self, _event: Spun) {}
-
     #[applies(PaidOut)]
     fn paid_out(&mut self, event: PaidOut) {
         self.ledger.debit(event.cents);
@@ -968,8 +1012,8 @@ fn positive(cents: i64) -> Result<(), Refused> {
 
 // ---------------------------------------------------------------- the lamp
 
-/// The smallest aggregate: no snapshot form, and a rejection (inferred,
-/// `Infallible`) it never returns.
+/// The smallest aggregate: no snapshot form, and a command that lists no
+/// refusal, so cannot refuse.
 #[derive(Clone, Default, PartialEq, Debug)]
 pub struct Lamp {
     on: bool,
@@ -978,7 +1022,11 @@ pub struct Lamp {
 #[aggregate(domain = "lamp")]
 impl Lamp {
     #[handles_cmd(SwitchOn)]
-    fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<Option<SwitchedOn>, Infallible> {
+    fn switch_on(
+        &self,
+        _cmd: SwitchOn,
+        _ctx: &Context,
+    ) -> Result<Option<SwitchedOn>, Failed<Unrefusable>> {
         Ok((!self.on).then_some(SwitchedOn {}))
     }
 
@@ -1096,7 +1144,11 @@ impl Payload for ToggleEvent {
 #[aggregate(domain = "toggle", command = ToggleCommand, event = ToggleEvent)]
 impl Toggle {
     #[handles_cmd(SwitchOn)]
-    fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<Option<SwitchedOn>, Infallible> {
+    fn switch_on(
+        &self,
+        _cmd: SwitchOn,
+        _ctx: &Context,
+    ) -> Result<Option<SwitchedOn>, Failed<Unrefusable>> {
         Ok((!self.on).then_some(SwitchedOn {}))
     }
 
@@ -1105,7 +1157,7 @@ impl Toggle {
         &self,
         _cmd: SwitchOff,
         _ctx: &Context,
-    ) -> Result<Option<SwitchedOff>, Infallible> {
+    ) -> Result<Option<SwitchedOff>, Failed<Unrefusable>> {
         Ok(self.on.then_some(SwitchedOff {}))
     }
 
@@ -1164,14 +1216,14 @@ impl Badge {
     /// before the continuation runs, at the stream's next sequence, and the
     /// continuation keeps the badge it ran on ([`DECIDED`]).
     #[handles_cmd(Issue, rooted_by = key)]
-    fn issue(&self, cmd: Issue, ctx: &Context) -> Result<Emit<Self>, Failed<Infallible>> {
+    fn issue(&self, cmd: Issue, ctx: &Context) -> Result<Emit<Self>, Failed<Unrefusable>> {
         let due = ctx.command.next_sequence;
         Ok(
             Emit::of(Issued { key: cmd.key }).then(move |badge: &Self, _: &Context| {
                 DECIDED.with(|decided| decided.borrow_mut().push(badge.clone()));
                 match badge.seen.last().map(|(sequence, _)| *sequence) == Some(due) {
                     true => Ok(None::<Issued>),
-                    false => Err(Failed::<Infallible>::bug(&MisFolded)),
+                    false => Err(Failed::<Unrefusable>::bug(&MisFolded)),
                 }
             }),
         )
@@ -1313,10 +1365,10 @@ fn probe_failure<X>(status: i64, seat: i64) -> Failed<X> {
     }
 }
 
-/// A handler that fails both ways, [`Failed`]: a refusal under a status of
-/// the business set, a refusal by `?` from its own rejection, and a bug;
-/// beside a handler that still returns its rejection as is. The rejection,
-/// `Refused`, is inferred through `Failed`, and the two agree.
+/// A handler that fails both ways, [`Failed`]: a typed refusal under a
+/// status of the business set, one by `?` from the wallet's own
+/// [`Refused`], and a bug; beside a handler that returns its refusal
+/// choice as is. Every refusing command lists `refuses(Refused)`.
 #[derive(Clone, Default, PartialEq, Debug)]
 pub struct Meter {
     reading: i64,
@@ -1327,16 +1379,18 @@ impl Meter {
     /// A negative reading is the caller's mistake (INVALID_ARGUMENT); one
     /// over the limit refuses by `?` (FAILED_PRECONDITION); a zero reading
     /// is the meter's bug.
-    #[handles_cmd(Gauge)]
-    fn gauge(&self, cmd: Gauge, _ctx: &Context) -> Result<Gauged, Failed<Refused>> {
+    #[handles_cmd(Gauge, refuses(Refused))]
+    fn gauge(&self, cmd: Gauge, _ctx: &Context) -> Result<Gauged, Failed<Refuses<Self, Gauge>>> {
         if cmd.reading == 0 {
             return Err(Failed::bug(&MeterBroke { seat: 3 }));
         }
         if cmd.reading < 0 {
-            return Err(Failed::from(Refused::NotPositive { cents: cmd.reading })
-                .with_status(BusinessStatus::InvalidArgument));
+            return Err(
+                Failed::rejected(Refused::NotPositive { cents: cmd.reading })
+                    .with_status(BusinessStatus::InvalidArgument),
+            );
         }
-        within(cmd.reading)?;
+        within(cmd.reading).map_err(Failed::rejected)?;
         Ok(Gauged {
             reading: cmd.reading,
         })
@@ -1345,8 +1399,8 @@ impl Meter {
     /// A reading, then a step that fails both ways: a zero reading is the
     /// step's bug, a negative one its refusal (INVALID_ARGUMENT); either
     /// fails the whole decision.
-    #[handles_cmd(Tune)]
-    fn tune(&self, cmd: Tune, _ctx: &Context) -> Result<Emit<Self>, Refused> {
+    #[handles_cmd(Tune, refuses(Refused))]
+    fn tune(&self, cmd: Tune, _ctx: &Context) -> Result<Emit<Self>, Refuses<Self, Tune>> {
         let reading = cmd.reading;
         Ok(Emit::of(Gauged { reading: 1 })
             .then(move |meter: &Self, ctx: &Context| meter.adjust(reading, ctx)))
@@ -1370,12 +1424,16 @@ impl Meter {
         Ok(Sealed {})
     }
 
-    /// The handler as it was before `Failed`: its own rejection, as is.
-    #[handles_cmd(Calibrate)]
-    fn calibrate(&self, _cmd: Calibrate, _ctx: &Context) -> Result<Calibrated, Refused> {
+    /// A handler with no `Failed`: its refusal choice, as is.
+    #[handles_cmd(Calibrate, refuses(Refused))]
+    fn calibrate(
+        &self,
+        _cmd: Calibrate,
+        _ctx: &Context,
+    ) -> Result<Calibrated, Refuses<Self, Calibrate>> {
         match self.reading {
             0 => Ok(Calibrated {}),
-            cents => Err(Refused::NotEmpty { cents }),
+            cents => Err(Refused::NotEmpty { cents }.into()),
         }
     }
 
@@ -1383,7 +1441,7 @@ impl Meter {
     /// (or, with `step`, its continuation step) fails as `status` picks
     /// ([`probe_failure`]); once it is up, a `Probed`.
     #[handles_cmd(Probe)]
-    fn probe(&self, cmd: Probe, _ctx: &Context) -> Result<Emit<Self>, Failed<Refused>> {
+    fn probe(&self, cmd: Probe, _ctx: &Context) -> Result<Emit<Self>, Failed<Unrefusable>> {
         let status = cmd.status;
         if !cmd.step {
             return match probe_down() {
@@ -1393,7 +1451,7 @@ impl Meter {
         }
         Ok(
             Emit::of(Probed {}).then(move |_: &Self, _: &Context| match probe_down() {
-                true => Err(probe_failure::<Refused>(status, 6)),
+                true => Err(probe_failure::<Unrefusable>(status, 6)),
                 false => Ok(None::<Probed>),
             }),
         )
@@ -1446,8 +1504,9 @@ domain_type!(Climb { to: u32 });
 domain_type!(Slip {});
 domain_type!(Rung {});
 
-/// A decision that climbs one rung per step, to the step limit's edge
-/// and past it; and a fact whose steps never stop.
+/// A decision that climbs one rung per step, as many as it takes (there
+/// is no step cap); and a fact whose steps slip until the ladder is five
+/// rungs high.
 #[derive(Clone, Default, PartialEq, Debug)]
 pub struct Ladder {
     rungs: u32,
@@ -1457,13 +1516,13 @@ pub struct Ladder {
 #[aggregate(domain = "ladder")]
 impl Ladder {
     #[handles_cmd(Climb)]
-    fn climb(&self, cmd: Climb, _ctx: &Context) -> Result<Emit<Self>, Infallible> {
+    fn climb(&self, cmd: Climb, _ctx: &Context) -> Result<Emit<Self>, Failed<Unrefusable>> {
         let to = cmd.to;
         Ok(Emit::of(Rung {}).then(move |ladder: &Ladder, ctx: &Context| ladder.higher(to, ctx)))
     }
 
     /// One more rung while below `to`.
-    fn higher(&self, to: u32, _ctx: &Context) -> Result<Emit<Self>, Infallible> {
+    fn higher(&self, to: u32, _ctx: &Context) -> Result<Emit<Self>, Failed<Unrefusable>> {
         match self.rungs < to {
             true => Ok(Emit::of(Rung {})
                 .then(move |ladder: &Ladder, ctx: &Context| ladder.higher(to, ctx))),
@@ -1476,8 +1535,12 @@ impl Ladder {
         Record::of(Rung {}).then(Self::slipping)
     }
 
+    /// One more rung while below five: idempotent once there.
     fn slipping(&self, _ctx: &Context) -> Record<Self> {
-        Record::of(Rung {}).then(Self::slipping)
+        match self.rungs < 5 {
+            true => Record::of(Rung {}).then(Self::slipping),
+            false => Record::of(None::<Rung>),
+        }
     }
 
     #[applies(Rung)]
@@ -1490,10 +1553,9 @@ impl Ladder {
 // ---------------------------------------------------------------- the pot
 
 /// An aggregate whose handlers read angzarr-router's whole
-/// `CommandContext`, their [`Context`]'s `command`: a stake decided under
-/// AGGREGATE_HANDLES reads the window it did not see and, when told to,
-/// acknowledges it; a mark records the stream's root; a peek records what
-/// the router knows of the input.
+/// `CommandContext`, their [`Context`]'s `command`: a stake records its
+/// amount; a mark records the stream's root; a peek records what the
+/// router knows of the input.
 #[derive(Clone, Default, PartialEq, Debug)]
 pub struct Pot {
     cents: i64,
@@ -1501,32 +1563,19 @@ pub struct Pot {
 
 #[aggregate(domain = "pot")]
 impl Pot {
-    /// A stake that does not acknowledge never reads the context, so the
-    /// router finds the window unacknowledged.
+    /// A stake: its amount, whatever its window would have been (there is
+    /// no conflict concept, decision 14.92).
     #[handles_cmd(Stake)]
-    fn stake(&self, cmd: Stake, ctx: &Context) -> Result<Staked, Infallible> {
-        if !cmd.acknowledge {
-            return Ok(Staked {
-                cents: cmd.cents,
-                window: 0,
-            });
-        }
-        let window = match &ctx.command.conflict {
-            Some(conflict) => {
-                conflict.resolve_conflicts(conflict.window(), conflict.nonce());
-                conflict.window().len() as u32
-            }
-            None => 0,
-        };
+    fn stake(&self, cmd: Stake, _ctx: &Context) -> Result<Staked, Failed<Unrefusable>> {
         Ok(Staked {
             cents: cmd.cents,
-            window,
+            window: 0,
         })
     }
 
     /// The stream's root and domain, from the router's cover.
     #[handles_cmd(Mark)]
-    fn mark(&self, _cmd: Mark, ctx: &Context) -> Result<Marked, Infallible> {
+    fn mark(&self, _cmd: Mark, ctx: &Context) -> Result<Marked, Failed<Unrefusable>> {
         let cover = ctx.command.cover.clone().unwrap_or_default();
         Ok(Marked {
             root: cover.root.unwrap_or_default().value.to_vec(),
@@ -1534,16 +1583,20 @@ impl Pot {
         })
     }
 
-    /// What the router knows of the input, under whatever resolution it
-    /// was decided.
+    /// What the router knows of the input: its stream's head, whether it
+    /// had history, and the expected sequence its command was sent with.
     #[handles_cmd(Peek)]
-    fn peek(&self, _cmd: Peek, ctx: &Context) -> Result<Peeked, Infallible> {
+    fn peek(&self, _cmd: Peek, ctx: &Context) -> Result<Peeked, Failed<Unrefusable>> {
+        let expected_sequence = match &ctx.command.arm {
+            markup::InputArm::Command { expected_sequence } => expected_sequence.unwrap_or(0),
+            markup::InputArm::Fact { .. } => 0,
+        };
         Ok(Peeked {
             next_sequence: ctx.command.next_sequence,
             had_prior_events: ctx.command.had_prior_events,
-            expected_sequence: ctx.command.expected_sequence,
-            resolution: ctx.command.conflict_resolution as i32,
-            conflict: ctx.command.conflict.is_some(),
+            expected_sequence,
+            resolution: 0,
+            conflict: false,
         })
     }
 
@@ -1584,13 +1637,7 @@ impl State for TallyState {
 
     fn descriptor() -> StateDescriptor {
         StateDescriptor {
-            type_url: "/toy.tally.v1.TallyState".to_string(),
-            options: Some(StateOptions {
-                conflict_resolutions: vec![
-                    ConflictResolution::Strict as i32,
-                    ConflictResolution::AggregateHandles as i32,
-                ],
-            }),
+            type_name: "toy.tally.v1.TallyState".to_string(),
         }
     }
 }
@@ -1648,13 +1695,7 @@ fn tally_handlers(
     table: ::angzarr_embedded::angzarr_router::domain::DomainDispatch<TallyState>,
 ) -> ::angzarr_embedded::angzarr_router::domain::DomainDispatch<TallyState> {
     table.on_command("toy.tally.cmd.v1.Count", |_, _, _| {
-        Ok(Some(EventBook {
-            pages: vec![EventPage {
-                payload: Some(Counted {}.to_any()),
-                ..Default::default()
-            }],
-            ..Default::default()
-        }))
+        Ok(RouterEmit::of([Counted {}.to_any()]))
     })
 }
 
@@ -1711,12 +1752,11 @@ fn send(domain: &str, n: u8, payload: Any, correlation: Option<Uuid>) -> Command
         page: Some(CommandPage {
             body: Some(command_page::Body::Command(Command {
                 payload: Some(payload),
+                handling: None,
             })),
             command_id: Some(Uuid::from_bytes([n; 16])),
             correlation_id: correlation,
-            ..CommandPage::default()
         }),
-        handling: None,
     }
 }
 
@@ -1752,14 +1792,13 @@ fn fact(domain: &str, payload: Any, external_id: &str) -> CommandBook {
         page: Some(CommandPage {
             body: Some(command_page::Body::Fact(Fact {
                 payload: Some(payload),
+                origin: Some(FactOrigin {
+                    external_id: external_id.to_string(),
+                    description: "toy payout".to_string(),
+                }),
             })),
-            fact_origin: Some(FactOrigin {
-                external_id: external_id.to_string(),
-                description: "toy payout".to_string(),
-            }),
             ..CommandPage::default()
         }),
-        handling: None,
     }
 }
 
@@ -1784,11 +1823,16 @@ fn opened(registry: &Registry, bonus: i64) -> Stream<Wallet> {
     wallet
 }
 
-/// The refusal `failure` is, as its caller receives it: its code and its
-/// English.
+/// The refusal `failure` is, as its caller receives it: a wallet's
+/// [`Refused`], decoded from the typed object it travels as, by its code
+/// and args; any other typed refusal as the router keyed it
+/// (`ANGZARR_REASON_COMMAND_REFUSED` and its `refusal_type`).
 fn rejection(failure: Failure<Rejected>) -> (String, Vec<(String, String)>) {
     match failure {
-        Failure::Rejected(rejected) => said(&rejected),
+        Failure::Rejected(rejected) => match rejected.refusal::<Refused>() {
+            Some(refused) => said(&refused),
+            None => said(&rejected),
+        },
         other => panic!("refused by the domain, not {other:?}"),
     }
 }
@@ -1842,7 +1886,7 @@ mod context_instant {
     use super::*;
 
     /// A handler's instant is the router's, `ctx.command.recorded_at`: the
-    /// `ContextualCommand.recorded_at` the kernel stamped (decision 14.37).
+    /// `HandleRequest.recorded_at` the kernel stamped (decision 14.37).
     /// The context keeps no instant of its own beside it, so the two never
     /// disagree.
     #[test]
@@ -1897,7 +1941,7 @@ mod route {
 
     /// A type URL no handler is marked for (a command the proto declares
     /// and the markup does not handle, or another domain's) is the router's
-    /// ROUTER_REASON_UNKNOWN_COMMAND_TYPE, not a rejection, and reaches no handler.
+    /// ANGZARR_REASON_UNKNOWN_COMMAND_TYPE, not a rejection, and reaches no handler.
     #[test]
     fn an_unmarked_type_url_is_the_routers_unknown_command_type() {
         let registry = registry();
@@ -1907,13 +1951,13 @@ mod route {
 
         match refused {
             Err(Failure::Kernel(KernelError::Router(e))) => {
-                assert_eq!(e.code, "ROUTER_REASON_UNKNOWN_COMMAND_TYPE");
+                assert_eq!(e.code, "ANGZARR_REASON_UNKNOWN_COMMAND_TYPE");
                 assert_eq!(
                     e.extras.get("type_url").map(String::as_str),
                     Some("/toy.tally.cmd.v1.Count")
                 );
             }
-            other => panic!("the router's ROUTER_REASON_UNKNOWN_COMMAND_TYPE, not {other:?}"),
+            other => panic!("the router's ANGZARR_REASON_UNKNOWN_COMMAND_TYPE, not {other:?}"),
         }
         assert_eq!(wallet.len(), 2, "nothing was committed");
     }
@@ -1937,7 +1981,6 @@ mod route {
                 "/toy.wallet.cmd.v1.Hold",
                 "/toy.wallet.cmd.v1.Note",
                 "/toy.wallet.cmd.v1.Open",
-                "/toy.wallet.cmd.v1.Spin",
                 "/toy.wallet.cmd.v1.Sweep",
                 "/toy.wallet.cmd.v1.Withdraw",
             ]
@@ -1957,7 +2000,6 @@ mod route {
                 "/toy.wallet.v1.PaidOut",
                 "/toy.wallet.v1.PayoutRefused",
                 "/toy.wallet.v1.Rewarded",
-                "/toy.wallet.v1.Spun",
                 "/toy.wallet.v1.Withdrew",
             ]
         );
@@ -2160,63 +2202,21 @@ mod continuation {
         assert_eq!(wallet.state(), &before, "nothing was applied");
     }
 
-    /// A decision whose steps never stop is the kernel's `TooManySteps`,
-    /// at the limit, with nothing committed.
+    /// There is no step cap (decision 14.104): a decision runs as many
+    /// steps as it takes, every one's events committed together.
     #[test]
-    fn steps_past_the_limit_are_too_many() {
-        let registry = registry();
-        let mut wallet = opened(&registry, 0);
-
-        let refused = run(&mut wallet, &registry, 2, any(Spin {}));
-
-        match refused {
-            Err(Failure::Kernel(KernelError::TooManySteps { stream, limit })) => {
-                assert_eq!(limit, STEP_LIMIT);
-                assert_eq!(&stream, wallet.cover());
-            }
-            other => panic!("too many steps, not {other:?}"),
-        }
-        assert_eq!(wallet.len(), 2, "nothing was committed");
-    }
-
-    /// A decision that runs exactly the limit's steps (the last emitting
-    /// nothing) commits; one more step is too many.
-    #[test]
-    fn the_limit_is_the_last_step_allowed() {
+    fn a_decision_runs_as_many_steps_as_it_takes() {
         let registry = registry();
         let mut ladder = Stream::<Ladder>::new(root(), None).unwrap();
-        let climbed = run(
-            &mut ladder,
-            &registry,
-            1,
-            any(Climb {
-                to: STEP_LIMIT as u32,
-            }),
-        );
-        assert_eq!(climbed.map(|events| events.len()), Ok(STEP_LIMIT));
-        let mut ladder = Stream::<Ladder>::new(root(), None).unwrap();
-        let too_far = run(
-            &mut ladder,
-            &registry,
-            1,
-            any(Climb {
-                to: STEP_LIMIT as u32 + 1,
-            }),
-        );
-        assert!(
-            matches!(
-                too_far,
-                Err(Failure::Kernel(KernelError::TooManySteps { .. }))
-            ),
-            "{too_far:?}"
-        );
+        let climbed = run(&mut ladder, &registry, 1, any(Climb { to: 40 }));
+        assert_eq!(climbed.map(|events| events.len()), Ok(40));
+        assert_eq!(ladder.state().rungs, 40);
     }
 
-    /// A fact's steps that never stop are a bug: the ingest panics, which
-    /// the router catches (its cause ROUTER_REASON_HANDLER_PANICKED) and the kernel
-    /// dead-letters.
+    /// A fact's continuation runs as many steps as it takes too, none of
+    /// them able to refuse: the slip stops at five rungs.
     #[test]
-    fn a_facts_steps_past_the_limit_are_a_bug() {
+    fn a_facts_steps_run_to_their_end() {
         let registry = registry();
         let mut ladder = Stream::<Ladder>::new(root(), None).unwrap();
         let slipped = execute(
@@ -2225,16 +2225,8 @@ mod continuation {
             1,
             fact("ladder", any(Slip {}), "slip-1"),
         );
-        assert!(
-            matches!(
-                &slipped,
-                Err(Failure::Kernel(KernelError::Router(e)))
-                    if e.extras.get("cause").map(String::as_str) == Some("ROUTER_REASON_HANDLER_PANICKED")
-            ),
-            "{slipped:?}"
-        );
-        assert_eq!(slipped.err().map(|f| f.recovery()), Some(Recovery::Bug));
-        assert!(ladder.is_empty());
+        assert_eq!(slipped.map(|events| events.len()), Ok(5));
+        assert_eq!(ladder.state().rungs, 5);
     }
 
     /// The helper runs the step, applies what it emits, and finds that
@@ -2474,7 +2466,7 @@ mod registration {
             .unwrap();
         let original = opened(&registry, 7);
         let mut pages: Vec<_> = original.events().iter().map(Envelope::page).collect();
-        pages[1].payload = Some(pack(&wire::OldDeposited { cents: 7 }));
+        pages[1].body = ev(pack(&wire::OldDeposited { cents: 7 }));
 
         let replayed =
             Stream::<Wallet>::replay(original.cover().clone(), &pages, &registry).unwrap();
@@ -2555,8 +2547,8 @@ mod snapshot {
         let state = snapshot.state.clone().unwrap_or_default();
         assert_eq!(type_name(&state.type_url), "toy.wallet.v1.WalletSnapshot");
         assert_eq!(
-            <Wallet as State>::descriptor().type_url,
-            "/toy.wallet.v1.WalletSnapshot"
+            <Wallet as State>::descriptor().type_name,
+            "toy.wallet.v1.WalletSnapshot"
         );
         assert_eq!(
             wallet.state().to_snapshot(),
@@ -2578,8 +2570,8 @@ mod snapshot {
         assert_eq!(on, Ok(vec![any(SwitchedOn {})]));
         assert!(lamp.snapshot(&registry).is_none());
         assert_eq!(
-            <Lamp as State>::descriptor().type_url,
-            "/angzarr_embedded.next.markup.NoSnapshot"
+            <Lamp as State>::descriptor().type_name,
+            "angzarr_embedded.next.markup.NoSnapshot"
         );
     }
 }
@@ -2587,9 +2579,9 @@ mod snapshot {
 mod rejection {
     use super::*;
 
-    /// A handler's `Err` is the domain's own rejection, as it returned it,
-    /// and nothing is committed or applied. The rejection type is inferred
-    /// from the handlers' `Result`s.
+    /// A handler's `Err` is its command's typed refusal, the wallet's
+    /// `Refused` packed as its object, and nothing is committed or
+    /// applied.
     #[test]
     fn a_rejection_is_typed_and_commits_nothing() {
         let registry = registry();
@@ -2621,7 +2613,7 @@ mod failed {
     }
 
     /// A handler's `Failed::Bug` is a bug, never a refusal: INTERNAL
-    /// ROUTER_REASON_UNHANDLED_HANDLER_ERROR, `Recovery::Bug`, dead-lettered with the
+    /// ANGZARR_REASON_UNHANDLED_HANDLER_ERROR, `Recovery::Bug`, dead-lettered with the
     /// bug's code as its `cause` and its args as `cause.<arg>`, no English,
     /// and nothing written.
     #[test]
@@ -2643,7 +2635,7 @@ mod failed {
         assert!(
             matches!(
                 &failure,
-                Failure::Kernel(KernelError::Router(e)) if e.code == "ROUTER_REASON_UNHANDLED_HANDLER_ERROR"
+                Failure::Kernel(KernelError::Router(e)) if e.code == "ANGZARR_REASON_UNHANDLED_HANDLER_ERROR"
             ),
             "a bug, not a refusal: {failure:?}"
         );
@@ -2676,7 +2668,10 @@ mod failed {
             panic!("a business refusal, not {failure:?}");
         };
         assert_eq!(rejected.status(), BusinessStatus::InvalidArgument);
-        assert_eq!(said(rejected), said(&Refused::NotPositive { cents: -4 }));
+        assert_eq!(
+            rejected.refusal::<Refused>().as_ref().map(|r| said(r)),
+            Some(said(&Refused::NotPositive { cents: -4 }))
+        );
         assert_eq!(failure.recovery(), Recovery::Business);
         assert!(log.lines().is_empty(), "a refusal is not dead-lettered");
         assert_eq!(pages(&store, &meter_cover()), None, "nothing written");
@@ -2684,14 +2679,14 @@ mod failed {
 
     /// The meter's one dead letter, a fatal bug of `seat`: its reason the
     /// router's key as the spec spells it, the bug's code its `cause` and
-    /// its args `cause.<arg>`, and its one detail `processing_failed`,
-    /// never retried, not transient (decision 14.48); no English.
+    /// its args `cause.<arg>`, never retried (decision 14.48); no
+    /// English.
     fn broke_at(log: &MemoryDeadLetters, seat: i64) {
-        use crate::toys::{assert_letter, one_letter, processing_failed, wire};
+        use crate::toys::{assert_letter, one_letter, wire};
         let lines = log.lines();
         assert_eq!(lines.len(), 1, "dead-lettered once: {lines:?}");
         let cause = format!(
-            "meter: ROUTER_REASON_UNHANDLED_HANDLER_ERROR cause=toy-meter-broke cause.seat={seat}"
+            "meter: ANGZARR_REASON_UNHANDLED_HANDLER_ERROR cause=toy-meter-broke cause.seat={seat}"
         );
         assert!(lines[0].contains(&cause), "{cause}: {}", lines[0]);
         assert!(
@@ -2700,7 +2695,7 @@ mod failed {
             lines[0]
         );
         let reason = wire(
-            "ROUTER_REASON_UNHANDLED_HANDLER_ERROR",
+            "ANGZARR_REASON_UNHANDLED_HANDLER_ERROR",
             &[
                 ("cause", "toy-meter-broke"),
                 ("cause.seat", &seat.to_string()),
@@ -2709,8 +2704,8 @@ mod failed {
         assert_letter(
             &one_letter(log.letters()),
             ::angzarr_embedded::v1::ComponentKind::Aggregate,
-            &reason,
-            processing_failed(&reason, 0, false),
+            &::angzarr_embedded::v1::angzarr_dead_letter::Why::Reason(reason),
+            0,
         );
     }
 
@@ -2722,7 +2717,7 @@ mod failed {
     }
 
     /// A continuation step's bug fails the whole decision as a handler's
-    /// does: ROUTER_REASON_UNHANDLED_HANDLER_ERROR, `Recovery::Bug`, dead-lettered with
+    /// does: ANGZARR_REASON_UNHANDLED_HANDLER_ERROR, `Recovery::Bug`, dead-lettered with
     /// its cause, and nothing written, the handler's own event included.
     #[test]
     fn a_steps_bug_fails_the_whole_decision() {
@@ -2734,7 +2729,7 @@ mod failed {
         assert!(
             matches!(
                 &failure,
-                Failure::Kernel(KernelError::Router(e)) if e.code == "ROUTER_REASON_UNHANDLED_HANDLER_ERROR"
+                Failure::Kernel(KernelError::Router(e)) if e.code == "ANGZARR_REASON_UNHANDLED_HANDLER_ERROR"
             ),
             "a bug, not a refusal: {failure:?}"
         );
@@ -2756,7 +2751,10 @@ mod failed {
             panic!("a business refusal, not {failure:?}");
         };
         assert_eq!(rejected.status(), BusinessStatus::InvalidArgument);
-        assert_eq!(said(rejected), said(&Refused::NotPositive { cents: -2 }));
+        assert_eq!(
+            rejected.refusal::<Refused>().as_ref().map(|r| said(r)),
+            Some(said(&Refused::NotPositive { cents: -2 }))
+        );
         assert_eq!(failure.recovery(), Recovery::Business);
         assert!(log.lines().is_empty(), "a refusal is not dead-lettered");
         assert_eq!(pages(&store, &meter_cover()), None, "nothing written");
@@ -2774,7 +2772,7 @@ mod failed {
         assert!(
             matches!(
                 &failure,
-                Failure::Kernel(KernelError::Router(e)) if e.code == "ROUTER_REASON_UNHANDLED_HANDLER_ERROR"
+                Failure::Kernel(KernelError::Router(e)) if e.code == "ANGZARR_REASON_UNHANDLED_HANDLER_ERROR"
             ),
             "a bug, not a refusal: {failure:?}"
         );
@@ -2784,7 +2782,7 @@ mod failed {
     }
 
     /// ... and its typed refusal goes out under its status, keyed
-    /// ROUTER_REASON_COMMAND_REFUSED with its object's type, the object packed beside.
+    /// ANGZARR_REASON_COMMAND_REFUSED with its object's type, the object packed beside.
     #[test]
     fn a_typed_refusal_goes_out_under_its_status_with_its_object() {
         let store = Mem::new();
@@ -2800,7 +2798,7 @@ mod failed {
         assert_eq!(
             said(rejected),
             (
-                "ROUTER_REASON_COMMAND_REFUSED".to_string(),
+                "ANGZARR_REASON_COMMAND_REFUSED".to_string(),
                 vec![(
                     "refusal_type".to_string(),
                     "toy.meter.v1.MeterSealed".to_string()
@@ -2863,12 +2861,12 @@ mod failed {
         let mut meter = Stream::<Meter>::new(root(), None).unwrap();
 
         let over = run(&mut meter, &registry, 1, any(Gauge { reading: 2000 }));
-        let Err(Failure::Rejected(over)) = over else {
+        let Err(Failure::Rejected(ref rejected)) = over else {
             panic!("refused by `?`, not {over:?}");
         };
-        assert_eq!(over.status(), BusinessStatus::FailedPrecondition);
+        assert_eq!(rejected.status(), BusinessStatus::FailedPrecondition);
         assert_eq!(
-            said(&over),
+            rejection(over.unwrap_err()),
             said(&Refused::OverLimit {
                 cents: 2000,
                 limit: METER_LIMIT
@@ -2877,11 +2875,14 @@ mod failed {
 
         run(&mut meter, &registry, 2, any(Gauge { reading: 7 })).unwrap();
         let busy = run(&mut meter, &registry, 3, any(Calibrate {}));
-        let Err(Failure::Rejected(busy)) = busy else {
+        let Err(Failure::Rejected(ref rejected)) = busy else {
             panic!("refused as before, not {busy:?}");
         };
-        assert_eq!(busy.status(), BusinessStatus::FailedPrecondition);
-        assert_eq!(said(&busy), said(&Refused::NotEmpty { cents: 7 }));
+        assert_eq!(rejected.status(), BusinessStatus::FailedPrecondition);
+        assert_eq!(
+            rejection(busy.unwrap_err()),
+            said(&Refused::NotEmpty { cents: 7 })
+        );
     }
 }
 
@@ -2896,7 +2897,7 @@ mod generated {
         handler: &H,
         cmd: Withdraw,
         ctx: &Context,
-    ) -> Result<Withdrew, Refused> {
+    ) -> Result<Withdrew, Refuses<Wallet, Withdraw>> {
         handler.withdraw(cmd, ctx)
     }
 
@@ -2926,13 +2927,10 @@ mod generated {
 
         assert_eq!(through, direct);
         assert_eq!(
-            withdraw_through(&through, Withdraw { cents: 4 }, &ctx),
-            Ok(Withdrew { cents: 4 })
+            withdraw_through(&through, Withdraw { cents: 4 }, &ctx).ok(),
+            Some(Withdrew { cents: 4 })
         );
-        assert_eq!(
-            withdraw_through(&through, Withdraw { cents: 11 }, &ctx),
-            Err(Refused::Overdrawn { short: 1 })
-        );
+        assert!(withdraw_through(&through, Withdraw { cents: 11 }, &ctx).is_err());
     }
 
     /// `HANDLES` (commands and facts) and `APPLIES` are the marked types'
@@ -2958,7 +2956,6 @@ mod generated {
                 command("Sweep"),
                 command("Close"),
                 command("Note"),
-                command("Spin"),
                 TypeName {
                     package: "toy.wallet.fact.v1",
                     name: "Payout",
@@ -2979,7 +2976,6 @@ mod generated {
                 event("Held"),
                 event("Closed"),
                 event("Noted"),
-                event("Spun"),
                 event("PaidOut"),
                 event("PayoutRefused"),
             ]
@@ -3091,27 +3087,33 @@ mod full_context {
         );
     }
 
-    /// A command whose natural key names another stream is refused
-    /// INVALID_ARGUMENT before its handler runs, and records nothing.
+    /// A command whose natural key names another stream is a bug, not a
+    /// refusal: its handler asked the wrong stream, so the router answers
+    /// ANGZARR_REASON_UNHANDLED_HANDLER_ERROR caused by not-its-stream,
+    /// and records nothing.
     #[test]
-    fn a_command_whose_key_names_another_stream_is_refused() {
+    fn a_command_whose_key_names_another_stream_is_a_bug() {
         let mut badge = badge("gold");
-        let refused = badge
+        let failed = badge
             .when(Issue {
                 key: "silver".to_string(),
             })
-            .refused();
+            .result();
+        let Err(Failure::Kernel(KernelError::Router(error))) = failed else {
+            panic!("a bug, not {failed:?}");
+        };
+        assert_eq!(error.code, "ANGZARR_REASON_UNHANDLED_HANDLER_ERROR");
         assert_eq!(
-            said(&refused),
-            (
-                code!("not-its-stream").to_string(),
-                vec![
-                    ("domain".to_string(), "badge".to_string()),
-                    ("key".to_string(), "silver".to_string()),
-                ]
-            )
+            error.extras.get("cause").map(String::as_str),
+            Some(code!("not-its-stream"))
         );
-        assert_eq!(refused.status(), BusinessStatus::InvalidArgument);
+        assert_eq!(
+            (
+                error.extras.get("cause.domain").map(String::as_str),
+                error.extras.get("cause.key").map(String::as_str)
+            ),
+            (Some("badge"), Some("silver"))
+        );
         assert!(badge.pages().is_empty());
     }
 
@@ -3144,11 +3146,13 @@ mod full_context {
 
     fn full_meta() -> ::angzarr_embedded::v1::EventMeta {
         ::angzarr_embedded::v1::EventMeta {
-            causation: Some(Causation::CommandId(correlation(7))),
-            fact: Some(FactOrigin {
-                external_id: "pi_1234".to_string(),
-                ..FactOrigin::default()
-            }),
+            causation: Some(Causation::Fact(::angzarr_embedded::v1::FactCause {
+                command_id: Some(correlation(7)),
+                origin: Some(FactOrigin {
+                    external_id: "pi_1234".to_string(),
+                    ..FactOrigin::default()
+                }),
+            })),
             correlation_id: Some(correlation(8)),
             recorded_at: Some(at(1_700_000_000)),
             rules_version: "1.4.2+build.7".to_string(),
@@ -3200,14 +3204,19 @@ mod full_context {
             cover: Some(Cover::natural("badge", "gold")),
             pages: vec![EventPage {
                 sequence: 0,
-                payload: Some(any(Issued {
+                body: ev(any(Issued {
                     key: "gold".to_string(),
                 })),
                 meta: Some(full_meta()),
             }],
             ..EventBook::default()
         };
-        ready(seen.dispatch(&book)).unwrap();
+        ready(
+            seen.dispatch(&::angzarr_embedded::angzarr_router::hpb::ProjectRequest {
+                events: Some(book),
+            }),
+        )
+        .unwrap();
         assert_eq!(*port.lock().unwrap(), [full_meta()]);
     }
 
@@ -3268,29 +3277,22 @@ mod beside {
 // --------------------------------------------- the process manager and policies
 //
 // A PROCESS MANAGER IS A DOMAIN. The buy-in takes commands (which policies
-// send it, and which it may refuse) and facts (a timeout; refusal facts),
-// and records only its own events; it subscribes to nothing. Its root is
-// the correlation, and only its declared starting inputs may start an
-// instance. Two policies carry events across: the buy-in's into holds on the
-// wallet (BuyInWallet), and the wallet's holds back into the buy-in
-// (WalletBuyIn). When the wallet refuses a hold (with a typed
-// InsufficientFunds, recording nothing), the policy answers one refusal fact
-// for the buy-in: passed through as `CommandRefused`, handled by
-// `#[on_refused(Hold)]`; or, where the policy has its own
-// `#[on_refused(Hold)]` callback, the callback's domestic fact, `HoldLost`.
-// What the policies answer is pinned here; running them, each step committed
-// on its own, comes with the kernel's committed-step dispatch.
+// send it, and which it may refuse) and facts (a timeout; a refusal's
+// translation), and records only its own events; it subscribes to nothing.
+// Its root is the correlation, and only its declared starting inputs may
+// start an instance. Two policies carry events across: the buy-in's into
+// holds on the wallet (BuyInWallet), and the wallet's holds back into the
+// buy-in (WalletBuyIn). When the wallet refuses a hold (with a typed
+// InsufficientFunds, recording nothing), the refusal takes ONE path
+// (decision 14.89): the policy's one Translate callback, `#[on_refused]`,
+// answers the buy-in's own fact, `HoldLost`; a policy with none answers a
+// bug, and the refused hold is dead-lettered.
 //
-// Also pinned: translate is selected by the presence of the policy's
-// callback, nothing else, and the callback returns a fact of its source;
-// typed refusals are `Refuses<Self, Cmd>` in `markup::Rejection<R>`, the
-// objects `Diagnostic`s; one marker, `#[on_refused]`, serves the source's
-// handler and the policy's callback; angzarr-embedded does not check that a PM
-// declares a starting input (angzarr-cli warns), so nothing here pins it;
-// `Policy::on_refused` answers the fact's payload as `Any`; a
-// `CommandRefused` from outside a policy is accepted when its trigger names
-// the receiving stream; a policy names a PM target's root with the
-// correlation.
+// Also pinned: the callback returns a fact of its source; typed refusals
+// are `Refuses<Self, Cmd>`, the objects domain types; angzarr-embedded does
+// not check that a PM declares a starting input (angzarr-cli warns), so
+// nothing here pins it; `Policy::on_refused` answers the fact's payload as
+// `Any`; a policy names a PM target's root with the correlation.
 
 /// A buy-in: a process across the wallet, keyed by its correlation.
 #[derive(Clone, Default, PartialEq, Debug)]
@@ -3300,18 +3302,14 @@ pub struct BuyIn {
     failed: bool,
 }
 
-#[derive(Clone, PartialEq, Debug)]
-pub enum BuyInRefused {
-    AlreadyStarted,
-}
-
-impl fmt::Display for BuyInRefused {
+/// A buy-in's typed refusal object: it has started already.
+impl fmt::Display for AlreadyStarted {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("the buy-in has started already")
     }
 }
 
-impl Diagnostic for BuyInRefused {
+impl Diagnostic for AlreadyStarted {
     fn code(&self) -> &str {
         "toy-buyin-already-started"
     }
@@ -3324,10 +3322,14 @@ impl Diagnostic for BuyInRefused {
 #[process_manager(domain = "buyin")]
 impl BuyIn {
     /// The starting input: a new correlation's buy-in begins here.
-    #[handles_cmd(StartBuyIn, starts)]
-    fn start(&self, cmd: StartBuyIn, _ctx: &Context) -> Result<BuyInStarted, BuyInRefused> {
+    #[handles_cmd(StartBuyIn, starts, refuses(AlreadyStarted))]
+    fn start(
+        &self,
+        cmd: StartBuyIn,
+        _ctx: &Context,
+    ) -> Result<BuyInStarted, Refuses<Self, StartBuyIn>> {
         match self.started {
-            true => Err(BuyInRefused::AlreadyStarted),
+            true => Err(AlreadyStarted {}.into()),
             false => Ok(BuyInStarted {
                 wallet: cmd.wallet,
                 cents: cmd.cents,
@@ -3337,49 +3339,32 @@ impl BuyIn {
 
     /// Not a starting input: refused for a correlation with no buy-in.
     #[handles_cmd(RecordHeld)]
-    fn record_held(&self, cmd: RecordHeld, _ctx: &Context) -> Result<BuyInHeld, BuyInRefused> {
+    fn record_held(
+        &self,
+        cmd: RecordHeld,
+        _ctx: &Context,
+    ) -> Result<BuyInHeld, Failed<Unrefusable>> {
         Ok(BuyInHeld { cents: cmd.cents })
     }
 
     /// A timeout, a fact, not a starting one: dead-lettered for a
-    /// correlation with no buy-in. Records the fact's origin, from the one context.
+    /// correlation with no buy-in. Records the fact's origin, from the one
+    /// context.
     #[handles_fact(BuyInExpired)]
     fn expired(&self, _fact: BuyInExpired, ctx: &Context) -> Record<Self> {
-        Record::of(Expired {
-            external_id: ctx
-                .command
-                .fact_origin
+        let external_id = match &ctx.command.arm {
+            markup::InputArm::Fact { origin } => origin
                 .as_ref()
                 .map(|origin| origin.external_id.clone())
                 .unwrap_or_default(),
-        })
+            markup::InputArm::Command { .. } => String::new(),
+        };
+        Record::of(Expired { external_id })
     }
 
-    /// The wallet refused the hold BuyInWallet sent: passed through, its
-    /// typed refusal object unpacked here, and whether the buy-in had
-    /// history read from the router's context. A wallet short by exactly
-    /// 23 cannot happen: the handler's error, a bug.
-    #[on_refused(Hold)]
-    fn hold_refused(
-        &self,
-        refused: CommandRefused<Hold>,
-        ctx: &Context,
-    ) -> Result<Record<Self>, Report> {
-        let short = refused
-            .refusal::<InsufficientFunds>()
-            .map(|object| object.short)
-            .unwrap_or_default();
-        if short == 23 {
-            return Err(Report::new("toy-buyin-impossible-short").arg("short", short));
-        }
-        Ok(Record::of(BuyInFailed {
-            short,
-            had_history: ctx.command.had_prior_events,
-        }))
-    }
-
-    /// The same refusal, translated by the policy into the buy-in's own
-    /// fact: the buy-in never reads the wallet's refusal object.
+    /// The wallet's refusal of a hold, translated by the policy into the
+    /// buy-in's own fact: the buy-in never reads the wallet's refusal
+    /// object. Whether it had history is the router's context's.
     #[handles_fact(HoldLost)]
     fn hold_lost(&self, fact: HoldLost, _ctx: &Context) -> Record<Self> {
         Record::of(HoldWasLost { short: fact.short })
@@ -3398,11 +3383,6 @@ impl BuyIn {
     #[applies(Expired)]
     fn expired_at(&mut self, _event: Expired) {}
 
-    #[applies(BuyInFailed)]
-    fn failed(&mut self, _event: BuyInFailed) {
-        self.failed = true;
-    }
-
     #[applies(HoldWasLost)]
     fn lost(&mut self, _event: HoldWasLost) {
         self.failed = true;
@@ -3410,8 +3390,8 @@ impl BuyIn {
 }
 
 /// The policy for (buy-in, wallet): a started buy-in holds its stake on the
-/// wallet it names. Pass-through: a refused hold reaches the buy-in as
-/// `CommandRefused`.
+/// wallet it names. With no Translate callback, a refused hold is the
+/// policy's bug (`ANGZARR_REASON_NO_REFUSAL_HANDLER`), dead-lettered.
 pub struct BuyInWallet;
 
 #[policy(name = "buyin-wallet", source = BuyIn, target = Wallet)]
@@ -3426,9 +3406,8 @@ impl BuyInWallet {
     }
 }
 
-/// As [`BuyInWallet`], with an `#[on_refused(Hold)]` callback, whose
-/// presence selects translate for `Hold`: it reads the wallet's refusal
-/// object and hands the buy-in its own fact.
+/// As [`BuyInWallet`], with its one Translate callback: it reads the
+/// wallet's refusal object and hands the buy-in its own fact.
 pub struct TranslatingBuyInWallet;
 
 #[policy(name = "buyin-wallet", source = BuyIn, target = Wallet)]
@@ -3443,55 +3422,23 @@ impl TranslatingBuyInWallet {
     }
 
     /// A wallet short by exactly 23 cannot happen: the callback's error, a
-    /// bug, naming the refused command it read from its context.
-    #[on_refused(Hold)]
-    fn hold_refused(
-        &self,
-        refusal: &Refusal<Hold>,
-        ctx: &CommandContext,
-    ) -> Result<HoldLost, Report> {
-        let short = refusal
+    /// bug, naming the refused command it read from its delivery.
+    #[on_refused]
+    fn hold_refused(&self, refused: &Translating) -> Result<HoldLost, Report> {
+        let short = refused
             .refusal::<InsufficientFunds>()
             .map(|object| object.short)
-            .unwrap_or(refusal.command().cents);
+            .or_else(|| refused.command::<Hold>().map(|hold| hold.cents))
+            .unwrap_or_default();
         if short == 23 {
-            let command = ctx.command_id.clone().unwrap_or_default().to_string();
+            let command = (refused.delivery().command_id.clone())
+                .unwrap_or_default()
+                .to_string();
             return Err(Report::new("toy-buyin-wallet-impossible-short")
                 .arg("short", short)
                 .arg("command", command));
         }
         Ok(HoldLost { short })
-    }
-}
-
-/// As [`TranslatingBuyInWallet`], its callback declining what it does not
-/// translate: a hold refused for insufficient funds is the buy-in's
-/// `HoldLost`; any other refusal of a hold is `None`, passed through to the
-/// buy-in as `CommandRefused`, as if it had no callback.
-pub struct DecliningBuyInWallet;
-
-#[policy(name = "buyin-wallet", source = BuyIn, target = Wallet)]
-impl DecliningBuyInWallet {
-    #[on_event(BuyInStarted)]
-    fn started(
-        &self,
-        event: &BuyInStarted,
-        _ctx: &PolicyContext,
-    ) -> Result<Commands<Wallet>, Infallible> {
-        Ok(Commands::none().to(uuid(&event.wallet), Hold { cents: event.cents }))
-    }
-
-    #[on_refused(Hold)]
-    fn hold_refused(
-        &self,
-        refusal: &Refusal<Hold>,
-        _ctx: &CommandContext,
-    ) -> Result<Option<HoldLost>, Infallible> {
-        Ok(refusal
-            .refusal::<InsufficientFunds>()
-            .map(|object| HoldLost {
-                short: object.short,
-            }))
     }
 }
 
@@ -3504,15 +3451,38 @@ pub enum BuyInFact {
 }
 
 impl<S: markup::Ingests<HoldLost>> markup::Translation<S> for BuyInFact {
-    fn fact(self) -> Option<Any> {
+    fn fact(self) -> Any {
         match self {
-            BuyInFact::HoldLost(fact) => Some(markup::pack_message(&fact)),
+            BuyInFact::HoldLost(fact) => markup::pack_message(&fact),
         }
     }
 }
 
-/// As [`DecliningBuyInWallet`], answering the choice of the buy-in's facts:
-/// the generated interface's shape.
+/// The unhandled refusal of a policy's Translate callback: a refusal it
+/// has no fact for, a bug.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Untranslated;
+
+impl fmt::Display for Untranslated {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        angzarr_diagnostic::display(self, f)
+    }
+}
+
+impl Diagnostic for Untranslated {
+    fn code(&self) -> &str {
+        "toy-buyin-wallet-untranslated"
+    }
+
+    fn args(&self) -> Vec<(&str, Arg)> {
+        vec![]
+    }
+}
+
+/// As [`TranslatingBuyInWallet`], answering the choice of the buy-in's
+/// facts (the generated interface's shape): a hold refused for
+/// insufficient funds is the buy-in's `HoldLost`; any other refusal is the
+/// callback's bug, as there is no declining.
 pub struct ChoosingBuyInWallet;
 
 #[policy(name = "buyin-wallet", source = BuyIn, target = Wallet)]
@@ -3526,17 +3496,16 @@ impl ChoosingBuyInWallet {
         Ok(Commands::none().to(uuid(&event.wallet), Hold { cents: event.cents }))
     }
 
-    #[on_refused(Hold)]
-    fn hold_refused(
-        &self,
-        refusal: &Refusal<Hold>,
-        _ctx: &CommandContext,
-    ) -> Result<Option<BuyInFact>, Infallible> {
-        Ok(refusal.refusal::<InsufficientFunds>().map(|object| {
-            BuyInFact::HoldLost(HoldLost {
-                short: object.short,
+    #[on_refused]
+    fn hold_refused(&self, refused: &Translating) -> Result<BuyInFact, Untranslated> {
+        refused
+            .refusal::<InsufficientFunds>()
+            .map(|object| {
+                BuyInFact::HoldLost(HoldLost {
+                    short: object.short,
+                })
             })
-        }))
+            .ok_or(Untranslated)
     }
 }
 
@@ -3553,6 +3522,16 @@ impl WalletBuyIn {
             RecordHeld { cents: event.cents },
         ))
     }
+}
+
+/// `event` as a page's body: a domain event.
+fn ev(event: Any) -> Option<::angzarr_embedded::v1::event_page::Body> {
+    Some(::angzarr_embedded::v1::event_page::Body::Event(event))
+}
+
+/// `page`'s domain event.
+fn event_of(page: &EventPage) -> &Any {
+    ::angzarr_embedded::angzarr_router::page_event(page).expect("a page holds an event")
 }
 
 /// `bytes` as a root.
@@ -3576,26 +3555,17 @@ fn buy_in_cover(c: &Uuid) -> Cover {
     }
 }
 
-/// A book of `body` for the stream at `cover`, command id `[n; 16]`,
-/// with `correlation` if given and `origin` for a fact.
-fn book(
-    cover: Cover,
-    n: u8,
-    body: command_page::Body,
-    correlation: Option<Uuid>,
-    origin: Option<FactOrigin>,
-) -> CommandBook {
-    let fact = origin.is_some();
+/// A book of `body` for the stream at `cover`, command id `[n; 16]` (a
+/// fact's derived), with `correlation` if given.
+fn book(cover: Cover, n: u8, body: command_page::Body, correlation: Option<Uuid>) -> CommandBook {
+    let fact = matches!(body, command_page::Body::Fact(_));
     CommandBook {
         cover: Some(cover),
         page: Some(CommandPage {
             body: Some(body),
             command_id: (!fact).then(|| Uuid::from_bytes([n; 16])),
             correlation_id: correlation,
-            fact_origin: origin,
-            ..CommandPage::default()
         }),
-        handling: None,
     }
 }
 
@@ -3607,9 +3577,9 @@ fn command_to(cover: Cover, n: u8, payload: Any, correlation: Option<Uuid>) -> C
         n,
         command_page::Body::Command(Command {
             payload: Some(payload),
+            handling: None,
         }),
         correlation,
-        None,
     )
 }
 
@@ -3620,12 +3590,12 @@ fn fact_to(cover: Cover, payload: Any, external_id: &str) -> CommandBook {
         0,
         command_page::Body::Fact(Fact {
             payload: Some(payload),
+            origin: Some(FactOrigin {
+                external_id: external_id.to_string(),
+                description: "toy".to_string(),
+            }),
         }),
         None,
-        Some(FactOrigin {
-            external_id: external_id.to_string(),
-            description: "toy".to_string(),
-        }),
     )
 }
 
@@ -3671,7 +3641,7 @@ fn buy_in_events(store: &Mem, c: &Uuid) -> Option<Vec<String>> {
     pages(store, &buy_in_cover(c)).map(|pages| {
         pages
             .iter()
-            .map(|p| type_name(&p.payload.as_ref().unwrap().type_url).to_string())
+            .map(|p| type_name(&event_of(p).type_url).to_string())
             .collect()
     })
 }
@@ -3755,7 +3725,7 @@ mod process_manager {
     }
 
     /// A command that is not a starting one, for a correlation with no
-    /// instance, is refused (`COORDINATOR_REASON_PM_NO_INSTANCE`, a business refusal) and
+    /// instance, is refused (`ANGZARR_REASON_PM_NO_INSTANCE`, a business refusal) and
     /// records nothing. Its code is pinned as a string.
     #[test]
     fn a_non_starting_command_for_no_instance_is_refused() {
@@ -3771,14 +3741,15 @@ mod process_manager {
         let Err(refused) = handle_in::<BuyIn>(&store, &registry, &log, 2, held) else {
             panic!("a command for no instance is refused");
         };
-        assert_eq!(refused.code(), "COORDINATOR_REASON_PM_NO_INSTANCE");
+        assert_eq!(refused.code(), "ANGZARR_REASON_PM_NO_INSTANCE");
         assert_eq!(refused.recovery(), Recovery::Business);
         assert_eq!(buy_in_events(&store, &correlation(2)), None);
     }
 
     /// A fact that is not a starting one, for a correlation with no
-    /// instance, is dead-lettered (decision 14.69): never refused, so
-    /// parked, nothing recorded, its letter told.
+    /// instance, is dead-lettered (C-0593): never refused, so its sender is
+    /// answered ANGZARR_REASON_FACT_DEAD_LETTERED, its cause the start
+    /// rule's key; nothing recorded, its letter told.
     #[test]
     fn a_non_starting_fact_for_no_instance_is_dead_lettered() {
         let registry = buy_ins();
@@ -3789,19 +3760,26 @@ mod process_manager {
             any(BuyInExpired {}),
             "timeout-3",
         );
-        let parked = handle_in::<BuyIn>(&store, &registry, &log, 2, expired);
+        let dead_lettered = handle_in::<BuyIn>(&store, &registry, &log, 2, expired)
+            .err()
+            .expect("dead-lettered");
+        assert_eq!(dead_lettered.code(), "ANGZARR_REASON_FACT_DEAD_LETTERED");
         assert!(
-            matches!(parked, Ok(Handled::Parked(_))),
-            "{:?}",
-            parked.err().map(|e| e.to_string())
+            dead_lettered
+                .to_string()
+                .contains("cause=ANGZARR_REASON_PM_NO_INSTANCE"),
+            "{dead_lettered}"
         );
         assert_eq!(buy_in_events(&store, &correlation(3)), None);
         let reasons: Vec<_> = log
             .letters()
             .into_iter()
-            .filter_map(|l| l.reason.map(|r| r.code))
+            .filter_map(|l| match l.why {
+                Some(::angzarr_embedded::v1::angzarr_dead_letter::Why::Reason(r)) => Some(r.code),
+                _ => None,
+            })
             .collect();
-        assert_eq!(reasons, ["COORDINATOR_REASON_PM_NO_INSTANCE"]);
+        assert_eq!(reasons, ["ANGZARR_REASON_PM_NO_INSTANCE"]);
     }
 
     /// In memory, the kernel's start rule reads whether the stream holds
@@ -3828,7 +3806,7 @@ mod process_manager {
             .execute(held(2), &registry, &sampled, &log)
             .ready()
             .expect_err("no instance");
-        assert_eq!(refused.code(), "COORDINATOR_REASON_PM_NO_INSTANCE");
+        assert_eq!(refused.code(), "ANGZARR_REASON_PM_NO_INSTANCE");
         buy_in
             .execute(start(&correlation(11), 3, 0), &registry, &sampled, &log)
             .ready()
@@ -3882,7 +3860,7 @@ mod process_manager {
             recorded.books()[0]
                 .pages
                 .last()
-                .and_then(|p| p.payload.clone()),
+                .map(|p| event_of(p).clone()),
             Some(any(Expired {
                 external_id: "timeout-7".to_string()
             }))
@@ -3926,9 +3904,8 @@ mod process_manager {
         );
     }
 
-    /// `STARTS` names the starting inputs, `HANDLES` every command and
-    /// fact, and `REFUSALS` the commands whose refusals it handles, each in
-    /// marker order.
+    /// `STARTS` names the starting inputs and `HANDLES` every command and
+    /// fact, each in marker order.
     #[test]
     fn its_constants_name_its_inputs() {
         let name = |name| TypeName {
@@ -3944,13 +3921,6 @@ mod process_manager {
                 name("BuyInExpired"),
                 name("HoldLost"),
             ]
-        );
-        assert_eq!(
-            BuyIn::REFUSALS,
-            [TypeName {
-                package: "toy.wallet.cmd.v1",
-                name: "Hold",
-            }]
         );
     }
 
@@ -4170,96 +4140,50 @@ mod policy_errors {
 /// resolution.
 mod handler_context {
     use super::*;
-    use ::angzarr_embedded::v1::Handling;
+    use ::angzarr_embedded::CommandBookExt as _;
 
     fn pot() -> Stream<Pot> {
         Stream::new(root(), None).unwrap()
     }
 
-    fn pot_cover() -> Cover {
-        Cover {
-            domain: "pot".to_string(),
-            root: Some(root()),
-            edition: None,
-        }
+    /// Stake `n` of `cents`, issued against `expected`.
+    fn staking(n: u8, cents: i64, expected: u64) -> CommandBook {
+        send(
+            "pot",
+            n,
+            any(Stake {
+                cents,
+                acknowledge: true,
+            }),
+            None,
+        )
+        .at(expected)
     }
 
-    /// Stake `n` of `cents`, issued against `expected`, asking for
-    /// AGGREGATE_HANDLES; acknowledging its window or not.
-    fn staking(n: u8, cents: i64, acknowledge: bool, expected: u64) -> CommandBook {
-        let mut book = send("pot", n, any(Stake { cents, acknowledge }), None);
-        book.handling = Some(Handling {
-            expected_sequence: Some(expected),
-            conflict_resolution: ConflictResolution::AggregateHandles as i32,
-        });
-        book
-    }
-
-    /// A stake at the head under AGGREGATE_HANDLES (the window empty, the
-    /// nonce still delivered) and one behind it (a window of one) are each
-    /// accepted once the handler acknowledges its window through
-    /// `ctx.conflict`.
+    /// A command whose expected sequence is the head is decided; one
+    /// issued before the last write is refused, before its handler runs,
+    /// with the coordinator's `ExpectedSequenceMismatch` (decision 14.94):
+    /// there is no window and no conflict concept (decision 14.92).
     #[test]
-    fn an_aggregate_handles_handler_acknowledges_its_window_and_is_accepted() {
+    fn a_stake_at_the_head_is_decided_and_one_behind_it_refused() {
         let registry = registry();
         let mut pot = pot();
         assert_eq!(
-            execute(&mut pot, &registry, 1, staking(1, 5, true, 0)),
+            execute(&mut pot, &registry, 1, staking(1, 5, 0)),
             Ok(vec![any(Staked {
                 cents: 5,
                 window: 0
             })]),
-            "the first stake, at the head: acknowledged, accepted"
         );
-        assert_eq!(
-            execute(&mut pot, &registry, 2, staking(2, 7, true, 0)),
-            Ok(vec![any(Staked {
-                cents: 7,
-                window: 1
-            })]),
-            "issued before the first: it saw the one event it missed"
-        );
-    }
-
-    /// A handler that never acknowledges its window has its output
-    /// discarded: the router's COORDINATOR_REASON_CONFLICT_UNRESOLVED, the kernel's
-    /// `Unresolved`, dead-lettered under that key with the command's
-    /// expected sequence and the head as its `sequence_mismatch` (decision
-    /// 14.48), and nothing recorded.
-    #[test]
-    fn an_aggregate_handles_handler_that_never_acknowledges_is_unresolved() {
-        use crate::toys::{assert_letter, one_letter, sequence_mismatch, wire};
-        let registry = registry();
-        let mut pot = pot();
-        execute(&mut pot, &registry, 1, staking(1, 5, true, 0)).unwrap();
-        let log = MemoryDeadLetters::new();
-        let sampled = Sampled {
-            now: at(2),
-            command_id: Uuid::from_bytes([0x08; 16]),
+        let refused = execute(&mut pot, &registry, 2, staking(2, 7, 0));
+        let Err(Failure::Rejected(rejected)) = refused else {
+            panic!("refused, not {refused:?}");
         };
-        let Err(failure) = pot
-            .execute(staking(2, 5, false, 0), &registry, &sampled, &log)
-            .ready()
-        else {
-            panic!("unresolved");
-        };
+        assert_eq!(rejected.status(), BusinessStatus::FailedPrecondition);
         assert_eq!(
-            failure,
-            Failure::Kernel(KernelError::Unresolved {
-                stream: pot_cover(),
-                expected: 0,
-                actual: 1,
-            })
-        );
-        let letter = one_letter(log.letters());
-        assert_letter(
-            &letter,
-            ::angzarr_embedded::v1::ComponentKind::Aggregate,
-            &wire(
-                "COORDINATOR_REASON_CONFLICT_UNRESOLVED",
-                &[("stream", "pot/0a0a0a0a-0a0a-0a0a-0a0a-0a0a0a0a0a0a")],
-            ),
-            sequence_mismatch(0, 1),
+            said(&rejected).0,
+            "ANGZARR_REASON_COMMAND_REFUSED",
+            "the framework's one typed refusal"
         );
         assert_eq!(pot.len(), 1, "nothing recorded past the first stake");
     }
@@ -4279,11 +4203,11 @@ mod handler_context {
         );
     }
 
-    /// A STRICT handler reads the router's context too: the next sequence,
-    /// whether the stream has history, the sequence the command was issued
-    /// against, the resolution, and no conflict.
+    /// A handler reads the router's context: the next sequence, whether the
+    /// stream has history, and the expected sequence its command was sent
+    /// with (none here).
     #[test]
-    fn a_strict_handler_receives_the_context_too() {
+    fn a_handler_receives_the_context() {
         let registry = registry();
         let mut pot = pot();
         assert_eq!(
@@ -4292,7 +4216,7 @@ mod handler_context {
                 next_sequence: 0,
                 had_prior_events: false,
                 expected_sequence: 0,
-                resolution: ConflictResolution::Strict as i32,
+                resolution: 0,
                 conflict: false,
             })]),
             "a new stream"
@@ -4302,21 +4226,37 @@ mod handler_context {
             Ok(vec![any(Peeked {
                 next_sequence: 1,
                 had_prior_events: true,
-                expected_sequence: 1,
-                resolution: ConflictResolution::Strict as i32,
+                expected_sequence: 0,
+                resolution: 0,
                 conflict: false,
             })]),
             "a stream with one event"
+        );
+        assert_eq!(
+            execute(
+                &mut pot,
+                &registry,
+                3,
+                send("pot", 3, any(Peek {}), None).at(2)
+            ),
+            Ok(vec![any(Peeked {
+                next_sequence: 2,
+                had_prior_events: true,
+                expected_sequence: 2,
+                resolution: 0,
+                conflict: false,
+            })]),
+            "sent at the head it read"
         );
     }
 }
 
 mod typed_refusals {
     use super::*;
-    use ::angzarr_embedded::v1::Diagnostic as WireDiagnostic;
 
-    /// As [`BuyInWallet`], hand-written, and answering no refusal: its
-    /// refused hold fails its step and is dead-lettered.
+    /// As [`BuyInWallet`], hand-written, and translating no refusal: the
+    /// trait's default answers its refused hold a bug, and the hold is
+    /// dead-lettered.
     struct QuietBuyInWallet;
 
     impl Policy for QuietBuyInWallet {
@@ -4341,15 +4281,14 @@ mod typed_refusals {
         }
     }
 
-    /// A typed refusal of a policy's command that no OnRefused answers is
-    /// dead-lettered under ROUTER_REASON_COMMAND_REFUSED with its
-    /// `refusal_type`, and its one detail is `command_refused`: the type and
-    /// the refusal object itself, kept whole (decision 14.48, C-0733).
+    /// A typed refusal of a policy's command that its policy does not
+    /// translate is the policy's bug (decision 14.89): the refused hold is
+    /// dead-lettered as it was delivered, by the policy, under
+    /// ANGZARR_REASON_NO_REFUSAL_HANDLER naming the command's type (C-0618).
     #[test]
-    fn a_typed_refusal_dead_letters_its_object_as_command_refused() {
-        use crate::toys::{one_letter, wire};
-        use ::angzarr_embedded::v1::angzarr_dead_letter::RejectionDetails;
-        use ::angzarr_embedded::v1::CommandRefusedDetails;
+    fn an_untranslated_typed_refusal_is_the_policys_bug_and_dead_lettered() {
+        use crate::toys::{one_letter, reason};
+        use ::angzarr_embedded::v1::angzarr_dead_letter::Payload as Letter;
         let mut registry = buy_ins();
         registry.policy(QuietBuyInWallet).unwrap();
         let store = Mem::new();
@@ -4364,29 +4303,30 @@ mod typed_refusals {
         .unwrap();
         let _ = handle_in::<BuyIn>(&store, &registry, &log, 2, start(&correlation(3), 2, 50));
         let letter = one_letter(log.letters());
-        let reason = wire(
-            "ROUTER_REASON_COMMAND_REFUSED",
-            &[("refusal_type", "toy.wallet.v1.InsufficientFunds")],
-        );
         crate::toys::assert_letter(
             &letter,
             ::angzarr_embedded::v1::ComponentKind::Policy,
-            &reason,
-            RejectionDetails::CommandRefused(CommandRefusedDetails {
-                refusal_type: "toy.wallet.v1.InsufficientFunds".to_string(),
-                refusal: Some(any(InsufficientFunds { short: 50 })),
-            }),
+            &reason(
+                "ANGZARR_REASON_NO_REFUSAL_HANDLER",
+                &[("command_type", "/toy.wallet.cmd.v1.Hold")],
+            ),
+            0,
         );
         assert_eq!(letter.source_component, "quiet-buyin-wallet");
+        assert!(
+            matches!(&letter.payload, Some(Letter::RejectedReaction(delivery))
+                if delivery.component == "quiet-buyin-wallet"),
+            "{letter:?}"
+        );
     }
 
-    /// A typed refusal is keyed, as on the wire, ROUTER_REASON_COMMAND_REFUSED with its
-    /// object's full type name as `refusal_type`; a message-only refusal by
-    /// its own code and args. Each displays its code and args.
+    /// A typed refusal is keyed, as on the wire,
+    /// ANGZARR_REASON_COMMAND_REFUSED with its object's full type name as
+    /// `refusal_type`, and displays that code and args.
     #[test]
     fn a_typed_refusal_is_keyed_command_refused_with_its_type() {
-        let typed = Rejection::<Refused>::Typed(markup::TypedRefusal::of(&WalletClosed {}));
-        assert_eq!(typed.code(), "ROUTER_REASON_COMMAND_REFUSED");
+        let typed = TypedRefusal::of(&WalletClosed {});
+        assert_eq!(typed.code(), "ANGZARR_REASON_COMMAND_REFUSED");
         assert!(
             matches!(&typed.args()[..], [("refusal_type", Arg::Str(t))] if t == "toy.wallet.v1.WalletClosed"),
             "{:?}",
@@ -4394,73 +4334,29 @@ mod typed_refusals {
         );
         assert_eq!(
             typed.to_string(),
-            "ROUTER_REASON_COMMAND_REFUSED refusal_type=toy.wallet.v1.WalletClosed"
+            "ANGZARR_REASON_COMMAND_REFUSED refusal_type=toy.wallet.v1.WalletClosed"
         );
-        let message = Rejection::<Refused>::Message(Refused::Overdrawn { short: 20 });
-        assert_eq!(message.to_string(), "toy-wallet-overdrawn short=20");
+        assert_eq!(typed.object::<WalletClosed>(), Some(WalletClosed {}));
+        assert_eq!(typed.packed(), &any(WalletClosed {}));
     }
 
-    /// A translating callback reads an untyped refusal's code and args as
-    /// its diagnostic; a typed one has none, and its object instead.
+    /// A refusal as a refused policy's Translate is handed it
+    /// (`io.angzarr.handler.v1.Refusal`): the status it travelled as and
+    /// its typed object, never English.
     #[test]
-    fn a_refusals_diagnostic_is_an_untyped_refusals_code_and_args() {
-        let overdrawn = WireDiagnostic {
-            code: "toy-wallet-overdrawn".to_string(),
-            args: [("short".to_string(), "20".to_string())].into(),
-        };
-        let untyped = Refusal::new(
-            EventBook::default(),
-            Withdraw { cents: 30 },
-            RefusalResponse {
-                reason: Some(refusal_response::Reason::Diagnostic(overdrawn.clone())),
-            },
-        );
-        assert_eq!(untyped.diagnostic(), Some(&overdrawn));
-        assert_eq!(untyped.refusal::<InsufficientFunds>(), None);
-        let typed = Refusal::new(
-            EventBook::default(),
-            Withdraw { cents: 30 },
-            insufficient(20),
-        );
-        assert_eq!(typed.diagnostic(), None);
-        assert_eq!(
-            typed.refusal::<InsufficientFunds>(),
-            Some(InsufficientFunds { short: 20 })
-        );
-    }
-
-    /// A refusal's response is the oneof (decision 14.37): a typed
-    /// refusal's object, or an untyped refusal's diagnostic, its code and
-    /// args; never English. As the markup builds it and as the kernel hands
-    /// it to a refused policy alike.
-    #[test]
-    fn a_refusals_response_is_its_object_or_its_diagnostic() {
-        let overdrawn = || {
-            Some(refusal_response::Reason::Diagnostic(WireDiagnostic {
-                code: "toy-wallet-overdrawn".to_string(),
-                args: [("short".to_string(), "20".to_string())].into(),
-            }))
-        };
-        let message = Rejection::<Refused>::Message(Refused::Overdrawn { short: 20 });
-        assert_eq!(message.response().reason, overdrawn());
-
+    fn a_refusal_reaches_translate_as_its_status_and_object() {
         let registry = registry();
-        let mut wallet = opened(&registry, 10);
-        let Err(Failure::Rejected(untyped)) =
-            run(&mut wallet, &registry, 2, any(Withdraw { cents: 30 }))
-        else {
-            panic!("refused");
-        };
-        assert_eq!(untyped.response().reason, overdrawn());
         let mut closed = super::wallet();
         let Err(Failure::Rejected(typed)) = run(&mut closed, &registry, 1, any(Hold { cents: 1 }))
         else {
             panic!("refused");
         };
+        let refusal = typed.as_refusal();
         assert_eq!(
-            typed.response().reason,
-            Some(refusal_response::Reason::Refusal(any(WalletClosed {})))
+            refusal.status,
+            ::angzarr_embedded::v1::RefusalStatus::FailedPrecondition as i32
         );
+        assert_eq!(refusal.typed, Some(any(WalletClosed {})));
     }
 
     /// A handler with `refuses` refuses with one of its typed objects, as
@@ -4483,12 +4379,12 @@ mod typed_refusals {
         assert_eq!(wallet.len(), 2, "nothing was recorded");
     }
 
-    /// As a refused policy receives it: the object packed; keyed
-    /// ROUTER_REASON_COMMAND_REFUSED with the object's type as `refusal_type`, as on the
-    /// wire, and its `Display` is that code and args, never English
-    /// (decision 14.37).
+    /// As its caller receives it: the object packed; keyed
+    /// ANGZARR_REASON_COMMAND_REFUSED with the object's type as
+    /// `refusal_type`, as on the wire, and its `Display` is that code and
+    /// args, never English (decision 14.37).
     #[test]
-    fn a_typed_refusals_response_packs_its_object_and_message() {
+    fn a_typed_refusals_object_is_packed_beside_its_key() {
         let registry = registry();
         let mut wallet = wallet();
         let refused = run(&mut wallet, &registry, 1, any(Hold { cents: 1 }));
@@ -4496,18 +4392,20 @@ mod typed_refusals {
             panic!("refused");
         };
         assert_eq!(
-            (rejection.refusal_object().cloned(), rejection.to_string()),
+            (rejection.refusal_object().clone(), rejection.to_string()),
             (
-                Some(any(WalletClosed {})),
-                "ROUTER_REASON_COMMAND_REFUSED refusal_type=toy.wallet.v1.WalletClosed".to_string()
+                any(WalletClosed {}),
+                "ANGZARR_REASON_COMMAND_REFUSED refusal_type=toy.wallet.v1.WalletClosed"
+                    .to_string()
             )
         );
     }
 
-    /// A handler without `refuses` refuses with the domain's own rejection,
-    /// a message only: no object.
+    /// The wallet's own refusal travels as its one typed object,
+    /// `toy.wallet.v1.Refused` (decision 14.95: there is no message-only
+    /// refusal), matched as a value, never by its English.
     #[test]
-    fn a_message_only_refusal_has_no_object() {
+    fn a_domains_own_refusal_is_its_typed_object() {
         let registry = registry();
         let mut wallet = opened(&registry, 10);
         let Err(Failure::Rejected(rejection)) =
@@ -4515,15 +4413,13 @@ mod typed_refusals {
         else {
             panic!("refused");
         };
-        assert_eq!(said(&rejection), said(&Refused::Overdrawn { short: 20 }));
-        assert!(
-            matches!(&rejection.args()[..], [("short", Arg::Str(short))] if short == "20"),
-            "its args, as the router carried them: {:?}",
-            rejection.args()
+        assert_eq!(
+            rejection.refusal::<Refused>(),
+            Some(Refused::Overdrawn { short: 20 })
         );
         assert_eq!(
-            (rejection.refusal_object().cloned(), rejection.to_string()),
-            (None, "toy-wallet-overdrawn short=20".to_string())
+            rejection.to_string(),
+            "ANGZARR_REASON_COMMAND_REFUSED refusal_type=toy.wallet.v1.Refused"
         );
     }
 
@@ -4550,131 +4446,95 @@ fn trigger(c: &Uuid) -> EventRef {
     }
 }
 
-/// A refusal of a hold for `cents`, sent by the buy-in policy for the
-/// buy-in at correlation `c`, with `response`.
-fn hold_refusal(c: &Uuid, cents: i64, response: RefusalResponse) -> markup::v1::Refusal {
-    markup::v1::Refusal {
-        event: Some(EventBook {
-            cover: Some(buy_in_cover(c)),
-            pages: vec![EventPage {
-                sequence: 0,
-                payload: Some(any(BuyInStarted {
-                    wallet: root().value.to_vec(),
-                    cents,
-                })),
-                ..EventPage::default()
-            }],
-            ..EventBook::default()
+/// The refusal of a hold for `cents`, sent by the buy-in policy for the
+/// buy-in at correlation `c`, refused with `refusal`, as its Translate
+/// callback is handed it.
+fn hold_refusal(c: &Uuid, cents: i64, refusal: Any) -> Translating {
+    let delivery = ::angzarr_embedded::v1::ReactionDelivery {
+        cover: Some(Cover {
+            domain: "wallet".to_string(),
+            root: Some(root()),
+            edition: None,
         }),
-        command: Some(send("wallet", 9, any(Hold { cents }), Some(c.clone()))),
-        response: Some(response),
-    }
+        body: Some(::angzarr_embedded::v1::reaction_delivery::Body::Command(
+            any(Hold { cents }),
+        )),
+        command_id: Some(Uuid::from_bytes([0x09; 16])),
+        correlation_id: Some(c.clone()),
+        causation: Some(trigger(c)),
+        component: "buyin-wallet".to_string(),
+    };
+    Translating::new(
+        delivery,
+        BusinessStatus::FailedPrecondition,
+        refusal,
+        trigger(c),
+        ::angzarr_embedded::v1::EventMeta::default(),
+    )
 }
 
-fn insufficient(short: i64) -> RefusalResponse {
-    RefusalResponse {
-        reason: Some(refusal_response::Reason::Refusal(any(InsufficientFunds {
-            short,
-        }))),
-    }
+fn insufficient(short: i64) -> Any {
+    any(InsufficientFunds { short })
 }
 
 mod policy_refusals {
     use super::*;
 
-    /// Pass-through (the default): the generated `on_refused` answers
-    /// angzarr's `CommandRefused { command, refusal, trigger }`, the
-    /// refused command as sent, its typed object still packed, the trigger
-    /// the triggering event; the message stays behind. The answer is the
-    /// fact's payload, as `Any`.
-    #[test]
-    fn pass_through_builds_command_refused_for_the_source() {
-        let refusal = hold_refusal(&correlation(1), 30, insufficient(20));
-        let fact = BuyInWallet
-            .on_refused(&refusal, &CommandContext::default())
-            .unwrap();
-        assert_eq!(
-            fact,
-            pack(&markup::v1::CommandRefused {
-                command: refusal.command.clone(),
-                refusal: Some(any(InsufficientFunds { short: 20 })),
-                trigger: Some(trigger(&correlation(1))),
-            })
-        );
-    }
-
-    /// Translate (selected by the callback's presence): it reads the typed
-    /// object and answers the source's own fact.
+    /// The one Translate callback reads the typed object and answers the
+    /// source's own fact, packed.
     #[test]
     fn translate_answers_the_callbacks_domestic_fact() {
         let refusal = hold_refusal(&correlation(1), 30, insufficient(20));
         assert_eq!(
-            TranslatingBuyInWallet
-                .on_refused(&refusal, &CommandContext::default())
-                .unwrap(),
+            TranslatingBuyInWallet.on_refused(&refusal).unwrap(),
             any(HoldLost { short: 20 })
         );
+        assert_eq!(refusal.status(), Some(BusinessStatus::FailedPrecondition));
+        assert_eq!(refusal.command::<Hold>(), Some(Hold { cents: 30 }));
+        assert_eq!(refusal.trigger(), &trigger(&correlation(1)));
     }
 
-    /// A callback answering `Some` translates: the source's own fact.
+    /// A policy with no callback answers every refusal a bug
+    /// (decision 14.89): ANGZARR_REASON_NO_REFUSAL_HANDLER, naming the
+    /// refused command's type. There is no pass-through.
     #[test]
-    fn a_callback_answering_some_translates() {
+    fn a_policy_with_no_callback_answers_every_refusal_a_bug() {
         let refusal = hold_refusal(&correlation(1), 30, insufficient(20));
-        assert_eq!(
-            DecliningBuyInWallet
-                .on_refused(&refusal, &CommandContext::default())
-                .unwrap(),
-            any(HoldLost { short: 20 })
-        );
-    }
-
-    /// A callback answering `None` declines: the refusal is passed through,
-    /// angzarr's `CommandRefused`, exactly as a policy with no callback for
-    /// the command answers it.
-    #[test]
-    fn a_callback_answering_none_passes_the_refusal_through() {
-        let closed = RefusalResponse {
-            reason: Some(refusal_response::Reason::Refusal(any(WalletClosed {}))),
-        };
-        let refusal = hold_refusal(&correlation(1), 30, closed);
-        let ctx = CommandContext::default();
-        assert_eq!(
-            DecliningBuyInWallet.on_refused(&refusal, &ctx).unwrap(),
-            BuyInWallet.on_refused(&refusal, &ctx).unwrap()
+        let error = BuyInWallet
+            .on_refused(&refusal)
+            .expect_err("no Translate callback");
+        assert_eq!(error.code(), "ANGZARR_REASON_NO_REFUSAL_HANDLER");
+        assert!(
+            matches!(&error.args()[..], [("command_type", Arg::Str(t))] if t == "/toy.wallet.cmd.v1.Hold"),
+            "{:?}",
+            error.args()
         );
     }
 
     /// A callback answering a choice of the source's facts translates into
-    /// the one it holds, and declines with `None`.
+    /// the one it holds; a refusal it has no fact for is its error, a bug:
+    /// there is no declining.
     #[test]
-    fn a_callback_answering_a_choice_of_facts_translates_or_declines() {
-        let ctx = CommandContext::default();
+    fn a_callback_answering_a_choice_of_facts_translates_or_fails() {
         let refusal = hold_refusal(&correlation(1), 30, insufficient(20));
         assert_eq!(
-            ChoosingBuyInWallet.on_refused(&refusal, &ctx).unwrap(),
+            ChoosingBuyInWallet.on_refused(&refusal).unwrap(),
             any(HoldLost { short: 20 })
         );
-        let closed = RefusalResponse {
-            reason: Some(refusal_response::Reason::Refusal(any(WalletClosed {}))),
-        };
-        let refusal = hold_refusal(&correlation(1), 30, closed);
-        assert_eq!(
-            ChoosingBuyInWallet.on_refused(&refusal, &ctx).unwrap(),
-            BuyInWallet.on_refused(&refusal, &ctx).unwrap()
-        );
+        let closed = hold_refusal(&correlation(1), 30, any(WalletClosed {}));
+        let error = ChoosingBuyInWallet
+            .on_refused(&closed)
+            .expect_err("a refusal it has no fact for");
+        assert_eq!(error.code(), "toy-buyin-wallet-untranslated");
     }
 
-    /// A translating callback's error is its answer, a bug: its code and
-    /// args, the refused command named from the context it was handed.
+    /// A Translate callback's error is its answer, a bug: its code and
+    /// args, the refused command named from the delivery it was handed.
     #[test]
     fn a_translating_callbacks_error_is_its_answer() {
         let refusal = hold_refusal(&correlation(1), 30, insufficient(23));
-        let ctx = CommandContext {
-            command_id: Some(Uuid::from_bytes([0x09; 16])),
-            ..CommandContext::default()
-        };
         let error = TranslatingBuyInWallet
-            .on_refused(&refusal, &ctx)
+            .on_refused(&refusal)
             .expect_err("the callback failed");
         assert_eq!(error.code(), "toy-buyin-wallet-impossible-short");
         let args = error.args();
@@ -4685,40 +4545,12 @@ mod policy_refusals {
         );
     }
 
-    /// A refused command of a type the policy translates that does not
-    /// decode is its error, a bug: never passed through as one it does not
-    /// translate.
+    /// A policy's constants: the events it handles.
     #[test]
-    fn a_translated_refused_command_that_does_not_decode_is_the_policys_error() {
-        let mut refusal = hold_refusal(&correlation(1), 30, insufficient(20));
-        let corrupt = Any {
-            type_url: any(Hold { cents: 30 }).type_url,
-            value: vec![0xff, 0xff, 0xff],
-        };
-        refusal.command = Some(send("wallet", 9, corrupt.clone(), Some(correlation(1))));
-        let error = TranslatingBuyInWallet
-            .on_refused(&refusal, &CommandContext::default())
-            .expect_err("a command it translates that does not decode fails it");
-        assert_eq!(error.code(), code!("payload-decode"));
-        let args = error.args();
-        assert!(
-            args.iter().any(|(name, arg)| *name == "type_url"
-                && matches!(arg, Arg::Str(url) if *url == corrupt.type_url)),
-            "{args:?}"
-        );
-    }
-
-    /// A policy's constants: what events it handles, and what it translates, the
-    /// latter derived from its `#[on_refused]` callbacks.
-    #[test]
-    fn its_constants_name_its_events_and_translations() {
+    fn its_constants_name_its_events() {
         let started = TypeName {
             package: "toy.buyin.v1",
             name: "BuyInStarted",
-        };
-        let hold = TypeName {
-            package: "toy.wallet.cmd.v1",
-            name: "Hold",
         };
         assert_eq!(<BuyInWallet as Policy>::EVENTS, [started]);
         assert_eq!(
@@ -4728,132 +4560,20 @@ mod policy_refusals {
                 name: "Held",
             }]
         );
-        assert_eq!(<BuyInWallet as Policy>::TRANSLATES, []);
-        assert_eq!(<TranslatingBuyInWallet as Policy>::TRANSLATES, [hold]);
     }
 
-    /// The source's `#[on_refused(Hold)]` is chosen by the refused
-    /// command's type, and reads the typed object: a `CommandRefused` of a
-    /// hold, delivered to the buy-in its trigger names, records the
-    /// failure. Delivered from outside a policy, it is accepted because
-    /// its trigger names the receiving stream.
+    /// The buy-in's fact set is its own facts alone: a refusal reaches a
+    /// policy's Translate, never a domain, so it reads no `CommandRefused`.
     #[test]
-    fn on_refused_dispatches_by_the_refused_commands_type() {
-        let registry = buy_ins();
-        let store = Mem::new();
-        let log = MemoryDeadLetters::new();
-        handle_in::<BuyIn>(&store, &registry, &log, 2, start(&correlation(2), 2, 30)).unwrap();
-        let refused = BuyInWallet
-            .on_refused(
-                &hold_refusal(&correlation(2), 30, insufficient(20)),
-                &CommandContext::default(),
-            )
-            .unwrap();
-        handle_in::<BuyIn>(
-            &store,
-            &registry,
-            &log,
-            3,
-            fact_to(buy_in_cover(&correlation(2)), refused, "refusal-2"),
-        )
-        .unwrap();
-        assert_eq!(
-            buy_in_events(&store, &correlation(2)),
-            buy_in(&["BuyInStarted", "BuyInFailed"])
-        );
-        let pages = pages(&store, &buy_in_cover(&correlation(2))).expect("the buy-in");
-        assert_eq!(
-            pages[1].payload,
-            Some(any(BuyInFailed {
-                short: 20,
-                had_history: true
-            })),
-            "the handler read the typed refusal object, and the router's context"
-        );
-    }
-
-    /// A refusal of a command the source has no `#[on_refused]` for is
-    /// an unknown type, named by the refused command's type: what the
-    /// dispatch dead-letters as a refusal with no path.
-    #[test]
-    fn a_refusal_with_no_handler_is_the_refused_commands_unknown_type() {
-        let registry = buy_ins();
-        let store = Mem::new();
-        let log = MemoryDeadLetters::new();
-        handle_in::<BuyIn>(&store, &registry, &log, 2, start(&correlation(8), 2, 30)).unwrap();
-        let mut refusal = hold_refusal(&correlation(8), 30, insufficient(20));
-        refusal.command = Some(send(
-            "wallet",
-            9,
-            any(Withdraw { cents: 30 }),
-            Some(correlation(8)),
-        ));
-        let refused = BuyInWallet
-            .on_refused(&refusal, &CommandContext::default())
-            .unwrap();
-        let unhandled = handle_in::<BuyIn>(
-            &store,
-            &registry,
-            &log,
-            3,
-            fact_to(buy_in_cover(&correlation(8)), refused, "refusal-8"),
-        );
-        match unhandled {
-            Err(Failure::Kernel(KernelError::Router(e))) => {
-                assert_eq!(e.code, "ROUTER_REASON_NO_REFUSAL_HANDLER");
-                assert_eq!(
-                    e.extras.get("command_type").map(String::as_str),
-                    Some("/toy.wallet.cmd.v1.Withdraw")
-                );
-            }
-            Err(other) => panic!("the router's ROUTER_REASON_NO_REFUSAL_HANDLER, not {other}"),
-            Ok(_) => panic!("the router's ROUTER_REASON_NO_REFUSAL_HANDLER, not handled"),
-        }
-    }
-
-    /// The buy-in's fact set reads angzarr's `CommandRefused`, beside its
-    /// own facts: it has an `#[on_refused]` handler.
-    #[test]
-    fn a_fact_set_with_refusal_handlers_reads_command_refused() {
+    fn a_fact_set_is_its_own_facts() {
         let mut facts = <<BuyIn as Domain>::Fact as Payload>::type_urls();
         facts.sort();
         assert_eq!(
             facts,
             [
-                "/io.angzarr.v1.CommandRefused",
                 "/toy.buyin.cmd.v1.BuyInExpired",
                 "/toy.buyin.cmd.v1.HoldLost",
             ]
-        );
-    }
-
-    /// A refusal fact is accepted only by the exact stream its trigger
-    /// names: delivered anywhere else, it is malformed.
-    #[test]
-    fn a_refusal_fact_for_another_stream_is_malformed() {
-        let registry = buy_ins();
-        let store = Mem::new();
-        let log = MemoryDeadLetters::new();
-        handle_in::<BuyIn>(&store, &registry, &log, 2, start(&correlation(3), 2, 30)).unwrap();
-        let elsewhere = BuyInWallet
-            .on_refused(
-                &hold_refusal(&correlation(4), 30, insufficient(20)),
-                &CommandContext::default(),
-            )
-            .unwrap();
-        let Err(refused) = handle_in::<BuyIn>(
-            &store,
-            &registry,
-            &log,
-            3,
-            fact_to(buy_in_cover(&correlation(3)), elsewhere, "refusal-3"),
-        ) else {
-            panic!("a refusal fact for another stream is malformed");
-        };
-        assert_eq!(refused.code(), code!("malformed-refusal-misaddressed"));
-        assert_eq!(
-            buy_in_events(&store, &correlation(3)),
-            buy_in(&["BuyInStarted"])
         );
     }
 }
@@ -4883,7 +4603,7 @@ fn settle_in<D: Domain>(
     )?;
     match handled {
         Handled::Applied(recorded) => Ok(recorded),
-        Handled::Duplicate(..) | Handled::Parked(_) => Ok(::angzarr_embedded::Recorded::default()),
+        Handled::Duplicate(..) => Ok(::angzarr_embedded::Recorded::default()),
     }
 }
 
@@ -4898,7 +4618,7 @@ fn steps(settled: &::angzarr_embedded::Recorded) -> Vec<(String, Vec<String>)> {
                 book.cover.as_ref().unwrap().domain.clone(),
                 book.pages
                     .iter()
-                    .map(|p| type_name(&p.payload.as_ref().unwrap().type_url).to_string())
+                    .map(|p| type_name(&event_of(p).type_url).to_string())
                     .collect(),
             )
         })
@@ -4934,52 +4654,63 @@ mod refusal_flow {
         );
     }
 
-    /// Pass-through: the buy-in's start is committed first; the wallet
-    /// refuses the hold and records nothing; the policy's `CommandRefused`
-    /// reaches the buy-in's `#[on_refused(Hold)]` as a step of its own,
-    /// which records the failure.
+    /// A refusal its policy does not translate: the buy-in's start is
+    /// committed first; the wallet refuses the hold and records nothing;
+    /// the policy has no Translate callback, so the refusal is its bug
+    /// (decision 14.89: no pass-through), ANGZARR_REASON_NO_REFUSAL_HANDLER,
+    /// the refused hold dead-lettered, and the step fails as the policy's
+    /// failure.
     #[test]
-    fn a_refused_command_reaches_the_sources_on_refused_handler() {
+    fn an_untranslated_refusal_is_the_policys_failure() {
         let (registry, store) = funded(false, 10);
         let log = MemoryDeadLetters::new();
-        let settled = settle_in::<BuyIn>(&store, &registry, &log, 2, start(&correlation(2), 2, 30));
-        let Ok(settled) = settled else {
-            panic!("{:?}", settled.err().map(|e| e.to_string()));
+        let failure = settle_in::<BuyIn>(&store, &registry, &log, 2, start(&correlation(2), 2, 30))
+            .err()
+            .expect("the untranslated refusal fails the call");
+        let Failure::Downstream {
+            error: StepError::PolicyFailed(report),
+            ..
+        } = &failure
+        else {
+            panic!("the policy's failure: {failure:?}");
         };
+        assert_eq!(report.code(), "ANGZARR_REASON_NO_REFUSAL_HANDLER");
         assert_eq!(
-            steps(&settled),
-            [
-                ("buyin", "toy.buyin.v1.BuyInStarted"),
-                ("buyin", "toy.buyin.v1.BuyInFailed"),
-            ]
-            .map(|(domain, event)| (domain.to_string(), vec![event.to_string()]))
+            buy_in_events(&store, &correlation(2)),
+            buy_in(&["BuyInStarted"])
         );
         assert_eq!(
             pages(&store, wallet().cover()).map(|p| p.len()),
             Some(2),
             "the wallet recorded nothing of the hold"
         );
+        let lines = log.lines();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains("buyin-wallet: ANGZARR_REASON_NO_REFUSAL_HANDLER"),
+            "{lines:?}"
+        );
     }
 
-    /// The source's `#[on_refused]` handler's error is the policy's failure,
-    /// a bug: the step fails as `PolicyFailed`, a defect, is dead-lettered
-    /// with the error's code and args (no English), records nothing, and
-    /// the policy's position moves past the trigger, so a resume does not
-    /// run it again.
+    /// The Translate callback's error is the policy's failure, a bug: the
+    /// step fails as `PolicyFailed`, a defect, is dead-lettered with the
+    /// error's code and args as its cause (no English), records nothing,
+    /// and the policy's position moves past the trigger, so a resume does
+    /// not run it again.
     #[test]
-    fn a_refusal_handlers_error_dead_letters_its_step_as_the_policys_failure() {
-        let (registry, store) = funded(false, 7);
+    fn a_translate_callbacks_error_dead_letters_its_step_as_the_policys_failure() {
+        let (registry, store) = funded(true, 7);
         let log = MemoryDeadLetters::new();
         let failure = settle_in::<BuyIn>(&store, &registry, &log, 2, start(&correlation(9), 2, 30))
             .err()
-            .expect("the refusal handler's error fails the call");
+            .expect("the callback's error fails the call");
         let Failure::Downstream { error, .. } = &failure else {
             panic!("a downstream failure: {failure:?}");
         };
         let StepError::PolicyFailed(report) = error else {
             panic!("the policy's failure: {error:?}");
         };
-        assert_eq!(report.code(), "toy-buyin-impossible-short");
+        assert_eq!(report.code(), "ANGZARR_REASON_UNHANDLED_HANDLER_ERROR");
         assert_eq!(failure.recovery(), Recovery::Bug);
         assert_eq!(
             buy_in_events(&store, &correlation(9)),
@@ -4990,8 +4721,8 @@ mod refusal_flow {
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(
             lines[0].contains(
-                "buyin: ROUTER_REASON_UNHANDLED_HANDLER_ERROR cause=toy-buyin-impossible-short cause.short=23"
-            ),
+                "buyin-wallet: ANGZARR_REASON_UNHANDLED_HANDLER_ERROR cause=toy-buyin-wallet-impossible-short"
+            ) && lines[0].contains("cause.short=23"),
             "a handler's bug, its code and args the cause: {}",
             lines[0]
         );
@@ -5018,14 +4749,14 @@ mod refusal_flow {
         assert_eq!(log.lines().len(), 1, "nothing dead-lettered again");
     }
 
-    /// Under `OnPolicyBug::Stay`, the source's `#[on_refused]` handler's
-    /// error is still the policy's failure, dead-lettered, but the
-    /// policy's position stays at the trigger, so a resume runs the step
-    /// again and dead-letters it again.
+    /// Under `OnPolicyBug::Stay`, the callback's error is still the
+    /// policy's failure, dead-lettered, but the policy's position stays at
+    /// the trigger, so a resume runs the step again and dead-letters it
+    /// again.
     #[test]
-    fn under_stay_a_refusal_handlers_error_holds_the_policys_position() {
+    fn under_stay_a_translate_callbacks_error_holds_the_policys_position() {
         use ::angzarr_embedded::{Kernel, OnPolicyBug};
-        let (registry, store) = funded(false, 7);
+        let (registry, store) = funded(true, 7);
         let log = MemoryDeadLetters::new();
         let kernel = Kernel::new(&registry)
             .log_with(&log)
@@ -5037,7 +4768,7 @@ mod refusal_flow {
         let failure =
             ready(kernel.handle::<BuyIn, _>(&store, start(&correlation(9), 2, 30), &sampled))
                 .err()
-                .expect("the refusal handler's error fails the call");
+                .expect("the callback's error fails the call");
         assert!(
             matches!(
                 &failure,
@@ -5071,10 +4802,11 @@ mod refusal_flow {
     }
 
     /// The refusal fact's id is the refused command's id, and its origin's
-    /// external id that id's canonical text.
+    /// external id that id's canonical text: its events record it as their
+    /// fact cause (decision 14.102).
     #[test]
     fn the_refusal_facts_id_is_the_refused_commands() {
-        let (registry, store) = funded(false, 10);
+        let (registry, store) = funded(true, 10);
         let log = MemoryDeadLetters::new();
         settle_in::<BuyIn>(&store, &registry, &log, 2, start(&correlation(3), 2, 30)).unwrap();
         let pages = pages(&store, &buy_in_cover(&correlation(3))).expect("the buy-in");
@@ -5085,9 +4817,12 @@ mod refusal_flow {
         )
         .unwrap();
         let meta = pages[1].meta.clone().expect("meta");
-        assert_eq!(meta.causation, Some(Causation::CommandId(hold_id.clone())));
+        let Some(Causation::Fact(cause)) = meta.causation else {
+            panic!("a fact's cause: {meta:?}");
+        };
+        assert_eq!(cause.command_id, Some(hold_id.clone()));
         assert_eq!(
-            meta.fact.map(|origin| origin.external_id),
+            cause.origin.map(|origin| origin.external_id),
             Some(hold_id.to_string())
         );
     }
@@ -5113,13 +4848,16 @@ mod refusal_flow {
         );
     }
 
-    /// A refusal with no path: a hold on the wallet outside any buy-in is
-    /// committed, the wallet's policy sends `RecordHeld` to a correlation
-    /// with no buy-in, which refuses it, and the wallet handles no refusal
-    /// of `RecordHeld`. The hold stays committed, the fact is
-    /// dead-lettered, and the call is Ok.
+    /// A reaction the framework refuses: a hold on the wallet outside any
+    /// buy-in is committed, and the wallet's policy sends `RecordHeld` to a
+    /// correlation with no buy-in, refused by the start rule,
+    /// ANGZARR_REASON_PM_NO_INSTANCE. It is the framework's key, never a
+    /// typed refusal, so it never reaches a Translate: the reaction is
+    /// dead-lettered by the buy-in, under that key, never English; its
+    /// letter is its record, so the step is done and the chain settles, and
+    /// the hold stays committed.
     #[test]
-    fn a_refusal_with_no_handler_is_dead_lettered() {
+    fn a_reaction_the_framework_refuses_is_dead_lettered() {
         let (registry, store) = funded(false, 50);
         let log = MemoryDeadLetters::new();
         let settled = settle_in::<Wallet>(
@@ -5129,39 +4867,23 @@ mod refusal_flow {
             2,
             send("wallet", 2, any(Hold { cents: 5 }), Some(correlation(5))),
         );
-        let Ok(settled) = settled else {
-            panic!("{:?}", settled.err().map(|e| e.to_string()));
-        };
-        assert_eq!(
-            steps(&settled),
-            [("wallet".to_string(), vec!["toy.wallet.v1.Held".to_string()])]
+        assert!(
+            settled.is_ok(),
+            "the letter is the step's record: {:?}",
+            settled.err()
         );
-        let lines = log.lines();
-        assert_eq!(lines.len(), 1, "{lines:?}");
-        assert!(lines[0].contains(" stream=wallet/"), "{lines:?}");
-    }
-
-    /// The dead letter of a refusal with no path carries the code of what
-    /// was missing (the router's `ROUTER_REASON_NO_REFUSAL_HANDLER`, as angzarr-embedded's
-    /// code), never rendered English.
-    #[test]
-    fn a_refusal_with_no_handlers_dead_letter_carries_its_code() {
-        let (registry, store) = funded(false, 50);
-        let log = MemoryDeadLetters::new();
-        let _ = settle_in::<Wallet>(
-            &store,
-            &registry,
-            &log,
-            2,
-            send("wallet", 2, any(Hold { cents: 5 }), Some(correlation(5))),
+        assert_eq!(
+            pages(&store, wallet().cover()).and_then(|p| p.last().map(|p| event_of(p).clone())),
+            Some(any(Held { cents: 5 })),
+            "the hold stays committed"
         );
         let lines = log.lines();
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(
-            lines[0].contains("wallet: ROUTER_REASON_NO_REFUSAL_HANDLER command_type="),
-            "the router's key as the spec spells it: {lines:?}"
+            lines[0].contains("buyin: ANGZARR_REASON_PM_NO_INSTANCE"),
+            "the key as the spec spells it: {lines:?}"
         );
-        assert!(!lines[0].contains("nothing handles"), "{lines:?}");
+        assert!(lines[0].contains(" stream=buyin/"), "{lines:?}");
     }
 
     /// The dead letter of a malformed policy book carries the error's code
@@ -5184,7 +4906,7 @@ mod refusal_flow {
         // A policy's command for a domain the kernel cannot route is the
         // spec's key (decision 14.49), naming the domain.
         assert!(
-            lines[0].contains("COORDINATOR_REASON_POLICY_COMMAND_UNKNOWN_DOMAIN"),
+            lines[0].contains("ANGZARR_REASON_POLICY_COMMAND_UNKNOWN_DOMAIN"),
             "{lines:?}"
         );
         assert!(lines[0].contains("domain=buyin"), "{lines:?}");
@@ -5210,7 +4932,7 @@ mod refusal_flow {
         );
         assert!(settled.is_err(), "the policy's step failed");
         assert_eq!(
-            pages(&store, wallet().cover()).and_then(|p| p.last().and_then(|p| p.payload.clone())),
+            pages(&store, wallet().cover()).and_then(|p| p.last().map(|p| event_of(p).clone())),
             Some(any(Held { cents: 5 })),
             "the hold stays committed"
         );
@@ -5281,6 +5003,7 @@ mod router {
     use super::*;
     use ::angzarr_embedded::angzarr_proto::v1 as pb;
     use ::angzarr_embedded::angzarr_router::error::HandlerError;
+    use ::angzarr_embedded::angzarr_router::hpb;
     use ::angzarr_embedded::angzarr_router::policy::PolicyDispatch;
     use ::angzarr_embedded::StepError;
 
@@ -5329,26 +5052,20 @@ mod router {
 
     /// A hand-built policy for (buy-in, wallet), the router's own table: a
     /// started buy-in holds its stake on the wallet. `astray` edits each
-    /// command before it is answered.
-    fn hold_dispatch(astray: fn(&mut pb::CommandBook)) -> PolicyDispatch {
+    /// output before it is answered.
+    fn hold_dispatch(astray: fn(&mut hpb::Output)) -> PolicyDispatch {
         PolicyDispatch::new("hand-built-hold", "buyin", "wallet").on_event(
             "toy.buyin.v1.BuyInStarted",
-            move |event, _source| -> Result<Vec<pb::CommandBook>, HandlerError> {
+            move |event, _source| -> Result<Vec<hpb::Output>, HandlerError> {
                 let started =
                     <wire::BuyInStarted as prost::Message>::decode(event.value.as_slice())
                         .map_err(|e| HandlerError::Other(e.to_string()))?;
-                let mut hold = pb::CommandBook {
-                    cover: Some(wallet_cover("wallet")),
-                    page: Some(pb::CommandPage {
-                        body: Some(pb::command_page::Body::Command(pb::Command {
-                            payload: Some(any(Hold {
-                                cents: started.cents,
-                            })),
-                        })),
-                        ..Default::default()
+                let mut hold = ::angzarr_embedded::angzarr_router::policy::command(
+                    wallet_cover("wallet").root,
+                    any(Hold {
+                        cents: started.cents,
                     }),
-                    handling: None,
-                };
+                );
                 astray(&mut hold);
                 Ok(vec![hold])
             },
@@ -5374,7 +5091,7 @@ mod router {
     }
 
     /// A policy's command to an aggregate with no root is the policy's bug,
-    /// refused by the router (`COORDINATOR_REASON_POLICY_COMMAND_NO_ROOT`), dead-lettered and
+    /// refused by the router (`ANGZARR_REASON_POLICY_COMMAND_NO_ROOT`), dead-lettered and
     /// never delivered; the trigger's step stays committed.
     #[test]
     fn a_policy_command_to_an_aggregate_with_no_root_is_refused_no_root() {
@@ -5387,7 +5104,7 @@ mod router {
         };
         assert_eq!(
             router_reason(&failed),
-            Some("COORDINATOR_REASON_POLICY_COMMAND_NO_ROOT"),
+            Some("ANGZARR_REASON_POLICY_COMMAND_NO_ROOT"),
             "{failed}"
         );
         assert_eq!(failed.recovery(), Recovery::Bug);
@@ -5421,39 +5138,11 @@ mod router {
         };
         assert_eq!(
             router_reason(&failed),
-            Some("COORDINATOR_REASON_POLICY_COMMAND_NO_ROOT"),
+            Some("ANGZARR_REASON_POLICY_COMMAND_NO_ROOT"),
             "{failed}"
         );
         assert_eq!(buy_in_events(&store, &correlation(2)), None);
         assert_eq!(log.lines().len(), 1, "{:?}", log.lines());
-    }
-
-    /// A policy's command carrying a correlation other than its trigger's is
-    /// the policy's bug, refused by the router
-    /// (`COORDINATOR_REASON_POLICY_COMMAND_OTHER_CORRELATION`), and never delivered.
-    #[test]
-    fn a_policy_command_in_another_correlation_is_refused_other_correlation() {
-        let (registry, store) = opened_with_dispatch(hold_dispatch(|hold| {
-            hold.page.as_mut().unwrap().correlation_id = Some(pb::Uuid {
-                value: vec![0xee; 16].into(),
-            });
-        }));
-        let log = MemoryDeadLetters::new();
-        let Err(failed) =
-            settle_in::<BuyIn>(&store, &registry, &log, 2, start(&correlation(3), 2, 30))
-        else {
-            panic!("a policy command in another correlation fails its step");
-        };
-        assert_eq!(
-            router_reason(&failed),
-            Some("COORDINATOR_REASON_POLICY_COMMAND_OTHER_CORRELATION"),
-            "{failed}"
-        );
-        assert_eq!(
-            pages(&store, wallet().cover()).map(|p| p.len()),
-            Some(2),
-            "the wallet recorded nothing"
-        );
     }
 
     /// A process manager's input whose correlation is not its root is
@@ -5544,23 +5233,33 @@ mod router {
         );
     }
 
-    /// A refusal only the router makes reaches the caller unchanged: a
-    /// command outside the policy's one destination
-    /// (`COORDINATOR_REASON_POLICY_COMMAND_OUTSIDE_DESTINATION`, naming both domains).
+    /// A refusal only the kernel makes of a policy's answer reaches the
+    /// caller unchanged, in the router's shape: an output to its trigger's
+    /// own stream (`ANGZARR_REASON_POLICY_TARGETS_ITS_TRIGGER`, naming the
+    /// stream and the output's type; decision 14.71), its metadata the
+    /// kernel error's args.
     #[test]
-    fn a_refusal_only_the_router_makes_reaches_the_caller() {
-        let (registry, store) = opened_with_dispatch(hold_dispatch(|hold| {
-            hold.cover = Some(wallet_cover("lamp"));
-        }));
+    fn a_refusal_only_the_kernel_makes_reaches_the_caller() {
+        let selfish = PolicyDispatch::new("self-record", "buyin", "buyin").on_event(
+            "toy.buyin.v1.BuyInStarted",
+            |_event, source| -> Result<Vec<hpb::Output>, HandlerError> {
+                let root = source.cover.and_then(|cover| cover.root.clone());
+                Ok(vec![::angzarr_embedded::angzarr_router::policy::command(
+                    root,
+                    any(RecordHeld { cents: 1 }),
+                )])
+            },
+        );
+        let (registry, store) = opened_with_dispatch(selfish);
         let log = MemoryDeadLetters::new();
         let Err(failed) =
             settle_in::<BuyIn>(&store, &registry, &log, 2, start(&correlation(7), 2, 30))
         else {
-            panic!("a command outside the destination fails its step");
+            panic!("an output to the trigger's own stream fails its step");
         };
         assert_eq!(
             router_reason(&failed),
-            Some("COORDINATOR_REASON_POLICY_COMMAND_OUTSIDE_DESTINATION"),
+            Some("ANGZARR_REASON_POLICY_TARGETS_ITS_TRIGGER"),
             "{failed}"
         );
         let Failure::Downstream {
@@ -5568,23 +5267,18 @@ mod router {
             ..
         } = &failed
         else {
-            unreachable!("the router's reason is a downstream router error");
+            unreachable!("the reason is a downstream router error");
         };
         assert_eq!(
-            error.extras.get("expected_domain").map(String::as_str),
-            Some("wallet")
-        );
-        assert_eq!(
-            error.extras.get("actual_domain").map(String::as_str),
-            Some("lamp")
+            error.extras.get("command_type").map(String::as_str),
+            Some("toy.buyin.cmd.v1.RecordHeld")
         );
         let routed = KernelError::Router(error.clone());
         let args = routed.args();
         assert!(
-            args.iter()
-                .any(|(name, arg)| *name == "actual_domain"
-                    && matches!(arg, Arg::Str(d) if d == "lamp")),
-            "the router's metadata, as args: {args:?}"
+            args.iter().any(|(name, arg)| *name == "command_type"
+                && matches!(arg, Arg::Str(t) if t == "toy.buyin.cmd.v1.RecordHeld")),
+            "the metadata, as args: {args:?}"
         );
     }
 
@@ -5605,23 +5299,17 @@ mod router {
 
         async fn dispatch(
             &self,
-            req: &pb::ContextualCommand,
-        ) -> Result<pb::CommandHandlerResponse, ::angzarr_embedded::angzarr_router::error::CodedError>
+            req: &hpb::HandleRequest,
+        ) -> Result<hpb::HandleResponse, ::angzarr_embedded::angzarr_router::error::CodedError>
         {
-            let next = req.events.as_ref().map_or(0, |b| b.next_sequence);
-            Ok(pb::CommandHandlerResponse {
-                conflict: None,
-                events: Some(pb::EventBook {
-                    pages: vec![pb::EventPage {
-                        payload: Some(any(Noted {
-                            root: vec![next as u8],
-                            command_id: Vec::new(),
-                            correlation_id: Vec::new(),
-                        })),
-                        ..Default::default()
-                    }],
-                    ..Default::default()
-                }),
+            let next = req.history.as_ref().map_or(0, |b| b.next_sequence);
+            Ok(hpb::HandleResponse {
+                events: vec![any(Noted {
+                    root: vec![next as u8],
+                    command_id: Vec::new(),
+                    correlation_id: Vec::new(),
+                })],
+                state: None,
                 rules_version: "remote-1".to_string(),
             })
         }
@@ -5630,20 +5318,22 @@ mod router {
     /// [`Remote`]'s descriptor, as angzarr-build generates it (decision
     /// 14.42): what every remote handler here registers by.
     fn remote_descriptor() -> pb::ComponentDescriptor {
+        descriptor_for("remote")
+    }
+
+    /// [`remote_descriptor`], of the aggregate of `domain`.
+    fn descriptor_for(domain: &str) -> pb::ComponentDescriptor {
         pb::ComponentDescriptor {
-            name: "remote".to_string(),
-            kind: pb::ComponentKind::Aggregate as i32,
+            name: domain.to_string(),
             rules_version: "remote-1".to_string(),
-            state: Some(StateDescriptor {
-                type_url: "/toy.remote.v1.State".to_string(),
-                options: Some(StateOptions {
-                    conflict_resolutions: vec![
-                        ConflictResolution::Strict as i32,
-                        ConflictResolution::AggregateHandles as i32,
-                    ],
-                }),
-            }),
-            ..Default::default()
+            kind: Some(pb::component_descriptor::Kind::Aggregate(
+                pb::AggregateDescriptor {
+                    domain: domain.to_string(),
+                    state: Some(StateDescriptor {
+                        type_name: "toy.remote.v1.State".to_string(),
+                    }),
+                },
+            )),
         }
     }
 
@@ -5676,18 +5366,20 @@ mod router {
         let written = pages(&store, &remote_cover).expect("the remote's stream");
         assert_eq!(written.len(), 1);
         assert_eq!(
-            written[0].payload,
-            Some(any(Noted {
+            event_of(&written[0]),
+            &any(Noted {
                 root: vec![0],
                 command_id: Vec::new(),
                 correlation_id: Vec::new(),
-            }))
+            })
         );
         let meta = written[0].meta.clone().expect("stamped");
         assert_eq!(meta.rules_version, "remote-1");
         assert_eq!(
             meta.causation,
-            Some(Causation::CommandId(Uuid::from_bytes([4; 16])))
+            Some(Causation::Command(::angzarr_embedded::v1::CommandCause {
+                command_id: Some(Uuid::from_bytes([4; 16])),
+            }))
         );
         assert_eq!(meta.correlation_id, Some(correlation(4)));
         let again = ready(kernel.handle_any(&store, note(), &sampled)).unwrap();
@@ -5705,7 +5397,7 @@ mod router {
         );
     }
 
-    /// A [`Remote`] that keeps the `ContextualCommand.recorded_at` of each
+    /// A [`Remote`] that keeps the `HandleRequest.recorded_at` of each
     /// input it is handed.
     struct Clocked(std::sync::Arc<std::sync::Mutex<Vec<Option<Timestamp>>>>);
 
@@ -5720,8 +5412,8 @@ mod router {
 
         async fn dispatch(
             &self,
-            req: &pb::ContextualCommand,
-        ) -> Result<pb::CommandHandlerResponse, ::angzarr_embedded::angzarr_router::error::CodedError>
+            req: &hpb::HandleRequest,
+        ) -> Result<hpb::HandleResponse, ::angzarr_embedded::angzarr_router::error::CodedError>
         {
             self.0.lock().unwrap().push(req.recorded_at);
             Remote.dispatch(req).await
@@ -5729,8 +5421,8 @@ mod router {
     }
 
     /// The kernel stamps the input's acceptance time on the
-    /// `ContextualCommand` it hands the handler (decision 14.37,
-    /// `ContextualCommand.recorded_at`), and its events carry that same
+    /// `HandleRequest` it hands the handler (decision 14.37,
+    /// `HandleRequest.recorded_at`), and its events carry that same
     /// instant as their `EventMeta.recorded_at`, held to `max(the stream's
     /// last, now)`: a later input sampled earlier is stamped at the last.
     #[test]
@@ -5773,7 +5465,7 @@ mod router {
     }
 
     /// A remote handler that cannot be reached, until `up`: it answers
-    /// angzarr-embedded-host's `COORDINATOR_REASON_HANDLER_UNAVAILABLE`
+    /// angzarr-embedded-host's `ANGZARR_REASON_HANDLER_UNAVAILABLE`
     /// (UNAVAILABLE, its cause in its metadata); reached, it answers as [`Remote`].
     struct Flaky {
         up: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -5790,15 +5482,15 @@ mod router {
 
         async fn dispatch(
             &self,
-            req: &pb::ContextualCommand,
-        ) -> Result<pb::CommandHandlerResponse, ::angzarr_embedded::angzarr_router::error::CodedError>
+            req: &hpb::HandleRequest,
+        ) -> Result<hpb::HandleResponse, ::angzarr_embedded::angzarr_router::error::CodedError>
         {
             use ::angzarr_embedded::angzarr_router::error::{CodedError, GrpcCode};
             if self.up.load(std::sync::atomic::Ordering::SeqCst) {
                 return Remote.dispatch(req).await;
             }
             Err(CodedError {
-                code: "COORDINATOR_REASON_HANDLER_UNAVAILABLE".to_string(),
+                code: "ANGZARR_REASON_HANDLER_UNAVAILABLE".to_string(),
                 extras: [
                     ("domain".to_string(), "remote".to_string()),
                     ("cause".to_string(), "not-running".to_string()),
@@ -5829,20 +5521,10 @@ mod router {
                 PolicyDispatch::new("wallet-remote", "wallet", "remote").on_event(
                     "toy.wallet.v1.Held",
                     |_, source| {
-                        Ok(vec![pb::CommandBook {
-                            cover: Some(pb::Cover {
-                                domain: "remote".to_string(),
-                                root: source.and_then(|c| c.root.clone()),
-                                edition: None,
-                            }),
-                            page: Some(pb::CommandPage {
-                                body: Some(pb::command_page::Body::Command(pb::Command {
-                                    payload: Some(any(Note {})),
-                                })),
-                                ..Default::default()
-                            }),
-                            handling: None,
-                        }])
+                        Ok(vec![::angzarr_embedded::angzarr_router::policy::command(
+                            source.cover.and_then(|c| c.root.clone()),
+                            any(Note {}),
+                        )])
                     },
                 ),
             )
@@ -5872,7 +5554,7 @@ mod router {
             "{origin:?}"
         );
         assert_eq!(origin.recovery(), Recovery::Retry);
-        assert_eq!(origin.code(), "COORDINATOR_REASON_HANDLER_UNAVAILABLE");
+        assert_eq!(origin.code(), "ANGZARR_REASON_HANDLER_UNAVAILABLE");
 
         handle_in::<Wallet>(
             &store,
@@ -5920,7 +5602,7 @@ mod router {
     }
 
     /// A remote handler down for its first `down_for` dispatches
-    /// (COORDINATOR_REASON_HANDLER_UNAVAILABLE, retryable), then up; `calls` counts
+    /// (ANGZARR_REASON_HANDLER_UNAVAILABLE, retryable), then up; `calls` counts
     /// every dispatch.
     struct Recovering {
         down_for: std::sync::Arc<std::sync::atomic::AtomicUsize>,
@@ -5938,8 +5620,8 @@ mod router {
 
         async fn dispatch(
             &self,
-            req: &pb::ContextualCommand,
-        ) -> Result<pb::CommandHandlerResponse, ::angzarr_embedded::angzarr_router::error::CodedError>
+            req: &hpb::HandleRequest,
+        ) -> Result<hpb::HandleResponse, ::angzarr_embedded::angzarr_router::error::CodedError>
         {
             use std::sync::atomic::Ordering::SeqCst;
             self.calls.fetch_add(1, SeqCst);
@@ -5997,7 +5679,7 @@ mod router {
     fn capped() -> ::angzarr_embedded::OnRetryable {
         ::angzarr_embedded::OnRetryable {
             max_retries: 3,
-            max_race_runs: 10,
+            max_race_runs: ::angzarr_embedded::DEFAULT_RACE_RUNS,
             initial_backoff: std::time::Duration::from_millis(10),
             multiplier: 3.0,
             max_backoff: std::time::Duration::from_millis(50),
@@ -6019,20 +5701,10 @@ mod router {
                 PolicyDispatch::new("wallet-remote", "wallet", "remote").on_event(
                     "toy.wallet.v1.Held",
                     |_, source| {
-                        Ok(vec![pb::CommandBook {
-                            cover: Some(pb::Cover {
-                                domain: "remote".to_string(),
-                                root: source.and_then(|c| c.root.clone()),
-                                edition: None,
-                            }),
-                            page: Some(pb::CommandPage {
-                                body: Some(pb::command_page::Body::Command(pb::Command {
-                                    payload: Some(any(Note {})),
-                                })),
-                                ..Default::default()
-                            }),
-                            handling: None,
-                        }])
+                        Ok(vec![::angzarr_embedded::angzarr_router::policy::command(
+                            source.cover.and_then(|c| c.root.clone()),
+                            any(Note {}),
+                        )])
                     },
                 ),
             )
@@ -6072,7 +5744,7 @@ mod router {
             kernel.retryable(),
             OnRetryable {
                 max_retries: 3,
-                max_race_runs: 10,
+                max_race_runs: ::angzarr_embedded::DEFAULT_RACE_RUNS,
                 initial_backoff: Duration::from_millis(100),
                 multiplier: 2.0,
                 max_backoff: Duration::from_secs(5),
@@ -6192,7 +5864,7 @@ mod router {
             let lines = log.lines();
             assert_eq!(lines.len(), 1, "{policy_bug:?}: {lines:?}");
             assert!(
-                lines[0].contains("remote: COORDINATOR_REASON_HANDLER_UNAVAILABLE cause=not-running domain=remote stream=remote/0a0a0a0a-0a0a-0a0a-0a0a-0a0a0a0a0a0a retry_count=3"),
+                lines[0].contains("remote: ANGZARR_REASON_HANDLER_UNAVAILABLE cause=not-running domain=remote stream=remote/0a0a0a0a-0a0a-0a0a-0a0a-0a0a0a0a0a0a retry_count=3"),
                 "{lines:?}"
             );
             let _ = ready(kernel.resume(&store, &sampled_at(3)));
@@ -6253,8 +5925,8 @@ mod router {
 
         async fn dispatch(
             &self,
-            _: &pb::ContextualCommand,
-        ) -> Result<pb::CommandHandlerResponse, ::angzarr_embedded::angzarr_router::error::CodedError>
+            _: &hpb::HandleRequest,
+        ) -> Result<hpb::HandleResponse, ::angzarr_embedded::angzarr_router::error::CodedError>
         {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Err(self.error.clone())
@@ -6340,14 +6012,12 @@ mod router {
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(lines[0].contains("retry_count=3"), "{lines:?}");
         // A policy step's ABORTED re-run at its cap records the handler's
-        // own key as last answered: processing_failed, its retries,
-        // transient (decision 14.48).
-        let reason = crate::toys::wire("SEAT_MOVED", &[]);
+        // own key as last answered, with its retries (decision 14.48).
         crate::toys::assert_letter(
             &crate::toys::one_letter(log.letters()),
             ::angzarr_embedded::v1::ComponentKind::Aggregate,
-            &reason,
-            crate::toys::processing_failed(&reason, 3, true),
+            &crate::toys::reason("SEAT_MOVED", &[]),
+            3,
         );
     }
 
@@ -6442,7 +6112,7 @@ mod router {
 
         /// A handler's retryable bug is retried up to the cap, each wait
         /// the backoff less its jitter, through the injected `Wait`; then
-        /// the caller gets it as ROUTER_REASON_UNHANDLED_HANDLER_ERROR with
+        /// the caller gets it as ANGZARR_REASON_UNHANDLED_HANDLER_ERROR with
         /// its cause, under its status, `Recovery::Retry`. The caller is
         /// waiting, so nothing is dead-lettered, and nothing is written.
         #[test]
@@ -6458,7 +6128,7 @@ mod router {
 
             let error = coded(&failed);
             assert_eq!(
-                error.code, "ROUTER_REASON_UNHANDLED_HANDLER_ERROR",
+                error.code, "ANGZARR_REASON_UNHANDLED_HANDLER_ERROR",
                 "{failed:?}"
             );
             assert_eq!(error.grpc, GrpcCode::Unavailable, "{failed:?}");
@@ -6545,23 +6215,13 @@ mod router {
                     PolicyDispatch::new("wallet-meter", "wallet", "meter").on_event(
                         "toy.wallet.v1.Held",
                         move |_, source| {
-                            Ok(vec![pb::CommandBook {
-                                cover: Some(pb::Cover {
-                                    domain: "meter".to_string(),
-                                    root: source.and_then(|c| c.root.clone()),
-                                    edition: None,
+                            Ok(vec![::angzarr_embedded::angzarr_router::policy::command(
+                                source.cover.and_then(|c| c.root.clone()),
+                                any(Probe {
+                                    status,
+                                    step: false,
                                 }),
-                                page: Some(pb::CommandPage {
-                                    body: Some(pb::command_page::Body::Command(pb::Command {
-                                        payload: Some(any(Probe {
-                                            status,
-                                            step: false,
-                                        })),
-                                    })),
-                                    ..Default::default()
-                                }),
-                                handling: None,
-                            }])
+                            )])
                         },
                     ),
                 )
@@ -6578,7 +6238,7 @@ mod router {
             for (status, cause) in [
                 (
                     1,
-                    ": ROUTER_REASON_UNHANDLED_HANDLER_ERROR cause=toy-meter-broke cause.seat=5",
+                    ": ANGZARR_REASON_UNHANDLED_HANDLER_ERROR cause=toy-meter-broke cause.seat=5",
                 ),
                 (4, ": toy-meter-moved seat=5"),
             ] {
@@ -6625,7 +6285,7 @@ mod router {
 
         /// Each `RetryableStatus` a handler picks goes out exactly as that
         /// status, from a handler, a step and a typed-refusal handler
-        /// alike: ROUTER_REASON_UNHANDLED_HANDLER_ERROR, its cause beside.
+        /// alike: ANGZARR_REASON_UNHANDLED_HANDLER_ERROR, its cause beside.
         #[test]
         fn each_retryable_status_goes_out_exactly() {
             for (n, status) in [
@@ -6654,7 +6314,7 @@ mod router {
                     let error = coded(&failed);
                     assert_eq!(error.grpc, GrpcCode::from(status), "{status:?}: {failed:?}");
                     assert_eq!(
-                        error.code, "ROUTER_REASON_UNHANDLED_HANDLER_ERROR",
+                        error.code, "ANGZARR_REASON_UNHANDLED_HANDLER_ERROR",
                         "{status:?}"
                     );
                     assert_eq!(
@@ -6672,11 +6332,12 @@ mod router {
         }
     }
 
-    /// A caller's own `expected_sequence` ahead of the head goes back to
-    /// the caller at once, malformed (decision 14.47): never retried,
-    /// never dead-lettered.
+    /// A caller's own `expected_sequence` ahead of the head is refused at
+    /// once, `ExpectedSequenceMismatch` (decision 14.94: behind and ahead
+    /// are one refusal), before the handler runs: never retried, never
+    /// dead-lettered.
     #[test]
-    fn a_callers_expected_sequence_ahead_goes_back_at_once() {
+    fn a_callers_expected_sequence_ahead_is_refused_at_once() {
         let (registry, _) = recovering(0);
         let store = Mem::new();
         let log = MemoryDeadLetters::new();
@@ -6685,24 +6346,18 @@ mod router {
             .log_with(&log)
             .on_retryable(capped())
             .wait_with(&waits);
-        let mut stale = send("remote", 3, any(Note {}), None);
-        stale.handling = Some(::angzarr_embedded::v1::Handling {
-            expected_sequence: Some(5),
-            conflict_resolution: ConflictResolution::Strict as i32,
-        });
-        let failed = ready(kernel.handle_any(&store, stale, &sampled_at(9)))
+        use ::angzarr_embedded::CommandBookExt as _;
+        let ahead = send("remote", 3, any(Note {}), None).at(5);
+        let failed = ready(kernel.handle_any(&store, ahead, &sampled_at(9)))
             .err()
             .expect("ahead");
-        assert!(
-            matches!(
-                &failed,
-                Failure::Kernel(KernelError::ExpectedSequenceAhead {
-                    expected: 5,
-                    head: 0,
-                    ..
-                })
-            ),
-            "{failed:?}"
+        let Failure::Rejected(rejected) = &failed else {
+            panic!("refused: {failed:?}");
+        };
+        assert_eq!(rejected.status(), BusinessStatus::FailedPrecondition);
+        assert_eq!(
+            rejected.refusal_object().type_url,
+            "/io.angzarr.v1.ExpectedSequenceMismatch"
         );
         assert!(waits.micros().is_empty(), "{:?}", waits.micros());
         assert!(log.lines().is_empty(), "{:?}", log.lines());
@@ -6724,8 +6379,8 @@ mod router {
 
         async fn dispatch(
             &self,
-            _: &pb::ContextualCommand,
-        ) -> Result<pb::CommandHandlerResponse, ::angzarr_embedded::angzarr_router::error::CodedError>
+            _: &hpb::HandleRequest,
+        ) -> Result<hpb::HandleResponse, ::angzarr_embedded::angzarr_router::error::CodedError>
         {
             Err(self.error.clone())
         }
@@ -6764,20 +6419,10 @@ mod router {
                 PolicyDispatch::new("wallet-remote", "wallet", "remote").on_event(
                     "toy.wallet.v1.Held",
                     |_, source| {
-                        Ok(vec![pb::CommandBook {
-                            cover: Some(pb::Cover {
-                                domain: "remote".to_string(),
-                                root: source.and_then(|c| c.root.clone()),
-                                edition: None,
-                            }),
-                            page: Some(pb::CommandPage {
-                                body: Some(pb::command_page::Body::Command(pb::Command {
-                                    payload: Some(any(Note {})),
-                                })),
-                                ..Default::default()
-                            }),
-                            handling: None,
-                        }])
+                        Ok(vec![::angzarr_embedded::angzarr_router::policy::command(
+                            source.cover.and_then(|c| c.root.clone()),
+                            any(Note {}),
+                        )])
                     },
                 ),
             )
@@ -6785,34 +6430,37 @@ mod router {
         registry
     }
 
-    /// A code the router does not know, refused FAILED_PRECONDITION, is the
-    /// domain's deliberate refusal: a business rejection under its own
-    /// code and args, nothing dead-lettered.
+    /// A code the router does not know, failed FAILED_PRECONDITION with no
+    /// typed refusal object, is no refusal (typed refusals only): the
+    /// router's error under that code and args, `Recovery::Business`,
+    /// handed back, nothing dead-lettered.
     #[test]
-    fn an_unknown_code_refused_as_failed_precondition_is_a_rejection() {
+    fn an_unknown_code_failed_as_failed_precondition_is_an_untyped_business_failure() {
         use ::angzarr_embedded::angzarr_router::error::GrpcCode;
-        refused_as_a_rejection(GrpcCode::FailedPrecondition);
+        failed_as_business(GrpcCode::FailedPrecondition);
     }
 
-    /// A code the router does not know, refused INVALID_ARGUMENT, is a
-    /// business refusal too (the owner's ruling, 2026-10-29).
+    /// The same under INVALID_ARGUMENT, a business status too (the owner's
+    /// ruling, 2026-10-29).
     #[test]
-    fn an_unknown_code_refused_as_invalid_argument_is_a_rejection() {
+    fn an_unknown_code_failed_as_invalid_argument_is_an_untyped_business_failure() {
         use ::angzarr_embedded::angzarr_router::error::GrpcCode;
-        refused_as_a_rejection(GrpcCode::InvalidArgument);
+        failed_as_business(GrpcCode::InvalidArgument);
     }
 
-    /// A code the router does not know, refused NOT_FOUND, is a business
-    /// refusal too (the owner's ruling, 2026-10-29).
+    /// The same under NOT_FOUND, a business status too (the owner's
+    /// ruling, 2026-10-29).
     #[test]
-    fn an_unknown_code_refused_as_not_found_is_a_rejection() {
+    fn an_unknown_code_failed_as_not_found_is_an_untyped_business_failure() {
         use ::angzarr_embedded::angzarr_router::error::GrpcCode;
-        refused_as_a_rejection(GrpcCode::NotFound);
+        failed_as_business(GrpcCode::NotFound);
     }
 
-    /// A remote handler refusing under a code of its own with `grpc` is a
-    /// business rejection under that code and args, nothing dead-lettered.
-    fn refused_as_a_rejection(grpc: ::angzarr_embedded::angzarr_router::error::GrpcCode) {
+    /// A remote handler failing under a code of its own with the business
+    /// status `grpc` and no typed refusal: the router's error under that
+    /// code, status and args, carrying no refusal, `Recovery::Business`,
+    /// nothing dead-lettered.
+    fn failed_as_business(grpc: ::angzarr_embedded::angzarr_router::error::GrpcCode) {
         let registry = faulty(grpc);
         let store = Mem::new();
         let log = MemoryDeadLetters::new();
@@ -6821,19 +6469,22 @@ mod router {
             now: at(9),
             command_id: Uuid::from_bytes([0x79; 16]),
         };
-        let refused =
+        let failed =
             ready(kernel.handle_any(&store, send("remote", 3, any(Note {}), None), &sampled))
                 .err()
-                .expect("refused");
-        let Failure::Rejected(rejected) = &refused else {
-            panic!("{grpc:?}, a business rejection: {refused:?}");
+                .expect("failed");
+        let Failure::Kernel(KernelError::Router(error)) = &failed else {
+            panic!("{grpc:?}, the router's error: {failed:?}");
         };
-        assert_eq!(rejected.code(), "PLAYER_BROKE");
-        assert!(
-            matches!(rejected.args().as_slice(), [("seat", Arg::Str(v))] if v == "3"),
-            "its args: {rejected:?}"
+        assert_eq!(error.code, "PLAYER_BROKE");
+        assert_eq!(error.grpc, grpc);
+        assert!(error.refusal.is_none(), "no typed refusal: {error:?}");
+        assert_eq!(
+            error.extras.get("seat").map(String::as_str),
+            Some("3"),
+            "its args: {error:?}"
         );
-        assert_eq!(refused.recovery(), Recovery::Business);
+        assert_eq!(failed.recovery(), Recovery::Business);
         assert!(log.lines().is_empty(), "{:?}", log.lines());
     }
 
@@ -6991,7 +6642,7 @@ mod router {
     }
 
     /// A handler's bug (angzarr-router's `CodedError::bug`, decision
-    /// 14.37) is INTERNAL ROUTER_REASON_UNHANDLED_HANDLER_ERROR with the handler's own
+    /// 14.37) is INTERNAL ANGZARR_REASON_UNHANDLED_HANDLER_ERROR with the handler's own
     /// code and args as its cause: `Recovery::Bug`, dead-lettered by that
     /// code and its cause (`cause=<code>`, `cause.<arg>`), at the origin and
     /// as a policy's step, whose position moves past the trigger.
@@ -7019,7 +6670,7 @@ mod router {
             );
             assert!(
                 lines[0].contains(
-                    "remote: ROUTER_REASON_UNHANDLED_HANDLER_ERROR cause=PLAYER_BROKE cause.seat=3"
+                    "remote: ANGZARR_REASON_UNHANDLED_HANDLER_ERROR cause=PLAYER_BROKE cause.seat=3"
                 ),
                 "its key, and the handler's code and args as its cause: {}",
                 lines[0]
@@ -7039,7 +6690,7 @@ mod router {
         assert!(
             matches!(
                 &origin,
-                Failure::Kernel(KernelError::Router(e)) if e.code == "ROUTER_REASON_UNHANDLED_HANDLER_ERROR"
+                Failure::Kernel(KernelError::Router(e)) if e.code == "ANGZARR_REASON_UNHANDLED_HANDLER_ERROR"
             ),
             "{origin:?}"
         );
@@ -7070,7 +6721,7 @@ mod router {
                 Failure::Downstream {
                     error: StepError::Kernel(KernelError::Router(e)),
                     ..
-                } if e.code == "ROUTER_REASON_UNHANDLED_HANDLER_ERROR"
+                } if e.code == "ANGZARR_REASON_UNHANDLED_HANDLER_ERROR"
             ),
             "{held:?}"
         );
@@ -7088,7 +6739,7 @@ mod router {
     }
 
     /// A source whose fact handler fails with a fault of the router's own
-    /// (ROUTER_REASON_UNHANDLED_HANDLER_ERROR): its commands answer as [`Remote`]'s.
+    /// (ANGZARR_REASON_UNHANDLED_HANDLER_ERROR): its commands answer as [`Remote`]'s.
     struct Picky;
 
     impl ::angzarr_embedded::angzarr_router::router::CommandHandler for Picky {
@@ -7102,12 +6753,12 @@ mod router {
 
         async fn dispatch(
             &self,
-            req: &pb::ContextualCommand,
-        ) -> Result<pb::CommandHandlerResponse, ::angzarr_embedded::angzarr_router::error::CodedError>
+            req: &hpb::HandleRequest,
+        ) -> Result<hpb::HandleResponse, ::angzarr_embedded::angzarr_router::error::CodedError>
         {
             use ::angzarr_embedded::angzarr_router::error::CodedError;
             let fact = req
-                .command
+                .input
                 .as_ref()
                 .and_then(|c| c.page.as_ref())
                 .is_some_and(|p| matches!(p.body, Some(pb::command_page::Body::Fact(_))));
@@ -7131,25 +6782,26 @@ mod router {
     ) -> (Registry, Mem) {
         let mut registry = registry();
         registry
-            .command_handler("picky", picky, remote_descriptor())
+            .command_handler("picky", picky, descriptor_for("picky"))
             .unwrap();
         registry
             .policy_dispatch(
-                PolicyDispatch::new("picky-wallet", "picky", "wallet").on_event(
-                    "toy.wallet.v1.Noted",
-                    |_, _| {
-                        Ok(vec![pb::CommandBook {
-                            cover: Some(wallet_cover("wallet")),
-                            page: Some(pb::CommandPage {
-                                body: Some(pb::command_page::Body::Command(pb::Command {
-                                    payload: Some(any(Hold { cents: 1000 })),
-                                })),
-                                ..Default::default()
-                            }),
-                            handling: None,
-                        }])
-                    },
-                ),
+                PolicyDispatch::new("picky-wallet", "picky", "wallet")
+                    .on_event("toy.wallet.v1.Noted", |_, _| {
+                        Ok(vec![::angzarr_embedded::angzarr_router::policy::command(
+                            wallet_cover("wallet").root,
+                            any(Hold { cents: 1000 }),
+                        )])
+                    })
+                    // Its Translate answers every refusal with a fact of
+                    // picky's, which picky fails on.
+                    .on_refused(|_, _, _| {
+                        Ok(any(Noted {
+                            root: Vec::new(),
+                            command_id: Vec::new(),
+                            correlation_id: Vec::new(),
+                        }))
+                    }),
             )
             .unwrap();
         let store = Mem::new();
@@ -7165,27 +6817,13 @@ mod router {
         (registry, store)
     }
 
-    /// The refusal fact's step failing on [`Picky`]'s fact handler.
-    fn assert_the_fact_step_failed<R: fmt::Debug>(failed: &Failure<R>) {
-        use ::angzarr_embedded::StepError;
-        assert!(
-            matches!(
-                failed,
-                Failure::Downstream {
-                    error: StepError::Kernel(KernelError::Router(e)),
-                    ..
-                } if e.code == "ROUTER_REASON_UNHANDLED_HANDLER_ERROR"
-            ),
-            "{failed:?}"
-        );
-    }
-
     /// A refusal fact its source fails on with a bug, not for having no
-    /// handler for it, fails the step as that bug: dead-lettered as the
-    /// source's handler's bug (never as an unhandled refusal), and the
-    /// policy's position moves past the trigger.
+    /// handler for it, is dead-lettered at the source as its handler's bug
+    /// (never as an unhandled refusal): the fact's dead letter is the
+    /// record to replay, so the step is done and the policy's position
+    /// moves past the trigger.
     #[test]
-    fn a_refusal_fact_its_source_fails_on_fails_the_step() {
+    fn a_refusal_fact_its_source_fails_on_is_dead_lettered_at_the_source() {
         let (registry, store) = picky();
         let log = MemoryDeadLetters::new();
         let kernel = ::angzarr_embedded::Kernel::new(&registry).log_with(&log);
@@ -7193,16 +6831,13 @@ mod router {
             now: at(9),
             command_id: Uuid::from_bytes([0x79; 16]),
         };
-        let failed =
-            ready(kernel.handle_any(&store, send("picky", 2, any(Note {}), None), &sampled))
-                .err()
-                .expect("the refusal fact's step fails");
-        assert_the_fact_step_failed(&failed);
+        ready(kernel.handle_any(&store, send("picky", 2, any(Note {}), None), &sampled))
+            .expect("the refusal fact's step is done");
         let lines = log.lines();
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(
             lines[0]
-                .contains("picky: ROUTER_REASON_UNHANDLED_HANDLER_ERROR cause=PICKY_FACT_BROKE"),
+                .contains("picky: ANGZARR_REASON_UNHANDLED_HANDLER_ERROR cause=PICKY_FACT_BROKE"),
             "the source's handler's bug, its code the cause: {}",
             lines[0]
         );
@@ -7232,12 +6867,12 @@ mod router {
 
         async fn dispatch(
             &self,
-            req: &pb::ContextualCommand,
-        ) -> Result<pb::CommandHandlerResponse, ::angzarr_embedded::angzarr_router::error::CodedError>
+            req: &hpb::HandleRequest,
+        ) -> Result<hpb::HandleResponse, ::angzarr_embedded::angzarr_router::error::CodedError>
         {
             use ::angzarr_embedded::angzarr_router::error::{CodedError, GrpcCode};
             let fact = req
-                .command
+                .input
                 .as_ref()
                 .and_then(|c| c.page.as_ref())
                 .is_some_and(|p| matches!(p.body, Some(pb::command_page::Body::Fact(_))));
@@ -7254,8 +6889,8 @@ mod router {
     }
 
     /// A refusal fact its source fails on with a retryable bug is retried
-    /// to the cap, then dead-lettered, and the policy's position moves past
-    /// the trigger, as for a bug: a resume does not run it again.
+    /// to the cap, then dead-lettered at the source, and the policy's
+    /// position moves past the trigger: a resume does not run it again.
     #[test]
     fn a_refusal_fact_its_source_cannot_take_yet_is_retried_then_moved_past() {
         let (registry, store) = picky_with(Box::new(Unsteady));
@@ -7269,9 +6904,8 @@ mod router {
             now: at(9),
             command_id: Uuid::from_bytes([0x79; 16]),
         };
-        let failed =
-            ready(kernel.handle_any(&store, send("picky", 2, any(Note {}), None), &sampled));
-        assert!(failed.is_err());
+        ready(kernel.handle_any(&store, send("picky", 2, any(Note {}), None), &sampled))
+            .expect("the refusal fact's step is done");
         assert_eq!(waits.micros(), [10_000, 30_000, 50_000]);
         let lines = log.lines();
         assert_eq!(lines.len(), 1, "{lines:?}");
@@ -7294,11 +6928,12 @@ mod router {
         );
     }
 
-    /// Under `OnPolicyBug::Stay`, a refusal fact its source fails on with a
-    /// bug is still dead-lettered, but the policy's position stays, so a
-    /// resume runs the step again.
+    /// `OnPolicyBug::Stay` holds a position for the policy's own bug only:
+    /// a refusal fact its source fails on is dead-lettered at the source,
+    /// that dead letter its record, so the position still moves past and a
+    /// resume runs nothing again.
     #[test]
-    fn under_stay_a_refusal_fact_its_source_fails_on_holds_the_position() {
+    fn under_stay_a_refusal_fact_its_source_fails_on_still_moves_past() {
         use ::angzarr_embedded::{Kernel, OnPolicyBug};
         let (registry, store) = picky();
         let log = MemoryDeadLetters::new();
@@ -7309,26 +6944,19 @@ mod router {
             now: at(9),
             command_id: Uuid::from_bytes([0x79; 16]),
         };
-        let failed =
-            ready(kernel.handle_any(&store, send("picky", 2, any(Note {}), None), &sampled))
-                .err()
-                .expect("the refusal fact's step fails");
-        assert_the_fact_step_failed(&failed);
+        ready(kernel.handle_any(&store, send("picky", 2, any(Note {}), None), &sampled))
+            .expect("the refusal fact's step is done");
         assert_eq!(log.lines().len(), 1, "{:?}", log.lines());
-        let resumed = ready(kernel.resume(&store, &sampled))
-            .err()
-            .expect("the position stayed, so the step runs again");
-        assert_the_fact_step_failed(&resumed);
-        assert_eq!(
-            log.lines().len(),
-            2,
-            "dead-lettered again: {:?}",
-            log.lines()
+        let resumed = ready(kernel.resume(&store, &sampled)).expect("nothing left owed");
+        assert!(
+            resumed.steps().is_empty(),
+            "the position moved past the trigger"
         );
+        assert_eq!(log.lines().len(), 1, "not again: {:?}", log.lines());
     }
 
     /// A domain's input goes through the router too: a command type the
-    /// wallet has no handler for is the router's `ROUTER_REASON_UNKNOWN_COMMAND_TYPE`.
+    /// wallet has no handler for is the router's `ANGZARR_REASON_UNKNOWN_COMMAND_TYPE`.
     #[test]
     fn a_domains_unknown_command_is_the_routers_unknown_command_type() {
         let registry = registry();
@@ -7345,7 +6973,7 @@ mod router {
         };
         assert_eq!(
             router_reason(&failed),
-            Some("ROUTER_REASON_UNKNOWN_COMMAND_TYPE"),
+            Some("ANGZARR_REASON_UNKNOWN_COMMAND_TYPE"),
             "{failed}"
         );
         assert_eq!(pages(&store, wallet().cover()), None);
@@ -7357,7 +6985,7 @@ mod router {
         let lines = log.lines();
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(
-            lines[0].contains("wallet: ROUTER_REASON_UNKNOWN_COMMAND_TYPE "),
+            lines[0].contains("wallet: ANGZARR_REASON_UNKNOWN_COMMAND_TYPE "),
             "{lines:?}"
         );
         assert!(
@@ -7597,7 +7225,7 @@ mod projector {
         assert_eq!(failures[0].0, "balances");
         assert_eq!(
             failures[0].1.code(),
-            "ROUTER_REASON_UNHANDLED_HANDLER_ERROR"
+            "ANGZARR_REASON_UNHANDLED_HANDLER_ERROR"
         );
         assert_eq!(
             committed
@@ -7610,7 +7238,7 @@ mod projector {
         let stored = pages(&store, wallet().cover()).expect("the stream");
         assert_eq!(stored.len(), 2, "and they stay committed");
         assert_eq!(
-            Failure::<Rejection<Refused>>::Projection {
+            Failure::<Rejected>::Projection {
                 committed,
                 failures,
                 dead_letters: Vec::new(),
@@ -7720,14 +7348,15 @@ mod projector {
 
         async fn dispatch(
             &self,
-            events: &EventBook,
+            request: &::angzarr_embedded::angzarr_router::hpb::ProjectRequest,
         ) -> Result<
-            ::angzarr_embedded::v1::Projection,
+            ::angzarr_embedded::angzarr_router::hpb::ProjectResponse,
             ::angzarr_embedded::angzarr_router::error::CodedError,
         > {
-            let domain = events.cover.clone().unwrap_or_default().domain;
+            let events = request.events.clone().unwrap_or_default();
+            let domain = events.cover.unwrap_or_default().domain;
             self.0.lock().unwrap().push(domain);
-            Ok(::angzarr_embedded::v1::Projection::default())
+            Ok(::angzarr_embedded::angzarr_router::hpb::ProjectResponse::default())
         }
     }
 
@@ -7784,7 +7413,7 @@ mod projector {
         };
         assert_eq!(
             failures[0].1.code(),
-            "ROUTER_REASON_UNHANDLED_HANDLER_ERROR"
+            "ANGZARR_REASON_UNHANDLED_HANDLER_ERROR"
         );
         let report = failures[0].1.to_string();
         assert!(report.contains("cause=toy-wallet-not-open"), "{report}");

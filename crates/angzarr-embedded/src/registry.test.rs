@@ -1,7 +1,8 @@
-//! The registry: angzarr-embedded's mirror of `ComponentDescriptor.state`, looked up
-//! by `cover.domain`, and the conflict-resolution defaults. These run.
+//! The registry: angzarr-embedded's mirror of each component's
+//! descriptor (its kind, its state's type, its rules version), looked up
+//! by `cover.domain`. These run.
 
-use crate::v1::{ConflictResolution, Snapshot};
+use crate::v1::Snapshot;
 use crate::{pack, Misconfigured, Registry, Upcaster};
 
 use crate::toys::{account, registry, shelf, Account};
@@ -10,25 +11,8 @@ use crate::toys::{account, registry, shelf, Account};
 fn registration_fills_the_state_descriptor_from_the_generated_impl() {
     let registry = registry();
     let shelf = registry.catalog().state("shelf").unwrap();
-    assert_eq!(shelf.type_url, "/toy.shelf.v1.ShelfState");
-    assert!(registry
-        .catalog()
-        .supports("shelf", ConflictResolution::Commutative));
-    assert!(registry
-        .catalog()
-        .supports("shelf", ConflictResolution::Strict));
-    assert!(registry
-        .catalog()
-        .supports("account", ConflictResolution::AggregateHandles));
-    assert!(
-        !registry
-            .catalog()
-            .supports("account", ConflictResolution::Commutative),
-        "no conflict units"
-    );
-    assert!(!registry
-        .catalog()
-        .supports("nowhere", ConflictResolution::Strict));
+    assert_eq!(shelf.type_name, "toy.shelf.v1.ShelfState");
+    assert_eq!(registry.catalog().state("nowhere"), None);
     assert_eq!(
         registry.catalog().rules_version("account").as_deref(),
         Some("v2")
@@ -37,40 +21,6 @@ fn registration_fills_the_state_descriptor_from_the_generated_impl() {
         registry.catalog().domains().collect::<Vec<_>>(),
         ["account", "ledger", "shelf"]
     );
-}
-
-#[test]
-fn commutative_is_the_default_where_the_state_declares_units_else_strict() {
-    let registry = registry();
-    let set = "/toy.shelf.cmd.v1.Set";
-    let deposit = "/toy.account.cmd.v1.Deposit";
-    assert_eq!(
-        registry.catalog().resolve("shelf", set, None),
-        Some(ConflictResolution::Commutative),
-        "the built-in default where the state supports it"
-    );
-    assert_eq!(
-        registry.catalog().resolve("account", deposit, None),
-        Some(ConflictResolution::Strict),
-        "and STRICT where it does not"
-    );
-    assert_eq!(
-        registry
-            .catalog()
-            .resolve("shelf", "/toy.shelf.cmd.v1.Note", None),
-        Some(ConflictResolution::Strict),
-        "a command type's configuration is above the default"
-    );
-    assert_eq!(
-        registry.catalog().resolve(
-            "shelf",
-            "type.googleapis.com/toy.shelf.cmd.v1.Note",
-            Some(ConflictResolution::AggregateHandles)
-        ),
-        Some(ConflictResolution::AggregateHandles),
-        "and the book's request above that"
-    );
-    assert_eq!(registry.catalog().resolve("nowhere", set, None), None);
 }
 
 #[test]
@@ -128,38 +78,6 @@ fn misconfiguration_is_refused_at_registration() {
 }
 
 #[test]
-fn a_configured_resolution_the_state_lacks_is_refused() {
-    use crate::toys::account::AccountState;
-    use crate::Domain;
-
-    /// An account configured COMMUTATIVE although its state has no units.
-    struct Eager;
-    impl Domain for Eager {
-        type State = AccountState;
-        type Command = std::convert::Infallible;
-        type Fact = std::convert::Infallible;
-        type Event = crate::toys::AccountEvent;
-        type Rejection = std::convert::Infallible;
-        const RULES_VERSION: &'static str = "v1";
-        const NAME: &'static str = "eager";
-        const CONFLICT_RESOLUTION: Option<ConflictResolution> =
-            Some(ConflictResolution::Commutative);
-        fn apply(_: &mut AccountState, _: &Self::Event, _: &crate::PageContext<'_>) {}
-    }
-
-    assert_eq!(
-        Registry::new()
-            .register::<Eager>(Upcaster::new("u", "eager"), |t| t)
-            .err(),
-        Some(Misconfigured::UnsupportedResolution {
-            domain: "eager".to_string(),
-            command_type: None,
-            resolution: ConflictResolution::Commutative
-        })
-    );
-}
-
-#[test]
 fn a_snapshot_is_usable_only_under_a_compatible_version_and_the_state_type() {
     let registry = registry();
     let state = pack(&account::AccountState::default());
@@ -190,70 +108,8 @@ fn a_snapshot_is_usable_only_under_a_compatible_version_and_the_state_type() {
 }
 
 #[test]
-fn a_state_descriptor_without_the_implicit_base_is_refused() {
-    use crate::v1::{ConflictResolution, StateDescriptor, StateOptions};
-
-    /// Lists STRICT only: not the base every generated descriptor has.
-    #[derive(Clone, PartialEq, prost::Message)]
-    pub struct StrictOnly {}
-
-    impl prost::Name for StrictOnly {
-        const NAME: &'static str = "StrictOnly";
-        const PACKAGE: &'static str = "toy.bad.v1";
-    }
-
-    impl crate::State for StrictOnly {
-        type Snapshot = Self;
-
-        fn to_snapshot(&self) -> Self {
-            self.clone()
-        }
-
-        fn from_snapshot(snapshot: Self) -> Result<Self, angzarr_diagnostic::Report> {
-            Ok(snapshot)
-        }
-
-        fn descriptor() -> StateDescriptor {
-            StateDescriptor {
-                type_url: "/toy.bad.v1.StrictOnly".to_string(),
-                options: Some(StateOptions {
-                    conflict_resolutions: vec![ConflictResolution::Strict as i32],
-                }),
-            }
-        }
-    }
-
-    struct Bad;
-
-    impl crate::Domain for Bad {
-        type State = StrictOnly;
-        type Command = std::convert::Infallible;
-        type Fact = std::convert::Infallible;
-        type Event = std::convert::Infallible;
-        type Rejection = std::convert::Infallible;
-        const RULES_VERSION: &'static str = "v1";
-
-        const NAME: &'static str = "bad";
-
-        fn apply(_: &mut StrictOnly, event: &std::convert::Infallible, _: &crate::PageContext<'_>) {
-            match *event {}
-        }
-    }
-
-    let mut registry = crate::Registry::new();
-    assert_eq!(
-        registry
-            .register::<Bad>(crate::Upcaster::new("u", "bad"), |t| t)
-            .err(),
-        Some(crate::Misconfigured::StateResolutionsInvalid {
-            component: "bad".to_string()
-        })
-    );
-}
-
-#[test]
 fn a_state_descriptor_naming_another_type_than_its_snapshot_is_refused() {
-    use crate::v1::{ConflictResolution, StateDescriptor, StateOptions};
+    use crate::v1::StateDescriptor;
 
     #[derive(Clone, PartialEq, prost::Message)]
     pub struct Snap {}
@@ -281,13 +137,7 @@ fn a_state_descriptor_naming_another_type_than_its_snapshot_is_refused() {
 
         fn descriptor() -> StateDescriptor {
             StateDescriptor {
-                type_url: "/toy.bad.v1.Elsewhere".to_string(),
-                options: Some(StateOptions {
-                    conflict_resolutions: vec![
-                        ConflictResolution::Strict as i32,
-                        ConflictResolution::AggregateHandles as i32,
-                    ],
-                }),
+                type_name: "toy.bad.v1.Elsewhere".to_string(),
             }
         }
     }
@@ -316,27 +166,19 @@ fn a_state_descriptor_naming_another_type_than_its_snapshot_is_refused() {
             .err(),
         Some(crate::Misconfigured::StateTypeMismatch {
             component: "bad".to_string(),
-            type_url: "/toy.bad.v1.Elsewhere".to_string(),
-            state_type_url: format!(
-                "/{}",
-                <<Misnamed as crate::State>::Snapshot as prost::Name>::full_name()
-            ),
+            type_name: "toy.bad.v1.Elsewhere".to_string(),
+            snapshot_type_name: <<Misnamed as crate::State>::Snapshot as prost::Name>::full_name(),
         })
     );
 }
 
-/// A hand-written handler of `kind`, registered by its descriptor.
-struct Hello {
-    kind: angzarr_proto::v1::ComponentKind,
-}
+/// A hand-written handler, registered by its descriptor: its kind is the
+/// descriptor's.
+struct Hello;
 
 impl angzarr_router::router::CommandHandler for Hello {
     fn name(&self) -> &str {
         "hello"
-    }
-
-    fn kind(&self) -> angzarr_proto::v1::ComponentKind {
-        self.kind
     }
 
     fn command_types(&self) -> Vec<String> {
@@ -345,48 +187,72 @@ impl angzarr_router::router::CommandHandler for Hello {
 
     async fn dispatch(
         &self,
-        _: &angzarr_proto::v1::ContextualCommand,
-    ) -> Result<angzarr_proto::v1::CommandHandlerResponse, angzarr_router::error::CodedError> {
+        _: &angzarr_router::hpb::HandleRequest,
+    ) -> Result<angzarr_router::hpb::HandleResponse, angzarr_router::error::CodedError> {
         Ok(Default::default())
     }
 }
 
+/// `hello`'s descriptor, an aggregate of `state`.
 fn hello(state: Option<crate::v1::StateDescriptor>) -> angzarr_proto::v1::ComponentDescriptor {
+    named("hello", aggregate_of("hello", state))
+}
+
+/// A descriptor named `name` of `kind`, under rules version h1.
+fn named(
+    name: &str,
+    kind: angzarr_proto::v1::component_descriptor::Kind,
+) -> angzarr_proto::v1::ComponentDescriptor {
     angzarr_proto::v1::ComponentDescriptor {
-        name: "hello".to_string(),
+        name: name.to_string(),
         rules_version: "h1".to_string(),
-        state,
-        ..Default::default()
+        kind: Some(kind),
     }
 }
 
+/// An aggregate of `domain` holding `state`.
+fn aggregate_of(
+    domain: &str,
+    state: Option<crate::v1::StateDescriptor>,
+) -> angzarr_proto::v1::component_descriptor::Kind {
+    angzarr_proto::v1::component_descriptor::Kind::Aggregate(
+        angzarr_proto::v1::AggregateDescriptor {
+            domain: domain.to_string(),
+            state,
+        },
+    )
+}
+
+/// A process manager of `domain` holding `state`, started by `starting`.
+fn process_manager_of(
+    domain: &str,
+    state: Option<crate::v1::StateDescriptor>,
+    starting: &[&str],
+) -> angzarr_proto::v1::component_descriptor::Kind {
+    angzarr_proto::v1::component_descriptor::Kind::ProcessManager(
+        angzarr_proto::v1::ProcessManagerDescriptor {
+            domain: domain.to_string(),
+            state,
+            starting_types: starting.iter().map(|t| t.to_string()).collect(),
+        },
+    )
+}
+
 fn base_state() -> crate::v1::StateDescriptor {
-    use crate::v1::{ConflictResolution, StateDescriptor, StateOptions};
-    StateDescriptor {
-        type_url: "/toy.hello.v1.State".to_string(),
-        options: Some(StateOptions {
-            conflict_resolutions: vec![
-                ConflictResolution::Strict as i32,
-                ConflictResolution::AggregateHandles as i32,
-            ],
-        }),
+    crate::v1::StateDescriptor {
+        type_name: "toy.hello.v1.State".to_string(),
     }
 }
 
 /// A handler registers on what its descriptor says: refused without a
-/// rules version or a state type, a process manager's kind kept.
+/// rules version or a state type, or for a descriptor of another domain
+/// than the one it is registered as; a process manager's kind kept.
 #[test]
 fn a_command_handler_registers_by_its_descriptor() {
     use angzarr_proto::v1::ComponentKind;
     let refused = |descriptor| {
         crate::Registry::new()
-            .command_handler(
-                "hello",
-                Hello {
-                    kind: ComponentKind::Aggregate,
-                },
-                descriptor,
-            )
+            .command_handler("hello", Hello, descriptor)
             .err()
     };
     let unversioned = angzarr_proto::v1::ComponentDescriptor {
@@ -399,12 +265,8 @@ fn a_command_handler_registers_by_its_descriptor() {
             component: "hello".to_string()
         })
     );
-    let untyped = crate::v1::StateDescriptor {
-        type_url: String::new(),
-        ..base_state()
-    };
     assert_eq!(
-        refused(hello(Some(untyped))),
+        refused(hello(Some(crate::v1::StateDescriptor::default()))),
         Some(Misconfigured::MissingStateType {
             component: "hello".to_string(),
             kind: "COMPONENT_KIND_AGGREGATE".to_string(),
@@ -417,15 +279,27 @@ fn a_command_handler_registers_by_its_descriptor() {
             kind: "COMPONENT_KIND_AGGREGATE".to_string(),
         })
     );
+    assert_eq!(
+        refused(named(
+            "hello",
+            aggregate_of("elsewhere", Some(base_state()))
+        )),
+        Some(Misconfigured::DescriptorNoDomain {
+            component: "hello".to_string(),
+            kind: "COMPONENT_KIND_AGGREGATE".to_string(),
+        }),
+        "a descriptor of another domain"
+    );
 
     let mut registry = crate::Registry::new();
     registry
         .command_handler(
             "hello",
-            Hello {
-                kind: ComponentKind::ProcessManager,
-            },
-            hello(Some(base_state())),
+            Hello,
+            named(
+                "hello",
+                process_manager_of("hello", Some(base_state()), &[]),
+            ),
         )
         .unwrap();
     assert!(registry.catalog().is_process_manager("hello"));
@@ -443,13 +317,7 @@ fn a_command_handler_registers_by_its_descriptor() {
     );
     let mut aggregate = crate::Registry::new();
     aggregate
-        .command_handler(
-            "hello",
-            Hello {
-                kind: ComponentKind::Aggregate,
-            },
-            hello(Some(base_state())),
-        )
+        .command_handler("hello", Hello, hello(Some(base_state())))
         .unwrap();
     assert!(!aggregate.catalog().is_process_manager("hello"));
     assert_eq!(aggregate.catalog().kind("hello"), ComponentKind::Aggregate);
@@ -462,49 +330,38 @@ fn a_command_handler_registers_by_its_descriptor() {
 /// leaves the old in place.
 #[test]
 fn a_described_domain_is_replaced_whole_by_its_new_descriptor() {
-    use angzarr_proto::v1::ComponentKind;
     let mut registry = crate::Registry::new();
     let description = registry
         .described_handler(
             "hello",
-            Hello {
-                kind: ComponentKind::ProcessManager,
-            },
-            angzarr_proto::v1::ComponentDescriptor {
-                starting_types: vec!["toy.hello.v1.Start".to_string()],
-                ..hello(Some(base_state()))
-            },
+            Hello,
+            named(
+                "hello",
+                process_manager_of("hello", Some(base_state()), &["toy.hello.v1.Start"]),
+            ),
         )
         .unwrap();
     assert_eq!(
         format!("{description:?}"),
         "Description { domain: \"hello\", .. }"
     );
-    let commutative = crate::v1::StateDescriptor {
-        type_url: "/toy.hello.v2.State".to_string(),
-        options: Some(crate::v1::StateOptions {
-            conflict_resolutions: vec![
-                ConflictResolution::Commutative as i32,
-                ConflictResolution::Strict as i32,
-                ConflictResolution::AggregateHandles as i32,
-            ],
-        }),
+    let next = crate::v1::StateDescriptor {
+        type_name: "toy.hello.v2.State".to_string(),
     };
     description
         .replace(angzarr_proto::v1::ComponentDescriptor {
             rules_version: "h2".to_string(),
-            starting_types: vec!["toy.hello.v1.Begin".to_string()],
-            ..hello(Some(commutative.clone()))
+            ..named(
+                "hello",
+                process_manager_of("hello", Some(next.clone()), &["toy.hello.v1.Begin"]),
+            )
         })
         .unwrap();
     assert_eq!(
         registry.catalog().rules_version("hello").as_deref(),
         Some("h2")
     );
-    assert_eq!(registry.catalog().state("hello"), Some(commutative));
-    assert!(registry
-        .catalog()
-        .supports("hello", ConflictResolution::Commutative));
+    assert_eq!(registry.catalog().state("hello"), Some(next));
     assert_eq!(
         registry.catalog().starting_types("hello"),
         Some(["toy.hello.v1.Begin".to_string()].into())
@@ -512,7 +369,10 @@ fn a_described_domain_is_replaced_whole_by_its_new_descriptor() {
 
     let refused = description.replace(angzarr_proto::v1::ComponentDescriptor {
         rules_version: String::new(),
-        ..hello(Some(base_state()))
+        ..named(
+            "hello",
+            process_manager_of("hello", Some(base_state()), &[]),
+        )
     });
     assert_eq!(
         refused,
@@ -520,19 +380,17 @@ fn a_described_domain_is_replaced_whole_by_its_new_descriptor() {
             component: "hello".to_string()
         })
     );
+    assert!(
+        description.replace(hello(Some(base_state()))).is_err(),
+        "another kind is no description of it again"
+    );
     assert_eq!(
         registry.catalog().rules_version("hello").as_deref(),
         Some("h2"),
         "the old kept"
     );
     assert!(registry
-        .described_handler(
-            "hello",
-            Hello {
-                kind: ComponentKind::Aggregate,
-            },
-            hello(Some(base_state())),
-        )
+        .described_handler("hello", Hello, hello(Some(base_state())))
         .is_err());
 }
 
@@ -541,11 +399,10 @@ fn a_described_domain_is_replaced_whole_by_its_new_descriptor() {
 /// its domain; a domain not registered here has none.
 #[test]
 fn a_domain_is_named_as_a_component_by_its_kind() {
-    use angzarr_proto::v1::ComponentKind;
-    let named = |kind| {
+    let names = |kind| {
         let mut registry = crate::Registry::new();
         registry
-            .command_handler("hello", Hello { kind }, hello(Some(base_state())))
+            .command_handler("hello", Hello, named("hello", kind))
             .unwrap();
         (
             registry.catalog().component_name("hello"),
@@ -553,11 +410,11 @@ fn a_domain_is_named_as_a_component_by_its_kind() {
         )
     };
     assert_eq!(
-        named(ComponentKind::Aggregate),
+        names(aggregate_of("hello", Some(base_state()))),
         (Some("hello".to_string()), None)
     );
     assert_eq!(
-        named(ComponentKind::ProcessManager),
+        names(process_manager_of("hello", Some(base_state()), &[])),
         (Some("pmg-hello".to_string()), None)
     );
 }
@@ -573,9 +430,9 @@ impl angzarr_router::router::ProjectorHandler for Named {
 
     async fn dispatch(
         &self,
-        _: &crate::v1::EventBook,
-    ) -> Result<crate::v1::Projection, angzarr_router::error::CodedError> {
-        Ok(crate::v1::Projection::default())
+        _: &angzarr_router::hpb::ProjectRequest,
+    ) -> Result<angzarr_router::hpb::ProjectResponse, angzarr_router::error::CodedError> {
+        Ok(angzarr_router::hpb::ProjectResponse::default())
     }
 }
 
@@ -617,12 +474,10 @@ fn a_snapshot_is_usable_under_the_registered_major_and_minor() {
         registry
             .command_handler(
                 domain,
-                Hello {
-                    kind: angzarr_proto::v1::ComponentKind::Aggregate,
-                },
+                Hello,
                 angzarr_proto::v1::ComponentDescriptor {
                     rules_version: version.to_string(),
-                    ..hello(Some(base_state()))
+                    ..named(domain, aggregate_of(domain, Some(base_state())))
                 },
             )
             .unwrap();

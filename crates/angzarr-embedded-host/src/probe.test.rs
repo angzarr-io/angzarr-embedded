@@ -40,13 +40,19 @@ fn with(mut component: ComponentConfig, env: &[(&str, &str)]) -> ComponentConfig
     component
 }
 
-/// `component` probed with `input`, under the fake's short time limits.
+/// `component` probed with `input`, under the fake's short time limits:
+/// a start limit of [`START_LIMIT_MS`], which a child that never serves
+/// waits out (the probe runs on tokio's clock, as an application does).
 fn probed(component: ComponentConfig, input: Input) -> Probed {
     let mut supervision = config(vec![]).supervision;
+    supervision.handshake_timeout_ms = START_LIMIT_MS;
     supervision.shutdown_grace_ms = 500;
     supervision.terminate_grace_ms = 500;
     probe(&component, &Languages::builtin(), &supervision, input)
 }
+
+/// The probe's start limit, in milliseconds.
+const START_LIMIT_MS: u64 = 300;
 
 /// Each step's outcome, a failure by its code alone.
 fn outcomes(probed: &Probed) -> Vec<(Step, Option<String>)> {
@@ -62,13 +68,12 @@ fn outcomes(probed: &Probed) -> Vec<(Step, Option<String>)> {
         .collect()
 }
 
-/// The six steps' outcomes: `passed` for the first `passed`, then
+/// The five steps' outcomes: `passed` for the first `passed`, then
 /// `failed` (a code), then not run.
 fn expect(passed: usize, failed: Option<&str>) -> Vec<(Step, Option<String>)> {
     let steps = [
         Step::Launch,
-        Step::Handshake,
-        Step::Health,
+        Step::Serving,
         Step::Describe,
         Step::Handle,
         Step::Shutdown,
@@ -83,7 +88,7 @@ fn expect(passed: usize, failed: Option<&str>) -> Vec<(Step, Option<String>)> {
 }
 
 /// A child that keeps the protocol passes every step: launched,
-/// handshaken, SERVING, described, its command answered, and exited by
+/// SERVING, described, its command answered, and exited by
 /// itself with status 0 on its stdin's end.
 #[test]
 fn a_conforming_child_passes_every_step() {
@@ -150,48 +155,29 @@ fn an_in_process_component_fails_the_launch() {
     );
 }
 
-/// A malformed handshake fails the handshake under the spec's key.
+/// A child not SERVING on the host's path within the start limit, one
+/// serving no health or never listening included, fails the serving step
+/// under the spec's key; so does one exiting first.
 #[test]
-fn a_malformed_handshake_fails_the_handshake() {
-    let probed = probed(
-        domain("player", "player", mode::MALFORMED),
-        command("player", any("/examples.blackjack.SitDown")),
-    );
-    assert_eq!(outcomes(&probed), expect(1, Some(code!("handshake"))));
-    let Outcome::Failed(report) = &probed.steps[1].1 else {
-        panic!("{probed:?}");
-    };
-    assert!(
-        report
-            .to_string()
-            .contains("cause=HOST_REASON_HANDSHAKE_MALFORMED"),
-        "{report}"
-    );
-}
-
-/// A child that is not SERVING once it has handshaken, or serves no
-/// health, fails the health step.
-#[test]
-fn a_child_not_serving_fails_the_health_step() {
-    let not_serving = probed(
+fn a_child_not_serving_fails_the_serving_step() {
+    for child in [
         with(
             domain("player", "player", mode::SERVE),
             &[(HEALTH_ENV, health::NOT_SERVING)],
         ),
-        command("player", any("/examples.blackjack.SitDown")),
-    );
-    assert_eq!(
-        outcomes(&not_serving),
-        expect(2, Some("HOST_REASON_CHILD_NOT_SERVING"))
-    );
-    let no_health = probed(
         with(
             domain("player", "player", mode::SERVE),
             &[(HEALTH_ENV, health::NONE)],
         ),
-        command("player", any("/examples.blackjack.SitDown")),
-    );
-    assert_eq!(outcomes(&no_health), expect(2, Some(code!("health"))));
+        domain("player", "player", mode::SILENT),
+        domain("player", "player", mode::EXITS),
+    ] {
+        let probed = probed(child, command("player", any("/examples.blackjack.SitDown")));
+        assert_eq!(
+            outcomes(&probed),
+            expect(1, Some("EMBEDDED_REASON_CHILD_NOT_SERVING"))
+        );
+    }
 }
 
 /// A child describing itself as another kind than its entry says fails
@@ -210,7 +196,7 @@ fn a_child_of_another_kind_fails_the_describe_step() {
         player,
         command("player", any("/examples.blackjack.SitDown")),
     );
-    assert_eq!(outcomes(&probed), expect(3, Some(code!("kind-mismatch"))));
+    assert_eq!(outcomes(&probed), expect(2, Some(code!("kind-mismatch"))));
 }
 
 /// An input the child does not answer (it exits mid-call) fails the
@@ -225,7 +211,7 @@ fn an_input_not_answered_fails_the_handle_step() {
     );
     assert_eq!(
         outcomes(&died),
-        expect(4, Some("COORDINATOR_REASON_HANDLER_UNAVAILABLE"))
+        expect(3, Some("ANGZARR_REASON_HANDLER_UNAVAILABLE"))
     );
     assert!(!died.passed(), "the steps before it passed; not the probe");
     let other_kind = probed(
@@ -234,7 +220,7 @@ fn an_input_not_answered_fails_the_handle_step() {
     );
     assert_eq!(
         outcomes(&other_kind),
-        expect(4, Some("HOST_REASON_PROBE_INPUT"))
+        expect(3, Some("EMBEDDED_REASON_PROBE_INPUT"))
     );
 }
 
@@ -248,14 +234,14 @@ fn a_child_ignoring_its_stdins_end_fails_the_shutdown_step() {
     );
     assert_eq!(
         outcomes(&probed),
-        expect(5, Some("HOST_REASON_CHILD_NOT_EXITED"))
+        expect(4, Some("EMBEDDED_REASON_CHILD_NOT_EXITED"))
     );
-    let Outcome::Failed(report) = &probed.steps[5].1 else {
+    let Outcome::Failed(report) = &probed.steps[4].1 else {
         panic!("{probed:?}");
     };
     assert_eq!(
         report.to_string(),
-        "HOST_REASON_CHILD_NOT_EXITED component=player ended=terminated"
+        "EMBEDDED_REASON_CHILD_NOT_EXITED component=player ended=terminated"
     );
 }
 
@@ -275,8 +261,7 @@ fn an_upcaster_sidecar_is_not_described_or_handed_an_input() {
         outcomes(&probed),
         [
             (Step::Launch, passed()),
-            (Step::Handshake, passed()),
-            (Step::Health, passed()),
+            (Step::Serving, passed()),
             (Step::Describe, None),
             (Step::Handle, None),
             (Step::Shutdown, passed()),
@@ -318,7 +303,7 @@ fn client_pythons_child_shim_passes_every_step() {
             any("type.googleapis.com/io.angzarr.examples.v1.DecideMove"),
         ),
     );
-    assert_eq!(outcomes(&probed), expect(6, None), "{probed:?}");
+    assert_eq!(outcomes(&probed), expect(5, None), "{probed:?}");
 }
 
 /// The probe's shutdown and input failures are the spec's keys (decision
@@ -331,7 +316,7 @@ fn the_probes_failures_are_spec_keys() {
     };
     assert_eq!(
         exit_status.to_string(),
-        "HOST_REASON_CHILD_EXIT_STATUS component=player exit_code=3"
+        "EMBEDDED_REASON_CHILD_EXIT_STATUS component=player exit_code=3"
     );
     let probe_input = HostError::ProbeInput {
         component: "player".to_string(),
@@ -339,7 +324,7 @@ fn the_probes_failures_are_spec_keys() {
     };
     assert_eq!(
         probe_input.to_string(),
-        "HOST_REASON_PROBE_INPUT component=player kind=policy"
+        "EMBEDDED_REASON_PROBE_INPUT component=player kind=policy"
     );
 }
 
@@ -351,7 +336,7 @@ fn a_probes_input_is_on_its_root_of_the_type_given() {
     let Input::Command(command) = Input::command("player", "/x.SitDown", vec![8, 1]) else {
         panic!("a command");
     };
-    let book = command.command.unwrap();
+    let book = command.input.unwrap();
     let cover = book.cover.unwrap();
     assert_eq!(
         (cover.domain.as_str(), cover.root),
@@ -359,6 +344,7 @@ fn a_probes_input_is_on_its_root_of_the_type_given() {
     );
     let Some(pb::command_page::Body::Command(pb::Command {
         payload: Some(payload),
+        handling: None,
     })) = book.page.unwrap().body
     else {
         panic!("a command page");
@@ -375,7 +361,7 @@ fn a_probes_input_is_on_its_root_of_the_type_given() {
     assert_eq!(book.next_sequence, 1);
     let page = &book.pages[0];
     assert_eq!(page.sequence, 0);
-    let payload = page.payload.as_ref().unwrap();
+    let payload = angzarr_router::page_event(page).unwrap();
     assert_eq!(
         (payload.type_url.as_str(), payload.value.as_slice()),
         ("/x.Seated", &[2u8][..])

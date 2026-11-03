@@ -12,16 +12,16 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use angzarr_embedded::testing::{MemoryStore, Ready as _, Samples};
-use angzarr_embedded::v1::meta::EditionCreated;
 use angzarr_embedded::v1::{
-    command_page, Command, CommandBook, CommandPage, ComponentDescriptor, ComponentKind,
-    ConflictResolution, Cover, EventPage, Fact, FactOrigin, Handling, Snapshot, StateDescriptor,
-    StateOptions, Uuid,
+    command_page, component_descriptor, event_page, meta_event, AggregateDescriptor, Command,
+    CommandBook, CommandPage, ComponentDescriptor, ComponentKind, Cover, EditionCreated, EventMeta,
+    EventPage, Fact, FactOrigin, Handling, MetaEvent, ProcessManagerDescriptor, ReactionDelivery,
+    Snapshot, StateDescriptor, Uuid,
 };
 use angzarr_embedded::{
-    pack, Any, EventStore, Failure, Handled, Kernel, MemoryDeadLetters, OnRetryable, PositionKey,
-    PositionStore, Recorded, Registry, Rejected, SnapshotStore, StreamRef, Timestamp, Wait, Write,
-    DEAD_LETTER_PREFIX,
+    Answered as PortAnswer, Any, Coordinated, CoordinatorPort, EventStore, Failure, Handled,
+    Kernel, MemoryDeadLetters, OnRetryable, PositionKey, PositionStore, Recorded, Registry,
+    Rejected, SnapshotStore, StreamRef, Timestamp, Wait, Write, DEAD_LETTER_PREFIX,
 };
 
 use crate::tests::answer::Answered;
@@ -34,8 +34,8 @@ use crate::tests::upcasting::{Port, Sidecar};
 pub(crate) struct Domain {
     pub(crate) kind: ComponentKind,
     pub(crate) rules_version: String,
+    /// The state message's full name, no type URL prefix (decision 14.101).
     pub(crate) state_type: String,
-    pub(crate) resolutions: Vec<ConflictResolution>,
     /// A process manager's starting input types, by bare name.
     pub(crate) starting: Vec<String>,
     pub(crate) business: Arc<Business>,
@@ -116,6 +116,47 @@ pub(crate) struct Coordinator {
     /// Each catch-up projector a scenario declares, by name: its source
     /// domain and every book it was handed (processed_state.feature).
     pub(crate) projectors: BTreeMap<String, crate::tests::processed::Projected>,
+    /// Domains another coordinator owns, by name: each the deliveries its
+    /// port was handed, as the policy's coordinator stamped them.
+    pub(crate) remotes: BTreeMap<String, Remote>,
+}
+
+/// A coordinator elsewhere owning a domain: it keeps every
+/// `ReactionDelivery` handed to it and applies each, persisting nothing
+/// the scenario reads.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Remote(Arc<Mutex<Vec<ReactionDelivery>>>);
+
+impl Remote {
+    /// Every delivery handed to it, in order.
+    pub(crate) fn delivered(&self) -> Vec<ReactionDelivery> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
+
+/// A remote coordinator's answer: applied, its events not the scenario's.
+fn applied() -> PortAnswer {
+    PortAnswer {
+        events: None,
+        delivery: angzarr_embedded::v1::DeliveryOutcome::Applied,
+    }
+}
+
+impl CoordinatorPort for Remote {
+    fn handle(&self, _book: CommandBook) -> Coordinated<'_> {
+        Box::pin(async { Ok(applied()) })
+    }
+
+    fn deliver(&self, delivery: ReactionDelivery) -> Coordinated<'_> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(delivery);
+        Box::pin(async { Ok(applied()) })
+    }
 }
 
 /// A policy as registered: its name, source and destination, and its
@@ -182,13 +223,6 @@ pub(crate) fn root(name: &str) -> Uuid {
     Uuid::from_bytes(bytes)
 }
 
-/// The resolution by its spec name.
-pub(crate) fn resolution(name: &str) -> ConflictResolution {
-    ConflictResolution::from_str_name(&format!("CONFLICT_RESOLUTION_{name}"))
-        .or_else(|| ConflictResolution::from_str_name(name))
-        .unwrap_or_else(|| panic!("no conflict resolution {name}"))
-}
-
 impl Coordinator {
     fn new() -> Coordinator {
         let mut world = Coordinator::empty();
@@ -220,6 +254,7 @@ impl Coordinator {
             edition: None,
             sidecars: BTreeMap::new(),
             clock: None,
+            remotes: BTreeMap::new(),
         }
     }
 
@@ -257,24 +292,24 @@ impl Coordinator {
     }
 
     /// `name`'s aggregate, registered at rules version `1.4.2+build.7`
-    /// with state `/<package><Name>State` (`/orders.v1.OrderState`),
-    /// supporting every resolution, unless a given has said otherwise.
+    /// with state `<package><Name>State` (`orders.v1.OrderState`), unless a
+    /// given has said otherwise.
     pub(crate) fn domain(&mut self, name: &str) -> &mut Domain {
         let store = self.store.clone();
         self.domains.entry(name.to_string()).or_insert_with(|| {
             let package = package(name);
-            let state_type = format!("/{package}{}State", camel(name));
+            let state_type = format!("{package}{}State", camel(name));
             let rules_version = "1.4.2+build.7";
             Domain {
                 kind: ComponentKind::Aggregate,
                 rules_version: rules_version.to_string(),
-                business: Arc::new(Business::new(&package, rules_version, &state_type, &store)),
+                business: Arc::new(Business::new(
+                    &package,
+                    rules_version,
+                    &format!("/{state_type}"),
+                    &store,
+                )),
                 state_type,
-                resolutions: vec![
-                    ConflictResolution::Strict,
-                    ConflictResolution::AggregateHandles,
-                    ConflictResolution::Commutative,
-                ],
                 starting: Vec::new(),
             }
         })
@@ -285,7 +320,7 @@ impl Coordinator {
     /// `RemoveEverything`, the one C-0540 sends to no handler.
     fn order_domain(&mut self) {
         let business = self.business("order");
-        let mut error = crate::tests::policy::internal("ROUTER_REASON_UNKNOWN_COMMAND_TYPE");
+        let mut error = crate::tests::policy::internal("ANGZARR_REASON_UNKNOWN_COMMAND_TYPE");
         error.grpc = angzarr_embedded::angzarr_router::error::GrpcCode::Internal;
         business.rule(crate::tests::business::Rule {
             input: "RemoveEverything".to_string(),
@@ -340,6 +375,11 @@ impl Coordinator {
         self.current = Some(self.cover("order", name));
     }
 
+    /// From here on the scenario speaks of the stream `cover`.
+    pub(crate) fn speak_of_stream(&mut self, cover: Cover) {
+        self.current = Some(cover);
+    }
+
     /// The type URL of `name` in `domain`'s package.
     pub(crate) fn type_url(&mut self, domain: &str, name: &str) -> String {
         self.business(domain).type_url(name)
@@ -353,11 +393,16 @@ impl Coordinator {
             .zip(names)
             .map(|(sequence, name)| EventPage {
                 sequence,
-                payload: Some(Any {
+                body: Some(event_page::Body::Event(Any {
                     type_url: self.type_url(&cover.domain, name),
                     value: Vec::new(),
+                })),
+                // Recorded in the stream's root's correlation, as every
+                // stored event is recorded in one.
+                meta: Some(EventMeta {
+                    correlation_id: cover.root.clone(),
+                    ..EventMeta::default()
                 }),
-                ..EventPage::default()
             })
             .collect();
         self.store
@@ -366,7 +411,7 @@ impl Coordinator {
             .expect("the given events are written");
     }
 
-    /// A snapshot of `cover` at `sequence`, of the state type
+    /// A snapshot of `cover` at `sequence`, its state's type URL
     /// `state_type`, recorded under `rules_version`.
     pub(crate) fn snapshot(
         &mut self,
@@ -457,16 +502,14 @@ impl Coordinator {
             .into_iter()
             .filter(|page| page.sequence >= from)
             .filter(|page| {
-                !page
-                    .payload
-                    .as_ref()
+                !angzarr_embedded::angzarr_router::page_event(page)
                     .is_some_and(|p| p.type_url.ends_with(".OrderNoteAdded"))
             })
             .collect()
     }
 
     /// A client's command of the type `name` to `cover`, with a command id
-    /// of its own and no handling.
+    /// of its own and no expected sequence.
     pub(crate) fn command(&mut self, cover: &Cover, name: &str) -> CommandBook {
         let payload = Any {
             type_url: self.type_url(&cover.domain, name),
@@ -476,8 +519,8 @@ impl Coordinator {
             cover,
             command_page::Body::Command(Command {
                 payload: Some(payload),
+                handling: None,
             }),
-            None,
         )
     }
 
@@ -495,21 +538,16 @@ impl Coordinator {
             cover,
             command_page::Body::Fact(Fact {
                 payload: Some(payload),
+                origin: Some(origin),
             }),
-            Some(origin),
         )
     }
 
-    fn book(
-        &mut self,
-        cover: &Cover,
-        body: command_page::Body,
-        fact_origin: Option<FactOrigin>,
-    ) -> CommandBook {
+    fn book(&mut self, cover: &Cover, body: command_page::Body) -> CommandBook {
         self.inputs += 1;
-        let command_id = match fact_origin {
-            Some(_) => None,
-            None => {
+        let command_id = match &body {
+            command_page::Body::Fact(_) => None,
+            command_page::Body::Command(_) => {
                 let mut bytes = [0x0c; 16];
                 bytes[12..].copy_from_slice(&self.inputs.to_be_bytes());
                 Some(Uuid::from_bytes(bytes))
@@ -520,24 +558,21 @@ impl Coordinator {
             page: Some(CommandPage {
                 body: Some(body),
                 command_id,
-                fact_origin,
                 ..CommandPage::default()
             }),
-            handling: None,
         }
     }
 
-    /// `book` expecting `expected` (`None`: unset), resolved by
-    /// `resolution` (`None`: by configuration).
-    pub(crate) fn handled_as(
-        mut book: CommandBook,
-        expected: Option<u64>,
-        resolution: Option<ConflictResolution>,
-    ) -> CommandBook {
-        book.handling = Some(Handling {
-            expected_sequence: expected,
-            conflict_resolution: resolution.unwrap_or(ConflictResolution::Unspecified) as i32,
-        });
+    /// `book`, a command, expecting `expected` (`None`: unset; its
+    /// `Command.handling`, decision 14.79).
+    pub(crate) fn handled_as(mut book: CommandBook, expected: Option<u64>) -> CommandBook {
+        if let Some(command_page::Body::Command(command)) =
+            book.page.as_mut().and_then(|page| page.body.as_mut())
+        {
+            command.handling = expected.map(|expected| Handling {
+                expected_sequence: Some(expected),
+            });
+        }
         book
     }
 
@@ -547,27 +582,32 @@ impl Coordinator {
         let present = self
             .domains
             .iter()
-            .filter(|(name, _)| !self.absent.contains(*name));
+            .filter(|(name, _)| !self.absent.contains(*name))
+            .filter(|(name, _)| !self.remotes.contains_key(*name));
         for (name, domain) in present {
             let package = package(name);
+            let state = Some(StateDescriptor {
+                type_name: domain.state_type.clone(),
+            });
+            let kind = match domain.kind {
+                ComponentKind::ProcessManager => {
+                    component_descriptor::Kind::ProcessManager(ProcessManagerDescriptor {
+                        domain: name.clone(),
+                        state,
+                        starting_types: (domain.starting.iter())
+                            .map(|s| format!("{package}{s}"))
+                            .collect(),
+                    })
+                }
+                _ => component_descriptor::Kind::Aggregate(AggregateDescriptor {
+                    domain: name.clone(),
+                    state,
+                }),
+            };
             let descriptor = ComponentDescriptor {
                 name: name.clone(),
-                kind: domain.kind as i32,
                 rules_version: domain.rules_version.clone(),
-                starting_types: (domain.starting.iter())
-                    .map(|s| format!("{package}{s}"))
-                    .collect(),
-                state: Some(StateDescriptor {
-                    type_url: domain.state_type.clone(),
-                    options: Some(StateOptions {
-                        conflict_resolutions: domain
-                            .resolutions
-                            .iter()
-                            .map(|r| *r as i32)
-                            .collect(),
-                    }),
-                }),
-                ..ComponentDescriptor::default()
+                kind: Some(kind),
             };
             let process = Process {
                 business: Arc::clone(&domain.business),
@@ -576,6 +616,11 @@ impl Coordinator {
             registry
                 .command_handler(name, process, descriptor)
                 .unwrap_or_else(|e| panic!("{name} registers: {e}"));
+        }
+        for (domain, remote) in &self.remotes {
+            registry
+                .remote(domain, remote.clone())
+                .unwrap_or_else(|e| panic!("{domain} registers remote: {e}"));
         }
         for (domain, sidecar) in &self.sidecars {
             registry
@@ -676,24 +721,22 @@ impl Coordinator {
         self.handle(book).await;
     }
 
-    /// `cover` forked into its edition at main's head, as angzarr's system
-    /// layer forks a stream: its creation event written there.
+    /// `cover` forked into its edition at main's head, as angzarr's
+    /// ForkStream forks a stream (decision 14.107): its fork, an empty
+    /// `EditionCreated` in its page's meta-event arm, written there at its
+    /// own sequence.
     pub(crate) fn fork(&mut self, cover: &Cover) {
-        let edition = cover.edition.clone().expect("an edition stream");
         let main = Cover {
             edition: None,
             ..cover.clone()
         };
         let head = self.pages(&main).len() as u64;
-        let created = EditionCreated {
-            edition,
-            parent_sequence: head,
-            ..EditionCreated::default()
-        };
         let page = EventPage {
             sequence: head,
-            payload: Some(pack(&created)),
-            ..EventPage::default()
+            body: Some(event_page::Body::MetaEvent(MetaEvent {
+                kind: Some(meta_event::Kind::Created(EditionCreated {})),
+            })),
+            meta: None,
         };
         self.store
             .write(Write::append(sref(cover), head, &[page]))
@@ -735,5 +778,26 @@ impl Coordinator {
             assert!(line.starts_with(DEAD_LETTER_PREFIX), "{line}");
         }
         lines
+    }
+}
+
+/// An event's cause as its meta names it (decision 14.102): its command
+/// id, either arm, and, for a fact's, its origin.
+pub(crate) fn cause_of(
+    meta: &angzarr_embedded::v1::EventMeta,
+) -> (Option<Uuid>, Option<FactOrigin>) {
+    use angzarr_embedded::v1::event_meta::Causation;
+    match &meta.causation {
+        Some(Causation::Command(cause)) => (cause.command_id.clone(), None),
+        Some(Causation::Fact(cause)) => (cause.command_id.clone(), cause.origin.clone()),
+        None => (None, None),
+    }
+}
+
+/// An input page's fact origin, for a fact.
+pub(crate) fn origin_of(page: &CommandPage) -> Option<FactOrigin> {
+    match &page.body {
+        Some(command_page::Body::Fact(fact)) => fact.origin.clone(),
+        _ => None,
     }
 }

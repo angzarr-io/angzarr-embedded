@@ -7,7 +7,7 @@ Feature: Temporal queries - state as of a sequence or a time
 
   Background:
     Given an "order" aggregate with events at sequences 0 through 9
-    And each event sequence N was created N minutes after "2026-01-01T10:00:00Z"
+    And each event at sequence N was recorded (EventMeta.recorded_at) N minutes after "2026-01-01T10:00:00Z"
 
   # ---------------------------------------------------------------------------
   # as_of_sequence
@@ -38,30 +38,31 @@ Feature: Temporal queries - state as of a sequence or a time
   # as_of_time
   # ---------------------------------------------------------------------------
 
+  # A snapshot carries no time of its own: as_of_time T may start from a
+  # snapshot iff the event at its sequence (the last event folded into its
+  # state) was recorded at or before T (docs/design/snapshots.md §5).
+
   @C-0405
-  Scenario: as_of_time starts from a snapshot persisted at or before the time
-    Given the aggregate has a snapshot at sequence 4 created at "2026-01-01T10:04:30Z"
+  Scenario: as_of_time starts from a snapshot whose last folded event was recorded by the time
+    Given the aggregate has a snapshot at sequence 4
     When I query the aggregate as of time "2026-01-01T10:05:30Z"
     Then the result carries the snapshot at sequence 4
     And the result contains the page at sequence 5 only
 
   @C-0406
-  Scenario: as_of_time ignores a snapshot persisted after the time
-    Given the aggregate has a snapshot at sequence 4 created at "2026-01-01T10:07:00Z"
+  Scenario: as_of_time ignores a snapshot whose last folded event was recorded after the time
+    Given the aggregate has a snapshot at sequence 7
     When I query the aggregate as of time "2026-01-01T10:05:30Z"
     Then the result carries no snapshot
     And the result contains pages at sequences 0 through 5
 
-  @C-0407
-  Scenario: as_of_time ignores a snapshot without created_at
-    Given the aggregate has a snapshot at sequence 4 with no created_at
-    When I query the aggregate as of time "2026-01-01T10:05:30Z"
-    Then the result carries no snapshot
-    And the result contains pages at sequences 0 through 5
+  # C-0407 (a snapshot without created_at ignored) is retired: a Snapshot
+  # has no time field; whether it lies in the prefix is read from the
+  # recorded_at of the event at its sequence (docs/design/snapshots.md §5).
 
   @C-0408
   Scenario Outline: Snapshot and full replay fold to the same state
-    Given the aggregate has a snapshot at sequence 4 created at "2026-01-01T10:04:30Z"
+    Given the aggregate has a snapshot at sequence 4
     When I query the aggregate as of <point>
     Then folding the result yields the same state as replaying sequences 0 through <last> without a snapshot
 

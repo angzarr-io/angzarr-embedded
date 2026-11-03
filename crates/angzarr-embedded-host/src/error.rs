@@ -10,61 +10,22 @@
 use std::fmt;
 
 use angzarr_diagnostic::{code, Arg, Diagnostic, Report};
-// A child's failures are the local-process transport's keys; a projector
-// with no input domain is core's (decision 14.64).
-use angzarr_proto::v1::HostReason as CoreHostReason;
-use angzarr_proto_transport_embedded::v1::{reason_args, HostReason};
+// A child's failures are the local-process transport's keys (decision
+// 14.64).
+use angzarr_proto_transport_embedded::v1::{reason_args, EmbeddedReason};
 
-/// What was wrong with a child's handshake: the one stdout line,
-/// `angzarr-handshake v1 unix:<absolute-socket-path>`, it prints once it is
-/// serving.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum HandshakeError {
-    /// A line that announces itself as a handshake (it starts
-    /// `angzarr-handshake`) but is not a v1 one naming an absolute UTF-8
-    /// Unix socket path: the spec's `HOST_REASON_HANDSHAKE_MALFORMED`.
-    /// `line` is the line as read, its line ending removed; one that is
-    /// not UTF-8 has each byte outside printable ASCII, and each
-    /// backslash, written `\xhh` (`\xe9`), so nothing is decoded lossily.
-    Malformed { line: String },
-    /// No handshake within the configured time: the spec's
-    /// `HOST_REASON_HANDSHAKE_TIMEOUT`.
-    Timeout { timeout_ms: u64 },
-    /// The child's stdout ended (it exited, or closed it) before a
-    /// handshake: the spec's `HOST_REASON_HANDSHAKE_CLOSED`.
-    Closed,
-    /// Reading the child's stdout failed. `kind` is the I/O error's
-    /// `std::io::ErrorKind`, by name.
-    Unreadable { kind: String },
-}
+/// A key of the local-process transport (`EMBEDDED_REASON_*`), as the
+/// kernel's `SpecKey` answers it: its full name, and how its
+/// `(io.angzarr.v1.reason)` option says it surfaces.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Embedded(pub EmbeddedReason);
 
-impl fmt::Display for HandshakeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        angzarr_diagnostic::display(self, f)
+impl angzarr_embedded::SpecKey for Embedded {
+    fn key(self) -> &'static str {
+        self.0.as_str_name()
     }
-}
-
-impl Diagnostic for HandshakeError {
-    fn code(&self) -> &str {
-        match self {
-            HandshakeError::Malformed { .. } => HostReason::HandshakeMalformed.as_str_name(),
-            HandshakeError::Timeout { .. } => HostReason::HandshakeTimeout.as_str_name(),
-            HandshakeError::Closed => HostReason::HandshakeClosed.as_str_name(),
-            HandshakeError::Unreadable { .. } => code!("handshake-unreadable"),
-        }
-    }
-
-    fn args(&self) -> Vec<(&str, Arg)> {
-        match self {
-            HandshakeError::Malformed { line } => {
-                vec![(reason_args::LINE, line.as_str().into())]
-            }
-            HandshakeError::Timeout { timeout_ms } => {
-                vec![(reason_args::TIMEOUT_MS, (*timeout_ms).into())]
-            }
-            HandshakeError::Closed => vec![],
-            HandshakeError::Unreadable { kind } => vec![("kind", kind.as_str().into())],
-        }
+    fn surface(self) -> Option<angzarr_proto::ReasonSurface> {
+        self.0.surface()
     }
 }
 
@@ -96,26 +57,20 @@ pub enum HostError {
         program: String,
         kind: String,
     },
-    /// The child started but its handshake failed.
-    Handshake {
-        domain: String,
-        cause: HandshakeError,
-    },
-    /// No gRPC connection to the socket the handshake named.
-    Connect { domain: String, socket: String },
     /// `ComponentService.Describe` failed; `grpc_code` is the status's wire
     /// code.
     Describe { domain: String, grpc_code: i32 },
-    /// A child's `grpc.health.v1.Health.Watch` failed (the child protocol:
-    /// every child serves gRPC health); `grpc_code` is the status's wire
-    /// code.
-    Health { domain: String, grpc_code: i32 },
-    /// A child that is described reported its server (service `""`) other
-    /// than SERVING once it had handshaken, when the child protocol says
-    /// it handshakes only once SERVING: the spec's
-    /// `HOST_REASON_CHILD_NOT_SERVING`. `status` is the health status, by
-    /// its name (`NOT_SERVING`).
-    NotServing { component: String, status: String },
+    /// A child that did not report its server's health (service `""`)
+    /// SERVING on the socket path the host chose within the start limit
+    /// (`timeout_ms`), or exited first (docs/design/child-protocol.md §2;
+    /// decision 14.80): the spec's `EMBEDDED_REASON_CHILD_NOT_SERVING`.
+    /// `status` is the last health status it answered, by its name
+    /// (`NOT_SERVING`), or `none` for a child that answered none.
+    NotServing {
+        component: String,
+        status: String,
+        timeout_ms: u64,
+    },
     /// The child described itself as another kind than its `kind` says:
     /// `described` is its descriptor's `ComponentKind`, by name.
     KindMismatch {
@@ -123,13 +78,6 @@ pub enum HostError {
         configured: String,
         described: String,
     },
-    /// A policy whose descriptor names no input domain: it has no source.
-    NoInput { domain: String },
-    /// A projector whose descriptor names no input domain: there is no
-    /// wildcard domain, so it would fold nothing. The spec's
-    /// `HOST_REASON_PROJECTOR_NO_INPUT_DOMAIN` (decision 14.55), its
-    /// `component` the component entry's name.
-    ProjectorNoInputDomain { component: String },
     /// A `kind = "upcaster"` component that names no domain to upcast
     /// (`upcasts`).
     UpcasterNoDomain { domain: String },
@@ -149,16 +97,16 @@ pub enum HostError {
     /// takes such a change only when it starts.
     DescriptorChanged { domain: String },
     /// A probed child exited on its stdin's end with a status other than
-    /// 0 ([`crate::probe`]): the spec's `HOST_REASON_CHILD_EXIT_STATUS`.
+    /// 0 ([`crate::probe`]): the spec's `EMBEDDED_REASON_CHILD_EXIT_STATUS`.
     ExitStatus { component: String, exit_code: i32 },
     /// A probed child did not exit by itself on its stdin's end within the
     /// shutdown grace ([`crate::probe`]): the spec's
-    /// `HOST_REASON_CHILD_NOT_EXITED`. `ended` is how it ended
+    /// `EMBEDDED_REASON_CHILD_NOT_EXITED`. `ended` is how it ended
     /// ([`ChildExit::ended`](crate::ChildExit::ended)).
     NotExited { component: String, ended: String },
     /// The probe was given an input a child of `kind` does not handle (a
     /// command for a policy, a book of events for a domain): the spec's
-    /// `HOST_REASON_PROBE_INPUT`.
+    /// `EMBEDDED_REASON_PROBE_INPUT`.
     ProbeInput { component: String, kind: String },
     /// The configured `socket_dir` is too long for a Unix socket path to
     /// hold the host's socket names in it: at most `max_bytes` bytes.
@@ -205,23 +153,16 @@ impl Diagnostic for HostError {
             HostError::EmptyLaunch { .. } => code!("empty-launch"),
             HostError::UnknownLanguage { .. } => code!("unknown-language"),
             HostError::Spawn { .. } => code!("spawn"),
-            HostError::Handshake { .. } => code!("handshake"),
-            HostError::Connect { .. } => code!("connect"),
             HostError::Describe { .. } => code!("describe"),
-            HostError::Health { .. } => code!("health"),
-            HostError::NotServing { .. } => HostReason::ChildNotServing.as_str_name(),
+            HostError::NotServing { .. } => EmbeddedReason::ChildNotServing.as_str_name(),
             HostError::KindMismatch { .. } => code!("kind-mismatch"),
-            HostError::NoInput { .. } => code!("no-input"),
-            HostError::ProjectorNoInputDomain { .. } => {
-                CoreHostReason::ProjectorNoInputDomain.as_str_name()
-            }
             HostError::Descriptor { .. } => code!("descriptor"),
             HostError::DescriptorChanged { .. } => code!("descriptor-changed"),
             HostError::UpcasterNoDomain { .. } => code!("upcaster-no-domain"),
             HostError::NotExposable { .. } => code!("not-exposable"),
-            HostError::ExitStatus { .. } => HostReason::ChildExitStatus.as_str_name(),
-            HostError::NotExited { .. } => HostReason::ChildNotExited.as_str_name(),
-            HostError::ProbeInput { .. } => HostReason::ProbeInput.as_str_name(),
+            HostError::ExitStatus { .. } => EmbeddedReason::ChildExitStatus.as_str_name(),
+            HostError::NotExited { .. } => EmbeddedReason::ChildNotExited.as_str_name(),
+            HostError::ProbeInput { .. } => EmbeddedReason::ProbeInput.as_str_name(),
             HostError::SocketDirTooLong { .. } => code!("socket-dir-too-long"),
             HostError::ConfigUnreadable { .. } => code!("config-unreadable"),
             HostError::ConfigInvalid { .. } => code!("config-invalid"),
@@ -239,12 +180,10 @@ impl Diagnostic for HostError {
         match self {
             HostError::DuplicateDomain { domain: d }
             | HostError::EmptyLaunch { domain: d }
-            | HostError::NoInput { domain: d }
             | HostError::DescriptorChanged { domain: d }
             | HostError::UpcasterNoDomain { domain: d } => {
                 vec![domain(d)]
             }
-            HostError::ProjectorNoInputDomain { component: c } => vec![component(c)],
             HostError::NoLaunch {
                 domain: d,
                 language,
@@ -258,9 +197,6 @@ impl Diagnostic for HostError {
                 ("program", program.as_str().into()),
                 ("kind", kind.as_str().into()),
             ],
-            HostError::Handshake { domain: d, cause } => {
-                vec![domain(d), ("cause", Arg::nested(cause))]
-            }
             HostError::ExitStatus {
                 component: c,
                 exit_code,
@@ -279,20 +215,16 @@ impl Diagnostic for HostError {
             | HostError::NotListed { domain: d, kind } => {
                 vec![domain(d), ("kind", kind.as_str().into())]
             }
-            HostError::Connect { domain: d, socket } => {
-                vec![domain(d), ("socket", socket.as_str().into())]
-            }
             HostError::NotServing {
                 component: c,
                 status,
-            } => {
-                vec![component(c), (reason_args::STATUS, status.as_str().into())]
-            }
+                timeout_ms,
+            } => vec![
+                component(c),
+                (reason_args::STATUS, status.as_str().into()),
+                (reason_args::TIMEOUT_MS, (*timeout_ms).into()),
+            ],
             HostError::Describe {
-                domain: d,
-                grpc_code,
-            }
-            | HostError::Health {
                 domain: d,
                 grpc_code,
             } => vec![domain(d), ("grpc_code", (*grpc_code).into())],
@@ -337,30 +269,12 @@ impl Diagnostic for HostError {
     }
 }
 
-impl std::error::Error for HandshakeError {}
 impl std::error::Error for HostError {}
 
 /// One value of every error this module defines, each variant once.
 pub(crate) fn diagnostic_samples() -> Vec<Box<dyn Diagnostic>> {
-    let handshake = handshake_samples()
-        .into_iter()
-        .map(|e| Box::new(e) as Box<dyn Diagnostic>);
     let host = component_samples().into_iter().chain(host_samples());
-    handshake.chain(host.map(|e| Box::new(e) as _)).collect()
-}
-
-/// Each [`HandshakeError`] variant.
-fn handshake_samples() -> Vec<HandshakeError> {
-    vec![
-        HandshakeError::Malformed {
-            line: "angzarr-handshake v2".to_string(),
-        },
-        HandshakeError::Timeout { timeout_ms: 30_000 },
-        HandshakeError::Closed,
-        HandshakeError::Unreadable {
-            kind: "BrokenPipe".to_string(),
-        },
-    ]
+    host.map(|e| Box::new(e) as _).collect()
 }
 
 /// Each [`HostError`] variant about one component, which it names.
@@ -383,33 +297,20 @@ fn component_samples() -> Vec<HostError> {
             program: "uv".to_string(),
             kind: "NotFound".to_string(),
         },
-        HostError::Handshake {
-            domain: d(),
-            cause: HandshakeError::Closed,
-        },
-        HostError::Connect {
-            domain: d(),
-            socket: "/run/angzarr/player.sock".to_string(),
-        },
         HostError::Describe {
             domain: d(),
             grpc_code: 14,
         },
-        HostError::Health {
-            domain: d(),
-            grpc_code: 12,
-        },
         HostError::NotServing {
             component: d(),
             status: "NOT_SERVING".to_string(),
+            timeout_ms: 5000,
         },
         HostError::KindMismatch {
             domain: d(),
             configured: "policy".to_string(),
             described: "AGGREGATE".to_string(),
         },
-        HostError::NoInput { domain: d() },
-        HostError::ProjectorNoInputDomain { component: d() },
         HostError::UpcasterNoDomain { domain: d() },
         HostError::NotExposable {
             domain: d(),

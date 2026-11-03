@@ -17,18 +17,17 @@ use std::time::Duration;
 
 use angzarr_diagnostic::Diagnostic;
 use angzarr_embedded::angzarr_router::error::{CodedError, GrpcCode};
+use angzarr_embedded::angzarr_router::hpb;
 use angzarr_embedded::angzarr_router::router::{CommandHandler, PolicyComponent, ProjectorHandler};
 use angzarr_embedded::v1::{
-    command_page, Command, CommandBook, CommandPage, ComponentDescriptor, ComponentKind,
-    ConflictResolution, ContextualCommand, Cover, EventBook, EventPage, Fact, FactOrigin,
-    StateDescriptor, StateOptions, Uuid,
+    command_page, component_descriptor, AggregateDescriptor, Command, CommandBook, CommandPage,
+    ComponentDescriptor, Cover, Fact, FactOrigin, StateDescriptor, Uuid,
 };
 use angzarr_embedded::{
-    Any, EventStore, Failure, Handled, Kernel, MemoryDeadLetters, OnRetryable, Registry, Sampled,
-    StreamRef, Timestamp,
+    Any, EventStore, Failure, Kernel, MemoryDeadLetters, OnRetryable, Registry, Sampled, StreamRef,
+    Timestamp,
 };
 use angzarr_ports::memory::MemoryStore;
-use angzarr_proto::v1::CommandHandlerResponse;
 
 use super::{Hooks, Host};
 use crate::config::{ComponentConfig, ComponentKindConfig};
@@ -39,10 +38,8 @@ use crate::fake_child::{
 };
 use angzarr_test_dir::TestFile;
 
-/// The kernel's key for angzarr's `COORDINATOR_REASON_PM_NO_INSTANCE` (a router code reaches
-/// the caller under the kernel's own key, `angzarr-embedded-` and the
-/// code in kebab case).
-const PM_NO_INSTANCE: &str = "COORDINATOR_REASON_PM_NO_INSTANCE";
+/// The kernel's key for a process manager with no instance for an input.
+const PM_NO_INSTANCE: &str = "ANGZARR_REASON_PM_NO_INSTANCE";
 
 fn root() -> Uuid {
     Uuid::from_bytes([0x0b; 16])
@@ -70,11 +67,11 @@ fn send(domain: &str, n: u8, payload: Any) -> CommandBook {
         page: Some(CommandPage {
             body: Some(command_page::Body::Command(Command {
                 payload: Some(payload),
+                handling: None,
             })),
             command_id: Some(Uuid::from_bytes([n; 16])),
             ..CommandPage::default()
         }),
-        handling: None,
     }
 }
 
@@ -85,14 +82,13 @@ fn tell(domain: &str, n: u8, payload: Any) -> CommandBook {
         page: Some(CommandPage {
             body: Some(command_page::Body::Fact(Fact {
                 payload: Some(payload),
+                origin: Some(FactOrigin {
+                    external_id: format!("outside-{n}"),
+                    description: "a test's fact".to_string(),
+                }),
             })),
-            fact_origin: Some(FactOrigin {
-                external_id: format!("outside-{n}"),
-                description: "a test's fact".to_string(),
-            }),
             ..CommandPage::default()
         }),
-        handling: None,
     }
 }
 
@@ -111,8 +107,8 @@ fn payloads(store: &MemoryStore, stream: &Cover) -> Vec<Option<Any>> {
     block_on(store.read(stream, 0, None))
         .unwrap()
         .pages
-        .into_iter()
-        .map(|p| p.payload)
+        .iter()
+        .map(|p| angzarr_embedded::angzarr_router::page_event(p).cloned())
         .collect()
 }
 
@@ -124,31 +120,24 @@ fn block_on<F: std::future::Future>(future: F) -> F::Output {
         .block_on(future)
 }
 
-fn state(type_url: &str) -> Option<StateDescriptor> {
-    Some(StateDescriptor {
-        type_url: type_url.to_string(),
-        options: Some(StateOptions {
-            conflict_resolutions: vec![
-                ConflictResolution::Strict as i32,
-                ConflictResolution::AggregateHandles as i32,
-            ],
-        }),
-    })
-}
-
+/// An aggregate's descriptor, `name` in the domain `name` lowercased, its
+/// state `state_type`.
 fn descriptor(name: &str, state_type: &str) -> ComponentDescriptor {
     ComponentDescriptor {
         name: name.to_string(),
-        kind: ComponentKind::Aggregate as i32,
         rules_version: format!("{name}-1"),
-        state: state(state_type),
-        ..Default::default()
+        kind: Some(component_descriptor::Kind::Aggregate(AggregateDescriptor {
+            domain: name.to_lowercase(),
+            state: Some(StateDescriptor {
+                type_name: state_type.to_string(),
+            }),
+        })),
     }
 }
 
 /// The payload of a command or a fact.
-fn input(req: &ContextualCommand) -> Any {
-    let page = req.command.as_ref().and_then(|c| c.page.as_ref());
+fn input(req: &hpb::HandleRequest) -> Any {
+    let page = req.input.as_ref().and_then(|c| c.page.as_ref());
     match page.and_then(|p| p.body.as_ref()) {
         Some(command_page::Body::Command(c)) => c.payload.clone().unwrap_or_default(),
         Some(command_page::Body::Fact(f)) => f.payload.clone().unwrap_or_default(),
@@ -156,17 +145,11 @@ fn input(req: &ContextualCommand) -> Any {
     }
 }
 
-fn one_event(payload: Any, rules_version: &str) -> CommandHandlerResponse {
-    CommandHandlerResponse {
-        events: Some(EventBook {
-            pages: vec![EventPage {
-                payload: Some(payload),
-                ..Default::default()
-            }],
-            ..Default::default()
-        }),
+fn one_event(payload: Any, rules_version: &str) -> hpb::HandleResponse {
+    hpb::HandleResponse {
+        events: vec![payload],
+        state: None,
         rules_version: rules_version.to_string(),
-        conflict: None,
     }
 }
 
@@ -183,13 +166,10 @@ impl CommandHandler for Table {
         vec!["test.table.v1.Seat".to_string()]
     }
 
-    async fn dispatch(
-        &self,
-        req: &ContextualCommand,
-    ) -> Result<CommandHandlerResponse, CodedError> {
+    async fn dispatch(&self, req: &hpb::HandleRequest) -> Result<hpb::HandleResponse, CodedError> {
         let sent = input(req);
         let is_fact = matches!(
-            req.command
+            req.input
                 .as_ref()
                 .and_then(|c| c.page.as_ref())
                 .and_then(|p| p.body.as_ref()),
@@ -220,10 +200,7 @@ impl CommandHandler for Wallet {
         vec![HOLD[1..].to_string(), HOLD_TOO_MUCH[1..].to_string()]
     }
 
-    async fn dispatch(
-        &self,
-        req: &ContextualCommand,
-    ) -> Result<CommandHandlerResponse, CodedError> {
+    async fn dispatch(&self, req: &hpb::HandleRequest) -> Result<hpb::HandleResponse, CodedError> {
         if input(req).type_url == HOLD_TOO_MUCH {
             return Err(CodedError {
                 code: "INSUFFICIENT_FUNDS".to_string(),
@@ -272,9 +249,9 @@ fn process_manager(starting: &str) -> Host {
 }
 
 /// A non-starting COMMAND for a root with no instance is refused before
-/// the child decides: FAILED_PRECONDITION, COORDINATOR_REASON_PM_NO_INSTANCE, a business
-/// rejection, nothing recorded (process_manager.proto, Starting an
-/// instance). The child would have answered `Noted`.
+/// the child decides: FAILED_PRECONDITION, ANGZARR_REASON_PM_NO_INSTANCE,
+/// the framework's refusal (never a typed one), nothing recorded (C-0595).
+/// The child would have answered `Noted`.
 #[test]
 fn a_remote_process_managers_non_starting_command_with_no_instance_is_refused() {
     let host = process_manager("test.pm.v1.Open");
@@ -295,20 +272,18 @@ fn a_remote_process_managers_non_starting_command_with_no_instance_is_refused() 
         written.is_empty(),
         "no instance is started by a non-starting command: {written:?}"
     );
-    let Err(Failure::Rejected(rejected)) = &refused else {
-        panic!(
-            "refused COORDINATOR_REASON_PM_NO_INSTANCE: {:?}",
-            refused.err()
-        );
+    let Err(Failure::Kernel(angzarr_embedded::KernelError::Router(rejected))) = &refused else {
+        panic!("refused ANGZARR_REASON_PM_NO_INSTANCE: {:?}", refused.err());
     };
-    assert_eq!(rejected.code(), PM_NO_INSTANCE);
+    assert_eq!(rejected.code, PM_NO_INSTANCE);
+    assert_eq!(rejected.grpc, GrpcCode::FailedPrecondition);
     assert!(log.lines().is_empty(), "{:?}", log.lines());
     host.shutdown();
 }
 
-/// A non-starting FACT for a root with no instance is dead-lettered
-/// (decision 14.69): never refused, so PARKED, no events, its letter
-/// keyed COORDINATOR_REASON_PM_NO_INSTANCE.
+/// A non-starting FACT for a root with no instance is dead-lettered, its
+/// letter keyed ANGZARR_REASON_PM_NO_INSTANCE, and its sender answered
+/// ANGZARR_REASON_FACT_DEAD_LETTERED, no events (C-0593).
 #[test]
 fn a_remote_process_managers_non_starting_fact_with_no_instance_is_dead_lettered() {
     let host = process_manager("test.pm.v1.Open");
@@ -318,24 +293,34 @@ fn a_remote_process_managers_non_starting_fact_with_no_instance_is_dead_lettered
     let log = MemoryDeadLetters::new();
     let kernel = Kernel::new(&registry).log_with(&log);
 
-    let handled = block_on(kernel.handle_any(
+    let answered = block_on(kernel.handle_any(
         &store,
         tell("audit", 1, any("/test.pm.v1.Closed")),
         &sampled(1),
-    ))
-    .map_err(|e| format!("{e:?}"))
-    .expect("a dead-lettered fact is parked");
+    ));
 
     let written = payloads(&store, &cover("audit"));
     assert!(
         written.is_empty(),
         "a non-starting fact starts no instance: {written:?}"
     );
-    assert!(matches!(handled, Handled::Parked(_)), "parked");
+    assert!(
+        matches!(
+            &answered,
+            Err(Failure::Kernel(
+                angzarr_embedded::KernelError::FactDeadLettered { .. }
+            ))
+        ),
+        "{:?}",
+        answered.err()
+    );
     let reasons: Vec<_> = log
         .letters()
         .into_iter()
-        .filter_map(|l| l.reason.map(|r| r.code))
+        .filter_map(|l| match l.why {
+            Some(angzarr_embedded::v1::angzarr_dead_letter::Why::Reason(r)) => Some(r.code),
+            _ => None,
+        })
         .collect();
     assert_eq!(reasons, [PM_NO_INSTANCE]);
     host.shutdown();
@@ -392,7 +377,7 @@ fn a_remote_process_managers_start_rule_matches_by_type_name_whatever_the_prefix
         &sampled(1),
     ));
     assert!(
-        matches!(&refused, Err(Failure::Rejected(r)) if r.code() == PM_NO_INSTANCE),
+        matches!(&refused, Err(Failure::Kernel(angzarr_embedded::KernelError::Router(r))) if r.code == PM_NO_INSTANCE),
         "an unlisted type does not start one: {:?}",
         refused.err()
     );
@@ -457,13 +442,13 @@ fn a_remote_policy_turns_its_sources_events_into_commands_through_the_kernel() {
     let host = Host::start(config(vec![policy_domain(&log_path)])).expect("the host starts");
     let mut registry = Registry::new();
     registry
-        .command_handler("table", Table, descriptor("Table", "/test.table.v1.State"))
+        .command_handler("table", Table, descriptor("Table", "test.table.v1.State"))
         .unwrap();
     registry
         .command_handler(
             "wallet",
             Wallet,
-            descriptor("Wallet", "/test.wallet.v1.State"),
+            descriptor("Wallet", "test.wallet.v1.State"),
         )
         .unwrap();
     host.register(&mut registry)
@@ -499,13 +484,13 @@ fn a_refusal_of_a_remote_policys_command_is_answered_by_its_on_refused() {
     let host = Host::start(config(vec![policy_domain(&log_path)])).expect("the host starts");
     let mut registry = Registry::new();
     registry
-        .command_handler("table", Table, descriptor("Table", "/test.table.v1.State"))
+        .command_handler("table", Table, descriptor("Table", "test.table.v1.State"))
         .unwrap();
     registry
         .command_handler(
             "wallet",
             Wallet,
-            descriptor("Wallet", "/test.wallet.v1.State"),
+            descriptor("Wallet", "test.wallet.v1.State"),
         )
         .unwrap();
     host.register(&mut registry)
@@ -566,7 +551,7 @@ fn projected(log_path: &Path) -> (Host, Registry) {
     let host = Host::start(config(vec![projector_domain(log_path)])).expect("the host starts");
     let mut registry = Registry::new();
     registry
-        .command_handler("table", Table, descriptor("Table", "/test.table.v1.State"))
+        .command_handler("table", Table, descriptor("Table", "test.table.v1.State"))
         .unwrap();
     host.register(&mut registry)
         .expect("a projector child registers as a projector");
@@ -671,7 +656,7 @@ fn a_remote_projectors_bug_is_fatal_not_retried_and_dead_lettered() {
     let lines = log.lines();
     assert_eq!(lines.len(), 1, "dead-lettered: {lines:?}");
     assert!(lines[0].contains("PROJECTOR_BROKE"), "{}", lines[0]);
-    processing_failed(&log, "PROJECTOR_BROKE", 0, false);
+    processing_failed(&log, "PROJECTOR_BROKE", 0);
     host.shutdown();
 }
 
@@ -708,7 +693,7 @@ fn a_remote_projectors_business_status_is_its_bug() {
     let lines = log.lines();
     assert_eq!(lines.len(), 1, "dead-lettered: {lines:?}");
     assert!(lines[0].contains("VIEW_REFUSED"), "{}", lines[0]);
-    processing_failed(&log, "VIEW_REFUSED", 0, false);
+    processing_failed(&log, "VIEW_REFUSED", 0);
     host.shutdown();
 }
 
@@ -742,32 +727,28 @@ fn a_remote_projectors_retryable_failure_is_dead_lettered_at_the_cap() {
     assert_eq!(lines.len(), 1, "dead-lettered: {lines:?}");
     assert!(lines[0].contains("VIEW_DB_DOWN"), "{}", lines[0]);
     assert!(lines[0].contains("retry_count=3"), "{}", lines[0]);
-    processing_failed(&log, "VIEW_DB_DOWN", 3, true);
+    processing_failed(&log, "VIEW_DB_DOWN", 3);
     host.shutdown();
 }
 
 /// `log`'s one letter is the projector's failure under the child's own
-/// key as answered, its events the payload, and its one detail
-/// `processing_failed` with `retry_count` and `is_transient` (decision
-/// 14.48).
-fn processing_failed(log: &MemoryDeadLetters, key: &str, retry_count: u32, is_transient: bool) {
-    use angzarr_embedded::v1::angzarr_dead_letter::{Payload, RejectionDetails};
+/// key as answered, its events the payload, with its `retry_count`
+/// (decision 14.48).
+fn processing_failed(log: &MemoryDeadLetters, key: &str, retry_count: u32) {
+    use angzarr_embedded::v1::angzarr_dead_letter::{Payload, Why};
     let letters = log.letters();
     assert_eq!(letters.len(), 1, "{letters:?}");
     let letter = &letters[0];
-    let reason = letter.reason.clone().expect("a reason");
+    let Some(Why::Reason(reason)) = letter.why.clone() else {
+        panic!("a reason: {letter:?}");
+    };
     assert_eq!(reason.code, key, "{letter:?}");
     assert_eq!(
         letter.source_component_kind(),
         angzarr_embedded::v1::ComponentKind::Projector,
         "{letter:?}"
     );
-    let Some(RejectionDetails::ProcessingFailed(details)) = &letter.rejection_details else {
-        panic!("processing_failed: {letter:?}");
-    };
-    assert_eq!(details.failure.as_ref(), Some(&reason));
-    assert_eq!(details.retry_count, retry_count);
-    assert_eq!(details.is_transient, is_transient);
+    assert_eq!(letter.retry_count, retry_count);
     assert!(
         matches!(letter.payload, Some(Payload::RejectedEvents(_))),
         "{letter:?}"
@@ -826,42 +807,41 @@ fn a_child_of_another_kind_than_configured_is_refused() {
     );
 }
 
-/// A policy child that names no input domain is refused at start: it has
-/// no source.
+/// A policy or projector child that names no input domain is refused at
+/// start by the kernel's validation of its descriptor, under the spec's key
+/// (C-0747; decision 14.55): there is no wildcard domain.
 #[test]
-fn a_policy_child_with_no_input_is_refused() {
-    let log = log_file("policy-no-input");
-    let mut policy = policy_domain(&log);
-    policy.env.remove(INPUT_ENV);
-    let refused = Host::start(config(vec![policy])).err();
-    assert_eq!(
-        refused,
-        Some(HostError::NoInput {
-            domain: "table-wallet".to_string(),
-        })
-    );
-}
-
-/// A projector child that names no input domain is refused at start under
-/// the spec's key (C-0747; decision 14.55): there is no wildcard domain,
-/// so it would fold nothing.
-#[test]
-fn a_projector_child_with_no_input_is_refused_under_its_key() {
+fn a_reader_child_with_no_input_is_refused_under_its_key() {
     use angzarr_diagnostic::Diagnostic;
-    let log = log_file("projector-no-input");
-    let mut projector = projector_domain(&log);
+    let policy_log = log_file("policy-no-input");
+    let projector_log = log_file("projector-no-input");
+    let mut policy = policy_domain(&policy_log);
+    policy.env.remove(INPUT_ENV);
+    let mut projector = projector_domain(&projector_log);
     projector.env.remove(INPUT_ENV);
-    let refused = Host::start(config(vec![projector])).err();
-    assert_eq!(
-        refused,
-        Some(HostError::ProjectorNoInputDomain {
-            component: "table-view".to_string(),
-        })
-    );
-    assert_eq!(
-        refused.map(|e| e.code().to_string()).as_deref(),
-        Some("HOST_REASON_PROJECTOR_NO_INPUT_DOMAIN")
-    );
+    for (child, name, kind) in [
+        (policy, "table-wallet", "COMPONENT_KIND_POLICY"),
+        (projector, "table-view", "COMPONENT_KIND_PROJECTOR"),
+    ] {
+        let refused = Host::start(config(vec![child])).err();
+        let Some(HostError::Descriptor { domain, cause }) = &refused else {
+            panic!("refused for its descriptor: {refused:?}");
+        };
+        assert_eq!(domain, name);
+        assert_eq!(cause.code(), "ANGZARR_REASON_NO_INPUT_DOMAIN");
+        assert_eq!(
+            cause,
+            &angzarr_embedded::Misconfigured::NoInputDomain {
+                component: if name == "table-wallet" {
+                    "TableWalletPolicy"
+                } else {
+                    "TableView"
+                }
+                .to_string(),
+                kind: kind.to_string(),
+            }
+        );
+    }
 }
 
 /// A projector's retryable bug (UNAVAILABLE) and its immediate-return
@@ -934,7 +914,7 @@ fn upcast() -> (Host, Registry) {
     let host = Host::start(config(vec![upcaster_domain()])).expect("the host starts");
     let mut registry = Registry::new();
     registry
-        .command_handler("table", Table, descriptor("Table", "/test.table.v1.State"))
+        .command_handler("table", Table, descriptor("Table", "test.table.v1.State"))
         .unwrap();
     host.register(&mut registry)
         .expect("an upcaster registers as its domain's sidecar");
@@ -1111,7 +1091,7 @@ fn a_sidecar_is_up_only_while_its_health_reports_serving() {
     let host = Host::start_with(config(vec![sidecar]), hooks).expect("the host starts");
     let mut registry = Registry::new();
     registry
-        .command_handler("table", Table, descriptor("Table", "/test.table.v1.State"))
+        .command_handler("table", Table, descriptor("Table", "test.table.v1.State"))
         .unwrap();
     host.register(&mut registry).unwrap();
     let (mut fake, _) = control.accept().unwrap();
@@ -1178,7 +1158,7 @@ fn a_sidecar_whose_health_is_unknown_is_not_up() {
         let host = Host::start_with(config(vec![sidecar]), hooks).expect("the host starts");
         let mut registry = Registry::new();
         registry
-            .command_handler("table", Table, descriptor("Table", "/test.table.v1.State"))
+            .command_handler("table", Table, descriptor("Table", "test.table.v1.State"))
             .unwrap();
         host.register(&mut registry).unwrap();
         let log = MemoryDeadLetters::new();
@@ -1207,16 +1187,20 @@ fn a_sidecar_whose_health_is_unknown_is_not_up() {
     }
 }
 
-/// A sidecar that serves no gRPC health is refused at start, as a domain
-/// whose Describe fails is: naming the component and the status's code.
+/// A sidecar that serves no gRPC health is never ready: refused at start
+/// once its start limit has passed, `EMBEDDED_REASON_CHILD_NOT_SERVING`
+/// with no status (decision 14.80). Its limit is short: it is waited out.
 #[test]
 fn a_sidecar_serving_no_health_is_refused_at_start() {
     let sidecar = with_env(upcaster_domain(), &[(HEALTH_ENV, health::NONE)]);
+    let mut config = config(vec![sidecar]);
+    config.supervision.handshake_timeout_ms = 300;
     assert_eq!(
-        Host::start(config(vec![sidecar])).err(),
-        Some(HostError::Health {
-            domain: "table-upcaster".to_string(),
-            grpc_code: tonic::Code::Unimplemented as i32,
+        Host::start(config).err(),
+        Some(HostError::NotServing {
+            component: "table-upcaster".to_string(),
+            status: "none".to_string(),
+            timeout_ms: 300,
         })
     );
 }

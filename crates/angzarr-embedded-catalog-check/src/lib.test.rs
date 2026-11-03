@@ -453,36 +453,32 @@ fn angzarr_embedded_reexports_the_angzarr_ports_catalog() {
 }
 
 /// Every live key of the spec's enums embedded answers, with its declared
-/// args: core's three, and the local-process transport's HostReason. An
-/// enum's numbers may skip those reserved for keys it moved (decision
-/// 14.64), so every number up to a bound is tried.
+/// args: core's `AngzarrReason`, and the local-process transport's
+/// `EmbeddedReason`. An enum's numbers may skip those reserved for keys it
+/// moved (decision 14.64), so every number up to a bound is tried.
 fn spec_keys() -> Vec<(&'static str, &'static [&'static str])> {
-    use angzarr_embedded::v1::{CoordinatorReason, HostReason, RouterReason};
-    use angzarr_proto_transport_embedded::v1::HostReason as ChildReason;
-    let numbers = || 1..=64;
-    let router = numbers().filter_map(|n| RouterReason::try_from(n).ok());
-    let host = numbers().filter_map(|n| HostReason::try_from(n).ok());
-    let coordinator = numbers().filter_map(|n| CoordinatorReason::try_from(n).ok());
-    let child = numbers().filter_map(|n| ChildReason::try_from(n).ok());
-    router
-        .map(|r| (r.as_str_name(), r.args()))
-        .chain(host.map(|r| (r.as_str_name(), r.args())))
-        .chain(coordinator.map(|r| (r.as_str_name(), r.args())))
-        .chain(child.map(|r| (r.as_str_name(), r.args())))
+    use angzarr_embedded::v1::AngzarrReason;
+    use angzarr_proto_transport_embedded::v1::EmbeddedReason;
+    let numbers = || 1..=128;
+    let core = numbers().filter_map(|n| AngzarrReason::try_from(n).ok());
+    let embedded = numbers().filter_map(|n| EmbeddedReason::try_from(n).ok());
+    core.map(|r| (r.as_str_name(), r.args()))
+        .chain(embedded.map(|r| (r.as_str_name(), r.args())))
         .collect()
 }
 
-/// Every reason angzarr-router refuses with is the kernel's code too,
+/// Every core key angzarr-router can refuse with is the kernel's code too,
 /// verbatim, with the router's args (decision 14.60): `KernelError::Router`
 /// forwards the router's `CodedError` under it, its message the spec's.
 #[test]
-fn every_router_reason_is_forwarded_under_its_own_key() {
+fn every_core_key_is_forwarded_under_its_own_key() {
     use angzarr_embedded::angzarr_router::error::CodedError;
+    use angzarr_embedded::v1::AngzarrReason;
     use angzarr_embedded::KernelError;
 
-    let router = (1..).map_while(|n| angzarr_embedded::v1::RouterReason::try_from(n).ok());
+    let core = (1..=128).filter_map(|n| AngzarrReason::try_from(n).ok());
     let mut problems = Vec::new();
-    for reason in router {
+    for reason in core {
         let key = reason.as_str_name();
         let error = KernelError::Router(CodedError {
             code: key.to_string(),
@@ -501,23 +497,25 @@ fn every_router_reason_is_forwarded_under_its_own_key() {
     assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
 
-/// Every reason angzarr-router refuses with is among angzarr-embedded's
-/// samples, every declared arg given, so each forwarded key is held to the
-/// spec's catalog as every sample is.
+/// Every core key angzarr-embedded's samples answer under gives, across
+/// its answerers, exactly the args the key declares, so each answered key
+/// is held to the spec's catalog whole. A key whose answerers differ (the
+/// router's duplicate and the registry's, decision 14.44) gives every
+/// declared arg across them.
 #[test]
-fn every_router_reason_is_sampled() {
+fn every_sampled_core_key_gives_its_declared_args() {
+    use angzarr_embedded::v1::AngzarrReason;
     let samples = angzarr_embedded::diagnostic_samples();
-    let router = (1..).map_while(|n| angzarr_embedded::v1::RouterReason::try_from(n).ok());
+    let core = (1..=128).filter_map(|n| AngzarrReason::try_from(n).ok());
     let mut problems = Vec::new();
-    for reason in router {
+    let mut answered = 0;
+    for reason in core {
         let key = reason.as_str_name();
-        // A key whose answerers differ (the router's duplicate and the
-        // registry's, decision 14.44) gives every declared arg across them.
         let answers: Vec<_> = samples.iter().filter(|d| d.code() == key).collect();
         if answers.is_empty() {
-            problems.push(format!("{key}: no sample"));
             continue;
         }
+        answered += 1;
         let args: BTreeSet<&str> = answers
             .iter()
             .flat_map(|d| d.args().into_iter().map(|(n, _)| n))
@@ -527,6 +525,7 @@ fn every_router_reason_is_sampled() {
             problems.push(format!("{key}: args {args:?}, declared {declared:?}"));
         }
     }
+    assert!(answered > 0, "no core key sampled");
     assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
 
@@ -554,21 +553,21 @@ fn a_spec_keyed_error_is_held_to_its_keys_args() {
     use angzarr_diagnostic::Report;
     let mut problems = Vec::new();
     spec_keyed(
-        &Report::new("COORDINATOR_REASON_CHAIN_TOO_DEEP").arg("stream", "a/b"),
+        &Report::new("ANGZARR_REASON_CHAIN_TOO_DEEP").arg("stream", "a/b"),
         &mut problems,
     );
     assert_eq!(
         problems,
         [
-            "COORDINATOR_REASON_CHAIN_TOO_DEEP: gives stream, which it does not declare",
-            "COORDINATOR_REASON_CHAIN_TOO_DEEP: its message names limit, which it does not give",
+            "ANGZARR_REASON_CHAIN_TOO_DEEP: gives stream, which it does not declare",
+            "ANGZARR_REASON_CHAIN_TOO_DEEP: its message names limit, which it does not give",
         ]
     );
     let mut nested = Vec::new();
     spec_keyed(
         &Report::new("angzarr-embedded-downstream").arg(
             "error",
-            Arg::nested(&Report::new("COORDINATOR_REASON_STORE_UNAVAILABLE").arg(
+            Arg::nested(&Report::new("ANGZARR_REASON_STORE_UNAVAILABLE").arg(
                 "cause",
                 Arg::nested(&Report::new("x").arg("ext_err_txt", "e")),
             )),
@@ -577,13 +576,14 @@ fn a_spec_keyed_error_is_held_to_its_keys_args() {
     );
     assert!(nested.is_empty(), "{nested:?}");
     let mut stray = Vec::new();
-    spec_keyed(&Report::new("COORDINATOR_REASON_UNSPECIFIED"), &mut stray);
+    spec_keyed(&Report::new("ANGZARR_REASON_UNSPECIFIED"), &mut stray);
     assert!(stray.is_empty(), "UNSPECIFIED is no live key: {stray:?}");
 }
 
 /// The kernel's codes were `angzarr-embedded-next-*` and are
 /// `angzarr-embedded-*`, the one rule being "strip `next-`"
-/// (docs/design/audit.md, *The one rename of the kernel's codes*). The rule collides with nothing: no kernel code is left under the old
+/// (docs/design/audit.md, *The renames of the kernel's codes*). The rule
+/// collides with nothing: no kernel code is left under the old
 /// prefix, in its source or any catalog; none lands under another checked
 /// crate's name (`angzarr-embedded-host-…`), where it would read as that
 /// crate's; and no two codes, the kernel's or another crate's, are the

@@ -134,7 +134,7 @@ Feature: State Building - Aggregate State Reconstruction
     Given an event with corrupted payload bytes
     When I attempt to build state
     Then an error should be raised
-    And the error's reason is ROUTER_REASON_PERSISTED_EVENT_CORRUPT, with the event's type_url in its args
+    And the error's reason is ANGZARR_REASON_PERSISTED_EVENT_CORRUPT, with the event's type_url in its args
 
   @C-0294
   Scenario: Missing required field in event
@@ -218,7 +218,9 @@ Feature: State Building - Aggregate State Reconstruction
   Scenario Outline: The coordinator stamps when it accepted the input on the delivery
     Given the coordinator's clock reads "2026-10-28T12:00:00Z"
     When <input> is accepted for an "order" aggregate
-    Then the ContextualCommand delivered to business code has recorded_at "2026-10-28T12:00:00Z"
+    # One call for commands and facts (decision 14.98): the request is a
+    # HandleRequest, its recorded_at stamped before the handler runs.
+    Then the HandleRequest delivered to business code has recorded_at "2026-10-28T12:00:00Z"
 
     Examples:
       | input                      |

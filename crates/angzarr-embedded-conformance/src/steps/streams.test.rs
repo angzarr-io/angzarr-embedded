@@ -4,17 +4,19 @@
 
 use cucumber::then;
 
-use angzarr_embedded::v1::angzarr_dead_letter::{Payload, RejectionDetails};
-use angzarr_embedded::v1::{command_page, AngzarrDeadLetter, ContextualCommand, Cover, EventPage};
+use angzarr_embedded::angzarr_router::hpb::HandleRequest;
+use angzarr_embedded::v1::angzarr_dead_letter::Payload;
+use angzarr_embedded::v1::{command_page, AngzarrDeadLetter, Cover, EventPage, EventRef};
 
 use crate::tests::business::recorded;
+use crate::tests::outcomes::reason_of;
 use crate::tests::policy::bare;
-use crate::tests::world::{root, Coordinator};
+use crate::tests::world::{cause_of, root, Coordinator};
 
 /// The type name of a delivery's input.
-fn input(delivered: &ContextualCommand) -> String {
+fn input(delivered: &HandleRequest) -> String {
     let body = delivered
-        .command
+        .input
         .as_ref()
         .and_then(|b| b.page.as_ref())
         .and_then(|p| p.body.as_ref());
@@ -27,16 +29,16 @@ fn input(delivered: &ContextualCommand) -> String {
 }
 
 /// A delivery's stream.
-fn stream(delivered: &ContextualCommand) -> Cover {
+fn stream(delivered: &HandleRequest) -> Cover {
     delivered
-        .command
+        .input
         .as_ref()
         .and_then(|b| b.cover.clone())
         .unwrap_or_default()
 }
 
 /// The deliveries to `domain` of `command`.
-fn deliveries(w: &mut Coordinator, domain: &str, command: &str) -> Vec<ContextualCommand> {
+fn deliveries(w: &mut Coordinator, domain: &str, command: &str) -> Vec<HandleRequest> {
     w.business(domain)
         .delivered()
         .into_iter()
@@ -45,7 +47,7 @@ fn deliveries(w: &mut Coordinator, domain: &str, command: &str) -> Vec<Contextua
 }
 
 /// The one delivery to `domain` of `command` on root `name`.
-fn delivery_on(w: &mut Coordinator, domain: &str, command: &str, name: &str) -> ContextualCommand {
+fn delivery_on(w: &mut Coordinator, domain: &str, command: &str, name: &str) -> HandleRequest {
     let on = deliveries(w, domain, command);
     let at: Vec<_> = on
         .iter()
@@ -56,9 +58,9 @@ fn delivery_on(w: &mut Coordinator, domain: &str, command: &str, name: &str) -> 
 }
 
 /// A delivery's correlation id.
-fn correlation(delivered: &ContextualCommand) -> Option<angzarr_embedded::v1::Uuid> {
+fn correlation(delivered: &HandleRequest) -> Option<angzarr_embedded::v1::Uuid> {
     delivered
-        .command
+        .input
         .as_ref()
         .and_then(|b| b.page.as_ref())
         .and_then(|p| p.correlation_id.clone())
@@ -138,7 +140,9 @@ fn input_events_carry(w: &mut Coordinator, input: String, correlated: String) {
     let pages: Vec<EventPage> = domains
         .iter()
         .flat_map(|d| persisted_in(w, d))
-        .filter(|p| p.payload.as_ref().is_some_and(|a| bare(a) == event))
+        .filter(|p| {
+            angzarr_embedded::angzarr_router::page_event(p).is_some_and(|a| bare(a) == event)
+        })
         .collect();
     assert_correlated(&pages, &correlated);
 }
@@ -155,7 +159,7 @@ fn holds_both(w: &mut Coordinator, domain: String, name: String) {
     let types: Vec<String> = w
         .persisted(&cover)
         .iter()
-        .filter_map(|p| p.payload.as_ref().map(bare))
+        .filter_map(|p| angzarr_embedded::angzarr_router::page_event(p).map(bare))
         .collect();
     let inputs: Vec<String> = w.business(&domain).delivered().iter().map(input).collect();
     let expected: Vec<String> = inputs.iter().map(|i| recorded(i).to_string()).collect();
@@ -163,13 +167,15 @@ fn holds_both(w: &mut Coordinator, domain: String, name: String) {
     assert_eq!(inputs.len(), 2);
 }
 
-#[then(regex = r#"^each command's causation_id is the (\w+) event of "([\w-]+)" "([^"]+)"$"#)]
+#[then(
+    regex = r#"^each command's ReactionDelivery causation is the (\w+) event of "([\w-]+)" "([^"]+)"$"#
+)]
 fn causation_is(w: &mut Coordinator, event: String, domain: String, name: String) {
     let cover = w.cover(&domain, &name);
     let trigger = w
         .pages(&cover)
         .into_iter()
-        .find(|p| p.payload.as_ref().is_some_and(|a| bare(a) == event))
+        .find(|p| angzarr_embedded::angzarr_router::page_event(p).is_some_and(|a| bare(a) == event))
         .expect("the trigger");
     let others: Vec<String> = w
         .domains
@@ -183,13 +189,42 @@ fn causation_is(w: &mut Coordinator, event: String, domain: String, name: String
         .collect();
     assert!(!delivered.is_empty());
     for d in delivered {
-        let causation = d
-            .command
-            .and_then(|b| b.page)
-            .and_then(|p| p.causation_id)
-            .expect("a causation");
+        let causation = d.causation.expect("a causation");
         assert_eq!(causation.stream.as_ref(), Some(&cover));
         assert_eq!(causation.sequence, trigger.sequence);
+    }
+}
+
+#[then(
+    "no event either command records carries that causation: their causation is the command arm with the command's command_id"
+)]
+fn events_not_caused_by_trigger(w: &mut Coordinator) {
+    let source = w.policies.last().expect("a policy").input.clone();
+    let others: Vec<String> = w
+        .domains
+        .keys()
+        .filter(|d| **d != source)
+        .cloned()
+        .collect();
+    for domain in others {
+        let ids: Vec<_> = w
+            .business(&domain)
+            .delivered()
+            .into_iter()
+            .filter_map(|d| d.input.and_then(|b| b.page).and_then(|p| p.command_id))
+            .collect();
+        for event in persisted_in(w, &domain) {
+            let meta = event.meta.expect("stamped");
+            assert!(
+                matches!(
+                    meta.causation,
+                    Some(angzarr_embedded::v1::event_meta::Causation::Command(_))
+                ),
+                "{meta:?}"
+            );
+            let cause = cause_of(&meta).0.expect("a command id");
+            assert!(ids.contains(&cause), "{meta:?}");
+        }
     }
 }
 
@@ -198,13 +233,13 @@ fn letters_of(w: &Coordinator, reason: &str) -> Vec<AngzarrDeadLetter> {
     w.log
         .letters()
         .into_iter()
-        .filter(|l| l.reason.as_ref().is_some_and(|r| r.code == reason))
+        .filter(|l| reason_of(l).is_some_and(|r| r.code == reason))
         .collect()
 }
 
 /// A stream as a reason's `stream` arg names it (decision 14.65):
 /// `domain/root`, then `@edition` outside the main timeline.
-fn text(cover: &Cover) -> String {
+pub(crate) fn text(cover: &Cover) -> String {
     let root = cover
         .root
         .as_ref()
@@ -232,7 +267,7 @@ fn policy_bug(w: &mut Coordinator, reason: String, naming: String) {
         "one dead letter of {reason}: {:?}",
         w.log.letters()
     );
-    let args = &letters[0].reason.as_ref().expect("a reason").args;
+    let args = &reason_of(&letters[0]).expect("a reason").args;
     let mut wanted = crate::tests::outcomes::named(&naming);
     let word = |after: &str| {
         let at = naming.find(after)? + after.len();
@@ -263,7 +298,7 @@ fn policy_bug(w: &mut Coordinator, reason: String, naming: String) {
 }
 
 #[then(
-    regex = r"^(?:it|the OrderPlaced trigger) is dead-lettered(?: with reason (\w+) as rejected_events)?,? and an alert is raised$"
+    regex = r"^(?:it|the OrderPlaced trigger) is dead-lettered(?: with reason (\w+) as rejected_events)?(?:, retry_count 0)?,? and an alert is raised$"
 )]
 fn trigger_dead_lettered(w: &mut Coordinator, reason: String) {
     let letters = match reason.is_empty() {
@@ -283,7 +318,7 @@ fn trigger_dead_lettered(w: &mut Coordinator, reason: String) {
 }
 
 #[then(
-    regex = r#"^the (\w+) event that triggered it is dead-lettered with reason (\w+) and arg (\w+) "([^"]+)" as rejected_events, and an alert is raised$"#
+    regex = r#"^the (\w+) event that triggered it is dead-lettered with reason (\w+) and arg (\w+) "([^"]+)" as rejected_events(?:, retry_count 0)?, and an alert is raised$"#
 )]
 fn triggering_event_dead_lettered(
     w: &mut Coordinator,
@@ -302,36 +337,19 @@ fn triggering_event_dead_lettered(
     );
     let letter = &letters[0];
     assert_eq!(
-        letter.reason.as_ref().and_then(|r| r.args.get(&arg)),
+        reason_of(letter).and_then(|r| r.args.get(&arg)),
         Some(&value)
     );
     let Some(Payload::RejectedEvents(book)) = &letter.payload else {
         panic!("rejected events: {letter:?}");
     };
-    assert!(book
-        .pages
-        .iter()
-        .any(|p| p.payload.as_ref().is_some_and(|a| bare(a) == event)));
+    assert!(
+        book.pages
+            .iter()
+            .any(|p| angzarr_embedded::angzarr_router::page_event(p)
+                .is_some_and(|a| bare(a) == event))
+    );
     assert!(!w.alerts().is_empty());
-}
-
-#[then(
-    regex = r"^the dead letter's processing_failed details have failure code (\w+), retry_count (\d+) and is_transient (true|false)$"
-)]
-fn processing_failed(w: &mut Coordinator, code: String, retries: u32, transient: bool) {
-    let letters = letters_of(w, &code);
-    assert_eq!(letters.len(), 1, "{:?}", w.log.letters());
-    let Some(RejectionDetails::ProcessingFailed(details)) = &letters[0].rejection_details else {
-        panic!("processing failed details: {:?}", letters[0]);
-    };
-    assert_eq!(
-        details.failure.as_ref().map(|f| f.code.as_str()),
-        Some(code.as_str())
-    );
-    assert_eq!(
-        (details.retry_count, details.is_transient),
-        (retries, transient)
-    );
 }
 
 /// No domain but the source was delivered anything, and the source none
@@ -357,7 +375,8 @@ fn nothing_delivered(w: &mut Coordinator) {
         assert!(
             !persisted_in(w, &source)
                 .iter()
-                .any(|p| p.payload.as_ref().is_some_and(|a| bare(a) == kept)),
+                .any(|p| angzarr_embedded::angzarr_router::page_event(p)
+                    .is_some_and(|a| bare(a) == kept)),
             "{kept} recorded on {source}"
         );
     }
@@ -377,9 +396,12 @@ fn nothing_delivered(w: &mut Coordinator) {
 }
 
 #[then(
-    regex = r#"^no root is filled in for it, and nothing is appended to any "([\w-]+)" stream$"#
+    regex = r#"^(nothing is delivered, )?no root is filled in(?: for it)?, and nothing is appended to any "([\w-]+)" stream$"#
 )]
-fn no_root_filled(w: &mut Coordinator, domain: String) {
+fn no_root_filled(w: &mut Coordinator, delivered: String, domain: String) {
+    if !delivered.is_empty() {
+        nothing_delivered(w);
+    }
     assert!(w.business(&domain).delivered().is_empty());
     assert!(persisted_in(w, &domain).is_empty());
 }
@@ -426,10 +448,9 @@ fn position_stays(w: &mut Coordinator, domain: String, event: String) {
     let def = w.policies.last().expect("a policy");
     let name = def.name.clone();
     let cover = w.cover(&domain, "p-1");
-    let at = w
-        .pages(&cover)
-        .iter()
-        .position(|p| p.payload.as_ref().is_some_and(|a| bare(a) == event));
+    let at = w.pages(&cover).iter().position(|p| {
+        angzarr_embedded::angzarr_router::page_event(p).is_some_and(|a| bare(a) == event)
+    });
     assert_eq!(w.position(&name, &cover), at.expect("the event") as u64);
 }
 
@@ -439,4 +460,135 @@ async fn next_catch_up(w: &mut Coordinator) {
     let resumed = w.resume().await;
     w.resumed.push(resumed);
     assert_eq!(w.business("order").delivered().len(), before + 1);
+}
+
+/// Every `ReactionDelivery` the policy's coordinator handed to the
+/// coordinators elsewhere, in order.
+fn reaction_deliveries(w: &Coordinator) -> Vec<angzarr_embedded::v1::ReactionDelivery> {
+    w.remotes.values().flat_map(|r| r.delivered()).collect()
+}
+
+/// The EventRef of `domain` `name`'s page at `sequence`.
+fn event_ref(w: &Coordinator, domain: &str, name: &str, sequence: u64) -> EventRef {
+    EventRef {
+        stream: Some(w.cover(domain, name)),
+        sequence,
+    }
+}
+
+#[then(regex = r"^the ReactionDelivery's (\w+) is (.+)$")]
+fn reaction_delivery_field(w: &mut Coordinator, field: String, value: String) {
+    let [delivery] = &reaction_deliveries(w)[..] else {
+        panic!("one ReactionDelivery: {:?}", reaction_deliveries(w));
+    };
+    let trigger = delivery.causation.clone().expect("a causation");
+    let quoted: Vec<&str> = value.split('"').skip(1).step_by(2).collect();
+    match field.as_str() {
+        "cover" => {
+            let [domain, name] = quoted[..] else {
+                panic!("{value}")
+            };
+            assert!(value.ends_with("the trigger's edition"), "{value}");
+            let edition = trigger.stream.and_then(|s| s.edition);
+            let cover = Cover {
+                edition,
+                ..w.cover(domain, name)
+            };
+            assert_eq!(delivery.cover.as_ref(), Some(&cover));
+        }
+        "command_id" => {
+            // `the reaction id derived from (the OrderPlaced EventRef, "OrderToInventory", 0)`
+            let event = value
+                .split("(the ")
+                .nth(1)
+                .and_then(|v| v.split(' ').next())
+                .expect("the trigger's type");
+            let index: u32 = value
+                .trim_end_matches(')')
+                .rsplit(", ")
+                .next()
+                .and_then(|i| i.parse().ok())
+                .expect("an index");
+            let at = trigger.stream.clone().expect("the trigger's stream");
+            let order = w.pages(&at);
+            let page = order
+                .iter()
+                .find(|p| {
+                    angzarr_embedded::angzarr_router::page_event(p)
+                        .is_some_and(|a| bare(a) == event)
+                })
+                .expect("the trigger");
+            let eventref = EventRef {
+                stream: Some(at),
+                sequence: page.sequence,
+            };
+            let id = angzarr_embedded::ids::policy_command_id(&eventref, quoted[0], index);
+            assert_eq!(delivery.command_id, id.ok());
+        }
+        "correlation_id" => assert_eq!(delivery.correlation_id, Some(root(quoted[0]))),
+        "causation" => {
+            // `the EventRef of "order" "order-1" sequence 3`
+            let sequence: u64 = value
+                .rsplit(' ')
+                .next()
+                .and_then(|s| s.parse().ok())
+                .expect("a sequence");
+            let [domain, name] = quoted[..] else {
+                panic!("{value}")
+            };
+            assert_eq!(
+                delivery.causation,
+                Some(event_ref(w, domain, name, sequence))
+            );
+        }
+        "component" => assert_eq!(delivery.component, quoted[0]),
+        other => panic!("no ReactionDelivery field {other}"),
+    }
+}
+
+#[then(
+    regex = r#"^both ReactionDeliveries are addressed to domain "([\w-]+)", roots "([^"]+)" and "([^"]+)", on the main timeline$"#
+)]
+fn both_addressed(w: &mut Coordinator, domain: String, first: String, second: String) {
+    let covers: Vec<Option<Cover>> = reaction_deliveries(w)
+        .into_iter()
+        .map(|d| d.cover)
+        .collect();
+    let wanted = vec![
+        Some(w.cover(&domain, &first)),
+        Some(w.cover(&domain, &second)),
+    ];
+    assert_eq!(covers, wanted);
+}
+
+#[then("nothing is delivered to any other domain")]
+fn nothing_elsewhere(w: &mut Coordinator) {
+    let source = w.policies.last().expect("a policy").input.clone();
+    let output = w.policies.last().expect("a policy").output.clone();
+    for (name, remote) in &w.remotes {
+        if *name != output {
+            assert!(remote.delivered().is_empty(), "{name}");
+        }
+    }
+    let locals: Vec<String> = w
+        .domains
+        .keys()
+        .filter(|d| **d != source)
+        .cloned()
+        .collect();
+    for domain in locals {
+        if !w.remotes.contains_key(&domain) {
+            assert!(w.business(&domain).delivered().is_empty(), "{domain}");
+        }
+    }
+}
+
+#[then("the policy step follows its on_policy_bug setting")]
+fn follows_on_policy_bug(w: &mut Coordinator) {
+    // The default setting moves the policy's position past the trigger,
+    // the dead letter its record (`OnPolicyBug::MovePast`).
+    let def = w.policies.last().expect("a policy");
+    let (name, input) = (def.name.clone(), def.input.clone());
+    let cover = w.cover(&input, "p-1");
+    assert_eq!(w.position(&name, &cover), w.pages(&cover).len() as u64);
 }

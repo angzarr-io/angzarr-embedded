@@ -9,9 +9,10 @@ use angzarr_ports::faulty::{At, FaultyStore};
 use angzarr_router::error::CodedError;
 use angzarr_router::router::ProjectorHandler;
 
+use crate::angzarr_router::hpb::{ProjectRequest, ProjectResponse};
 use crate::toys::prelude::*;
 use crate::toys::{at, command, cover, cover_in, opened, registry, Account, AccountCmd, Edit};
-use crate::v1::{Cover, EventBook, EventPage, Projection};
+use crate::v1::Cover;
 use crate::{CatchUp, KernelError, Payload as _, Registry};
 
 /// One book as the projector was handed it: its stream, its pages'
@@ -47,7 +48,8 @@ impl ProjectorHandler for Recorder {
         "recorder"
     }
 
-    async fn dispatch(&self, events: &EventBook) -> Result<Projection, CodedError> {
+    async fn dispatch(&self, request: &ProjectRequest) -> Result<ProjectResponse, CodedError> {
+        let events = request.events.clone().unwrap_or_default();
         if let Some(write) = self.meanwhile.lock().unwrap().take() {
             write();
         }
@@ -60,7 +62,7 @@ impl ProjectorHandler for Recorder {
             .lock()
             .unwrap()
             .push((cover, sequences, events.next_sequence));
-        Ok(Projection::default())
+        Ok(ProjectResponse::default())
     }
 }
 
@@ -197,23 +199,7 @@ fn an_edition_stream_is_not_handed() {
     opened(&store, &registry, 1, 5);
     let main = cover("account", 1);
     let fork = cover_in("account", 1, "what-if");
-    let head = slice(&store, &main).next_sequence;
-    let created = EventPage {
-        sequence: head,
-        payload: Some(crate::Any {
-            type_url: crate::angzarr_ports::EDITION_CREATED_TYPE_URL.to_string(),
-            value: prost::Message::encode_to_vec(&crate::v1::meta::EditionCreated {
-                edition: "what-if".to_string(),
-                parent_sequence: head,
-                ..crate::v1::meta::EditionCreated::default()
-            }),
-        }),
-        ..pages(&store, &main).pop().unwrap()
-    };
-    store
-        .write(Write::append(sref(&fork), head, &[created]))
-        .ready()
-        .unwrap();
+    crate::toys::fork(&store, &fork);
     assert!(store.covers("account").ready().unwrap().contains(&fork));
 
     let recorder = Recorder::default();
@@ -660,8 +646,9 @@ fn follow_polls_waits_and_stops_when_told() {
 /// is, held or stored.
 #[test]
 fn a_catch_up_with_no_source_is_refused() {
-    let refused = Some(crate::Misconfigured::ProjectorNoInputDomain {
+    let refused = Some(crate::Misconfigured::NoInputDomain {
         component: "recorder".to_string(),
+        kind: "COMPONENT_KIND_PROJECTOR".to_string(),
     });
     assert_eq!(CatchUp::new(&[], Recorder::default()).err(), refused);
     assert_eq!(CatchUp::stored(&[], Recorder::default()).err(), refused);

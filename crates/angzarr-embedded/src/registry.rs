@@ -15,19 +15,21 @@ use std::any::Any as AnyType;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use angzarr_proto::v1::{ComponentDescriptor, ComponentKind};
+use angzarr_proto::v1::{
+    component_descriptor, AggregateDescriptor, ComponentDescriptor, ProcessManagerDescriptor,
+};
 use angzarr_router::domain::DomainDispatch;
 use angzarr_router::policy::PolicyDispatch;
 use angzarr_router::router::{
     self as router, DynCommandHandler, DynPolicyComponent, DynProjectorHandler,
 };
 
-use super::catalog::{Catalog, Configured, Description};
+use super::catalog::{domain_of, Catalog, Description};
 use super::domain::{Domain, State};
 use super::error::UpcastChainError;
 use super::markup::{self, AsyncProjector};
 use super::misconfigured::Misconfigured;
-use super::payload::{type_name, Payload};
+use super::payload::Payload;
 use super::route;
 use super::target::{CoordinatorPort, Target};
 use super::upcast::{UpcastPort, Upcaster};
@@ -66,13 +68,9 @@ pub(crate) struct ProjectorEntry {
 /// registry's one list in registration order.
 pub(crate) struct PolicyEntry {
     pub(crate) dispatch: Box<dyn DynPolicyComponent>,
-    /// The one domain its commands may go to (`ComponentDescriptor.output_domain`):
-    /// what the kernel holds them to (decision 14.42).
+    /// The one domain its commands may go to (`PolicyDescriptor.output_domain`):
+    /// what the kernel addresses them to (decision 14.42).
     pub(crate) output_domain: String,
-    /// Whether a refusal of its command is answered by its refusal fact
-    /// (the router's OnRefused); a policy that does not has its refused
-    /// command fail the step.
-    pub(crate) answers_refusals: bool,
 }
 
 impl PolicyEntry {
@@ -117,12 +115,10 @@ impl Registry {
     /// (`D::RULES_VERSION`, stamped on every event), its upcaster (for
     /// events and, discouraged, commands), and its handlers: `handlers`
     /// registers them on the router's table for `D` (`DomainDispatch`,
-    /// over `D::State`, already folding, restoring snapshots and resolving
-    /// COMMUTATIVE through `D`), with `on_command`, `on_fact` and
-    /// `on_refused`. Listed by the descriptor `D` generates
-    /// (`D::State::descriptor()`, as `registry.register::<D>()` fills
-    /// angzarr's `ComponentDescriptor.state`), and refused, as a child's
-    /// descriptor is, for configuration the state does not support.
+    /// over `D::State`, already folding and restoring snapshots through
+    /// `D`), with `on_command` and `on_fact`. Listed by the descriptor `D`
+    /// generates (`D::State::descriptor()` its state), and refused as a
+    /// child's descriptor is.
     pub fn register<D: Domain>(
         &mut self,
         upcaster: Upcaster,
@@ -150,39 +146,38 @@ impl Registry {
             });
         }
         let state = D::State::descriptor();
-        // A snapshot is found usable by the descriptor's type URL, and is
+        // A snapshot is found usable by the descriptor's type name, and is
         // written as the snapshot form's: they must be one type.
         let snapshot = <<D::State as State>::Snapshot as prost::Name>::full_name();
-        if type_name(&state.type_url) != snapshot {
+        if state.type_name != snapshot {
             return Err(Misconfigured::StateTypeMismatch {
                 component: domain,
-                type_url: state.type_url,
-                state_type_url: format!("/{snapshot}"),
+                type_name: state.type_name,
+                snapshot_type_name: snapshot,
             });
         }
         let process_manager = starting.is_some();
-        let kind = match process_manager {
-            true => ComponentKind::ProcessManager,
-            false => ComponentKind::Aggregate,
+        let kind = match starting {
+            Some(starting) => {
+                component_descriptor::Kind::ProcessManager(ProcessManagerDescriptor {
+                    domain: domain.clone(),
+                    state: Some(state),
+                    starting_types: starting.into_iter().collect(),
+                })
+            }
+            None => component_descriptor::Kind::Aggregate(AggregateDescriptor {
+                domain: domain.clone(),
+                state: Some(state),
+            }),
         };
         let descriptor = ComponentDescriptor {
             name: domain.clone(),
-            kind: kind as i32,
             rules_version: D::RULES_VERSION.to_string(),
-            state: Some(state),
-            starting_types: starting.into_iter().flatten().collect(),
-            ..ComponentDescriptor::default()
-        };
-        let configured = Configured {
-            component: D::CONFLICT_RESOLUTION,
-            by_command: (D::CONFLICT_RESOLUTION_BY_COMMAND.iter())
-                .map(|(command_type, resolution)| (command_type.to_string(), *resolution))
-                .collect(),
+            kind: Some(kind),
         };
         let upcaster = Arc::new(upcaster);
         let port: Arc<dyn UpcastPort> = upcaster.clone();
-        self.catalog
-            .list_domain(descriptor, configured, Some(port))?;
+        self.catalog.list_domain(descriptor, Some(port))?;
         let table = route::table::<D>(Arc::clone(&fresh), process_manager);
         let handler = Handler {
             dispatch: Box::new(handlers(table)),
@@ -206,10 +201,11 @@ impl Registry {
     /// another process behind one), described by `descriptor`, its
     /// generated `ComponentDescriptor` (decision 14.42: angzarr-build's
     /// `angzarr-descriptors.rs`, or the one a child answers `Describe`
-    /// with). The kernel knows only what the descriptor says: its state's
-    /// descriptor, its rules version, which its events are stamped with,
-    /// and a process manager's starting types. Refused without a rules
-    /// version or a state type. Its streams are dispatched like any
+    /// with). The kernel knows only what the descriptor says: its kind,
+    /// its state's descriptor, its rules version, which its events are
+    /// stamped with, and a process manager's starting types. Refused as
+    /// [`validate_descriptor`](super::validate_descriptor) refuses it, and
+    /// for a descriptor of another domain than `domain`. Its streams are dispatched like any
     /// domain's; with no typed [`Domain`] behind it, what a chain recorded
     /// of it is its pages alone ([`Recorded::events`](super::Recorded::events)
     /// decodes a typed domain's).
@@ -233,15 +229,15 @@ impl Registry {
         handler: impl router::CommandHandler + 'static,
         descriptor: ComponentDescriptor,
     ) -> Result<Description, Misconfigured> {
-        let kind = handler.kind();
-        let descriptor = ComponentDescriptor {
-            name: domain.to_string(),
-            kind: kind as i32,
-            ..descriptor
-        };
-        let description = self
-            .catalog
-            .list_domain(descriptor, Configured::default(), None)?;
+        if domain_of(&descriptor).is_some_and(|named| named != domain) {
+            return Err(Misconfigured::DescriptorNoDomain {
+                component: descriptor.name.clone(),
+                kind: super::misconfigured::kind_of(&descriptor)
+                    .as_str_name()
+                    .to_string(),
+            });
+        }
+        let description = self.catalog.list_domain(descriptor, None)?;
         let handler = Handler {
             dispatch: Box::new(handler),
             typed: None,
@@ -332,22 +328,21 @@ impl Registry {
     /// registered already ([`Misconfigured::ComponentRegistered`]) and for
     /// a remote domain's events ([`Misconfigured::RemoteSource`]).
     pub fn policy<P: super::Policy>(&mut self, policy: P) -> Result<&mut Self, Misconfigured> {
-        let answers_refusals = P::ANSWERS_REFUSALS;
         let dispatch = super::policy::dispatch(policy);
         let output_domain = dispatch.output_domain().to_string();
-        self.push_policy(Box::new(dispatch), output_domain, answers_refusals)
+        self.push_policy(Box::new(dispatch), output_domain)
     }
 
     /// Register a policy built as angzarr-router's dispatch table, written
     /// by hand: in the ONE list, beside every other policy, its source its
     /// input domain and its target its output domain. Its refused commands
-    /// are answered by its OnRefused. Refused as [`Registry::policy`] is.
+    /// are answered by its Translate. Refused as [`Registry::policy`] is.
     pub fn policy_dispatch(
         &mut self,
         dispatch: PolicyDispatch,
     ) -> Result<&mut Self, Misconfigured> {
         let output_domain = dispatch.output_domain().to_string();
-        self.push_policy(Box::new(dispatch), output_domain, true)
+        self.push_policy(Box::new(dispatch), output_domain)
     }
 
     /// Register a policy written as angzarr-router's `PolicyComponent`: a
@@ -355,27 +350,25 @@ impl Registry {
     /// remote policy), or any other. In the ONE list, beside every other
     /// policy, its source its input domain and its commands held to
     /// `output_domain` (its descriptor's); its refused commands are
-    /// answered by its OnRefused. Refused as [`Registry::policy`] is.
+    /// answered by its Translate. Refused as [`Registry::policy`] is.
     pub fn policy_component(
         &mut self,
         policy: impl router::PolicyComponent + 'static,
         output_domain: &str,
     ) -> Result<&mut Self, Misconfigured> {
-        self.push_policy(Box::new(policy), output_domain.to_string(), true)
+        self.push_policy(Box::new(policy), output_domain.to_string())
     }
 
     fn push_policy(
         &mut self,
         dispatch: Box<dyn DynPolicyComponent>,
         output_domain: String,
-        answers_refusals: bool,
     ) -> Result<&mut Self, Misconfigured> {
         self.catalog
-            .list_policy(dispatch.name(), dispatch.input_domain())?;
+            .list_policy(dispatch.name(), dispatch.input_domain(), &output_domain)?;
         self.policies.push(PolicyEntry {
             dispatch,
             output_domain,
-            answers_refusals,
         });
         Ok(self)
     }
@@ -427,7 +420,7 @@ impl Registry {
     /// [`OnRetryable`](super::OnRetryable), then dead-lettered, and any
     /// other (a bug) is dead-lettered at once. To run one caught up from
     /// the store instead, see [`CatchUp`](super::CatchUp). Refused for no
-    /// source ([`Misconfigured::ProjectorNoInputDomain`]), a name
+    /// source ([`Misconfigured::NoInputDomain`]), a name
     /// registered already and a remote source.
     pub fn projector_handler(
         &mut self,

@@ -16,7 +16,7 @@
 //!
 //! A component's language picks where it runs and its default launch
 //! command, and nothing else: the host speaks one protocol to every child
-//! (the handshake, then gRPC on a Unix socket), so a language is loaded
+//! (readiness by gRPC health on a Unix socket, then gRPC there), so a language is loaded
 //! with no more than its name ([`Language::child`]) and, if it has one, its
 //! default launch ([`Language::launched_by`]).
 //!
@@ -67,7 +67,9 @@ pub fn read(path: &std::path::Path) -> Result<HostConfig, HostError> {
 pub fn on_retryable(retry: &RetryConfig) -> OnRetryable {
     OnRetryable {
         max_retries: retry.max_retries,
-        max_race_runs: retry.max_race_runs,
+        // At least one run (decision 14.84): a config's 0 is one.
+        max_race_runs: std::num::NonZeroU32::new(retry.max_race_runs)
+            .unwrap_or(std::num::NonZeroU32::MIN),
         initial_backoff: std::time::Duration::from_millis(retry.initial_backoff_ms),
         multiplier: retry.multiplier,
         max_backoff: std::time::Duration::from_millis(retry.max_backoff_ms),

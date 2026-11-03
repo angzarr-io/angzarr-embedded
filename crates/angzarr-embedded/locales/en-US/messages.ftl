@@ -28,9 +28,6 @@ malformed-bad-correlation-id = the correlation id is { $len ->
         [one] one byte
        *[other] { $len } bytes
     }, not a UUID's 16
-malformed-causation-from-outside = a client's book names a causation: only the kernel's chain issues policy commands
-malformed-id-on-policy-command = a policy's book names its own { $field }: the kernel derives its ids from the trigger
-malformed-handling-on-policy-command = a policy's book has handling: its target stamps its own head
 malformed-bad-trigger = the policy command's trigger cannot name a command id: { $reason ->
         [bad-root] its root is not a UUID's 16 bytes
         [missing-trigger] it needs a stream with a root
@@ -40,18 +37,14 @@ malformed-bad-trigger = the policy command's trigger cannot name a command id: {
     }
 malformed-fact-without-origin = a fact without its origin
 malformed-empty-external-id = the fact's external id is empty: it is the fact's identity
-malformed-command-with-fact-origin = a command with a fact origin
 malformed-fact-command-id-not-derived = the fact's command id is not the one derived from its external id
-malformed-handling-on-fact = a fact with handling: a fact is never checked against a sequence nor conflict-resolved
-malformed-unknown-conflict-resolution = conflict resolution { $value } is not one this build knows
-malformed-unsupported-conflict-resolution = domain "{ $domain }"'s state does not support { $requested }
-malformed-refusal-misaddressed = the refusal fact is for another stream than the one its trigger names
 
 projection-failed = the command committed, then { $failures ->
     [one] projector { $projector } failed: { $error }
    *[other] { $failures } projectors failed, the first { $projector }: { $error }
 }
 downstream = a policy command down the chain failed, at depth { $depth }: { $error }
+policy-output-no-body = a policy's output holds neither a command nor a fact
 unknown-type = stream { $stream }'s domain does not decode the type { $type_url }
 invalid-payload = a { $type_url } for stream { $stream } is not a valid value: { $reason }
 upcast = upcasting a payload for stream { $stream } failed: { $error }
@@ -73,11 +66,13 @@ wire-missing = { $message }.{ $field } is required and absent
 wire-unknown-enum = { $message }.{ $field } holds { $value }, which no variant defines
 upcast-unavailable = the upcaster sidecar is not serving ({ $cause }): retry
 upcast-rule = the upcast rule from { $source } failed: { $error }
+upcast-answer-keys = the upcaster answered other keys than the payloads asked: each page's sequence once, or one unsequenced payload for a lone one
 upcaster-duplicate = domain { $domain }'s upcaster has two typed rules from { $source }: the second never runs
 upcaster-out-of-order = domain { $domain }'s upcaster registers the rule from { $source } before the rule from { $produced_by }, which produces it
 upcaster-dead-end = domain { $domain }'s upcaster takes { $source } to { $ends_at }, which the domain does not decode
+state-type-mismatch = component { $component }'s state is { $type_name }, but its snapshot form is { $snapshot_type_name }: its snapshots would never be usable
 
 
 ## A process manager's compensation (markup::Compensation, angzarr decision 14.74).
 
-undo-targets-command = the undo of step "{ $step }" becomes { $command }, a command its destination may refuse
+undo-targets-command = the undo of step "{ $step }" becomes { $command }, a command its destination may refuse: an undo must become a fact

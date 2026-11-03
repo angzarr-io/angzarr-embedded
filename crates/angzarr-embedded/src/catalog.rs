@@ -6,9 +6,8 @@
 //! The pipeline's domain-blind steps ([`check`](super::check), the
 //! coordinator's) look a domain up here by `cover.domain` and see only
 //! what angzarr's coordinator sees: the state's `StateDescriptor` (its
-//! type URL and the conflict resolutions it supports), the configured
-//! resolutions, the rules version, a process manager's starting types, and
-//! what its payloads are upcast through. A policy and a projector are
+//! type's name), the rules version, a process manager's starting types,
+//! and what its payloads are upcast through. A policy and a projector are
 //! listed by their descriptors too: their names and the domains they read.
 //! Every entry is made from a `ComponentDescriptor`, generated for a Rust
 //! component (from its markup or its `Domain`) or answered by a child to
@@ -23,10 +22,11 @@ use std::fmt;
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 
 use angzarr_proto::v1::{
-    ComponentDescriptor, ComponentKind, ConflictResolution, Snapshot, StateDescriptor, Target,
+    component_descriptor, ComponentDescriptor, ComponentKind, PolicyDescriptor,
+    ProjectorDescriptor, Snapshot, StateDescriptor,
 };
 
-use super::misconfigured::{supported, validate_descriptor, Misconfigured};
+use super::misconfigured::{kind_of, validate_descriptor, Misconfigured};
 use super::payload::type_name;
 use super::upcast::UpcastPort;
 
@@ -35,8 +35,6 @@ use super::upcast::UpcastPort;
 struct Described {
     /// The state's descriptor.
     state: StateDescriptor,
-    /// The resolutions it lists, read when it is described.
-    supported: Vec<ConflictResolution>,
     /// The registered rules version.
     rules_version: String,
     /// A process manager's starting input types, by full name, as its
@@ -49,10 +47,6 @@ struct Described {
 struct Listed {
     /// What its descriptor says, shared with its [`Description`].
     described: Arc<RwLock<Described>>,
-    /// Its own configured resolution (`Domain::CONFLICT_RESOLUTION`).
-    component: Option<ConflictResolution>,
-    /// Its configured resolutions by command, by full type name.
-    by_command: BTreeMap<String, ConflictResolution>,
     /// What its incoming payloads are upcast through (decision 14.39): a
     /// typed domain's [`Upcaster`](super::Upcaster), or the port
     /// [`Registry::upcast_with`](super::Registry::upcast_with) gave.
@@ -68,15 +62,6 @@ impl Listed {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
-}
-
-/// The configuration a domain is listed with beside its descriptor: its
-/// own resolution and its resolutions by command, each held to what its
-/// state supports.
-#[derive(Default)]
-pub(crate) struct Configured {
-    pub(crate) component: Option<ConflictResolution>,
-    pub(crate) by_command: BTreeMap<String, ConflictResolution>,
 }
 
 /// A domain listed by its descriptor: what its coordinator holds to
@@ -101,8 +86,8 @@ impl fmt::Debug for Description {
 
 impl Description {
     /// List `descriptor` as the domain's in place of the one it was
-    /// registered by: its state, its resolutions, its rules version and a
-    /// process manager's starting types, all at once. Refused, the old
+    /// registered by: its state, its rules version and a process manager's
+    /// starting types, all at once. Refused, the old
     /// one kept, as registering a domain refuses a descriptor.
     pub fn replace(&self, descriptor: ComponentDescriptor) -> Result<(), Misconfigured> {
         let described = described(&self.domain, self.kind, descriptor)?;
@@ -115,33 +100,55 @@ impl Description {
 }
 
 /// What `descriptor` says of `domain`, a handler of `kind`, refused as
-/// [`validate_descriptor`] refuses it.
+/// [`validate_descriptor`] refuses it, and when it describes another kind
+/// or another domain than the one it lists again.
 fn described(
     domain: &str,
     kind: ComponentKind,
     descriptor: ComponentDescriptor,
 ) -> Result<Described, Misconfigured> {
-    // Held to the rules as the domain's kind: a new descriptor lists the
-    // domain again, never another kind of it.
-    let descriptor = ComponentDescriptor {
-        kind: kind as i32,
-        ..descriptor
-    };
     validate_descriptor(&descriptor)?;
-    let starting = (kind == ComponentKind::ProcessManager).then(|| {
-        // A listed type URL counts by the name it ends in.
-        (descriptor.starting_types.iter())
-            .map(|t| type_name(t).to_string())
-            .collect()
-    });
-    let state = descriptor.state.unwrap_or_default();
-    let supported = supported(domain, &state)?;
+    use component_descriptor::Kind;
+    let (named, state, starting) = match descriptor.kind {
+        Some(Kind::Aggregate(a)) if kind == ComponentKind::Aggregate => (a.domain, a.state, None),
+        Some(Kind::ProcessManager(pm)) if kind == ComponentKind::ProcessManager => (
+            pm.domain,
+            pm.state,
+            // A listed type URL counts by the name it ends in.
+            Some(
+                (pm.starting_types.iter())
+                    .map(|t| type_name(t).to_string())
+                    .collect(),
+            ),
+        ),
+        _ => {
+            return Err(Misconfigured::DescriptorNoKind {
+                component: descriptor.name,
+            })
+        }
+    };
+    if named != domain {
+        return Err(Misconfigured::DescriptorNoDomain {
+            component: descriptor.name,
+            kind: kind.as_str_name().to_string(),
+        });
+    }
     Ok(Described {
-        state,
-        supported,
+        state: state.unwrap_or_default(),
         rules_version: descriptor.rules_version,
         starting,
     })
+}
+
+/// The domain a domain's descriptor (an aggregate's or a process
+/// manager's) names; `None` for another kind.
+pub(crate) fn domain_of(descriptor: &ComponentDescriptor) -> Option<&str> {
+    use component_descriptor::Kind;
+    match &descriptor.kind {
+        Some(Kind::Aggregate(a)) => Some(&a.domain),
+        Some(Kind::ProcessManager(pm)) => Some(&pm.domain),
+        _ => None,
+    }
 }
 
 /// types.proto's default snapshot compatibility rule: strip ONE leading
@@ -215,46 +222,28 @@ pub struct Catalog {
 }
 
 impl Catalog {
-    /// List domain `descriptor.name` by its descriptor (its handler's
-    /// kind, `descriptor.kind`), configured as `configured`, its payloads
-    /// upcast through `upcast`. Refused when the name is taken (here or remote), without
-    /// a rules version or a state type, with a state whose resolutions are
-    /// not resolutions, or configured with one its state does not support;
+    /// List the domain `descriptor` names by its descriptor, its payloads
+    /// upcast through `upcast`. Refused when the domain is taken (here or
+    /// remote), and as [`validate_descriptor`] refuses the descriptor;
     /// refused, nothing is listed.
     pub(crate) fn list_domain(
         &mut self,
         descriptor: ComponentDescriptor,
-        configured: Configured,
         upcast: Option<Arc<dyn UpcastPort>>,
     ) -> Result<Description, Misconfigured> {
-        let domain = descriptor.name.clone();
-        let kind = descriptor.kind();
+        validate_descriptor(&descriptor)?;
+        let kind = kind_of(&descriptor);
+        let domain = domain_of(&descriptor)
+            .ok_or_else(|| Misconfigured::DescriptorNoKind {
+                component: descriptor.name.clone(),
+            })?
+            .to_string();
         self.free(&domain)?;
-        let described = described(&domain, kind, descriptor)?;
-        let unsupported = |command_type: Option<&str>, resolution| {
-            Err(Misconfigured::UnsupportedResolution {
-                domain: domain.clone(),
-                command_type: command_type.map(str::to_string),
-                resolution,
-            })
-        };
-        if let Some(resolution) = configured.component {
-            if !described.supported.contains(&resolution) {
-                return unsupported(None, resolution);
-            }
-        }
-        for (command_type, resolution) in &configured.by_command {
-            if !described.supported.contains(resolution) {
-                return unsupported(Some(command_type), *resolution);
-            }
-        }
-        let described = Arc::new(RwLock::new(described));
+        let described = Arc::new(RwLock::new(described(&domain, kind, descriptor)?));
         self.domains.insert(
             domain.clone(),
             Listed {
                 described: Arc::clone(&described),
-                component: configured.component,
-                by_command: configured.by_command,
                 upcast,
             },
         );
@@ -290,7 +279,7 @@ impl Catalog {
             .policies
             .iter()
             .chain(&self.projectors)
-            .find(|reader| reader.inputs.iter().any(|input| input.domain == domain));
+            .find(|reader| reads(reader, domain));
         if let Some(reader) = reader {
             return Err(Misconfigured::RemoteSource {
                 domain: domain.to_string(),
@@ -301,11 +290,23 @@ impl Catalog {
         Ok(())
     }
 
-    /// List policy `name`, of `source`'s events. Refused for a name listed
-    /// already and for a remote source.
-    pub(crate) fn list_policy(&mut self, name: &str, source: &str) -> Result<(), Misconfigured> {
-        let descriptor = self.reader(name, &[source], &self.policies)?;
-        self.policies.push(descriptor);
+    /// List policy `name`, of `source`'s events, for `output`. Refused for
+    /// a name listed already and for a remote source.
+    pub(crate) fn list_policy(
+        &mut self,
+        name: &str,
+        source: &str,
+        output: &str,
+    ) -> Result<(), Misconfigured> {
+        self.reader(name, &[source], &self.policies)?;
+        self.policies.push(ComponentDescriptor {
+            name: name.to_string(),
+            kind: Some(component_descriptor::Kind::Policy(PolicyDescriptor {
+                input_domain: source.to_string(),
+                output_domain: output.to_string(),
+            })),
+            ..ComponentDescriptor::default()
+        });
         Ok(())
     }
 
@@ -317,24 +318,30 @@ impl Catalog {
         sources: &[&str],
     ) -> Result<(), Misconfigured> {
         if sources.is_empty() {
-            return Err(Misconfigured::ProjectorNoInputDomain {
+            return Err(Misconfigured::NoInputDomain {
                 component: name.to_string(),
+                kind: ComponentKind::Projector.as_str_name().to_string(),
             });
         }
-        let descriptor = self.reader(name, sources, &self.projectors)?;
-        self.projectors.push(descriptor);
+        self.reader(name, sources, &self.projectors)?;
+        self.projectors.push(ComponentDescriptor {
+            name: name.to_string(),
+            kind: Some(component_descriptor::Kind::Projector(ProjectorDescriptor {
+                input_domains: sources.iter().map(|s| s.to_string()).collect(),
+            })),
+            ..ComponentDescriptor::default()
+        });
         Ok(())
     }
 
-    /// The descriptor of a reader of `sources`' events (a policy, a
-    /// projector), named `name`: its name and inputs. Refused when
-    /// `listed` holds its name, or a source is remote.
+    /// Refused when `listed` holds a reader (a policy, a projector) named
+    /// `name`, or one of `sources` is remote.
     fn reader(
         &self,
         name: &str,
         sources: &[&str],
         listed: &[ComponentDescriptor],
-    ) -> Result<ComponentDescriptor, Misconfigured> {
+    ) -> Result<(), Misconfigured> {
         if listed.iter().any(|reader| reader.name == name) {
             return Err(Misconfigured::ComponentRegistered {
                 component: name.to_string(),
@@ -346,15 +353,7 @@ impl Catalog {
                 component: name.to_string(),
             });
         }
-        Ok(ComponentDescriptor {
-            name: name.to_string(),
-            inputs: (sources.iter())
-                .map(|domain| Target {
-                    domain: domain.to_string(),
-                })
-                .collect(),
-            ..ComponentDescriptor::default()
-        })
+        Ok(())
     }
 
     /// Refused when `domain` is handled somewhere already: here or remote.
@@ -401,40 +400,6 @@ impl Catalog {
             .map(|listed| listed.described().state.clone())
     }
 
-    /// Whether `domain`'s state supports `resolution`. `false` for a domain
-    /// not registered.
-    pub fn supports(&self, domain: &str, resolution: ConflictResolution) -> bool {
-        self.domains
-            .get(domain)
-            .is_some_and(|listed| listed.described().supported.contains(&resolution))
-    }
-
-    /// The resolution for a command of type `command_type_url` to `domain`
-    /// whose book requested `requested` (angzarr's precedence, highest
-    /// first; the kernel passes the command's type after upcasting): the
-    /// book's request; the configuration for its command type; the
-    /// domain's; the built-in default, **COMMUTATIVE where the state
-    /// supports it, otherwise STRICT**. Never UNSPECIFIED. `None` for a
-    /// domain not registered.
-    pub fn resolve(
-        &self,
-        domain: &str,
-        command_type_url: &str,
-        requested: Option<ConflictResolution>,
-    ) -> Option<ConflictResolution> {
-        let listed = self.domains.get(domain)?;
-        let built_in = match self.supports(domain, ConflictResolution::Commutative) {
-            true => ConflictResolution::Commutative,
-            false => ConflictResolution::Strict,
-        };
-        Some(
-            requested
-                .or_else(|| listed.by_command.get(type_name(command_type_url)).copied())
-                .or(listed.component)
-                .unwrap_or(built_in),
-        )
-    }
-
     /// `domain`'s registered rules version: what its events are stamped
     /// with.
     pub fn rules_version(&self, domain: &str) -> Option<String> {
@@ -455,8 +420,8 @@ impl Catalog {
     }
 
     /// Whether a load may start from `snapshot` of a `domain` stream
-    /// (types.proto, the Snapshot region's validity): its state's type URL
-    /// is the registered state's, and its rules version passes the default
+    /// (docs/design/snapshots.md §3): its state's type, by the name its
+    /// type URL ends in, is the registered state's (decision 14.101), and its rules version passes the default
     /// compatibility rule against the registered one ([`compatible`]). A
     /// snapshot that fails is not offered: the stream is replayed from its
     /// events, never migrated.
@@ -469,7 +434,7 @@ impl Catalog {
             && snapshot
                 .state
                 .as_ref()
-                .is_some_and(|s| type_name(&s.type_url) == type_name(&described.state.type_url))
+                .is_some_and(|s| type_name(&s.type_url) == described.state.type_name)
     }
 
     /// The registered policies' names, in registration order: what a
@@ -507,6 +472,17 @@ impl Catalog {
             ComponentKind::Unspecified => None,
             _ => Some(domain.to_string()),
         }
+    }
+}
+
+/// Whether reader `descriptor` (a policy's or a projector's) reads
+/// `domain`'s events.
+fn reads(descriptor: &ComponentDescriptor, domain: &str) -> bool {
+    use component_descriptor::Kind;
+    match &descriptor.kind {
+        Some(Kind::Policy(policy)) => policy.input_domain == domain,
+        Some(Kind::Projector(projector)) => projector.input_domains.iter().any(|d| d == domain),
+        _ => false,
     }
 }
 

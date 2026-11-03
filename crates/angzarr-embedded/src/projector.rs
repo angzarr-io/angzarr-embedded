@@ -178,7 +178,7 @@ impl Caught {
 impl<P: ProjectorHandler> CatchUp<P> {
     /// `projector` over the streams of `sources`, its positions held in
     /// memory. Refused for no source, as registering one is
-    /// ([`Misconfigured::ProjectorNoInputDomain`]).
+    /// ([`Misconfigured::NoInputDomain`]).
     pub fn new(sources: &[&str], projector: P) -> Result<CatchUp<P>, Misconfigured> {
         Self::kept(sources, projector, Record::Held(HeldRecord::default()))
     }
@@ -191,8 +191,11 @@ impl<P: ProjectorHandler> CatchUp<P> {
 
     fn kept(sources: &[&str], projector: P, record: Record) -> Result<CatchUp<P>, Misconfigured> {
         if sources.is_empty() {
-            return Err(Misconfigured::ProjectorNoInputDomain {
+            return Err(Misconfigured::NoInputDomain {
                 component: projector.name().to_string(),
+                kind: angzarr_proto::v1::ComponentKind::Projector
+                    .as_str_name()
+                    .to_string(),
             });
         }
         Ok(CatchUp {
@@ -326,7 +329,8 @@ impl<P: ProjectorHandler> CatchUp<P> {
             next_sequence: slice.next_sequence,
             snapshot: None,
         };
-        if let Err(error) = self.projector.dispatch(&book).await {
+        let request = angzarr_router::hpb::ProjectRequest { events: Some(book) };
+        if let Err(error) = self.projector.dispatch(&request).await {
             caught.failures.push((cover, KernelError::Router(error)));
             return Ok(());
         }
@@ -439,11 +443,13 @@ impl<P: ProjectorHandler> CatchUp<P> {
             .filter(|cover| ours(cover) && !listed.contains(&key(cover)))
             .collect();
         for cover in gone {
-            let book = EventBook {
-                cover: Some(cover.clone()),
-                ..EventBook::default()
+            let request = angzarr_router::hpb::ProjectRequest {
+                events: Some(EventBook {
+                    cover: Some(cover.clone()),
+                    ..EventBook::default()
+                }),
             };
-            if let Err(error) = self.projector.dispatch(&book).await {
+            if let Err(error) = self.projector.dispatch(&request).await {
                 caught.failures.push((cover, KernelError::Router(error)));
                 continue;
             }

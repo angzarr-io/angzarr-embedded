@@ -1,18 +1,19 @@
 //! Where the kernel meets angzarr-router: the router owns business
-//! dispatch (handlers, typed refusals and the refusal path); this module turns what the router answers into the kernel's terms.
+//! dispatch (handlers, typed refusals, a decision's continuations); this
+//! module turns what the router answers into the kernel's terms.
 //!
-//! - The router's answers keep their codes: a spec key (a `RouterReason`,
-//!   or a coordinator key the kernel answers in the router's shape) is the
-//!   kernel's code too, verbatim, with its args, so
+//! - The router's answers keep their codes: a spec key (an
+//!   `AngzarrReason`, the router's or the kernel's own, answered in the
+//!   router's shape) is the kernel's code too, verbatim, with its args, so
 //!   [`KernelError::Router`](super::KernelError::Router) needs no table
 //!   (decision 14.60).
-//! - [`Rejected`]: a domain's refusal, as the caller receives it: the
-//!   refusing handler's code and args, and its typed refusal object.
+//! - [`Rejected`]: a domain's typed refusal, as the caller receives it
+//!   (decision 14.95: typed refusals only): its key and args, its typed
+//!   refusal object and the business status it travelled as.
 //! - The table a typed [`Domain`] is dispatched by: the router's
 //!   `DomainDispatch` over the domain's state, folding with the domain's
-//!   own `apply`, with the state's codec,
-//!   resolving COMMUTATIVE by the state's conflict units; the domain's
-//!   handlers are registered on it.
+//!   own `apply`, with the state's codec; the domain's handlers are
+//!   registered on it.
 
 use std::cell::RefCell;
 use std::fmt;
@@ -20,9 +21,9 @@ use std::future::Future;
 use std::sync::Arc;
 
 use angzarr_diagnostic::{Arg, Diagnostic, Report};
-use angzarr_proto::v1::ConflictResolution;
 use angzarr_router::domain::DomainDispatch;
 use angzarr_router::error::{BusinessStatus, CodedError, GrpcCode, HandlerError};
+use angzarr_router::hpb;
 use angzarr_router::rebuild::{FoldFailure, Rebuilder};
 use angzarr_router::PageContext;
 use prost::Message;
@@ -30,26 +31,24 @@ use prost_types::Any;
 
 use super::domain::{Domain, State};
 use super::error::PayloadError;
-use super::markup::Failed;
 use super::payload::{type_name, Payload};
 
-/// A domain's refusal of a command, as its caller receives it (angzarr's
-/// business rejection, [`is_rejection`]): the code and args of the
-/// refusal the handler made (or the router's, a process manager's
-/// `COORDINATOR_REASON_PM_NO_INSTANCE`), and the typed refusal object it carries, if any.
-/// The refusing domain recorded nothing.
+/// A domain's typed refusal of a command, as its caller receives it
+/// (decision 14.95): `ANGZARR_REASON_COMMAND_REFUSED` and its
+/// `refusal_type`, the typed refusal object (one of the command's
+/// `refuses` types, or the coordinator's `ExpectedSequenceMismatch`), and
+/// the business status it went out under. The refusing domain recorded
+/// nothing.
 ///
-/// A domain's handler in this process refused with a value, its
-/// `Domain::Rejection` (a marked-up domain's
-/// [`Rejection`](super::markup::Rejection)), which is kept beside the
-/// report, to match as a value ([`Rejected::rejection`]); a refusal from
-/// another process, or the router's on a domain's behalf, is its code and
-/// args alone. Two rejections are equal when their reports, refusal
-/// objects and statuses are.
+/// A domain's handler in this process refused with a value (a marked-up
+/// domain's `Refuses` choice, a hand-written domain's own), which is kept
+/// beside the report, to match as a value ([`Rejected::rejection`]); a
+/// refusal from another process is its object alone. Two rejections are
+/// equal when their reports, refusal objects and statuses are.
 #[derive(Clone, Debug)]
 pub struct Rejected {
     report: Report,
-    refusal: Option<Any>,
+    refusal: Any,
     status: BusinessStatus,
     kept: Option<Kept>,
 }
@@ -60,7 +59,7 @@ impl PartialEq for Rejected {
     }
 }
 
-/// A domain's refusal as its handler made it: any `Domain::Rejection`.
+/// A domain's refusal as its handler made it: any value it offered.
 pub(crate) type Typed = Arc<dyn std::any::Any + Send + Sync>;
 
 /// A [`Typed`] refusal, kept in a [`Rejected`]: shown as `..`, since its
@@ -75,23 +74,37 @@ impl fmt::Debug for Kept {
 }
 
 impl Rejected {
-    /// The router's rejection, in the kernel's terms: under the key it
-    /// went out under, the handler's own or the spec's (a typed refusal's
-    /// ROUTER_REASON_COMMAND_REFUSED), its metadata the args.
-    pub(crate) fn of(error: &CodedError) -> Rejected {
+    /// The router's answer `error`, if it is a typed refusal (a business
+    /// status with its typed object; [`CodedError::as_refusal`]), in the
+    /// kernel's terms: under the key it went out under, its metadata the
+    /// args. `None` for anything else.
+    pub(crate) fn of(error: &CodedError) -> Option<Rejected> {
+        let refusal = error.refusal.as_deref()?.clone();
+        let status = BusinessStatus::try_from(error.grpc).ok()?;
         let report = error
             .extras
             .iter()
             .fold(Report::new(error.code.clone()), |report, (name, value)| {
                 report.arg(name.clone(), value.as_str())
             });
-        Rejected {
+        Some(Rejected {
             report,
-            refusal: error.refusal.as_deref().cloned(),
-            status: BusinessStatus::try_from(error.grpc)
-                .unwrap_or(BusinessStatus::FailedPrecondition),
+            refusal,
+            status,
             kept: None,
-        }
+        })
+    }
+
+    /// The coordinator's own typed refusal (decisions 14.93 and 14.94): a
+    /// command's expected sequence that is not the head it loaded,
+    /// `ExpectedSequenceMismatch { expected, head }`, FAILED_PRECONDITION.
+    pub(crate) fn mismatch(expected: u64, head: u64) -> Rejected {
+        let object = angzarr_proto::v1::ExpectedSequenceMismatch { expected, head };
+        let error = CodedError::refused(
+            BusinessStatus::FailedPrecondition,
+            super::payload::pack(&object),
+        );
+        Rejected::of(&error).unwrap_or_else(|| unreachable!("a typed refusal is one"))
     }
 
     /// The same rejection, keeping `typed`, the refusal its handler made.
@@ -103,26 +116,17 @@ impl Rejected {
     }
 
     /// The domain's own refusal, as its handler in this process made it,
-    /// if it is an `R`: its `Domain::Rejection`, matched as a value. `None`
-    /// for a refusal from another process or the router's (code and args
-    /// alone: [`Rejected::report`]), and for any other type.
+    /// if it is an `R`. `None` for a refusal from another process or the
+    /// coordinator's (its object alone: [`Rejected::refusal_object`]), and
+    /// for any other type.
     pub fn rejection<R: std::any::Any>(&self) -> Option<&R> {
         let kept: &(dyn std::any::Any + Send + Sync) = &*self.kept.as_ref()?.0;
         kept.downcast_ref::<R>()
     }
 
-    /// The refusal as a report: its code and args.
+    /// The refusal as a report: its key and args.
     pub fn report(&self) -> &Report {
         &self.report
-    }
-
-    /// The refusal as the wire carries it: the refusing handler's key (a
-    /// typed refusal's ROUTER_REASON_COMMAND_REFUSED), and its args.
-    pub(crate) fn wire(&self) -> angzarr_proto::v1::Diagnostic {
-        angzarr_proto::v1::Diagnostic {
-            code: self.report.code().to_string(),
-            args: flat_args(&self.report).into_iter().collect(),
-        }
     }
 
     /// The business status the refusal went out under.
@@ -130,31 +134,28 @@ impl Rejected {
         self.status
     }
 
-    /// As a refused policy receives it, angzarr's `RefusalResponse`: the
-    /// typed refusal object, or an untyped refusal as the wire carries it
-    /// ([`Rejected::wire`]): the key it went out under, the handler's own
-    /// or the spec's, and its args.
-    pub fn response(&self) -> angzarr_proto::v1::RefusalResponse {
-        use angzarr_proto::v1::refusal_response::Reason;
-        angzarr_proto::v1::RefusalResponse {
-            reason: Some(match &self.refusal {
-                Some(object) => Reason::Refusal(object.clone()),
-                None => Reason::Diagnostic(self.wire()),
-            }),
+    /// The refusal as a refused policy's Translate is handed it
+    /// (`io.angzarr.handler.v1.Refusal`): its status and its typed object.
+    pub fn as_refusal(&self) -> hpb::Refusal {
+        hpb::Refusal {
+            status: angzarr_proto::v1::RefusalStatus::from(self.status) as i32,
+            typed: Some(self.refusal.clone()),
         }
     }
 
-    /// The typed refusal object, packed, if the handler refused with one.
-    pub fn refusal_object(&self) -> Option<&Any> {
-        self.refusal.as_ref()
+    /// The refusal as the router carries it: its status, key and object.
+    pub fn as_coded(&self) -> CodedError {
+        CodedError::refused(self.status, self.refusal.clone())
     }
 
-    /// The typed refusal object, as `T`, if the handler refused with one
-    /// and it is a `T`.
+    /// The typed refusal object, packed.
+    pub fn refusal_object(&self) -> &Any {
+        &self.refusal
+    }
+
+    /// The typed refusal object, as `T`, if it is one.
     pub fn refusal<T: super::markup::DomainMessage>(&self) -> Option<T> {
-        super::markup::decode_message(self.refusal.as_ref()?)
-            .ok()
-            .flatten()
+        super::markup::decode_message(&self.refusal).ok().flatten()
     }
 }
 
@@ -174,48 +175,34 @@ impl Diagnostic for Rejected {
     }
 }
 
-/// Whether the router's `error` is a business refusal: its status is of
-/// the business set (FAILED_PRECONDITION, INVALID_ARGUMENT, NOT_FOUND,
-/// ALREADY_EXISTS, OUT_OF_RANGE, PERMISSION_DENIED), which decides the
-/// class (decision 14.37). The router answers its own errors on malformed
-/// input INTERNAL, so a refusal is a handler's, or the router's on its
-/// behalf (a typed refusal's ROUTER_REASON_COMMAND_REFUSED, a process manager's
-/// COORDINATOR_REASON_PM_NO_INSTANCE).
-pub(crate) fn is_rejection(error: &CodedError) -> bool {
-    super::error::class(error.grpc as i32) == super::error::Class::BusinessFatal
-}
-
-/// Whether the router's `error`, which the kernel keeps as
-/// [`KernelError::Router`](super::KernelError::Router) (never a refusal,
-/// [`is_rejection`]: that is [`Rejected`]), is a fatal bug ([`class`](super::class):
-/// INTERNAL, UNKNOWN, DATA_LOSS), never a policy's failure
-/// ([`POLICY_FAILED`]). A handler's bug is ROUTER_REASON_UNHANDLED_HANDLER_ERROR, its
-/// own code and args its `cause`; the router's own errors on malformed
-/// input are bugs too. The kernel dead-letters it by its code and args at
-/// once, and a policy's step moves the policy's position past it unless
-/// the kernel says to stay ([`OnPolicyBug`](super::OnPolicyBug)). A
-/// retryable bug is retried first, then dead-lettered.
+/// Whether the router's `error` is a fatal bug ([`class`](super::class):
+/// INTERNAL, UNKNOWN, DATA_LOSS). A handler's bug is
+/// ANGZARR_REASON_UNHANDLED_HANDLER_ERROR, its own code and args its
+/// `cause`; the router's own errors on malformed input are bugs too. The
+/// kernel dead-letters it by its code and args at once, and a policy's step
+/// moves the policy's position past it unless the kernel says to stay
+/// ([`OnPolicyBug`](super::OnPolicyBug)). A retryable bug is retried
+/// first, then dead-lettered.
 pub(crate) fn is_handler_fault(error: &CodedError) -> bool {
-    error.code != POLICY_FAILED
-        && super::error::class(error.grpc as i32) == super::error::Class::BugFatal
+    super::error::class(error.grpc as i32) == super::error::Class::BugFatal
 }
 
-/// A handler's refusal `rejection`, with its typed refusal object, as the
-/// router carries it: a business rejection (FAILED_PRECONDITION). A typed
-/// refusal is keyed ROUTER_REASON_COMMAND_REFUSED, its object's type as `refusal_type`
-/// and the object beside (decision 14.37); a refusal without one under its
-/// own code, its args flattened as metadata.
+/// A hand-written handler's typed refusal (decision 14.95): `refusal`, one
+/// of the command's `refuses` types, packed, under `status`, the business
+/// status its message declares, as the router carries it
+/// (`ANGZARR_REASON_COMMAND_REFUSED`, the object's type as
+/// `refusal_type` and the object in the details).
 ///
-/// The rejection itself is kept for the kernel's caller, typed
-/// ([`Rejected::rejection`]), when the kernel dispatched the handler in
-/// this process.
-pub fn rejection<R: Diagnostic + Send + Sync + 'static>(
+/// `rejection`, the refusal as the handler made it, is kept for the
+/// kernel's caller, typed ([`Rejected::rejection`]), when the kernel
+/// dispatched the handler in this process.
+pub fn rejection<R: Send + Sync + 'static>(
     rejection: R,
-    refusal: Option<Any>,
+    status: BusinessStatus,
+    refusal: Any,
 ) -> HandlerError {
-    let refused = refused(&rejection, refusal, BusinessStatus::FailedPrecondition);
     offer(rejection);
-    refused
+    HandlerError::Coded(CodedError::refused(status, refusal))
 }
 
 thread_local! {
@@ -279,93 +266,38 @@ impl Drop for Catch<'_> {
     }
 }
 
-/// A marked-up handler's failure, as the router carries it: a refusal
-/// under its status ([`refused`]), an immediate return (ABORTED under its
-/// own code, angzarr-router's `CodedError::immediate`), a fatal bug
-/// ([`bug`]), or a retryable bug under the status it picked
-/// (ROUTER_REASON_UNHANDLED_HANDLER_ERROR, its cause as a fatal bug's,
-/// `CodedError::retryable_bug`).
-pub(crate) fn failed<R: Diagnostic + Send + Sync + 'static>(
-    failed: Failed<super::markup::Rejection<R>>,
-) -> HandlerError {
-    match failed {
-        Failed::Rejected { rejection, status } => {
-            let refused = refused(&rejection, rejection.refusal().cloned(), status);
-            offer(rejection);
-            refused
-        }
-        Failed::Immediate(report) => {
-            HandlerError::Coded(CodedError::immediate(report.code(), flat_args(&report)))
-        }
-        Failed::Bug(report) => bug(&report),
-        Failed::RetryableBug { status, report } => HandlerError::Coded(CodedError::retryable_bug(
-            status,
-            report.code(),
-            flat_args(&report),
-        )),
-    }
-}
-
 /// A handler's bug, as the router carries it (decision 14.37): INTERNAL
-/// ROUTER_REASON_UNHANDLED_HANDLER_ERROR, the bug's code as its `cause` and its args,
-/// flattened, as `cause.<arg>`; never a refusal.
+/// ANGZARR_REASON_UNHANDLED_HANDLER_ERROR, the bug's code as its `cause`
+/// and its args, flattened, as `cause.<arg>`; never a refusal.
 pub(crate) fn bug(bug: &dyn Diagnostic) -> HandlerError {
     HandlerError::Coded(CodedError::bug(bug.code(), flat_args(bug)))
 }
 
-/// A handler's refusal `rejection` under `status`, with its typed refusal
-/// object: a typed refusal keyed ROUTER_REASON_COMMAND_REFUSED, its object's type as
-/// `refusal_type` and the object beside; a refusal without one under its
-/// own code, its args flattened as metadata. Either goes out under
-/// `status`.
-pub(crate) fn refused(
-    rejection: &dyn Diagnostic,
-    refusal: Option<Any>,
-    status: BusinessStatus,
-) -> HandlerError {
-    HandlerError::Coded(match refusal {
-        Some(object) => CodedError {
-            grpc: status.into(),
-            ..CodedError::refused(object)
-        },
-        None => CodedError::rejection(status, rejection.code(), flat_args(rejection)),
-    })
-}
-
 /// A spec key the kernel raises (decision 14.65): its full name, the code
-/// it travels as, and the status its `(io.angzarr.v1.reason)` option
-/// declares, generated into angzarr-proto. Core's three key enums are
-/// keys; a key travels under its declared status and no other.
+/// it travels as, and how its `(io.angzarr.v1.reason)` option says it
+/// surfaces, generated into angzarr-proto (or a transport's crate). A key
+/// travels under its declared status and no other.
 pub trait SpecKey: Copy {
     /// The key: its value's full name, prefix included.
     fn key(self) -> &'static str;
-    /// The status its option declares.
-    fn status(self) -> angzarr_proto::v1::ReasonStatus;
+    /// How its option says it surfaces.
+    fn surface(self) -> Option<angzarr_proto::ReasonSurface>;
     /// The gRPC code it travels with: its declared status's
-    /// ([`GrpcCode::of_status`]). A readiness key never travels as a
+    /// ([`GrpcCode::of_surface`]). A readiness key never travels as a
     /// status, so it has none.
     fn grpc(self) -> Option<GrpcCode> {
-        GrpcCode::of_status(self.status())
+        GrpcCode::of_surface(self.surface())
     }
 }
 
-macro_rules! spec_key {
-    ($($enum:ty),*) => {$(
-        impl SpecKey for $enum {
-            fn key(self) -> &'static str {
-                self.as_str_name()
-            }
-            fn status(self) -> angzarr_proto::v1::ReasonStatus {
-                <$enum>::status(self)
-            }
-        }
-    )*};
+impl SpecKey for angzarr_proto::v1::AngzarrReason {
+    fn key(self) -> &'static str {
+        self.as_str_name()
+    }
+    fn surface(self) -> Option<angzarr_proto::ReasonSurface> {
+        angzarr_proto::v1::AngzarrReason::surface(self)
+    }
 }
-spec_key!(
-    angzarr_proto::v1::RouterReason,
-    angzarr_proto::v1::HostReason,
-    angzarr_proto::v1::CoordinatorReason
-);
 
 /// The spec key `key` with its args `extras`, in the router's shape, under
 /// the status its option declares (decision 14.65). A readiness key is
@@ -384,10 +316,10 @@ pub fn spec_coded(
 }
 
 /// One of angzarr-embedded's own failures, INTERNAL under its own `code`
-/// ([`POLICY_FAILED`], an upcast's failure): a spec key is
-/// [`spec_coded`]'s instead. Never a
+/// (an upcast's failure): a spec key is [`spec_coded`]'s instead. Never a
 /// handler's bug, which angzarr-router's `CodedError::bug` answers as
-/// ROUTER_REASON_UNHANDLED_HANDLER_ERROR with the handler's code as its cause.
+/// ANGZARR_REASON_UNHANDLED_HANDLER_ERROR with the handler's code as its
+/// cause.
 pub(crate) fn internal(
     code: &str,
     extras: impl IntoIterator<Item = (String, String)>,
@@ -399,16 +331,6 @@ pub(crate) fn internal(
         refusal: None,
     }
 }
-
-/// The router's code for a policy's own failure (its `on_event`'s error, a
-/// marked event that does not decode, or its source's `#[on_refused]`
-/// handler's error): the kernel's
-/// [`StepError::PolicyFailed`](super::StepError::PolicyFailed), a defect.
-pub(crate) const POLICY_FAILED: &str = "ANGZARR_EMBEDDED_POLICY_FAILED";
-
-/// The metadata key a policy's failure carries its own code under: no arg
-/// name has a hyphen, so it never meets one of the failure's args.
-const POLICY_REASON: &str = "policy-reason";
 
 /// A diagnostic's args, flattened as angzarr carries them (decision
 /// 14.37): each by its name, a wrapped cause as its code under the arg's
@@ -442,51 +364,24 @@ pub(crate) fn diagnostic(diagnostic: &dyn Diagnostic) -> angzarr_proto::v1::Diag
     }
 }
 
-/// A policy's `failure`, as the router carries it: INTERNAL under
-/// [`POLICY_FAILED`], the failure's code and flattened args as metadata.
-pub(crate) fn policy_failed(failure: &dyn Diagnostic) -> HandlerError {
-    let extras = std::iter::once((POLICY_REASON.to_string(), failure.code().to_string()))
-        .chain(flat_args(failure));
-    HandlerError::Coded(internal(POLICY_FAILED, extras))
-}
-
-/// The policy's failure the router carries, if `error` is one: its code
-/// and args, as [`policy_failed`] packed them.
-pub(crate) fn policy_failure(error: &CodedError) -> Option<Report> {
-    if error.code != POLICY_FAILED {
-        return None;
-    }
-    let reason = error.extras.get(POLICY_REASON).cloned().unwrap_or_default();
-    Some(
-        error
-            .extras
-            .iter()
-            .filter(|(name, _)| name.as_str() != POLICY_REASON)
-            .fold(Report::new(reason), |report, (name, value)| {
-                report.arg(name.clone(), value.as_str())
-            }),
-    )
-}
-
-/// The type URL of the page a fact handler that records no event answers
-/// with: the router's fact record always holds one payload. Never written
-/// and never folded.
-pub const NOTHING: &str = "/angzarr_embedded.next.Nothing";
-
-/// Whether `page` is a fact's record of nothing ([`NOTHING`]).
-pub(crate) fn is_nothing(page: &angzarr_proto::v1::EventPage) -> bool {
-    page.payload.as_ref().is_some_and(|p| p.type_url == NOTHING)
+/// The router's `error` as a report: its key, its args.
+pub(crate) fn report(error: &CodedError) -> Report {
+    error
+        .extras
+        .iter()
+        .fold(Report::new(error.code.clone()), |report, (name, value)| {
+            report.arg(name.clone(), value.as_str())
+        })
 }
 
 // ------------------------------------------------------------- the table
 
 /// The router's table for typed domain `D`, before its handlers: named
 /// `D::NAME` (a process manager's if `process_manager`), folding each
-/// event, upcast by the kernel before it is handed over, through `D::apply`,
-/// answering `D::RULES_VERSION`, with the state's codec when it has a snapshot form
-/// (a delivered starting state restored onto a fresh state from `fresh`,
-/// and the state every answer carries), resolving COMMUTATIVE by
-/// [`State::changed`] when the state supports it.
+/// event, upcast by the kernel before it is handed over, through
+/// `D::apply`, answering `D::RULES_VERSION`, with the state's codec when it
+/// has a snapshot form (a delivered starting state restored onto a fresh
+/// state from `fresh`, and the state every answer carries).
 pub(crate) fn table<D: Domain>(
     fresh: Arc<dyn Fn() -> D::State + Send + Sync>,
     process_manager: bool,
@@ -496,15 +391,14 @@ pub(crate) fn table<D: Domain>(
     let mut rebuilder = Rebuilder::new(move || fresh())
         .with_fold(move |state, pages, cover| {
             for (index, page) in pages.iter().enumerate() {
-                if is_nothing(page) {
+                let Some(any) = angzarr_router::page_event(page) else {
                     continue;
-                }
+                };
                 let failed = |cause: &dyn Diagnostic| FoldFailure {
                     page_index: Some(index),
                     cause: Some(diagnostic(cause)),
                 };
-                let any = page.payload.clone().unwrap_or_default();
-                let event = D::Event::from_any(&any).map_err(|e| failed(&e))?;
+                let event = D::Event::from_any(any).map_err(|e| failed(&e))?;
                 let page = PageContext {
                     cover,
                     sequence: page.sequence,
@@ -541,27 +435,7 @@ pub(crate) fn table<D: Domain>(
         true => DomainDispatch::process_manager(D::NAME, D::NAME, rebuilder),
         false => DomainDispatch::new(D::NAME, D::NAME, rebuilder),
     };
-    let base = base.with_rules_version(D::RULES_VERSION);
-    let commutative = <D::State as State>::descriptor().options.is_some_and(|o| {
-        o.conflict_resolutions
-            .contains(&(ConflictResolution::Commutative as i32))
-    });
-    match commutative {
-        true => base.with_commutative_via(
-            |state: &D::State| Ok(state.clone()),
-            |state: &mut D::State, image: &D::State| {
-                *state = image.clone();
-                Ok(())
-            },
-            |before: &D::State, after: &D::State| {
-                Ok(D::State::changed(before, after)
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect())
-            },
-        ),
-        false => base,
-    }
+    base.with_rules_version(D::RULES_VERSION)
 }
 
 #[cfg(test)]

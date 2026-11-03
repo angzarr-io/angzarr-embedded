@@ -2,8 +2,8 @@
 //! again as the child. The host launches it as
 //! `<test binary> --exact fake_child::entry --nocapture` with
 //! `ANGZARR_FAKE_CHILD` set to a mode; [`entry`] is a no-op in every other
-//! run. libtest's own "running 1 test" line comes before the handshake on
-//! stdout, as a chatty child's would.
+//! run. libtest's own "running 1 test" line is on its stdout, as a chatty
+//! child's would be: the host never reads it.
 //!
 //! The child serves stub `CommandHandlerService` and `ComponentService`s
 //! on `ANGZARR_SOCKET`, describing itself as `ANGZARR_FAKE_NAME` (an
@@ -29,10 +29,10 @@
 //! - `process_manager`: a process manager whose starting types are
 //!   `ANGZARR_FAKE_STARTING`'s, comma-separated, handling as above;
 //! - `policy`: a `PolicyService` from `ANGZARR_FAKE_INPUT` to
-//!   `ANGZARR_FAKE_TARGET`, answering a `...Seated` event with
+//!   `ANGZARR_FAKE_TARGET`, reacting to a `...Seated` event with
 //!   [`HOLD`] and a `...SeatedBig` one with [`HOLD_TOO_MUCH`], each to the
-//!   event's root; and a refusal with the fact [`SEAT_RELEASED`], its value
-//!   the refused command's type URL;
+//!   event's root; and translating a refusal into the fact
+//!   [`SEAT_RELEASED`], its value the refused command's type URL;
 //! - `projector`: a `ProjectorService` of `ANGZARR_FAKE_INPUT`'s events,
 //!   failing an event by its type URL's last segment: `...Break` INTERNAL
 //!   (`PROJECTOR_BROKE`), `...Refuse` FAILED_PRECONDITION
@@ -44,14 +44,16 @@
 //! call: `handle <type>` per event, `refused <typed refusal type URL>`.
 //!
 //! - `upcaster`: an upcaster sidecar (decision 14.39), serving
-//!   `UpcasterService` and gRPC health (no descriptor): a page whose
-//!   payload is `/test.table.v0.Sit` comes back `/test.table.v1.Seat`;
+//!   `UpcasterService` and gRPC health (no descriptor), answering each
+//!   page keyed by its sequence: a page whose event is
+//!   `/test.table.v0.Sit` comes back `/test.table.v1.Seat`;
 //!   `...v0.Die` exits with code 7 mid-call; `...v0.Bad` is INTERNAL
 //!   (`UPCAST_RULE_BROKE`); any other passes through.
 //!
-//! Every kind serves gRPC health, as the child protocol says a child must:
-//! SERVING, or `ANGZARR_FAKE_HEALTH`'s ([`health`]: `none` serves no
-//! health at all); given `ANGZARR_FAKE_CONTROL`, a Unix socket's path, it
+//! Every kind serves gRPC health on `ANGZARR_SOCKET`, as the child protocol
+//! says a child must (its readiness: there is no handshake line): SERVING,
+//! or `ANGZARR_FAKE_HEALTH`'s ([`health`]: `none` serves no health at
+//! all); given `ANGZARR_FAKE_CONTROL`, a Unix socket's path, it
 //! connects there as it starts, and each byte read sets its status: `1`
 //! SERVING, any other NOT_SERVING; and it writes `h` there when a
 //! `...Hang` command reaches it, so a test knows the call is in flight.
@@ -77,7 +79,7 @@ use tokio_stream::wrappers::UnixListenerStream;
 use tonic::{Request, Response, Status};
 
 use crate::config::{ComponentConfig, HostConfig, Supervision};
-use crate::handshake::SOCKET_ENV;
+use crate::host::SOCKET_ENV;
 use angzarr_proto_component::v1::command_handler_service_server::{
     CommandHandlerService, CommandHandlerServiceServer,
 };
@@ -92,6 +94,7 @@ use angzarr_proto_component::v1::upcaster_service_server::{
     UpcasterService, UpcasterServiceServer,
 };
 use angzarr_proto_component::v1::DescribeRequest;
+use angzarr_router::hpb;
 use tonic_health::pb::health_check_response::ServingStatus;
 use tonic_health::pb::health_server::{Health, HealthServer};
 use tonic_health::pb::{HealthCheckRequest, HealthCheckResponse};
@@ -114,10 +117,13 @@ pub(crate) const INPUT_ENV: &str = "ANGZARR_FAKE_INPUT";
 pub(crate) const TARGET_ENV: &str = "ANGZARR_FAKE_TARGET";
 /// The file a policy or projector logs its calls to.
 pub(crate) const LOG_ENV: &str = "ANGZARR_FAKE_LOG";
-/// An upcaster's health as it starts: [`health`]'s; SERVING when unset.
+/// Its health as it starts: [`health`]'s; SERVING when unset.
 pub(crate) const HEALTH_ENV: &str = "ANGZARR_FAKE_HEALTH";
-/// The Unix socket an upcaster reads its health from, byte by byte.
+/// The Unix socket a child reads its health from, byte by byte.
 pub(crate) const CONTROL_ENV: &str = "ANGZARR_FAKE_CONTROL";
+/// The domain an aggregate or process manager describes; its described
+/// name when unset.
+pub(crate) const DOMAIN_ENV: &str = "ANGZARR_FAKE_DOMAIN";
 /// A path: while a file is there, a health `Check` never answers.
 pub(crate) const CHECK_HANG_ENV: &str = "ANGZARR_FAKE_CHECK_HANG";
 
@@ -130,7 +136,7 @@ pub(crate) const HUNG: u8 = b'h';
 static CONTROL: std::sync::OnceLock<tokio::sync::Mutex<tokio::net::unix::OwnedWriteHalf>> =
     std::sync::OnceLock::new();
 
-/// An upcaster's health as it starts, besides SERVING.
+/// A child's health as it starts, besides SERVING.
 pub(crate) mod health {
     /// NOT_SERVING.
     pub(crate) const NOT_SERVING: &str = "not-serving";
@@ -159,37 +165,34 @@ pub(crate) const SEAT_RELEASED: &str = "/test.table.v1.SeatReleased";
 
 /// The fake's behaviours.
 pub(crate) mod mode {
-    /// Handshake, then serve.
+    /// Serve on the socket the host chose.
     pub(crate) const SERVE: &str = "serve";
-    /// Lines of chatter on stdout, then the handshake, then serve.
+    /// Lines of chatter on stdout, then serve.
     pub(crate) const NOISY: &str = "noisy";
-    /// Never handshake; wait for stdin's end.
+    /// Never listen on the path; wait for stdin's end.
     pub(crate) const SILENT: &str = "silent";
-    /// A v2 handshake; then wait for stdin's end.
-    pub(crate) const MALFORMED: &str = "malformed";
+    /// Exit with status 3 at once, before any health Check is answered.
+    pub(crate) const EXITS: &str = "exits";
     /// Serve, and ignore stdin's end: SIGTERM (its default action) stops
     /// it.
     pub(crate) const STUBBORN: &str = "stubborn";
     /// Serve, and ignore stdin's end and SIGTERM: only SIGKILL stops it.
     pub(crate) const DEAF: &str = "deaf";
-    /// Handshake, close stdout, then serve: the host sees stdout's end
-    /// while the child lives on.
+    /// Close stdout, then serve: the host sees stdout's end while the
+    /// child lives on.
     pub(crate) const CLOSES_STDOUT: &str = "closes-stdout";
     /// Serve; on stdin's end, exit only once no health watch is open, as a
     /// server letting its calls in flight finish does.
     pub(crate) const GRACEFUL: &str = "graceful";
-    /// Handshake, then write more on stdout than a pipe holds
+    /// Write more on stdout than a pipe holds
     /// ([`FLOOD_BYTES`](super::FLOOD_BYTES)), then serve: it serves only
     /// once the host drains its stdout.
     pub(crate) const FLOOD: &str = "flood";
 }
 
-/// What the flooding fake writes on stdout after its handshake: four times
+/// What the flooding fake writes on stdout before it listens: four times
 /// Linux's default pipe capacity.
 pub(crate) const FLOOD_BYTES: usize = 4 * 65_536;
-
-/// The v2 line the malformed fake prints.
-pub(crate) const MALFORMED_LINE: &str = "angzarr-handshake v2 unix:/tmp/angzarr-fake.sock";
 
 /// The typed refusal a `...Refuse` command is answered with.
 pub(crate) fn refusal() -> Any {
@@ -227,6 +230,7 @@ pub(crate) fn domain(name: &str, described: &str, mode: &str) -> ComponentConfig
         env: BTreeMap::from([
             (MODE_ENV.to_string(), mode.to_string()),
             (NAME_ENV.to_string(), described.to_string()),
+            (DOMAIN_ENV.to_string(), name.to_string()),
         ]),
         expose: Default::default(),
     }
@@ -289,10 +293,7 @@ fn entry() {
     }
     match mode.as_str() {
         mode::SILENT => park(),
-        mode::MALFORMED => {
-            say(MALFORMED_LINE);
-            park()
-        }
+        mode::EXITS => std::process::exit(3),
         mode::NOISY => {
             say("Loading player...");
             say("");
@@ -355,8 +356,6 @@ fn serve(name: String, close_stdout: bool, flood: bool) -> ! {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async move {
         let _ = std::fs::remove_file(&socket);
-        let listener = UnixListener::bind(&socket).unwrap();
-        say(&format!("angzarr-handshake v1 unix:{}", socket.display()));
         if close_stdout {
             close_stdout_for_good();
         }
@@ -368,6 +367,7 @@ fn serve(name: String, close_stdout: bool, flood: bool) -> ! {
             writeln!(out).unwrap();
             out.flush().unwrap();
         }
+        let listener = UnixListener::bind(&socket).unwrap();
         let fake = Fake { name };
         let kind = std::env::var(KIND_ENV).unwrap_or_default();
         let started = std::env::var(HEALTH_ENV).unwrap_or_default();
@@ -480,13 +480,21 @@ impl Health for FakeHealth {
 impl UpcasterService for Fake {
     async fn upcast(
         &self,
-        request: Request<pb::UpcastRequest>,
-    ) -> Result<Response<pb::UpcastResponse>, Status> {
-        let mut events = request.into_inner().events;
-        for page in &mut events {
-            let Some(payload) = page.payload.as_mut() else {
-                continue;
-            };
+        request: Request<hpb::UpcastRequest>,
+    ) -> Result<Response<hpb::UpcastResponse>, Status> {
+        let pages: Vec<(Option<u64>, Any)> = match request.into_inner().input {
+            Some(hpb::upcast_request::Input::LonePayload(payload)) => vec![(None, payload)],
+            Some(hpb::upcast_request::Input::Pages(pages)) => pages
+                .events
+                .iter()
+                .filter_map(|page| {
+                    angzarr_router::page_event(page).map(|e| (Some(page.sequence), e.clone()))
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+        let mut answered = Vec::new();
+        for (sequence, mut payload) in pages {
             match payload.type_url.as_str() {
                 "/test.table.v0.Sit" => payload.type_url = "/test.table.v1.Seat".to_string(),
                 "/test.table.v0.Die" => std::process::exit(7),
@@ -501,8 +509,16 @@ impl UpcasterService for Fake {
                 }
                 _ => {}
             }
+            let key = match sequence {
+                Some(sequence) => hpb::upcasted::Key::Sequence(sequence),
+                None => hpb::upcasted::Key::NoSequence(hpb::NoSequence {}),
+            };
+            answered.push(hpb::Upcasted {
+                key: Some(key),
+                payload: Some(payload),
+            });
         }
-        Ok(Response::new(pb::UpcastResponse { events }))
+        Ok(Response::new(hpb::UpcastResponse { pages: answered }))
     }
 }
 
@@ -516,54 +532,46 @@ impl ComponentService for Fake {
         &self,
         _: Request<DescribeRequest>,
     ) -> Result<Response<pb::ComponentDescriptor>, Status> {
+        use pb::component_descriptor::Kind;
         let env = |name| std::env::var(name).unwrap_or_default();
-        let kind = env(KIND_ENV);
-        if kind == kind::POLICY || kind == kind::PROJECTOR {
-            let kind = match kind.as_str() {
-                kind::POLICY => pb::ComponentKind::Policy,
-                _ => pb::ComponentKind::Projector,
-            };
-            return Ok(Response::new(pb::ComponentDescriptor {
-                name: self.name.clone(),
-                kind: kind as i32,
-                inputs: vec![pb::Target {
-                    domain: env(INPUT_ENV),
-                }],
-                rules_version: rules_version(),
-                // A policy's one destination: where its commands go.
-                output_domain: match kind {
-                    pb::ComponentKind::Policy => env(TARGET_ENV),
-                    _ => String::new(),
-                },
-                ..Default::default()
-            }));
-        }
-        let (kind, starting_types) = match kind.as_str() {
-            kind::PROCESS_MANAGER => (
-                pb::ComponentKind::ProcessManager,
-                env(STARTING_ENV)
+        // The domain it serves: its component entry's name
+        // ([`DOMAIN_ENV`]), else its described name.
+        let domain = match env(DOMAIN_ENV) {
+            named if !named.is_empty() => named,
+            _ => self.name.clone(),
+        };
+        let state = Some(pb::StateDescriptor {
+            type_name: "test.player.v1.State".to_string(),
+        });
+        let kind = match env(KIND_ENV).as_str() {
+            kind::POLICY => Kind::Policy(pb::PolicyDescriptor {
+                input_domain: env(INPUT_ENV),
+                output_domain: env(TARGET_ENV),
+            }),
+            kind::PROJECTOR => Kind::Projector(pb::ProjectorDescriptor {
+                input_domains: [env(INPUT_ENV)]
+                    .into_iter()
+                    .filter(|d| !d.is_empty())
+                    .collect(),
+            }),
+            kind::PROCESS_MANAGER => Kind::ProcessManager(pb::ProcessManagerDescriptor {
+                domain: domain.clone(),
+                state,
+                starting_types: env(STARTING_ENV)
                     .split(',')
                     .filter(|t| !t.is_empty())
                     .map(str::to_string)
                     .collect(),
-            ),
-            _ => (pb::ComponentKind::Aggregate, Vec::new()),
+            }),
+            _ => Kind::Aggregate(pb::AggregateDescriptor {
+                domain: domain.clone(),
+                state,
+            }),
         };
         Ok(Response::new(pb::ComponentDescriptor {
             name: self.name.clone(),
-            kind: kind as i32,
             rules_version: rules_version(),
-            starting_types,
-            state: Some(pb::StateDescriptor {
-                type_url: "/test.player.v1.State".to_string(),
-                options: Some(pb::StateOptions {
-                    conflict_resolutions: vec![
-                        pb::ConflictResolution::Strict as i32,
-                        pb::ConflictResolution::AggregateHandles as i32,
-                    ],
-                }),
-            }),
-            ..Default::default()
+            kind: Some(kind),
         }))
     }
 }
@@ -572,15 +580,17 @@ impl ComponentService for Fake {
 impl CommandHandlerService for Fake {
     async fn handle(
         &self,
-        request: Request<pb::ContextualCommand>,
-    ) -> Result<Response<pb::CommandHandlerResponse>, Status> {
+        request: Request<hpb::HandleRequest>,
+    ) -> Result<Response<hpb::HandleResponse>, Status> {
         let request = request.into_inner();
-        let next = request.events.as_ref().map_or(0, |b| b.next_sequence);
-        let command = request.command.unwrap_or_default();
+        let next = request.history.as_ref().map_or(0, |b| b.next_sequence);
+        let command = request.input.unwrap_or_default();
         let type_url = command
             .page
             .as_ref()
-            .and_then(angzarr_router::command_payload)
+            .and_then(|page| {
+                angzarr_router::command_payload(page).or_else(|| angzarr_router::fact_payload(page))
+            })
             .map(|any| any.type_url.clone())
             .unwrap_or_default();
         log(&format!("handle {type_url} {}", rules_version()));
@@ -603,16 +613,9 @@ impl CommandHandlerService for Fake {
         if type_url.ends_with("Die") {
             std::process::exit(7);
         }
-        Ok(Response::new(pb::CommandHandlerResponse {
-            conflict: None,
-            events: Some(pb::EventBook {
-                cover: command.cover,
-                pages: vec![pb::EventPage {
-                    payload: Some(noted(next)),
-                    ..Default::default()
-                }],
-                ..Default::default()
-            }),
+        Ok(Response::new(hpb::HandleResponse {
+            events: vec![noted(next)],
+            state: None,
             rules_version: rules_version(),
         }))
     }
@@ -647,16 +650,15 @@ fn packed(type_url: &str, value: Vec<u8>) -> Any {
 
 #[tonic::async_trait]
 impl PolicyService for Fake {
-    async fn handle(
+    async fn react(
         &self,
-        request: Request<pb::EventBook>,
-    ) -> Result<Response<pb::PolicyResponse>, Status> {
-        let book = request.into_inner();
-        let target = std::env::var(TARGET_ENV).unwrap_or_default();
+        request: Request<hpb::ReactRequest>,
+    ) -> Result<Response<hpb::ReactResponse>, Status> {
+        let book = request.into_inner().trigger.unwrap_or_default();
         let root = book.cover.as_ref().and_then(|c| c.root.clone());
-        let mut reactions = Vec::new();
+        let mut outputs = Vec::new();
         for page in &book.pages {
-            let type_url = page.payload.as_ref().map_or("", |a| a.type_url.as_str());
+            let type_url = angzarr_router::page_event(page).map_or("", |a| a.type_url.as_str());
             log(&format!("handle {type_url}"));
             let command = if type_url.ends_with("SeatedBig") {
                 HOLD_TOO_MUCH
@@ -665,72 +667,44 @@ impl PolicyService for Fake {
             } else {
                 continue;
             };
-            let commands = vec![pb::CommandBook {
-                cover: Some(pb::Cover {
-                    domain: target.clone(),
-                    root: root.clone(),
-                    edition: None,
-                }),
-                page: Some(pb::CommandPage {
-                    body: Some(pb::command_page::Body::Command(pb::Command {
-                        payload: Some(packed(command, Vec::new())),
-                    })),
-                    ..Default::default()
-                }),
-                handling: None,
-            }];
-            reactions.push(pb::PolicyReaction {
-                trigger_sequence: page.sequence,
-                outputs: commands,
-            });
+            outputs.push(angzarr_router::policy::command(
+                root.clone(),
+                packed(command, Vec::new()),
+            ));
         }
-        Ok(Response::new(pb::PolicyResponse { reactions }))
+        Ok(Response::new(hpb::ReactResponse { outputs }))
     }
 
-    async fn on_refused(
+    async fn translate(
         &self,
-        request: Request<pb::Refusal>,
-    ) -> Result<Response<pb::OnRefusedResponse>, Status> {
-        let refusal = request.into_inner();
-        let typed = refusal
-            .response
-            .as_ref()
-            .and_then(|r| match &r.reason {
-                Some(pb::refusal_response::Reason::Refusal(any)) => Some(any.type_url.clone()),
-                _ => None,
-            })
-            .unwrap_or_default();
+        request: Request<hpb::TranslateRequest>,
+    ) -> Result<Response<hpb::TranslateResponse>, Status> {
+        let request = request.into_inner();
+        let typed = (request.refusal.as_ref())
+            .and_then(|r| r.typed.as_ref())
+            .map_or(String::new(), |any| any.type_url.clone());
         log(&format!("refused {typed}"));
-        let refused = refusal
-            .command
-            .as_ref()
-            .and_then(|c| c.page.as_ref())
-            .and_then(angzarr_router::command_payload)
-            .map_or(String::new(), |a| a.type_url.clone());
-        Ok(Response::new(pb::OnRefusedResponse {
-            fact: Some(pb::CommandBook {
-                cover: None,
-                page: Some(pb::CommandPage {
-                    body: Some(pb::command_page::Body::Fact(pb::Fact {
-                        payload: Some(packed(SEAT_RELEASED, refused.into_bytes())),
-                    })),
-                    ..Default::default()
-                }),
-                handling: None,
-            }),
+        let refused = match request.command.and_then(|c| c.body) {
+            Some(
+                pb::reaction_delivery::Body::Command(any) | pb::reaction_delivery::Body::Fact(any),
+            ) => any.type_url,
+            None => String::new(),
+        };
+        Ok(Response::new(hpb::TranslateResponse {
+            fact: Some(packed(SEAT_RELEASED, refused.into_bytes())),
         }))
     }
 }
 
 #[tonic::async_trait]
 impl ProjectorService for Fake {
-    async fn handle(
+    async fn project(
         &self,
-        request: Request<pb::EventBook>,
-    ) -> Result<Response<pb::Projection>, Status> {
-        let book = request.into_inner();
+        request: Request<hpb::ProjectRequest>,
+    ) -> Result<Response<hpb::ProjectResponse>, Status> {
+        let book = request.into_inner().events.unwrap_or_default();
         for page in &book.pages {
-            let type_url = page.payload.as_ref().map_or("", |a| a.type_url.as_str());
+            let type_url = angzarr_router::page_event(page).map_or("", |a| a.type_url.as_str());
             let line = format!("handle {type_url}");
             let first = logged(&line) == 0;
             log(&line);
@@ -752,12 +726,7 @@ impl ProjectorService for Fake {
                 return Err(fail(tonic::Code::Aborted, "VIEW_STALE"));
             }
         }
-        Ok(Response::new(pb::Projection {
-            cover: book.cover.clone(),
-            projector: self.name.clone(),
-            next_sequence: book.pages.last().map_or(0, |p| p.sequence + 1),
-            projection: None,
-        }))
+        Ok(Response::new(hpb::ProjectResponse { projection: None }))
     }
 }
 

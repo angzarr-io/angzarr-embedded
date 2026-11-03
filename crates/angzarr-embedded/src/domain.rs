@@ -2,18 +2,15 @@
 //! fold into it.
 
 use angzarr_diagnostic::Diagnostic;
-use angzarr_proto::v1::{ConflictResolution, StateDescriptor};
+use angzarr_proto::v1::StateDescriptor;
 
-use super::conflict::Units;
 use super::payload::Payload;
 use angzarr_router::PageContext;
 
 /// A domain's state: a domain type, with a prost message as its snapshot
 /// form ([`State::Snapshot`]), so it can be snapshotted as `Any`. angzarr's
-/// generator (`angzarr_build`, backlog CR-1 and CR-4) emits the impl from the
-/// state message, its `(io.angzarr.v1.state)` option and its
-/// `(io.angzarr.v1.conflict)` field markers; a state that is itself a prost
-/// message is its own snapshot form.
+/// generator (`angzarr_build`) emits the impl from the state message; a
+/// state that is itself a prost message is its own snapshot form.
 pub trait State: Default + Clone + Send + 'static {
     /// The wire form a snapshot carries. Its type URL is the state's, as
     /// [`State::descriptor`] names it; registration refuses a descriptor
@@ -39,12 +36,10 @@ pub trait State: Default + Clone + Send + 'static {
         Ok(())
     }
 
-    /// The state's type URL and the conflict resolutions it supports, the
-    /// full resolved list (`[COMMUTATIVE, STRICT, AGGREGATE_HANDLES]` for a
-    /// state that lists COMMUTATIVE and marks its units; `[STRICT,
-    /// AGGREGATE_HANDLES]`, the implicit base, for one with no option). What
-    /// [`Registry::register`](super::Registry::register) records, as
-    /// angzarr's `ComponentDescriptor.state`.
+    /// The state's type, by its message's full name (decision 14.101):
+    /// what [`Registry::register`](super::Registry::register) records, as
+    /// angzarr's `ComponentDescriptor`'s state, and what a snapshot's state
+    /// is held to.
     fn descriptor() -> StateDescriptor;
 
     /// Whether the kernel takes snapshots of this state. `false` for a
@@ -54,15 +49,6 @@ pub trait State: Default + Clone + Send + 'static {
     /// replayed from the start, and [`Stream::snapshot`](super::Stream::snapshot)
     /// is `None`.
     const SNAPSHOTS: bool = true;
-
-    /// The conflict units whose values differ between `before` and
-    /// `after` (angzarr's `conflict_units` table, field kind by field kind,
-    /// with the fail-safe wildcard for every unmarked field that differs).
-    /// Pure. Called only under COMMUTATIVE, so only for a state that lists
-    /// it; the default, for a state with no units, says "everything".
-    fn changed(_before: &Self, _after: &Self) -> Units {
-        Units::everything()
-    }
 }
 
 /// One kind of event stream, as the kernel reads it: its state, its
@@ -108,20 +94,6 @@ pub trait Domain: Sized + 'static {
     /// answers report it; the kernel reads it only to choose which
     /// snapshots to offer ([`Catalog::snapshot_usable`](super::Catalog::snapshot_usable)).
     const RULES_VERSION: &'static str;
-
-    /// The domain's configured conflict resolution (angzarr's component
-    /// configuration). `None`: the built-in default, COMMUTATIVE where the
-    /// state supports it, otherwise STRICT. Refused at registration if the
-    /// state does not support it.
-    const CONFLICT_RESOLUTION: Option<ConflictResolution> = None;
-
-    /// Configured resolutions per command type, by the command message's
-    /// full name (`"hatpick.list.v1.Draw"`): above the domain's own, below a
-    /// book's request. Refused at registration if the state does not
-    /// support one. Looked up by the command's current type, after
-    /// upcasting: an old command type has its current type's setting, so
-    /// only current types are named here.
-    const CONFLICT_RESOLUTION_BY_COMMAND: &'static [(&'static str, ConflictResolution)] = &[];
 
     /// Fold one event into the state, given where it sits: `page`, the
     /// router's page context, its stream's cover, its sequence and its

@@ -24,8 +24,9 @@ use angzarr_router::PageContext;
 pub struct Envelope<E> {
     pub(crate) sequence: u64,
     pub(crate) causation: Causation,
+    /// The causation's command id, either arm: always well formed.
+    pub(crate) command_id: Uuid,
     pub(crate) correlation_id: Uuid,
-    pub(crate) fact: Option<FactOrigin>,
     pub(crate) recorded_at: Timestamp,
     pub(crate) rules_version: String,
     pub(crate) event: E,
@@ -38,13 +39,14 @@ impl<E> Envelope<E> {
     }
 
     /// Its direct cause (angzarr's `EventMeta.causation`): the producing
-    /// command's id. Never absent on a recorded event.
+    /// input, by its arm (decision 14.102): a command's id, or a fact's id
+    /// and origin. Never absent on a recorded event.
     ///
-    /// For an event of a policy's command this is the command, never the
+    /// For an event of a policy's output this is the output, never the
     /// policy's trigger: events record their direct cause only (angzarr
-    /// decision 13.3). The trigger is the command's own causation
-    /// ([`Identified::causation_id`](super::Identified::causation_id)),
-    /// which goes to tracing, not to the event.
+    /// decision 13.3). The trigger is the reaction's own causation
+    /// ([`Identified::causation`](super::Identified::causation)), which goes
+    /// to tracing, not to the event.
     pub fn causation(&self) -> &Causation {
         &self.causation
     }
@@ -52,8 +54,7 @@ impl<E> Envelope<E> {
     /// The producing command's id, what deduplication finds: a command's,
     /// a fact's derived id, or a reaction's.
     pub fn command_id(&self) -> &Uuid {
-        let Causation::CommandId(id) = &self.causation;
-        id
+        &self.command_id
     }
 
     /// Never absent on a recorded event.
@@ -61,9 +62,12 @@ impl<E> Envelope<E> {
         &self.correlation_id
     }
 
-    /// The source, for a fact's event.
+    /// The source, for a fact's event: its causation's origin.
     pub fn fact(&self) -> Option<&FactOrigin> {
-        self.fact.as_ref()
+        match &self.causation {
+            Causation::Fact(cause) => cause.origin.as_ref(),
+            Causation::Command(_) => None,
+        }
     }
 
     pub fn recorded_at(&self) -> Timestamp {
@@ -85,21 +89,22 @@ impl<E> Envelope<E> {
     pub fn meta(&self) -> EventMeta {
         EventMeta {
             causation: Some(self.causation.clone()),
-            fact: self.fact.clone(),
             correlation_id: Some(self.correlation_id.clone()),
             recorded_at: Some(self.recorded_at),
             rules_version: self.rules_version.clone(),
         }
     }
 
-    /// As an `EventPage { sequence, meta, payload }`: what the store
-    /// appends and an angzarr reader is served.
+    /// As an `EventPage { sequence, meta, body }`, the body its event arm:
+    /// what the store appends and an angzarr reader is served.
     pub fn page(&self) -> EventPage
     where
         E: Payload,
     {
         EventPage {
-            payload: Some(self.event.to_any()),
+            body: Some(angzarr_proto::v1::event_page::Body::Event(
+                self.event.to_any(),
+            )),
             meta: Some(self.meta()),
             sequence: self.sequence,
         }
@@ -122,7 +127,7 @@ impl<E> Envelope<E> {
             .map_err(KernelError::Replay)?;
         let unreadable = |reason: Report| unreadable(stream, sequence, reason);
         let payload = upcaster
-            .upcast_event(&page.payload.clone().unwrap_or_default())
+            .upcast_event(angzarr_router::page_event(page).unwrap_or(&Default::default()))
             .map_err(|e| unreadable(Report::of(&e)))?;
         let event = E::from_any(&payload).map_err(|e| unreadable(Report::of(&e)))?;
         Ok(meta.with(event))
@@ -138,10 +143,13 @@ impl<E> Envelope<E> {
         event: E,
     ) -> Result<Envelope<E>, ReplayError> {
         let incomplete = |field| ReplayError::IncompleteMeta { sequence, field };
-        let causation = match meta.causation {
-            Some(Causation::CommandId(id)) if id.is_well_formed() => Causation::CommandId(id),
-            _ => return Err(incomplete("causation")),
-        };
+        let causation = meta.causation.ok_or_else(|| incomplete("causation"))?;
+        let command_id = match &causation {
+            Causation::Command(cause) => cause.command_id.clone(),
+            Causation::Fact(cause) => cause.command_id.clone(),
+        }
+        .filter(Uuid::is_well_formed)
+        .ok_or_else(|| incomplete("causation"))?;
         let correlation_id = meta
             .correlation_id
             .filter(Uuid::is_well_formed)
@@ -150,8 +158,8 @@ impl<E> Envelope<E> {
         Ok(Envelope {
             sequence,
             causation,
+            command_id,
             correlation_id,
-            fact: meta.fact,
             recorded_at,
             rules_version: meta.rules_version,
             event,
@@ -163,8 +171,8 @@ impl<E> Envelope<E> {
         Envelope {
             sequence: self.sequence,
             causation: self.causation,
+            command_id: self.command_id,
             correlation_id: self.correlation_id,
-            fact: self.fact,
             recorded_at: self.recorded_at,
             rules_version: self.rules_version,
             event,
@@ -188,6 +196,9 @@ pub struct Stream<D: Domain> {
     #[cfg(any(test, feature = "test-support"))]
     base: D::State,
     events: Vec<Envelope<D::Event>>,
+    /// How many of the held pages are framework meta-events (an edition
+    /// stream's fork): they hold a sequence, and are no event.
+    meta_events: u64,
     state: D::State,
     /// The last event's `recorded_at`: the floor for the next.
     last_recorded_at: Option<Timestamp>,
@@ -225,6 +236,7 @@ impl<D: Domain> Stream<D> {
             #[cfg(any(test, feature = "test-support"))]
             base: state.clone(),
             events: Vec::new(),
+            meta_events: 0,
             state,
             last_recorded_at: None,
         }
@@ -251,7 +263,9 @@ impl<D: Domain> Stream<D> {
     }
 
     /// Fold stored `pages` onto the end of the stream, each checked as
-    /// [`Stream::replay`] says.
+    /// [`Stream::replay`] says. A framework meta-event (an edition stream's
+    /// fork) holds its sequence and is never folded: business code never
+    /// sees one (decision 14.106).
     fn fold(&mut self, pages: &[EventPage], registry: &Registry) -> Result<(), KernelError> {
         let upcaster = Self::typed(registry)?;
         for (index, page) in pages.iter().enumerate() {
@@ -260,6 +274,10 @@ impl<D: Domain> Stream<D> {
                     index,
                     found: page.sequence,
                 }));
+            }
+            if angzarr_router::page_event(page).is_none() {
+                self.meta_events += 1;
+                continue;
             }
             let envelope = Envelope::decode(&self.cover, page, upcaster)?;
             let sequence = envelope.sequence;
@@ -320,6 +338,7 @@ impl<D: Domain> Stream<D> {
         let upcaster = Self::typed(registry)?;
         book.pages
             .iter()
+            .filter(|page| angzarr_router::page_event(page).is_some())
             .map(|page| Envelope::decode(&cover, page, upcaster))
             .collect()
     }
@@ -367,6 +386,7 @@ impl<D: Domain> Stream<D> {
             #[cfg(any(test, feature = "test-support"))]
             base: state.clone(),
             events: Vec::new(),
+            meta_events: 0,
             state,
             last_recorded_at,
         };
@@ -430,10 +450,10 @@ impl<D: Domain> Stream<D> {
         &self.state
     }
 
-    /// The number of events, which is also the next event's sequence (the
-    /// head).
+    /// The number of pages, which is also the next event's sequence (the
+    /// head): the events, and an edition stream's fork.
     pub fn len(&self) -> u64 {
-        self.first + self.events.len() as u64
+        self.first + self.events.len() as u64 + self.meta_events
     }
 
     pub fn is_empty(&self) -> bool {

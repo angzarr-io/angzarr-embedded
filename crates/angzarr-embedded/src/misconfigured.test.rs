@@ -1,43 +1,54 @@
-//! The one validator every component meets (decision 14.65): each of
-//! 14.42's descriptor rules, under its spec key.
+//! The one validator every component meets (decision 14.65): each of the
+//! descriptor rules a `kind` oneof leaves to check, under its spec key.
 
 use angzarr_diagnostic::Diagnostic;
+use angzarr_proto::v1::component_descriptor::Kind;
 use angzarr_proto::v1::{
-    ComponentDescriptor, ComponentKind, StateDescriptor, StateOptions, Target,
+    AggregateDescriptor, ComponentDescriptor, ComponentKind, PolicyDescriptor,
+    ProcessManagerDescriptor, ProjectorDescriptor, StateDescriptor,
 };
 
-use super::validate_descriptor;
+use super::{kind_of, validate_descriptor};
 
-fn state(resolutions: &[i32]) -> StateDescriptor {
-    StateDescriptor {
-        type_url: "/toy.State".to_string(),
-        options: Some(StateOptions {
-            conflict_resolutions: resolutions.to_vec(),
-        }),
+fn state() -> Option<StateDescriptor> {
+    Some(StateDescriptor {
+        type_name: "toy.State".to_string(),
+    })
+}
+
+fn named(kind: Kind) -> ComponentDescriptor {
+    ComponentDescriptor {
+        name: "order".to_string(),
+        rules_version: "1.0.0".to_string(),
+        kind: Some(kind),
     }
 }
 
-fn of(kind: ComponentKind) -> ComponentDescriptor {
-    let stateful = matches!(
-        kind,
-        ComponentKind::Aggregate | ComponentKind::ProcessManager
-    );
-    ComponentDescriptor {
-        name: "order".to_string(),
-        kind: kind as i32,
-        rules_version: "1.0.0".to_string(),
-        state: stateful.then(|| state(&[2, 3])),
-        inputs: match kind {
-            ComponentKind::Policy => vec![Target {
-                domain: "cart".to_string(),
-            }],
-            _ => Vec::new(),
-        },
-        output_domain: match kind {
-            ComponentKind::Policy => "inventory".to_string(),
-            _ => String::new(),
-        },
-        ..ComponentDescriptor::default()
+fn aggregate() -> AggregateDescriptor {
+    AggregateDescriptor {
+        domain: "order".to_string(),
+        state: state(),
+    }
+}
+
+fn process_manager() -> ProcessManagerDescriptor {
+    ProcessManagerDescriptor {
+        domain: "order".to_string(),
+        state: state(),
+        starting_types: vec!["toy.Start".to_string()],
+    }
+}
+
+fn policy() -> PolicyDescriptor {
+    PolicyDescriptor {
+        input_domain: "cart".to_string(),
+        output_domain: "inventory".to_string(),
+    }
+}
+
+fn projector() -> ProjectorDescriptor {
+    ProjectorDescriptor {
+        input_domains: vec!["cart".to_string()],
     }
 }
 
@@ -51,108 +62,120 @@ fn refused(descriptor: ComponentDescriptor) -> String {
 #[test]
 fn a_well_formed_descriptor_of_each_kind_passes() {
     for kind in [
-        ComponentKind::Aggregate,
-        ComponentKind::ProcessManager,
-        ComponentKind::Policy,
-        ComponentKind::Projector,
+        Kind::Aggregate(aggregate()),
+        Kind::ProcessManager(process_manager()),
+        Kind::Policy(policy()),
+        Kind::Projector(projector()),
     ] {
-        assert_eq!(validate_descriptor(&of(kind)), Ok(()), "{kind:?}");
+        assert_eq!(
+            validate_descriptor(&named(kind.clone())),
+            Ok(()),
+            "{kind:?}"
+        );
     }
 }
 
 #[test]
+fn the_kind_is_the_oneofs_arm() {
+    for (kind, tag) in [
+        (Kind::Aggregate(aggregate()), ComponentKind::Aggregate),
+        (
+            Kind::ProcessManager(process_manager()),
+            ComponentKind::ProcessManager,
+        ),
+        (Kind::Policy(policy()), ComponentKind::Policy),
+        (Kind::Projector(projector()), ComponentKind::Projector),
+    ] {
+        assert_eq!(kind_of(&named(kind)), tag);
+    }
+    let none = ComponentDescriptor {
+        kind: None,
+        ..named(Kind::Aggregate(aggregate()))
+    };
+    assert_eq!(kind_of(&none), ComponentKind::Unspecified);
+}
+
+#[test]
 fn each_rule_refuses_under_its_key() {
-    let aggregate = || of(ComponentKind::Aggregate);
-    let policy = || of(ComponentKind::Policy);
     for (descriptor, key) in [
         (
             ComponentDescriptor {
                 rules_version: String::new(),
-                ..aggregate()
+                ..named(Kind::Aggregate(aggregate()))
             },
-            "COORDINATOR_REASON_MISSING_RULES_VERSION",
+            "ANGZARR_REASON_MISSING_RULES_VERSION",
         ),
         (
             ComponentDescriptor {
-                starting_types: vec!["/toy.Start".to_string()],
-                ..aggregate()
+                kind: None,
+                ..named(Kind::Aggregate(aggregate()))
             },
-            "COORDINATOR_REASON_STARTING_TYPES_ON_NON_PM",
+            "ANGZARR_REASON_DESCRIPTOR_NO_KIND",
         ),
         (
-            ComponentDescriptor {
+            named(Kind::Aggregate(AggregateDescriptor {
+                domain: String::new(),
+                ..aggregate()
+            })),
+            "ANGZARR_REASON_DESCRIPTOR_NO_DOMAIN",
+        ),
+        (
+            named(Kind::ProcessManager(ProcessManagerDescriptor {
+                domain: String::new(),
+                ..process_manager()
+            })),
+            "ANGZARR_REASON_DESCRIPTOR_NO_DOMAIN",
+        ),
+        (
+            named(Kind::Aggregate(AggregateDescriptor {
                 state: None,
                 ..aggregate()
-            },
-            "COORDINATOR_REASON_MISSING_STATE_TYPE",
+            })),
+            "ANGZARR_REASON_MISSING_STATE_TYPE",
         ),
         (
-            ComponentDescriptor {
-                state: Some(StateDescriptor {
-                    type_url: String::new(),
-                    ..state(&[2, 3])
-                }),
-                ..of(ComponentKind::ProcessManager)
-            },
-            "COORDINATOR_REASON_MISSING_STATE_TYPE",
+            named(Kind::ProcessManager(ProcessManagerDescriptor {
+                state: Some(StateDescriptor::default()),
+                ..process_manager()
+            })),
+            "ANGZARR_REASON_MISSING_STATE_TYPE",
         ),
         (
-            ComponentDescriptor {
-                state: Some(state(&[2, 3])),
-                ..of(ComponentKind::Projector)
-            },
-            "COORDINATOR_REASON_STATE_ON_STATELESS_KIND",
-        ),
-        (
-            ComponentDescriptor {
-                state: Some(state(&[2, 3])),
+            named(Kind::Policy(PolicyDescriptor {
+                input_domain: String::new(),
                 ..policy()
-            },
-            "COORDINATOR_REASON_STATE_ON_STATELESS_KIND",
+            })),
+            "ANGZARR_REASON_NO_INPUT_DOMAIN",
         ),
         (
-            ComponentDescriptor {
-                inputs: Vec::new(),
-                ..policy()
-            },
-            "COORDINATOR_REASON_POLICY_INPUT_COUNT",
-        ),
-        (
-            ComponentDescriptor {
+            named(Kind::Policy(PolicyDescriptor {
                 output_domain: String::new(),
                 ..policy()
-            },
-            "COORDINATOR_REASON_POLICY_NO_OUTPUT_DOMAIN",
+            })),
+            "ANGZARR_REASON_POLICY_NO_OUTPUT_DOMAIN",
         ),
         (
-            ComponentDescriptor {
-                output_domain: "inventory".to_string(),
-                ..aggregate()
-            },
-            "COORDINATOR_REASON_OUTPUT_DOMAIN_ON_NON_POLICY",
-        ),
-        (
-            ComponentDescriptor {
-                state: Some(state(&[2])),
-                ..aggregate()
-            },
-            "COORDINATOR_REASON_STATE_RESOLUTIONS_INVALID",
-        ),
-        (
-            ComponentDescriptor {
-                state: Some(state(&[2, 3, 0])),
-                ..aggregate()
-            },
-            "COORDINATOR_REASON_STATE_RESOLUTIONS_INVALID",
-        ),
-        (
-            ComponentDescriptor {
-                state: Some(state(&[2, 3, 99])),
-                ..aggregate()
-            },
-            "COORDINATOR_REASON_STATE_RESOLUTIONS_INVALID",
+            named(Kind::Projector(ProjectorDescriptor {
+                input_domains: Vec::new(),
+            })),
+            "ANGZARR_REASON_NO_INPUT_DOMAIN",
         ),
     ] {
         assert_eq!(refused(descriptor.clone()), key, "{descriptor:?}");
     }
+}
+
+#[test]
+fn a_refusal_names_the_component_and_its_kind() {
+    let refusal = validate_descriptor(&named(Kind::Projector(ProjectorDescriptor {
+        input_domains: Vec::new(),
+    })))
+    .unwrap_err();
+    assert_eq!(
+        refusal,
+        super::Misconfigured::NoInputDomain {
+            component: "order".to_string(),
+            kind: "COMPONENT_KIND_PROJECTOR".to_string(),
+        }
+    );
 }

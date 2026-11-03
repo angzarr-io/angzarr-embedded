@@ -8,7 +8,7 @@
 //!
 //! What is pinned: a hand-written aggregate registered with
 //! `Registry::aggregate` decides its commands as one decision (its event,
-//! or its rejection with nothing committed), and a hand-written policy
+//! or its typed refusal with nothing committed), and a hand-written policy
 //! registered with `Registry::policy` answers its source's event with a
 //! command to another root of its own domain (never the trigger's own
 //! stream, decision 14.71), which the kernel runs as the next step. A policy's target known by its name
@@ -24,19 +24,19 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use ::angzarr_embedded::angzarr_proto::v1::{
-    CommandHandlerResponse, ComponentDescriptor, ComponentKind, ConflictResolution,
-    ContextualCommand, StateOptions,
+    component_descriptor, AggregateDescriptor, ComponentDescriptor,
 };
 use ::angzarr_embedded::angzarr_router::domain::DomainDispatch;
 use ::angzarr_embedded::angzarr_router::error::CodedError;
+use ::angzarr_embedded::angzarr_router::hpb;
 use ::angzarr_embedded::angzarr_router::router::CommandHandler;
 use ::angzarr_embedded::markup::{
-    self, CommandTarget, Commands, Context, Decides, DomainMessage, EventSource, Ingests,
-    NoSnapshot, Policy, PolicyContext, Rejection, Routed, TypeName,
+    self, CommandTarget, Commands, Context, Decides, DomainMessage, EventSource, Failed, Ingests,
+    NoSnapshot, Policy, PolicyContext, Refusing, Routed, TypeName, TypedRefusal, Unrefusable,
 };
 use ::angzarr_embedded::v1::{
-    command_page, Command, CommandBook, CommandPage, Cover, DeliveryOutcome, EventBook, EventPage,
-    Outcome, StateDescriptor, Uuid,
+    command_page, reaction_delivery, Command, CommandBook, CommandPage, Cover, DeliveryOutcome,
+    EventBook, EventPage, ReactionDelivery, StateDescriptor, Uuid,
 };
 use ::angzarr_embedded::{
     type_name, Answered, Any, Coordinated, CoordinatorPort, Domain, Failure, Handled, Kernel,
@@ -63,6 +63,18 @@ mod wire {
 
     #[derive(Clone, PartialEq, ::prost::Message)]
     pub struct Note {}
+
+    /// A typed refusal object: a bump by zero or less.
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct NotPositive {
+        #[prost(int64, tag = "1")]
+        pub by: i64,
+    }
+
+    impl ::prost::Name for NotPositive {
+        const NAME: &'static str = "NotPositive";
+        const PACKAGE: &'static str = "toy.counter.v1";
+    }
 
     /// A typed refusal object: a bump past the counter's limit.
     #[derive(Clone, PartialEq, ::prost::Message)]
@@ -165,6 +177,23 @@ impl Diagnostic for TooBig {
 
     fn args(&self) -> Vec<(&str, Arg)> {
         vec![("by", self.by.into())]
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct NotPositive {
+    by: i64,
+}
+
+impl DomainMessage for NotPositive {
+    type Wire = wire::NotPositive;
+
+    fn to_wire(&self) -> wire::NotPositive {
+        wire::NotPositive { by: self.by }
+    }
+
+    fn from_wire(wire: wire::NotPositive) -> Result<Self, WireError> {
+        Ok(NotPositive { by: wire.by })
     }
 }
 
@@ -311,31 +340,30 @@ impl Payload for CounterEvent {
 
 // --------------------------------------------------------- the aggregate
 
-/// Why the counter refuses a bump.
+/// The typed refusals a bump lists (`refuses(NotPositive)`): the choice
+/// the markup would build.
 #[derive(Clone, Debug, PartialEq)]
-pub enum Refused {
-    /// A bump by zero or less.
-    NotPositive { by: i64 },
+pub enum BumpRefuses {
+    NotPositive(NotPositive),
 }
 
-impl fmt::Display for Refused {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        angzarr_diagnostic::display(self, f)
+impl From<BumpRefuses> for TypedRefusal {
+    fn from(choice: BumpRefuses) -> TypedRefusal {
+        match choice {
+            BumpRefuses::NotPositive(object) => TypedRefusal::of(&object),
+        }
     }
 }
 
-impl Diagnostic for Refused {
-    fn code(&self) -> &str {
-        match self {
-            Refused::NotPositive { .. } => "toy-counter-not-positive",
-        }
+impl markup::Fails<Counter> for BumpRefuses {
+    fn into_failed(self) -> Failed<TypedRefusal> {
+        Failed::rejected(self)
     }
+}
 
-    fn args(&self) -> Vec<(&str, Arg)> {
-        match self {
-            Refused::NotPositive { by } => vec![("by", (*by).into())],
-        }
-    }
+impl Refusing<Bump> for Counter {
+    type Refuses = BumpRefuses;
+    const REFUSES: &'static [TypeName] = &[TypeName::of::<wire::NotPositive>()];
 }
 
 /// A running total, written by hand.
@@ -345,27 +373,16 @@ pub struct Counter {
 }
 
 impl Counter {
-    fn bump(&self, command: Bump, _ctx: &Context) -> Result<Bumped, Refused> {
+    fn bump(&self, command: Bump, _ctx: &Context) -> Result<Bumped, BumpRefuses> {
         match command.by > 0 {
             true => Ok(Bumped { by: command.by }),
-            false => Err(Refused::NotPositive { by: command.by }),
+            false => Err(BumpRefuses::NotPositive(NotPositive { by: command.by })),
         }
     }
 
-    fn note(&self, _command: Note, _ctx: &Context) -> Result<Noted, Infallible> {
+    /// A note lists no refusal: it cannot refuse.
+    fn note(&self, _command: Note, _ctx: &Context) -> Result<Noted, Failed<Unrefusable>> {
         Ok(Noted)
-    }
-}
-
-impl markup::Fails<Counter> for Refused {
-    fn into_failed(self) -> markup::Failed<Rejection<Refused>> {
-        markup::Failed::rejected(self)
-    }
-}
-
-impl markup::Fails<Counter> for Infallible {
-    fn into_failed(self) -> markup::Failed<Rejection<Refused>> {
-        match self {}
     }
 }
 
@@ -392,7 +409,7 @@ impl Domain for Counter {
     type Command = CounterCommand;
     type Fact = Infallible;
     type Event = CounterEvent;
-    type Rejection = Rejection<Refused>;
+    type Rejection = TypedRefusal;
     const RULES_VERSION: &'static str = "v1";
 
     const NAME: &'static str = "counter";
@@ -410,13 +427,13 @@ impl Routed for Counter {
             .on_command(
                 &TypeName::of::<wire::Bump>().full_name(),
                 |any, state, cctx| {
-                    markup::run_command::<Counter, _, Bump, _, _>(any, state, cctx, Counter::bump)
+                    markup::run_command::<Counter, Bump, _, _>(any, state, cctx, Counter::bump)
                 },
             )
             .on_command(
                 &TypeName::of::<wire::Note>().full_name(),
                 |any, state, cctx| {
-                    markup::run_command::<Counter, _, Note, _, _>(any, state, cctx, Counter::note)
+                    markup::run_command::<Counter, Note, _, _>(any, state, cctx, Counter::note)
                 },
             )
     }
@@ -492,35 +509,44 @@ impl Policy for BankBumps {
     }
 }
 
-/// The bank's coordinator, elsewhere: every book it is handed, each
-/// answered with one `Deposited`.
+/// The bank's coordinator, elsewhere: every reaction it is delivered,
+/// each answered with one `Deposited`. A client's book is handled alike.
 #[derive(Clone, Default)]
 struct BankCoordinator {
-    handed: Arc<Mutex<Vec<CommandBook>>>,
+    delivered: Arc<Mutex<Vec<ReactionDelivery>>>,
 }
 
-impl CoordinatorPort for BankCoordinator {
-    fn handle(&self, book: CommandBook) -> Coordinated<'_> {
-        let cover = book.cover.clone();
-        self.handed.lock().unwrap().push(book);
+impl BankCoordinator {
+    /// The bank's answer for `cover`: one `Deposited`, applied.
+    fn deposited(cover: Option<Cover>) -> Coordinated<'static> {
         Box::pin(async move {
             Ok(Answered {
                 events: Some(EventBook {
                     cover,
                     pages: vec![EventPage {
-                        payload: Some(Any {
+                        body: Some(::angzarr_embedded::v1::event_page::Body::Event(Any {
                             type_url: "/toy.bank.v1.Deposited".to_string(),
                             value: Vec::new(),
-                        }),
+                        })),
                         ..EventPage::default()
                     }],
                     ..EventBook::default()
                 }),
-                outcome: Some(Outcome {
-                    delivery: DeliveryOutcome::Applied as i32,
-                }),
+                delivery: DeliveryOutcome::Applied,
             })
         })
+    }
+}
+
+impl CoordinatorPort for BankCoordinator {
+    fn handle(&self, book: CommandBook) -> Coordinated<'_> {
+        BankCoordinator::deposited(book.cover)
+    }
+
+    fn deliver(&self, delivery: ReactionDelivery) -> Coordinated<'_> {
+        let cover = delivery.cover.clone();
+        self.delivered.lock().unwrap().push(delivery);
+        BankCoordinator::deposited(cover)
     }
 }
 
@@ -548,10 +574,10 @@ fn bump(by: i64) -> CommandBook {
         page: Some(CommandPage {
             body: Some(command_page::Body::Command(Command {
                 payload: Some(markup::pack_message(&Bump { by })),
+                handling: None,
             })),
             ..CommandPage::default()
         }),
-        handling: None,
     }
 }
 
@@ -586,7 +612,10 @@ fn settle(registry: &Registry, book: CommandBook) -> Result<Vec<(Uuid, Vec<Strin
                 let types = book
                     .pages
                     .iter()
-                    .map(|p| type_name(&p.payload.as_ref().unwrap().type_url).to_string())
+                    .map(|p| {
+                        let event = ::angzarr_embedded::angzarr_router::page_event(p).unwrap();
+                        type_name(&event.type_url).to_string()
+                    })
                     .collect();
                 (root.unwrap_or_default(), types)
             })
@@ -622,21 +651,21 @@ fn a_hand_written_aggregate_and_policy_run_as_marked_up_ones_do() {
     );
 }
 
-/// A hand-written aggregate's rejection refuses the command under its own
-/// code, and nothing runs after it.
+/// A hand-written aggregate's typed refusal refuses the command under
+/// `ANGZARR_REASON_COMMAND_REFUSED`, and nothing runs after it.
 #[test]
-fn a_hand_written_aggregates_rejection_is_the_callers() {
+fn a_hand_written_aggregates_refusal_is_the_callers() {
     assert_eq!(
         settle(&registry(), bump(0)),
-        Err("toy-counter-not-positive".to_string())
+        Err("ANGZARR_REASON_COMMAND_REFUSED".to_string())
     );
 }
 
-/// A marked-up aggregate's refusal comes back typed, as the domain's
-/// rejection: the refusal its handler made, matched as a value, never by
-/// its code.
+/// A hand-written aggregate's refusal comes back typed, as the domain's
+/// rejection: the typed refusal its handler made, its object matched as a
+/// value, never by its code.
 #[test]
-fn a_marked_up_aggregates_refusal_comes_back_typed_as_its_rejection() {
+fn a_hand_written_aggregates_refusal_comes_back_typed_as_its_rejection() {
     let registry = registry();
     let store = Mem::default();
     let sampled = Sampled {
@@ -657,13 +686,16 @@ fn a_marked_up_aggregates_refusal_comes_back_typed_as_its_rejection() {
         .rejection::<<Counter as Domain>::Rejection>()
         .expect("typed");
     assert_eq!(
-        rejection,
-        &Rejection::Message(Refused::NotPositive { by: 0 })
+        rejection.object::<NotPositive>(),
+        Some(NotPositive { by: 0 })
     );
+    let rejected = match failure {
+        Failure::Rejected(rejected) => rejected,
+        other => panic!("{other:?}"),
+    };
     assert_eq!(
-        rejection.message(),
-        Some(&Refused::NotPositive { by: 0 }),
-        "the domain's own refusal, a message only"
+        rejected.refusal::<NotPositive>(),
+        Some(NotPositive { by: 0 })
     );
 }
 
@@ -701,15 +733,17 @@ fn a_policy_targets_a_remote_domain_by_its_command_set_alone() {
         settle(&registry, bump(3)),
         Ok(vec![(root(), vec!["toy.counter.v1.Bumped".to_string()])])
     );
-    let handed = bank.handed.lock().unwrap().clone();
-    assert_eq!(handed.len(), 1, "{handed:?}");
-    let cover = handed[0].cover.clone().unwrap_or_default();
+    let delivered = bank.delivered.lock().unwrap().clone();
+    assert_eq!(delivered.len(), 1, "{delivered:?}");
+    let cover = delivered[0].cover.clone().unwrap_or_default();
     assert_eq!((cover.domain.as_str(), cover.root), ("bank", Some(root())));
-    let payload = match handed[0].page.as_ref().and_then(|p| p.body.as_ref()) {
-        Some(command_page::Body::Command(command)) => command.payload.clone(),
-        _ => None,
-    };
-    assert_eq!(payload, Some(markup::pack_message(&Deposit { cents: 300 })));
+    assert_eq!(
+        delivered[0].body,
+        Some(reaction_delivery::Body::Command(markup::pack_message(
+            &Deposit { cents: 300 }
+        )))
+    );
+    assert_eq!(delivered[0].component, "counter-bank");
 }
 
 /// A domain's command set, as a policy's target reads it, is the
@@ -721,51 +755,6 @@ fn a_domain_is_its_own_command_target() {
         <Counter as CommandTarget>::command_types(),
         ["toy.counter.v1.Bump", "toy.counter.v1.Note"]
     );
-}
-
-/// A refusal fact (angzarr's `CommandRefused`), as a hand-written fact
-/// payload set reads it: decoded as the refusal of its command's type, and
-/// of no other; its refused command's type URL named; the fact's own type
-/// URL the one the set lists.
-#[test]
-fn a_refusal_fact_decodes_as_its_commands_refusal() {
-    let refused = markup::v1::CommandRefused {
-        command: Some(CommandBook {
-            cover: Some(Cover {
-                domain: Counter::NAME.to_string(),
-                root: Some(root()),
-                edition: None,
-            }),
-            page: Some(CommandPage {
-                body: Some(command_page::Body::Command(Command {
-                    payload: Some(markup::pack_message(&Bump { by: 7 })),
-                })),
-                ..CommandPage::default()
-            }),
-            handling: None,
-        }),
-        refusal: None,
-        trigger: None,
-    };
-    let any = ::angzarr_embedded::pack(&refused);
-    assert_eq!(any.type_url, markup::command_refused_type_url());
-    let decoded = markup::decode_command_refused::<Bump>(&any)
-        .unwrap()
-        .expect("a refusal of a bump");
-    assert_eq!(decoded.command(), &Bump { by: 7 });
-    assert_eq!(decoded.target().root, Some(root()));
-    assert!(markup::decode_command_refused::<Note>(&any)
-        .unwrap()
-        .is_none());
-    assert_eq!(
-        markup::refused_command_type_url(&any).as_deref(),
-        Some("/toy.counter.v1.Bump")
-    );
-    let other = markup::pack_message(&Bump { by: 7 });
-    assert!(markup::decode_command_refused::<Bump>(&other)
-        .unwrap()
-        .is_none());
-    assert_eq!(markup::refused_command_type_url(&other), None);
 }
 
 /// A typed refusal object reads back as its own type, and as no other.
@@ -793,7 +782,7 @@ impl EventSource for Player {
     }
 }
 
-/// The fact a translating policy of the player's would answer with: one
+/// The fact a Translate callback of the player's policy would answer: one
 /// the player ingests, written beside its event set as `Decides` is beside
 /// a command set.
 impl Ingests<Noted> for Player {}
@@ -811,19 +800,13 @@ impl CommandHandler for PlayerChild {
         vec!["toy.player.v1.Decide".to_string()]
     }
 
-    async fn dispatch(&self, _: &ContextualCommand) -> Result<CommandHandlerResponse, CodedError> {
-        Ok(CommandHandlerResponse {
-            conflict: None,
-            events: Some(EventBook {
-                pages: vec![EventPage {
-                    payload: Some(Any {
-                        type_url: format!("/{MOVE_DECIDED}"),
-                        value: Vec::new(),
-                    }),
-                    ..EventPage::default()
-                }],
-                ..EventBook::default()
-            }),
+    async fn dispatch(&self, _: &hpb::HandleRequest) -> Result<hpb::HandleResponse, CodedError> {
+        Ok(hpb::HandleResponse {
+            events: vec![Any {
+                type_url: format!("/{MOVE_DECIDED}"),
+                value: Vec::new(),
+            }],
+            state: None,
             rules_version: "player-1".to_string(),
         })
     }
@@ -833,18 +816,13 @@ impl CommandHandler for PlayerChild {
 fn player_descriptor() -> ComponentDescriptor {
     ComponentDescriptor {
         name: "Player".to_string(),
-        kind: ComponentKind::Aggregate as i32,
         rules_version: "player-1".to_string(),
-        state: Some(StateDescriptor {
-            type_url: "/toy.player.v1.State".to_string(),
-            options: Some(StateOptions {
-                conflict_resolutions: vec![
-                    ConflictResolution::Strict as i32,
-                    ConflictResolution::AggregateHandles as i32,
-                ],
+        kind: Some(component_descriptor::Kind::Aggregate(AggregateDescriptor {
+            domain: Player::DOMAIN.to_string(),
+            state: Some(StateDescriptor {
+                type_name: "toy.player.v1.State".to_string(),
             }),
-        }),
-        ..ComponentDescriptor::default()
+        })),
     }
 }
 
@@ -886,10 +864,10 @@ fn decide() -> CommandBook {
                     type_url: "/toy.player.v1.Decide".to_string(),
                     value: Vec::new(),
                 }),
+                handling: None,
             })),
             ..CommandPage::default()
         }),
-        handling: None,
     }
 }
 
@@ -931,7 +909,10 @@ fn a_policy_is_sourced_from_a_child_hosted_domain_by_its_event_set_alone() {
             let types = book
                 .pages
                 .iter()
-                .map(|p| type_name(&p.payload.as_ref().unwrap().type_url).to_string())
+                .map(|p| {
+                    let event = ::angzarr_embedded::angzarr_router::page_event(p).unwrap();
+                    type_name(&event.type_url).to_string()
+                })
                 .collect();
             (domain.unwrap_or_default(), types)
         })
@@ -960,15 +941,12 @@ fn a_domain_is_its_own_event_source() {
     );
 }
 
-/// A translating policy's fact for a child-hosted source is checked
+/// A Translate callback's fact for a child-hosted source is checked
 /// against what the source's event set says it ingests, and packs as any
 /// fact does.
 #[test]
 fn a_fact_for_a_child_hosted_source_packs_as_any_fact() {
-    let fact = markup::translated_fact::<Player, Noted, Infallible>(
-        Ok(Noted),
-        &markup::v1::Refusal::default(),
-    );
+    let fact = markup::translated_fact::<Player, Noted, Infallible>(Ok(Noted));
     assert_eq!(
         fact.ok().map(|any| any.type_url),
         Some("/toy.counter.v1.Noted".to_string())

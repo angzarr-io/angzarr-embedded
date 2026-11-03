@@ -426,7 +426,8 @@ impl ComponentKindConfig {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Supervision {
-    /// How long a child has, from its start, to print its handshake.
+    /// How long a child has, from its start, to report SERVING on its
+    /// socket's health service.
     pub handshake_timeout_ms: u64,
     /// The wait before the first restart of a child that exited; each
     /// restart that fails doubles it, up to `max_backoff_ms`, and a child
@@ -444,7 +445,7 @@ pub struct Supervision {
     /// fails retryably (`cause = timeout`).
     pub call_timeout_ms: u64,
     /// How often the host sends each child a grpc.health.v1 `Check` of
-    /// its overall server, once it has handshaken (the child protocol's
+    /// its overall server, once it is serving (the child protocol's
     /// supervision, decision 14.63).
     pub health_check_interval_ms: u64,
     /// How long a `Check` has to be answered; past it, the child is

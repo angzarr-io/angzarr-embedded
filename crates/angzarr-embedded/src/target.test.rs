@@ -4,12 +4,13 @@
 //! step alike, and its answer comes back as a local domain's would.
 //!
 //! The coordinator here is a fake [`CoordinatorPort`]: it records every
-//! book it is handed and answers with what the test gave it.
+//! book (`Handle`) and reaction (`Deliver`) it is handed and answers with
+//! what the test gave it.
 
 use std::sync::{Arc, Mutex};
 
-use angzarr_proto::v1::CommandHandlerResponse;
-use angzarr_router::error::{CodedError, HandlerError};
+use angzarr_router::error::{BusinessStatus, CodedError};
+use angzarr_router::hpb::{HandleRequest, HandleResponse, ProjectRequest, ProjectResponse};
 use angzarr_router::policy::PolicyDispatch;
 use angzarr_router::router::CommandHandler;
 
@@ -17,15 +18,15 @@ use super::*;
 use crate::toys::prelude::*;
 use crate::toys::{at, command, command_id, cover, Edit};
 use crate::v1::{
-    command_page, Command, CommandBook, CommandPage, ComponentDescriptor, ComponentKind,
-    ConflictResolution, ContextualCommand, Cover, DeliveryOutcome, EventBook, EventPage, Outcome,
-    StateDescriptor, StateOptions,
+    command_page, component_descriptor, reaction_delivery, AggregateDescriptor, Command,
+    CommandBook, ComponentDescriptor, ComponentKind, DeliveryOutcome, EventBook, EventPage,
+    ReactionDelivery, StateDescriptor,
 };
 use crate::{
-    rejection, Any, Failure, Handled, Kernel, KernelError, Malformed, MemoryDeadLetters,
-    Misconfigured, Registry,
+    pack, Any, Failure, Handled, Kernel, KernelError, Malformed, MemoryDeadLetters, Misconfigured,
+    Registry,
 };
-use angzarr_diagnostic::{Diagnostic, Report};
+use angzarr_diagnostic::Diagnostic;
 
 fn any(type_url: &str) -> Any {
     Any {
@@ -41,11 +42,12 @@ enum Answer {
     Refused(CodedError),
 }
 
-/// A coordinator elsewhere, owning the `bank` domain: every book it is
-/// handed, in order, and one answer for all of them.
+/// A coordinator elsewhere, owning the `bank` domain: every book and
+/// reaction it is handed, in order, and one answer for all of them.
 #[derive(Clone)]
 struct FakeCoordinator {
     handed: Arc<Mutex<Vec<CommandBook>>>,
+    delivered: Arc<Mutex<Vec<ReactionDelivery>>>,
     answer: Answer,
 }
 
@@ -53,19 +55,23 @@ impl FakeCoordinator {
     fn answering(answer: Answer) -> FakeCoordinator {
         FakeCoordinator {
             handed: Arc::default(),
+            delivered: Arc::default(),
             answer,
         }
     }
 
+    /// The books handed by `Handle`.
     fn handed(&self) -> Vec<CommandBook> {
         self.handed.lock().unwrap().clone()
     }
-}
 
-impl CoordinatorPort for FakeCoordinator {
-    fn handle(&self, book: CommandBook) -> Coordinated<'_> {
-        let cover = book.cover.clone();
-        self.handed.lock().unwrap().push(book);
+    /// The reactions handed by `Deliver`.
+    fn delivered(&self) -> Vec<ReactionDelivery> {
+        self.delivered.lock().unwrap().clone()
+    }
+
+    /// The test's answer, for a call on `cover`.
+    fn answer(&self, cover: Option<crate::v1::Cover>) -> Coordinated<'_> {
         let answer = self.answer.clone();
         Box::pin(async move {
             match answer {
@@ -78,18 +84,30 @@ impl CoordinatorPort for FakeCoordinator {
                             .enumerate()
                             .map(|(n, payload)| EventPage {
                                 sequence: n as u64,
-                                payload: Some(payload),
+                                body: Some(crate::v1::event_page::Body::Event(payload)),
                                 ..EventPage::default()
                             })
                             .collect(),
                         ..EventBook::default()
                     }),
-                    outcome: Some(Outcome {
-                        delivery: delivery as i32,
-                    }),
+                    delivery,
                 }),
             }
         })
+    }
+}
+
+impl CoordinatorPort for FakeCoordinator {
+    fn handle(&self, book: CommandBook) -> Coordinated<'_> {
+        let cover = book.cover.clone();
+        self.handed.lock().unwrap().push(book);
+        self.answer(cover)
+    }
+
+    fn deliver(&self, delivery: ReactionDelivery) -> Coordinated<'_> {
+        let cover = delivery.cover.clone();
+        self.delivered.lock().unwrap().push(delivery);
+        self.answer(cover)
     }
 }
 
@@ -113,36 +131,30 @@ impl CommandHandler for Till {
         vec!["toy.till.v1.Ring".to_string()]
     }
 
-    async fn dispatch(&self, _: &ContextualCommand) -> Result<CommandHandlerResponse, CodedError> {
-        Ok(CommandHandlerResponse {
-            conflict: None,
-            events: Some(EventBook {
-                pages: vec![EventPage {
-                    payload: Some(any(&format!("/{RUNG}"))),
-                    ..EventPage::default()
-                }],
-                ..EventBook::default()
-            }),
+    async fn dispatch(&self, _: &HandleRequest) -> Result<HandleResponse, CodedError> {
+        Ok(HandleResponse {
+            events: vec![any(&format!("/{RUNG}"))],
+            state: None,
             rules_version: "till-1".to_string(),
         })
     }
 }
 
 fn till_descriptor() -> ComponentDescriptor {
+    descriptor_of("till")
+}
+
+/// The till's descriptor, as a domain named `domain`.
+fn descriptor_of(domain: &str) -> ComponentDescriptor {
     ComponentDescriptor {
         name: "Till".to_string(),
-        kind: ComponentKind::Aggregate as i32,
         rules_version: "till-1".to_string(),
-        state: Some(StateDescriptor {
-            type_url: "/toy.till.v1.State".to_string(),
-            options: Some(StateOptions {
-                conflict_resolutions: vec![
-                    ConflictResolution::Strict as i32,
-                    ConflictResolution::AggregateHandles as i32,
-                ],
+        kind: Some(component_descriptor::Kind::Aggregate(AggregateDescriptor {
+            domain: domain.to_string(),
+            state: Some(StateDescriptor {
+                type_name: "toy.till.v1.State".to_string(),
             }),
-        }),
-        ..ComponentDescriptor::default()
+        })),
     }
 }
 
@@ -204,7 +216,7 @@ fn a_domain_is_either_local_or_remote_never_both() {
     );
     assert_eq!(
         registry
-            .command_handler("bank", Till, till_descriptor())
+            .command_handler("bank", Till, descriptor_of("bank"))
             .err(),
         taken("bank")
     );
@@ -233,7 +245,7 @@ fn a_command_for_a_remote_domain_reaches_its_coordinator_and_answers_as_if_local
     let page = handed[0].page.as_ref().unwrap();
     assert_eq!(page.command_id, Some(command_id(1)));
     assert!(
-        matches!(&page.body, Some(command_page::Body::Command(Command { payload: Some(p) }))
+        matches!(&page.body, Some(command_page::Body::Command(Command { payload: Some(p), handling: None }))
             if p.type_url == "/toy.bank.v1.Deposit"),
         "{page:?}"
     );
@@ -244,7 +256,11 @@ fn a_command_for_a_remote_domain_reaches_its_coordinator_and_answers_as_if_local
     let books = recorded.books();
     assert_eq!(books.len(), 1, "{books:?}");
     assert_eq!(books[0].cover, Some(cover("bank", 1)));
-    let payloads: Vec<_> = books[0].pages.iter().map(|p| p.payload.clone()).collect();
+    let payloads: Vec<_> = books[0]
+        .pages
+        .iter()
+        .map(|p| crate::angzarr_router::page_event(p).cloned())
+        .collect();
     assert_eq!(
         payloads,
         deposited().into_iter().map(Some).collect::<Vec<_>>()
@@ -299,13 +315,14 @@ fn a_remote_duplicate_is_a_duplicate() {
     assert_eq!(book.pages.len(), 1);
 }
 
-/// The coordinator's business refusal is the caller's rejection, under its
-/// code, as a local handler's is; nothing dead-lettered.
+/// The coordinator's typed refusal is the caller's rejection, its object
+/// and status as sent, as a local handler's is; nothing dead-lettered.
 #[test]
 fn a_remote_refusal_is_the_callers_rejection() {
-    let HandlerError::Coded(refusal) = rejection(Report::new("BANK_CLOSED"), None) else {
-        unreachable!("a rejection is coded");
-    };
+    let object = pack(&crate::toys::ToyRefusal {
+        code: "BANK_CLOSED".to_string(),
+    });
+    let refusal = CodedError::refused(BusinessStatus::FailedPrecondition, object.clone());
     let coordinator = FakeCoordinator::answering(Answer::Refused(refusal));
     let registry = registry_with(&coordinator);
     let log = MemoryDeadLetters::new();
@@ -315,10 +332,37 @@ fn a_remote_refusal_is_the_callers_rejection() {
         .ready()
         .err()
         .expect("refused");
+    let Failure::Rejected(rejected) = &failed else {
+        panic!("refused: {failed:?}");
+    };
+    assert_eq!(rejected.code(), "ANGZARR_REASON_COMMAND_REFUSED");
+    assert_eq!(rejected.refusal_object(), &object);
+    assert_eq!(rejected.status(), BusinessStatus::FailedPrecondition);
     assert!(
-        matches!(&failed, Failure::Rejected(r) if r.code() == "BANK_CLOSED"),
-        "{failed:?}"
+        rejected.rejection::<crate::toys::ToyRefusal>().is_none(),
+        "a refusal from another process is its object alone"
     );
+    assert!(log.lines().is_empty(), "{:?}", log.lines());
+}
+
+/// A framework key under a business status from the coordinator is no
+/// refusal (decision 14.95: only a typed refusal is one): the caller is
+/// answered it as the router's error, its status kept; nothing
+/// dead-lettered.
+#[test]
+fn a_remote_framework_key_under_a_business_status_is_no_refusal() {
+    let not_forked = crate::spec_coded(crate::v1::AngzarrReason::EditionNotForked, []);
+    let coordinator = FakeCoordinator::answering(Answer::Refused(not_forked.clone()));
+    let registry = registry_with(&coordinator);
+    let log = MemoryDeadLetters::new();
+    let failed = Kernel::new(&registry)
+        .log_with(&log)
+        .handle_any(&MemoryStore::new(), deposit(1), &at(1))
+        .ready()
+        .err()
+        .expect("answered");
+    assert_eq!(failed, Failure::Kernel(KernelError::Router(not_forked)));
+    assert_eq!(failed.recovery(), crate::Recovery::Business);
     assert!(log.lines().is_empty(), "{:?}", log.lines());
 }
 
@@ -378,36 +422,29 @@ fn a_domain_neither_here_nor_remote_is_unknown() {
     assert!(coordinator.handed().is_empty());
 }
 
+/// A policy from the till into the bank: each Rung deposits into the bank
+/// stream of the till's root.
+fn till_to_bank() -> PolicyDispatch {
+    PolicyDispatch::new("till-bank", "till", "bank").on_event(RUNG, |_, source| {
+        Ok(vec![angzarr_router::policy::command(
+            source.cover.and_then(|c| c.root.clone()),
+            any("/toy.bank.v1.Deposit"),
+        )])
+    })
+}
+
 /// A policy from the local `till` into the remote `bank`: the till's event
-/// sets off a step the kernel hands to the bank's coordinator, with the
-/// step's derived command id; the chain records both streams' events, and
-/// the policy's position on the till moves past its trigger.
+/// sets off a step the kernel hands to the bank's coordinator as a
+/// reaction (`Deliver`; decision 14.79), with the step's derived command
+/// id, the trigger its causation and the policy its component; the chain
+/// records both streams' events, and the policy's position on the till
+/// moves past its trigger.
 #[test]
 fn a_policy_step_into_a_remote_domain_goes_to_its_coordinator() {
     let coordinator =
         FakeCoordinator::answering(Answer::Events(DeliveryOutcome::Applied, deposited()));
     let mut registry = registry_with(&coordinator);
-    registry
-        .policy_dispatch(PolicyDispatch::new("till-bank", "till", "bank").on_event(
-            RUNG,
-            |_, source| {
-                Ok(vec![CommandBook {
-                    cover: Some(Cover {
-                        domain: "bank".to_string(),
-                        root: source.and_then(|c| c.root.clone()),
-                        edition: None,
-                    }),
-                    page: Some(CommandPage {
-                        body: Some(command_page::Body::Command(Command {
-                            payload: Some(any("/toy.bank.v1.Deposit")),
-                        })),
-                        ..CommandPage::default()
-                    }),
-                    handling: None,
-                }])
-            },
-        ))
-        .unwrap();
+    registry.policy_dispatch(till_to_bank()).unwrap();
     let log = MemoryDeadLetters::new();
     let store = MemoryStore::new();
     let ring = command(cover("till", 1), any("/toy.till.v1.Ring"));
@@ -417,17 +454,29 @@ fn a_policy_step_into_a_remote_domain_goes_to_its_coordinator() {
         .ready()
         .expect("handled");
 
-    let handed = coordinator.handed();
-    assert_eq!(handed.len(), 1, "{handed:?}");
-    assert_eq!(handed[0].cover, Some(cover("bank", 1)));
     assert!(
-        handed[0]
-            .page
-            .as_ref()
-            .and_then(|p| p.command_id.as_ref())
-            .is_some(),
+        coordinator.handed().is_empty(),
+        "a reaction is no client's Handle"
+    );
+    let delivered = coordinator.delivered();
+    assert_eq!(delivered.len(), 1, "{delivered:?}");
+    assert_eq!(delivered[0].cover, Some(cover("bank", 1)));
+    assert!(
+        delivered[0].command_id.is_some(),
         "the step's derived command id is fixed here"
     );
+    assert_eq!(delivered[0].component, "till-bank");
+    assert_eq!(
+        delivered[0].causation,
+        Some(crate::v1::EventRef {
+            stream: Some(cover("till", 1)),
+            sequence: 0,
+        })
+    );
+    assert!(matches!(
+        &delivered[0].body,
+        Some(reaction_delivery::Body::Command(p)) if p.type_url == "/toy.bank.v1.Deposit"
+    ));
     let books = handled.books();
     let covers: Vec<_> = books.iter().map(|b| b.cover.clone()).collect();
     assert_eq!(covers, [Some(cover("till", 1)), Some(cover("bank", 1))]);
@@ -448,8 +497,8 @@ impl angzarr_router::router::ProjectorHandler for Quiet {
         "quiet"
     }
 
-    async fn dispatch(&self, _: &EventBook) -> Result<crate::v1::Projection, CodedError> {
-        Ok(crate::v1::Projection::default())
+    async fn dispatch(&self, _: &ProjectRequest) -> Result<ProjectResponse, CodedError> {
+        Ok(ProjectResponse::default())
     }
 }
 
@@ -467,7 +516,7 @@ fn a_policy_of_a_remote_domains_events_is_refused() {
         .map(|e| e.to_string());
     assert_eq!(
         refused.as_deref(),
-        Some("HOST_REASON_REMOTE_SOURCE component=bank-till domain=bank")
+        Some("ANGZARR_REASON_REMOTE_SOURCE component=bank-till domain=bank")
     );
 }
 
@@ -482,7 +531,7 @@ fn a_projector_of_a_remote_domains_events_is_refused() {
         .map(|e| e.to_string());
     assert_eq!(
         refused.as_deref(),
-        Some("HOST_REASON_REMOTE_SOURCE component=quiet domain=bank")
+        Some("ANGZARR_REASON_REMOTE_SOURCE component=quiet domain=bank")
     );
 }
 
@@ -564,27 +613,7 @@ fn a_remote_policy_step_carries_its_triggers_correlation() {
     let coordinator =
         FakeCoordinator::answering(Answer::Events(DeliveryOutcome::Applied, deposited()));
     let mut registry = registry_with(&coordinator);
-    registry
-        .policy_dispatch(PolicyDispatch::new("till-bank", "till", "bank").on_event(
-            RUNG,
-            |_, source| {
-                Ok(vec![CommandBook {
-                    cover: Some(Cover {
-                        domain: "bank".to_string(),
-                        root: source.and_then(|c| c.root.clone()),
-                        edition: None,
-                    }),
-                    page: Some(CommandPage {
-                        body: Some(command_page::Body::Command(Command {
-                            payload: Some(any("/toy.bank.v1.Deposit")),
-                        })),
-                        ..CommandPage::default()
-                    }),
-                    handling: None,
-                }])
-            },
-        ))
-        .unwrap();
+    registry.policy_dispatch(till_to_bank()).unwrap();
     let log = MemoryDeadLetters::new();
     let ring = command(cover("till", 1), any("/toy.till.v1.Ring")).correlated(6);
     Kernel::new(&registry)
@@ -592,6 +621,9 @@ fn a_remote_policy_step_carries_its_triggers_correlation() {
         .handle_any(&MemoryStore::new(), ring, &at(1))
         .ready()
         .expect("handled");
-    let page = coordinator.handed()[0].page.clone().unwrap();
-    assert_eq!(page.correlation_id, Some(crate::toys::correlation(6)));
+    let delivered = coordinator.delivered();
+    assert_eq!(
+        delivered[0].correlation_id,
+        Some(crate::toys::correlation(6))
+    );
 }

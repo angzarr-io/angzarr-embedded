@@ -38,7 +38,7 @@ pub(crate) fn instant_column(at: &Timestamp) -> i64 {
 /// The rows of one stream as read in its edition (parameters `?1` domain,
 /// `?2` root, `?3` the edition column's value, `''` for main): its own rows,
 /// and main's below its fork, the sequence of its first own row (its
-/// creation). A main stream, and an edition stream with no row of its own,
+/// fork). A main stream, and an edition stream with no row of its own,
 /// is main's rows alone.
 macro_rules! view {
     () => {
@@ -250,7 +250,11 @@ pub(crate) fn insert_pages<D: Dialect>(
             .meta
             .as_ref()
             .and_then(|m| m.causation.as_ref())
-            .map(|Causation::CommandId(id)| id.value.to_vec());
+            .and_then(|causation| match causation {
+                Causation::Command(cause) => cause.command_id.as_ref(),
+                Causation::Fact(cause) => cause.command_id.as_ref(),
+            })
+            .map(|id| id.value.to_vec());
         let (correlation_id, recorded_at) = meta_columns(page);
         insert
             .values([

@@ -9,7 +9,7 @@
 //! adapter's commit position.
 //!
 //! **Editions are per-stream forks only** in this adapter: an edition
-//! stream is forked by a creation event as its first own event, at or below
+//! stream is forked by its fork event as its first own event, at or below
 //! main's head, and reads main below the fork; any other first write to it
 //! is refused `EditionNotForked`. The edition administration (the
 //! `Editions` port) is not implemented: the suite's checks for it are
@@ -131,7 +131,6 @@ mod base {
         a_forked_stream_reads_main_below_its_fork_then_its_own,
         a_fork_below_mains_head_lands_at_its_stated_sequence,
         a_fork_above_mains_head_is_a_conflict,
-        a_creation_stating_another_parent_sequence_is_malformed,
         find_command_finds_a_commands_events_on_its_stream,
         find_command_finds_a_retried_facts_events_by_its_id,
         find_command_finds_a_refusal_fact_on_the_trigger_stream_by_the_refused_id,
@@ -414,7 +413,7 @@ async fn two_handles_writing_one_stream_at_once_land_one_and_refuse_the_other() 
 
 // ------------------------------------------------------------- editions
 
-/// A write to an edition stream that no creation event forked is outside
+/// A write to an edition stream that no fork event forked is outside
 /// input to an unforked stream, refused `EditionNotForked`, and nothing is
 /// written, in the edition or in main.
 #[tokio::test]
@@ -1818,10 +1817,9 @@ fn every_change_token_is_a_send_future() {
 
 // ------------------------------------------------- forks and round trips
 
-/// A fork lands at its fork sequence as stated
-/// (`EditionCreated.parent_sequence`), main's head or below it; past main's
-/// head it is a conflict. Once forked, a
-/// second creation is refused; main is never forked into; an empty write
+/// A fork lands at its fork sequence, its own page's sequence, main's head
+/// or below it; past main's head it is a conflict. Once forked, a
+/// second fork is refused; main is never forked into; an empty write
 /// to an unforked edition stream checks main's head and writes nothing.
 #[tokio::test]
 async fn a_fork_lands_at_or_below_mains_head_once() {
@@ -1833,7 +1831,7 @@ async fn a_fork_lands_at_or_below_mains_head_once() {
         .unwrap();
     let late = edition_stream("tasks", 1, "late");
     assert_eq!(
-        append(&store, late, 3, &[created_page(3, "late")]).await,
+        append(&store, late, 3, &[created_page(3)]).await,
         Err(StoreError::conflict(late, 3, 2)),
         "past main's head"
     );
@@ -1844,21 +1842,21 @@ async fn a_fork_lands_at_or_below_mains_head_once() {
     );
     let early = edition_stream("tasks", 1, "early");
     assert_eq!(
-        append(&store, early, 1, &[created_page(1, "early")]).await,
+        append(&store, early, 1, &[created_page(1)]).await,
         Ok(2),
         "below main's head"
     );
     assert_eq!(
         pages(&store, early).await,
-        [page(0, 1), created_page(1, "early")],
+        [page(0, 1), created_page(1)],
         "main below the fork, then its own"
     );
     assert_eq!(
-        append(&store, early, 2, &[created_page(2, "early")]).await,
+        append(&store, early, 2, &[created_page(2)]).await,
         Err(StoreError::edition_already_forked(early))
     );
     assert_eq!(
-        append(&store, main, 2, &[created_page(2, "main")]).await,
+        append(&store, main, 2, &[created_page(2)]).await,
         Err(StoreError::EditionNameRequired)
     );
     assert_eq!(append(&store, early, 2, &[page(2, 3)]).await, Ok(3));

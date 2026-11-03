@@ -5,7 +5,7 @@
 //!   its root the key's UUIDv5 under its domain ([`ids::compute_root`]),
 //!   in the main edition.
 //! - [`CommandBookExt::command`]: a client's command to a stream, with no
-//!   ids and no handling, its payload packed (or
+//!   ids and no expected sequence, its payload packed (or
 //!   [`CommandBookExt::command_of`] a domain's payload, packing it); [`CommandBookExt::at`] sends it at the head its
 //!   sender read, [`CommandBookExt::with_id`] under the sender's command
 //!   id.
@@ -43,8 +43,8 @@ pub trait CommandBookExt: Sized {
     /// A client's command carrying `payload` (packed: a domain's
     /// [`Payload::to_any`](super::Payload::to_any), or [`pack`](super::pack)
     /// of a message) to `cover`: no command id (the kernel takes the
-    /// [`Sampled`](super::Sampled) one), no correlation, no handling (the
-    /// kernel stamps the head it loads).
+    /// [`Sampled`](super::Sampled) one), no correlation, no expected
+    /// sequence (it is decided on the stream as it is when it is loaded).
     fn command(cover: Cover, payload: Any) -> Self;
 
     /// [`CommandBookExt::command`] of a domain's command payload, packed
@@ -52,9 +52,11 @@ pub trait CommandBookExt: Sized {
     /// command enum's value, or one of its variants'.
     fn command_of(cover: Cover, payload: &impl Payload) -> Self;
 
-    /// The same book, sent at `head`: its expected sequence, the head its
-    /// sender read, its conflict resolution as it was (unset: by
-    /// configuration).
+    /// The same book, sent at `head`: its command's expected sequence, the
+    /// head its sender read (`Command.handling`; decision 14.79), refused
+    /// `ExpectedSequenceMismatch` unless it is the head when it is loaded
+    /// (decision 14.94). A fact has no expected sequence: its book is
+    /// unchanged.
     fn at(self, head: u64) -> Self;
 
     /// The same book, under the client's command id `command_id`.
@@ -68,10 +70,10 @@ impl CommandBookExt for CommandBook {
             page: Some(CommandPage {
                 body: Some(command_page::Body::Command(Command {
                     payload: Some(payload),
+                    handling: None,
                 })),
                 ..CommandPage::default()
             }),
-            handling: None,
         }
     }
 
@@ -80,8 +82,13 @@ impl CommandBookExt for CommandBook {
     }
 
     fn at(mut self, head: u64) -> CommandBook {
-        let handling = self.handling.get_or_insert_with(Handling::default);
-        handling.expected_sequence = Some(head);
+        if let Some(command_page::Body::Command(command)) =
+            self.page.as_mut().and_then(|page| page.body.as_mut())
+        {
+            command.handling = Some(Handling {
+                expected_sequence: Some(head),
+            });
+        }
         self
     }
 

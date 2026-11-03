@@ -6,22 +6,20 @@
 //! completed once the event recording its reply is folded, and the state
 //! says so ([`Compensation::step`]'s `recorded`). An undo is an event of
 //! the PM's own, built from that record, which the PM's outbound policy
-//! turns into what the step's destination declares: a fact where it can
-//! (decision 14.69), so an undo is never refused and compensation never
-//! loops.
+//! turns into what the step's destination declares: a fact (decisions 14.69
+//! and 14.83), so an undo is never refused and compensation never loops.
 //!
 //! ```ignore
 //! let compensation = Compensation::new(
 //!     |_: &ShipmentState, reason: String| ShipmentEvent::from(ShipmentFailed { reason }),
 //!     |state: &ShipmentState| state.failed,
-//!     |_: &ShipmentState, step: &str| ShipmentEvent::from(CompensationFailed { step: step.into() }),
 //! )
 //! .step::<Inventory, ReleaseStock, _>(
 //!     "reserve stock",
 //!     |state| (!state.reservation_id.is_empty())
 //!         .then(|| StockReserved { reservation_id: state.reservation_id.clone() }),
 //!     |reserved| StockReleaseDue { reservation_id: reserved.reservation_id.clone() }.into(),
-//! );
+//! )?;
 //! // a step refused: the failed event, then each completed step's undo,
 //! // newest first
 //! let events = compensation.rollback(state, "payment declined".into());
@@ -30,9 +28,9 @@
 //! Which event undoes which step is known only here, so registering a step
 //! checks it against what its destination declares (the owner's ruling
 //! Q10): an undo whose target is one of the destination's commands, which
-//! may be refused, is warned of ([`Compensation::warnings`]); a refused
-//! one's refusal, reaching the PM, records CompensationFailed
-//! ([`Compensation::undo_refused`]).
+//! may be refused, is refused at registration ([`UndoTargetsCommand`];
+//! decision 14.83), so no undo is ever refused and there is no
+//! CompensationFailed.
 
 use std::any::{Any, TypeId};
 use std::fmt;
@@ -47,8 +45,6 @@ use super::policy::CommandTarget;
 type Failed<S, E, R> = Box<dyn Fn(&S, R) -> E + Send + Sync>;
 /// Whether the state has rolled back.
 type RolledBack<S> = Box<dyn Fn(&S) -> bool + Send + Sync>;
-/// The CompensationFailed event for a step, by its name.
-type CompensationFailed<S, E> = Box<dyn Fn(&S, &str) -> E + Send + Sync>;
 /// A step's undo, when the state records it done.
 type Recorded<S, E> = Box<dyn Fn(&S) -> Option<E> + Send + Sync>;
 /// A step's undo of a reply recording it done, the reply's type erased.
@@ -59,9 +55,7 @@ type Replied<E> = Box<dyn Fn(&dyn Any) -> Option<E> + Send + Sync>;
 pub struct Compensation<S, E, R = String> {
     failed: Failed<S, E, R>,
     rolled_back: RolledBack<S>,
-    compensation_failed: CompensationFailed<S, E>,
     steps: Vec<Step<S, E>>,
-    warnings: Vec<UndoTargetsCommand>,
 }
 
 /// One registered step.
@@ -69,8 +63,6 @@ struct Step<S, E> {
     name: &'static str,
     /// The type of the event recording it done.
     forward: TypeId,
-    /// The type its undo becomes at its destination.
-    target: TypeId,
     /// Its undo, when the state records it done.
     recorded: Recorded<S, E>,
     /// Its undo of a reply recording it done.
@@ -80,20 +72,15 @@ struct Step<S, E> {
 impl<S, E, R> Compensation<S, E, R> {
     /// No steps yet: `failed` builds a rollback's failed event from the
     /// state and the reason, whose fold marks the state rolled back,
-    /// which `rolled_back` reads; `compensation_failed` builds the event
-    /// recording that a step's undo was refused, from the state and the
-    /// step's name.
+    /// which `rolled_back` reads.
     pub fn new(
         failed: impl Fn(&S, R) -> E + Send + Sync + 'static,
         rolled_back: impl Fn(&S) -> bool + Send + Sync + 'static,
-        compensation_failed: impl Fn(&S, &str) -> E + Send + Sync + 'static,
     ) -> Self {
         Compensation {
             failed: Box::new(failed),
             rolled_back: Box::new(rolled_back),
-            compensation_failed: Box::new(compensation_failed),
             steps: Vec::new(),
-            warnings: Vec::new(),
         }
     }
 
@@ -103,13 +90,13 @@ impl<S, E, R> Compensation<S, E, R> {
     /// its undo from that event. Its undo becomes `U` at `D`, the step's
     /// destination: checked here, at registration, against what `D`
     /// declares; a `U` that is one of `D`'s commands, which may be refused,
-    /// is warned of ([`Compensation::warnings`]).
+    /// is refused ([`UndoTargetsCommand`]; decision 14.83).
     pub fn step<D, U, F>(
         mut self,
         name: &'static str,
         recorded: impl Fn(&S) -> Option<F> + Send + Sync + 'static,
         undo: impl Fn(&F) -> E + Send + Sync + 'static,
-    ) -> Self
+    ) -> Result<Self, UndoTargetsCommand>
     where
         D: CommandTarget,
         U: DomainMessage,
@@ -117,7 +104,7 @@ impl<S, E, R> Compensation<S, E, R> {
     {
         let target = TypeName::of::<U::Wire>().full_name();
         if D::command_types().contains(&target) {
-            self.warnings.push(UndoTargetsCommand {
+            return Err(UndoTargetsCommand {
                 step: name,
                 command: target,
             });
@@ -127,17 +114,10 @@ impl<S, E, R> Compensation<S, E, R> {
         self.steps.push(Step {
             name,
             forward: TypeId::of::<F>(),
-            target: TypeId::of::<U>(),
             recorded: Box::new(move |state| recorded(state).map(|done| undo(&done))),
             replied: Box::new(move |reply| reply.downcast_ref::<F>().map(|done| replied(done))),
         });
-        self
-    }
-
-    /// What registering the steps warned of: each undo that becomes one of
-    /// its destination's commands, which may be refused.
-    pub fn warnings(&self) -> &[UndoTargetsCommand] {
-        &self.warnings
+        Ok(self)
     }
 
     /// The rollback of `state` for `reason`: the failed event, then the
@@ -167,14 +147,6 @@ impl<S, E, R> Compensation<S, E, R> {
         };
         std::iter::once(reply.into()).chain(undo).collect()
     }
-
-    /// The event recording that the undo becoming `U` was refused: its
-    /// step's CompensationFailed; `None` when no step's undo becomes `U`.
-    pub fn undo_refused<U: 'static>(&self, state: &S) -> Option<E> {
-        let target = TypeId::of::<U>();
-        let step = self.steps.iter().find(|s| s.target == target)?;
-        Some((self.compensation_failed)(state, step.name))
-    }
 }
 
 impl<S, E, R> fmt::Debug for Compensation<S, E, R> {
@@ -182,14 +154,13 @@ impl<S, E, R> fmt::Debug for Compensation<S, E, R> {
         let steps: Vec<&str> = self.steps.iter().map(|s| s.name).collect();
         f.debug_struct("Compensation")
             .field("steps", &steps)
-            .field("warnings", &self.warnings)
             .finish()
     }
 }
 
 /// A step whose undo becomes one of its destination's commands, which the
-/// destination may refuse: warned of when the step is registered (a
-/// warning, not a refusal; some undos really can be refused).
+/// destination may refuse: refused when the step is registered (decision
+/// 14.83), so no undo is ever refused.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct UndoTargetsCommand {
     /// The step, by the name it was registered under.

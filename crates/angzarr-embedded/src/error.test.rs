@@ -30,76 +30,10 @@ fn the_kernel_classifies_every_status_itself() {
     }
 }
 
-/// The coordinator's conflicts on the wire (decisions 14.42, 14.45):
-/// each ABORTED under its key, its args as metadata; an error that is
-/// none of them has no wire answer of the coordinator's.
-#[test]
-fn the_coordinators_conflicts_are_coded_under_their_keys() {
-    use std::collections::BTreeMap;
-
-    use angzarr_router::error::GrpcCode;
-
-    use super::KernelError;
-    use angzarr_proto::v1::CoordinatorReason;
-    let stream = || angzarr_proto::v1::Cover {
-        domain: "shelf".to_string(),
-        ..Default::default()
-    };
-    let coded = |error: KernelError| {
-        error
-            .as_coded()
-            .map(|c| (c.code, c.extras, c.grpc))
-            .expect("one of the coordinator's answers")
-    };
-    let extras = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
-        pairs
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect()
-    };
-    assert_eq!(
-        coded(KernelError::Overlap {
-            stream: stream(),
-            expected: 1,
-            actual: 3,
-            window_units: "items[a]".to_string(),
-            command_units: "items[a].count".to_string(),
-        }),
-        (
-            CoordinatorReason::ConflictOverlap.as_str_name().to_string(),
-            extras(&[
-                ("stream", "shelf/"),
-                ("window_units", "items[a]"),
-                ("command_units", "items[a].count")
-            ]),
-            GrpcCode::Aborted
-        )
-    );
-    assert_eq!(
-        coded(KernelError::Unresolved {
-            stream: stream(),
-            expected: 1,
-            actual: 3,
-        }),
-        (
-            CoordinatorReason::ConflictUnresolved
-                .as_str_name()
-                .to_string(),
-            extras(&[("stream", "shelf/")]),
-            GrpcCode::Aborted
-        )
-    );
-    assert!(KernelError::UnregisteredDomain {
-        domain: "shelf".to_string()
-    }
-    .as_coded()
-    .is_none());
-}
-
-/// The limits and an unreachable handler on the wire, under decision
-/// 14.49's keys: the two limits INTERNAL (fatal bugs) with their `limit`,
-/// the unreachable handler UNAVAILABLE (a retryable bug) with its domain
-/// and cause.
+/// The chain's limit and an unreachable handler on the wire, under
+/// decision 14.49's keys: the limit INTERNAL (a fatal bug) with its
+/// `limit`, the unreachable handler UNAVAILABLE (a retryable bug) with its
+/// domain and cause.
 #[test]
 fn the_limits_and_an_unreachable_handler_are_coded_under_their_keys() {
     use std::collections::BTreeMap;
@@ -107,7 +41,7 @@ fn the_limits_and_an_unreachable_handler_are_coded_under_their_keys() {
     use angzarr_router::error::GrpcCode;
 
     use super::KernelError;
-    use angzarr_proto::v1::{CoordinatorReason, RouterReason};
+    use angzarr_proto::v1::AngzarrReason;
     let stream = || angzarr_proto::v1::Cover {
         domain: "shelf".to_string(),
         ..Default::default()
@@ -127,19 +61,8 @@ fn the_limits_and_an_unreachable_handler_are_coded_under_their_keys() {
     assert_eq!(
         coded(KernelError::ChainTooDeep { limit: 8 }),
         (
-            CoordinatorReason::ChainTooDeep.as_str_name().to_string(),
+            AngzarrReason::ChainTooDeep.as_str_name().to_string(),
             extras(&[("limit", "8")]),
-            GrpcCode::Internal
-        )
-    );
-    assert_eq!(
-        coded(KernelError::TooManySteps {
-            stream: stream(),
-            limit: 16
-        }),
-        (
-            RouterReason::TooManySteps.as_str_name().to_string(),
-            extras(&[("limit", "16")]),
             GrpcCode::Internal
         )
     );
@@ -149,9 +72,7 @@ fn the_limits_and_an_unreachable_handler_are_coded_under_their_keys() {
             cause: "timeout".to_string()
         }),
         (
-            CoordinatorReason::HandlerUnavailable
-                .as_str_name()
-                .to_string(),
+            AngzarrReason::HandlerUnavailable.as_str_name().to_string(),
             extras(&[
                 ("stream", "shelf/"),
                 ("domain", "shelf"),
@@ -164,10 +85,11 @@ fn the_limits_and_an_unreachable_handler_are_coded_under_their_keys() {
 
 /// The retryable failures of the store and the upcaster sidecar on the
 /// wire, under decision 14.51's keys, each UNAVAILABLE (a retryable bug):
-/// a race the store lost, handed back at a race re-run cap of 0, with the
-/// head stamped and the head found; a store that could not answer, its
-/// failure the `cause`; a sidecar that could not be reached, its domain and
-/// cause. A store error that is not retryable has no wire answer here.
+/// a store that could not answer, its failure the `cause`; a sidecar that
+/// could not be reached, its domain and cause. A race the store lost is
+/// never answered as itself (it is run again, and given up at the race
+/// re-run cap as ANGZARR_REASON_RETRY_CAP_EXHAUSTED; decision 14.84), and a
+/// store error that is not retryable has no wire answer here.
 #[test]
 fn the_retryable_store_and_sidecar_failures_are_coded_under_their_keys() {
     use std::collections::BTreeMap;
@@ -176,7 +98,7 @@ fn the_retryable_store_and_sidecar_failures_are_coded_under_their_keys() {
     use angzarr_router::error::GrpcCode;
 
     use super::{KernelError, UpcastError};
-    use angzarr_proto::v1::CoordinatorReason;
+    use angzarr_proto::v1::AngzarrReason;
     let stream = || angzarr_proto::v1::Cover {
         domain: "shelf".to_string(),
         ..Default::default()
@@ -193,17 +115,11 @@ fn the_retryable_store_and_sidecar_failures_are_coded_under_their_keys() {
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
     };
-    assert_eq!(
-        coded(KernelError::Store(angzarr_ports::StoreError::conflict(
-            stream(),
-            3,
-            4
-        ))),
-        (
-            CoordinatorReason::StoreConflict.as_str_name().to_string(),
-            extras(&[("stream", "shelf/"), ("expected", "3"), ("actual", "4")]),
-            GrpcCode::Unavailable
-        )
+    assert!(
+        KernelError::Store(angzarr_ports::StoreError::conflict(stream(), 3, 4))
+            .as_coded()
+            .is_none(),
+        "a lost race is run again, never answered as itself"
     );
     assert_eq!(
         coded(KernelError::Store(angzarr_ports::StoreError::Unavailable(
@@ -216,9 +132,7 @@ fn the_retryable_store_and_sidecar_failures_are_coded_under_their_keys() {
             )
         ))),
         (
-            CoordinatorReason::StoreUnavailable
-                .as_str_name()
-                .to_string(),
+            AngzarrReason::StoreUnavailable.as_str_name().to_string(),
             extras(&[
                 ("cause", "x-down"),
                 ("cause.ext_err_txt", "database is locked")
@@ -234,9 +148,7 @@ fn the_retryable_store_and_sidecar_failures_are_coded_under_their_keys() {
             },
         }),
         (
-            CoordinatorReason::UpcasterUnavailable
-                .as_str_name()
-                .to_string(),
+            AngzarrReason::UpcasterUnavailable.as_str_name().to_string(),
             extras(&[
                 ("domain", "shelf"),
                 ("cause", "x-sidecar-down"),
@@ -305,40 +217,6 @@ fn spec_keyed(
     use super::KernelError;
     vec![
         (
-            KernelError::Stale {
-                stream: stream(),
-                expected: 1,
-                actual: 2,
-            },
-            GrpcCode::Aborted,
-        ),
-        (
-            KernelError::ExpectedSequenceAhead {
-                stream: stream(),
-                expected: 3,
-                head: 2,
-            },
-            GrpcCode::InvalidArgument,
-        ),
-        (
-            KernelError::Overlap {
-                stream: stream(),
-                expected: 1,
-                actual: 2,
-                window_units: "a".to_string(),
-                command_units: "a".to_string(),
-            },
-            GrpcCode::Aborted,
-        ),
-        (
-            KernelError::Unresolved {
-                stream: stream(),
-                expected: 1,
-                actual: 2,
-            },
-            GrpcCode::Aborted,
-        ),
-        (
             KernelError::RetryCapExhausted {
                 stream: stream(),
                 attempts: 3,
@@ -355,23 +233,21 @@ fn spec_keyed(
             GrpcCode::Internal,
         ),
         (
-            KernelError::EventsNotItsStream {
+            KernelError::StateTypeMismatch {
                 stream: stream(),
-                event_stream: angzarr_proto::v1::Cover {
-                    edition: Some("beta".to_string()),
-                    ..stream()
-                },
+                registered: "a.State".to_string(),
+                state_type: "a.Other".to_string(),
+            },
+            GrpcCode::Internal,
+        ),
+        (
+            KernelError::FactDeadLettered {
+                stream: stream(),
+                cause: angzarr_diagnostic::Report::new("x-bad"),
             },
             GrpcCode::Internal,
         ),
         (KernelError::ChainTooDeep { limit: 8 }, GrpcCode::Internal),
-        (
-            KernelError::TooManySteps {
-                stream: stream(),
-                limit: 16,
-            },
-            GrpcCode::Internal,
-        ),
         (
             KernelError::HandlerUnavailable {
                 stream: stream(),

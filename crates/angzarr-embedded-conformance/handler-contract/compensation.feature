@@ -16,6 +16,10 @@ Feature: Compensation - a process manager's rollback, kept by the client library
   "charge payment" (PaymentCharged, undone by RefundDue, which becomes
   RefundPayment); its failed event is ShipmentFailed.
 
+  An undo's target must be a fact (decision 14.83): a step whose undo
+  targets a command is refused when it is registered, so no undo is ever
+  refused and there is no CompensationFailed.
+
   Background:
     Given the shipment process manager's steps, registered at startup
 
@@ -52,37 +56,21 @@ Feature: Compensation - a process manager's rollback, kept by the client library
     Then it records PaymentCharged alone
 
   @C-0792
-  Scenario Outline: Registering a step checks its undo's target against the descriptor
+  Scenario Outline: Registering a step checks that its undo's target is a fact
     # Decision 14.74, the owner's rulings 6 and Q10: which event undoes which
     # step is known only in code, so the library checks at startup, when the
-    # step is registered, and warns of an undo that may be refused.
+    # step is registered. An undo targeting a command is refused, not
+    # warned of (decision 14.83).
     Given "reserve stock" is registered with an undo that becomes <target>
     When the shipment process manager starts
-    Then <warning>
+    Then <outcome>
 
     Examples:
-      | target                           | warning                                                                                                  |
-      | "test.compensation.ReleaseStock" | registration reports no warning                                                                          |
-      | "test.compensation.RestockItems" | registration warns that the undo of "reserve stock" targets the command "test.compensation.RestockItems" |
+      | target                           | outcome                                                                                                                      |
+      | "test.compensation.ReleaseStock" | registration succeeds                                                                                                        |
+      | "test.compensation.RestockItems" | registration is refused, naming the step "reserve stock" and its undo's target, the command "test.compensation.RestockItems" |
 
-  @C-0793
-  Scenario: An undo its destination refuses records CompensationFailed
-    # Ruling 6: a refused undo makes the PM record CompensationFailed. The
-    # undo here targets a command, which registration warned of (C-0792).
-    Given "reserve stock" is registered with an undo that becomes "test.compensation.RestockItems"
-    And the shipment has completed "reserve stock" and rolled back
-    When the refusal of its "test.compensation.RestockItems" reaches the shipment
-    Then it records CompensationFailed for "reserve stock"
-
-  @C-0796
-  Scenario: A refused undo's handling succeeds and dead-letters nothing
-    # Owner decision 38 (a), 2026-11-02 (14.74): CompensationFailed is the
-    # alert. A handling either records events or is dead-lettered, never
-    # both, so the refusal is not dead-lettered; a human learns of it by
-    # watching CompensationFailed, through a projector or subscriber.
-    Given "reserve stock" is registered with an undo that becomes "test.compensation.RestockItems"
-    And the shipment has completed "reserve stock" and rolled back
-    When the refusal of its "test.compensation.RestockItems" reaches the shipment
-    Then the handling succeeds
-    And it records CompensationFailed for "reserve stock"
-    And nothing is dead-lettered for the refusal
+  # C-0793 (a refused undo recorded as CompensationFailed) and C-0796 (that
+  # handling succeeding, nothing dead-lettered) are retired: an undo's target
+  # must be a fact, so no undo can be refused, and CompensationFailed is
+  # deleted (decision 14.83; owner decision 38 is moot).

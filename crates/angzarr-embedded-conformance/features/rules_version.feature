@@ -8,8 +8,9 @@ Feature: Rules version - recording who decided, and choosing snapshots
   decided it.
 
   The coordinator alone decides whether a stored snapshot may be used. It
-  offers a snapshot only when the snapshot's state type is the registered
-  state type and its version passes the domain's compatibility rule against
+  offers a snapshot only when the name its state's type URL ends in is the
+  registered state type name (StateDescriptor.type_name; decision 14.101)
+  and its version passes the domain's compatibility rule against
   the registered version. By default, versions are compatible when their
   major and minor numbers are equal, ignoring one leading "v" or "V"; a
   version that is not a semantic version is compatible only with exactly
@@ -23,7 +24,7 @@ Feature: Rules version - recording who decided, and choosing snapshots
   reporting any other version is a bug, and nothing it produced is kept.
 
   Background:
-    Given an "order" aggregate registered with state type "/orders.v1.OrderState" and rules version "1.4.2+build.7"
+    Given an "order" aggregate registered with state type "orders.v1.OrderState" and rules version "1.4.2+build.7"
 
   # ===========================================================================
   # Recording the version
@@ -108,7 +109,7 @@ Feature: Rules version - recording who decided, and choosing snapshots
   @snapshot_selection
   @C-0525
   Scenario Outline: Against a registered version that is not a semantic version, only the same version is offered
-    Given an "order" aggregate registered with state type "/orders.v1.OrderState" and rules version "build-2026-10-19.3"
+    Given an "order" aggregate registered with state type "orders.v1.OrderState" and rules version "build-2026-10-19.3"
     And order "order-1" has a snapshot at sequence 5 of state type "/orders.v1.OrderState" recorded under rules version "<snapshot version>"
     When the coordinator delivers an AddItem command for order "order-1"
     Then the snapshot is <offered>
@@ -135,7 +136,7 @@ Feature: Rules version - recording who decided, and choosing snapshots
   @snapshot_selection
   @C-0553
   Scenario Outline: One leading "v" is ignored when comparing semantic versions
-    Given an "order" aggregate registered with state type "/orders.v1.OrderState" and rules version "<registered>"
+    Given an "order" aggregate registered with state type "orders.v1.OrderState" and rules version "<registered>"
     And order "order-1" has a snapshot at sequence 5 of state type "/orders.v1.OrderState" recorded under rules version "<snapshot version>"
     When the coordinator delivers an AddItem command for order "order-1"
     Then the snapshot is <offered>
@@ -235,10 +236,21 @@ Feature: Rules version - recording who decided, and choosing snapshots
   @C-0748
   Scenario: An answer reporting another version is refused under its key
     # Decision 14.56: a bug, fatal; an asynchronous or reaction delivery is
-    # dead-lettered with the same key as its reason (14.48).
-    When business code answers an AddItem command sent awaiting the decision with an ItemAdded event, reporting rules version "1.5.0+build.9"
+    # dead-lettered with the same key as its reason (14.48). The key
+    # concerns one stream, so it names it (decision 14.65).
+    When business code answers an AddItem command for order "order-1" sent awaiting the decision with an ItemAdded event, reporting rules version "1.5.0+build.9"
     Then no events are persisted
-    And the caller is answered INTERNAL with reason COORDINATOR_REASON_RULES_VERSION_MISMATCH, component "order", registered "1.4.2+build.7" and reported "1.5.0+build.9"
+    And the caller is answered INTERNAL with reason ANGZARR_REASON_RULES_VERSION_MISMATCH, stream the stream of order "order-1", component "order", registered "1.4.2+build.7" and reported "1.5.0+build.9"
+
+  @rules_version
+  @C-0818
+  Scenario: An answer whose state is not the registered state type is refused under its key
+    # Decision 14.102: the coordinator owns every descriptor check; an
+    # answer whose state type is not StateDescriptor.type_name would
+    # never be offered its snapshots back. A bug, fatal.
+    When business code answers an AddItem command for order "order-1" sent awaiting the decision with an ItemAdded event and a state of type "/orders.v1.LegacyOrderState", reporting rules version "1.4.2+build.7"
+    Then no events are persisted and no snapshot is stored
+    And the caller is answered INTERNAL with reason ANGZARR_REASON_STATE_TYPE_MISMATCH, stream the stream of order "order-1", component "order", registered "orders.v1.OrderState" and state_type "orders.v1.LegacyOrderState"
 
   @rules_version
   @C-0559

@@ -1,13 +1,12 @@
 //! Toy domains for the kernel's tests, their payloads prost messages under
 //! versioned packages, as hatpick's will be:
 //!
-//! - an **account**: no conflict units (STRICT by default), a fee on
-//!   every withdrawal, facts from a payment provider, an old command type
-//!   (`toy.account.cmd.v0.Credit`, whole euros) and an old event type
-//!   (`toy.account.v0.Credited`) that upcast to the current ones;
-//! - a **shelf**: shaped like hatpick's `ListState`, its state declaring
-//!   conflict units (COMMUTATIVE by default), one command type configured
-//!   STRICT;
+//! - an **account**: a fee on every withdrawal, facts from a payment
+//!   provider, an old command type (`toy.account.cmd.v0.Credit`, whole
+//!   euros) and an old event type (`toy.account.v0.Credited`) that upcast
+//!   to the current ones;
+//! - a **shelf**: shaped like hatpick's `ListState`, a prost state that is
+//!   its own snapshot form;
 //! - a **ledger** a policy commands from the account, which refuses large
 //!   amounts, for the chain. Its state is a plain Rust type whose snapshot
 //!   form is a prost message, as a generated domain state's is.
@@ -17,15 +16,16 @@ use std::fmt;
 
 pub use angzarr_ports::memory::MemoryStore;
 
-use crate::angzarr_router::domain::{CommandContext, Conflict, DomainDispatch, FactRecord};
+use crate::angzarr_router::domain::{CommandContext, DomainDispatch, Emit, InputArm};
+use crate::angzarr_router::error::BusinessStatus;
 use crate::markup::{Commands, PolicyContext};
 use crate::v1::{
-    command_page, Command, CommandBook, CommandPage, ConflictResolution, Cover, EventPage,
-    EventRef, Fact, FactOrigin, Handling, StateDescriptor, StateOptions, Uuid,
+    command_page, Command, CommandBook, CommandPage, Cover, EventPage, Fact, FactOrigin, Handling,
+    StateDescriptor, Uuid,
 };
 use crate::{
-    ids, pack, Any, Decoder, Domain, Key, Misconfigured, Payload, PayloadError, Policy, Registry,
-    Sampled, State, Timestamp, UnitPath, Units, Upcaster,
+    ids, pack, Any, Decoder, Domain, Misconfigured, Payload, PayloadError, Policy, Registry,
+    Sampled, State, Timestamp, Upcaster,
 };
 use crate::{EventStore, ListStreams, PositionKey, PositionStore, Store, StreamRef};
 use angzarr_diagnostic::{Arg, Diagnostic, Report};
@@ -109,42 +109,40 @@ pub fn cover_in(domain: &str, n: u128, edition: &str) -> Cover {
     }
 }
 
-/// A client's command to `cover`, with no ids and no handling.
+/// A client's command to `cover`, with no ids and no expected sequence.
 pub fn command(cover: Cover, payload: Any) -> CommandBook {
     CommandBook {
         cover: Some(cover),
         page: Some(CommandPage {
             body: Some(command_page::Body::Command(Command {
                 payload: Some(payload),
+                handling: None,
             })),
             ..CommandPage::default()
         }),
-        handling: None,
     }
 }
 
-/// A fact to `cover` from `external_id`, with no ids and no handling.
+/// A fact to `cover` from `external_id`, with no ids.
 pub fn fact(cover: Cover, payload: Any, external_id: &str) -> CommandBook {
     CommandBook {
         cover: Some(cover),
         page: Some(CommandPage {
             body: Some(command_page::Body::Fact(Fact {
                 payload: Some(payload),
+                origin: Some(FactOrigin {
+                    external_id: external_id.to_string(),
+                    description: "toy payments webhook".to_string(),
+                }),
             })),
-            fact_origin: Some(FactOrigin {
-                external_id: external_id.to_string(),
-                description: "toy payments webhook".to_string(),
-            }),
             ..CommandPage::default()
         }),
-        handling: None,
     }
 }
 
 /// Edits to a book, for building cases.
 pub trait Edit: Sized {
     fn page_mut(&mut self) -> &mut CommandPage;
-    fn book_mut(&mut self) -> &mut CommandBook;
 
     /// With the client-supplied command id `n`.
     fn id(mut self, n: u128) -> Self {
@@ -158,28 +156,14 @@ pub trait Edit: Sized {
         self
     }
 
-    /// Expecting the stream at `sequence`, resolved by `resolution` if
-    /// stale (`Unspecified`: by configuration).
-    fn expecting(mut self, sequence: u64, resolution: ConflictResolution) -> Self {
-        self.book_mut().handling = Some(Handling {
-            expected_sequence: Some(sequence),
-            conflict_resolution: resolution as i32,
-        });
-        self
-    }
-
-    /// Asking for `resolution`, with no expected sequence.
-    fn resolved_by(mut self, resolution: ConflictResolution) -> Self {
-        self.book_mut().handling = Some(Handling {
-            expected_sequence: None,
-            conflict_resolution: resolution as i32,
-        });
-        self
-    }
-
-    /// Claiming to react to `trigger`: only the kernel may.
-    fn caused_by(mut self, trigger: EventRef) -> Self {
-        self.page_mut().causation_id = Some(trigger);
+    /// A command expecting the stream at `sequence` (its
+    /// `Command.handling`); a fact's book unchanged.
+    fn expecting(mut self, sequence: u64) -> Self {
+        if let Some(command_page::Body::Command(command)) = self.page_mut().body.as_mut() {
+            command.handling = Some(Handling {
+                expected_sequence: Some(sequence),
+            });
+        }
         self
     }
 }
@@ -188,19 +172,14 @@ impl Edit for CommandBook {
     fn page_mut(&mut self) -> &mut CommandPage {
         self.page.get_or_insert_with(CommandPage::default)
     }
-
-    fn book_mut(&mut self) -> &mut CommandBook {
-        self
-    }
 }
 
 // ---------------------------------------------------------------- handlers
 
 /// What a toy's handler reads besides the state and its input: the
-/// router's `CommandContext` (the stream, the input's ids, a fact's origin,
-/// the conflict under AGGREGATE_HANDLES), the instant the kernel records at,
-/// and the domain's rules version. (A fixture standing in for a domain's
-/// handlers.)
+/// router's `CommandContext` (the stream, the input's ids, a fact's
+/// origin), the instant the kernel records at, and the domain's rules
+/// version. (A fixture standing in for a domain's handlers.)
 pub struct ToyCtx<'a, D: Domain> {
     pub stream: Cover,
     pub command_id: Uuid,
@@ -211,12 +190,13 @@ pub struct ToyCtx<'a, D: Domain> {
     pub domain: std::marker::PhantomData<fn() -> D>,
     /// The stream's next sequence.
     pub head: u64,
-    pub conflict: Option<Conflict>,
 }
 
 /// A toy domain's handlers, written against the state: its command
-/// handler, which may refuse, and its fact handler, which may not.
-/// Registered on the router's table by [`register`].
+/// handler, which may refuse (its rejection travels as the typed
+/// [`ToyRefusal`], FAILED_PRECONDITION, and is kept for the caller), and
+/// its fact handler, which may not. Registered on the router's table by
+/// [`register`].
 pub trait Toy: Domain {
     fn decide(
         cmd: &Self::Command,
@@ -232,18 +212,36 @@ pub trait Toy: Domain {
 
 /// The router's context, with the kernel's instant and the domain's rules
 /// version, as a toy reads it.
-fn toy_ctx<'a, D: Domain>(cctx: CommandContext) -> ToyCtx<'a, D> {
+fn toy_ctx<'a, D: Domain>(cctx: &CommandContext) -> ToyCtx<'a, D> {
     ToyCtx {
-        stream: cctx.cover.unwrap_or_default(),
-        command_id: cctx.command_id.unwrap_or_default(),
-        correlation_id: cctx.correlation_id.unwrap_or_default(),
-        source: cctx.fact_origin,
+        stream: cctx.cover.clone().unwrap_or_default(),
+        command_id: cctx.command_id.clone().unwrap_or_default(),
+        correlation_id: cctx.correlation_id.clone().unwrap_or_default(),
+        source: match &cctx.arm {
+            InputArm::Fact { origin } => origin.clone(),
+            InputArm::Command { .. } => None,
+        },
         recorded_at: cctx.recorded_at.unwrap_or_default(),
         rules_version: D::RULES_VERSION,
         domain: std::marker::PhantomData,
         head: cctx.next_sequence,
-        conflict: cctx.conflict,
     }
+}
+
+named!(
+    "toy.v1",
+    ToyRefusal {
+        /// The toy rejection's code.
+        #[prost(string, tag = "1")]
+        code: String,
+    }
+);
+
+/// A toy's rejection as the typed refusal it travels as.
+pub fn toy_refusal(rejection: &dyn Diagnostic) -> Any {
+    pack(&ToyRefusal {
+        code: rejection.code().to_string(),
+    })
 }
 
 /// `D`'s handlers, on the router's table.
@@ -254,32 +252,24 @@ pub fn handlers<D: Toy>() -> impl FnOnce(DomainDispatch<D::State>) -> DomainDisp
                 let cmd = D::Command::from_any(any).expect("the router routed it by type");
                 let ctx = toy_ctx::<D>(cctx);
                 match D::decide(&cmd, state, &ctx) {
-                    Ok(events) => Ok(Some(crate::v1::EventBook {
-                        pages: events
-                            .iter()
-                            .map(|e| EventPage {
-                                payload: Some(e.to_any()),
-                                ..EventPage::default()
-                            })
-                            .collect(),
-                        ..Default::default()
-                    })),
-                    Err(rejection) => Err(crate::rejection(rejection, None)),
+                    Ok(events) => Ok(Emit::of(events.iter().map(Payload::to_any))),
+                    Err(rejection) => {
+                        let refusal = toy_refusal(&rejection);
+                        Err(crate::rejection(
+                            rejection,
+                            BusinessStatus::FailedPrecondition,
+                            refusal,
+                        ))
+                    }
                 }
             });
         }
         for url in <D::Fact as Payload>::type_urls() {
-            table = table.on_fact_with_context(crate::type_name(&url), move |any, state, cctx| {
+            table = table.on_fact(crate::type_name(&url), move |any, state, cctx| {
                 let fact = D::Fact::from_any(any).expect("the router routed it by type");
                 let ctx = toy_ctx::<D>(cctx);
-                let mut events = D::ingest(state, &fact, &ctx)
-                    .into_iter()
-                    .map(|e| e.to_any());
-                let record = events.next().expect("a toy's fact records an event");
-                Ok(FactRecord {
-                    fact: record,
-                    flags: events.collect(),
-                })
+                let events = D::ingest(state, &fact, &ctx);
+                Ok(Emit::of(events.iter().map(Payload::to_any)))
             });
         }
         table
@@ -300,13 +290,23 @@ pub fn descriptor_of<D: Domain>(
     rules_version: &str,
     starting: &[&str],
 ) -> crate::v1::ComponentDescriptor {
+    use crate::v1::component_descriptor::Kind;
+    let state = Some(<D::State as State>::descriptor());
+    let domain = D::NAME.to_string();
+    let kind = match kind {
+        crate::v1::ComponentKind::ProcessManager => {
+            Kind::ProcessManager(crate::v1::ProcessManagerDescriptor {
+                domain,
+                state,
+                starting_types: starting.iter().map(|t| t.to_string()).collect(),
+            })
+        }
+        _ => Kind::Aggregate(crate::v1::AggregateDescriptor { domain, state }),
+    };
     crate::v1::ComponentDescriptor {
         name: D::NAME.to_string(),
-        kind: kind as i32,
         rules_version: rules_version.to_string(),
-        state: Some(<D::State as State>::descriptor()),
-        starting_types: starting.iter().map(|t| t.to_string()).collect(),
-        ..Default::default()
+        kind: Some(kind),
     }
 }
 
@@ -465,8 +465,8 @@ pub fn account_upcaster() -> Upcaster {
         })
 }
 
-/// No generated conflict units: the implicit base only, so STRICT is the
-/// default. (A fixture standing in for generated code.)
+/// The account's state, its own snapshot form, described by its type name.
+/// (A fixture standing in for generated code.)
 impl State for AccountState {
     /// A prost state is its own snapshot form.
     type Snapshot = Self;
@@ -481,13 +481,7 @@ impl State for AccountState {
 
     fn descriptor() -> StateDescriptor {
         StateDescriptor {
-            type_url: "/toy.account.v1.AccountState".to_string(),
-            options: Some(StateOptions {
-                conflict_resolutions: vec![
-                    ConflictResolution::Strict as i32,
-                    ConflictResolution::AggregateHandles as i32,
-                ],
-            }),
+            type_name: "toy.account.v1.AccountState".to_string(),
         }
     }
 }
@@ -708,7 +702,14 @@ impl Toy for Account {
         // What the rest of the context says, pinned here: a wrong value is a
         // panic, so the fact tests fail on it.
         assert_eq!(ctx.stream.domain, "account");
-        assert_eq!(ctx.command_id, ids::fact_command_id(&source.external_id));
+        // A client's fact is identified by its external id; a reaction's
+        // (a policy's fact, a refusal fact) by its stamp, its origin's
+        // external id the stamp's text.
+        assert!(
+            ctx.command_id == ids::fact_command_id(&source.external_id)
+                || source.external_id == ctx.command_id.to_string(),
+            "{source:?}"
+        );
         assert!(ctx.correlation_id.is_well_formed());
         vec![AccountEvent::Received(account::Received {
             cents,
@@ -729,11 +730,10 @@ pub mod shelf {
     //
     // ```text
     // message ShelfState {
-    //   option (io.angzarr.v1.state) = { conflict_resolutions: [CONFLICT_RESOLUTION_COMMUTATIVE] };
-    //   map<string, int64> items = 1 [(io.angzarr.v1.conflict) = {}];
-    //   repeated string columns = 2 [(io.angzarr.v1.conflict) = {}];
-    //   Settings settings = 3 [(io.angzarr.v1.conflict) = {}];
-    //   string notes = 4;  // unmarked: a build warning, and it conflicts with everything
+    //   map<string, int64> items = 1;
+    //   repeated string columns = 2;
+    //   Settings settings = 3;
+    //   string notes = 4;
     // }
     // ```
     named!("toy.shelf.v1", ShelfState {
@@ -758,8 +758,7 @@ pub mod shelf {
             item: String,
             #[prost(int64, tag = "2")]
             count: i64,
-            /// Under AGGREGATE_HANDLES: acknowledge the window, or return
-            /// without doing so (a handler bug).
+            /// Unread: kept so the wire shape is as before.
             #[prost(bool, tag = "3")]
             resolve: bool,
         }
@@ -774,7 +773,6 @@ pub mod shelf {
             days: u32,
         }
     );
-    // Configured STRICT, by command type, on a COMMUTATIVE state.
     named!(
         "toy.shelf.cmd.v1",
         Note {
@@ -787,7 +785,7 @@ pub mod shelf {
     named!("toy.shelf.v1", WasSet {
         #[prost(string, tag = "1")] item: String,
         #[prost(int64, tag = "2")] count: i64,
-        /// How many events the window held, when decide was handed one.
+        /// Unset: kept so the wire shape is as before.
         #[prost(uint64, optional, tag = "3")] window: Option<u64>,
     });
     named!("toy.shelf.v1", ColumnsSet {
@@ -812,8 +810,8 @@ pub mod shelf {
 pub use shelf::ShelfState;
 
 /// **A test fixture standing in for generated code**: what angzarr's
-/// generator emits for `ShelfState`'s markers. Never hand-write this for a
-/// real domain.
+/// generator emits for `ShelfState`. Never hand-write this for a real
+/// domain.
 impl State for ShelfState {
     /// A prost state is its own snapshot form.
     type Snapshot = Self;
@@ -828,35 +826,8 @@ impl State for ShelfState {
 
     fn descriptor() -> StateDescriptor {
         StateDescriptor {
-            type_url: "/toy.shelf.v1.ShelfState".to_string(),
-            options: Some(StateOptions {
-                conflict_resolutions: vec![
-                    ConflictResolution::Commutative as i32,
-                    ConflictResolution::Strict as i32,
-                    ConflictResolution::AggregateHandles as i32,
-                ],
-            }),
+            type_name: "toy.shelf.v1.ShelfState".to_string(),
         }
-    }
-
-    fn changed(before: &Self, after: &Self) -> Units {
-        let mut units = Units::new();
-        let items = UnitPath::field("items");
-        for item in before.items.keys().chain(after.items.keys()) {
-            if before.items.get(item) != after.items.get(item) {
-                units.insert(items.key(Key::Str(item)));
-            }
-        }
-        if before.columns != after.columns {
-            units.insert(UnitPath::field("columns"));
-        }
-        if before.settings != after.settings {
-            units.insert(UnitPath::field("settings"));
-        }
-        if before.notes != after.notes {
-            units.insert(UnitPath::field("notes").wildcard());
-        }
-        units
     }
 }
 
@@ -878,7 +849,7 @@ pub enum ShelfEvent {
     Noted(String),
 }
 
-/// Set `item` to `count`, acknowledging any window.
+/// Set `item` to `count`.
 pub fn set(item: &str, count: i64) -> Any {
     pack(&shelf::Set {
         item: item.to_string(),
@@ -954,11 +925,6 @@ impl Domain for Shelf {
     const NAME: &'static str = "shelf";
     const RULES_VERSION: &'static str = "v1";
 
-    /// A note is free text a person reads as a whole against the items: a
-    /// stale one is refused rather than merged.
-    const CONFLICT_RESOLUTION_BY_COMMAND: &'static [(&'static str, ConflictResolution)] =
-        &[("toy.shelf.cmd.v1.Note", ConflictResolution::Strict)];
-
     fn apply(s: &mut ShelfState, e: &ShelfEvent, _: &crate::PageContext<'_>) {
         match e {
             ShelfEvent::WasSet(set) => {
@@ -979,23 +945,14 @@ impl Toy for Shelf {
     fn decide(
         cmd: &ShelfCmd,
         _: &ShelfState,
-        ctx: &ToyCtx<'_, Self>,
+        _: &ToyCtx<'_, Self>,
     ) -> Result<Vec<ShelfEvent>, Infallible> {
         let event = match cmd {
-            ShelfCmd::Set(set) => {
-                let mut window = None;
-                if let Some(conflict) = &ctx.conflict {
-                    window = Some(conflict.window().len() as u64);
-                    if set.resolve {
-                        conflict.resolve_conflicts(conflict.window(), conflict.nonce());
-                    }
-                }
-                ShelfEvent::WasSet(shelf::WasSet {
-                    item: set.item.clone(),
-                    count: set.count,
-                    window,
-                })
-            }
+            ShelfCmd::Set(set) => ShelfEvent::WasSet(shelf::WasSet {
+                item: set.item.clone(),
+                count: set.count,
+                window: None,
+            }),
             ShelfCmd::Columns(columns) => ShelfEvent::ColumnsSet(columns.clone()),
             ShelfCmd::Cooldown(days) => ShelfEvent::CooldownSet(*days),
             ShelfCmd::Note(note) => ShelfEvent::Noted(note.clone()),
@@ -1073,13 +1030,7 @@ impl State for LedgerState {
 
     fn descriptor() -> StateDescriptor {
         StateDescriptor {
-            type_url: "/toy.ledger.v1.LedgerSnapshot".to_string(),
-            options: Some(StateOptions {
-                conflict_resolutions: vec![
-                    ConflictResolution::Strict as i32,
-                    ConflictResolution::AggregateHandles as i32,
-                ],
-            }),
+            type_name: "toy.ledger.v1.LedgerSnapshot".to_string(),
         }
     }
 
@@ -1261,6 +1212,50 @@ pub fn slice(store: &impl EventStore, stream: &Cover) -> crate::Slice {
     store.read(sref(stream), 0, None).ready().unwrap()
 }
 
+/// The fork of `stream`, an edition stream, off its main stream's head:
+/// its `EditionCreated` meta-event, the page an explicit fork writes
+/// (decision 14.107).
+pub fn fork_page(sequence: u64) -> EventPage {
+    EventPage {
+        sequence,
+        body: Some(crate::v1::event_page::Body::MetaEvent(
+            crate::v1::MetaEvent {
+                kind: Some(crate::v1::meta_event::Kind::Created(
+                    crate::v1::EditionCreated {},
+                )),
+            },
+        )),
+        meta: None,
+    }
+}
+
+/// Fork edition stream `stream` off its main stream's head, as an
+/// application does through its store: its fork page written at that head.
+pub fn fork(store: &impl Store, stream: &Cover) {
+    let main = Cover {
+        edition: None,
+        ..stream.clone()
+    };
+    let head = slice(store, &main).next_sequence;
+    store
+        .write(crate::Write::append(sref(stream), head, &[fork_page(head)]))
+        .ready()
+        .expect("the fork is written");
+}
+
+/// The expected sequence and head of `rejected`, if it is the
+/// coordinator's stale refusal, `ExpectedSequenceMismatch` (decision 14.94).
+pub fn mismatch_of(rejected: &crate::Rejected) -> Option<(u64, u64)> {
+    use prost::Name as _;
+    let refusal = rejected.refusal_object();
+    if refusal.type_url != crate::v1::ExpectedSequenceMismatch::type_url() {
+        return None;
+    }
+    let mismatch: crate::v1::ExpectedSequenceMismatch =
+        prost::Message::decode(&refusal.value[..]).expect("an ExpectedSequenceMismatch");
+    Some((mismatch.expected, mismatch.head))
+}
+
 /// Every stream holding an event, in every domain, in the ports' order.
 pub fn streams(store: &MemoryStore) -> Vec<Cover> {
     store.list_streams().ready().unwrap()
@@ -1280,7 +1275,9 @@ pub fn payloads<E: Payload>(books: &[crate::v1::EventBook]) -> Vec<E> {
     books
         .iter()
         .flat_map(|b| &b.pages)
-        .map(|p| E::from_any(p.payload.as_ref().expect("a page has a payload")).unwrap())
+        .map(|p| {
+            E::from_any(crate::angzarr_router::page_event(p).expect("a page has an event")).unwrap()
+        })
         .collect()
 }
 
@@ -1320,34 +1317,9 @@ pub fn wire(code: &str, args: &[(&str, &str)]) -> crate::v1::Diagnostic {
     }
 }
 
-/// The `processing_failed` details of a letter whose reason is `reason`
-/// (decision 14.48): the same Diagnostic as its failure.
-pub fn processing_failed(
-    reason: &crate::v1::Diagnostic,
-    retry_count: u32,
-    is_transient: bool,
-) -> crate::v1::angzarr_dead_letter::RejectionDetails {
-    crate::v1::angzarr_dead_letter::RejectionDetails::ProcessingFailed(
-        crate::v1::ProcessingFailedDetails {
-            failure: Some(reason.clone()),
-            retry_count,
-            is_transient,
-        },
-    )
-}
-
-/// The `sequence_mismatch` details: the command's expected sequence and
-/// the stream's head.
-pub fn sequence_mismatch(
-    expected: u64,
-    actual: u64,
-) -> crate::v1::angzarr_dead_letter::RejectionDetails {
-    crate::v1::angzarr_dead_letter::RejectionDetails::SequenceMismatch(
-        crate::v1::SequenceMismatchDetails {
-            expected_sequence: expected,
-            actual_sequence: actual,
-        },
-    )
+/// A letter's why: the reason `code` with `args` (decision 14.101).
+pub fn reason(code: &str, args: &[(&str, &str)]) -> crate::v1::angzarr_dead_letter::Why {
+    crate::v1::angzarr_dead_letter::Why::Reason(wire(code, args))
 }
 
 /// Account deposits → the ledger, but a deposit of 13 cents cannot happen:
@@ -1389,21 +1361,26 @@ pub fn one_letter(letters: Vec<crate::v1::AngzarrDeadLetter>) -> crate::v1::Angz
 }
 
 /// `letter` names the kind of the component that dead-lettered it,
-/// `kind`; its reason is `reason` and its one rejection detail `details`
-/// (decision 14.48), and its line leads with the reason's key.
+/// `kind`; its why is `why` (decision 14.101) and its `retry_count`
+/// `retries`, and its line leads with the why's key.
 pub fn assert_letter(
     letter: &crate::v1::AngzarrDeadLetter,
     kind: crate::v1::ComponentKind,
-    reason: &crate::v1::Diagnostic,
-    details: crate::v1::angzarr_dead_letter::RejectionDetails,
+    why: &crate::v1::angzarr_dead_letter::Why,
+    retries: u32,
 ) {
+    use crate::v1::angzarr_dead_letter::Why;
     assert_eq!(letter.source_component_kind(), kind, "{letter:?}");
-    assert_eq!(letter.reason.as_ref(), Some(reason), "{letter:?}");
-    assert_eq!(letter.rejection_details, Some(details), "{letter:?}");
+    assert_eq!(letter.why.as_ref(), Some(why), "{letter:?}");
+    assert_eq!(letter.retry_count, retries, "{letter:?}");
+    let key = match why {
+        Why::Reason(reason) => reason.code.clone(),
+        Why::Refusal(_) => "ANGZARR_REASON_COMMAND_REFUSED".to_string(),
+        Why::Transport(transport) => crate::type_name(&transport.type_url).to_string(),
+    };
     let line = crate::dead_letter_line(letter);
     assert!(
-        line.contains(&format!(": {} ", reason.code))
-            || line.ends_with(&format!(": {}", reason.code)),
+        line.contains(&format!(": {key} ")) || line.ends_with(&format!(": {key}")),
         "the line leads with the key: {line}"
     );
 }

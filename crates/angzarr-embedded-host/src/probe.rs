@@ -5,8 +5,10 @@
 //! a client library for a new language runs against its own child shim,
 //! without an application around it.
 //!
-//! The steps, in order ([`Step`]): launch it; read its handshake; watch its
-//! gRPC health, which must report SERVING; describe it, its descriptor of
+//! The steps, in order ([`Step`]): launch it; wait for its gRPC health to
+//! report SERVING on the socket the host chose, within the start limit
+//! (there is no handshake line: decision 14.80); describe it, its
+//! descriptor of
 //! the kind its entry says and valid; hand it one input ([`Input`]: a
 //! command for a domain, a book of events for a policy or a projector),
 //! which it must answer; and stop it, after which it must have exited by
@@ -20,6 +22,7 @@ use std::time::Duration;
 use angzarr_diagnostic::Report;
 use angzarr_embedded::KernelError;
 use angzarr_proto::v1 as pb;
+use angzarr_router::hpb;
 use angzarr_router::router::{CommandHandler, PolicyComponent, ProjectorHandler};
 
 use crate::config::{ComponentConfig, ComponentKindConfig, Languages, Placement, Supervision};
@@ -32,10 +35,9 @@ use crate::remote::{Link, RemoteCommandHandler, RemotePolicyHandler, RemoteProje
 pub enum Step {
     /// Its launch command found, and started.
     Launch,
-    /// Its handshake read, and its socket connected to.
-    Handshake,
-    /// Its gRPC health watched, reporting SERVING.
-    Health,
+    /// Its gRPC health watch reporting SERVING on the socket the host
+    /// chose, within the start limit (`EMBEDDED_REASON_CHILD_NOT_SERVING`).
+    Serving,
     /// `ComponentService.Describe` answered with a valid descriptor of
     /// its entry's kind.
     Describe,
@@ -58,11 +60,11 @@ pub enum Outcome {
 }
 
 /// What the probe hands the child to handle: a command for a domain (an
-/// aggregate or a process manager), a book of events for a policy or a
-/// projector.
+/// aggregate or a process manager), as its `HandleRequest`; a book of
+/// events for a policy (its first page, the trigger) or a projector.
 #[derive(Clone, Debug)]
 pub enum Input {
-    Command(Box<pb::ContextualCommand>),
+    Command(Box<hpb::HandleRequest>),
     Events(pb::EventBook),
 }
 
@@ -75,18 +77,22 @@ impl Input {
     /// `type_url`, `payload` its encoded message (empty: every field its
     /// default).
     pub fn command(domain: &str, type_url: &str, payload: Vec<u8>) -> Input {
-        Input::Command(Box::new(pb::ContextualCommand {
-            command: Some(pb::CommandBook {
+        Input::Command(Box::new(hpb::HandleRequest {
+            input: Some(pb::CommandBook {
                 cover: Some(probe_cover(domain)),
                 page: Some(pb::CommandPage {
                     body: Some(pb::command_page::Body::Command(pb::Command {
                         payload: Some(packed(type_url, payload)),
+                        handling: None,
                     })),
                     ..pb::CommandPage::default()
                 }),
-                ..pb::CommandBook::default()
             }),
-            ..pb::ContextualCommand::default()
+            history: Some(pb::EventBook {
+                cover: Some(probe_cover(domain)),
+                ..pb::EventBook::default()
+            }),
+            ..hpb::HandleRequest::default()
         }))
     }
 
@@ -97,7 +103,7 @@ impl Input {
             cover: Some(probe_cover(domain)),
             pages: vec![pb::EventPage {
                 sequence: 0,
-                payload: Some(packed(type_url, payload)),
+                body: Some(pb::event_page::Body::Event(packed(type_url, payload))),
                 ..pb::EventPage::default()
             }],
             next_sequence: 1,
@@ -137,10 +143,9 @@ impl Probed {
 }
 
 /// The steps, in order.
-const STEPS: [Step; 6] = [
+const STEPS: [Step; 5] = [
     Step::Launch,
-    Step::Handshake,
-    Step::Health,
+    Step::Serving,
     Step::Describe,
     Step::Handle,
     Step::Shutdown,
@@ -193,7 +198,7 @@ pub fn probe(
                 return;
             }
         };
-        for step in [Step::Launch, Step::Handshake, Step::Health] {
+        for step in [Step::Launch, Step::Serving] {
             ran(step, Ok(()));
         }
         let call_timeout = Duration::from_millis(supervision.call_timeout_ms);
@@ -246,12 +251,9 @@ fn not_run_after(mut steps: Vec<(Step, Outcome)>) -> Probed {
 /// The step a refusal of [`Supervisor::come_up`] fails.
 fn failed_at(refused: &HostError) -> Step {
     match refused {
-        HostError::Handshake { .. } | HostError::Connect { .. } => Step::Handshake,
-        HostError::Health { .. } | HostError::NotServing { .. } => Step::Health,
+        HostError::NotServing { .. } => Step::Serving,
         HostError::Describe { .. }
         | HostError::KindMismatch { .. }
-        | HostError::NoInput { .. }
-        | HostError::ProjectorNoInputDomain { .. }
         | HostError::Descriptor { .. } => Step::Describe,
         _ => Step::Launch,
     }
@@ -318,13 +320,15 @@ async fn handle(
         }
         (ComponentKindConfig::Policy, Input::Events(book)) => {
             RemotePolicyHandler::new(name, descriptor, link, call_timeout)
-                .dispatch(&book)
+                .react(&hpb::ReactRequest {
+                    trigger: Some(book),
+                })
                 .await
                 .map(drop)
         }
         (ComponentKindConfig::Projector, Input::Events(book)) => {
             RemoteProjectorHandler::new(name, descriptor, link, call_timeout)
-                .dispatch(&book)
+                .dispatch(&hpb::ProjectRequest { events: Some(book) })
                 .await
                 .map(drop)
         }

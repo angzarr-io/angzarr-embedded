@@ -4,10 +4,12 @@
 //! here is a recording one, caught up stored; a policy is caught up by the
 //! kernel's resume, which first tells it of the streams gone.
 
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
 use angzarr_embedded::angzarr_ports::{ListStreams as _, Processed as _};
-use angzarr_embedded::v1::{Cover, EventBook, Projection};
+use angzarr_embedded::angzarr_router::error::{CodedError, RetryableStatus};
+use angzarr_embedded::v1::{Cover, EventBook};
 use angzarr_embedded::{CatchUp, EventStore as _, PositionKey, Purge as _, StreamRef, Write};
 use cucumber::{given, then, when};
 
@@ -18,14 +20,17 @@ use crate::tests::world::Coordinator;
 /// book it was handed.
 #[derive(Clone, Default)]
 pub(crate) struct Projected {
-    pub(crate) domain: String,
+    pub(crate) domains: Vec<String>,
     pub(crate) books: Arc<Mutex<Vec<EventBook>>>,
+    /// What it answers its next run with instead of a projection.
+    pub(crate) fails: Arc<Mutex<Option<CodedError>>>,
 }
 
 /// The projector handler that records what it is handed.
 struct Recording {
     name: String,
     books: Arc<Mutex<Vec<EventBook>>>,
+    fails: Arc<Mutex<Option<CodedError>>>,
 }
 
 impl angzarr_embedded::ProjectorHandler for Recording {
@@ -35,10 +40,17 @@ impl angzarr_embedded::ProjectorHandler for Recording {
 
     async fn dispatch(
         &self,
-        book: &EventBook,
-    ) -> Result<Projection, angzarr_embedded::angzarr_router::error::CodedError> {
-        self.books.lock().unwrap().push(book.clone());
-        Ok(Projection::default())
+        request: &angzarr_embedded::angzarr_router::hpb::ProjectRequest,
+    ) -> Result<
+        angzarr_embedded::angzarr_router::hpb::ProjectResponse,
+        angzarr_embedded::angzarr_router::error::CodedError,
+    > {
+        let book = request.events.clone().unwrap_or_default();
+        self.books.lock().unwrap().push(book);
+        if let Some(error) = self.fails.lock().unwrap().take() {
+            return Err(error);
+        }
+        Ok(angzarr_embedded::angzarr_router::hpb::ProjectResponse::default())
     }
 }
 
@@ -68,8 +80,8 @@ fn projector_processed(w: &mut Coordinator, name: String, domain: String, order:
     w.projectors.insert(
         name.clone(),
         Projected {
-            domain,
-            books: Arc::default(),
+            domains: vec![domain],
+            ..Projected::default()
         },
     );
     processed_to(w, &name, &order, n);
@@ -110,9 +122,11 @@ async fn catches_up(w: &mut Coordinator, name: String) {
             let recording = Recording {
                 name: name.clone(),
                 books: Arc::clone(&projected.books),
+                fails: Arc::clone(&projected.fails),
             };
             let registry = w.registry();
-            let mut catch_up = CatchUp::stored(&[projected.domain.as_str()], recording).unwrap();
+            let sources: Vec<&str> = projected.domains.iter().map(String::as_str).collect();
+            let mut catch_up = CatchUp::stored(&sources, recording).unwrap();
             let store = w.store.clone();
             catch_up
                 .step(&store, registry.catalog())
@@ -174,7 +188,9 @@ fn handed_nothing(w: &mut Coordinator, name: String, order: String) {
     assert_eq!(handed(w, &name, &cover), []);
 }
 
-#[then(regex = r#"^the record of "(\w+)" still holds order "([\w-]+)" at sequence (\d+)$"#)]
+#[then(
+    regex = r#"^(?:the|after its affirmative answer the) record of "(\w+)" (?:still )?holds order "([\w-]+)" at (?:next_)?sequence (\d+)$"#
+)]
 fn still_holds(w: &mut Coordinator, name: String, order: String, n: u64) {
     let cover = w.cover("order", &order);
     let record = futures_ready(w.store.processed(&name));
@@ -187,4 +203,125 @@ fn no_longer_holds(w: &mut Coordinator, name: String, order: String) {
     let record = futures_ready(w.store.processed(&name));
     assert!(record.iter().all(|(c, _)| *c != cover), "{record:?}");
     assert!(!futures_ready(w.store.list_streams()).contains(&cover));
+}
+
+#[then(regex = r#"^"(\w+)"'s React is not called for order "([\w-]+)"$"#)]
+fn react_not_called(w: &mut Coordinator, name: String, order: String) {
+    let cover = w.cover("order", &order);
+    let def = w
+        .policies
+        .iter()
+        .find(|p| p.name == name)
+        .expect("the policy");
+    let sources = crate::tests::policy::locked(&def.script).sources.clone();
+    assert!(
+        sources.iter().all(|s| s.cover.as_ref() != Some(&cover)),
+        "{sources:?}"
+    );
+}
+
+#[given(
+    regex = r#"^a projector "(\w+)" of (?:domain "([\w-]+)"|domains "([\w-]+)" and "([\w-]+)")$"#
+)]
+fn projector_of(w: &mut Coordinator, name: String, one: String, first: String, second: String) {
+    let domains = match one.is_empty() {
+        true => vec![first, second],
+        false => vec![one],
+    };
+    w.projectors.insert(
+        name,
+        Projected {
+            domains,
+            ..Projected::default()
+        },
+    );
+}
+
+#[given(regex = r#"^order "([\w-]+)" holds events at sequences 0 to (\d+)$"#)]
+fn order_holds(w: &mut Coordinator, order: String, last: usize) {
+    let cover = w.cover("order", &order);
+    w.write(&cover, &vec!["Happened"; last + 1]);
+}
+
+#[given(regex = r#"^order "([\w-]+)" and payment "([\w-]+)" each record events$"#)]
+fn each_record(w: &mut Coordinator, order: String, payment: String) {
+    for cover in [w.cover("order", &order), w.cover("payment", &payment)] {
+        w.write(&cover, &["Happened", "Happened"]);
+    }
+}
+
+#[given(regex = r#"^"(\w+)" has processed order "([\w-]+)" to next_sequence (\d+)$"#)]
+fn has_processed(w: &mut Coordinator, name: String, order: String, n: u64) {
+    let cover = w.cover("order", &order);
+    let stream = StreamRef::try_from(&cover).unwrap();
+    let key = PositionKey {
+        handler: &name,
+        stream,
+    };
+    futures_ready(w.store.write(Write::positions(&[(key, n)])));
+}
+
+#[given(
+    regex = r#"^"(\w+)" (answers UNAVAILABLE|answers INTERNAL|does not answer before its deadline) for its next run$"#
+)]
+fn fails_next_run(w: &mut Coordinator, name: String, failure: String) {
+    // A deadline missed reaches the kernel as the port's DEADLINE_EXCEEDED.
+    let error = match failure.as_str() {
+        "answers UNAVAILABLE" => {
+            CodedError::retryable_bug(RetryableStatus::Unavailable, "VIEW_STORE_UNAVAILABLE", [])
+        }
+        "answers INTERNAL" => CodedError::bug("VIEW_STORE_CORRUPT", []),
+        _ => CodedError::retryable_bug(RetryableStatus::DeadlineExceeded, "PROJECTOR_DEADLINE", []),
+    };
+    let projected = w.projectors.get(&name).expect("the projector");
+    *projected.fails.lock().unwrap() = Some(error);
+}
+
+#[when(
+    regex = r#"^the coordinator delivers (?:the run of sequences (\d+) to (\d+) )?to "(\w+)"(?: and it answers a projection)?$"#
+)]
+async fn delivers_run(w: &mut Coordinator, first: String, last: String, name: String) {
+    catches_up(w, name.clone()).await;
+    if let (Ok(first), Ok(last)) = (first.parse::<u64>(), last.parse::<u64>()) {
+        assert_eq!(last_run(w, &name), (first..=last).collect::<Vec<_>>());
+    }
+}
+
+/// The sequences of the last book `name` was handed.
+fn last_run(w: &Coordinator, name: &str) -> Vec<u64> {
+    let books = w.projectors[name].books.lock().unwrap().clone();
+    let book = books.last().expect("a run delivered");
+    book.pages.iter().map(|p| p.sequence).collect()
+}
+
+#[then(regex = r#"^the run of sequences (\d+) to (\d+) is delivered to "(\w+)" again$"#)]
+async fn delivered_again(w: &mut Coordinator, first: u64, last: u64, name: String) {
+    catches_up(w, name.clone()).await;
+    let run: Vec<u64> = (first..=last).collect();
+    let books = w.projectors[&name].books.lock().unwrap().clone();
+    let runs = books
+        .iter()
+        .filter(|b| b.pages.iter().map(|p| p.sequence).collect::<Vec<_>>() == run)
+        .count();
+    assert_eq!(runs, 2, "{books:?}");
+}
+
+#[then("each Project call holds pages of one stream only, in sequence order")]
+fn one_stream_each(w: &mut Coordinator) {
+    let books: Vec<EventBook> = w
+        .projectors
+        .values()
+        .flat_map(|p| p.books.lock().unwrap().clone())
+        .collect();
+    let covers: BTreeSet<String> = books.iter().map(|b| format!("{:?}", b.cover)).collect();
+    assert_eq!(covers.len(), 2, "each stream's run: {books:?}");
+    for book in &books {
+        let sequences: Vec<u64> = book.pages.iter().map(|p| p.sequence).collect();
+        assert!(sequences.windows(2).all(|p| p[0] < p[1]), "{book:?}");
+    }
+}
+
+#[then("no order is promised between the order stream's runs and the payment stream's runs")]
+fn no_order_promised(_w: &mut Coordinator) {
+    // Nothing to observe: a projector may be handed either stream first.
 }

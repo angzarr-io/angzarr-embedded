@@ -90,12 +90,18 @@ async fn instance_decides(w: &mut Coordinator, version: String, order: String) {
 }
 
 /// What business code answers: the events of `answered` ("ItemAdded and
-/// ShippingQuoted events", "an ItemAdded event and a snapshot"), reporting
-/// `version`.
+/// ShippingQuoted events", "an ItemAdded event and a snapshot", "an
+/// ItemAdded event and a state of type "/orders.v1.LegacyOrderState""),
+/// reporting `version`.
 fn answering(w: &mut Coordinator, domain: &str, answered: &str, version: &str) {
+    let state_type = answered
+        .split(" and ")
+        .find(|part| part.starts_with("a state of type"))
+        .and_then(|part| part.split('"').nth(1))
+        .map(str::to_string);
     let names: Vec<String> = answered
         .split(" and ")
-        .filter(|part| !part.contains("snapshot"))
+        .filter(|part| !part.contains("snapshot") && !part.starts_with("a state of type"))
         .map(|part| {
             let part = part.trim_start_matches("an ").trim_start_matches("a ");
             part.split(' ').next().unwrap_or_default().to_string()
@@ -105,6 +111,9 @@ fn answering(w: &mut Coordinator, domain: &str, answered: &str, version: &str) {
     w.business(domain).every(|a| {
         a.events = Some(names);
         a.rules_version = Some(version);
+        if state_type.is_some() {
+            a.state_type = state_type;
+        }
     });
 }
 
@@ -113,7 +122,7 @@ fn answering(w: &mut Coordinator, domain: &str, answered: &str, version: &str) {
 /// alike (the last is tagged: there is no asynchronous send); one "by a
 /// policy" is a policy's reaction to a payment.
 #[when(
-    regex = r#"^business code answers an AddItem command (?:sent ([\w ]+?) )?with (.+?), reporting rules version "([^"]*)"$"#
+    regex = r#"^business code answers an AddItem command (?:(?:for order "order-1" )?sent ([\w ]+?) )?with (.+?), reporting rules version "([^"]*)"$"#
 )]
 async fn answers_add_item(w: &mut Coordinator, how: String, answered: String, version: String) {
     answering(w, "order", &answered, &version);
@@ -121,7 +130,7 @@ async fn answers_add_item(w: &mut Coordinator, how: String, answered: String, ve
         return delivers_add_item(w, "order-1".to_string()).await;
     }
     let to = Root::Named("order-1".to_string());
-    crate::tests::policies::reactor(w, "order", "AddItem", to, None);
+    crate::tests::policies::reactor(w, "order", "AddItem", to);
     w.begin();
     let book = crate::tests::policies::payment_received(w);
     w.handle(book).await;
@@ -137,7 +146,7 @@ async fn policy_command_answered(
     version: String,
 ) {
     answering(w, "fulfillment", &format!("a {event} event"), &version);
-    crate::tests::policies::reactor(w, "fulfillment", &command, Root::TriggerCorrelation, None);
+    crate::tests::policies::reactor(w, "fulfillment", &command, Root::TriggerCorrelation);
     w.begin();
     let book = crate::tests::policies::payment_received(w);
     w.handle(book).await;
@@ -191,8 +200,7 @@ fn nth_event(w: &Coordinator, name: &str, nth: usize) -> angzarr_embedded::v1::E
         .iter()
         .flat_map(|cover| w.persisted(cover))
         .filter(|page| {
-            page.payload
-                .as_ref()
+            angzarr_embedded::angzarr_router::page_event(page)
                 .is_some_and(|p| p.type_url.ends_with(&format!(".{name}")))
         })
         .nth(nth - 1)
@@ -223,7 +231,7 @@ fn snapshot_records(w: &mut Coordinator, what: String, value: String) {
 fn receives_snapshot(w: &mut Coordinator, sequence: u64) {
     let delivered = w.business("order").delivered().pop().expect("delivered");
     let snapshot = delivered
-        .events
+        .history
         .and_then(|e| e.snapshot)
         .expect("a snapshot");
     assert_eq!(snapshot.sequence, sequence);
@@ -233,7 +241,7 @@ fn receives_snapshot(w: &mut Coordinator, sequence: u64) {
 fn receives_events(w: &mut Coordinator, first: u64, last: u64) {
     let delivered = w.business("order").delivered().pop().expect("delivered");
     let sequences: Vec<u64> = delivered
-        .events
+        .history
         .map_or(Vec::new(), |e| e.pages.iter().map(|p| p.sequence).collect());
     assert_eq!(sequences, (first..=last).collect::<Vec<_>>());
 }
@@ -241,7 +249,7 @@ fn receives_events(w: &mut Coordinator, first: u64, last: u64) {
 #[then(regex = r"^the snapshot is (offered|not offered)$")]
 fn snapshot_offered(w: &mut Coordinator, offered: String) {
     let delivered = w.business("order").delivered().pop().expect("delivered");
-    let snapshot = delivered.events.and_then(|e| e.snapshot);
+    let snapshot = delivered.history.and_then(|e| e.snapshot);
     assert_eq!(snapshot.is_some(), offered == "offered", "{snapshot:?}");
 }
 
@@ -273,7 +281,10 @@ fn no_event_of(w: &mut Coordinator, name: String) {
     assert!(covers
         .iter()
         .flat_map(|cover| w.persisted(cover))
-        .all(|page| !page.payload.is_some_and(|p| p.type_url.ends_with(&suffix))));
+        .all(|page| {
+            !angzarr_embedded::angzarr_router::page_event(&page)
+                .is_some_and(|p| p.type_url.ends_with(&suffix))
+        }));
 }
 
 #[then(
@@ -295,7 +306,7 @@ fn snapshot_bytes(w: &mut Coordinator) {
     let business = w.business("order");
     let delivered = business.delivered().pop().expect("delivered");
     let offered = delivered
-        .events
+        .history
         .and_then(|e| e.snapshot)
         .expect("a snapshot");
     let returned = business.returned();

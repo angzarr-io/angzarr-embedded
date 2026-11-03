@@ -6,16 +6,16 @@ use cucumber::{given, when};
 
 use angzarr_embedded::v1::Cover;
 
-use crate::tests::policy::{locked, Fault, Reaction, Root, Translation};
+use crate::tests::policy::{locked, Arm, Reaction, Root, Translation};
 use crate::tests::world::Coordinator;
 
 /// A policy as a scenario introduces it: `"OrderToInventory" translating
 /// from "order" to "inventory"`.
 #[derive(Debug, Default)]
-struct Header {
-    name: String,
-    input: String,
-    output: String,
+pub(crate) struct Header {
+    pub(crate) name: String,
+    pub(crate) input: String,
+    pub(crate) output: String,
 }
 
 /// The quoted words of `text`, in order.
@@ -44,9 +44,9 @@ impl std::str::FromStr for Header {
 
 /// A stream as a scenario names it: `"inventory" "inv-7"`.
 #[derive(Debug, Default)]
-struct Address {
-    domain: String,
-    root: String,
+pub(crate) struct Address {
+    pub(crate) domain: String,
+    pub(crate) root: String,
 }
 
 impl std::str::FromStr for Address {
@@ -63,33 +63,21 @@ impl std::str::FromStr for Address {
     }
 }
 
-/// A reaction on `on`: `command` to `domain` at `root`.
-fn reaction(on: &str, domain: &str, command: &str, root: Root) -> Reaction {
+/// A reaction on `on`: a `command` of `domain`'s package, at `root`.
+pub(crate) fn reaction(on: &str, domain: &str, command: &str, root: Root) -> Reaction {
     Reaction {
         on: on.to_string(),
         domain: domain.to_string(),
         command: command.to_string(),
-        fact: false,
+        arm: Arm::Command,
         root,
-        correlation: None,
-        fault: None,
     }
 }
 
 /// `reaction` added to the policy `name`'s script, the policy registered.
-fn reacts(w: &mut Coordinator, header: &Header, reaction: Reaction) {
+pub(crate) fn reacts(w: &mut Coordinator, header: &Header, reaction: Reaction) {
     let script = w.policy(&header.name, &header.input, &header.output);
     locked(&script).reactions.push(reaction);
-}
-
-/// The fault a scenario says a reaction carries.
-fn fault(text: &str) -> Fault {
-    match text {
-        "sets a command_id other than the stamped one" => Fault::CommandId,
-        "sets a causation_id other than the trigger's" => Fault::CausationId,
-        "carries a fact_origin" => Fault::FactOrigin,
-        other => panic!("no fault {other}"),
-    }
 }
 
 #[given(
@@ -130,22 +118,6 @@ fn sends_with_no_root(w: &mut Coordinator, header: Header, command: String, on: 
 }
 
 #[given(
-    regex = r#"^a policy ("\w+" translating from "[\w-]+" to "[\w-]+") that sends (\w+) to ("[\w-]+" "[^"]+") with correlation_id "([^"]+)" on (\w+)$"#
-)]
-fn sends_other_correlation(
-    w: &mut Coordinator,
-    header: Header,
-    command: String,
-    to: Address,
-    correlation: String,
-    on: String,
-) {
-    let mut reaction = reaction(&on, &to.domain, &command, Root::Named(to.root));
-    reaction.correlation = Some(correlation);
-    reacts(w, &header, reaction);
-}
-
-#[given(
     regex = r#"^a policy ("\w+" translating from "[\w-]+" to "[\w-]+") that builds (?:a )?(\w+)(?: command)? from (\w+)(?:, setting its root to the trigger's correlation)?$"#
 )]
 fn builds(w: &mut Coordinator, header: Header, command: String, on: String) {
@@ -154,7 +126,7 @@ fn builds(w: &mut Coordinator, header: Header, command: String, on: String) {
 }
 
 /// The policy registered last.
-fn last_policy(w: &Coordinator) -> Header {
+pub(crate) fn last_policy(w: &Coordinator) -> Header {
     let def = w.policies.last().expect("a policy");
     Header {
         name: def.name.clone(),
@@ -187,24 +159,6 @@ fn its_business_code_answers(
 }
 
 #[given(
-    regex = r#"^a policy ("\w+" translating from "[\w-]+" to "[\w-]+") whose business code answers an (\w+) event with a (\w+) (command|fact) for ("[\w-]+" "[^"]+") that (.+)$"#
-)]
-fn answers_with_fault(
-    w: &mut Coordinator,
-    header: Header,
-    on: String,
-    command: String,
-    arm: String,
-    to: Address,
-    faulty: String,
-) {
-    let mut reaction = reaction(&on, &to.domain, &command, Root::Named(to.root));
-    reaction.fact = arm == "fact";
-    reaction.fault = Some(fault(&faulty));
-    reacts(w, &header, reaction);
-}
-
-#[given(
     regex = r#"^a policy ("\w+" translating from "[\w-]+" to "[\w-]+") whose business code answers every (\w+) event with an? (\w+) command for another order, a new one each time$"#
 )]
 fn answers_another_stream(w: &mut Coordinator, header: Header, on: String, command: String) {
@@ -221,8 +175,16 @@ fn handles_by_emitting(w: &mut Coordinator, on: String, command: String, arm: St
         &command,
         Root::Named("t-1".to_string()),
     );
-    reaction.fact = arm == "fact";
+    reaction.arm = arm_of(&arm);
     reacts(w, &header, reaction);
+}
+
+/// An arm as a scenario names it.
+pub(crate) fn arm_of(text: &str) -> Arm {
+    match text {
+        "fact" => Arm::Fact,
+        _ => Arm::Command,
+    }
 }
 
 #[given(
@@ -237,12 +199,12 @@ fn sends_arm_to_root(
     to: Address,
     on: String,
 ) {
-    let (command, fact) = match fact.is_empty() {
-        false => (fact, true),
-        true => (named, arm == "fact"),
+    let (command, arm) = match fact.is_empty() {
+        false => (fact, Arm::Fact),
+        true => (named, arm_of(&arm)),
     };
     let mut reaction = reaction(&on, &to.domain, &command, Root::Named(to.root));
-    reaction.fact = fact;
+    reaction.arm = arm;
     reacts(w, &header, reaction);
 }
 
@@ -250,7 +212,7 @@ fn sends_arm_to_root(
 /// and then a StockHoldRequested fact`, each a type and whether it is a
 /// fact.
 #[derive(Debug, Default)]
-struct Outputs(Vec<(String, bool)>);
+struct Outputs(Vec<(String, Arm)>);
 
 impl std::str::FromStr for Outputs {
     type Err = String;
@@ -259,7 +221,7 @@ impl std::str::FromStr for Outputs {
         text.split(" and then ")
             .map(|output| match output.split(' ').collect::<Vec<_>>()[..] {
                 ["a" | "an", name, arm @ ("command" | "fact")] => {
-                    Ok((name.to_string(), arm == "fact"))
+                    Ok((name.to_string(), arm_of(arm)))
                 }
                 _ => Err(format!("no output: {output}")),
             })
@@ -278,9 +240,9 @@ fn answers_in_order(
     outputs: Outputs,
     to: Address,
 ) {
-    for (name, fact) in outputs.0 {
+    for (name, arm) in outputs.0 {
         let mut reaction = reaction(&on, &to.domain, &name, Root::Named(to.root.clone()));
-        reaction.fact = fact;
+        reaction.arm = arm;
         reacts(w, &header, reaction);
     }
 }
@@ -291,7 +253,7 @@ pub(crate) fn sends_as_fact(w: &Coordinator, command: &str) {
     let def = w.policies.last().expect("a policy");
     for reaction in &mut locked(&def.script).reactions {
         if reaction.command == command {
-            reaction.fact = true;
+            reaction.arm = Arm::Fact;
         }
     }
 }
@@ -328,7 +290,7 @@ fn callback_fails(w: &mut Coordinator, name: String) {
 }
 
 #[when(
-    regex = r#"^an? (\w+) event (?:with correlation "([^"]+)" )?is recorded for order "([\w-]+)"(?: on the main timeline| in edition "([\w-]+)")?$"#
+    regex = r#"^an? (\w+) event (?:with correlation "([^"]+)" )?is recorded for order "([\w-]+)"(?: on the main timeline| in edition "([\w-]+)"| at sequence (\d+))?$"#
 )]
 async fn recorded_for_order(
     w: &mut Coordinator,
@@ -336,12 +298,18 @@ async fn recorded_for_order(
     correlation: String,
     order: String,
     edition: String,
+    at: String,
 ) {
-    w.begin();
     let cover = Cover {
         edition: (!edition.is_empty()).then_some(edition),
         ..w.cover("order", &order)
     };
+    if let Ok(at) = at.parse::<usize>() {
+        // The events before it, written as a given's are.
+        let before = at - w.pages(&cover).len();
+        w.write(&cover, &vec!["OrderNoteAdded"; before]);
+    }
+    w.begin();
     let correlation = match correlation.is_empty() {
         true => w.order_correlation.clone(),
         false => Some(correlation),
@@ -360,20 +328,13 @@ async fn add_item_handled(w: &mut Coordinator, order: String) {
 /// The policy a scenario's "policy-emitted" command comes from: `Reactor`,
 /// from `payment` to `domain`, sending `command` to the stream `root` on
 /// each PaymentReceived.
-pub(crate) fn reactor(
-    w: &mut Coordinator,
-    domain: &str,
-    command: &str,
-    root: Root,
-    fault: Option<Fault>,
-) {
+pub(crate) fn reactor(w: &mut Coordinator, domain: &str, command: &str, root: Root) {
     let header = Header {
         name: "Reactor".to_string(),
         input: "payment".to_string(),
         output: domain.to_string(),
     };
-    let mut reaction = reaction("PaymentReceived", domain, command, root);
-    reaction.fault = fault;
+    let reaction = reaction("PaymentReceived", domain, command, root);
     reacts(w, &header, reaction);
 }
 
@@ -385,23 +346,16 @@ pub(crate) fn payment_received(w: &mut Coordinator) -> angzarr_embedded::v1::Com
 }
 
 #[given(
-    regex = r"^a policy-emitted (\w+) command(?: with no expected sequence and no conflict resolution| targeting sequence (\d+))?$"
+    regex = r"^a policy's (\w+) reaction(?:, delivered as a ReactionDelivery with no Handling)?$"
 )]
-fn policy_emitted(w: &mut Coordinator, command: String, expected: String) {
-    let fault = expected.parse().ok().map(Fault::Handling);
-    reactor(
-        w,
-        "order",
-        &command,
-        Root::Named("order-1".to_string()),
-        fault,
-    );
+fn policy_emitted(w: &mut Coordinator, command: String) {
+    reactor(w, "order", &command, Root::Named("order-1".to_string()));
     let book = payment_received(w);
     w.pending.push(book);
 }
 
 #[given(
-    regex = r#"^a policy "(\w+)" translating from "([\w-]+)" to "([\w-]+)" that sends (\w+) to ("[\w-]+" "[^"]+") on (\w+), with no expected sequence and no conflict resolution$"#
+    regex = r#"^a policy "(\w+)" translating from "([\w-]+)" to "([\w-]+)" that sends (\w+) to ("[\w-]+" "[^"]+") on (\w+), with no expected sequence$"#
 )]
 fn sends_unhandled(
     w: &mut Coordinator,
@@ -440,4 +394,66 @@ async fn policy_runs(w: &mut Coordinator, _name: String, _event: String) {
     w.begin();
     let resumed = w.resume().await;
     w.resumed.push(resumed);
+}
+
+#[given(
+    regex = r#"^a policy ("\w+" translating from "[\w-]+" to "[\w-]+") whose business code answers an (\w+) event with one (command|fact) Output (\w+) for root "([^"]+)"$"#
+)]
+fn answers_one_output(
+    w: &mut Coordinator,
+    header: Header,
+    on: String,
+    arm: String,
+    name: String,
+    root: String,
+) {
+    let mut reaction = reaction(&on, &header.output, &name, Root::Named(root));
+    reaction.arm = arm_of(&arm);
+    reacts(w, &header, reaction);
+    owned_elsewhere(w, &header.output);
+}
+
+/// `domain` owned by a coordinator elsewhere, so each `ReactionDelivery`
+/// the policy's coordinator stamps for it is seen whole as it leaves.
+fn owned_elsewhere(w: &mut Coordinator, domain: &str) {
+    w.remotes.entry(domain.to_string()).or_default();
+}
+
+#[given(
+    regex = r#"^its business code answers an (\w+) event with two command Outputs, (\w+) for root "([^"]+)" and (\w+) for root "([^"]+)"$"#
+)]
+fn answers_two_outputs(
+    w: &mut Coordinator,
+    on: String,
+    first: String,
+    first_root: String,
+    second: String,
+    second_root: String,
+) {
+    let header = last_policy(w);
+    for (name, root) in [(first, first_root), (second, second_root)] {
+        let reaction = reaction(&on, &header.output, &name, Root::Named(root));
+        reacts(w, &header, reaction);
+    }
+    owned_elsewhere(w, &header.output);
+}
+
+#[given(
+    regex = r#"^a policy ("\w+" translating from "[\w-]+" to "[\w-]+") whose reaction to an? (\w+) event is an? (\w+) command for this "order" stream$"#
+)]
+fn reaction_for_this_stream(w: &mut Coordinator, header: Header, on: String, command: String) {
+    let order = w.order().root.expect("a root").to_string();
+    let reaction = reaction(&on, &header.output, &command, Root::Named(order));
+    reacts(w, &header, reaction);
+}
+
+#[when("the policy's coordinator delivers the reaction through Deliver")]
+async fn delivers_through_deliver(w: &mut Coordinator) {
+    // The policy's coordinator is this kernel: its reaction to a source
+    // event is delivered as a step of the source's chain.
+    let def = w.policies.last().expect("a policy");
+    let on = locked(&def.script).reactions[0].on.clone();
+    let cover = w.cover(&def.input.clone(), "p-1");
+    w.begin();
+    w.record(&cover, &on, None).await;
 }

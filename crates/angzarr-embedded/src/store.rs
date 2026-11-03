@@ -30,11 +30,10 @@
 //! **Editions** are per-stream forks (14.32), the store's to enforce: an
 //! edition stream never forked reads as main's, and a write to it is
 //! refused ([`StoreError::EditionNotForked`]). The kernel reads the fork
-//! from the stream it loads, and refuses an outside input to an unforked
-//! edition stream before its handler runs
-//! (`COORDINATOR_REASON_EDITION_NOT_FORKED`; C-0633); a policy's command to
-//! one meets the store's refusal at the write. The kernel creates no
-//! edition.
+//! from the stream it loads, and refuses every input to an unforked
+//! edition stream, a client's or a reaction's, at its load, before business
+//! code (`ANGZARR_REASON_EDITION_NOT_FORKED`): a client is answered, a
+//! reaction is dead-lettered. The kernel creates no edition.
 
 use std::future::Future;
 
@@ -109,7 +108,7 @@ pub(crate) trait Port {
     /// The dead letters raised since the last write that kept any, in a
     /// write of their own, placed at `trigger` where a letter names no
     /// place of its own: a step that moves no position, a projector's, a
-    /// parked fact's. Nothing is written when none was raised.
+    /// dead-lettered fact's. Nothing is written when none was raised.
     fn write_letters(
         &mut self,
         trigger: Option<(&Cover, u64)>,

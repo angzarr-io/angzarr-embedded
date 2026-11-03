@@ -14,7 +14,7 @@ Feature: Query server - reading the event store with no component behind it
     When a client queries the events of order "order-1"
     Then the result carries events 0 to 3
     When a client sends an AddItem command for order "order-1" to the query server
-    Then the command is refused UNIMPLEMENTED with reason COORDINATOR_REASON_COMMANDS_NOT_SERVED and arg domain "order"
+    Then the command is refused UNIMPLEMENTED with reason DISTRIBUTED_REASON_COMMANDS_NOT_SERVED and arg domain "order"
 
   @query_server
   @C-0589

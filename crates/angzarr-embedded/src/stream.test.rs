@@ -10,7 +10,8 @@ use crate::{
 };
 use angzarr_diagnostic::{code, Report};
 use angzarr_ports::Cause;
-use angzarr_router::error::{BusinessStatus, CodedError, GrpcCode, RouterReason};
+use angzarr_proto::v1::AngzarrReason;
+use angzarr_router::error::{BusinessStatus, CodedError, GrpcCode};
 
 use crate::toys::{
     account, at, command, command_id, cover, instant, registry, registry_with_upcasters, root,
@@ -20,17 +21,18 @@ use crate::Payload;
 
 fn meta(sequence: u64, rules: &str) -> EventMeta {
     EventMeta {
-        causation: Some(Causation::CommandId(command_id(sequence as u128))),
+        causation: Some(Causation::Command(crate::v1::CommandCause {
+            command_id: Some(command_id(sequence as u128)),
+        })),
         correlation_id: Some(command_id(sequence as u128)),
         recorded_at: Some(instant(sequence as i64)),
         rules_version: rules.to_string(),
-        ..EventMeta::default()
     }
 }
 
 fn page(sequence: u64, payload: crate::Any) -> EventPage {
     EventPage {
-        payload: Some(payload),
+        body: Some(crate::v1::event_page::Body::Event(payload)),
         meta: Some(meta(sequence, "v2")),
         sequence,
     }
@@ -109,8 +111,15 @@ fn replay_refuses_a_log_that_does_not_hold_together() {
             (|m: &mut EventMeta| m.causation = None) as fn(&mut EventMeta),
         ),
         ("causation", |m| {
-            m.causation = Some(Causation::CommandId(crate::v1::Uuid {
-                value: vec![1; 15].into(),
+            m.causation = Some(Causation::Command(crate::v1::CommandCause {
+                command_id: Some(crate::v1::Uuid {
+                    value: vec![1; 15].into(),
+                }),
+            }))
+        }),
+        ("causation", |m| {
+            m.causation = Some(Causation::Command(crate::v1::CommandCause {
+                command_id: None,
             }))
         }),
         ("correlation_id", |m| m.correlation_id = None),
@@ -247,14 +256,25 @@ fn a_decision_commits_only_to_the_stream_and_head_it_was_made_against() {
     let mut b = Stream::<Account>::new(root(2), None).unwrap();
     let open = |n| command(cover("account", n), AccountCmd::Open.to_any());
     a.execute(open(1), &registry, &at(1), &log).ready().unwrap();
-    assert!(matches!(
-        a.execute(open(2), &registry, &at(2), &log).ready(),
-        Err(Failure::Kernel(KernelError::Stale { .. }))
-    ));
-    assert!(matches!(
-        b.execute(open(1), &registry, &at(2), &log).ready(),
-        Err(Failure::Kernel(KernelError::Stale { .. }))
-    ));
+    // Another stream's book, as one at another head, is refused
+    // ExpectedSequenceMismatch at this stream's head.
+    assert_eq!(
+        mismatch(a.execute(open(2), &registry, &at(2), &log).ready().err()),
+        Some((1, 1))
+    );
+    assert_eq!(
+        mismatch(b.execute(open(1), &registry, &at(2), &log).ready().err()),
+        Some((0, 0))
+    );
+    assert_eq!(
+        mismatch(
+            a.execute(open(1).expecting(0), &registry, &at(2), &log)
+                .ready()
+                .err()
+        ),
+        Some((0, 1)),
+        "behind the head"
+    );
     assert_eq!(
         a.execute(
             command(cover("ledger", 1), AccountCmd::Open.to_any()),
@@ -384,13 +404,18 @@ fn assert_recovers<const N: usize>(cases: [(Recovery, KernelError); N]) {
     }
 }
 
-/// A stale write, retried.
-fn stale() -> KernelError {
-    KernelError::Stale {
-        stream: cover("account", 1),
-        expected: 1,
-        actual: 2,
-    }
+/// A store that did not answer, retried.
+fn unavailable() -> KernelError {
+    KernelError::Store(StoreError::Unavailable(Cause::new("x-down", [])))
+}
+
+/// A refusal's expected sequence and head, if `failure` is the stale
+/// refusal.
+fn mismatch(failure: Option<Failure<crate::Rejected>>) -> Option<(u64, u64)> {
+    let Some(Failure::Rejected(rejected)) = failure else {
+        return None;
+    };
+    crate::toys::mismatch_of(&rejected)
 }
 
 /// The kernel's own errors say how to recover.
@@ -409,13 +434,20 @@ fn the_kernels_errors_say_how_to_recover() {
                 type_url: String::new(),
             },
         ),
-        (Recovery::Retry, stale()),
+        (Recovery::Retry, unavailable()),
         (
-            Recovery::Retry,
-            KernelError::Unresolved {
+            Recovery::Bug,
+            KernelError::RetryCapExhausted {
                 stream: stream.clone(),
-                expected: 1,
-                actual: 2,
+                attempts: 3,
+                cap: 3,
+            },
+        ),
+        (
+            Recovery::Bug,
+            KernelError::FactDeadLettered {
+                stream: stream.clone(),
+                cause: Report::new("x-bad"),
             },
         ),
         (
@@ -506,10 +538,11 @@ fn a_handlers_code_says_how_to_recover_by_its_status() {
     assert_recovers([
         (
             Recovery::Business,
-            KernelError::Router(CodedError::rejection(
+            KernelError::Router(CodedError::refused(
                 BusinessStatus::FailedPrecondition,
-                "PLAYER_BROKE",
-                [],
+                pack(&crate::toys::ToyRefusal {
+                    code: "PLAYER_BROKE".to_string(),
+                }),
             )),
         ),
         (
@@ -526,10 +559,11 @@ fn a_handlers_code_says_how_to_recover_by_its_status() {
         // has each), so each is a refusal.
         (
             Recovery::Business,
-            KernelError::Router(CodedError::rejection(
+            KernelError::Router(CodedError::refused(
                 BusinessStatus::InvalidArgument,
-                "PLAYER_BROKE",
-                [],
+                pack(&crate::toys::ToyRefusal {
+                    code: "PLAYER_BROKE".to_string(),
+                }),
             )),
         ),
         (
@@ -565,31 +599,29 @@ fn a_handlers_code_says_how_to_recover_by_its_status() {
     ]);
 }
 
-/// The router's own errors and the coordinator's conflicts say how to
-/// recover.
+/// The router's own errors say how to recover: on malformed input, bugs.
 #[test]
-fn the_routers_and_coordinators_codes_say_how_to_recover() {
+fn the_routers_codes_say_how_to_recover() {
     assert_recovers([
-        (
-            Recovery::Retry,
-            KernelError::Router(CodedError::immediate(
-                angzarr_proto::v1::CoordinatorReason::ConflictOverlap.as_str_name(),
-                [],
-            )),
-        ),
         // The router's own errors on malformed input are bugs, INTERNAL,
         // never the sender's to fix (the owner's ruling, 2026-10-29).
         (
             Recovery::Bug,
-            KernelError::Router(router_own(RouterReason::NoRefusalHandler.as_str_name())),
+            KernelError::Router(router_own(AngzarrReason::NoRefusalHandler.as_str_name())),
         ),
         (
             Recovery::Bug,
-            KernelError::Router(router_own(RouterReason::UnknownCommandType.as_str_name())),
+            KernelError::Router(router_own(AngzarrReason::UnknownCommandType.as_str_name())),
         ),
         (
             Recovery::Bug,
-            KernelError::Router(router_own(RouterReason::AnyDecodeFailed.as_str_name())),
+            KernelError::Router(router_own(AngzarrReason::AnyDecodeFailed.as_str_name())),
+        ),
+        // A framework key under a business status is no refusal (decision
+        // 14.95) but recovers as its status says.
+        (
+            Recovery::Business,
+            KernelError::Router(crate::spec_coded(AngzarrReason::EditionNotForked, [])),
         ),
     ]);
 }
@@ -620,7 +652,7 @@ fn a_failure_says_how_to_recover_as_its_error() {
         "a malformed policy book is the kernel's, not the caller's"
     );
     assert_eq!(
-        downstream(StepError::Kernel(stale())).recovery(),
+        downstream(StepError::Kernel(unavailable())).recovery(),
         Recovery::Retry
     );
 }
@@ -655,15 +687,8 @@ fn errors_display_their_code_and_args_and_wrappers_their_cause_flattened() {
     assert_eq!(failure.args().len(), 2);
     // A condition the spec keys shows its key and the key's args alone
     // (decision 14.60).
-    let keyed = KernelError::Stale {
-        stream: cover("account", 1),
-        expected: 1,
-        actual: 2,
-    };
-    assert_eq!(
-        keyed.to_string(),
-        "COORDINATOR_REASON_EXPECTED_SEQUENCE_STALE stream=account/0a000000-0000-0000-0000-000000000001 expected=1 actual=2"
-    );
+    let keyed = KernelError::ChainTooDeep { limit: 2 };
+    assert_eq!(keyed.to_string(), "ANGZARR_REASON_CHAIN_TOO_DEEP limit=2");
     let rejected = Failure::Rejected(crate::toys::Refused::Overdrawn { short: 3 });
     assert_eq!(rejected.code(), "toy-account-overdrawn");
     assert_eq!(rejected.to_string(), "toy-account-overdrawn short=3");
@@ -726,7 +751,7 @@ fn errors_display_their_code_and_args_and_wrappers_their_cause_flattened() {
     ));
     assert_eq!(
         router.to_string(),
-        "ROUTER_REASON_UNHANDLED_HANDLER_ERROR cause=PLAYER_BROKE cause.seat=2",
+        "ANGZARR_REASON_UNHANDLED_HANDLER_ERROR cause=PLAYER_BROKE cause.seat=2",
         "the kernel's code, never the router's English or its SCREAMING reason"
     );
 }
@@ -741,14 +766,14 @@ fn an_unreachable_handler_carries_its_cause_as_a_key() {
         stream: cover("account", 1),
         cause: "not-running".to_string(),
     };
-    assert_eq!(unreachable.code(), "COORDINATOR_REASON_HANDLER_UNAVAILABLE");
+    assert_eq!(unreachable.code(), "ANGZARR_REASON_HANDLER_UNAVAILABLE");
     assert!(unreachable
         .args()
         .iter()
         .any(|arg| matches!(arg, ("cause", Arg::Str(key)) if key == "not-running")));
     assert_eq!(
         unreachable.to_string(),
-        "COORDINATOR_REASON_HANDLER_UNAVAILABLE stream=account/0a000000-0000-0000-0000-000000000001 domain=account cause=not-running"
+        "ANGZARR_REASON_HANDLER_UNAVAILABLE stream=account/0a000000-0000-0000-0000-000000000001 domain=account cause=not-running"
     );
 }
 
@@ -892,62 +917,6 @@ fn a_facts_events_read_back_with_its_origin() {
     assert_eq!(stream.events()[0].fact().unwrap().external_id, "pi_r");
     assert!(!stream.is_empty());
     assert!(Stream::<Account>::new(root(9), None).unwrap().is_empty());
-}
-
-#[test]
-fn commutative_cannot_compare_a_window_hidden_in_a_snapshot() {
-    use crate::toys::{set, shelf, ShelfState};
-    use crate::v1::ConflictResolution;
-    let registry = registry();
-    let log = crate::MemoryDeadLetters::new();
-    let snapshot = Snapshot {
-        sequence: 1,
-        state: Some(pack(&ShelfState {
-            items: [("a".to_string(), 1), ("b".to_string(), 2)].into(),
-            ..Default::default()
-        })),
-        rules_version: "v1".to_string(),
-    };
-    let set_page = |sequence: u64, item: &str| EventPage {
-        payload: Some(pack(&shelf::WasSet {
-            item: item.to_string(),
-            count: 3,
-            window: None,
-        })),
-        meta: Some(meta(sequence, "v1")),
-        sequence,
-    };
-    let mut stream = Stream::<Shelf>::resume(
-        cover("shelf", 3),
-        &snapshot,
-        None,
-        &[set_page(2, "c")],
-        &registry,
-    )
-    .unwrap();
-    let behind = |n: u128, expected| {
-        command(cover("shelf", 3), set("d", 1))
-            .id(n)
-            .expecting(expected, ConflictResolution::Commutative)
-    };
-    assert_eq!(
-        stream
-            .execute(behind(11, 1), &registry, &at(9), &log)
-            .ready()
-            .err(),
-        Some(Failure::Kernel(KernelError::BeforeSnapshot {
-            stream: cover("shelf", 3),
-            first: 2
-        }))
-    );
-    let applied = stream
-        .execute(behind(12, 2), &registry, &at(9), &log)
-        .ready()
-        .unwrap();
-    assert!(
-        matches!(&applied, crate::Executed::Applied(e) if e.len() == 1),
-        "the window from the first held event is held: c and d commute: {applied:?}"
-    );
 }
 
 /// A stream resumed from a snapshot hands the router the snapshot at the

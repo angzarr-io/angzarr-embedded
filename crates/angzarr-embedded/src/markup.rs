@@ -19,34 +19,35 @@
 //! - [`Emits`] and [`Emit`]: what a command handler's `Ok` may be. A shape
 //!   (`E`, a tuple, `Option<E>`, `Vec<E>`) is events the router applies, in
 //!   order; [`Emit::then`] adds a continuation step the router runs on the
-//!   instance after them, within the same decision.
+//!   instance after them, within the same decision. It runs as
+//!   angzarr-router's own `Emit` (decision 14.104), with no step cap.
 //! - [`Record`] and [`Records`]: what a FACT handler returns: as [`Emit`],
 //!   but its continuation steps return no `Result`.
-//! - [`Rejection`], [`Refusing`], [`Refuses`] and [`TypedRefusal`]: a
-//!   command's refusal, a message only or one of its declared typed
-//!   refusal objects.
+//! - [`Refusing`], [`Refuses`] and [`TypedRefusal`]: a command's refusal,
+//!   one of its declared typed refusal objects (decision 14.95: typed
+//!   refusals only), and [`Unrefusable`], what a command that declares
+//!   none fails with.
 //! - [`Failed`], [`BusinessStatus`], [`RetryableStatus`] and [`Fails`]:
 //!   what a command handler or a continuation step fails with, a business
 //!   refusal (under a status of the business set), an immediate return
 //!   (ABORTED), a fatal bug, or a retryable bug (under the status it
 //!   picks).
-//! - [`CommandRefused`] and [`Refusal`]: a refusal fact as its source's
-//!   `#[on_refused]` handler reads it, and a refusal as a translating
-//!   policy's callback reads it.
+//! - [`Refused`]: a refusal of a command a policy sent, as its ONE
+//!   Translate callback reads it (decision 14.89).
 //! - [`ProcessManager`]: what sets a process manager, a domain, apart: its
 //!   starting inputs. [`Compensation`] its rollback (angzarr decision
 //!   14.74): each step paired in code with its undo, the failed event and
 //!   the completed steps' undos, newest first, a late reply undone at once,
-//!   an undo that becomes a command warned of ([`UndoTargetsCommand`]) and
-//!   one refused recorded as CompensationFailed.
+//!   and an undo that becomes a command refused at registration
+//!   ([`UndoTargetsCommand`]; decision 14.83).
 //! - [`Routed`]: a marked-up domain's handlers, registered on
 //!   angzarr-router's table.
 //! - [`Policy`], [`Commands`] and [`PolicyContext`]: a policy, its output
 //!   and its handler's context. [`Decides`] and [`Ingests`] say what a
 //!   domain takes, for the checks on a policy.
 //! - [`AsyncProjector`] and [`ProjectionContext`]: a projector.
-//! - [`STEP_LIMIT`] and [`assert_step_idempotent`]: the cap on a decision's
-//!   continuation steps, and the test helper for a step.
+//! - [`assert_step_idempotent`]: the test helper for a continuation step,
+//!   which must be idempotent on its own result (there is no step cap).
 //! - [`TypeName`]: a message's package and name, as the generated
 //!   constants list them.
 //! - [`NoSnapshot`]: the snapshot form of a domain that has none.
@@ -54,15 +55,11 @@
 //!   anything the markup writes can be written by hand
 //!   (`src/hand_written.test.rs` registers an aggregate and a policy
 //!   with no macro): packing and decoding ([`pack_message`],
-//!   [`type_url_of`], [`decode_message`], [`command_refused_type_url`],
-//!   [`decode_command_refused`], [`refused_command_type_url`]); running a
-//!   domain's handler as one decision ([`run_command`],
-//!   [`run_rooted_command`], [`run_fact`], [`run_on_refused`]); a policy's answers ([`policy_answer`],
-//!   [`pass_through`], [`decode_refusal`], [`translated_fact`]); a
+//!   [`type_url_of`], [`decode_message`]); running a domain's handler as
+//!   one decision ([`run_command`], [`run_rooted_command`], [`run_fact`]);
+//!   a policy's answers ([`policy_answer`], [`translated_fact`]); a
 //!   projector's run ([`projecting`]); and a state's descriptor
 //!   ([`state_descriptor`]).
-//! - [`v1`]: angzarr's refusal messages, until angzarr-embedded's angzarr-proto has
-//!   them.
 //!
 //! Every component here assumes nothing about distribution: the same
 //! marked-up aggregate, process manager, policy or projector runs in
@@ -74,7 +71,9 @@ use std::fmt;
 
 use angzarr_diagnostic::code;
 use angzarr_proto::v1::event_meta::Causation;
-use angzarr_proto::v1::{command_page, Cover, EventBook, EventMeta, EventRef, FactOrigin, Uuid};
+use angzarr_proto::v1::{Cover, EventBook, EventMeta, EventRef, FactOrigin, Uuid};
+use angzarr_router::error::HandlerError;
+use angzarr_router::hpb;
 use prost_types::{Any, Timestamp};
 
 use super::domain::Domain;
@@ -90,9 +89,10 @@ pub use angzarr_router::PageContext;
 /// the expansion needs no dependency of its user's.
 pub use angzarr_diagnostic::Report;
 
-/// angzarr-router's context of the input a handler decides, and its
-/// conflict under AGGREGATE_HANDLES: a [`Context`]'s `command`.
-pub use angzarr_router::domain::{CommandContext, Conflict};
+/// angzarr-router's context of the input a handler decides: a
+/// [`Context`]'s `command`, and the input's arm with what it alone
+/// carries.
+pub use angzarr_router::domain::{CommandContext, InputArm};
 
 /// The statuses a business refusal may go out under, angzarr-router's
 /// business set: a [`Failed::Rejected`]'s status. Any other status is a
@@ -118,19 +118,18 @@ pub use angzarr_router::error::RetryableStatus;
 ///
 /// - [`Context::command`]: angzarr-router's whole
 ///   [`CommandContext`](angzarr_router::domain::CommandContext), as the
-///   router hands it to the handler: `cover` (the stream's domain and
-///   root), `next_sequence`, `had_prior_events`, `expected_sequence`,
-///   `conflict_resolution`, `conflict` (under AGGREGATE_HANDLES, the window
-///   the command did not see and the nonce the handler hands back through
-///   `resolve_conflicts`), and the input's identity: `command_id` (a
-///   client's, the one the application minted, a policy's derived one, or,
-///   for a fact, the one derived from its origin; a refusal fact's is the
-///   refused command's), `correlation_id` and, for a fact, `fact_origin`.
-///   Nothing the router knows of the input is withheld, and nothing it
+///   router hands it to the handler: `cover` (the stream's domain, root and
+///   edition), `next_sequence`, `had_prior_events`, `arm` (a command's
+///   expected sequence as sent, or a fact's origin), the input's identity:
+///   `command_id` (a client's, the one the application minted, a policy's
+///   derived one, or, for a fact, the one derived from its origin; a
+///   refusal fact's is the refused command's) and `correlation_id`, and,
+///   for a policy's input, its `causation`, the event the policy reacted
+///   to. Nothing the router knows of the input is withheld, and nothing it
 ///   knows is kept twice.
 /// - [`Context::recorded_at`]: the instant the input was accepted and its
 ///   events will be recorded at, the router's `recorded_at`
-///   (`ContextualCommand.recorded_at`, decision 14.37), sampled by the
+///   (`HandleRequest.recorded_at`, decision 14.37), sampled by the
 ///   application and stamped by the kernel, so the handler stays pure:
 ///   there is no wall clock.
 #[derive(Clone, Debug, Default)]
@@ -241,9 +240,9 @@ pub trait DomainMessage: Clone + Send + Sync + Sized + 'static {
 
 /// A continuation step: a pure `&self` method of the aggregate (or a
 /// closure over one), run on the instance with every event so far applied.
-/// It fails as a handler does ([`Fails`]): a refusal with the domain's own
-/// rejection or a [`Refuses`] choice, as is or as a [`Failed`], or a bug.
-type Step<A> = Box<dyn FnOnce(&A, &Context) -> Result<Emit<A>, Failed<<A as Domain>::Rejection>>>;
+/// It fails as a handler does ([`Fails`]): a refusal with one of its
+/// command's typed refusals, as is or as a [`Failed`], or a bug.
+type Step<A> = Box<dyn FnOnce(&A, &Context) -> Result<Emit<A>, Failed<TypedRefusal>>>;
 
 /// Events for the router to apply, in order, and optionally one
 /// continuation step to run on the instance after them.
@@ -257,12 +256,13 @@ type Step<A> = Box<dyn FnOnce(&A, &Context) -> Result<Emit<A>, Failed<<A as Doma
 /// ```
 ///
 /// The router applies the events, calls the step on the updated instance,
-/// applies what it returns, and repeats while there is a continuation. All
-/// of it is **one decision**: a rejection from the handler or from any step
-/// refuses it all, a bug from any of them fails it all as the handler's
-/// bug would, and what is committed is every step's events, in order, in
-/// one commit. More than [`STEP_LIMIT`] steps is a bug, and the kernel's
-/// [`KernelError::TooManySteps`](super::KernelError::TooManySteps).
+/// applies what it returns, and repeats while there is a continuation: it
+/// runs as angzarr-router's `Emit` (decision 14.104). All of it is **one
+/// decision**: a refusal from the handler or from any step refuses it all,
+/// a bug from any of them fails it all as the handler's bug would, and what
+/// is committed is every step's events, in order, in one commit. There is
+/// no step cap: a step that always continues never ends, so a step must be
+/// idempotent on its own result ([`assert_step_idempotent`]).
 ///
 /// A continuation is the only way a later event is decided from the state
 /// after an earlier one. Applying an event never sets off processing: an
@@ -411,7 +411,7 @@ impl<A: Domain, T: DomainMessage + Into<A::Event>> Emits<A> for Vec<T> {
 /// refused, it's a fact"), so its handler returns no `Result`, and neither
 /// does any step: a step is `fn(&self, ctx: &Context) -> R`, `R` a shape
 /// ([`Records`]) or another `Record`. Same router semantics as [`Emit`]:
-/// one decision, every step's events committed together, [`STEP_LIMIT`].
+/// one decision, every step's events committed together, no step cap.
 ///
 /// ```text
 /// fn payout(&self, fact: Payout, ctx: &Context) -> Record<Self> {
@@ -526,11 +526,11 @@ records_shape! {
 ///   as starting (`#[handles_cmd(C, starts)]`, `#[handles_fact(F, starts)]`)
 ///   may start an instance. Any other input for a stream with no instance is
 ///   not delivered, decided before the handler by the type after
-///   upcasting: a FACT is dead-lettered (`COORDINATOR_REASON_PM_NO_INSTANCE`;
-///   never refused, so parked, angzarr decision 14.69), and a COMMAND is refused (`COORDINATOR_REASON_PM_NO_INSTANCE`, a
-///   business refusal, so a
-///   policy's refused command yields its refusal fact like any other),
-///   recording nothing.
+///   upcasting, FAILED_PRECONDITION `ANGZARR_REASON_PM_NO_INSTANCE`,
+///   recording nothing: a COMMAND is answered so, and a FACT is
+///   dead-lettered, its sender answered `ANGZARR_REASON_FACT_DEAD_LETTERED`
+///   (C-0593). It is the framework's key, never a typed refusal, so a
+///   policy's command so refused is dead-lettered, never translated.
 ///
 /// A process manager whose `STARTS` is empty can never start an instance;
 /// angzarr-embedded does not refuse one (no compile error, no check): the warning is
@@ -553,8 +553,8 @@ pub trait Decides<C: DomainMessage>: CommandTarget {}
 
 /// That `A` ingests fact `F`: `#[handles_fact(F)]` on its impl, or, for
 /// a child-hosted domain's event set ([`EventSource`]), written beside it.
-/// What a translating policy's callback is checked against: it must return
-/// a fact its source ingests; and what a policy's fact for its target is
+/// What a policy's Translate callback is checked against: it must return a
+/// fact its source ingests; and what a policy's fact for its target is
 /// ([`Commands::fact`]). Emitted by the macro, one per fact.
 pub trait Ingests<F: DomainMessage>: EventSource {}
 
@@ -580,8 +580,10 @@ pub type Refuses<A, C> = <A as Refusing<C>>::Refuses;
 
 /// A typed refusal object, packed: one of a command's `refuses` types (a
 /// [`DomainMessage`] of the command's own domain). Keyed, as on the wire,
-/// ROUTER_REASON_COMMAND_REFUSED with the object's full type name as `refusal_type`
-/// (decision 14.37): the object is the refusal's data.
+/// `ANGZARR_REASON_COMMAND_REFUSED` with the object's full type name as
+/// `refusal_type` (decision 14.37): the object is the refusal's data. A
+/// marked-up domain's `Domain::Rejection`: what its caller matches
+/// ([`Rejected::rejection`](super::Rejected::rejection)).
 #[derive(Clone, PartialEq, Debug)]
 pub struct TypedRefusal {
     object: Any,
@@ -589,7 +591,7 @@ pub struct TypedRefusal {
 
 impl TypedRefusal {
     /// `object`, packed.
-    pub fn of<T: DomainMessage + angzarr_diagnostic::Diagnostic>(object: &T) -> TypedRefusal {
+    pub fn of<T: DomainMessage>(object: &T) -> TypedRefusal {
         TypedRefusal {
             object: pack_message(object),
         }
@@ -600,110 +602,76 @@ impl TypedRefusal {
         super::payload::type_name(&self.object.type_url)
     }
 
+    /// The object, packed.
+    pub fn packed(&self) -> &Any {
+        &self.object
+    }
+
     /// The object, as `T`, if it is one.
     pub fn object<T: DomainMessage>(&self) -> Option<T> {
         decode_message(&self.object).ok().flatten()
     }
 }
 
-/// A marked-up domain's `Domain::Rejection`: a handler's refusal, as the
-/// caller (or a refused policy) receives it.
-///
-/// - [`Rejection::Message`]: a command handler without `refuses` refused
-///   with the domain's own rejection `R` (inferred from those handlers, or
-///   given by `rejection = ..`), a message only, as is.
-/// - [`Rejection::Typed`]: a handler with `refuses` refused with one of
-///   its listed objects.
-///
-/// Either way the refusing domain records nothing.
-#[derive(Clone, PartialEq, Debug)]
-pub enum Rejection<R> {
-    Message(R),
-    Typed(TypedRefusal),
-}
-
-/// A message-only refusal: a handler's or a step's `Err` of the domain's
-/// own rejection.
-impl<R> From<R> for Rejection<R> {
-    fn from(rejection: R) -> Self {
-        Rejection::Message(rejection)
-    }
-}
-
-impl<R: angzarr_diagnostic::Diagnostic> Rejection<R> {
-    /// As a refused policy receives it, the oneof: the typed object
-    /// packed, or a message-only refusal's code and args.
-    pub fn response(&self) -> v1::RefusalResponse {
-        v1::RefusalResponse {
-            reason: Some(match self {
-                Rejection::Typed(typed) => {
-                    v1::refusal_response::Reason::Refusal(typed.object.clone())
-                }
-                Rejection::Message(_) => {
-                    v1::refusal_response::Reason::Diagnostic(super::route::diagnostic(self))
-                }
-            }),
-        }
-    }
-}
-
-impl<R> Rejection<R> {
-    /// The typed refusal object, packed: `None` unless [`Rejection::Typed`].
-    pub fn refusal(&self) -> Option<&Any> {
-        self.typed().map(|typed| &typed.object)
-    }
-
-    /// The domain's own rejection: `None` unless [`Rejection::Message`].
-    pub fn message(&self) -> Option<&R> {
-        match self {
-            Rejection::Message(rejection) => Some(rejection),
-            Rejection::Typed(_) => None,
-        }
-    }
-
-    /// The typed refusal object: `None` unless [`Rejection::Typed`].
-    pub fn typed(&self) -> Option<&TypedRefusal> {
-        match self {
-            Rejection::Typed(typed) => Some(typed),
-            Rejection::Message(_) => None,
-        }
-    }
-}
-
-impl<R: angzarr_diagnostic::Diagnostic> fmt::Display for Rejection<R> {
+impl fmt::Display for TypedRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         angzarr_diagnostic::display(self, f)
     }
 }
 
-impl<R: angzarr_diagnostic::Diagnostic> angzarr_diagnostic::Diagnostic for Rejection<R> {
+impl angzarr_diagnostic::Diagnostic for TypedRefusal {
     fn code(&self) -> &str {
-        match self {
-            Rejection::Message(rejection) => rejection.code(),
-            Rejection::Typed(_) => angzarr_proto::v1::RouterReason::CommandRefused.as_str_name(),
-        }
+        angzarr_proto::v1::AngzarrReason::CommandRefused.as_str_name()
     }
 
     fn args(&self) -> Vec<(&str, angzarr_diagnostic::Arg)> {
-        match self {
-            Rejection::Message(rejection) => rejection.args(),
-            Rejection::Typed(typed) => vec![(
-                angzarr_proto::v1::reason_args::REFUSAL_TYPE,
-                typed.refusal_type().into(),
-            )],
-        }
+        vec![(
+            angzarr_proto::v1::reason_args::REFUSAL_TYPE,
+            self.refusal_type().into(),
+        )]
+    }
+}
+
+/// What a command that declares no refusal fails with: nothing it can
+/// refuse with (decision 14.95: a command that lists no refusal cannot
+/// refuse, C-0674). Its handler's `Err` is a [`Failed`] of it, so it can
+/// still fail with a bug or ask for a re-run.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Unrefusable {}
+
+impl From<Unrefusable> for TypedRefusal {
+    fn from(never: Unrefusable) -> TypedRefusal {
+        match never {}
+    }
+}
+
+impl fmt::Display for Unrefusable {
+    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {}
+    }
+}
+
+impl angzarr_diagnostic::Diagnostic for Unrefusable {
+    fn code(&self) -> &str {
+        match *self {}
+    }
+
+    fn args(&self) -> Vec<(&str, angzarr_diagnostic::Arg)> {
+        match *self {}
     }
 }
 
 /// What a command handler, or a continuation step, fails with: one of
-/// decision 14.37's four classes. `X` is what it refuses with: the
-/// domain's own rejection, or, for a handler with `refuses(..)`, its
-/// [`Refuses`] choice.
+/// decision 14.37's four classes. `X` is what it refuses with: for a
+/// handler with `refuses(..)`, its [`Refuses`] choice; for one without,
+/// [`Unrefusable`].
 ///
-/// - [`Failed::Rejected`] (business, fatal): the domain said no. It goes
-///   out as a business refusal under `status` (FAILED_PRECONDITION unless
-///   the handler says otherwise, [`Failed::with_status`]), the refusal's
-///   code and args beside, and reaches the issuing policy's refusal path.
+/// - [`Failed::Rejected`] (business, fatal): the domain said no, with one
+///   of its command's typed refusals. It goes out under `status`
+///   (FAILED_PRECONDITION unless the handler says otherwise,
+///   [`Failed::with_status`]: the status the refusal message declares),
+///   `ANGZARR_REASON_COMMAND_REFUSED` and the object, and reaches the
+///   issuing policy's Translate.
 /// - [`Failed::Immediate`] (business, immediate): "re-read and
 ///   re-decide". It goes out as ABORTED under the report's own code and
 ///   args (angzarr-router's `CodedError::immediate`): back to an outside
@@ -712,13 +680,13 @@ impl<R: angzarr_diagnostic::Diagnostic> angzarr_diagnostic::Diagnostic for Rejec
 ///   capped backoff, then dead-lettered. Never a policy's refusal path.
 /// - [`Failed::Bug`] (bug, fatal): a defect, never a business answer: the
 ///   report of the bug value (a policy's `Err` is the same), its code and
-///   args. It goes out as INTERNAL ROUTER_REASON_UNHANDLED_HANDLER_ERROR, the code as its
+///   args. It goes out as INTERNAL ANGZARR_REASON_UNHANDLED_HANDLER_ERROR, the code as its
 ///   `cause` and each arg as `cause.<arg>`, and the input is dead-lettered
 ///   at once.
 /// - [`Failed::RetryableBug`] (bug, retryable): a defect outside the
 ///   handler that may clear (a dependency that is down), under the
 ///   [`RetryableStatus`] the handler picks. It goes out under that status
-///   as ROUTER_REASON_UNHANDLED_HANDLER_ERROR, its cause as a fatal bug's
+///   as ANGZARR_REASON_UNHANDLED_HANDLER_ERROR, its cause as a fatal bug's
 ///   (angzarr-router's `CodedError::retryable_bug`); the kernel retries
 ///   it with capped backoff, then dead-letters it with its `retry_count`.
 ///   Never a policy's refusal path.
@@ -728,14 +696,10 @@ impl<R: angzarr_diagnostic::Diagnostic> angzarr_diagnostic::Diagnostic for Rejec
 /// inside one returning `Failed<X>`.
 ///
 /// ```text
-/// fn gauge(&self, cmd: Gauge, ctx: &Context) -> Result<Gauged, Failed<Refused>> {
+/// fn gauge(&self, cmd: Gauge, ctx: &Context) -> Result<Gauged, Failed<Unrefusable>> {
 ///     if broken { return Err(Failed::bug(&MeterBroke { seat })); }
 ///     if offline { return Err(Failed::retryable_bug(RetryableStatus::Unavailable, &MeterOffline { seat })); }
 ///     if moved { return Err(Failed::immediate(&SeatMoved { seat })); }
-///     if cmd.reading < 0 {
-///         return Err(Failed::from(Refused::Negative).with_status(BusinessStatus::InvalidArgument));
-///     }
-///     within(cmd.reading)?; // a Result<_, Refused>: FAILED_PRECONDITION
 ///     ..
 /// }
 ///
@@ -837,125 +801,17 @@ impl<X: angzarr_diagnostic::Diagnostic> fmt::Display for Failed<X> {
 }
 
 /// What a command handler's or a continuation step's `Err` may be, for
-/// domain `A`: a [`Failed`] of anything `Into` the domain's rejection, or,
-/// as the macro emits for each domain, its own rejection or a
-/// [`Refuses`] choice as is.
+/// domain `A`: a [`Failed`] of anything `Into` a [`TypedRefusal`] (a
+/// [`Refuses`] choice, [`Unrefusable`]), or, as the macro emits for each
+/// domain, a [`Refuses`] choice as is.
 pub trait Fails<A: Domain> {
-    /// This failure, its refusal as the domain's rejection.
-    fn into_failed(self) -> Failed<A::Rejection>;
+    /// This failure, its refusal as a typed refusal.
+    fn into_failed(self) -> Failed<TypedRefusal>;
 }
 
-impl<A: Domain, X: Into<A::Rejection>> Fails<A> for Failed<X> {
-    fn into_failed(self) -> Failed<A::Rejection> {
+impl<A: Domain, X: Into<TypedRefusal>> Fails<A> for Failed<X> {
+    fn into_failed(self) -> Failed<TypedRefusal> {
         self.widen()
-    }
-}
-
-/// The pass-through refusal fact, as the policy's SOURCE domain's handler
-/// for it reads it: `#[on_refused(C)]`, a fact handler,
-/// `fn(&self, refused: CommandRefused<C>, ctx: &Context) ->
-/// Result<Record<Self>, E>` (or a shape), `ctx` the router's context of
-/// the refusal fact. It cannot refuse; its `Err`, any `Diagnostic`, is a
-/// bug, its policy's failure
-/// ([`StepError::PolicyFailed`](super::StepError::PolicyFailed)). The macro dispatches angzarr's
-/// `CommandRefused` fact by the refused command's type to the handler for
-/// it: which refusals a domain handles is inferred from its handlers, so a
-/// `CommandRefused` for a command it has no handler for is caught at run
-/// time (`angzarr-embedded-no-refusal-handler`, dead-lettered).
-#[derive(Clone, PartialEq, Debug)]
-pub struct CommandRefused<C> {
-    command: C,
-    target: Cover,
-    refusal: Option<Any>,
-    trigger: EventRef,
-}
-
-impl<C> CommandRefused<C> {
-    /// A refusal fact for a handler's own unit tests; the router builds the
-    /// real one from angzarr's `CommandRefused`.
-    pub fn new(command: C, target: Cover, refusal: Option<Any>, trigger: EventRef) -> Self {
-        CommandRefused {
-            command,
-            target,
-            refusal,
-            trigger,
-        }
-    }
-
-    /// The refused command, as sent.
-    pub fn command(&self) -> &C {
-        &self.command
-    }
-
-    /// The stream that refused it.
-    pub fn target(&self) -> &Cover {
-        &self.target
-    }
-
-    /// The typed refusal object, as `T`, if the target refused with one
-    /// and it is a `T`.
-    pub fn refusal<T: DomainMessage>(&self) -> Option<T> {
-        decode_message(self.refusal.as_ref()?).ok().flatten()
-    }
-
-    /// The policy's triggering event: a page of this stream.
-    pub fn trigger(&self) -> &EventRef {
-        &self.trigger
-    }
-}
-
-/// What a policy's translating callback reads (`#[on_refused(C)]` on the
-/// policy's impl): angzarr's `Refusal { event, command,
-/// response }`, the command decoded, beside the refused command's
-/// [`CommandContext`]. The callback returns `Result` of a fact of the
-/// policy's source domain, so the source never refers to the target's
-/// types; its `Err` is a bug, dead-lettered as
-/// [`StepError::PolicyFailed`](super::StepError::PolicyFailed).
-#[derive(Clone, PartialEq, Debug)]
-pub struct Refusal<C> {
-    event: EventBook,
-    command: C,
-    response: v1::RefusalResponse,
-}
-
-impl<C> Refusal<C> {
-    /// A refusal for a callback's own unit tests; the policy's generated
-    /// `on_refused` builds the real one.
-    pub fn new(event: EventBook, command: C, response: v1::RefusalResponse) -> Self {
-        Refusal {
-            event,
-            command,
-            response,
-        }
-    }
-
-    /// The triggering event: a book of the source stream holding the one
-    /// event the policy reacted to.
-    pub fn event(&self) -> &EventBook {
-        &self.event
-    }
-
-    /// The refused command, as sent.
-    pub fn command(&self) -> &C {
-        &self.command
-    }
-
-    /// The typed refusal object, as `T`, if the target refused with one
-    /// and it is a `T`.
-    pub fn refusal<T: DomainMessage>(&self) -> Option<T> {
-        match self.response.reason.as_ref()? {
-            v1::refusal_response::Reason::Refusal(object) => decode_message(object).ok().flatten(),
-            v1::refusal_response::Reason::Diagnostic(_) => None,
-        }
-    }
-
-    /// A refusal without a typed object: its code and args (decision
-    /// 14.37), never English; `None` for a typed one.
-    pub fn diagnostic(&self) -> Option<&angzarr_proto::v1::Diagnostic> {
-        match self.response.reason.as_ref()? {
-            v1::refusal_response::Reason::Diagnostic(diagnostic) => Some(diagnostic),
-            v1::refusal_response::Reason::Refusal(_) => None,
-        }
     }
 }
 
@@ -967,7 +823,7 @@ impl<C> Refusal<C> {
 /// they react to events the application's own domains created, so an `Err`
 /// is a bug, dead-lettered as
 /// [`StepError::PolicyFailed`](super::StepError::PolicyFailed).
-pub use super::policy::{CommandTarget, EventSource, Policy};
+pub use super::policy::{no_refusal_handler, CommandTarget, EventSource, Policy, Refused};
 
 /// A process manager's compensation (angzarr decision 14.74): its steps,
 /// each paired in code with its undo, and the rollback built from them.
@@ -1043,18 +899,15 @@ impl<T: CommandTarget> Commands<T> {
         self.facts.get(index).copied().unwrap_or(false)
     }
 
-    /// Each output as its page's body, with its stream's root, in order.
-    pub(crate) fn into_orders(self) -> Vec<(Uuid, command_page::Body)> {
+    /// Each output as the router's `Output` (decision 14.78): its stream's
+    /// root and its payload in the arm of its kind, in order.
+    pub(crate) fn into_outputs(self) -> Vec<hpb::Output> {
         self.orders
             .into_iter()
             .zip(self.facts)
-            .map(|((root, payload), fact)| {
-                let payload = Some(payload);
-                let body = match fact {
-                    true => command_page::Body::Fact(angzarr_proto::v1::Fact { payload }),
-                    false => command_page::Body::Command(angzarr_proto::v1::Command { payload }),
-                };
-                (root, body)
+            .map(|((root, payload), fact)| match fact {
+                true => angzarr_router::policy::fact(Some(root), payload),
+                false => angzarr_router::policy::command(Some(root), payload),
             })
             .collect()
     }
@@ -1147,7 +1000,7 @@ impl PolicyContext {
 
     /// The fact the event records, for a fact's event.
     pub fn fact_origin(&self) -> Option<&FactOrigin> {
-        self.meta.fact.as_ref()
+        fact_origin_of(&self.meta)
     }
 
     /// The full version of the build that decided the event.
@@ -1156,19 +1009,23 @@ impl PolicyContext {
     }
 }
 
-/// The producing command's id `meta` names as the event's cause.
+/// The producing input's id `meta` names as the event's cause, either arm
+/// (decision 14.102).
 fn command_id_of(meta: &EventMeta) -> Option<&Uuid> {
     match &meta.causation {
-        Some(Causation::CommandId(id)) => Some(id),
+        Some(Causation::Command(cause)) => cause.command_id.as_ref(),
+        Some(Causation::Fact(cause)) => cause.command_id.as_ref(),
         None => None,
     }
 }
 
-/// angzarr's refusal messages (`io.angzarr.v1`'s `CommandRefused`,
-/// `RefusalResponse` and `Refusal`, decision 14.31), as angzarr-router
-/// carries them.
-pub mod v1 {
-    pub use angzarr_proto::v1::{refusal_response, CommandRefused, Refusal, RefusalResponse};
+/// The fact's origin `meta` names as the event's cause: `None` for a
+/// command's event.
+fn fact_origin_of(meta: &EventMeta) -> Option<&FactOrigin> {
+    match &meta.causation {
+        Some(Causation::Fact(cause)) => cause.origin.as_ref(),
+        _ => None,
+    }
 }
 
 /// A projector written in the markup (`#[projector]`): one or more source
@@ -1232,8 +1089,10 @@ impl<P: AsyncProjector> angzarr_router::router::ProjectorHandler for Projected<P
 
     async fn dispatch(
         &self,
-        events: &EventBook,
-    ) -> Result<angzarr_proto::v1::Projection, angzarr_router::error::CodedError> {
+        request: &hpb::ProjectRequest,
+    ) -> Result<hpb::ProjectResponse, angzarr_router::error::CodedError> {
+        let unsent = EventBook::default();
+        let events = request.events.as_ref().unwrap_or(&unsent);
         let mut instance = self.take().await;
         let ran = project_book(&mut instance, events).await;
         *self
@@ -1246,12 +1105,7 @@ impl<P: AsyncProjector> angzarr_router::router::ProjectorHandler for Projected<P
                 super::route::flat_args(&report),
             )
         })?;
-        Ok(angzarr_proto::v1::Projection {
-            cover: events.cover.clone(),
-            projector: P::NAME.to_string(),
-            next_sequence: events.next_sequence,
-            projection: None,
-        })
+        Ok(hpb::ProjectResponse { projection: None })
     }
 }
 
@@ -1283,8 +1137,10 @@ async fn project_book<P: AsyncProjector>(
     for page in &book.pages {
         let meta = page.meta.clone().unwrap_or_default();
         let ctx = ProjectionContext::of(cover.clone(), page.sequence, meta);
-        let payload = page.payload.clone().unwrap_or_default();
-        let run = projector.project(&payload, &ctx);
+        let Some(payload) = angzarr_router::page_event(page) else {
+            continue;
+        };
+        let run = projector.project(payload, &ctx);
         if let Some(run) = run {
             run.await?;
         }
@@ -1379,7 +1235,7 @@ impl ProjectionContext {
 
     /// The fact the event records, for a fact's event.
     pub fn fact_origin(&self) -> Option<&FactOrigin> {
-        self.meta.fact.as_ref()
+        fact_origin_of(&self.meta)
     }
 
     /// The full version of the build that decided the event.
@@ -1388,19 +1244,14 @@ impl ProjectionContext {
     }
 }
 
-/// The most continuation steps one decision may run, after its handler.
-/// A chain that would run more is a bug (a step that always continues),
-/// refused as [`KernelError::TooManySteps`](super::KernelError::TooManySteps)
-/// with nothing committed.
-pub const STEP_LIMIT: usize = 16;
-
 /// The test helper for a continuation step: runs `step` on `instance`,
 /// applies what it emits (following its continuations, as the router
-/// does, up to [`STEP_LIMIT`]), then runs `step` again on the result and
-/// panics, saying the step is not idempotent and naming what it emitted,
-/// unless it emits nothing and continues nowhere. Returns the
-/// instance after the first run. A step must be idempotent on its own
-/// result, or a chain through it never settles.
+/// does), then runs `step` again on the result and panics, saying the step
+/// is not idempotent and naming what it emitted, unless it emits nothing
+/// and continues nowhere (decision 14.104; angzarr-router's
+/// `check_step_idempotent`). Returns the instance after the first run. A
+/// step must be idempotent on its own result, or a chain through it never
+/// settles: there is no step cap.
 pub fn assert_step_idempotent<A, S, O, E>(instance: A, step: S, ctx: &Context) -> A
 where
     A: Domain<State = A>,
@@ -1410,13 +1261,12 @@ where
     E: Fails<A> + fmt::Debug,
 {
     let mut instance = instance;
-    let first = match step(&instance, ctx) {
+    let mut emit = match step(&instance, ctx) {
         Ok(first) => first.into_emit(),
         Err(rejection) => panic!("the step refused: {rejection:?}"),
     };
-    let mut emit = first;
     let mut applied = 0;
-    for _ in 0..=STEP_LIMIT {
+    loop {
         for event in std::mem::take(&mut emit.events) {
             decided::<A>(&mut instance, &event, ctx, applied);
             applied += 1;
@@ -1445,6 +1295,20 @@ where
         );
     }
     instance
+}
+
+/// Fold `event`, the decision's `index`th, into `working`: on the stream
+/// `ctx` is for, at the sequence it will be given, with the metadata the
+/// kernel will stamp it with ([`CommandContext::event_meta`] of `ctx`
+/// under `A`'s rules version), so the state decided is the state replayed.
+fn decided<A: Domain>(working: &mut A::State, event: &A::Event, ctx: &Context, index: usize) {
+    let meta = ctx.command.event_meta(A::RULES_VERSION);
+    let page = PageContext {
+        cover: ctx.command.cover.as_ref(),
+        sequence: ctx.command.next_sequence + index as u64,
+        meta: Some(&meta),
+    };
+    A::apply(working, event, &page);
 }
 
 // ---------------------------------------------------------------- the glue
@@ -1491,75 +1355,10 @@ pub fn decode_message<T: DomainMessage>(any: &Any) -> Result<Option<T>, PayloadE
         })
 }
 
-/// The full name of angzarr's `CommandRefused`.
-fn command_refused() -> String {
-    <v1::CommandRefused as prost::Name>::full_name()
-}
-
-/// The type URL of angzarr's `CommandRefused`, the pass-through refusal
-/// fact: what a hand-written fact payload enum with refusal handlers
-/// lists beside its own types.
-pub fn command_refused_type_url() -> String {
-    format!("/{}", command_refused())
-}
-
-/// `any`, angzarr's `CommandRefused`, as the refusal of a `C`, if it is
-/// one: `Ok(None)` for a payload of another type, or for the refusal of
-/// another command; a `CommandRefused`, or its command of `C`'s type,
-/// that does not decode is the error. What a hand-written fact payload
-/// enum decodes a refusal fact with.
-pub fn decode_command_refused<C: DomainMessage>(
-    any: &Any,
-) -> Result<Option<CommandRefused<C>>, PayloadError> {
-    if super::payload::type_name(&any.type_url) != command_refused() {
-        return Ok(None);
-    }
-    let wire = <v1::CommandRefused as prost::Message>::decode(&any.value[..]).map_err(|error| {
-        PayloadError::Decode {
-            type_url: any.type_url.clone(),
-            error,
-        }
-    })?;
-    let book = wire.command.unwrap_or_default();
-    let Some(command) = command_payload(&book) else {
-        return Ok(None);
-    };
-    let Some(command) = decode_message::<C>(command)? else {
-        return Ok(None);
-    };
-    Ok(Some(CommandRefused {
-        command,
-        target: book.cover.unwrap_or_default(),
-        refusal: wire.refusal,
-        trigger: wire.trigger.unwrap_or_default(),
-    }))
-}
-
-/// The refused command's type URL in `any`, angzarr's `CommandRefused`;
-/// `None` for another payload, or one that does not decode. What a
-/// hand-written fact payload enum names in its
-/// [`PayloadError::UnknownType`] for a refusal it has no handler for, so
-/// the error says which command's refusal it was.
-pub fn refused_command_type_url(any: &Any) -> Option<String> {
-    if super::payload::type_name(&any.type_url) != command_refused() {
-        return None;
-    }
-    let wire = <v1::CommandRefused as prost::Message>::decode(&any.value[..]).ok()?;
-    command_payload(wire.command.as_ref()?).map(|payload| payload.type_url.clone())
-}
-
-/// A command book's payload, if it holds a command.
-fn command_payload(book: &angzarr_proto::v1::CommandBook) -> Option<&Any> {
-    match book.page.as_ref()?.body.as_ref()? {
-        angzarr_proto::v1::command_page::Body::Command(command) => command.payload.as_ref(),
-        angzarr_proto::v1::command_page::Body::Fact(_) => None,
-    }
-}
-
 /// A marked-up domain's handlers, as angzarr-router dispatches them: what
 /// `#[aggregate]` and `#[process_manager]` generate, each marked handler
 /// registered on the router's table for the domain (`on_command`,
-/// `on_fact_with_context`, `on_refused`).
+/// `on_fact`).
 pub trait Routed: Domain {
     /// `table`, with every marked handler registered on it.
     fn route(
@@ -1568,18 +1367,20 @@ pub trait Routed: Domain {
 }
 
 /// The context a handler reads: the router's, its instant included.
-fn context_of(cctx: angzarr_router::domain::CommandContext) -> Context {
-    Context { command: cctx }
+fn context_of(cctx: &CommandContext) -> Context {
+    Context {
+        command: cctx.clone(),
+    }
 }
 
-/// The input `any` as a `T`, or the router's ROUTER_REASON_ANY_DECODE_FAILED for a
+/// The input `any` as a `T`, or the router's ANGZARR_REASON_ANY_DECODE_FAILED for a
 /// payload that is not one: malformed input, a bug (INTERNAL), never a
 /// refusal (decision 14.37). Bytes that do not decode carry prost's text
 /// as `ext_err_txt`; a payload of another type, or not a valid `T`, its
 /// type alone.
-fn input<T: DomainMessage>(any: &Any) -> Result<T, angzarr_router::error::HandlerError> {
+fn input<T: DomainMessage>(any: &Any) -> Result<T, HandlerError> {
     use angzarr_proto::v1::reason_args;
-    use angzarr_router::error::{CodedError, HandlerError, RouterReason};
+    use angzarr_router::error::{AngzarrReason, CodedError};
     let message_type = || super::payload::type_name(&any.type_url).to_string();
     match decode_message::<T>(any) {
         Ok(Some(value)) => Ok(value),
@@ -1587,65 +1388,97 @@ fn input<T: DomainMessage>(any: &Any) -> Result<T, angzarr_router::error::Handle
             CodedError::undecodable(&message_type(), &error),
         )),
         Ok(None) | Err(_) => Err(HandlerError::Coded(super::route::spec_coded(
-            RouterReason::AnyDecodeFailed,
+            AngzarrReason::AnyDecodeFailed,
             [(reason_args::MESSAGE_TYPE.to_string(), message_type())],
         ))),
     }
 }
 
-/// `events`, packed, as the book a handler answers the router with.
-fn book<A: Domain>(events: Vec<A::Event>) -> EventBook {
-    EventBook {
-        pages: events
-            .iter()
-            .map(|event| angzarr_proto::v1::EventPage {
-                payload: Some(event.to_any()),
-                ..Default::default()
-            })
-            .collect(),
-        ..EventBook::default()
+/// `emit`, the markup's typed decision, as angzarr-router's `Emit`
+/// (decision 14.104): its events packed, and each continuation run on the
+/// state the router folds them into, with the [`Context`] of the router's,
+/// its failure as the router carries it ([`handler_error`]).
+fn routed<A>(emit: Emit<A>) -> angzarr_router::domain::Emit<A>
+where
+    A: Domain<State = A>,
+{
+    let Emit { events, next } = emit;
+    let emitted = angzarr_router::domain::Emit::of(events.iter().map(|event| event.to_any()));
+    match next {
+        None => emitted,
+        Some(step) => emitted.then(move |state: &A, cctx: &CommandContext| {
+            step(state, &context_of(cctx))
+                .map(routed)
+                .map_err(handler_error)
+        }),
     }
 }
 
-/// `events` as the router records a fact: the first event as the record,
-/// the rest as its flags; nothing, as the record of no event.
-fn fact_record<A: Domain>(events: Vec<A::Event>) -> angzarr_router::domain::FactRecord {
-    let mut events = events.iter().map(|event| event.to_any());
-    let fact = events.next().unwrap_or_else(|| Any {
-        type_url: super::route::NOTHING.to_string(),
-        value: Vec::new(),
-    });
-    angzarr_router::domain::FactRecord {
-        fact,
-        flags: events.collect(),
+/// `record`, the markup's typed record of a fact, as angzarr-router's
+/// `Emit`: its events packed, each continuation run on the state the
+/// router folds them into; none can fail.
+fn recorded<A>(record: Record<A>) -> angzarr_router::domain::Emit<A>
+where
+    A: Domain<State = A>,
+{
+    let Record { events, next } = record;
+    let emitted = angzarr_router::domain::Emit::of(events.iter().map(|event| event.to_any()));
+    match next {
+        None => emitted,
+        Some(step) => emitted.then(move |state: &A, cctx: &CommandContext| {
+            Ok(recorded(step(state, &context_of(cctx))))
+        }),
+    }
+}
+
+/// A marked-up handler's failure, as the router carries it (decision
+/// 14.95): a typed refusal under its status (`ANGZARR_REASON_COMMAND_REFUSED`,
+/// its object in the details, and the refusal kept for an in-process
+/// caller), an immediate return (ABORTED under its own code,
+/// angzarr-router's `CodedError::immediate`), a fatal bug
+/// (`ANGZARR_REASON_UNHANDLED_HANDLER_ERROR`, its code the cause), or a
+/// retryable bug under the status it picked.
+fn handler_error(failed: Failed<TypedRefusal>) -> HandlerError {
+    use angzarr_router::error::CodedError;
+    match failed {
+        Failed::Rejected { rejection, status } => {
+            let object = rejection.object.clone();
+            super::route::rejection(rejection, status, object)
+        }
+        Failed::Immediate(report) => HandlerError::Coded(CodedError::immediate(
+            angzarr_diagnostic::Diagnostic::code(&report),
+            super::route::flat_args(&report),
+        )),
+        Failed::Bug(report) => super::route::bug(&report),
+        Failed::RetryableBug { status, report } => HandlerError::Coded(CodedError::retryable_bug(
+            status,
+            angzarr_diagnostic::Diagnostic::code(&report),
+            super::route::flat_args(&report),
+        )),
     }
 }
 
 /// Runs a command handler as ONE decision, for angzarr-router's
 /// `DomainDispatch::on_command` (a [`Routed`] domain's table): decodes
 /// `any` as the command `C` (a payload that is not one is the router's
-/// ROUTER_REASON_ANY_DECODE_FAILED, INTERNAL), calls `handler` with the
-/// instance, the command and the [`Context`] made of `cctx`, then applies
-/// its events, in order, to a working copy of `state` and runs each
-/// continuation step ([`Emit::then`]) on that copy, until none is left.
-/// The answer is every event, as the book the router records. A
-/// rejection, the handler's or any step's, refuses the whole decision as
-/// the router carries a business refusal, under its status; more than
-/// [`STEP_LIMIT`] steps is
-/// [`KernelError::TooManySteps`](super::KernelError::TooManySteps), with
-/// nothing committed.
+/// ANGZARR_REASON_ANY_DECODE_FAILED, INTERNAL), calls `handler` with the
+/// instance, the command and the [`Context`] made of `cctx`, and answers
+/// its decision as the router's `Emit`, which the router runs to its end:
+/// each step's events applied, in order, before the next step runs on the
+/// instance. A refusal, the handler's or any step's, refuses the whole
+/// decision as the router carries a typed refusal, under its status; there
+/// is no step cap.
 ///
 /// What `#[handles_cmd]` registers; a hand-written [`Routed`] domain
 /// registers its own handler with it, as `#[aggregate]` would.
-pub fn run_command<A, R, C, O, E>(
+pub fn run_command<A, C, O, E>(
     any: &Any,
     state: &A,
-    cctx: angzarr_router::domain::CommandContext,
+    cctx: &CommandContext,
     handler: impl FnOnce(&A, C, &Context) -> Result<O, E>,
-) -> Result<Option<EventBook>, angzarr_router::error::HandlerError>
+) -> Result<angzarr_router::domain::Emit<A>, HandlerError>
 where
-    A: Domain<State = A, Rejection = Rejection<R>> + Clone,
-    R: angzarr_diagnostic::Diagnostic + Send + Sync + 'static,
+    A: Domain<State = A>,
     C: DomainMessage,
     O: Emits<A>,
     E: Fails<A>,
@@ -1656,267 +1489,98 @@ where
 }
 
 /// [`run_command`] for a command whose natural key, `key` of it, names its
-/// stream: refused [`NotItsStream`], INVALID_ARGUMENT, before `handler`
-/// runs, when the stream's root is not the key's
-/// ([`Context::rooted_by`]). What `#[handles_cmd(C, rooted_by = field)]`
-/// registers.
-pub fn run_rooted_command<A, R, C, O, E>(
+/// stream: refused before `handler` runs, when the stream's root is not
+/// the key's ([`Context::rooted_by`]), as the handler's bug
+/// ([`NotItsStream`]: a command sent to another entity's stream is the
+/// sender's mistake, and no typed refusal of the command's). What
+/// `#[handles_cmd(C, rooted_by = field)]` registers.
+pub fn run_rooted_command<A, C, O, E>(
     any: &Any,
     state: &A,
-    cctx: angzarr_router::domain::CommandContext,
+    cctx: &CommandContext,
     key: impl FnOnce(&C) -> &str,
     handler: impl FnOnce(&A, C, &Context) -> Result<O, E>,
-) -> Result<Option<EventBook>, angzarr_router::error::HandlerError>
+) -> Result<angzarr_router::domain::Emit<A>, HandlerError>
 where
-    A: Domain<State = A, Rejection = Rejection<R>> + Clone,
-    R: angzarr_diagnostic::Diagnostic + Send + Sync + 'static,
+    A: Domain<State = A>,
     C: DomainMessage,
     O: Emits<A>,
     E: Fails<A>,
 {
     let ctx = context_of(cctx);
     let command = input::<C>(any)?;
-    ctx.rooted_by(A::NAME, key(&command)).map_err(|refusal| {
-        super::route::refused(&refusal, None, BusinessStatus::InvalidArgument)
-    })?;
+    ctx.rooted_by(A::NAME, key(&command))
+        .map_err(|refusal| super::route::bug(&refusal))?;
     decide(state, command, &ctx, handler)
 }
 
-/// `handler`'s decision on `command`, run as ONE decision: its events
-/// applied, in order, to a working copy of `state`, each continuation step
-/// run on that copy, until none is left (see [`run_command`]).
-fn decide<A, R, C, O, E>(
+/// `handler`'s decision on `command`, as the router's `Emit`.
+fn decide<A, C, O, E>(
     state: &A,
     command: C,
     ctx: &Context,
     handler: impl FnOnce(&A, C, &Context) -> Result<O, E>,
-) -> Result<Option<EventBook>, angzarr_router::error::HandlerError>
+) -> Result<angzarr_router::domain::Emit<A>, HandlerError>
 where
-    A: Domain<State = A, Rejection = Rejection<R>> + Clone,
-    R: angzarr_diagnostic::Diagnostic + Send + Sync + 'static,
+    A: Domain<State = A>,
     O: Emits<A>,
     E: Fails<A>,
 {
-    let fail = super::route::failed::<R>;
-    let mut emit = handler(state, command, ctx)
-        .map_err(|e| fail(e.into_failed()))?
-        .into_emit();
-    let mut working = state.clone();
-    let mut events = Vec::new();
-    let mut steps = 0;
-    loop {
-        for event in std::mem::take(&mut emit.events) {
-            decided::<A>(&mut working, &event, ctx, events.len());
-            events.push(event);
-        }
-        let Some(next) = emit.next.take() else {
-            return Ok(Some(book::<A>(events)));
-        };
-        steps += 1;
-        if steps > STEP_LIMIT {
-            return Err(angzarr_router::error::HandlerError::Coded(
-                super::route::spec_coded(
-                    angzarr_proto::v1::RouterReason::TooManySteps,
-                    [(
-                        angzarr_proto::v1::reason_args::LIMIT.to_string(),
-                        STEP_LIMIT.to_string(),
-                    )],
-                ),
-            ));
-        }
-        emit = next(&working, ctx).map_err(fail)?;
-    }
-}
-
-/// Fold `event`, the decision's `index`th, into `working`: on the stream
-/// `ctx` is for, at the sequence it will be given, with the metadata the
-/// kernel will stamp it with ([`CommandContext::event_meta`](angzarr_router::domain::CommandContext::event_meta) of `ctx`
-/// under `A`'s rules version), so the state decided is the state replayed.
-fn decided<A: Domain>(working: &mut A::State, event: &A::Event, ctx: &Context, index: usize) {
-    let meta = ctx.command.event_meta(A::RULES_VERSION);
-    let page = PageContext {
-        cover: ctx.command.cover.as_ref(),
-        sequence: ctx.command.next_sequence + index as u64,
-        meta: Some(&meta),
-    };
-    A::apply(working, event, &page);
+    handler(state, command, ctx)
+        .map(|emit| routed(emit.into_emit()))
+        .map_err(|e| handler_error(e.into_failed()))
 }
 
 /// Runs a fact handler as ONE decision, for angzarr-router's
-/// `DomainDispatch::on_fact_with_context`: decodes `any` as the fact `F`
-/// (a payload that is not one is ROUTER_REASON_ANY_DECODE_FAILED,
-/// INTERNAL), calls `handler`, then applies its events and runs its
-/// continuation steps ([`Record::then`]) on a working copy of `state`, as
+/// `DomainDispatch::on_fact`: decodes `any` as the fact `F` (a payload
+/// that is not one is ANGZARR_REASON_ANY_DECODE_FAILED, INTERNAL), calls
+/// `handler`, and answers its record as the router's `Emit`, as
 /// [`run_command`] does. A fact is never refused, so `handler` returns no
-/// `Result`; more than [`STEP_LIMIT`] steps is a bug, which panics: the
-/// router catches it, and the kernel dead-letters it.
+/// `Result`.
 ///
 /// What `#[handles_fact]` registers.
 pub fn run_fact<A, F, Rr>(
     any: &Any,
     state: &A,
-    cctx: angzarr_router::domain::CommandContext,
+    cctx: &CommandContext,
     handler: impl FnOnce(&A, F, &Context) -> Rr,
-) -> Result<angzarr_router::domain::FactRecord, angzarr_router::error::HandlerError>
+) -> Result<angzarr_router::domain::Emit<A>, HandlerError>
 where
-    A: Domain<State = A> + Clone,
+    A: Domain<State = A>,
     F: DomainMessage,
     Rr: Records<A>,
 {
     let ctx = context_of(cctx);
     let fact = input::<F>(any)?;
-    Ok(fact_record::<A>(record(
-        state,
-        &ctx,
-        handler(state, fact, &ctx),
-    )))
+    Ok(recorded(handler(state, fact, &ctx).into_record()))
 }
 
-/// Runs a passed-through refusal's handler, for angzarr-router's
-/// `DomainDispatch::on_refused` of a `C`: `refused` (angzarr's
-/// `CommandRefused`) as a [`CommandRefused<C>`] (its command not a `C`
-/// is ROUTER_REASON_ANY_DECODE_FAILED, INTERNAL), handed to `handler` with
-/// the [`Context`] of the refusal fact, and its record run as
-/// [`run_fact`] runs one. The handler's error is a bug, the policy's
-/// failure, as the router carries it
-/// ([`StepError::PolicyFailed`](super::StepError::PolicyFailed)).
-///
-/// What `#[on_refused(C)]` on a domain registers.
-pub fn run_on_refused<A, C, Rr, E>(
-    refused: &v1::CommandRefused,
-    state: &A,
-    cctx: CommandContext,
-    handler: impl FnOnce(&A, CommandRefused<C>, &Context) -> Result<Rr, E>,
-) -> Result<angzarr_router::domain::FactRecord, angzarr_router::error::HandlerError>
-where
-    A: Domain<State = A> + Clone,
-    C: DomainMessage,
-    Rr: Records<A>,
-    E: angzarr_diagnostic::Diagnostic,
-{
-    let ctx = context_of(cctx);
-    let book = refused.command.clone().unwrap_or_default();
-    let command = input::<C>(command_payload(&book).unwrap_or(&Any::default()))?;
-    let refused = CommandRefused {
-        command,
-        target: book.cover.unwrap_or_default(),
-        refusal: refused.refusal.clone(),
-        trigger: refused.trigger.clone().unwrap_or_default(),
-    };
-    let recorded =
-        handler(state, refused, &ctx).map_err(|failure| super::route::policy_failed(&failure))?;
-    Ok(fact_record::<A>(record(state, &ctx, recorded)))
-}
-
-/// A fact's record run as one decision on a working copy of `state`.
-fn record<A, Rr>(state: &A, ctx: &Context, recorded: Rr) -> Vec<A::Event>
-where
-    A: Domain<State = A> + Clone,
-    Rr: Records<A>,
-{
-    let mut working = state.clone();
-    let mut events = Vec::new();
-    let mut record = recorded.into_record();
-    let mut steps = 0;
-    loop {
-        for event in std::mem::take(&mut record.events) {
-            decided::<A>(&mut working, &event, ctx, events.len());
-            events.push(event);
-        }
-        let Some(next) = record.next.take() else {
-            return events;
-        };
-        steps += 1;
-        assert!(
-            steps <= STEP_LIMIT,
-            "the fact on stream {} ran more than its limit of {STEP_LIMIT} continuation steps",
-            super::error::cover_text(&ctx.command.cover.clone().unwrap_or_default())
-        );
-        record = next(&working, ctx);
-    }
-}
-
-/// angzarr's pass-through refusal fact for `refusal`, packed:
-/// `CommandRefused { command, refusal, trigger }`, the response's refusal
-/// object still packed (none for a message-only refusal) and the trigger
-/// the triggering event's `EventRef`. What
-/// [`Policy::on_refused`] answers by default,
-/// and what a policy that translates some refusals answers for the rest.
-pub fn pass_through(refusal: &v1::Refusal) -> Any {
-    let trigger = refusal.event.as_ref().map(|book| EventRef {
-        stream: book.cover.clone(),
-        sequence: book.pages.first().map_or(0, |page| page.sequence),
-    });
-    super::payload::pack(&v1::CommandRefused {
-        command: refusal.command.clone(),
-        refusal: refusal
-            .response
-            .as_ref()
-            .and_then(|r| match r.reason.as_ref()? {
-                v1::refusal_response::Reason::Refusal(object) => Some(object.clone()),
-                v1::refusal_response::Reason::Diagnostic(_) => None,
-            }),
-        trigger,
-    })
-}
-
-/// `refusal` as a policy's translating callback for command `C` reads it,
-/// a [`Refusal<C>`]: `Ok(None)` if the refused command is not a `C`; one
-/// of `C`'s type that does not decode is the error, a bug (the policy's
-/// failure), as an undecodable event in `on_event` is. What a
-/// [`Policy::on_refused`] that translates
-/// decodes with.
-pub fn decode_refusal<C: DomainMessage>(
-    refusal: &v1::Refusal,
-) -> Result<Option<Refusal<C>>, Report> {
-    let Some(payload) = refusal.command.as_ref().and_then(command_payload) else {
-        return Ok(None);
-    };
-    let Some(command) = decode_message::<C>(payload).map_err(|error| Report::of(&error))? else {
-        return Ok(None);
-    };
-    Ok(Some(Refusal {
-        event: refusal.event.clone().unwrap_or_default(),
-        command,
-        response: refusal.response.clone().unwrap_or_default(),
-    }))
-}
-
-/// What a policy's translating callback (`#[on_refused(C)]`) answers on
+/// What a policy's Translate callback (`#[on_refused]`) answers on
 /// success, for its source `S`: a fact `F` the source ingests
-/// ([`Ingests`]), the refusal translated; a choice of such facts that
-/// implements it (angzarr-cli's generated `<Domain>Fact`); or an `Option`
-/// of either, whose `None` declines, the refusal passed through as it is
-/// for a command the policy has no callback for. A callback answering
-/// anything else does not compile.
+/// ([`Ingests`]), the refusal translated, or a choice of such facts that
+/// implements it (angzarr-cli's generated `<Domain>Fact`). There is no
+/// declining and no pass-through (decision 14.89): a refusal the callback
+/// does not handle is its error, a bug. A callback answering anything else
+/// does not compile.
 pub trait Translation<S> {
-    /// The fact, packed; `None` when the callback declined.
-    fn fact(self) -> Option<Any>;
+    /// The fact, packed.
+    fn fact(self) -> Any;
 }
 
 impl<S: Ingests<F>, F: DomainMessage> Translation<S> for F {
-    fn fact(self) -> Option<Any> {
-        Some(pack_message(&self))
+    fn fact(self) -> Any {
+        pack_message(&self)
     }
 }
 
-impl<S, T: Translation<S>> Translation<S> for Option<T> {
-    fn fact(self) -> Option<Any> {
-        self.and_then(Translation::fact)
-    }
-}
-
-/// A translating callback's answer to `refusal` as
-/// [`Policy::on_refused`] returns it: its fact, one the policy's source
-/// `S` ingests, packed; the pass-through `CommandRefused`
-/// ([`pass_through`]) when it declined ([`Translation`]); or its error as a
+/// A Translate callback's answer as [`Policy::on_refused`] returns it: its
+/// fact, one the policy's source `S` ingests, packed; or its error as a
 /// [`Report`], whose code and args are the dead letter's `cause`.
 pub fn translated_fact<S, T: Translation<S>, E: angzarr_diagnostic::Diagnostic>(
     answer: Result<T, E>,
-    refusal: &v1::Refusal,
 ) -> Result<Any, Report> {
     answer
-        .map(|fact| fact.fact().unwrap_or_else(|| pass_through(refusal)))
+        .map(Translation::fact)
         .map_err(|error| Report::of(&error))
 }
 
@@ -1940,19 +1604,12 @@ where
 }
 
 /// The state descriptor of a domain whose snapshot form is `S`: `S`'s
-/// type URL, supporting STRICT and AGGREGATE_HANDLES, the implicit base
-/// the registry requires. What a marked-up domain's
+/// full name (decision 14.101). What a marked-up domain's
 /// [`State::descriptor`](super::State::descriptor) returns, and a
-/// hand-written one with no conflict units may.
+/// hand-written one may.
 pub fn state_descriptor<S: prost::Name>() -> angzarr_proto::v1::StateDescriptor {
     angzarr_proto::v1::StateDescriptor {
-        type_url: format!("/{}", S::full_name()),
-        options: Some(angzarr_proto::v1::StateOptions {
-            conflict_resolutions: vec![
-                angzarr_proto::v1::ConflictResolution::Strict as i32,
-                angzarr_proto::v1::ConflictResolution::AggregateHandles as i32,
-            ],
-        }),
+        type_name: S::full_name(),
     }
 }
 
