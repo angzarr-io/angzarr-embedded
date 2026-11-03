@@ -235,12 +235,12 @@ not put its tests in the reader's (or an LLM's) context.
   `*.test.rs`.
 - angzarr-embedded-host's tests put their scratch under the temporary
   directory (a fake child's call log, a control socket, a config) in a
-  guard, `test_dir::TestDir` or `TestFile`, removed when it drops, on a pass
-  and on a panic: the rule angzarr-cli's `test-support/test_dir.rs` keeps.
+  guard, angzarr core's `angzarr_test_dir::TestDir` or `TestFile` (a
+  dev-dependency), removed when it drops, on a pass and on a panic.
   Never a bare `temp_dir().join(..)`, which a failing test leaves behind.
   `ANGZARR_KEEP_TEST_DIRS=1` keeps a failing test's files, named on its
   stderr. A directory for the host's own sockets is
-  `TestDir::for_sockets`, under the host's default socket directory, short
+  host.test.rs's `for_sockets`, under the host's default socket directory, short
   whatever `$TMPDIR` is. angzarr-store-sqlite's tests take a database file
   from its `test_database::database()` guard, on the same rule.
 - The host's socket for a child is a `SocketFile`, removed when it drops,

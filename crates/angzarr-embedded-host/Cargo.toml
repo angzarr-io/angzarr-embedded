@@ -62,6 +62,10 @@ tower = { version = "0.5", default-features = false, features = ["util"] }
 angzarr-ports = { git = "https://github.com/angzarr-io/angzarr", rev = "7225592247ae8d478dda64b5f154106b9b560b74", features = ["memory"] }
 tonic = { version = "0.14", default-features = false, features = ["router"] }
 tokio-stream = { version = "0.1", features = ["net"] }
+# The tests' scratch directories and files: angzarr core's one guard. std
+# alone and no shared type, so it is pinned at the first core rev that has
+# it, ahead of the rev the router and the rest of core are pinned at.
+angzarr-test-dir = { git = "https://github.com/angzarr-io/angzarr", rev = "4a79bd64a4121ed78f82a8eca6ed445eefe20bf2" }
 
 # The build writes the catalog's source under the crate's name
 # (angzarr_diagnostic::build): no catalog spells its crate's name.

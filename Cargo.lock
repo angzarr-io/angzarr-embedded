@@ -73,6 +73,7 @@ dependencies = [
  "angzarr-proto-transport-embedded",
  "angzarr-router",
  "angzarr-store-sqlite",
+ "angzarr-test-dir",
  "hyper-util",
  "libc",
  "prost",
@@ -181,6 +182,11 @@ dependencies = [
  "sqlx",
  "tokio",
 ]
+
+[[package]]
+name = "angzarr-test-dir"
+version = "0.1.0"
+source = "git+https://github.com/angzarr-io/angzarr?rev=4a79bd64a4121ed78f82a8eca6ed445eefe20bf2#4a79bd64a4121ed78f82a8eca6ed445eefe20bf2"
 
 [[package]]
 name = "angzarr-yaml"

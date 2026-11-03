@@ -37,7 +37,7 @@ use crate::fake_child::{
     config, domain, health, kind, mode, noted, CONTROL_ENV, HEALTH_ENV, HOLD, HOLD_TOO_MUCH,
     INPUT_ENV, KIND_ENV, LOG_ENV, SEAT_RELEASED, STARTING_ENV, TARGET_ENV,
 };
-use crate::test_dir::TestFile;
+use angzarr_test_dir::TestFile;
 
 /// The kernel's key for angzarr's `COORDINATOR_REASON_PM_NO_INSTANCE` (a router code reaches
 /// the caller under the kernel's own key, `angzarr-embedded-` and the
