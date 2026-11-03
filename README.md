@@ -35,6 +35,7 @@ was `angzarr_embedded::next`, and that path is gone, with no alias.
 | [`angzarr-embedded-host`](crates/angzarr-embedded-host) | remote components as child processes (the go-plugin model): launched from the `component` entries of its config (`angzarr.yaml`, angzarr-embedded-host-config's schema), which list every component, in-process ones too (`kind`, required, = `domain`, `policy`, `projector` or `upcaster`; read strictly: unknown keys and values refused, at their key path), handshaken, reached by gRPC on a Unix socket, supervised (restarted when it exits, or when its health, watched and checked every interval, stays unhealthy past a grace, up to a restart limit that clears after a healthy window), and handed back to the kernel by kind (a domain as an angzarr-router `CommandHandler`, a policy as a `PolicyComponent`, a projector as a `ProjectorHandler`) |
 | [`angzarr-embedded-host-config`](crates/angzarr-embedded-host-config) | the host config's schema, `angzarr.yaml` stamped `schema_version` (version 2; 1 and an unstamped file still read): its types, its versioned loader and its fixtures, with no runtime (serde and angzarr-yaml only), shared by angzarr-embedded-host and angzarr-cli's `lint app` and `scaffold app` |
 | [`angzarr-store-sqlite`](crates/angzarr-store-sqlite) | angzarr-ports on SQLite, the one SQLite adapter angzarr-embedded and angzarr share: a leaf (nothing of angzarr-embedded), sea-query statements on sqlx, with its migrations; held to the ports' conformance suite |
+| [`angzarr-embedded-runner`](crates/angzarr-embedded-runner) | an application's use cases' one way to run a command through the kernel (`Runner`): the kernel's retry (`KERNEL_RETRY`, `backoff`: capped exponential backoff with full jitter) waited on the application's `Delay` and `Jitter` ports, the command stamped by its `Clock`, the dead letters each call answers gathered, the domain's refusal typed (`Refusal`) or why it was not decided (`Unrun`), and a stale shaped command shaped again |
 | [`angzarr-embedded-macros`](crates/angzarr-embedded-macros) | markup over hand-written aggregates, process managers, policies and projectors, generating their `angzarr_embedded` glue |
 | [`angzarr-embedded-catalog-check`](crates/angzarr-embedded-catalog-check) | test-only: every error code has a message, with exactly its args, in every shipped Fluent catalog |
 | [`angzarr-embedded-conformance`](crates/angzarr-embedded-conformance) | test-only: the spec's coordinator-contract tier (vendored `.feature` files) run against the kernel by cucumber; each scenario it does not run is tagged with why, the one record of where angzarr-embedded and the contract part |
@@ -69,8 +70,9 @@ are Apache-2.0 OR BSD-3-Clause too. In a normal build (dev-dependencies, which
 only tests build, aside):
 
 - **Carry angzarr-proto:** `angzarr-embedded` and `angzarr-embedded-host`,
-  which depend on it directly, and `angzarr-store-sqlite`, which depends on
-  angzarr-ports.
+  which depend on it directly, `angzarr-store-sqlite`, which depends on
+  angzarr-ports, and `angzarr-embedded-runner`, which depends on
+  angzarr-embedded.
   `angzarr-embedded-host` also carries angzarr-proto-component and
   angzarr-proto-transport-embedded, angzarr core's crates for the component
   contract and the local-process transport (decision 14.64), under the
