@@ -103,6 +103,16 @@ takes angzarr-embedded-host itself. It defines no errors: a config that
 does not load is angzarr-yaml's `LoadError`. The `language` closed set is
 the host's, since it is the languages the running application loads.
 
+angzarr-embedded-runner depends on `angzarr-embedded` (the kernel it
+runs commands through) and `angzarr-diagnostic` (the reports its outcomes
+carry, at the rev angzarr-embedded pins), and on nothing else, because it is
+an application's use cases' one way to run a command: the kernel's retry
+waited on the application's ports (`Clock`, `Delay`, `Jitter`, its own
+traits), the dead letters gathered, the refusal typed. Its tests run on a
+toy marked-up note (`src/note.test.rs`), so it takes angzarr-embedded-macros
+and prost as dev-dependencies. Moved from taskloom's `kernel-runner`
+(2026-11-02, relicensed by its owner).
+
 angzarr-embedded-host depends on `angzarr-embedded` (the kernel's `Registry`,
 which `Host::register` fills), `angzarr-router` and `angzarr-proto`
 (pinned at the revs the router names, so its graph holds one angzarr-proto),
