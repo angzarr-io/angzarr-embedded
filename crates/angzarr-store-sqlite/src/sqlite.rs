@@ -276,7 +276,7 @@ impl SqliteStore {
     /// against by a caller that judges a store before an open migrates it
     /// (an export refuses a store whose ledger is not exactly this).
     pub fn build_migrations() -> Vec<angzarr_ports::Migration> {
-        todo!("the build's migration set")
+        crate::migrations::build(&MIGRATOR)
     }
 
     /// A database held only in memory, migrated.

@@ -7,9 +7,10 @@
 use angzarr_ports::Store;
 use prost_types::Any;
 
-use crate::domain::Domain;
+use crate::domain::{Domain, State};
 use crate::error::KernelError;
 use crate::handle::Kernel;
+use crate::payload::pack;
 use crate::v1::Cover;
 
 /// One stream folded: its cover, its head, and its state in its snapshot
@@ -23,7 +24,7 @@ pub struct Folded {
 
 impl Kernel<'_> {
     /// Every stream of `D` in `store` holding events of its own, in every
-    /// edition, in the store's order ([`EventStore::covers`]), each loaded
+    /// edition, in the store's order ([`covers`](angzarr_ports::EventStore::covers)), each loaded
     /// as [`Kernel::load`] loads it (its newest usable snapshot, then its
     /// events, each checked and upcast), with its head and its state
     /// packed as its snapshot form.
@@ -32,8 +33,17 @@ impl Kernel<'_> {
         D: Domain,
         S: Store,
     {
-        let _ = store;
-        todo!("the fold of every {} stream", D::NAME)
+        let covers = store.covers(D::NAME).await.map_err(KernelError::Store)?;
+        let mut folded = Vec::with_capacity(covers.len());
+        for cover in covers {
+            let (stream, head) = self.load::<D, S>(store, &cover).await?;
+            folded.push(Folded {
+                state: pack(&stream.state().to_snapshot()),
+                cover,
+                head,
+            });
+        }
+        Ok(folded)
     }
 }
 
