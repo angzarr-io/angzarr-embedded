@@ -1490,7 +1490,7 @@ where
 
 /// [`run_command`] for a command whose natural key, `key` of it, names its
 /// stream: refused before `handler` runs, when the stream's root is not
-/// the key's ([`Context::rooted_by`]), as the handler's bug
+/// the key's ([`Context::rooted_by`]), refused INVALID_ARGUMENT
 /// ([`NotItsStream`]: a command sent to another entity's stream is the
 /// sender's mistake, and no typed refusal of the command's). What
 /// `#[handles_cmd(C, rooted_by = field)]` registers.
@@ -1510,7 +1510,7 @@ where
     let ctx = context_of(cctx);
     let command = input::<C>(any)?;
     ctx.rooted_by(A::NAME, key(&command))
-        .map_err(|refusal| super::route::bug(&refusal))?;
+        .map_err(|refusal| super::route::invalid_argument(&refusal))?;
     decide(state, command, &ctx, handler)
 }
 

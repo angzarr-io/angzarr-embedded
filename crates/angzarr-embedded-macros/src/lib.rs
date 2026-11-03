@@ -114,9 +114,8 @@
 //!   `String`, or anything `AsRef<str>`) is its natural key, and the
 //!   stream's root must be that key's UUIDv5 under the domain
 //!   (`Context::rooted_by`, as `Cover::natural` addresses it); a command
-//!   sent elsewhere fails before its handler runs, as a bug
-//!   (`angzarr-embedded-not-its-stream` the cause of
-//!   ANGZARR_REASON_UNHANDLED_HANDLER_ERROR): it is no typed refusal of the
+//!   sent elsewhere is refused INVALID_ARGUMENT before its handler runs,
+//!   under `angzarr-embedded-not-its-stream`: it is no typed refusal of the
 //!   command's.
 //!
 //! There are no other markers on a domain: a refusal of a policy's command

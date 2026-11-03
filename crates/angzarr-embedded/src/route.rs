@@ -273,6 +273,18 @@ pub(crate) fn bug(bug: &dyn Diagnostic) -> HandlerError {
     HandlerError::Coded(CodedError::bug(bug.code(), flat_args(bug)))
 }
 
+/// A command the sender got wrong, refused INVALID_ARGUMENT under the
+/// diagnostic's own code and args: no typed refusal of the command's, no
+/// bug of its handler's.
+pub(crate) fn invalid_argument(refused: &dyn Diagnostic) -> HandlerError {
+    HandlerError::Coded(CodedError {
+        code: refused.code().to_string(),
+        extras: flat_args(refused).into_iter().collect(),
+        grpc: GrpcCode::InvalidArgument,
+        refusal: None,
+    })
+}
+
 /// A spec key the kernel raises (decision 14.65): its full name, the code
 /// it travels as, and how its `(io.angzarr.v1.reason)` option says it
 /// surfaces, generated into angzarr-proto (or a transport's crate). A key
