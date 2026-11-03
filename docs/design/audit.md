@@ -375,9 +375,8 @@ snapshot that decodes but is not a valid state (`from_snapshot` refuses it)
 is unreadable, `PayloadError::Invalid`. A state that is itself a prost
 message is its own snapshot form. `Registry::register::<D>` lists it in the
 catalog by the descriptor `D` generates, its state `D::State::descriptor()`,
-as angzarr's `registry.register::<D>()` fills `ComponentDescriptor.state`,
-and refuses a descriptor naming another type than the snapshot form's
-(`Misconfigured::StateTypeMismatch`). angzarr's generator emits the impl;
+as angzarr's `registry.register::<D>()` fills `ComponentDescriptor.state`.
+angzarr's generator emits the impl;
 the test fixtures write it by hand (`src/toys.test.rs`).
 
 ## Step 5: dispatch through angzarr-router
@@ -426,11 +425,9 @@ one lists and keeps nothing, and none panics. One validator decides it
 registration's and a child's alike (the host calls it on every Describe),
 to 14.42's rules (a rules version, a state type, an input domain, a
 policy's output domain), and the catalog adds its own (a name registered
-twice, an upcaster for another domain or none, a remote source, a state
-type that is not the snapshot form's). Each refusal of the spec's is its
-key, verbatim (the descriptor rules' `ANGZARR_REASON_*` readiness keys,
-`ANGZARR_REASON_DUPLICATE_COMPONENT`); the rest are angzarr-embedded's own
-codes.
+twice, an upcaster for another domain or none, a remote source). Each
+refusal is a spec key, verbatim (the descriptor rules' `ANGZARR_REASON_*`
+readiness keys, `ANGZARR_REASON_DUPLICATE_COMPONENT`).
 
 The kernel awaits each dispatch (angzarr-router's `CommandHandler`,
 `PolicyComponent` and `ProjectorHandler` return futures; it holds them as

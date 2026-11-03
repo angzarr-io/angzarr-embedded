@@ -528,11 +528,6 @@ pub(crate) fn misconfigured_samples() -> Vec<Misconfigured> {
         Misconfigured::PolicyNoOutputDomain {
             component: "bookkeeping".to_string(),
         },
-        Misconfigured::StateTypeMismatch {
-            component: component(),
-            type_name: "toy.account.v1.Account".to_string(),
-            snapshot_type_name: "toy.account.v1.Snapshot".to_string(),
-        },
         Misconfigured::RemoteSource {
             domain: component(),
             component: "bookkeeping".to_string(),

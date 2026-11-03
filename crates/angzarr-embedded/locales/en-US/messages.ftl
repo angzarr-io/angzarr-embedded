@@ -70,7 +70,6 @@ upcast-answer-keys = the upcaster answered other keys than the payloads asked: e
 upcaster-duplicate = domain { $domain }'s upcaster has two typed rules from { $source }: the second never runs
 upcaster-out-of-order = domain { $domain }'s upcaster registers the rule from { $source } before the rule from { $produced_by }, which produces it
 upcaster-dead-end = domain { $domain }'s upcaster takes { $source } to { $ends_at }, which the domain does not decode
-state-type-mismatch = component { $component }'s state is { $type_name }, but its snapshot form is { $snapshot_type_name }: its snapshots would never be usable
 
 
 ## A process manager's compensation (markup::Compensation, angzarr decision 14.74).

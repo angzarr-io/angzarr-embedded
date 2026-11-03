@@ -171,17 +171,12 @@ fn a_remote_domain_is_listed_apart_and_keeps_its_readers_out() {
 
 /// Decision 14.65 (the owner's ruling on decision 21 of the 2026-10-31
 /// run): every misconfiguration, a Rust registration's or a child's
-/// descriptor's, is refused under a spec key, its args exactly the key's;
-/// the one a child's descriptor cannot make, a hand-written state whose
-/// snapshot form is another type, is angzarr-embedded's own.
+/// descriptor's, is refused under a spec key, its args exactly the key's.
 #[test]
 fn every_misconfiguration_is_a_spec_key_with_its_declared_args() {
     use angzarr_diagnostic::Diagnostic as _;
     let samples = crate::misconfigured_samples();
-    let (own, spec): (Vec<_>, Vec<_>) = samples
-        .iter()
-        .partition(|m| matches!(m, Misconfigured::StateTypeMismatch { .. }));
-    let mut keys: Vec<&str> = spec.iter().map(|m| m.code()).collect();
+    let mut keys: Vec<&str> = samples.iter().map(|m| m.code()).collect();
     keys.sort_unstable();
     keys.dedup();
     assert_eq!(
@@ -199,7 +194,7 @@ fn every_misconfiguration_is_a_spec_key_with_its_declared_args() {
             "ANGZARR_REASON_UPCASTER_UNKNOWN_DOMAIN",
         ]
     );
-    for misconfigured in spec {
+    for misconfigured in &samples {
         let declared = angzarr_proto::reason_key_args(misconfigured.code())
             .unwrap_or_else(|| panic!("{} is no spec key", misconfigured.code()));
         let given: Vec<&str> = misconfigured.args().iter().map(|(n, _)| *n).collect();
@@ -207,11 +202,4 @@ fn every_misconfiguration_is_a_spec_key_with_its_declared_args() {
             assert!(declared.contains(name), "{misconfigured:?}: {name}");
         }
     }
-    assert_eq!(own.len(), 1);
-    assert!(
-        angzarr_proto::reason_key_args(own[0].code()).is_none(),
-        "{} is embedded's own",
-        own[0].code()
-    );
-    assert!(own[0].code().ends_with("state-type-mismatch"));
 }

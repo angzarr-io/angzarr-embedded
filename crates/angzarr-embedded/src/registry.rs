@@ -146,16 +146,6 @@ impl Registry {
             });
         }
         let state = D::State::descriptor();
-        // A snapshot is found usable by the descriptor's type name, and is
-        // written as the snapshot form's: they must be one type.
-        let snapshot = <<D::State as State>::Snapshot as prost::Name>::full_name();
-        if state.type_name != snapshot {
-            return Err(Misconfigured::StateTypeMismatch {
-                component: domain,
-                type_name: state.type_name,
-                snapshot_type_name: snapshot,
-            });
-        }
         let process_manager = starting.is_some();
         let kind = match starting {
             Some(starting) => {

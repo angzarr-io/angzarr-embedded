@@ -6,7 +6,7 @@
 
 use std::fmt;
 
-use angzarr_diagnostic::{code, Arg, Diagnostic};
+use angzarr_diagnostic::{Arg, Diagnostic};
 use angzarr_proto::v1::reason_args as args;
 use angzarr_proto::v1::{component_descriptor, AngzarrReason, ComponentDescriptor, ComponentKind};
 
@@ -51,16 +51,6 @@ pub enum Misconfigured {
     /// read here, so a local component of them would never run. Remote
     /// stays remote. `ANGZARR_REASON_REMOTE_SOURCE`.
     RemoteSource { domain: String, component: String },
-    /// A typed domain whose state's descriptor names one type
-    /// (`type_name`) and whose snapshot form is another
-    /// (`snapshot_type_name`): its snapshots would never be found usable.
-    /// angzarr-embedded's own: a hand-written `State` can say so, a child's
-    /// descriptor cannot.
-    StateTypeMismatch {
-        component: String,
-        type_name: String,
-        snapshot_type_name: String,
-    },
 }
 
 impl fmt::Display for Misconfigured {
@@ -87,7 +77,6 @@ impl Diagnostic for Misconfigured {
             M::NoInputDomain { .. } => AngzarrReason::NoInputDomain,
             M::PolicyNoOutputDomain { .. } => AngzarrReason::PolicyNoOutputDomain,
             M::RemoteSource { .. } => AngzarrReason::RemoteSource,
-            M::StateTypeMismatch { .. } => return code!("state-type-mismatch"),
         };
         key.as_str_name()
     }
@@ -111,15 +100,6 @@ impl Diagnostic for Misconfigured {
             | M::NoInputDomain { component, kind } => vec![
                 text(args::COMPONENT, component),
                 text(args::COMPONENT_KIND, kind),
-            ],
-            M::StateTypeMismatch {
-                component,
-                type_name,
-                snapshot_type_name,
-            } => vec![
-                text("component", component),
-                text("type_name", type_name),
-                text("snapshot_type_name", snapshot_type_name),
             ],
             M::RemoteSource { domain, component } => {
                 vec![text(args::COMPONENT, component), text(args::DOMAIN, domain)]
