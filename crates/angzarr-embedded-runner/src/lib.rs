@@ -43,7 +43,8 @@ use angzarr_diagnostic::Report;
 use angzarr_embedded::markup::Rejection;
 use angzarr_embedded::v1::{CommandBook, Cover, Uuid};
 use angzarr_embedded::{
-    DeadLetter, Domain, Handled, OnRetryable, Payload, Recovery, Registry, Store, Wait,
+    DeadLetter, Domain, Failure, Handled, Kernel, OnRetryable, Payload, Recovery, Registry,
+    Rejected, Sampled, Store, Wait,
 };
 
 mod ports;
@@ -69,23 +70,20 @@ pub const KERNEL_RETRY: OnRetryable =
 /// by full jitter (from zero to its ceiling) under a ceiling of
 /// `base * 2^(n - 1)`, at most `cap`.
 pub const fn backoff(base: Duration, cap: Duration, attempts: u32) -> OnRetryable {
-    // red: no retry yet
-    let _ = (base, cap, attempts);
     OnRetryable {
-        max_retries: 0,
-        max_race_runs: 0,
-        initial_backoff: Duration::ZERO,
-        multiplier: 0.0,
-        max_backoff: Duration::ZERO,
-        jitter: 0.0,
+        max_retries: attempts.saturating_sub(1),
+        max_race_runs: attempts,
+        initial_backoff: base,
+        multiplier: 2.0,
+        max_backoff: cap,
+        jitter: 1.0,
     }
 }
 
 /// How many times `retry` tries a command, the first included: what a
 /// use case reports giving up after.
 pub const fn attempts(retry: &OnRetryable) -> u32 {
-    let _ = retry;
-    0
+    retry.max_retries.saturating_add(1)
 }
 
 /// The kernel's [`Wait`] over the application's [`Delay`] and [`Jitter`]
@@ -109,8 +107,13 @@ impl<D: Delay + Jitter + Send> Wait for Ported<'_, D> {
     /// Sleeps `backoff` on the port. The kernel waits one backoff at a
     /// time; a second wait begun during the first waits not at all.
     fn wait(&self, backoff: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-        let _ = (backoff, &self.0, PoisonError::<()>::into_inner);
-        Box::pin(async {})
+        Box::pin(async move {
+            let taken = self.0.lock().unwrap_or_else(PoisonError::into_inner).take();
+            if let Some(delay) = taken {
+                delay.sleep(backoff).await;
+                *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Some(delay);
+            }
+        })
     }
 
     /// The kernel takes `jitter * draw` of each wait off (with
@@ -119,7 +122,12 @@ impl<D: Delay + Jitter + Send> Wait for Ported<'_, D> {
     /// `1 - up_to(DRAW_SCALE) / DRAW_SCALE`, a draw past the scale held to
     /// it.
     fn draw(&self) -> f64 {
-        0.0
+        let mut held = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let kept = held
+            .as_mut()
+            .map_or(DRAW_SCALE, |delay| delay.up_to(DRAW_SCALE))
+            .min(DRAW_SCALE);
+        1.0 - kept.as_secs_f64() / DRAW_SCALE.as_secs_f64()
     }
 }
 
@@ -171,8 +179,17 @@ impl<C: Clock, D: Delay + Jitter + Send> Runner<'_, C, D> {
         R: Clone + Send + Sync + 'static,
         S: Store,
     {
-        let _ = (store, book, command_id);
-        todo!("red: run through the kernel")
+        let sampled = self.sampled(command_id);
+        let waits = Ported::new(&mut *self.delay);
+        let handled = kernel(self.registry, self.retry, &waits)
+            .handle::<A, _>(store, book, &sampled)
+            .await;
+        let answered = match &handled {
+            Ok(handled) => handled.dead_letters(),
+            Err(failure) => failure.dead_letters(),
+        };
+        self.dead_letters.extend_from_slice(answered);
+        self.settled(handled)
     }
 
     /// Run what `shape` makes of the `A` stream `stream`, as the kernel
@@ -193,8 +210,18 @@ impl<C: Clock, D: Delay + Jitter + Send> Runner<'_, C, D> {
         S: Store,
         P: Payload,
     {
-        let _ = (store, stream, command_id, shape);
-        todo!("red: shaped through the kernel")
+        let sampled = self.sampled(command_id);
+        let waits = Ported::new(&mut *self.delay);
+        let shaped = kernel(self.registry, self.retry, &waits)
+            .handle_shaped::<A, _, _, _>(store, stream, &sampled, shape)
+            .await;
+        let answered = match &shaped {
+            Ok((Some(handled), _)) => handled.dead_letters(),
+            Ok((None, _)) => &[],
+            Err(failure) => failure.dead_letters(),
+        };
+        self.dead_letters.extend_from_slice(answered);
+        self.settled(shaped)
     }
 
     /// After the `failed`th failure (from 1, counted into `failed`) of
@@ -208,9 +235,61 @@ impl<C: Clock, D: Delay + Jitter + Send> Runner<'_, C, D> {
         failure: Report,
         recovery: Recovery,
     ) -> Result<(), Unrun> {
-        let _ = (failed, failure, recovery);
-        todo!("red: wait as the kernel waits")
+        if recovery != Recovery::Retry {
+            return Err(Unrun::Failed(failure));
+        }
+        *failed += 1;
+        if *failed >= attempts(&self.retry) {
+            return Err(Unrun::GaveUp {
+                attempts: *failed,
+                error: failure,
+            });
+        }
+        let ceiling = self.retry.backoff(*failed - 1, 0.0);
+        let wait = self.delay.up_to(ceiling).min(ceiling);
+        self.delay.sleep(wait).await;
+        Ok(())
     }
+
+    /// The instant now and `command_id`: what the kernel stamps a command
+    /// with.
+    fn sampled(&mut self, command_id: &Uuid) -> Sampled {
+        Sampled {
+            now: self.clock.now(),
+            command_id: command_id.clone(),
+        }
+    }
+
+    /// What the kernel answered, as the use case reads it: its answer, or
+    /// the domain's refusal; a retryable failure, which has had the
+    /// kernel's retries, given up on at once ([`Unrun::GaveUp`]); any
+    /// other failure, [`Unrun::Failed`].
+    fn settled<H, R: Clone + 'static>(
+        &self,
+        handled: Result<H, Failure<Rejected>>,
+    ) -> Result<Result<H, Refusal<R>>, Unrun> {
+        match handled {
+            Ok(handled) => Ok(Ok(handled)),
+            Err(Failure::Rejected(rejected)) => Ok(Err(Refusal {
+                rejection: rejected
+                    .rejection::<Rejection<R>>()
+                    .and_then(Rejection::message)
+                    .cloned(),
+                report: rejected.report().clone(),
+            })),
+            Err(failure) if failure.recovery() == Recovery::Retry => Err(Unrun::GaveUp {
+                attempts: attempts(&self.retry),
+                error: Report::of(&failure),
+            }),
+            Err(failure) => Err(Unrun::Failed(Report::of(&failure))),
+        }
+    }
+}
+
+/// The kernel over `registry`, retrying as `retry` says, its waits
+/// `waits`.
+fn kernel<'k>(registry: &'k Registry, retry: OnRetryable, waits: &'k dyn Wait) -> Kernel<'k> {
+    Kernel::new(registry).on_retryable(retry).wait_with(waits)
 }
 
 // The tests' toy domain and fakes.
