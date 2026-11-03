@@ -142,6 +142,14 @@ impl Business {
         locked(&self.rules).push(rule);
     }
 
+    /// Inputs of `rule`'s type refused as `rule` says alone: the rules
+    /// they had are gone.
+    pub(crate) fn replace_rule(&self, rule: Rule) {
+        let mut rules = locked(&self.rules);
+        rules.retain(|r| r.input != rule.input);
+        rules.push(rule);
+    }
+
     /// The error a rule refuses `delivered`'s input of type `name` with.
     fn ruled(&self, name: &str, delivered: &HandleRequest) -> Option<CodedError> {
         let held: Vec<String> = delivered.history.as_ref().map_or(Vec::new(), |e| {

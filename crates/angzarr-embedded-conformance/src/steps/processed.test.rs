@@ -197,6 +197,16 @@ fn still_holds(w: &mut Coordinator, name: String, order: String, n: u64) {
     assert!(record.contains(&(cover, n)), "{record:?}");
 }
 
+/// The coordinator builds no `Projection` value in process: the run's
+/// cover, the projector's name and the position after it are the record's
+/// own key and value, which the projector's record holds once it answered.
+#[then(
+    regex = r#"^the coordinator builds the Projection with cover order "([\w-]+)", projector "(\w+)" and next_sequence (\d+)$"#
+)]
+fn builds_projection(w: &mut Coordinator, order: String, name: String, n: u64) {
+    still_holds(w, name, order, n);
+}
+
 #[then(regex = r#"^the record of "(\w+)" no longer holds order "([\w-]+)"$"#)]
 fn no_longer_holds(w: &mut Coordinator, name: String, order: String) {
     let cover = w.cover("order", &order);

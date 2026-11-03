@@ -58,6 +58,8 @@ mod refusals;
 mod script;
 #[path = "steps/streams.test.rs"]
 mod streams;
+#[path = "steps/sync_modes.test.rs"]
+mod sync_modes;
 #[path = "steps/upcasting.test.rs"]
 mod upcasting;
 #[path = "steps/versions.test.rs"]
