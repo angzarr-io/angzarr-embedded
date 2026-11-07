@@ -204,9 +204,7 @@ mod read {
 mod read_one_handle {
     use super::*;
     checks!(SqliteStore::open(&database()).await.unwrap();
-        #[ignore = "RED: hangs, a read unit holds the handle's one connection and a write through the same handle waits for ever"]
         a_read_unit_sees_the_store_as_it_began_through_one_handle,
-        #[ignore = "RED: hangs, a read unit holds the handle's one connection and a write through the same handle waits for ever"]
         a_read_unit_heads_and_snapshots_as_it_began_through_one_handle,
         #[ignore = "editions are not implemented yet in the SQLite adapter (owner ruling 2026-10-28); a follow-up; MemoryStore covers them"]
         a_read_unit_refuses_an_unknown_edition_and_reads_an_unforked_stream_as_main_through_one_handle,
@@ -217,8 +215,7 @@ mod read_one_handle_purge {
     use super::*;
     angzarr_ports::store_contract!(
         read_one_handle_purge,
-        #[tokio::test]
-        #[ignore = "RED: hangs, a read unit holds the handle's one connection and a write through the same handle waits for ever"],
+        #[tokio::test],
         SqliteStore::open(&database()).await.unwrap()
     );
 }

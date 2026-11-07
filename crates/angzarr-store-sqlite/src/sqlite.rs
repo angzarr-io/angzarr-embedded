@@ -1,5 +1,6 @@
 //! SQLite: the shared statements rendered by sea-query's SQLite builder and
-//! run on sqlx, over one connection per handle; the schema created by
+//! run on sqlx, over one connection per handle (and one more for each open
+//! read unit on a file); the schema created by
 //! `migrations/sqlite/`. There is no unit of work: a write is one
 //! `BEGIN IMMEDIATE` transaction, begun and committed inside the call, so
 //! nothing is held open between a step's reads and its write; two handles
@@ -1126,27 +1127,68 @@ impl ReadStore for SqliteStore {
     /// A deferred `BEGIN`, which takes no lock, and a first read at once:
     /// under WAL a read transaction's moment is its first read's. It runs
     /// on a store opened by [`open_existing`](SqliteStore::open_existing),
-    /// and waits on no writer. The handle serves nothing else until the
-    /// unit is dropped.
+    /// and waits on no writer.
+    ///
+    /// A store on a file reads on a read-only connection of the unit's own,
+    /// so the handle goes on serving writes and reads while the unit is
+    /// open, and the unit keeps the moment it began. A store in memory has
+    /// one connection, since a second would be another database, and no
+    /// snapshot a writer could not disturb: its unit holds the handle's
+    /// connection, and the handle serves nothing else until the unit is
+    /// dropped.
     async fn begin_read(&self) -> Result<SqliteRead<'_>, StoreError> {
-        let mut ex = self.conn.exec().await;
+        let conn = match &self.path {
+            Some(path) => ReadConn::Own(Box::new(crate::migrations::reading(path).await?)),
+            None => ReadConn::Handle(self.conn.lock.lock().await),
+        };
+        let mut ex = Exec {
+            conn,
+            sent: &self.conn.sent,
+        };
         ex.count();
         <Sqlite as Database>::TransactionManager::begin(&mut ex.conn, None)
             .await
             .map_err(unavailable)?;
-        let unit = SqliteRead { ex };
+        let mut unit = SqliteRead { ex };
         // Any read fixes the moment; this one reads only the schema.
-        let mut unit = unit;
         unit.ex.count();
         empty(&mut unit.ex.conn).await?;
         Ok(unit)
     }
 }
 
+/// The connection a read unit reads on.
+enum ReadConn<'s> {
+    /// One of its own, closed with the unit.
+    Own(Box<SqliteConnection>),
+    /// The handle's, held until the unit is dropped.
+    Handle(tokio::sync::MutexGuard<'s, SqliteConnection>),
+}
+
+impl std::ops::Deref for ReadConn<'_> {
+    type Target = SqliteConnection;
+
+    fn deref(&self) -> &SqliteConnection {
+        match self {
+            ReadConn::Own(conn) => conn,
+            ReadConn::Handle(guard) => guard,
+        }
+    }
+}
+
+impl DerefMut for ReadConn<'_> {
+    fn deref_mut(&mut self) -> &mut SqliteConnection {
+        match self {
+            ReadConn::Own(conn) => conn,
+            ReadConn::Handle(guard) => guard,
+        }
+    }
+}
+
 /// A read-only unit: one SQLite read transaction, seeing the database as
 /// it began. Dropped, it ends, having written nothing.
 pub struct SqliteRead<'s> {
-    ex: Exec<'s, tokio::sync::MutexGuard<'s, SqliteConnection>>,
+    ex: Exec<'s, ReadConn<'s>>,
 }
 
 impl Drop for SqliteRead<'_> {
