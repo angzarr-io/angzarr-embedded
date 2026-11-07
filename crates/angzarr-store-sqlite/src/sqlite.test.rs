@@ -24,8 +24,9 @@ use angzarr_ports::contract::{
     append, at, command, correlated, edition_stream, main_stream, page, snapshot,
 };
 use angzarr_ports::{
-    Arg, EventStore, Migrations, Outbox, PositionKey, PositionStore, Purge, ReadByCorrelation,
-    ReadStore, ReadUnit, ReadUntilTime, Slice, SnapshotStore, StoreError, StreamRef, Watch,
+    Arg, EventStore, Export, ExportRow, Migrations, Outbox, PositionKey, PositionStore, Purge,
+    ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, Slice, SnapshotStore, StoreError,
+    StreamRef, Watch,
 };
 use prost::Message;
 use sqlx::migrate::Migrator;
@@ -95,7 +96,7 @@ async fn pair(path: &Path) -> (SqliteStore, SqliteStore) {
 /// store from `$fresh`, a check carrying its own attributes (an edition
 /// check's `#[ignore]`). The base and read sections are stamped here, not
 /// by `store_contract!`, because each holds edition checks this adapter
-/// does not pass yet; their lists are angzarr-ports' at dd0e553, kept in
+/// does not pass yet; their lists are angzarr-ports' at 44143e65, kept in
 /// step by hand when the suite grows.
 macro_rules! checks {
     ($fresh:expr; $($(#[$a:meta])* $check:ident,)*) => {
@@ -199,6 +200,11 @@ mod read {
     );
 }
 
+/// NOT RUN: the `read_one_handle` and `read_one_handle_purge` sections. A
+/// read unit holds its handle's one connection for its whole life, so a
+/// write through the same handle waits on it for ever; two handles on a
+/// file (the `read` and `read_purge` sections above) are what this store
+/// holds the moment with.
 mod read_purge {
     use super::*;
     angzarr_ports::store_contract!(read_purge, #[tokio::test], pair(&database()).await);
@@ -305,6 +311,38 @@ mod dead_letters_purge {
     use super::*;
     angzarr_ports::store_contract!(
         dead_letters_purge,
+        #[tokio::test],
+        SqliteStore::open_in_memory().await.unwrap()
+    );
+}
+
+mod export {
+    use super::*;
+    angzarr_ports::store_contract!(
+        export,
+        #[tokio::test],
+        SqliteStore::open_in_memory().await.unwrap()
+    );
+}
+
+mod export_pair {
+    use super::*;
+    angzarr_ports::store_contract!(export_pair, #[tokio::test], pair(&database()).await);
+}
+
+mod export_dead_letters {
+    use super::*;
+    angzarr_ports::store_contract!(
+        export_dead_letters,
+        #[tokio::test],
+        SqliteStore::open_in_memory().await.unwrap()
+    );
+}
+
+mod export_every_kind {
+    use super::*;
+    angzarr_ports::store_contract!(
+        export_every_kind,
         #[tokio::test],
         SqliteStore::open_in_memory().await.unwrap()
     );
@@ -514,6 +552,103 @@ async fn end(mut conn: SqliteConnection, commit: bool) {
     let sql = if commit { "COMMIT" } else { "ROLLBACK" };
     sqlx::query(sql).execute(&mut conn).await.unwrap();
     conn.close().await.unwrap();
+}
+
+/// An export gives a page as it is stored, byte for byte, never decoded
+/// and encoded again: a field this build does not know, planted in the
+/// stored page, comes out with it, for the exporter to refuse.
+#[tokio::test]
+async fn an_export_gives_a_page_as_stored_byte_for_byte() {
+    let path = database();
+    let s = stream(1);
+    let store = SqliteStore::open(&path).await.unwrap();
+    append(&store, s, 0, &[page(0, 1)]).await.unwrap();
+    let mut conn = raw(&path).await;
+    sqlx::query("UPDATE events SET page = page || x'980601'")
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    conn.close().await.unwrap();
+    let mut planted = page(0, 1).encode_to_vec();
+    planted.extend_from_slice(&[0x98, 0x06, 0x01]);
+    assert_eq!(
+        store.export().await,
+        Ok(vec![ExportRow::Page {
+            stream: s.to_cover(),
+            sequence: 0,
+            stored: planted,
+        }])
+    );
+}
+
+/// An export reads a store opened to read and changes nothing of its
+/// file: its bytes and its modification time are as they were (the store
+/// export/import plan, E3). The source is what the plan exports, a
+/// `VACUUM INTO` copy of the store (section 3.1), whole in its one file:
+/// a live store's file is not the store until its WAL is checkpointed.
+#[tokio::test]
+async fn an_export_never_writes_the_source() {
+    let path = database();
+    let store = SqliteStore::open(&path).await.unwrap();
+    append(&store, stream(1), 0, &[page(0, 1), page(1, 2)])
+        .await
+        .unwrap();
+    store
+        .write_snapshot(stream(1), &snapshot(1, "v1"))
+        .await
+        .unwrap();
+    let copy = path.with_file_name("copy.db");
+    let mut conn = raw(&path).await;
+    sqlx::query("VACUUM INTO ?1")
+        .bind(copy.to_string_lossy().into_owned())
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    conn.close().await.unwrap();
+    let before = std::fs::read(&copy).unwrap();
+    let modified = std::fs::metadata(&copy).unwrap().modified().unwrap();
+    {
+        let source = SqliteStore::open_existing(&copy).await.unwrap().unwrap();
+        let rows = source.export().await.unwrap();
+        assert_eq!(rows.len(), 3, "two pages and a snapshot: {rows:?}");
+    }
+    assert_eq!(std::fs::read(&copy).unwrap(), before, "the file's bytes");
+    assert_eq!(
+        std::fs::metadata(&copy).unwrap().modified().unwrap(),
+        modified,
+        "the file's modification time"
+    );
+}
+
+/// The build's migration set, read without a store: the set every open
+/// applies, and the ledger an opened store holds.
+#[tokio::test]
+async fn the_builds_migration_set_is_what_an_open_applies() {
+    let store = SqliteStore::open_in_memory().await.unwrap();
+    let build = SqliteStore::build_migrations();
+    assert_eq!(build, store.migrations());
+    assert_eq!(
+        build.iter().map(|m| m.version).collect::<Vec<_>>(),
+        [1, 2, 3, 4, 5, 6]
+    );
+    let ledger = store.applied().await.unwrap();
+    assert_eq!(
+        ledger
+            .iter()
+            .map(|r| (r.version, r.checksum.clone()))
+            .collect::<Vec<_>>(),
+        build
+            .iter()
+            .map(|m| (m.version, m.checksum.clone()))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// An export says what it was taken from: this crate's package.
+#[tokio::test]
+async fn a_sqlite_store_names_its_backend_by_its_package() {
+    let store = SqliteStore::open_in_memory().await.unwrap();
+    assert_eq!(store.backend(), "angzarr-store-sqlite");
 }
 
 async fn journal_mode(path: &Path) -> String {

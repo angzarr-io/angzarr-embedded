@@ -86,6 +86,7 @@ mod check;
 mod compensation;
 mod coordinator;
 mod dead_letter;
+mod digest;
 mod domain;
 mod error;
 mod fixture;
@@ -163,6 +164,7 @@ pub use book::{CommandBookExt, CoverExt};
 pub use catalog::{Catalog, Description};
 pub use check::{check, Arm, Body, Checked, Identified, Malformed, Sampled};
 pub use dead_letter::{dead_letter_line, DeadLetterLog, MemoryDeadLetters, DEAD_LETTER_PREFIX};
+pub use digest::Folded;
 pub use domain::{Domain, State};
 pub use error::{
     class, ChainProblem, Class, Failure, KernelError, PayloadError, Recovery, ReplayError, Step,

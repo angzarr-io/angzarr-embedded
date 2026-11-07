@@ -952,3 +952,39 @@ fn a_fact_for_a_child_hosted_source_packs_as_any_fact() {
         Some("/toy.counter.v1.Noted".to_string())
     );
 }
+
+/// The re-fold digest of a domain that takes no snapshot (the counter:
+/// SNAPSHOTS false) lists its streams with their heads, and no state: it
+/// has no form of one to show, and a stand-in would compare nothing
+/// (store-export-import.plan.md, section 5.3.2).
+#[test]
+fn a_digest_of_a_domain_with_no_snapshot_form_gives_no_state() {
+    let registry = registry();
+    let store = Mem::default();
+    let sampled = Sampled {
+        now: Timestamp {
+            seconds: 1,
+            nanos: 0,
+        },
+        command_id: Uuid::from_bytes([0x72; 16]),
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("a runtime");
+    let kernel = Kernel::new(&registry);
+    runtime
+        .block_on(kernel.handle::<Counter, _>(&store, bump(2), &sampled))
+        .unwrap_or_else(|failure| panic!("{failure:?}"));
+    let folded = runtime
+        .block_on(kernel.fold_digest::<Counter, _>(&store))
+        .expect("it folds");
+    assert_eq!(
+        folded.len(),
+        2,
+        "the counter and the counter its policy notes on"
+    );
+    assert!(
+        folded.iter().all(|f| f.state.is_none() && f.head == 1),
+        "{folded:?}"
+    );
+}
