@@ -2996,29 +2996,22 @@
 //! ```
 //!
 
-//! # The deprecated spellings
+//! # One attribute per kind
 //!
-//! `handles_cmd` and `handles_fact` are deprecated aliases of [`handles`]:
-//! they expand through the same code, and warn at each use.
+//! A command and a fact have an attribute each, `handles_cmd` and
+//! `handles_fact`; neither is deprecated, and there is no `handles`.
 //!
 //! ```compile_fail
-//! #![deny(deprecated)]
-//! use angzarr_embedded_macros::handles_cmd;
-//!
-//! #[handles_cmd(Anything)]
-//! fn used() {}
+//! use angzarr_embedded_macros::handles;
 //! ```
 //!
 //! ```compile_fail
-//! #![deny(deprecated)]
-//! use angzarr_embedded_macros::handles_fact;
-//!
-//! #[handles_fact(Anything)]
+//! #[angzarr_embedded_macros::handles(Anything)]
 //! fn used() {}
 //! ```
 //!
 //! ```
-//! #![allow(deprecated)]
+//! #![deny(deprecated)]
 //! use angzarr_embedded_macros::{handles_cmd, handles_fact};
 //!
 //! #[handles_cmd(Anything)]
