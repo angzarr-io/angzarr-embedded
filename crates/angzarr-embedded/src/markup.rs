@@ -1301,18 +1301,24 @@ fn context_of(cctx: &CommandContext) -> Context {
 /// as `ext_err_txt`; a payload of another type, or not a valid `T`, its
 /// type alone.
 fn input<T: DomainMessage>(any: &Any) -> Result<T, HandlerError> {
+    input_coded(any).map_err(HandlerError::Coded)
+}
+
+/// [`input`], its failure as the router's [`CodedError`], which a fact's
+/// [`Bug`] keeps (`.bug()`): the code survives to the boundary.
+fn input_coded<T: DomainMessage>(any: &Any) -> Result<T, angzarr_router::error::CodedError> {
     use angzarr_proto::v1::reason_args;
     use angzarr_router::error::{AngzarrReason, CodedError};
     let message_type = || super::payload::type_name(&any.type_url).to_string();
     match decode_message::<T>(any) {
         Ok(Some(value)) => Ok(value),
-        Err(PayloadError::Decode { error, .. }) => Err(HandlerError::Coded(
-            CodedError::undecodable(&message_type(), &error),
-        )),
-        Ok(None) | Err(_) => Err(HandlerError::Coded(super::route::spec_coded(
+        Err(PayloadError::Decode { error, .. }) => {
+            Err(CodedError::undecodable(&message_type(), &error))
+        }
+        Ok(None) | Err(_) => Err(super::route::spec_coded(
             AngzarrReason::AnyDecodeFailed,
             [(reason_args::MESSAGE_TYPE.to_string(), message_type())],
-        ))),
+        )),
     }
 }
 
@@ -1464,15 +1470,34 @@ pub fn run_fact<A, F, Rr>(
     state: &A,
     cctx: &CommandContext,
     handler: impl FnOnce(&A, F, &Context) -> Rr,
-) -> Result<angzarr_router::domain::Emit<A>, HandlerError>
+) -> Result<angzarr_router::domain::FactEmit<A>, angzarr_router::error::Bug>
 where
     A: Domain<State = A>,
     F: DomainMessage,
     Rr: Emits<A>,
 {
+    use angzarr_router::error::BugExt as _;
     let ctx = context_of(cctx);
-    let fact = input::<F>(any)?;
-    Ok(routed(handler(state, fact, &ctx).into_emit()))
+    let fact = input_coded::<F>(any).bug()?;
+    Ok(as_fact(handler(state, fact, &ctx).into_emit()))
+}
+
+/// `emit` as the router's `FactEmit`: its events packed, each continuation
+/// run on the state the router folds them into; a step that fails is a bug.
+fn as_fact<A>(emit: Emit<A>) -> angzarr_router::domain::FactEmit<A>
+where
+    A: Domain<State = A>,
+{
+    let Emit { events, next } = emit;
+    let emitted = angzarr_router::domain::FactEmit::of(events.iter().map(|event| event.to_any()));
+    match next {
+        None => emitted,
+        Some(step) => emitted.then(move |state: &A, cctx: &CommandContext| {
+            step(state, &context_of(cctx))
+                .map(as_fact)
+                .map_err(|failed| angzarr_router::error::Bug::new(format!("{failed:?}")))
+        }),
+    }
 }
 
 /// What a policy's Translate callback (`#[on_refused]`) answers on

@@ -269,7 +269,9 @@ pub fn handlers<D: Toy>() -> impl FnOnce(DomainDispatch<D::State>) -> DomainDisp
                 let fact = D::Fact::from_any(any).expect("the router routed it by type");
                 let ctx = toy_ctx::<D>(cctx);
                 let events = D::ingest(state, &fact, &ctx);
-                Ok(Emit::of(events.iter().map(Payload::to_any)))
+                Ok(angzarr_router::domain::FactEmit::of(
+                    events.iter().map(Payload::to_any),
+                ))
             });
         }
         table
