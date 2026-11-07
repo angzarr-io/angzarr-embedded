@@ -244,6 +244,29 @@ pub trait DomainMessage: Clone + Send + Sync + Sized + 'static {
 /// command's typed refusals, as is or as a [`Failed`], or a bug.
 type Step<A> = Box<dyn FnOnce(&A, &Context) -> Result<Emit<A>, Failed<TypedRefusal>>>;
 
+/// Stub marker.
+pub enum Fallible {}
+/// Stub marker.
+pub enum Plain {}
+
+/// Stub: what a continuation step returns.
+pub trait StepOutcome<A: Domain, M> {
+    /// The step's decision.
+    fn into_step(self) -> Result<Emit<A>, Failed<TypedRefusal>>;
+}
+
+impl<A: Domain, O: Emits<A>, E: Fails<A>> StepOutcome<A, Fallible> for Result<O, E> {
+    fn into_step(self) -> Result<Emit<A>, Failed<TypedRefusal>> {
+        self.map(Emits::into_emit).map_err(Fails::into_failed)
+    }
+}
+
+impl<A: Domain, T: Emits<A>> StepOutcome<A, Plain> for T {
+    fn into_step(self) -> Result<Emit<A>, Failed<TypedRefusal>> {
+        unimplemented!("stub")
+    }
+}
+
 /// Events for the router to apply, in order, and optionally one
 /// continuation step to run on the instance after them.
 ///
@@ -280,16 +303,13 @@ impl<A: Domain> Emit<A> {
 
     /// Run `step` on the instance once these events are applied. The step
     /// may itself return an `Emit` with a continuation.
-    pub fn then<S, O, E>(self, step: S) -> Emit<A>
+    pub fn then<S, R, M>(self, step: S) -> Emit<A>
     where
-        S: FnOnce(&A, &Context) -> Result<O, E> + 'static,
-        O: Emits<A>,
-        E: Fails<A>,
+        S: FnOnce(&A, &Context) -> R + 'static,
+        R: StepOutcome<A, M>,
     {
         self.push(Box::new(move |instance, ctx| {
-            step(instance, ctx)
-                .map(Emits::into_emit)
-                .map_err(Fails::into_failed)
+            step(instance, ctx).into_step()
         }))
     }
 

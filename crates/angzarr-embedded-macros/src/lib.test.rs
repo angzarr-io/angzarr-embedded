@@ -26,7 +26,7 @@ fn a_second_handler_for_one_type_is_refused() {
             #[handles_cmd(On)]
             fn on(&self, cmd: On, ctx: &Context) -> Result<Lit, Failed<Unrefusable>> { todo!() }
             #[handles_fact(On)]
-            fn on_again(&self, fact: On, ctx: &Context) -> Record<Self> { todo!() }
+            fn on_again(&self, fact: On, ctx: &Context) -> Emit<Self> { todo!() }
         }
     });
     assert!(error.contains("a second handler for this type"), "{error}");
@@ -194,15 +194,298 @@ fn a_fact_handler_returning_a_result_is_refused() {
     );
 }
 
+/// A fact's handler returns an `Emit` (C-0851), the one return type of every
+/// handler.
 #[test]
-fn a_fact_handler_returning_an_emit_is_refused() {
+fn a_fact_handler_returning_an_emit_is_accepted() {
+    let expanded = domain(
+        quote!(domain = "lamp"),
+        quote! {
+            impl Lamp {
+                #[handles_fact(Cut)]
+                fn cut(&self, fact: Cut, ctx: &Context) -> Emit<Self> { todo!() }
+            }
+        },
+        Kind::Aggregate,
+    )
+    .expect("expands")
+    .to_string();
+    assert!(expanded.contains(". on_fact ("), "{expanded}");
+}
+
+/// `Record` is not a handler's return type.
+#[test]
+fn a_fact_handler_returning_a_record_is_refused() {
     let error = lamp(quote! {
         impl Lamp {
             #[handles_fact(Cut)]
-            fn cut(&self, fact: Cut, ctx: &Context) -> Emit<Self> { todo!() }
+            fn cut(&self, fact: Cut, ctx: &Context) -> Record<Self> { todo!() }
         }
     });
-    assert!(error.contains("not an `Emit`"), "{error}");
+    assert!(
+        error.contains("a fact handler returns `Emit<Self>`"),
+        "{error}"
+    );
+}
+
+/// The expansion of `#[handles]` on a method with `signature`, in an
+/// aggregate or a process manager.
+fn handled(kind: Kind, args: Tokens, signature: Tokens) -> Result<String, String> {
+    let attr = match kind {
+        Kind::Aggregate => quote!(domain = "lamp"),
+        Kind::ProcessManager => quote!(domain = "timer"),
+    };
+    domain(
+        attr,
+        quote! {
+            impl Lamp {
+                #[handles(#args)]
+                #signature
+            }
+        },
+        kind,
+    )
+    .map(|expanded| expanded.to_string())
+    .map_err(|error| error.to_string())
+}
+
+/// One `#[handles]` attribute reads its kind from the signature
+/// (decision 14.98; C-0648, C-0864): the same body under `Result<Emit<..>>`
+/// is a command handler and under a plain `Emit<..>` a fact handler.
+#[test]
+fn handles_reads_a_commands_kind_from_its_result() {
+    let expanded = handled(
+        Kind::Aggregate,
+        quote!(Cut),
+        quote! {
+            fn cut(&self, cmd: Cut, ctx: &Context) -> Result<Emit<Self>, Failed<Unrefusable>> {
+                Ok(Emit::of(Dark {}))
+            }
+        },
+    )
+    .expect("expands");
+    assert!(expanded.contains(". on_command ("), "{expanded}");
+    assert!(!expanded.contains(". on_fact ("), "{expanded}");
+    assert!(expanded.contains("Decides < Cut >"), "{expanded}");
+}
+
+#[test]
+fn handles_reads_a_facts_kind_from_its_plain_emit() {
+    let expanded = handled(
+        Kind::Aggregate,
+        quote!(Cut),
+        quote! {
+            fn cut(&self, fact: Cut, ctx: &Context) -> Emit<Self> {
+                Emit::of(Dark {})
+            }
+        },
+    )
+    .expect("expands");
+    assert!(expanded.contains(". on_fact ("), "{expanded}");
+    assert!(!expanded.contains(". on_command ("), "{expanded}");
+    assert!(expanded.contains("Ingests < Cut >"), "{expanded}");
+}
+
+/// Converting a command to a fact changes the return and nothing else
+/// (C-0864): a command that refuses keeps its `refuses`, a fact has none.
+#[test]
+fn handles_with_refuses_on_a_fact_is_refused_naming_the_kind() {
+    let error = handled(
+        Kind::Aggregate,
+        quote!(Cut, refuses(Burnt)),
+        quote! {
+            fn cut(&self, fact: Cut, ctx: &Context) -> Emit<Self> { todo!() }
+        },
+    )
+    .expect_err("refused");
+    assert!(error.contains("a fact handler"), "{error}");
+    assert!(error.contains("`refuses`"), "{error}");
+}
+
+#[test]
+fn handles_with_rooted_by_on_a_fact_is_refused_naming_the_kind() {
+    let error = handled(
+        Kind::Aggregate,
+        quote!(Cut, rooted_by = key),
+        quote! {
+            fn cut(&self, fact: Cut, ctx: &Context) -> Emit<Self> { todo!() }
+        },
+    )
+    .expect_err("refused");
+    assert!(error.contains("a fact handler"), "{error}");
+    assert!(error.contains("`rooted_by`"), "{error}");
+}
+
+#[test]
+fn handles_with_starts_on_an_aggregate_is_refused_naming_the_kind() {
+    for (signature, kind) in [
+        (
+            quote!(
+                fn cut(&self, cmd: Cut, ctx: &Context) -> Result<Emit<Self>, Failed<Unrefusable>> {
+                    todo!()
+                }
+            ),
+            "command handler",
+        ),
+        (
+            quote!(
+                fn cut(&self, fact: Cut, ctx: &Context) -> Emit<Self> {
+                    todo!()
+                }
+            ),
+            "fact handler",
+        ),
+    ] {
+        let error = handled(Kind::Aggregate, quote!(Cut, starts), signature).expect_err("refused");
+        assert!(error.contains("`starts` is a process manager's"), "{error}");
+        assert!(error.contains(kind), "{error}");
+    }
+}
+
+#[test]
+fn handles_with_starts_on_a_process_manager_is_accepted_for_both_kinds() {
+    for signature in [
+        quote!(
+            fn cut(&self, cmd: Cut, ctx: &Context) -> Result<Emit<Self>, Failed<Unrefusable>> {
+                todo!()
+            }
+        ),
+        quote!(
+            fn cut(&self, fact: Cut, ctx: &Context) -> Emit<Self> {
+                todo!()
+            }
+        ),
+    ] {
+        let expanded =
+            handled(Kind::ProcessManager, quote!(Cut, starts), signature).expect("expands");
+        assert!(
+            expanded.contains("& [:: angzarr_embedded :: markup :: TypeName :: of :: < < Cut"),
+            "{expanded}"
+        );
+    }
+}
+
+/// A command handler under `#[handles]` is told by its `Result`: a signature
+/// that returns neither a `Result` nor an `Emit` is a kind the attribute
+/// cannot read, refused saying so.
+#[test]
+fn handles_on_a_signature_of_neither_kind_is_refused() {
+    for signature in [
+        quote!(
+            fn cut(&self, cmd: Cut, ctx: &Context) -> Option<Dark> {
+                todo!()
+            }
+        ),
+        quote!(
+            fn cut(&self, cmd: Cut, ctx: &Context) {
+                todo!()
+            }
+        ),
+    ] {
+        let error = handled(Kind::Aggregate, quote!(Cut), signature).expect_err("refused");
+        assert!(
+            error.contains("reads its kind from the signature"),
+            "{error}"
+        );
+    }
+}
+
+/// A command handler under `#[handles]` still holds to its refusals.
+#[test]
+fn handles_holds_a_command_to_its_refusals() {
+    let error = handled(
+        Kind::Aggregate,
+        quote!(Cut),
+        quote!(
+            fn cut(&self, cmd: Cut, ctx: &Context) -> Result<Emit<Self>, Burnt> {
+                todo!()
+            }
+        ),
+    )
+    .expect_err("refused");
+    assert!(
+        error.contains("a command that lists no refusal cannot refuse"),
+        "{error}"
+    );
+}
+
+/// A second handler for one type is refused across the attribute's
+/// spellings.
+#[test]
+fn handles_and_its_aliases_share_the_one_handler_per_type_rule() {
+    let error = lamp(quote! {
+        impl Lamp {
+            #[handles(On)]
+            fn on(&self, cmd: On, ctx: &Context) -> Result<Emit<Self>, Failed<Unrefusable>> { todo!() }
+            #[handles_cmd(On)]
+            fn on_again(&self, cmd: On, ctx: &Context) -> Result<Emit<Self>, Failed<Unrefusable>> { todo!() }
+        }
+    });
+    assert!(error.contains("a second handler for this type"), "{error}");
+}
+
+/// A process manager's `starting_types` (the descriptor's, when the
+/// generator gives them) is cross-checked against its `starts` markers; with
+/// none given, nothing is checked.
+fn timer(args: Tokens) -> Result<String, String> {
+    domain(
+        quote!(domain = "timer", #args),
+        quote! {
+            impl Timer {
+                #[handles(Start, starts)]
+                fn start(&self, cmd: Start, ctx: &Context) -> Result<Emit<Self>, Failed<Unrefusable>> { todo!() }
+                #[handles(Lapse, starts)]
+                fn lapse(&self, fact: Lapse, ctx: &Context) -> Emit<Self> { todo!() }
+                #[handles(Ring)]
+                fn ring(&self, fact: Ring, ctx: &Context) -> Emit<Self> { todo!() }
+            }
+        },
+        Kind::ProcessManager,
+    )
+    .map(|expanded| expanded.to_string())
+    .map_err(|error| error.to_string())
+}
+
+#[test]
+fn starting_types_that_agree_with_the_starts_markers_expand() {
+    timer(quote!(starting_types = [Lapse, wire::Start])).expect("expands");
+}
+
+#[test]
+fn without_starting_types_the_starts_markers_are_not_cross_checked() {
+    timer(quote!()).expect("expands");
+}
+
+#[test]
+fn a_starting_type_no_input_starts_is_refused() {
+    let error = timer(quote!(starting_types = [Start, Lapse, Ring])).expect_err("refused");
+    assert!(error.contains("`Ring`"), "{error}");
+    assert!(error.contains("`starts`"), "{error}");
+}
+
+#[test]
+fn a_starts_marker_the_starting_types_omit_is_refused() {
+    let error = timer(quote!(starting_types = [Start])).expect_err("refused");
+    assert!(error.contains("`Lapse`"), "{error}");
+    assert!(error.contains("starting_types"), "{error}");
+}
+
+#[test]
+fn starting_types_on_an_aggregate_is_refused() {
+    let error = refused(
+        Kind::Aggregate,
+        quote!(domain = "lamp", starting_types = [On]),
+        quote! {
+            impl Lamp {
+                #[handles(On)]
+                fn on(&self, cmd: On, ctx: &Context) -> Result<Emit<Self>, Failed<Unrefusable>> { todo!() }
+            }
+        },
+    );
+    assert!(
+        error.contains("`starting_types` is a process manager's"),
+        "{error}"
+    );
 }
 
 /// A domain takes no `#[on_refused]`: a refusal reaches the policy's
@@ -254,7 +537,7 @@ fn refuses_on_a_fact_handler_is_refused() {
     let error = lamp(quote! {
         impl Lamp {
             #[handles_fact(Cut, refuses(Burnt))]
-            fn cut(&self, fact: Cut, ctx: &Context) -> Record<Self> { todo!() }
+            fn cut(&self, fact: Cut, ctx: &Context) -> Emit<Self> { todo!() }
         }
     });
     assert!(error.contains("a fact is never refused"), "{error}");
@@ -267,7 +550,7 @@ fn a_process_manager_marking_no_input_starts_declares_no_starting_type() {
         quote! {
             impl Timer {
                 #[handles_fact(Ring)]
-                fn ring(&self, fact: Ring, ctx: &Context) -> Record<Self> { todo!() }
+                fn ring(&self, fact: Ring, ctx: &Context) -> Emit<Self> { todo!() }
             }
         },
         Kind::ProcessManager,

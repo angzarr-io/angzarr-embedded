@@ -2967,6 +2967,26 @@
 //! ```
 //!
 
+//! # The deprecated spellings
+//!
+//! `handles_cmd` and `handles_fact` are deprecated aliases of [`handles`]:
+//! they expand through the same code, and warn at each use.
+//!
+//! ```compile_fail
+//! #![deny(deprecated)]
+//! use angzarr_embedded_macros::handles_cmd;
+//! ```
+//!
+//! ```compile_fail
+//! #![deny(deprecated)]
+//! use angzarr_embedded_macros::handles_fact;
+//! ```
+//!
+//! ```
+//! #![allow(deprecated)]
+//! use angzarr_embedded_macros::{handles_cmd, handles_fact};
+//! ```
+//!
 //! # Retry
 //!
 //! Retrying a command whose stream moved is a decorator around the kernel,
@@ -3009,6 +3029,12 @@ pub fn process_manager(attr: TokenStream, item: TokenStream) -> TokenStream {
     domain(attr.into(), item.into(), Kind::ProcessManager)
         .unwrap_or_else(Error::into_compile_error)
         .into()
+}
+
+/// Stub: inert; the kind is not read yet.
+#[proc_macro_attribute]
+pub fn handles(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
 }
 
 /// Marks a command handler (fallible): `#[handles_cmd(Cmd)]`, with

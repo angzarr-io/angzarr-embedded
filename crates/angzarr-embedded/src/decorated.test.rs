@@ -56,8 +56,8 @@ use ::angzarr_embedded::{
 };
 use angzarr_diagnostic::{code, Arg, Diagnostic, Report};
 use angzarr_embedded_macros::{
-    aggregate, applies, handles_cmd, handles_fact, on_event, on_refused, policy, process_manager,
-    projector, projects,
+    aggregate, applies, handles, handles_cmd, handles_fact, on_event, on_refused, policy,
+    process_manager, projector, projects,
 };
 
 // ---------------------------------------------------------------- the wire
@@ -1514,8 +1514,9 @@ pub struct Ladder {
 }
 
 #[aggregate(domain = "ladder")]
+#[allow(dead_code)] // red: `#[handles]` is inert until the macro reads it
 impl Ladder {
-    #[handles_cmd(Climb)]
+    #[handles(Climb)]
     fn climb(&self, cmd: Climb, _ctx: &Context) -> Result<Emit<Self>, Failed<Unrefusable>> {
         let to = cmd.to;
         Ok(Emit::of(Rung {}).then(move |ladder: &Ladder, ctx: &Context| ladder.higher(to, ctx)))
@@ -1530,16 +1531,17 @@ impl Ladder {
         }
     }
 
-    #[handles_fact(Slip)]
-    fn slip(&self, _fact: Slip, _ctx: &Context) -> Record<Self> {
-        Record::of(Rung {}).then(Self::slipping)
+    /// A fact returns an `Emit` as a command does, its steps plain.
+    #[handles(Slip)]
+    fn slip(&self, _fact: Slip, _ctx: &Context) -> Emit<Self> {
+        Emit::of(Rung {}).then(Self::slipping)
     }
 
     /// One more rung while below five: idempotent once there.
-    fn slipping(&self, _ctx: &Context) -> Record<Self> {
+    fn slipping(&self, _ctx: &Context) -> Emit<Self> {
         match self.rungs < 5 {
-            true => Record::of(Rung {}).then(Self::slipping),
-            false => Record::of(None::<Rung>),
+            true => Emit::of(Rung {}).then(Self::slipping),
+            false => Emit::of(None::<Rung>),
         }
     }
 
