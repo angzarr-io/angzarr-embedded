@@ -1,5 +1,5 @@
 //! Decorators over hand-written components. [`aggregate`] and
-//! [`process_manager`] generate, from the impl's [`handles`] and
+//! [`process_manager`] generate, from the impl's [`handles_cmd`] and [`handles_fact`] and
 //! [`applies`] markers, the runtime glue that runs a
 //! domain on angzarr-embedded (its `angzarr_embedded::Domain` and
 //! `angzarr_embedded::State` impls, routing by type URL), a nameable
@@ -27,7 +27,7 @@
 //!    command and fact, `(event){component}` on each event.
 //! 2. angzarr-cli generates the decorated impls into the build's output
 //!    every build: the `#[aggregate]` (or `#[process_manager]`) impl, one
-//!    `#[handles(Cmd)]` handler per command typed from its `emits` and
+//!    `#[handles_cmd(Cmd)]` handler per command typed from its `emits` and
 //!    `refuses` (and marked `starts` where the proto says so), one
 //!    `#[applies(Event)]` per event; and, for a policy, the `#[policy]`
 //!    impl with its one `#[on_refused]` Translate callback over the
@@ -48,14 +48,14 @@
 //! ```text
 //! #[aggregate(domain = "wallet", snapshot = WalletSnapshot)]
 //! impl Wallet {
-//!     #[handles(Deposit)] // lists no refusal: it cannot refuse
+//!     #[handles_cmd(Deposit)] // lists no refusal: it cannot refuse
 //!     fn deposit(&self, cmd: Deposit, ctx: &Context) -> Result<Emit<Self>, Failed<Unrefusable>> { .. }
 //!
-//!     #[handles(Hold, refuses(InsufficientFunds, WalletClosed))]
+//!     #[handles_cmd(Hold, refuses(InsufficientFunds, WalletClosed))]
 //!     fn hold(&self, cmd: Hold, ctx: &Context) -> Result<Held, Refuses<Self, Hold>> { .. }
 //!
-//!     #[handles(Payout)] // a fact: no Result, anywhere
-//!     fn payout(&self, fact: Payout, ctx: &Context) -> Emit<Self> { .. }
+//!     #[handles_fact(Payout)] // a fact: the router's FactEmit, its failure a Bug
+//!     fn payout(&self, fact: Payout, ctx: &Context) -> Result<FactEmit<Self>, Bug> { .. }
 //!
 //!     #[applies(Deposited)]
 //!     fn deposited(&mut self, event: Deposited) { .. }
@@ -83,10 +83,7 @@
 //!     not compile.
 //! - [`process_manager`], on an inherent impl: the same arguments; see
 //!   *Process managers*.
-//! - [`handles`]`(Input)`, one per command or fact, ONE attribute for both
-//!   (decision 14.98): the signature says which, and the macro reads it.
-//!
-//!   A **command** handler (a request: it may fail) returns a `Result`:
+//! - [`handles_cmd`]`(Cmd)`, one per command: a request, which may fail.
 //!   `fn(&self, cmd: Cmd, ctx: &Context) -> Result<R, E>`, where `R` is an
 //!   `Emits` shape: an event `E`, a tuple `(E1, E2, ..)` of up to four,
 //!   `Option<E>`, `Vec<E>`, or an `Emit<Self>` with a continuation whose
@@ -94,25 +91,23 @@
 //!   a shape (deferred). `E` is `Failed<Unrefusable>` for a command that
 //!   lists no refusal, which cannot refuse (decision 14.95), or, with
 //!   `refuses(T, ..)`, `Refuses<Self, Cmd>` (see *Typed refusals*).
-//!
-//!   A **fact** handler (a reaction's or the outside world's: not
-//!   refusable; "if it can't be refused, it's a fact") returns a plain
-//!   `Emit<Self>`: `fn(&self, fact: Fact, ctx: &Context) -> Emit<Self>`,
-//!   with no `Result`; the signature is what keeps a fact from refusing. A
-//!   refusal is an event the handler records. Its continuation steps return
-//!   plain shapes or another `Emit`. Converting a message between command
-//!   and fact changes the return and its options, nothing else.
+//! - [`handles_fact`]`(Fact)`, one per fact (a reaction's or the outside
+//!   world's: not refusable; "if it can't be refused, it's a fact"):
+//!   `fn(&self, fact: Fact, ctx: &Context) -> Result<FactEmit<Self>, Bug>`,
+//!   angzarr-router's own types (`markup::FactEmit`, `markup::Bug`). A
+//!   fact has no refusal return: its one failure is a `Bug`, which a handler
+//!   may classify (`Bug::coded`, `Bug::retryable`). A refusal is an event
+//!   the handler records. The attribute names the kind, not the return
+//!   type: a fact handler returning an `Emit`, or failing with a `Refuses`,
+//!   does not compile.
 //!
 //!   On a process manager, `starts` marks a starting input of either kind.
-//!   A signature that returns neither a `Result` nor an `Emit` does not
-//!   compile (the kind cannot be read); an argument that does not apply to
-//!   the kind read (`refuses(..)` or `rooted_by` on a fact handler) does
-//!   not compile either, and the error names the kind. A `Result` return
-//!   is a command handler: that a message declared `(fact)` has none is
-//!   held by the types, because a policy's fact reaches only a handler
-//!   that `markup::Ingests` it, and a command handler only `Decides`.
-//!   `handles_cmd` and `handles_fact` are deprecated aliases that name the
-//!   kind and hold the signature to it.
+//!   An argument that does not apply to the kind (`refuses(..)` or
+//!   `rooted_by` on a fact handler, `starts` on an aggregate's) does not
+//!   compile, and the error names the kind. That a message declared
+//!   `(fact)` has no command handler is held by the types, because a
+//!   policy's fact reaches only a handler that `markup::Ingests` it, and a
+//!   command handler only `Decides`.
 //! - [`applies`]`(Event)`, one per event: `fn(&mut self, event: Event)`,
 //!   or `fn(&mut self, event: Event, page: &PageContext)` to read where
 //!   the event sits, as a handler reads its `&Context`: its stream's cover,
@@ -120,7 +115,7 @@
 //!   a fact's origin, correlation and rules version; for an event of the
 //!   decision being made, the metadata it is stamped with when it
 //!   commits, so the state decided is the state replayed).
-//! - `rooted_by = field` on a command handler's [`handles`]: the command's `field` (a
+//! - `rooted_by = field` on a command handler's [`handles_cmd`]: the command's `field` (a
 //!   `String`, or anything `AsRef<str>`) is its natural key, and the
 //!   stream's root must be that key's UUIDv5 under the domain
 //!   (`Context::rooted_by`, as `Cover::natural` addresses it); a command
@@ -196,24 +191,29 @@
 //! so its handler returns `Result`, and a refusal goes back to the caller,
 //! the domain recording nothing. A **fact** (a timeout, a webhook, an
 //! import, a refusal fact from a policy) already happened and is never
-//! refused: its handler returns no `Result` and always records an outcome,
-//! a refusal included, as an event (`PayoutRefused`). A fact's step cannot
-//! fail; only a bug can. angzarr-router hands a fact to its fact handler, a
+//! refused: its handler returns the router's `Result<FactEmit<Self>, Bug>`
+//! and always records an outcome, a refusal included, as an event
+//! (`PayoutRefused`). A fact's step cannot refuse; only a bug can fail it. angzarr-router hands a fact to its fact handler, a
 //! command to its command handler, each registered on the router's table by
 //! the expansion (`markup::Routed`).
 //!
-//! A fact's continuation is an `Emit<Self>` too, `Emit::of(e).then(Self::step)`,
-//! whose step is `fn(&self, ctx: &Context) -> R` with no `Result`, `R` a
-//! shape or another `Emit`: the semantics are a command's (applied, then
-//! the step on the updated instance, one decision, no step cap). A step
-//! of a fact is not statically barred from failing; the router carries a
-//! fact's failure as a bug (decision 14.72), never a refusal.
+//! A fact's continuation is a `FactEmit<Self>` too,
+//! `FactEmit::of(events).then(Self::step)`, whose step is
+//! `fn(&self, ctx: &CommandContext) -> Result<FactEmit<Self>, Bug>`: the
+//! semantics are a command's (applied, then the step on the updated
+//! instance, one decision, no step cap), its failure only a `Bug`, never a
+//! refusal (decision 14.72). A `Bug` classified with `Bug::coded` or
+//! `Bug::retryable` reaches the boundary under its code and status, and a
+//! fact whose payload does not decode fails with
+//! ANGZARR_REASON_ANY_DECODE_FAILED. The step test helper is the router's
+//! `markup::assert_fact_step_idempotent` (the router's
+//! `DomainDispatch::check_fact_step_idempotent` over the domain's table).
 //!
 //! ## Typed refusals
 //!
 //! A command refuses only with a business-specific, TYPED refusal object
 //! (decision 14.95), the markup's spelling of the proto's
-//! `(command).refuses`: `#[handles(Hold, refuses(InsufficientFunds,
+//! `(command).refuses`: `#[handles_cmd(Hold, refuses(InsufficientFunds,
 //! WalletClosed))]`. Each listed type is a domain type of the command's own
 //! domain (a `DomainMessage`, never an event). The handler's `Err` is then
 //! `Refuses<Self, Hold>`, a choice the macro builds of exactly those
@@ -285,7 +285,7 @@
 //!   correlation" is a convention it may follow.
 //! - **The start rule**, the kernel's, by the descriptor's starting types.
 //!   Only an input marked `starts`
-//!   (`#[handles(StartBuyIn, starts)]`, `#[handles(F, starts)]`)
+//!   (`#[handles_cmd(StartBuyIn, starts)]`, `#[handles_fact(F, starts)]`)
 //!   may start an instance; `STARTS` lists them. Any other input for a
 //!   root with no instance is not delivered, FAILED_PRECONDITION
 //!   `ANGZARR_REASON_PM_NO_INSTANCE`, recording nothing: a command is
@@ -537,7 +537,7 @@
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::markup::{Context, DomainMessage, Failed, Unrefusable};
 //! # use angzarr_embedded::WireError;
-//! # use angzarr_embedded_macros::{aggregate, applies, handles};
+//! # use angzarr_embedded_macros::{aggregate, applies, handles_cmd};
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
 //! #     macro_rules! wire {
@@ -568,12 +568,12 @@
 //! # pub struct Lamp { on: bool }
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
-//!     #[handles(SwitchOn)]
+//!     #[handles_cmd(SwitchOn)]
 //!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<Option<SwitchedOn>, Failed<Unrefusable>> {
 //!         Ok((!self.on).then_some(SwitchedOn))
 //!     }
 //!
-//!     #[handles(SwitchOff)]
+//!     #[handles_cmd(SwitchOff)]
 //!     fn switch_off(&self, _cmd: SwitchOff, _ctx: &Context) -> Result<SwitchedOff, Failed<Unrefusable>> {
 //!         Ok(SwitchedOff)
 //!     }
@@ -597,7 +597,7 @@
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::markup::{Context, DomainMessage, Failed, Unrefusable};
 //! # use angzarr_embedded::WireError;
-//! # use angzarr_embedded_macros::{aggregate, applies, handles};
+//! # use angzarr_embedded_macros::{aggregate, applies, handles_cmd};
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
 //! #     macro_rules! wire {
@@ -628,17 +628,17 @@
 //! # pub struct Lamp { on: bool }
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
-//!     #[handles(SwitchOn)]
+//!     #[handles_cmd(SwitchOn)]
 //!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<Option<SwitchedOn>, Failed<Unrefusable>> {
 //!         Ok((!self.on).then_some(SwitchedOn))
 //!     }
 //!
-//!     #[handles(SwitchOn)]
+//!     #[handles_cmd(SwitchOn)]
 //!     fn switch_on_again(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<SwitchedOn, Failed<Unrefusable>> {
 //!         Ok(SwitchedOn)
 //!     }
 //!
-//!     #[handles(SwitchOff)]
+//!     #[handles_cmd(SwitchOff)]
 //!     fn switch_off(&self, _cmd: SwitchOff, _ctx: &Context) -> Result<SwitchedOff, Failed<Unrefusable>> {
 //!         Ok(SwitchedOff)
 //!     }
@@ -664,7 +664,7 @@
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::markup::{Context, DomainMessage, Failed, Unrefusable};
 //! # use angzarr_embedded::WireError;
-//! # use angzarr_embedded_macros::{aggregate, applies, handles};
+//! # use angzarr_embedded_macros::{aggregate, applies, handles_cmd};
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
 //! #     macro_rules! wire {
@@ -695,12 +695,12 @@
 //! # pub struct Lamp { on: bool }
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
-//!     #[handles(SwitchOn)]
+//!     #[handles_cmd(SwitchOn)]
 //!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<Option<SwitchedOn>, Failed<Unrefusable>> {
 //!         Ok((!self.on).then_some(SwitchedOn))
 //!     }
 //!
-//!     #[handles(SwitchOff)]
+//!     #[handles_cmd(SwitchOff)]
 //!     fn switch_off(&self, _cmd: SwitchOff, _ctx: &Context) -> Result<SwitchedOff, WireError> {
 //!         Ok(SwitchedOff)
 //!     }
@@ -724,7 +724,7 @@
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::markup::{Context, DomainMessage, Failed, Unrefusable};
 //! # use angzarr_embedded::WireError;
-//! # use angzarr_embedded_macros::{aggregate, applies, handles};
+//! # use angzarr_embedded_macros::{aggregate, applies, handles_cmd};
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
 //! #     macro_rules! wire {
@@ -755,12 +755,12 @@
 //! # pub struct Lamp { on: bool }
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
-//!     #[handles(SwitchOn)]
+//!     #[handles_cmd(SwitchOn)]
 //!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<Option<SwitchedOn>, Failed<Unrefusable>> {
 //!         Ok((!self.on).then_some(SwitchedOn))
 //!     }
 //!
-//!     #[handles(wire::SwitchOff)]
+//!     #[handles_cmd(wire::SwitchOff)]
 //!     fn switch_off(&self, _cmd: wire::SwitchOff, _ctx: &Context) -> Result<SwitchedOff, Failed<Unrefusable>> {
 //!         Ok(SwitchedOff)
 //!     }
@@ -783,7 +783,7 @@
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::markup::{Context, DomainMessage, Failed, Unrefusable};
 //! # use angzarr_embedded::WireError;
-//! # use angzarr_embedded_macros::{aggregate, applies, handles};
+//! # use angzarr_embedded_macros::{aggregate, applies, handles_cmd};
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
 //! #     macro_rules! wire {
@@ -814,12 +814,12 @@
 //! # pub struct Lamp { on: bool }
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
-//!     #[handles(SwitchOn)]
+//!     #[handles_cmd(SwitchOn)]
 //!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<Option<SwitchedOn>, Failed<Unrefusable>> {
 //!         Ok((!self.on).then_some(SwitchedOn))
 //!     }
 //!
-//!     #[handles(SwitchOff)]
+//!     #[handles_cmd(SwitchOff)]
 //!     fn switch_off(&self, _cmd: SwitchOff, _ctx: &Context) -> Result<SwitchedOff, Failed<Unrefusable>> {
 //!         self.on = false;
 //!         Ok(SwitchedOff)
@@ -843,7 +843,7 @@
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::markup::{Context, DomainMessage, Failed, Unrefusable};
 //! # use angzarr_embedded::WireError;
-//! # use angzarr_embedded_macros::{aggregate, applies, handles};
+//! # use angzarr_embedded_macros::{aggregate, applies, handles_cmd};
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
 //! #     macro_rules! wire {
@@ -874,12 +874,12 @@
 //! # pub struct Lamp { on: bool }
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
-//!     #[handles(SwitchOn)]
+//!     #[handles_cmd(SwitchOn)]
 //!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<Option<SwitchedOn>, Failed<Unrefusable>> {
 //!         Ok((!self.on).then_some(SwitchedOn))
 //!     }
 //!
-//!     #[handles(SwitchOff)]
+//!     #[handles_cmd(SwitchOff)]
 //!     fn switch_off(&mut self, _cmd: SwitchOff, _ctx: &Context) -> Result<SwitchedOff, Failed<Unrefusable>> {
 //!         self.on = false;
 //!         Ok(SwitchedOff)
@@ -904,7 +904,7 @@
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::markup::{Context, DomainMessage, Failed, Unrefusable};
 //! # use angzarr_embedded::WireError;
-//! # use angzarr_embedded_macros::{aggregate, applies, handles};
+//! # use angzarr_embedded_macros::{aggregate, applies, handles_cmd};
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
 //! #     macro_rules! wire {
@@ -941,12 +941,12 @@
 //!
 //!     #[aggregate(domain = "lamp", vis = pub(self))]
 //!     impl Lamp {
-//!         #[handles(SwitchOn)]
+//!         #[handles_cmd(SwitchOn)]
 //!         fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<Option<SwitchedOn>, Failed<Unrefusable>> {
 //!             Ok((!self.on).then_some(SwitchedOn))
 //!         }
 //!
-//!         #[handles(SwitchOff)]
+//!         #[handles_cmd(SwitchOff)]
 //!         fn switch_off(&self, _cmd: SwitchOff, _ctx: &Context) -> Result<SwitchedOff, Failed<Unrefusable>> {
 //!             Ok(SwitchedOff)
 //!         }
@@ -968,17 +968,17 @@
 //! fn main() {}
 //! ```
 //!
-//! A fact handler returning a `Result` does not compile: a fact cannot be
-//! refused, so its handler has nothing to refuse with. (Under `#[handles]` a
-//! `Result` makes the handler a command's; `handles_fact`, which names the
-//! kind, holds the signature to a fact's, and so does the `Emit` a fact
-//! returns: `run_fact` takes no `Result`.)
+//! A fact handler failing with anything but a `Bug` does not compile: a
+//! fact cannot be refused, so its handler has nothing to refuse with. The
+//! attribute names the kind, and holds the signature to a fact's:
+//! `Result<FactEmit<Self>, Bug>`, which an `Emit` (a command's) is not
+//! either.
 //!
 //! ```compile_fail
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::markup::{Context, DomainMessage, Failed, Unrefusable};
 //! # use angzarr_embedded::WireError;
-//! # use angzarr_embedded_macros::{aggregate, applies, handles_fact};
+//! # use angzarr_embedded_macros::{aggregate, applies, handles_cmd, handles_fact};
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
 //! #     macro_rules! wire {
@@ -1007,10 +1007,9 @@
 //! # domain!(SwitchOn, PowerCut, SwitchedOn, WentDark);
 //! # #[derive(Clone, Default)]
 //! # pub struct Lamp { on: bool }
-//! # #[allow(deprecated)]
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
-//!     #[handles(SwitchOn)]
+//!     #[handles_cmd(SwitchOn)]
 //!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<Option<SwitchedOn>, Failed<Unrefusable>> {
 //!         Ok((!self.on).then_some(SwitchedOn))
 //!     }
@@ -1036,10 +1035,11 @@
 //! handler says how.
 //!
 //! ```compile_fail
+//! # use angzarr_embedded::markup::{Bug, FactEmit};
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::markup::{Context, DomainMessage, Failed, Unrefusable};
 //! # use angzarr_embedded::WireError;
-//! # use angzarr_embedded_macros::{aggregate, applies, handles};
+//! # use angzarr_embedded_macros::{aggregate, applies, handles_cmd, handles_fact};
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
 //! #     macro_rules! wire {
@@ -1070,14 +1070,14 @@
 //! # pub struct Lamp { on: bool }
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
-//!     #[handles(SwitchOn)]
+//!     #[handles_cmd(SwitchOn)]
 //!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Option<SwitchedOn> {
 //!         (!self.on).then_some(SwitchedOn)
 //!     }
 //!
-//!     #[handles(PowerCut)]
-//!     fn power_cut(&self, _fact: PowerCut, _ctx: &Context) -> Emit<Self> {
-//!         Emit::of(WentDark)
+//!     #[handles_fact(PowerCut)]
+//!     fn power_cut(&self, _fact: PowerCut, _ctx: &Context) -> Result<FactEmit<Self>, Bug> {
+//!         Ok(FactEmit::of([::angzarr_embedded::markup::pack_message(&WentDark)]))
 //!     }
 //!
 //!     #[applies(SwitchedOn)]
@@ -1092,14 +1092,14 @@
 //! }
 //! ```
 //!
-//! Nor a handler `#[handles]` cannot read the kind of: its signature returns
-//! neither a `Result` (a command's) nor an `Emit` (a fact's).
+//! Nor a fact handler returning a bare shape: its signature is the router's
+//! `Result<FactEmit<Self>, Bug>`.
 //!
 //! ```compile_fail
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::markup::{Context, DomainMessage, Emit, Failed, Unrefusable};
 //! # use angzarr_embedded::WireError;
-//! # use angzarr_embedded_macros::{aggregate, applies, handles};
+//! # use angzarr_embedded_macros::{aggregate, applies, handles_cmd, handles_fact};
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
 //! #     macro_rules! wire {
@@ -1130,12 +1130,12 @@
 //! # pub struct Lamp { on: bool }
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
-//!     #[handles(SwitchOn)]
+//!     #[handles_cmd(SwitchOn)]
 //!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<Option<SwitchedOn>, Failed<Unrefusable>> {
 //!         Ok((!self.on).then_some(SwitchedOn))
 //!     }
 //!
-//!     #[handles(PowerCut)]
+//!     #[handles_fact(PowerCut)]
 //!     fn power_cut(&self, _fact: PowerCut, _ctx: &Context) -> Option<WentDark> {
 //!         Some(WentDark)
 //!     }
@@ -1152,14 +1152,14 @@
 //! }
 //! ```
 //!
-//! Nor `refuses(..)` on a fact handler: its plain `Emit` made it a fact
-//! handler, which is never refused.
+//! Nor `refuses(..)` on a fact handler: a fact is never refused.
 //!
 //! ```compile_fail
+//! # use angzarr_embedded::markup::{Bug, FactEmit};
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::markup::{Context, DomainMessage, Emit, Failed, Unrefusable};
 //! # use angzarr_embedded::WireError;
-//! # use angzarr_embedded_macros::{aggregate, applies, handles};
+//! # use angzarr_embedded_macros::{aggregate, applies, handles_cmd, handles_fact};
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
 //! #     macro_rules! wire {
@@ -1190,14 +1190,14 @@
 //! # pub struct Lamp { on: bool }
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
-//!     #[handles(SwitchOn)]
+//!     #[handles_cmd(SwitchOn)]
 //!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<Option<SwitchedOn>, Failed<Unrefusable>> {
 //!         Ok((!self.on).then_some(SwitchedOn))
 //!     }
 //!
-//!     #[handles(PowerCut, refuses(WentDark))]
-//!     fn power_cut(&self, _fact: PowerCut, _ctx: &Context) -> Emit<Self> {
-//!         Emit::of(WentDark)
+//!     #[handles_fact(PowerCut, refuses(WentDark))]
+//!     fn power_cut(&self, _fact: PowerCut, _ctx: &Context) -> Result<FactEmit<Self>, Bug> {
+//!         Ok(FactEmit::of([::angzarr_embedded::markup::pack_message(&WentDark)]))
 //!     }
 //!
 //!     #[applies(SwitchedOn)]
@@ -1218,7 +1218,7 @@
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::markup::{Context, DomainMessage, Failed, Unrefusable};
 //! # use angzarr_embedded::WireError;
-//! # use angzarr_embedded_macros::{aggregate, applies, handles};
+//! # use angzarr_embedded_macros::{aggregate, applies, handles_cmd};
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
 //! #     macro_rules! wire {
@@ -1254,12 +1254,12 @@
 //!         Ok(())
 //!     }
 //!
-//!     #[handles(SwitchOn)]
+//!     #[handles_cmd(SwitchOn)]
 //!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<Option<SwitchedOn>, Failed<Unrefusable>> {
 //!         Ok((!self.on).then_some(SwitchedOn))
 //!     }
 //!
-//!     #[handles(SwitchOff)]
+//!     #[handles_cmd(SwitchOff)]
 //!     fn switch_off(&self, _cmd: SwitchOff, _ctx: &Context) -> Result<SwitchedOff, Failed<Unrefusable>> {
 //!         Ok(SwitchedOff)
 //!     }
@@ -1283,7 +1283,7 @@
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::markup::{Context, DomainMessage, Failed, Unrefusable};
 //! # use angzarr_embedded::WireError;
-//! # use angzarr_embedded_macros::{aggregate, applies, handles};
+//! # use angzarr_embedded_macros::{aggregate, applies, handles_cmd};
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
 //! #     macro_rules! wire {
@@ -1316,12 +1316,12 @@
 //!
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
-//!     #[handles(SwitchOn)]
+//!     #[handles_cmd(SwitchOn)]
 //!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<Option<SwitchedOn>, Failed<Unrefusable>> {
 //!         Ok((!self.on).then_some(SwitchedOn))
 //!     }
 //!
-//!     #[handles(SwitchOff)]
+//!     #[handles_cmd(SwitchOff)]
 //!     fn switch_off(&self, _cmd: SwitchOff, _ctx: &Context) -> Result<SwitchedOff, Failed<Unrefusable>> {
 //!         Ok(SwitchedOff)
 //!     }
@@ -1347,7 +1347,7 @@
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::markup::{Context, DomainMessage, Failed, Unrefusable};
 //! # use angzarr_embedded::WireError;
-//! # use angzarr_embedded_macros::{aggregate, applies, handles};
+//! # use angzarr_embedded_macros::{aggregate, applies, handles_cmd};
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
 //! #     macro_rules! wire {
@@ -1380,12 +1380,12 @@
 //!
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
-//!     #[handles(SwitchOn)]
+//!     #[handles_cmd(SwitchOn)]
 //!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<Option<SwitchedOn>, Failed<Unrefusable>> {
 //!         Ok((!self.on).then_some(SwitchedOn))
 //!     }
 //!
-//!     #[handles(SwitchOff)]
+//!     #[handles_cmd(SwitchOff)]
 //!     fn switch_off(&self, _cmd: SwitchOff, _ctx: &Context) -> Result<SwitchedOff, Failed<Unrefusable>> {
 //!         Ok(SwitchedOff)
 //!     }
@@ -1412,6 +1412,7 @@
 //! Translate callback (every refusal of its command a bug).
 //!
 //! ```no_run
+//! # use angzarr_embedded::markup::{Bug, FactEmit};
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::markup::{
 //! #     Commands, Context, DomainMessage, Emit, Failed, PolicyContext, Refused, Refuses,
@@ -1419,7 +1420,7 @@
 //! # };
 //! # use angzarr_embedded::WireError;
 //! # use angzarr_embedded_macros::{
-//! #     aggregate, applies, handles, on_refused, process_manager, on_event, policy,
+//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, policy,
 //! # };
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
@@ -1470,7 +1471,7 @@
 //! # pub struct TimerLamp;
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
-//!     #[handles(SwitchOn, refuses(Burnt))]
+//!     #[handles_cmd(SwitchOn, refuses(Burnt))]
 //!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<SwitchedOn, Refuses<Self, SwitchOn>> {
 //!         match self.on {
 //!             true => Err(Burnt.into()),
@@ -1478,9 +1479,9 @@
 //!         }
 //!     }
 //!
-//!     #[handles(PowerCut)]
-//!     fn power_cut(&self, _fact: PowerCut, _ctx: &Context) -> Emit<Self> {
-//!         Emit::of(WentDark)
+//!     #[handles_fact(PowerCut)]
+//!     fn power_cut(&self, _fact: PowerCut, _ctx: &Context) -> Result<FactEmit<Self>, Bug> {
+//!         Ok(FactEmit::of([::angzarr_embedded::markup::pack_message(&WentDark)]))
 //!     }
 //!
 //!     #[applies(SwitchedOn)]
@@ -1496,19 +1497,19 @@
 //!
 //! #[process_manager(domain = "timer")]
 //! impl Timer {
-//!     #[handles(StartTimer, starts)]
+//!     #[handles_cmd(StartTimer, starts)]
 //!     fn start(&self, _cmd: StartTimer, _ctx: &Context) -> Result<TimerStarted, Failed<Unrefusable>> {
 //!         Ok(TimerStarted)
 //!     }
 //!
-//!     #[handles(Ring)]
-//!     fn ring(&self, _fact: Ring, _ctx: &Context) -> Emit<Self> {
-//!         Emit::of(Rang)
+//!     #[handles_fact(Ring)]
+//!     fn ring(&self, _fact: Ring, _ctx: &Context) -> Result<FactEmit<Self>, Bug> {
+//!         Ok(FactEmit::of([::angzarr_embedded::markup::pack_message(&Rang)]))
 //!     }
 //!
-//!     #[handles(LampLost)]
-//!     fn lamp_lost(&self, _fact: LampLost, _ctx: &Context) -> Emit<Self> {
-//!         Emit::of(Lost)
+//!     #[handles_fact(LampLost)]
+//!     fn lamp_lost(&self, _fact: LampLost, _ctx: &Context) -> Result<FactEmit<Self>, Bug> {
+//!         Ok(FactEmit::of([::angzarr_embedded::markup::pack_message(&Lost)]))
 //!     }
 //!
 //!     #[applies(TimerStarted)]
@@ -1536,6 +1537,7 @@
 //! compile: the choice holds only the listed types.
 //!
 //! ```compile_fail
+//! # use angzarr_embedded::markup::{Bug, FactEmit};
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::markup::{
 //! #     Commands, Context, DomainMessage, Emit, Failed, PolicyContext, Refused, Refuses,
@@ -1543,7 +1545,7 @@
 //! # };
 //! # use angzarr_embedded::WireError;
 //! # use angzarr_embedded_macros::{
-//! #     aggregate, applies, handles, on_refused, process_manager, on_event, policy,
+//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, policy,
 //! # };
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
@@ -1594,7 +1596,7 @@
 //! # pub struct TimerLamp;
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
-//!     #[handles(SwitchOn, refuses(Burnt))]
+//!     #[handles_cmd(SwitchOn, refuses(Burnt))]
 //!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<SwitchedOn, Refuses<Self, SwitchOn>> {
 //!         match self.on {
 //!             true => Err(Fused.into()),
@@ -1602,9 +1604,9 @@
 //!         }
 //!     }
 //!
-//!     #[handles(PowerCut)]
-//!     fn power_cut(&self, _fact: PowerCut, _ctx: &Context) -> Emit<Self> {
-//!         Emit::of(WentDark)
+//!     #[handles_fact(PowerCut)]
+//!     fn power_cut(&self, _fact: PowerCut, _ctx: &Context) -> Result<FactEmit<Self>, Bug> {
+//!         Ok(FactEmit::of([::angzarr_embedded::markup::pack_message(&WentDark)]))
 //!     }
 //!
 //!     #[applies(SwitchedOn)]
@@ -1623,6 +1625,7 @@
 //! signature is held to the marker.
 //!
 //! ```compile_fail
+//! # use angzarr_embedded::markup::{Bug, FactEmit};
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::markup::{
 //! #     Commands, Context, DomainMessage, Emit, Failed, PolicyContext, Refused, Refuses,
@@ -1630,7 +1633,7 @@
 //! # };
 //! # use angzarr_embedded::WireError;
 //! # use angzarr_embedded_macros::{
-//! #     aggregate, applies, handles, on_refused, process_manager, on_event, policy,
+//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, policy,
 //! # };
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
@@ -1681,7 +1684,7 @@
 //! # pub struct TimerLamp;
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
-//!     #[handles(SwitchOn, refuses(Burnt))]
+//!     #[handles_cmd(SwitchOn, refuses(Burnt))]
 //!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<SwitchedOn, Burnt> {
 //!         match self.on {
 //!             true => Err(Burnt),
@@ -1689,9 +1692,9 @@
 //!         }
 //!     }
 //!
-//!     #[handles(PowerCut)]
-//!     fn power_cut(&self, _fact: PowerCut, _ctx: &Context) -> Emit<Self> {
-//!         Emit::of(WentDark)
+//!     #[handles_fact(PowerCut)]
+//!     fn power_cut(&self, _fact: PowerCut, _ctx: &Context) -> Result<FactEmit<Self>, Bug> {
+//!         Ok(FactEmit::of([::angzarr_embedded::markup::pack_message(&WentDark)]))
 //!     }
 //!
 //!     #[applies(SwitchedOn)]
@@ -1710,6 +1713,7 @@
 //! (of the command's own domain), as an event is.
 //!
 //! ```compile_fail
+//! # use angzarr_embedded::markup::{Bug, FactEmit};
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::markup::{
 //! #     Commands, Context, DomainMessage, Emit, Failed, PolicyContext, Refused, Refuses,
@@ -1717,7 +1721,7 @@
 //! # };
 //! # use angzarr_embedded::WireError;
 //! # use angzarr_embedded_macros::{
-//! #     aggregate, applies, handles, on_refused, process_manager, on_event, policy,
+//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, policy,
 //! # };
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
@@ -1768,7 +1772,7 @@
 //! # pub struct TimerLamp;
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
-//!     #[handles(SwitchOn, refuses(wire::Burnt))]
+//!     #[handles_cmd(SwitchOn, refuses(wire::Burnt))]
 //!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<SwitchedOn, Refuses<Self, SwitchOn>> {
 //!         match self.on {
 //!             true => Err(wire::Burnt {}.into()),
@@ -1776,9 +1780,9 @@
 //!         }
 //!     }
 //!
-//!     #[handles(PowerCut)]
-//!     fn power_cut(&self, _fact: PowerCut, _ctx: &Context) -> Emit<Self> {
-//!         Emit::of(WentDark)
+//!     #[handles_fact(PowerCut)]
+//!     fn power_cut(&self, _fact: PowerCut, _ctx: &Context) -> Result<FactEmit<Self>, Bug> {
+//!         Ok(FactEmit::of([::angzarr_embedded::markup::pack_message(&WentDark)]))
 //!     }
 //!
 //!     #[applies(SwitchedOn)]
@@ -1797,6 +1801,7 @@
 //! compile.
 //!
 //! ```compile_fail
+//! # use angzarr_embedded::markup::{Bug, FactEmit};
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::markup::{
 //! #     Commands, Context, DomainMessage, Emit, Failed, PolicyContext, Refused, Refuses,
@@ -1804,7 +1809,7 @@
 //! # };
 //! # use angzarr_embedded::WireError;
 //! # use angzarr_embedded_macros::{
-//! #     aggregate, applies, handles, on_refused, process_manager, on_event, policy,
+//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, policy,
 //! # };
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
@@ -1855,7 +1860,7 @@
 //! # pub struct TimerLamp;
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
-//!     #[handles(SwitchOn, starts, refuses(Burnt))]
+//!     #[handles_cmd(SwitchOn, starts, refuses(Burnt))]
 //!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<SwitchedOn, Refuses<Self, SwitchOn>> {
 //!         match self.on {
 //!             true => Err(Burnt.into()),
@@ -1863,9 +1868,9 @@
 //!         }
 //!     }
 //!
-//!     #[handles(PowerCut)]
-//!     fn power_cut(&self, _fact: PowerCut, _ctx: &Context) -> Emit<Self> {
-//!         Emit::of(WentDark)
+//!     #[handles_fact(PowerCut)]
+//!     fn power_cut(&self, _fact: PowerCut, _ctx: &Context) -> Result<FactEmit<Self>, Bug> {
+//!         Ok(FactEmit::of([::angzarr_embedded::markup::pack_message(&WentDark)]))
 //!     }
 //!
 //!     #[applies(SwitchedOn)]
@@ -1884,6 +1889,7 @@
 //! aggregate is, not by a `name`.
 //!
 //! ```compile_fail
+//! # use angzarr_embedded::markup::{Bug, FactEmit};
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::markup::{
 //! #     Commands, Context, DomainMessage, Emit, Failed, PolicyContext, Refused, Refuses,
@@ -1891,7 +1897,7 @@
 //! # };
 //! # use angzarr_embedded::WireError;
 //! # use angzarr_embedded_macros::{
-//! #     aggregate, applies, handles, on_refused, process_manager, on_event, policy,
+//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, policy,
 //! # };
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
@@ -1942,19 +1948,19 @@
 //! # pub struct TimerLamp;
 //! #[process_manager(name = "timer")]
 //! impl Timer {
-//!     #[handles(StartTimer, starts)]
+//!     #[handles_cmd(StartTimer, starts)]
 //!     fn start(&self, _cmd: StartTimer, _ctx: &Context) -> Result<TimerStarted, Failed<Unrefusable>> {
 //!         Ok(TimerStarted)
 //!     }
 //!
-//!     #[handles(Ring)]
-//!     fn ring(&self, _fact: Ring, _ctx: &Context) -> Emit<Self> {
-//!         Emit::of(Rang)
+//!     #[handles_fact(Ring)]
+//!     fn ring(&self, _fact: Ring, _ctx: &Context) -> Result<FactEmit<Self>, Bug> {
+//!         Ok(FactEmit::of([::angzarr_embedded::markup::pack_message(&Rang)]))
 //!     }
 //!
-//!     #[handles(LampLost)]
-//!     fn lamp_lost(&self, _fact: LampLost, _ctx: &Context) -> Emit<Self> {
-//!         Emit::of(Lost)
+//!     #[handles_fact(LampLost)]
+//!     fn lamp_lost(&self, _fact: LampLost, _ctx: &Context) -> Result<FactEmit<Self>, Bug> {
+//!         Ok(FactEmit::of([::angzarr_embedded::markup::pack_message(&Lost)]))
 //!     }
 //!
 //!     #[applies(TimerStarted)]
@@ -1974,6 +1980,7 @@
 //! events reach it as commands, through a policy.
 //!
 //! ```compile_fail
+//! # use angzarr_embedded::markup::{Bug, FactEmit};
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::markup::{
 //! #     Commands, Context, DomainMessage, Emit, Failed, PolicyContext, Refused, Refuses,
@@ -1981,7 +1988,7 @@
 //! # };
 //! # use angzarr_embedded::WireError;
 //! # use angzarr_embedded_macros::{
-//! #     aggregate, applies, handles, on_refused, process_manager, on_event, policy,
+//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, policy,
 //! # };
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
@@ -2034,19 +2041,19 @@
 //!
 //! #[process_manager(domain = "timer")]
 //! impl Timer {
-//!     #[handles(StartTimer, starts)]
+//!     #[handles_cmd(StartTimer, starts)]
 //!     fn start(&self, _cmd: StartTimer, _ctx: &Context) -> Result<TimerStarted, Failed<Unrefusable>> {
 //!         Ok(TimerStarted)
 //!     }
 //!
 //!     #[on(Ring)]
-//!     fn ring(&self, _fact: Ring, _ctx: &Context) -> Emit<Self> {
-//!         Emit::of(Rang)
+//!     fn ring(&self, _fact: Ring, _ctx: &Context) -> Result<FactEmit<Self>, Bug> {
+//!         Ok(FactEmit::of([::angzarr_embedded::markup::pack_message(&Rang)]))
 //!     }
 //!
-//!     #[handles(LampLost)]
-//!     fn lamp_lost(&self, _fact: LampLost, _ctx: &Context) -> Emit<Self> {
-//!         Emit::of(Lost)
+//!     #[handles_fact(LampLost)]
+//!     fn lamp_lost(&self, _fact: LampLost, _ctx: &Context) -> Result<FactEmit<Self>, Bug> {
+//!         Ok(FactEmit::of([::angzarr_embedded::markup::pack_message(&Lost)]))
 //!     }
 //!
 //!     #[applies(TimerStarted)]
@@ -2073,7 +2080,7 @@
 //! # };
 //! # use angzarr_embedded::WireError;
 //! # use angzarr_embedded_macros::{
-//! #     aggregate, applies, handles, on_refused, process_manager, on_event, policy,
+//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, policy,
 //! # };
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
@@ -2129,6 +2136,7 @@
 //! reaches that policy's Translate callback, never a domain.
 //!
 //! ```compile_fail
+//! # use angzarr_embedded::markup::{Bug, FactEmit};
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::markup::{
 //! #     Commands, Context, DomainMessage, Emit, Failed, PolicyContext, Refused, Refuses,
@@ -2136,7 +2144,7 @@
 //! # };
 //! # use angzarr_embedded::WireError;
 //! # use angzarr_embedded_macros::{
-//! #     aggregate, applies, handles, on_refused, process_manager, on_event, policy,
+//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, policy,
 //! # };
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
@@ -2187,19 +2195,19 @@
 //! # pub struct TimerLamp;
 //! #[process_manager(domain = "timer")]
 //! impl Timer {
-//!     #[handles(StartTimer, starts)]
+//!     #[handles_cmd(StartTimer, starts)]
 //!     fn start(&self, _cmd: StartTimer, _ctx: &Context) -> Result<TimerStarted, Failed<Unrefusable>> {
 //!         Ok(TimerStarted)
 //!     }
 //!
-//!     #[handles(Ring)]
-//!     fn ring(&self, _fact: Ring, _ctx: &Context) -> Emit<Self> {
-//!         Emit::of(Rang)
+//!     #[handles_fact(Ring)]
+//!     fn ring(&self, _fact: Ring, _ctx: &Context) -> Result<FactEmit<Self>, Bug> {
+//!         Ok(FactEmit::of([::angzarr_embedded::markup::pack_message(&Rang)]))
 //!     }
 //!
-//!     #[handles(LampLost)]
-//!     fn lamp_lost(&self, _fact: LampLost, _ctx: &Context) -> Emit<Self> {
-//!         Emit::of(Lost)
+//!     #[handles_fact(LampLost)]
+//!     fn lamp_lost(&self, _fact: LampLost, _ctx: &Context) -> Result<FactEmit<Self>, Bug> {
+//!         Ok(FactEmit::of([::angzarr_embedded::markup::pack_message(&Lost)]))
 //!     }
 //!
 //!     #[on_refused]
@@ -2225,6 +2233,7 @@
 //! examples below).
 //!
 //! ```no_run
+//! # use angzarr_embedded::markup::{Bug, FactEmit};
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::markup::{
 //! #     Commands, Context, DomainMessage, Emit, Failed, PolicyContext, Refused, Refuses,
@@ -2232,7 +2241,7 @@
 //! # };
 //! # use angzarr_embedded::WireError;
 //! # use angzarr_embedded_macros::{
-//! #     aggregate, applies, handles, on_refused, process_manager, on_event, policy,
+//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, policy,
 //! # };
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
@@ -2283,7 +2292,7 @@
 //! # pub struct TimerLamp;
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
-//!     #[handles(SwitchOn, refuses(Burnt))]
+//!     #[handles_cmd(SwitchOn, refuses(Burnt))]
 //!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<SwitchedOn, Refuses<Self, SwitchOn>> {
 //!         match self.on {
 //!             true => Err(Burnt.into()),
@@ -2291,9 +2300,9 @@
 //!         }
 //!     }
 //!
-//!     #[handles(PowerCut)]
-//!     fn power_cut(&self, _fact: PowerCut, _ctx: &Context) -> Emit<Self> {
-//!         Emit::of(WentDark)
+//!     #[handles_fact(PowerCut)]
+//!     fn power_cut(&self, _fact: PowerCut, _ctx: &Context) -> Result<FactEmit<Self>, Bug> {
+//!         Ok(FactEmit::of([::angzarr_embedded::markup::pack_message(&WentDark)]))
 //!     }
 //!
 //!     #[applies(SwitchedOn)]
@@ -2309,19 +2318,19 @@
 //!
 //! #[process_manager(domain = "timer")]
 //! impl Timer {
-//!     #[handles(StartTimer, starts)]
+//!     #[handles_cmd(StartTimer, starts)]
 //!     fn start(&self, _cmd: StartTimer, _ctx: &Context) -> Result<TimerStarted, Failed<Unrefusable>> {
 //!         Ok(TimerStarted)
 //!     }
 //!
-//!     #[handles(Ring)]
-//!     fn ring(&self, _fact: Ring, _ctx: &Context) -> Emit<Self> {
-//!         Emit::of(Rang)
+//!     #[handles_fact(Ring)]
+//!     fn ring(&self, _fact: Ring, _ctx: &Context) -> Result<FactEmit<Self>, Bug> {
+//!         Ok(FactEmit::of([::angzarr_embedded::markup::pack_message(&Rang)]))
 //!     }
 //!
-//!     #[handles(LampLost)]
-//!     fn lamp_lost(&self, _fact: LampLost, _ctx: &Context) -> Emit<Self> {
-//!         Emit::of(Lost)
+//!     #[handles_fact(LampLost)]
+//!     fn lamp_lost(&self, _fact: LampLost, _ctx: &Context) -> Result<FactEmit<Self>, Bug> {
+//!         Ok(FactEmit::of([::angzarr_embedded::markup::pack_message(&Lost)]))
 //!     }
 //!
 //!     #[applies(TimerStarted)]
@@ -2354,6 +2363,7 @@
 //! compile.
 //!
 //! ```compile_fail
+//! # use angzarr_embedded::markup::{Bug, FactEmit};
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::markup::{
 //! #     Commands, Context, DomainMessage, Emit, Failed, PolicyContext, Refused, Refuses,
@@ -2361,7 +2371,7 @@
 //! # };
 //! # use angzarr_embedded::WireError;
 //! # use angzarr_embedded_macros::{
-//! #     aggregate, applies, handles, on_refused, process_manager, on_event, policy,
+//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, policy,
 //! # };
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
@@ -2412,7 +2422,7 @@
 //! # pub struct TimerLamp;
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
-//!     #[handles(SwitchOn, refuses(Burnt))]
+//!     #[handles_cmd(SwitchOn, refuses(Burnt))]
 //!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<SwitchedOn, Refuses<Self, SwitchOn>> {
 //!         match self.on {
 //!             true => Err(Burnt.into()),
@@ -2420,9 +2430,9 @@
 //!         }
 //!     }
 //!
-//!     #[handles(PowerCut)]
-//!     fn power_cut(&self, _fact: PowerCut, _ctx: &Context) -> Emit<Self> {
-//!         Emit::of(WentDark)
+//!     #[handles_fact(PowerCut)]
+//!     fn power_cut(&self, _fact: PowerCut, _ctx: &Context) -> Result<FactEmit<Self>, Bug> {
+//!         Ok(FactEmit::of([::angzarr_embedded::markup::pack_message(&WentDark)]))
 //!     }
 //!
 //!     #[applies(SwitchedOn)]
@@ -2438,19 +2448,19 @@
 //!
 //! #[process_manager(domain = "timer")]
 //! impl Timer {
-//!     #[handles(StartTimer, starts)]
+//!     #[handles_cmd(StartTimer, starts)]
 //!     fn start(&self, _cmd: StartTimer, _ctx: &Context) -> Result<TimerStarted, Failed<Unrefusable>> {
 //!         Ok(TimerStarted)
 //!     }
 //!
-//!     #[handles(Ring)]
-//!     fn ring(&self, _fact: Ring, _ctx: &Context) -> Emit<Self> {
-//!         Emit::of(Rang)
+//!     #[handles_fact(Ring)]
+//!     fn ring(&self, _fact: Ring, _ctx: &Context) -> Result<FactEmit<Self>, Bug> {
+//!         Ok(FactEmit::of([::angzarr_embedded::markup::pack_message(&Rang)]))
 //!     }
 //!
-//!     #[handles(LampLost)]
-//!     fn lamp_lost(&self, _fact: LampLost, _ctx: &Context) -> Emit<Self> {
-//!         Emit::of(Lost)
+//!     #[handles_fact(LampLost)]
+//!     fn lamp_lost(&self, _fact: LampLost, _ctx: &Context) -> Result<FactEmit<Self>, Bug> {
+//!         Ok(FactEmit::of([::angzarr_embedded::markup::pack_message(&Lost)]))
 //!     }
 //!
 //!     #[applies(TimerStarted)]
@@ -2488,6 +2498,7 @@
 //! the one callback.
 //!
 //! ```compile_fail
+//! # use angzarr_embedded::markup::{Bug, FactEmit};
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::markup::{
 //! #     Commands, Context, DomainMessage, Emit, Failed, PolicyContext, Refused, Refuses,
@@ -2495,7 +2506,7 @@
 //! # };
 //! # use angzarr_embedded::WireError;
 //! # use angzarr_embedded_macros::{
-//! #     aggregate, applies, handles, on_refused, process_manager, on_event, policy,
+//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, policy,
 //! # };
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
@@ -2546,7 +2557,7 @@
 //! # pub struct TimerLamp;
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
-//!     #[handles(SwitchOn, refuses(Burnt))]
+//!     #[handles_cmd(SwitchOn, refuses(Burnt))]
 //!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<SwitchedOn, Refuses<Self, SwitchOn>> {
 //!         match self.on {
 //!             true => Err(Burnt.into()),
@@ -2554,9 +2565,9 @@
 //!         }
 //!     }
 //!
-//!     #[handles(PowerCut)]
-//!     fn power_cut(&self, _fact: PowerCut, _ctx: &Context) -> Emit<Self> {
-//!         Emit::of(WentDark)
+//!     #[handles_fact(PowerCut)]
+//!     fn power_cut(&self, _fact: PowerCut, _ctx: &Context) -> Result<FactEmit<Self>, Bug> {
+//!         Ok(FactEmit::of([::angzarr_embedded::markup::pack_message(&WentDark)]))
 //!     }
 //!
 //!     #[applies(SwitchedOn)]
@@ -2572,19 +2583,19 @@
 //!
 //! #[process_manager(domain = "timer")]
 //! impl Timer {
-//!     #[handles(StartTimer, starts)]
+//!     #[handles_cmd(StartTimer, starts)]
 //!     fn start(&self, _cmd: StartTimer, _ctx: &Context) -> Result<TimerStarted, Failed<Unrefusable>> {
 //!         Ok(TimerStarted)
 //!     }
 //!
-//!     #[handles(Ring)]
-//!     fn ring(&self, _fact: Ring, _ctx: &Context) -> Emit<Self> {
-//!         Emit::of(Rang)
+//!     #[handles_fact(Ring)]
+//!     fn ring(&self, _fact: Ring, _ctx: &Context) -> Result<FactEmit<Self>, Bug> {
+//!         Ok(FactEmit::of([::angzarr_embedded::markup::pack_message(&Rang)]))
 //!     }
 //!
-//!     #[handles(LampLost)]
-//!     fn lamp_lost(&self, _fact: LampLost, _ctx: &Context) -> Emit<Self> {
-//!         Emit::of(Lost)
+//!     #[handles_fact(LampLost)]
+//!     fn lamp_lost(&self, _fact: LampLost, _ctx: &Context) -> Result<FactEmit<Self>, Bug> {
+//!         Ok(FactEmit::of([::angzarr_embedded::markup::pack_message(&Lost)]))
 //!     }
 //!
 //!     #[applies(TimerStarted)]
@@ -2617,6 +2628,7 @@
 //! one of the source's events.
 //!
 //! ```compile_fail
+//! # use angzarr_embedded::markup::{Bug, FactEmit};
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::markup::{
 //! #     Commands, Context, DomainMessage, Emit, Failed, PolicyContext, Refused, Refuses,
@@ -2624,7 +2636,7 @@
 //! # };
 //! # use angzarr_embedded::WireError;
 //! # use angzarr_embedded_macros::{
-//! #     aggregate, applies, handles, on_refused, process_manager, on_event, policy,
+//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, policy,
 //! # };
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
@@ -2675,7 +2687,7 @@
 //! # pub struct TimerLamp;
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
-//!     #[handles(SwitchOn, refuses(Burnt))]
+//!     #[handles_cmd(SwitchOn, refuses(Burnt))]
 //!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<SwitchedOn, Refuses<Self, SwitchOn>> {
 //!         match self.on {
 //!             true => Err(Burnt.into()),
@@ -2683,9 +2695,9 @@
 //!         }
 //!     }
 //!
-//!     #[handles(PowerCut)]
-//!     fn power_cut(&self, _fact: PowerCut, _ctx: &Context) -> Emit<Self> {
-//!         Emit::of(WentDark)
+//!     #[handles_fact(PowerCut)]
+//!     fn power_cut(&self, _fact: PowerCut, _ctx: &Context) -> Result<FactEmit<Self>, Bug> {
+//!         Ok(FactEmit::of([::angzarr_embedded::markup::pack_message(&WentDark)]))
 //!     }
 //!
 //!     #[applies(SwitchedOn)]
@@ -2701,19 +2713,19 @@
 //!
 //! #[process_manager(domain = "timer")]
 //! impl Timer {
-//!     #[handles(StartTimer, starts)]
+//!     #[handles_cmd(StartTimer, starts)]
 //!     fn start(&self, _cmd: StartTimer, _ctx: &Context) -> Result<TimerStarted, Failed<Unrefusable>> {
 //!         Ok(TimerStarted)
 //!     }
 //!
-//!     #[handles(Ring)]
-//!     fn ring(&self, _fact: Ring, _ctx: &Context) -> Emit<Self> {
-//!         Emit::of(Rang)
+//!     #[handles_fact(Ring)]
+//!     fn ring(&self, _fact: Ring, _ctx: &Context) -> Result<FactEmit<Self>, Bug> {
+//!         Ok(FactEmit::of([::angzarr_embedded::markup::pack_message(&Rang)]))
 //!     }
 //!
-//!     #[handles(LampLost)]
-//!     fn lamp_lost(&self, _fact: LampLost, _ctx: &Context) -> Emit<Self> {
-//!         Emit::of(Lost)
+//!     #[handles_fact(LampLost)]
+//!     fn lamp_lost(&self, _fact: LampLost, _ctx: &Context) -> Result<FactEmit<Self>, Bug> {
+//!         Ok(FactEmit::of([::angzarr_embedded::markup::pack_message(&Lost)]))
 //!     }
 //!
 //!     #[applies(TimerStarted)]
@@ -2746,6 +2758,7 @@
 //! `#[on_refused]`, and nothing else marks it.
 //!
 //! ```compile_fail
+//! # use angzarr_embedded::markup::{Bug, FactEmit};
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::markup::{
 //! #     Commands, Context, DomainMessage, Emit, Failed, PolicyContext, Refused, Refuses,
@@ -2753,7 +2766,7 @@
 //! # };
 //! # use angzarr_embedded::WireError;
 //! # use angzarr_embedded_macros::{
-//! #     aggregate, applies, handles, on_refused, process_manager, on_event, policy,
+//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, policy,
 //! # };
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
@@ -2804,7 +2817,7 @@
 //! # pub struct TimerLamp;
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
-//!     #[handles(SwitchOn, refuses(Burnt))]
+//!     #[handles_cmd(SwitchOn, refuses(Burnt))]
 //!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<SwitchedOn, Refuses<Self, SwitchOn>> {
 //!         match self.on {
 //!             true => Err(Burnt.into()),
@@ -2812,9 +2825,9 @@
 //!         }
 //!     }
 //!
-//!     #[handles(PowerCut)]
-//!     fn power_cut(&self, _fact: PowerCut, _ctx: &Context) -> Emit<Self> {
-//!         Emit::of(WentDark)
+//!     #[handles_fact(PowerCut)]
+//!     fn power_cut(&self, _fact: PowerCut, _ctx: &Context) -> Result<FactEmit<Self>, Bug> {
+//!         Ok(FactEmit::of([::angzarr_embedded::markup::pack_message(&WentDark)]))
 //!     }
 //!
 //!     #[applies(SwitchedOn)]
@@ -2830,19 +2843,19 @@
 //!
 //! #[process_manager(domain = "timer")]
 //! impl Timer {
-//!     #[handles(StartTimer, starts)]
+//!     #[handles_cmd(StartTimer, starts)]
 //!     fn start(&self, _cmd: StartTimer, _ctx: &Context) -> Result<TimerStarted, Failed<Unrefusable>> {
 //!         Ok(TimerStarted)
 //!     }
 //!
-//!     #[handles(Ring)]
-//!     fn ring(&self, _fact: Ring, _ctx: &Context) -> Emit<Self> {
-//!         Emit::of(Rang)
+//!     #[handles_fact(Ring)]
+//!     fn ring(&self, _fact: Ring, _ctx: &Context) -> Result<FactEmit<Self>, Bug> {
+//!         Ok(FactEmit::of([::angzarr_embedded::markup::pack_message(&Rang)]))
 //!     }
 //!
-//!     #[handles(LampLost)]
-//!     fn lamp_lost(&self, _fact: LampLost, _ctx: &Context) -> Emit<Self> {
-//!         Emit::of(Lost)
+//!     #[handles_fact(LampLost)]
+//!     fn lamp_lost(&self, _fact: LampLost, _ctx: &Context) -> Result<FactEmit<Self>, Bug> {
+//!         Ok(FactEmit::of([::angzarr_embedded::markup::pack_message(&Lost)]))
 //!     }
 //!
 //!     #[applies(TimerStarted)]
@@ -2875,6 +2888,7 @@
 //! compile.
 //!
 //! ```compile_fail
+//! # use angzarr_embedded::markup::{Bug, FactEmit};
 //! # use std::convert::Infallible;
 //! # use angzarr_embedded::markup::{
 //! #     Commands, Context, DomainMessage, Emit, Failed, PolicyContext, Refused, Refuses,
@@ -2882,7 +2896,7 @@
 //! # };
 //! # use angzarr_embedded::WireError;
 //! # use angzarr_embedded_macros::{
-//! #     aggregate, applies, handles, on_refused, process_manager, on_event, policy,
+//! #     aggregate, applies, handles_cmd, handles_fact, on_refused, process_manager, on_event, policy,
 //! # };
 //! # // A compile-only fixture: nothing here runs.
 //! # pub mod wire {
@@ -2933,7 +2947,7 @@
 //! # pub struct TimerLamp;
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
-//!     #[handles(SwitchOn, refuses(Burnt))]
+//!     #[handles_cmd(SwitchOn, refuses(Burnt))]
 //!     fn switch_on(&self, _cmd: SwitchOn, _ctx: &Context) -> Result<SwitchedOn, Refuses<Self, SwitchOn>> {
 //!         match self.on {
 //!             true => Err(Burnt.into()),
@@ -2941,9 +2955,9 @@
 //!         }
 //!     }
 //!
-//!     #[handles(PowerCut)]
-//!     fn power_cut(&self, _fact: PowerCut, _ctx: &Context) -> Emit<Self> {
-//!         Emit::of(WentDark)
+//!     #[handles_fact(PowerCut)]
+//!     fn power_cut(&self, _fact: PowerCut, _ctx: &Context) -> Result<FactEmit<Self>, Bug> {
+//!         Ok(FactEmit::of([::angzarr_embedded::markup::pack_message(&WentDark)]))
 //!     }
 //!
 //!     #[applies(SwitchedOn)]
@@ -2959,19 +2973,19 @@
 //!
 //! #[process_manager(domain = "timer")]
 //! impl Timer {
-//!     #[handles(StartTimer, starts)]
+//!     #[handles_cmd(StartTimer, starts)]
 //!     fn start(&self, _cmd: StartTimer, _ctx: &Context) -> Result<TimerStarted, Failed<Unrefusable>> {
 //!         Ok(TimerStarted)
 //!     }
 //!
-//!     #[handles(Ring)]
-//!     fn ring(&self, _fact: Ring, _ctx: &Context) -> Emit<Self> {
-//!         Emit::of(Rang)
+//!     #[handles_fact(Ring)]
+//!     fn ring(&self, _fact: Ring, _ctx: &Context) -> Result<FactEmit<Self>, Bug> {
+//!         Ok(FactEmit::of([::angzarr_embedded::markup::pack_message(&Rang)]))
 //!     }
 //!
-//!     #[handles(LampLost)]
-//!     fn lamp_lost(&self, _fact: LampLost, _ctx: &Context) -> Emit<Self> {
-//!         Emit::of(Lost)
+//!     #[handles_fact(LampLost)]
+//!     fn lamp_lost(&self, _fact: LampLost, _ctx: &Context) -> Result<FactEmit<Self>, Bug> {
+//!         Ok(FactEmit::of([::angzarr_embedded::markup::pack_message(&Lost)]))
 //!     }
 //!
 //!     #[applies(TimerStarted)]
@@ -3067,32 +3081,22 @@ pub fn process_manager(attr: TokenStream, item: TokenStream) -> TokenStream {
         .into()
 }
 
-/// Marks a handler of a command or of a fact: `#[handles(Input)]`, the one
-/// attribute for both (decision 14.98). Its kind is read from the
-/// signature: a handler returning `Result<Emit<Self>, ..>` is a command
-/// handler (a request: it may refuse), and one returning a plain
-/// `Emit<Self>` is a fact handler (it has no refusal return). Optionally
-/// `refuses(T, ..)` and `rooted_by = field` (a command handler's) and, on a
-/// process manager, `starts`. An argument that does not apply to the kind
-/// read is refused, naming the kind. Inert: [`aggregate`] and
+/// Marks a command handler (a request: it may fail):
+/// `#[handles_cmd(Cmd)]`, with optionally `refuses(T, ..)` (its typed
+/// refusal objects), `rooted_by = field` and, on a process manager,
+/// `starts`. Returns `Result<_, Failed<Unrefusable>>`, or with `refuses`
+/// `Result<_, Refuses<Self, Cmd>>`. Inert: [`aggregate`] and
 /// [`process_manager`] read it.
-#[proc_macro_attribute]
-pub fn handles(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    item
-}
-
-/// A command handler: [`handles`] with the kind named, whose signature must
-/// be a command's. Deprecated alias of [`handles`].
-#[deprecated(note = "use `#[handles]`, which reads the kind from the signature")]
 #[proc_macro_attribute]
 pub fn handles_cmd(_attr: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 
-/// A fact handler: [`handles`] with the kind named, whose signature must be
-/// a fact's (a plain `Emit<Self>`, no `Result`). Deprecated alias of
-/// [`handles`].
-#[deprecated(note = "use `#[handles]`, which reads the kind from the signature")]
+/// Marks a fact handler (a fact already happened: it is never refused):
+/// `#[handles_fact(Fact)]`, with optionally, on a process manager,
+/// `starts`; `refuses` and `rooted_by` are refused, naming the kind. Returns
+/// the router's `Result<FactEmit<Self>, Bug>`: its one failure is a bug.
+/// Inert: [`aggregate`] and [`process_manager`] read it.
 #[proc_macro_attribute]
 pub fn handles_fact(_attr: TokenStream, item: TokenStream) -> TokenStream {
     item
@@ -3304,10 +3308,6 @@ fn marked<'a>(imp: &'a ItemImpl, markers: &[&'static str]) -> syn::Result<Markup
         if let Some((_, second)) = on.next() {
             return Err(Error::new_spanned(second, "a method takes one marker"));
         }
-        let marker = match marker {
-            "handles" => read_kind(&method.sig)?,
-            named => named,
-        };
         found.push(Marked {
             marker,
             method,
@@ -3315,22 +3315,6 @@ fn marked<'a>(imp: &'a ItemImpl, markers: &[&'static str]) -> syn::Result<Markup
         });
     }
     Ok(Markup(found))
-}
-
-/// The kind a [`handles`] handler is, read from its signature: a `Result`
-/// is a command handler (`"handles_cmd"`), a plain `Emit` a fact handler
-/// (`"handles_fact"`).
-fn read_kind(sig: &Signature) -> syn::Result<&'static str> {
-    match returned(sig).as_ref().map(|(name, _)| name.as_str()) {
-        Some("Result") => Ok("handles_cmd"),
-        Some("Emit") => Ok("handles_fact"),
-        _ => Err(Error::new_spanned(
-            sig,
-            "`#[handles]` reads its kind from the signature: a command handler returns \
-             `Result<Emit<Self>, ..>` and a fact handler returns `Emit<Self>`; this returns \
-             neither",
-        )),
-    }
 }
 
 /// What a marked method is, for a message naming its kind.
@@ -3641,7 +3625,7 @@ impl Parse for Arg {
     }
 }
 
-/// A marker's arguments: `#[handles(Cmd, starts, refuses(T, ..))]`,
+/// A marker's arguments: `#[handles_cmd(Cmd, starts, refuses(T, ..))]`,
 /// every one after the type optional.
 struct Marker {
     ty: Type,
@@ -3822,7 +3806,6 @@ fn check_signature(x: &Marked<'_>) -> syn::Result<()> {
         }
     }
     let output = returned(sig);
-    let outer = output.as_ref().map(|(name, _)| name.as_str());
     match x.marker {
         "handles_cmd" => {
             let Some((_, args)) = output.as_ref().filter(|(name, _)| name == "Result") else {
@@ -3845,14 +3828,34 @@ fn check_signature(x: &Marked<'_>) -> syn::Result<()> {
                 ),
             }
         }
-        _ if outer == Some("Result") => {
-            fail("a fact handler returns no `Result`: a fact cannot be refused")
-        }
-        _ if outer == Some("Emit") => Ok(()),
-        _ => {
-            fail("a fact handler returns `Emit<Self>`, with no `Result`: a fact cannot be refused")
-        }
+        _ => check_fact_return(sig, output.as_ref()),
     }
+}
+
+/// A fact handler returns the router's `Result<FactEmit<Self>, Bug>`: the
+/// kind is the attribute's, so an `Emit` (a command's) is refused, and so
+/// is any failure but a `Bug`, since a fact cannot be refused.
+fn check_fact_return(sig: &Signature, output: Option<&(String, Vec<Type>)>) -> syn::Result<()> {
+    let fail = |message: &str| Err(Error::new_spanned(sig, message));
+    const SHAPE: &str = "a fact handler returns `Result<FactEmit<Self>, Bug>`";
+    let Some((_, args)) = output.filter(|(name, _)| name == "Result") else {
+        return fail(&format!(
+            "{SHAPE}, not an `Emit` or a `Record` (a command's): a fact cannot be refused, so \
+             its one failure is a `Bug`"
+        ));
+    };
+    let named = |ty: Option<&Type>| ty.and_then(last_ident).map(ToString::to_string);
+    if named(args.first()).as_deref() != Some("FactEmit") {
+        return fail(&format!(
+            "{SHAPE}: its success is the router's `FactEmit`, not an `Emit` (a command's)"
+        ));
+    }
+    if named(args.get(1)).as_deref() != Some("Bug") {
+        return fail(&format!(
+            "{SHAPE}: a fact cannot be refused, so its failure is a `Bug` and nothing else"
+        ));
+    }
+    Ok(())
 }
 
 /// `tokens` with every `Self` replaced by `self_ty`.
@@ -4027,7 +4030,7 @@ impl<'a> Decorated<'a> {
                  policy's one Translate callback, which answers a fact of this domain",
             ));
         }
-        let methods = marked(imp, &["handles", "handles_cmd", "handles_fact", "applies"])?;
+        let methods = marked(imp, &["handles_cmd", "handles_fact", "applies"])?;
         let decorated = Decorated {
             kind,
             self_ty,
@@ -4154,7 +4157,7 @@ impl<'a> Decorated<'a> {
                 },
                 _ => quote! {
                     .on_fact(#name, |any, state, cctx| {
-                        #m::run_fact::<#self_ty, #ty, _>(any, state, cctx, #handler)
+                        #m::run_fact::<#self_ty, #ty>(any, state, cctx, #handler)
                     })
                 },
             }

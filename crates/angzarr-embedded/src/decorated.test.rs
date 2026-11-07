@@ -39,10 +39,10 @@ use std::fmt;
 
 use ::angzarr_embedded::angzarr_router::domain::Emit as RouterEmit;
 use ::angzarr_embedded::markup::{
-    self, assert_step_idempotent, BusinessStatus, CommandContext, Commands, Context, DomainMessage,
-    Emit, Failed, PageContext, Policy, PolicyContext, ProcessManager, ProjectionContext,
-    Refused as Translating, Refuses, Refusing, RetryableStatus, TypeName, TypedRefusal,
-    Unrefusable,
+    self, assert_step_idempotent, Bug, BugExt, BusinessStatus, CommandContext, Commands, Context,
+    DomainMessage, Emit, FactEmit, Failed, PageContext, Policy, PolicyContext, ProcessManager,
+    ProjectionContext, Refused as Translating, Refuses, Refusing, RetryableStatus, TypeName,
+    TypedRefusal, Unrefusable,
 };
 use ::angzarr_embedded::v1::event_meta::Causation;
 use ::angzarr_embedded::v1::{
@@ -56,8 +56,14 @@ use ::angzarr_embedded::{
 };
 use angzarr_diagnostic::{code, Arg, Diagnostic, Report};
 use angzarr_embedded_macros::{
-    aggregate, applies, handles, on_event, on_refused, policy, process_manager, projector, projects,
+    aggregate, applies, handles_cmd, handles_fact, on_event, on_refused, policy, process_manager,
+    projector, projects,
 };
+
+/// `value` packed as the `Any` a fact's `FactEmit` carries.
+fn event<T: DomainMessage>(value: &T) -> Any {
+    markup::pack_message(value)
+}
 
 // ---------------------------------------------------------------- the wire
 
@@ -292,6 +298,13 @@ mod wire {
         }
     );
     message!("toy.ladder.fact.v1", Slip {});
+    message!(
+        "toy.ladder.fact.v1",
+        Jam {
+            #[prost(int64, tag = "1")]
+            code: i64,
+        }
+    );
     message!("toy.ladder.v1", Rung {});
 
     message!(
@@ -807,7 +820,7 @@ impl Wallet {
 #[aggregate(domain = "wallet", snapshot = wire::WalletSnapshot)]
 impl Wallet {
     /// Two events, a tuple: the router applies them in order.
-    #[handles(Open, refuses(Refused))]
+    #[handles_cmd(Open, refuses(Refused))]
     fn open(&self, cmd: Open, ctx: &Context) -> Result<(Opened, Deposited), Refuses<Self, Open>> {
         if self.open {
             return Err(Refused::AlreadyOpen.into());
@@ -824,7 +837,7 @@ impl Wallet {
     /// One event, stamped with the context's instant (the handler has no
     /// clock), then a continuation: whether the deposit is allowed, or
     /// earns the reward, depends on the balance after it.
-    #[handles(Deposit, refuses(Refused))]
+    #[handles_cmd(Deposit, refuses(Refused))]
     fn deposit(&self, cmd: Deposit, ctx: &Context) -> Result<Emit<Self>, Refuses<Self, Deposit>> {
         if !self.open {
             return Err(Refused::NotOpen.into());
@@ -852,7 +865,7 @@ impl Wallet {
         Ok((cents >= REWARD_AT && !self.rewarded).then_some(Rewarded { cents: cents / 10 }))
     }
 
-    #[handles(Withdraw, refuses(Refused))]
+    #[handles_cmd(Withdraw, refuses(Refused))]
     fn withdraw(&self, cmd: Withdraw, _ctx: &Context) -> Result<Withdrew, Refuses<Self, Withdraw>> {
         positive(cmd.cents)?;
         self.ledger.covers(cmd.cents)?;
@@ -861,7 +874,7 @@ impl Wallet {
 
     /// A command whose refusals are typed objects (`refuses`): it returns
     /// its event, or one of the listed objects, and nothing else compiles.
-    #[handles(Hold, refuses(InsufficientFunds, WalletClosed))]
+    #[handles_cmd(Hold, refuses(InsufficientFunds, WalletClosed))]
     fn hold(&self, cmd: Hold, _ctx: &Context) -> Result<Held, Refuses<Self, Hold>> {
         if !self.open {
             return Err(WalletClosed {}.into());
@@ -877,7 +890,7 @@ impl Wallet {
 
     /// Any number of one event, a `Vec`, each decided from the state before
     /// any of them.
-    #[handles(Sweep, refuses(Refused))]
+    #[handles_cmd(Sweep, refuses(Refused))]
     fn sweep(&self, cmd: Sweep, _ctx: &Context) -> Result<Vec<Withdrew>, Refuses<Self, Sweep>> {
         positive(cmd.chunk)?;
         Ok(self
@@ -889,7 +902,7 @@ impl Wallet {
     }
 
     /// One event or none, an `Option`: closing a closed wallet is nothing.
-    #[handles(Close, refuses(Refused))]
+    #[handles_cmd(Close, refuses(Refused))]
     fn close(&self, _cmd: Close, _ctx: &Context) -> Result<Option<Closed>, Refuses<Self, Close>> {
         match self.ledger.balance() {
             0 => Ok((!self.closed).then_some(Closed {})),
@@ -899,7 +912,7 @@ impl Wallet {
 
     /// Records what the context says about the command: its stream, its id
     /// and its correlation.
-    #[handles(Note, refuses(Refused))]
+    #[handles_cmd(Note, refuses(Refused))]
     fn note(&self, _cmd: Note, ctx: &Context) -> Result<Noted, Refuses<Self, Note>> {
         Ok(Noted {
             root: ctx
@@ -928,35 +941,40 @@ impl Wallet {
         })
     }
 
-    /// A fact (sent by a policy): no `Result`. A payout the wallet cannot
-    /// cover is not refused; its refusal is recorded.
-    #[handles(Payout)]
-    fn payout(&self, fact: Payout, _ctx: &Context) -> Emit<Self> {
-        match self.ledger.covers(fact.cents) {
-            Ok(()) => Emit::of(PaidOut { cents: fact.cents }),
-            Err(_) => Emit::of(PayoutRefused {
+    /// A fact (sent by a policy): never refused, its one failure a `Bug`. A
+    /// payout the wallet cannot cover is not refused; its refusal is
+    /// recorded.
+    #[handles_fact(Payout)]
+    fn payout(&self, fact: Payout, _ctx: &Context) -> Result<FactEmit<Self>, Bug> {
+        Ok(match self.ledger.covers(fact.cents) {
+            Ok(()) => FactEmit::of([event(&PaidOut { cents: fact.cents })]),
+            Err(_) => FactEmit::of([event(&PayoutRefused {
                 cents: fact.cents,
                 short: fact.cents - self.ledger.balance(),
-            }),
-        }
+            })]),
+        })
     }
 
     /// A fact with a continuation: the gift is recorded, then whether it
     /// earns the reward is decided on the balance after it. Nothing in it
     /// can refuse: a gift over the limit is recorded all the same.
-    #[handles(Gift)]
-    fn gift(&self, fact: Gift, ctx: &Context) -> Emit<Self> {
-        Emit::of(Deposited {
+    #[handles_fact(Gift)]
+    fn gift(&self, fact: Gift, ctx: &Context) -> Result<FactEmit<Self>, Bug> {
+        Ok(FactEmit::of([event(&Deposited {
             cents: fact.cents,
             at: ctx.recorded_at(),
-        })
-        .then(Self::reward_due)
+        })])
+        .then(Self::reward_due))
     }
 
-    /// A fact's continuation step: no `Result`.
-    fn reward_due(&self, _ctx: &Context) -> Option<Rewarded> {
+    /// A fact's continuation step: the router's context, and a `Bug` its
+    /// one failure.
+    fn reward_due(&self, _ctx: &CommandContext) -> Result<FactEmit<Self>, Bug> {
         let cents = self.ledger.balance();
-        (cents >= REWARD_AT && !self.rewarded).then_some(Rewarded { cents: cents / 10 })
+        Ok(match cents >= REWARD_AT && !self.rewarded {
+            true => FactEmit::of([event(&Rewarded { cents: cents / 10 })]),
+            false => FactEmit::none(),
+        })
     }
 
     #[applies(Opened)]
@@ -1020,7 +1038,7 @@ pub struct Lamp {
 
 #[aggregate(domain = "lamp")]
 impl Lamp {
-    #[handles(SwitchOn)]
+    #[handles_cmd(SwitchOn)]
     fn switch_on(
         &self,
         _cmd: SwitchOn,
@@ -1142,7 +1160,7 @@ impl Payload for ToggleEvent {
 
 #[aggregate(domain = "toggle", command = ToggleCommand, event = ToggleEvent)]
 impl Toggle {
-    #[handles(SwitchOn)]
+    #[handles_cmd(SwitchOn)]
     fn switch_on(
         &self,
         _cmd: SwitchOn,
@@ -1151,7 +1169,7 @@ impl Toggle {
         Ok((!self.on).then_some(SwitchedOn {}))
     }
 
-    #[handles(SwitchOff)]
+    #[handles_cmd(SwitchOff)]
     fn switch_off(
         &self,
         _cmd: SwitchOff,
@@ -1214,7 +1232,7 @@ impl Badge {
     /// Issue the badge its key names; the decision's own event is folded,
     /// before the continuation runs, at the stream's next sequence, and the
     /// continuation keeps the badge it ran on ([`DECIDED`]).
-    #[handles(Issue, rooted_by = key)]
+    #[handles_cmd(Issue, rooted_by = key)]
     fn issue(&self, cmd: Issue, ctx: &Context) -> Result<Emit<Self>, Failed<Unrefusable>> {
         let due = ctx.command.next_sequence;
         Ok(
@@ -1378,7 +1396,7 @@ impl Meter {
     /// A negative reading is the caller's mistake (INVALID_ARGUMENT); one
     /// over the limit refuses by `?` (FAILED_PRECONDITION); a zero reading
     /// is the meter's bug.
-    #[handles(Gauge, refuses(Refused))]
+    #[handles_cmd(Gauge, refuses(Refused))]
     fn gauge(&self, cmd: Gauge, _ctx: &Context) -> Result<Gauged, Failed<Refuses<Self, Gauge>>> {
         if cmd.reading == 0 {
             return Err(Failed::bug(&MeterBroke { seat: 3 }));
@@ -1398,7 +1416,7 @@ impl Meter {
     /// A reading, then a step that fails both ways: a zero reading is the
     /// step's bug, a negative one its refusal (INVALID_ARGUMENT); either
     /// fails the whole decision.
-    #[handles(Tune, refuses(Refused))]
+    #[handles_cmd(Tune, refuses(Refused))]
     fn tune(&self, cmd: Tune, _ctx: &Context) -> Result<Emit<Self>, Refuses<Self, Tune>> {
         let reading = cmd.reading;
         Ok(Emit::of(Gauged { reading: 1 })
@@ -1409,7 +1427,7 @@ impl Meter {
     /// a negative one its typed refusal under NOT_FOUND.
     /// A code over 100 is the probe's failure (a retryable bug or an
     /// immediate return, [`probe_failure`]) of the code less 100.
-    #[handles(Seal, refuses(MeterSealed))]
+    #[handles_cmd(Seal, refuses(MeterSealed))]
     fn seal(&self, cmd: Seal, _ctx: &Context) -> Result<Sealed, Failed<Refuses<Self, Seal>>> {
         if cmd.code == 0 {
             return Err(Failed::bug(&MeterBroke { seat: 9 }));
@@ -1424,7 +1442,7 @@ impl Meter {
     }
 
     /// A handler with no `Failed`: its refusal choice, as is.
-    #[handles(Calibrate, refuses(Refused))]
+    #[handles_cmd(Calibrate, refuses(Refused))]
     fn calibrate(
         &self,
         _cmd: Calibrate,
@@ -1439,7 +1457,7 @@ impl Meter {
     /// A probe of an outside dependency: while it is down, the handler
     /// (or, with `step`, its continuation step) fails as `status` picks
     /// ([`probe_failure`]); once it is up, a `Probed`.
-    #[handles(Probe)]
+    #[handles_cmd(Probe)]
     fn probe(&self, cmd: Probe, _ctx: &Context) -> Result<Emit<Self>, Failed<Unrefusable>> {
         let status = cmd.status;
         if !cmd.step {
@@ -1501,6 +1519,7 @@ fn within(reading: i64) -> Result<(), Refused> {
 
 domain_type!(Climb { to: u32 });
 domain_type!(Slip {});
+domain_type!(Jam { code: i64 });
 domain_type!(Rung {});
 
 /// A decision that climbs one rung per step, as many as it takes (there
@@ -1514,7 +1533,7 @@ pub struct Ladder {
 
 #[aggregate(domain = "ladder")]
 impl Ladder {
-    #[handles(Climb)]
+    #[handles_cmd(Climb)]
     fn climb(&self, cmd: Climb, _ctx: &Context) -> Result<Emit<Self>, Failed<Unrefusable>> {
         let to = cmd.to;
         Ok(Emit::of(Rung {}).then(move |ladder: &Ladder, ctx: &Context| ladder.higher(to, ctx)))
@@ -1529,18 +1548,40 @@ impl Ladder {
         }
     }
 
-    /// A fact returns an `Emit` as a command does, its steps plain.
-    #[handles(Slip)]
-    fn slip(&self, _fact: Slip, _ctx: &Context) -> Emit<Self> {
-        Emit::of(Rung {}).then(Self::slipping)
+    /// A fact returns a `FactEmit` and chains its steps with `then`.
+    #[handles_fact(Slip)]
+    fn slip(&self, _fact: Slip, _ctx: &Context) -> Result<FactEmit<Self>, Bug> {
+        Ok(FactEmit::of([event(&Rung {})]).then(Self::slipping))
+    }
+
+    /// A fact that fails, as its `code` says: an unclassified bug, a
+    /// classified one, a retryable one, a std error's through `.bug()`, or
+    /// one in the step after its first event.
+    #[handles_fact(Jam)]
+    fn jam(&self, fact: Jam, _ctx: &Context) -> Result<FactEmit<Self>, Bug> {
+        match fact.code {
+            0 => Err(Bug::new("the ladder jammed")),
+            1 => Err(Bug::coded(
+                "toy-ladder-jammed",
+                [("rung".to_string(), self.rungs.to_string())],
+            )),
+            2 => Err(Bug::retryable(
+                RetryableStatus::Unavailable,
+                "toy-ladder-busy",
+                [],
+            )),
+            3 => "rung".parse::<u32>().bug().map(|_| FactEmit::none()),
+            _ => Ok(FactEmit::of([event(&Rung {})])
+                .then(|_, _| Err(Bug::coded("toy-ladder-step-jammed", [])))),
+        }
     }
 
     /// One more rung while below five: idempotent once there.
-    fn slipping(&self, _ctx: &Context) -> Emit<Self> {
-        match self.rungs < 5 {
-            true => Emit::of(Rung {}).then(Self::slipping),
-            false => Emit::of(None::<Rung>),
-        }
+    fn slipping(&self, _ctx: &CommandContext) -> Result<FactEmit<Self>, Bug> {
+        Ok(match self.rungs < 5 {
+            true => FactEmit::of([event(&Rung {})]).then(Self::slipping),
+            false => FactEmit::none(),
+        })
     }
 
     #[applies(Rung)]
@@ -1565,7 +1606,7 @@ pub struct Pot {
 impl Pot {
     /// A stake: its amount, whatever its window would have been (there is
     /// no conflict concept, decision 14.92).
-    #[handles(Stake)]
+    #[handles_cmd(Stake)]
     fn stake(&self, cmd: Stake, _ctx: &Context) -> Result<Staked, Failed<Unrefusable>> {
         Ok(Staked {
             cents: cmd.cents,
@@ -1574,7 +1615,7 @@ impl Pot {
     }
 
     /// The stream's root and domain, from the router's cover.
-    #[handles(Mark)]
+    #[handles_cmd(Mark)]
     fn mark(&self, _cmd: Mark, ctx: &Context) -> Result<Marked, Failed<Unrefusable>> {
         let cover = ctx.command.cover.clone().unwrap_or_default();
         Ok(Marked {
@@ -1585,7 +1626,7 @@ impl Pot {
 
     /// What the router knows of the input: its stream's head, whether it
     /// had history, and the expected sequence its command was sent with.
-    #[handles(Peek)]
+    #[handles_cmd(Peek)]
     fn peek(&self, _cmd: Peek, ctx: &Context) -> Result<Peeked, Failed<Unrefusable>> {
         let expected_sequence = match &ctx.command.arm {
             markup::InputArm::Command { expected_sequence } => expected_sequence.unwrap_or(0),
@@ -2378,6 +2419,138 @@ mod facts {
             })])
         );
         assert_eq!(wallet.len(), 3);
+    }
+}
+
+mod fact_failures {
+    use super::*;
+    use ::angzarr_embedded::angzarr_router::error::{CodedError, GrpcCode};
+
+    fn jammed(code: i64) -> (Result<Vec<Any>, Failure<Rejected>>, Stream<Ladder>) {
+        let registry = registry();
+        let mut ladder = Stream::<Ladder>::new(root(), None).unwrap();
+        let answer = execute(
+            &mut ladder,
+            &registry,
+            1,
+            fact("ladder", any(Jam { code }), "jam-1"),
+        );
+        (answer, ladder)
+    }
+
+    /// The router's error `failure` is.
+    fn coded(failure: &Failure<Rejected>) -> &CodedError {
+        match failure {
+            Failure::Kernel(KernelError::Router(error)) => error,
+            other => panic!("the router's error, not {other:?}"),
+        }
+    }
+
+    /// A fact failing with `Bug::coded` reaches the boundary as the
+    /// router's unhandled-handler-error with the handler's code as its
+    /// cause and its args under it, and nothing is written.
+    #[test]
+    fn a_classified_bug_keeps_its_code_and_args() {
+        let (answer, ladder) = jammed(1);
+        let failure = answer.expect_err("a bug");
+        let error = coded(&failure);
+        assert_eq!(error.code, "ANGZARR_REASON_UNHANDLED_HANDLER_ERROR");
+        assert_eq!(
+            error.extras.get("cause").map(String::as_str),
+            Some("toy-ladder-jammed")
+        );
+        assert_eq!(
+            error.extras.get("cause.rung").map(String::as_str),
+            Some("0")
+        );
+        assert_eq!(error.grpc, GrpcCode::Internal, "{failure:?}");
+        assert_eq!(ladder.len(), 0, "nothing written");
+    }
+
+    /// A retryable bug keeps the status the handler picked.
+    #[test]
+    fn a_retryable_bug_keeps_its_status() {
+        let (answer, _) = jammed(2);
+        let failure = answer.expect_err("a retryable bug");
+        let error = coded(&failure);
+        assert_eq!(
+            error.extras.get("cause").map(String::as_str),
+            Some("toy-ladder-busy")
+        );
+        assert_eq!(error.grpc, GrpcCode::Unavailable, "{failure:?}");
+        assert_eq!(failure.recovery(), Recovery::Retry);
+    }
+
+    /// An unclassified bug and a std error through `.bug()` are bugs, never
+    /// a refusal and never the handler's own code.
+    #[test]
+    fn an_unclassified_bug_is_a_bug_and_not_a_refusal() {
+        for code in [0, 3] {
+            let (answer, ladder) = jammed(code);
+            let failure = answer.expect_err("a bug");
+            assert!(
+                !matches!(failure, Failure::Rejected(_)),
+                "code {code}: {failure:?}"
+            );
+            assert_eq!(ladder.len(), 0, "code {code}: nothing written");
+        }
+    }
+
+    /// A step that fails with a `Bug` fails the whole decision: the first
+    /// event is not written either.
+    #[test]
+    fn a_failing_step_fails_the_whole_decision() {
+        let (answer, ladder) = jammed(5);
+        let failure = answer.expect_err("a bug in the step");
+        assert_eq!(
+            coded(&failure).extras.get("cause").map(String::as_str),
+            Some("toy-ladder-step-jammed")
+        );
+        assert_eq!(ladder.len(), 0, "one decision, nothing written");
+    }
+
+    /// A payload that is not the fact it is routed by is the router's
+    /// ANGZARR_REASON_ANY_DECODE_FAILED, through the fact's `Bug`.
+    #[test]
+    fn a_payload_that_does_not_decode_keeps_the_routers_code() {
+        let registry = registry();
+        let mut ladder = Stream::<Ladder>::new(root(), None).unwrap();
+        let garbage = Any {
+            value: vec![0xff, 0xff, 0xff],
+            ..any(Jam { code: 0 })
+        };
+        let failure = execute(
+            &mut ladder,
+            &registry,
+            1,
+            fact("ladder", garbage, "garbage-1"),
+        )
+        .expect_err("undecodable");
+        let error = coded(&failure);
+        assert_eq!(
+            error.code, "ANGZARR_REASON_ANY_DECODE_FAILED",
+            "{failure:?}"
+        );
+        assert_eq!(error.grpc, GrpcCode::Internal, "{failure:?}");
+        assert_eq!(ladder.len(), 0);
+    }
+
+    /// The fact step helper passes a step that is idempotent on its own
+    /// result, and names one that is not.
+    #[test]
+    fn the_fact_step_helper_passes_an_idempotent_step() {
+        let wallet = holding(150, 1);
+        markup::assert_fact_step_idempotent(&wallet, Wallet::reward_due, &context(2).command);
+    }
+
+    #[test]
+    #[should_panic(expected = "not idempotent")]
+    fn the_fact_step_helper_names_a_step_that_emits_again() {
+        markup::assert_fact_step_idempotent(
+            &Ladder::default(),
+            Ladder::slipping,
+            &context(2).command,
+        );
     }
 }
 
@@ -3323,7 +3496,7 @@ impl Diagnostic for AlreadyStarted {
 #[process_manager(domain = "buyin")]
 impl BuyIn {
     /// The starting input: a new correlation's buy-in begins here.
-    #[handles(StartBuyIn, starts, refuses(AlreadyStarted))]
+    #[handles_cmd(StartBuyIn, starts, refuses(AlreadyStarted))]
     fn start(
         &self,
         cmd: StartBuyIn,
@@ -3339,7 +3512,7 @@ impl BuyIn {
     }
 
     /// Not a starting input: refused for a correlation with no buy-in.
-    #[handles(RecordHeld)]
+    #[handles_cmd(RecordHeld)]
     fn record_held(
         &self,
         cmd: RecordHeld,
@@ -3351,8 +3524,8 @@ impl BuyIn {
     /// A timeout, a fact, not a starting one: dead-lettered for a
     /// correlation with no buy-in. Records the fact's origin, from the one
     /// context.
-    #[handles(BuyInExpired)]
-    fn expired(&self, _fact: BuyInExpired, ctx: &Context) -> Emit<Self> {
+    #[handles_fact(BuyInExpired)]
+    fn expired(&self, _fact: BuyInExpired, ctx: &Context) -> Result<FactEmit<Self>, Bug> {
         let external_id = match &ctx.command.arm {
             markup::InputArm::Fact { origin } => origin
                 .as_ref()
@@ -3360,15 +3533,15 @@ impl BuyIn {
                 .unwrap_or_default(),
             markup::InputArm::Command { .. } => String::new(),
         };
-        Emit::of(Expired { external_id })
+        Ok(FactEmit::of([event(&Expired { external_id })]))
     }
 
     /// The wallet's refusal of a hold, translated by the policy into the
     /// buy-in's own fact: the buy-in never reads the wallet's refusal
     /// object. Whether it had history is the router's context's.
-    #[handles(HoldLost)]
-    fn hold_lost(&self, fact: HoldLost, _ctx: &Context) -> Emit<Self> {
-        Emit::of(HoldWasLost { short: fact.short })
+    #[handles_fact(HoldLost)]
+    fn hold_lost(&self, fact: HoldLost, _ctx: &Context) -> Result<FactEmit<Self>, Bug> {
+        Ok(FactEmit::of([event(&HoldWasLost { short: fact.short })]))
     }
 
     #[applies(BuyInStarted)]
@@ -4829,7 +5002,7 @@ mod refusal_flow {
     }
 
     /// Translate: the policy's callback hands the buy-in its own fact,
-    /// which its `#[handles(HoldLost)]` records, as its own step.
+    /// which its `#[handles_fact(HoldLost)]` records, as its own step.
     #[test]
     fn translate_delivers_the_callbacks_domestic_fact() {
         let (registry, store) = funded(true, 10);
@@ -7456,53 +7629,5 @@ mod projector {
                 component: "balances".to_string()
             })
         );
-    }
-}
-
-/// `handles_cmd` and `handles_fact` are deprecated aliases of `handles`:
-/// they warn at each use, and expand through the same code.
-#[allow(deprecated)]
-mod deprecated_aliases {
-    use super::*;
-    use angzarr_embedded_macros::{handles_cmd, handles_fact};
-
-    #[derive(Clone, Default, PartialEq, Debug)]
-    pub struct Stairs {
-        rungs: u32,
-    }
-
-    #[aggregate(domain = "stairs")]
-    impl Stairs {
-        #[handles_cmd(Climb)]
-        fn climb(&self, _cmd: Climb, _ctx: &Context) -> Result<Emit<Self>, Failed<Unrefusable>> {
-            Ok(Emit::of((Rung {}, Rung {})))
-        }
-
-        #[handles_fact(Slip)]
-        fn slip(&self, _fact: Slip, _ctx: &Context) -> Emit<Self> {
-            Emit::of(Rung {})
-        }
-
-        #[applies(Rung)]
-        fn rung(&mut self, _event: Rung) {
-            self.rungs += 1;
-        }
-    }
-
-    #[test]
-    fn the_aliases_route_a_command_and_a_fact_as_handles_does() {
-        let mut registry = Registry::new();
-        registry.aggregate::<Stairs>(Stairs::default).unwrap();
-        let mut stairs = Stream::<Stairs>::new(root(), None).unwrap();
-        let climbed = run(&mut stairs, &registry, 1, any(Climb { to: 2 }));
-        assert_eq!(climbed.map(|events| events.len()), Ok(2));
-        let slipped = execute(
-            &mut stairs,
-            &registry,
-            2,
-            fact("stairs", any(Slip {}), "slip-1"),
-        );
-        assert_eq!(slipped.map(|events| events.len()), Ok(1));
-        assert_eq!(stairs.state().rungs, 3);
     }
 }

@@ -11,7 +11,7 @@ use std::time::Duration;
 use ::angzarr_embedded::markup::{self, Context, DomainMessage, Refuses};
 use ::angzarr_embedded::{Any, Payload, PayloadError, Timestamp, WireError};
 use angzarr_diagnostic::{code, Arg, Diagnostic};
-use angzarr_embedded_macros::{aggregate, applies, handles};
+use angzarr_embedded_macros::{aggregate, applies, handles_cmd};
 
 use crate::{Clock, Delay, Jitter};
 
@@ -241,7 +241,7 @@ impl Note {
 #[aggregate(domain = "note", command = NoteCommand, event = NoteEvent)]
 impl Note {
     /// Write the note: refused on a stream with history.
-    #[handles(Write, refuses(NoteRejection))]
+    #[handles_cmd(Write, refuses(NoteRejection))]
     fn write(&self, cmd: Write, ctx: &Context) -> Result<Written, Refuses<Self, Write>> {
         match ctx.command.had_prior_events {
             true => Err(NoteRejection::Written {
@@ -252,14 +252,14 @@ impl Note {
         }
     }
 
-    #[handles(Rewrite, refuses(NoteRejection))]
+    #[handles_cmd(Rewrite, refuses(NoteRejection))]
     fn rewrite(&self, cmd: Rewrite, ctx: &Context) -> Result<Rewritten, Refuses<Self, Rewrite>> {
         let _ = ctx;
         self.open()?;
         Ok(Rewritten { text: cmd.text })
     }
 
-    #[handles(Erase, refuses(NoteRejection))]
+    #[handles_cmd(Erase, refuses(NoteRejection))]
     fn erase(&self, cmd: Erase, ctx: &Context) -> Result<Erased, Refuses<Self, Erase>> {
         let _ = (cmd, ctx);
         self.open()?;

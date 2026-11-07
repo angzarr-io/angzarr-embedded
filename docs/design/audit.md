@@ -471,7 +471,10 @@ the state's codec (`with_state_codec`: a delivered starting state restored
 onto a fresh state, and the state every answer carries). The domain's
 handlers are registered on it: `#[aggregate]` and `#[process_manager]`
 generate them (`markup::Routed`); a hand-written domain registers its own
-(`on_command`, `on_fact`). `Registry::command_handler` registers any
+(`on_command`, whose handler answers an `Emit` or a refusal, and
+`on_fact`, whose handler answers the router's `Result<FactEmit, Bug>`: a
+fact is never refused, its one failure a classified bug).
+`Registry::command_handler` registers any
 `CommandHandler` (a `DomainDispatch` built by hand, or a handler in another
 process behind one) with its `ComponentDescriptor`. `Kernel::handle_any`
 handles books for such a domain.
