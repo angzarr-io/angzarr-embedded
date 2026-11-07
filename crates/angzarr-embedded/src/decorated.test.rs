@@ -40,7 +40,7 @@ use std::fmt;
 use ::angzarr_embedded::angzarr_router::domain::Emit as RouterEmit;
 use ::angzarr_embedded::markup::{
     self, assert_step_idempotent, BusinessStatus, CommandContext, Commands, Context, DomainMessage,
-    Emit, Failed, PageContext, Policy, PolicyContext, ProcessManager, ProjectionContext, Record,
+    Emit, Failed, PageContext, Policy, PolicyContext, ProcessManager, ProjectionContext,
     Refused as Translating, Refuses, Refusing, RetryableStatus, TypeName, TypedRefusal,
     Unrefusable,
 };
@@ -56,8 +56,7 @@ use ::angzarr_embedded::{
 };
 use angzarr_diagnostic::{code, Arg, Diagnostic, Report};
 use angzarr_embedded_macros::{
-    aggregate, applies, handles, handles_cmd, handles_fact, on_event, on_refused, policy,
-    process_manager, projector, projects,
+    aggregate, applies, handles, on_event, on_refused, policy, process_manager, projector, projects,
 };
 
 // ---------------------------------------------------------------- the wire
@@ -808,7 +807,7 @@ impl Wallet {
 #[aggregate(domain = "wallet", snapshot = wire::WalletSnapshot)]
 impl Wallet {
     /// Two events, a tuple: the router applies them in order.
-    #[handles_cmd(Open, refuses(Refused))]
+    #[handles(Open, refuses(Refused))]
     fn open(&self, cmd: Open, ctx: &Context) -> Result<(Opened, Deposited), Refuses<Self, Open>> {
         if self.open {
             return Err(Refused::AlreadyOpen.into());
@@ -825,7 +824,7 @@ impl Wallet {
     /// One event, stamped with the context's instant (the handler has no
     /// clock), then a continuation: whether the deposit is allowed, or
     /// earns the reward, depends on the balance after it.
-    #[handles_cmd(Deposit, refuses(Refused))]
+    #[handles(Deposit, refuses(Refused))]
     fn deposit(&self, cmd: Deposit, ctx: &Context) -> Result<Emit<Self>, Refuses<Self, Deposit>> {
         if !self.open {
             return Err(Refused::NotOpen.into());
@@ -853,7 +852,7 @@ impl Wallet {
         Ok((cents >= REWARD_AT && !self.rewarded).then_some(Rewarded { cents: cents / 10 }))
     }
 
-    #[handles_cmd(Withdraw, refuses(Refused))]
+    #[handles(Withdraw, refuses(Refused))]
     fn withdraw(&self, cmd: Withdraw, _ctx: &Context) -> Result<Withdrew, Refuses<Self, Withdraw>> {
         positive(cmd.cents)?;
         self.ledger.covers(cmd.cents)?;
@@ -862,7 +861,7 @@ impl Wallet {
 
     /// A command whose refusals are typed objects (`refuses`): it returns
     /// its event, or one of the listed objects, and nothing else compiles.
-    #[handles_cmd(Hold, refuses(InsufficientFunds, WalletClosed))]
+    #[handles(Hold, refuses(InsufficientFunds, WalletClosed))]
     fn hold(&self, cmd: Hold, _ctx: &Context) -> Result<Held, Refuses<Self, Hold>> {
         if !self.open {
             return Err(WalletClosed {}.into());
@@ -878,7 +877,7 @@ impl Wallet {
 
     /// Any number of one event, a `Vec`, each decided from the state before
     /// any of them.
-    #[handles_cmd(Sweep, refuses(Refused))]
+    #[handles(Sweep, refuses(Refused))]
     fn sweep(&self, cmd: Sweep, _ctx: &Context) -> Result<Vec<Withdrew>, Refuses<Self, Sweep>> {
         positive(cmd.chunk)?;
         Ok(self
@@ -890,7 +889,7 @@ impl Wallet {
     }
 
     /// One event or none, an `Option`: closing a closed wallet is nothing.
-    #[handles_cmd(Close, refuses(Refused))]
+    #[handles(Close, refuses(Refused))]
     fn close(&self, _cmd: Close, _ctx: &Context) -> Result<Option<Closed>, Refuses<Self, Close>> {
         match self.ledger.balance() {
             0 => Ok((!self.closed).then_some(Closed {})),
@@ -900,7 +899,7 @@ impl Wallet {
 
     /// Records what the context says about the command: its stream, its id
     /// and its correlation.
-    #[handles_cmd(Note, refuses(Refused))]
+    #[handles(Note, refuses(Refused))]
     fn note(&self, _cmd: Note, ctx: &Context) -> Result<Noted, Refuses<Self, Note>> {
         Ok(Noted {
             root: ctx
@@ -931,11 +930,11 @@ impl Wallet {
 
     /// A fact (sent by a policy): no `Result`. A payout the wallet cannot
     /// cover is not refused; its refusal is recorded.
-    #[handles_fact(Payout)]
-    fn payout(&self, fact: Payout, _ctx: &Context) -> Record<Self> {
+    #[handles(Payout)]
+    fn payout(&self, fact: Payout, _ctx: &Context) -> Emit<Self> {
         match self.ledger.covers(fact.cents) {
-            Ok(()) => Record::of(PaidOut { cents: fact.cents }),
-            Err(_) => Record::of(PayoutRefused {
+            Ok(()) => Emit::of(PaidOut { cents: fact.cents }),
+            Err(_) => Emit::of(PayoutRefused {
                 cents: fact.cents,
                 short: fact.cents - self.ledger.balance(),
             }),
@@ -945,9 +944,9 @@ impl Wallet {
     /// A fact with a continuation: the gift is recorded, then whether it
     /// earns the reward is decided on the balance after it. Nothing in it
     /// can refuse: a gift over the limit is recorded all the same.
-    #[handles_fact(Gift)]
-    fn gift(&self, fact: Gift, ctx: &Context) -> Record<Self> {
-        Record::of(Deposited {
+    #[handles(Gift)]
+    fn gift(&self, fact: Gift, ctx: &Context) -> Emit<Self> {
+        Emit::of(Deposited {
             cents: fact.cents,
             at: ctx.recorded_at(),
         })
@@ -1021,7 +1020,7 @@ pub struct Lamp {
 
 #[aggregate(domain = "lamp")]
 impl Lamp {
-    #[handles_cmd(SwitchOn)]
+    #[handles(SwitchOn)]
     fn switch_on(
         &self,
         _cmd: SwitchOn,
@@ -1143,7 +1142,7 @@ impl Payload for ToggleEvent {
 
 #[aggregate(domain = "toggle", command = ToggleCommand, event = ToggleEvent)]
 impl Toggle {
-    #[handles_cmd(SwitchOn)]
+    #[handles(SwitchOn)]
     fn switch_on(
         &self,
         _cmd: SwitchOn,
@@ -1152,7 +1151,7 @@ impl Toggle {
         Ok((!self.on).then_some(SwitchedOn {}))
     }
 
-    #[handles_cmd(SwitchOff)]
+    #[handles(SwitchOff)]
     fn switch_off(
         &self,
         _cmd: SwitchOff,
@@ -1215,7 +1214,7 @@ impl Badge {
     /// Issue the badge its key names; the decision's own event is folded,
     /// before the continuation runs, at the stream's next sequence, and the
     /// continuation keeps the badge it ran on ([`DECIDED`]).
-    #[handles_cmd(Issue, rooted_by = key)]
+    #[handles(Issue, rooted_by = key)]
     fn issue(&self, cmd: Issue, ctx: &Context) -> Result<Emit<Self>, Failed<Unrefusable>> {
         let due = ctx.command.next_sequence;
         Ok(
@@ -1379,7 +1378,7 @@ impl Meter {
     /// A negative reading is the caller's mistake (INVALID_ARGUMENT); one
     /// over the limit refuses by `?` (FAILED_PRECONDITION); a zero reading
     /// is the meter's bug.
-    #[handles_cmd(Gauge, refuses(Refused))]
+    #[handles(Gauge, refuses(Refused))]
     fn gauge(&self, cmd: Gauge, _ctx: &Context) -> Result<Gauged, Failed<Refuses<Self, Gauge>>> {
         if cmd.reading == 0 {
             return Err(Failed::bug(&MeterBroke { seat: 3 }));
@@ -1399,7 +1398,7 @@ impl Meter {
     /// A reading, then a step that fails both ways: a zero reading is the
     /// step's bug, a negative one its refusal (INVALID_ARGUMENT); either
     /// fails the whole decision.
-    #[handles_cmd(Tune, refuses(Refused))]
+    #[handles(Tune, refuses(Refused))]
     fn tune(&self, cmd: Tune, _ctx: &Context) -> Result<Emit<Self>, Refuses<Self, Tune>> {
         let reading = cmd.reading;
         Ok(Emit::of(Gauged { reading: 1 })
@@ -1410,7 +1409,7 @@ impl Meter {
     /// a negative one its typed refusal under NOT_FOUND.
     /// A code over 100 is the probe's failure (a retryable bug or an
     /// immediate return, [`probe_failure`]) of the code less 100.
-    #[handles_cmd(Seal, refuses(MeterSealed))]
+    #[handles(Seal, refuses(MeterSealed))]
     fn seal(&self, cmd: Seal, _ctx: &Context) -> Result<Sealed, Failed<Refuses<Self, Seal>>> {
         if cmd.code == 0 {
             return Err(Failed::bug(&MeterBroke { seat: 9 }));
@@ -1425,7 +1424,7 @@ impl Meter {
     }
 
     /// A handler with no `Failed`: its refusal choice, as is.
-    #[handles_cmd(Calibrate, refuses(Refused))]
+    #[handles(Calibrate, refuses(Refused))]
     fn calibrate(
         &self,
         _cmd: Calibrate,
@@ -1440,7 +1439,7 @@ impl Meter {
     /// A probe of an outside dependency: while it is down, the handler
     /// (or, with `step`, its continuation step) fails as `status` picks
     /// ([`probe_failure`]); once it is up, a `Probed`.
-    #[handles_cmd(Probe)]
+    #[handles(Probe)]
     fn probe(&self, cmd: Probe, _ctx: &Context) -> Result<Emit<Self>, Failed<Unrefusable>> {
         let status = cmd.status;
         if !cmd.step {
@@ -1514,7 +1513,6 @@ pub struct Ladder {
 }
 
 #[aggregate(domain = "ladder")]
-#[allow(dead_code)] // red: `#[handles]` is inert until the macro reads it
 impl Ladder {
     #[handles(Climb)]
     fn climb(&self, cmd: Climb, _ctx: &Context) -> Result<Emit<Self>, Failed<Unrefusable>> {
@@ -1567,7 +1565,7 @@ pub struct Pot {
 impl Pot {
     /// A stake: its amount, whatever its window would have been (there is
     /// no conflict concept, decision 14.92).
-    #[handles_cmd(Stake)]
+    #[handles(Stake)]
     fn stake(&self, cmd: Stake, _ctx: &Context) -> Result<Staked, Failed<Unrefusable>> {
         Ok(Staked {
             cents: cmd.cents,
@@ -1576,7 +1574,7 @@ impl Pot {
     }
 
     /// The stream's root and domain, from the router's cover.
-    #[handles_cmd(Mark)]
+    #[handles(Mark)]
     fn mark(&self, _cmd: Mark, ctx: &Context) -> Result<Marked, Failed<Unrefusable>> {
         let cover = ctx.command.cover.clone().unwrap_or_default();
         Ok(Marked {
@@ -1587,7 +1585,7 @@ impl Pot {
 
     /// What the router knows of the input: its stream's head, whether it
     /// had history, and the expected sequence its command was sent with.
-    #[handles_cmd(Peek)]
+    #[handles(Peek)]
     fn peek(&self, _cmd: Peek, ctx: &Context) -> Result<Peeked, Failed<Unrefusable>> {
         let expected_sequence = match &ctx.command.arm {
             markup::InputArm::Command { expected_sequence } => expected_sequence.unwrap_or(0),
@@ -3325,7 +3323,7 @@ impl Diagnostic for AlreadyStarted {
 #[process_manager(domain = "buyin")]
 impl BuyIn {
     /// The starting input: a new correlation's buy-in begins here.
-    #[handles_cmd(StartBuyIn, starts, refuses(AlreadyStarted))]
+    #[handles(StartBuyIn, starts, refuses(AlreadyStarted))]
     fn start(
         &self,
         cmd: StartBuyIn,
@@ -3341,7 +3339,7 @@ impl BuyIn {
     }
 
     /// Not a starting input: refused for a correlation with no buy-in.
-    #[handles_cmd(RecordHeld)]
+    #[handles(RecordHeld)]
     fn record_held(
         &self,
         cmd: RecordHeld,
@@ -3353,8 +3351,8 @@ impl BuyIn {
     /// A timeout, a fact, not a starting one: dead-lettered for a
     /// correlation with no buy-in. Records the fact's origin, from the one
     /// context.
-    #[handles_fact(BuyInExpired)]
-    fn expired(&self, _fact: BuyInExpired, ctx: &Context) -> Record<Self> {
+    #[handles(BuyInExpired)]
+    fn expired(&self, _fact: BuyInExpired, ctx: &Context) -> Emit<Self> {
         let external_id = match &ctx.command.arm {
             markup::InputArm::Fact { origin } => origin
                 .as_ref()
@@ -3362,15 +3360,15 @@ impl BuyIn {
                 .unwrap_or_default(),
             markup::InputArm::Command { .. } => String::new(),
         };
-        Record::of(Expired { external_id })
+        Emit::of(Expired { external_id })
     }
 
     /// The wallet's refusal of a hold, translated by the policy into the
     /// buy-in's own fact: the buy-in never reads the wallet's refusal
     /// object. Whether it had history is the router's context's.
-    #[handles_fact(HoldLost)]
-    fn hold_lost(&self, fact: HoldLost, _ctx: &Context) -> Record<Self> {
-        Record::of(HoldWasLost { short: fact.short })
+    #[handles(HoldLost)]
+    fn hold_lost(&self, fact: HoldLost, _ctx: &Context) -> Emit<Self> {
+        Emit::of(HoldWasLost { short: fact.short })
     }
 
     #[applies(BuyInStarted)]
@@ -4831,7 +4829,7 @@ mod refusal_flow {
     }
 
     /// Translate: the policy's callback hands the buy-in its own fact,
-    /// which its `#[handles_fact(HoldLost)]` records, as its own step.
+    /// which its `#[handles(HoldLost)]` records, as its own step.
     #[test]
     fn translate_delivers_the_callbacks_domestic_fact() {
         let (registry, store) = funded(true, 10);
@@ -7458,5 +7456,53 @@ mod projector {
                 component: "balances".to_string()
             })
         );
+    }
+}
+
+/// `handles_cmd` and `handles_fact` are deprecated aliases of `handles`:
+/// they warn at each use, and expand through the same code.
+#[allow(deprecated)]
+mod deprecated_aliases {
+    use super::*;
+    use angzarr_embedded_macros::{handles_cmd, handles_fact};
+
+    #[derive(Clone, Default, PartialEq, Debug)]
+    pub struct Stairs {
+        rungs: u32,
+    }
+
+    #[aggregate(domain = "stairs")]
+    impl Stairs {
+        #[handles_cmd(Climb)]
+        fn climb(&self, _cmd: Climb, _ctx: &Context) -> Result<Emit<Self>, Failed<Unrefusable>> {
+            Ok(Emit::of((Rung {}, Rung {})))
+        }
+
+        #[handles_fact(Slip)]
+        fn slip(&self, _fact: Slip, _ctx: &Context) -> Emit<Self> {
+            Emit::of(Rung {})
+        }
+
+        #[applies(Rung)]
+        fn rung(&mut self, _event: Rung) {
+            self.rungs += 1;
+        }
+    }
+
+    #[test]
+    fn the_aliases_route_a_command_and_a_fact_as_handles_does() {
+        let mut registry = Registry::new();
+        registry.aggregate::<Stairs>(Stairs::default).unwrap();
+        let mut stairs = Stream::<Stairs>::new(root(), None).unwrap();
+        let climbed = run(&mut stairs, &registry, 1, any(Climb { to: 2 }));
+        assert_eq!(climbed.map(|events| events.len()), Ok(2));
+        let slipped = execute(
+            &mut stairs,
+            &registry,
+            2,
+            fact("stairs", any(Slip {}), "slip-1"),
+        );
+        assert_eq!(slipped.map(|events| events.len()), Ok(1));
+        assert_eq!(stairs.state().rungs, 3);
     }
 }

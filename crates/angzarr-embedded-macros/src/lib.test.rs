@@ -359,7 +359,7 @@ fn handles_with_starts_on_a_process_manager_is_accepted_for_both_kinds() {
         let expanded =
             handled(Kind::ProcessManager, quote!(Cut, starts), signature).expect("expands");
         assert!(
-            expanded.contains("& [:: angzarr_embedded :: markup :: TypeName :: of :: < < Cut"),
+            expanded.contains("const STARTS : & 'static [:: angzarr_embedded :: markup :: TypeName] = & [:: angzarr_embedded :: markup :: TypeName :: of :: << Cut as"),
             "{expanded}"
         );
     }

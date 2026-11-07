@@ -1,6 +1,6 @@
 //! What angzarr-embedded-macros' expansion names: the runtime under a marked-up
 //! aggregate or process manager (`#[aggregate]`, `#[process_manager]`,
-//! `#[handles_cmd]`, `#[handles_fact]`, `#[on_refused]`, `#[applies]`),
+//! `#[handles]`, `#[on_refused]`, `#[applies]`),
 //! policy (`#[policy]`, `#[on_event]`) and projector (`#[projector]`,
 //! `#[projects]`); see angzarr-embedded-macros' crate docs. A hand-written
 //! [`Domain`] needs none of it; a hand-written component that wants what
@@ -10,7 +10,7 @@
 //!   besides itself and its input: one context, an aggregate's and a
 //!   process manager's alike, its stream's root ([`Context::root`]) and
 //!   whether a natural key is the stream's ([`Context::rooted_by`],
-//!   [`NotItsStream`]: `#[handles_cmd(C, rooted_by = field)]`).
+//!   [`NotItsStream`]: `#[handles(C, rooted_by = field)]`).
 //! - [`PageContext`]: an applier's optional third argument, where its event
 //!   sits: its stream, its sequence and its whole metadata.
 //! - [`DomainMessage`]: a domain type (angzarr-codegen's domain layer) and
@@ -21,8 +21,9 @@
 //!   order; [`Emit::then`] adds a continuation step the router runs on the
 //!   instance after them, within the same decision. It runs as
 //!   angzarr-router's own `Emit` (decision 14.104), with no step cap.
-//! - [`Record`] and [`Records`]: what a FACT handler returns: as [`Emit`],
-//!   but its continuation steps return no `Result`.
+//! - A FACT handler returns an [`Emit`] too, with no `Result`: a fact is
+//!   never refused, and the signature is the guarantee. A continuation
+//!   step of a fact's `Emit` returns a plain shape ([`StepOutcome`]).
 //! - [`Refusing`], [`Refuses`] and [`TypedRefusal`]: a command's refusal,
 //!   one of its declared typed refusal objects (decision 14.95: typed
 //!   refusals only), and [`Unrefusable`], what a command that declares
@@ -178,7 +179,7 @@ impl Context {
     /// its root is `key`'s UUIDv5 under `domain`
     /// ([`ids::compute_root`](angzarr_proto::ids::compute_root)), as
     /// [`Cover::natural`](super::CoverExt::natural) addresses it. What
-    /// `#[handles_cmd(C, rooted_by = field)]` checks before its handler
+    /// `#[handles(C, rooted_by = field)]` checks before its handler
     /// runs; [`NotItsStream`] otherwise.
     pub fn rooted_by(&self, domain: &str, key: &str) -> Result<(), NotItsStream> {
         let derived = angzarr_proto::ids::compute_root(domain, key).ok();
@@ -195,7 +196,7 @@ impl Context {
 /// A command whose natural key is not its stream's: its key's UUIDv5 under
 /// its domain is not the root it was sent to ([`Context::rooted_by`]), so
 /// it would record one entity's events on another's stream. Refused
-/// INVALID_ARGUMENT, before its handler runs, by a `#[handles_cmd(C,
+/// INVALID_ARGUMENT, before its handler runs, by a `#[handles(C,
 /// rooted_by = field)]` handler ([`run_rooted_command`]).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct NotItsStream {
@@ -244,16 +245,20 @@ pub trait DomainMessage: Clone + Send + Sync + Sized + 'static {
 /// command's typed refusals, as is or as a [`Failed`], or a bug.
 type Step<A> = Box<dyn FnOnce(&A, &Context) -> Result<Emit<A>, Failed<TypedRefusal>>>;
 
-/// Stub marker.
-pub enum Fallible {}
-/// Stub marker.
-pub enum Plain {}
-
-/// Stub: what a continuation step returns.
+/// What a continuation step returns: its events as a plain [`Emits`]
+/// shape (the step cannot fail), or a `Result` of one whose `Err` is a
+/// [`Fails`] (a refusal with one of its command's typed refusals, or a bug).
+/// `M` ([`Plain`] or [`Fallible`]) only tells the two apart.
 pub trait StepOutcome<A: Domain, M> {
     /// The step's decision.
     fn into_step(self) -> Result<Emit<A>, Failed<TypedRefusal>>;
 }
+
+/// [`StepOutcome`]'s marker for a step returning an [`Emits`] shape.
+pub enum Plain {}
+
+/// [`StepOutcome`]'s marker for a step returning a `Result`.
+pub enum Fallible {}
 
 impl<A: Domain, O: Emits<A>, E: Fails<A>> StepOutcome<A, Fallible> for Result<O, E> {
     fn into_step(self) -> Result<Emit<A>, Failed<TypedRefusal>> {
@@ -263,7 +268,7 @@ impl<A: Domain, O: Emits<A>, E: Fails<A>> StepOutcome<A, Fallible> for Result<O,
 
 impl<A: Domain, T: Emits<A>> StepOutcome<A, Plain> for T {
     fn into_step(self) -> Result<Emit<A>, Failed<TypedRefusal>> {
-        unimplemented!("stub")
+        Ok(self.into_emit())
     }
 }
 
@@ -425,109 +430,6 @@ impl<A: Domain, T: DomainMessage + Into<A::Event>> Emits<A> for Vec<T> {
     }
 }
 
-/// What a FACT handler (`#[handles_fact]`) returns: events for the router
-/// to apply, in order, and optionally one continuation step, as [`Emit`],
-/// but nothing in it can refuse. A fact already happened ("if it can't be
-/// refused, it's a fact"), so its handler returns no `Result`, and neither
-/// does any step: a step is `fn(&self, ctx: &Context) -> R`, `R` a shape
-/// ([`Records`]) or another `Record`. Same router semantics as [`Emit`]:
-/// one decision, every step's events committed together, no step cap.
-///
-/// ```text
-/// fn payout(&self, fact: Payout, ctx: &Context) -> Record<Self> {
-///     Record::of(PaidOut { .. }).then(Self::emptied)
-/// }
-///
-/// fn emptied(&self, ctx: &Context) -> Option<Emptied> { .. }
-/// ```
-///
-/// A fact handler's continuation steps are infallible: a separate type,
-/// not `Emit`, so a fallible step in a fact's chain does not compile.
-pub struct Record<A: Domain> {
-    events: Vec<A::Event>,
-    next: Option<RecordStep<A>>,
-}
-
-/// A fact's continuation step: infallible.
-type RecordStep<A> = Box<dyn FnOnce(&A, &Context) -> Record<A>>;
-
-impl<A: Domain> Record<A> {
-    /// These events, and no continuation.
-    pub fn of(events: impl Records<A>) -> Record<A> {
-        events.into_record()
-    }
-
-    /// Run `step` on the instance once these events are applied. The step
-    /// may itself return a `Record` with a continuation.
-    pub fn then<S, O>(self, step: S) -> Record<A>
-    where
-        S: FnOnce(&A, &Context) -> O + 'static,
-        O: Records<A>,
-    {
-        self.push(Box::new(move |instance, ctx| {
-            step(instance, ctx).into_record()
-        }))
-    }
-
-    /// `step` after this record's continuation, if it has one, else as it.
-    fn push(self, step: RecordStep<A>) -> Record<A> {
-        let next: RecordStep<A> = match self.next {
-            None => step,
-            Some(first) => Box::new(move |instance, ctx| first(instance, ctx).push(step)),
-        };
-        Record {
-            events: self.events,
-            next: Some(next),
-        }
-    }
-}
-
-impl<A: Domain> fmt::Debug for Record<A>
-where
-    A::Event: fmt::Debug,
-{
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Record")
-            .field("events", &self.events)
-            .field("then", &self.next.is_some())
-            .finish()
-    }
-}
-
-/// What a fact handler, or a fact's continuation step, may return: the
-/// [`Emits`] shapes (an event, a tuple of up to four, `Option`, `Vec`) or
-/// a [`Record`]; never an [`Emit`], whose steps may refuse.
-pub trait Records<A: Domain> {
-    /// The events and the continuation, if any.
-    fn into_record(self) -> Record<A>;
-}
-
-impl<A: Domain> Records<A> for Record<A> {
-    fn into_record(self) -> Record<A> {
-        self
-    }
-}
-
-macro_rules! records_shape {
-    ($([$($t:ident),+] $shape:ty;)*) => {$(
-        impl<A: Domain, $($t: DomainMessage + Into<A::Event>),+> Records<A> for $shape {
-            fn into_record(self) -> Record<A> {
-                let Emit { events, .. } = Emits::<A>::into_emit(self);
-                Record { events, next: None }
-            }
-        }
-    )*};
-}
-
-records_shape! {
-    [T] T;
-    [T1, T2] (T1, T2);
-    [T1, T2, T3] (T1, T2, T3);
-    [T1, T2, T3, T4] (T1, T2, T3, T4);
-    [T] Option<T>;
-    [T] Vec<T>;
-}
-
 /// A process manager written in the markup (`#[process_manager]`). A
 /// process manager IS A DOMAIN: its inputs are commands (which policies send
 /// it, and which it may refuse) and facts (timeouts, webhooks, refusal
@@ -543,7 +445,7 @@ records_shape! {
 ///   instance may take inputs of several correlations); a `correlation_id`
 ///   left unset is given the root.
 /// - **The start rule**, the kernel's. Only an input type it declares
-///   as starting (`#[handles_cmd(C, starts)]`, `#[handles_fact(F, starts)]`)
+///   as starting (`#[handles(C, starts)]`, `#[handles(F, starts)]`)
 ///   may start an instance. Any other input for a stream with no instance is
 ///   not delivered, decided before the handler by the type after
 ///   upcasting, FAILED_PRECONDITION `ANGZARR_REASON_PM_NO_INSTANCE`,
@@ -565,13 +467,13 @@ pub trait ProcessManager: Domain<State = Self> {
     const STARTS: &'static [TypeName];
 }
 
-/// That `A` decides command `C`: `#[handles_cmd(C)]` on its impl, or, for
+/// That `A` decides command `C`: `#[handles(C)]` on its impl, or, for
 /// a remote domain's command set ([`CommandTarget`]), written beside it.
 /// What a policy's [`Commands`] is checked against. Emitted by the macro,
 /// one per command.
 pub trait Decides<C: DomainMessage>: CommandTarget {}
 
-/// That `A` ingests fact `F`: `#[handles_fact(F)]` on its impl, or, for
+/// That `A` ingests fact `F`: `#[handles(F)]` on its impl, or, for
 /// a child-hosted domain's event set ([`EventSource`]), written beside it.
 /// What a policy's Translate callback is checked against: it must return a
 /// fact its source ingests; and what a policy's fact for its target is
@@ -581,7 +483,7 @@ pub trait Ingests<F: DomainMessage>: EventSource {}
 // ---------------------------------------------------------------- refusals
 
 /// The typed refusal objects `A`'s handler for command `C` may refuse
-/// with: `#[handles_cmd(C, refuses(T1, T2, ..))]`, the markup's
+/// with: `#[handles(C, refuses(T1, T2, ..))]`, the markup's
 /// `CommandOptions.refuses`. The macro emits it for each such command,
 /// with [`Refusing::Refuses`] a choice of exactly those types, each
 /// `From` its type (and the choice `Into` the domain's [`Rejection`]): a
@@ -1434,23 +1336,6 @@ where
     }
 }
 
-/// `record`, the markup's typed record of a fact, as angzarr-router's
-/// `Emit`: its events packed, each continuation run on the state the
-/// router folds them into; none can fail.
-fn recorded<A>(record: Record<A>) -> angzarr_router::domain::Emit<A>
-where
-    A: Domain<State = A>,
-{
-    let Record { events, next } = record;
-    let emitted = angzarr_router::domain::Emit::of(events.iter().map(|event| event.to_any()));
-    match next {
-        None => emitted,
-        Some(step) => emitted.then(move |state: &A, cctx: &CommandContext| {
-            Ok(recorded(step(state, &context_of(cctx))))
-        }),
-    }
-}
-
 /// A marked-up handler's failure, as the router carries it (decision
 /// 14.95): a typed refusal under its status (`ANGZARR_REASON_COMMAND_REFUSED`,
 /// its object in the details, and the refusal kept for an in-process
@@ -1489,7 +1374,7 @@ fn handler_error(failed: Failed<TypedRefusal>) -> HandlerError {
 /// decision as the router carries a typed refusal, under its status; there
 /// is no step cap.
 ///
-/// What `#[handles_cmd]` registers; a hand-written [`Routed`] domain
+/// What `#[handles]` registers; a hand-written [`Routed`] domain
 /// registers its own handler with it, as `#[aggregate]` would.
 pub fn run_command<A, C, O, E>(
     any: &Any,
@@ -1513,7 +1398,7 @@ where
 /// the key's ([`Context::rooted_by`]), refused INVALID_ARGUMENT
 /// ([`NotItsStream`]: a command sent to another entity's stream is the
 /// sender's mistake, and no typed refusal of the command's). What
-/// `#[handles_cmd(C, rooted_by = field)]` registers.
+/// `#[handles(C, rooted_by = field)]` registers.
 pub fn run_rooted_command<A, C, O, E>(
     any: &Any,
     state: &A,
@@ -1554,11 +1439,26 @@ where
 /// Runs a fact handler as ONE decision, for angzarr-router's
 /// `DomainDispatch::on_fact`: decodes `any` as the fact `F` (a payload
 /// that is not one is ANGZARR_REASON_ANY_DECODE_FAILED, INTERNAL), calls
-/// `handler`, and answers its record as the router's `Emit`, as
-/// [`run_command`] does. A fact is never refused, so `handler` returns no
-/// `Result`.
+/// `handler`, and answers its `Emit` as the router's, as [`run_command`]
+/// does. A fact is never refused, so `handler` returns no `Result`: the
+/// signature is the guarantee. A step that nevertheless fails is the
+/// router's to carry, and a fact's failure is a bug, dead-lettered.
 ///
-/// What `#[handles_fact]` registers.
+/// What `#[handles]` registers for a fact handler; a handler returning a
+/// `Result` does not compile:
+///
+/// ```compile_fail
+/// # use angzarr_embedded::markup::{run_fact, Context, DomainMessage, Failed, Unrefusable};
+/// # use angzarr_embedded::angzarr_router::domain::CommandContext;
+/// # use angzarr_embedded::{Any, Domain};
+/// # fn refusing<A: Domain<State = A>, F: DomainMessage>(
+/// #     any: &Any, state: &A, cctx: &CommandContext,
+/// # ) {
+/// let _ = run_fact::<A, F, _>(any, state, cctx, |_: &A, _: F, _: &Context| {
+///     Err::<A::Event, Failed<Unrefusable>>(unimplemented!())
+/// });
+/// # }
+/// ```
 pub fn run_fact<A, F, Rr>(
     any: &Any,
     state: &A,
@@ -1568,11 +1468,11 @@ pub fn run_fact<A, F, Rr>(
 where
     A: Domain<State = A>,
     F: DomainMessage,
-    Rr: Records<A>,
+    Rr: Emits<A>,
 {
     let ctx = context_of(cctx);
     let fact = input::<F>(any)?;
-    Ok(recorded(handler(state, fact, &ctx).into_record()))
+    Ok(routed(handler(state, fact, &ctx).into_emit()))
 }
 
 /// What a policy's Translate callback (`#[on_refused]`) answers on
