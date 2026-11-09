@@ -96,7 +96,7 @@ async fn pair(path: &Path) -> (SqliteStore, SqliteStore) {
 /// store from `$fresh`, a check carrying its own attributes (an edition
 /// check's `#[ignore]`). The base and read sections are stamped here, not
 /// by `store_contract!`, because each holds edition checks this adapter
-/// does not pass yet; their lists are angzarr-ports' at 44143e65, kept in
+/// does not pass yet; their lists are angzarr-ports' at 3311a3ae, kept in
 /// step by hand when the suite grows.
 macro_rules! checks {
     ($fresh:expr; $($(#[$a:meta])* $check:ident,)*) => {

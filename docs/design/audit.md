@@ -5,7 +5,7 @@ beside it (`*.test.rs`). It is angzarr-embedded's one kernel.
 
 The wire contract is angzarr's protos on angzarr-project's spec line
 (`spec/20261102-draft`, vendored at **c4b87ed**; the core crates pinned at
-**44143e65**): a `CommandBook` is a cover and ONE `CommandPage`, whose body
+**3311a3ae**): a `CommandBook` is a cover and ONE `CommandPage`, whose body
 is a `Command` (its payload and its optional `Handling`) or a `Fact` (its
 payload and its `FactOrigin`); `EventMeta.causation` is the event's direct
 cause, a command (`CommandCause`) or a fact (`FactCause`, which carries the

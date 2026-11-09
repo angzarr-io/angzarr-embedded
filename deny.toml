@@ -13,7 +13,15 @@ all-features = true
 version = 2
 # RustSec advisories. An ignore needs the advisory id and why it does not
 # apply here.
-ignore = []
+# RUSTSEC-2026-0459: the SQLite the store bundles (libsqlite3-sys 0.30.1)
+# can return uninitialized page-cache memory when a process opens a database
+# together with a `-wal` sibling of a different page size. The exposure needs
+# a database plus -wal sibling written by a less trusted party; the databases
+# here are the user's own. Delete this ignore when the SQLite store moves to
+# libsqlite3-sys >= 0.39.
+ignore = [
+  { id = "RUSTSEC-2026-0459", reason = "bundled SQLite via the store; databases are the user's own; upstream bump pending" },
+]
 
 [licenses]
 version = 2
