@@ -147,6 +147,12 @@ mutants-diff base="main":
     fi
     cargo mutants --workspace --in-diff "$patch"
 
+# The gates' own self-tests: the mutation verdict (`_mutants-verdict`) over
+# fixture cargo-mutants outputs, and the refusal of a feature rule.
+[no-exit-message]
+selftest:
+    @{{justfile_directory()}}/scripts/mutants-verdict.selftest.sh
+
 # Wire lefthook's git hooks into the repository's .git/hooks. Worktrees share
 # .git/hooks, so this is once per clone, and again whenever lefthook.yml or
 # gates/lefthook.yml names a hook not installed yet. Needs lefthook (1.13.6)
