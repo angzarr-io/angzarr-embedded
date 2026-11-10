@@ -341,8 +341,16 @@ failing gate is a finding: fix the cause and commit again; never
    every crate's new code to a 90% kill rate (`mutation_thresholds`; a new
    crate gets a threshold there before it gets code). Red tests fail it on
    every branch (no mutant can be judged against failing tests), as does a
-   run that found mutants and tested fewer: a mutation run that judged
-   nothing has shown nothing. The last run's mutants.out is kept in
+   run that found mutants and tested fewer, and a tier that found mutants
+   and judged none (every one unviable): a mutation run that judged
+   nothing has shown nothing. The verdict is `_mutants-verdict` in
+   `gates/gates.just`, inline jq over cargo-mutants' `outcomes.json`
+   (`outcomes[]`, `total_mutants`) and its exit code, no log read; its
+   self-test is `scripts/mutants-verdict.selftest.sh` (`just selftest`).
+   No feature rule reaches a mutation run: every mutation recipe refuses a
+   non-empty `feature_rules`, and a crate whose tests need a feature of its
+   own turns it on through a dev-dependency on itself (ctxloom rulings
+   99/105). The last run's mutants.out is kept in
    `target/logs/mutants-push/`. `just mutants-staged` makes the same
    judgement over the staged diff, by hand, and `just mutants-all` over the
    whole workspace at HEAD (the full pass; weekly in CI,

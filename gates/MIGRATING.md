@@ -40,3 +40,18 @@ local work, which no hook can refuse, is tested just after and the way back
 named). With a remote, record its default branch (`git remote set-head
 origin --auto`): without origin/HEAD the default branch is the first of
 init.defaultBranch, main and master that is a branch.
+
+## The mutation verdict is a recipe, and takes no feature rule
+
+Carried from ctxloom (its rulings 99/105): the verdict is the private recipe
+`_mutants-verdict <gate> <out> <rc> [thresholds]` in `gates.just`, inline jq
+over cargo-mutants' `outcomes.json` (`outcomes[]` and `total_mutants`; the
+count found no longer comes from `mutants.json`) and its exit code, with no
+log read. Besides what it failed before, it fails a tier that found mutants
+and judged none (every one unviable). `mutants-push`, `mutants-staged`,
+`mutants-all` and `_mutants-judge` refuse a non-empty `feature_rules`
+(`_mutants-no-features`) and pass no feature to cargo mutants;
+`features_prepare` runs before the tests alone. A crate whose tests need a
+feature of its own turns it on through a dev-dependency on itself
+(`<crate> = { path = ".", features = ["<feature>"] }`). Its self-test is
+`scripts/mutants-verdict.selftest.sh`, in `just selftest`.
