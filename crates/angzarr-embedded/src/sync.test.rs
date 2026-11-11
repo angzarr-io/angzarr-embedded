@@ -712,3 +712,29 @@ fn a_passed_deadline_is_coded_with_its_milliseconds() {
         "angzarr-embedded-sync-deadline-passed deadline_ms=1500"
     );
 }
+
+#[test]
+fn a_projector_not_named_that_fails_fails_the_call_as_handle_fails_it() {
+    let (balances, other) = (View::named("balances"), View::named("other"));
+    other.fail_with(Some(CodedError {
+        grpc: GrpcCode::Internal,
+        ..view_store_down()
+    }));
+    let registry = with_views(&[&balances, &other]);
+    let log = MemoryDeadLetters::new();
+    let kernel = Kernel::new(&registry).log_with(&log);
+    let store = store();
+
+    let failure = kernel
+        .handle_sync(&store, deposit(3, 25), &names(&["balances"]), &at(30))
+        .ready()
+        .err()
+        .unwrap();
+    let Failure::Projection { failures, .. } = &failure else {
+        panic!("a projector not named fails as Handle's do: {failure:?}");
+    };
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].0, "other");
+    assert_eq!(log.letters().len(), 1, "dead-lettered, as Handle does");
+    assert_eq!(balances.seen(), [2], "the named one applied");
+}
