@@ -47,8 +47,10 @@ Carried from ctxloom (its rulings 99/105): the verdict is the private recipe
 `_mutants-verdict <gate> <out> <rc> [thresholds]` in `gates.just`, inline jq
 over cargo-mutants' `outcomes.json` (`outcomes[]` and `total_mutants`; the
 count found no longer comes from `mutants.json`) and its exit code, with no
-log read. Besides what it failed before, it fails a tier that found mutants
-and judged none (every one unviable). `mutants-push`, `mutants-staged`,
+log read. Besides what it failed before, it fails a run that found mutants
+and judged none of them at all (every one unviable; owner rulings 120, 124:
+the whole run's rule, so a tier all unviable beside one that judged passes,
+its row saying "none judged"). `mutants-push`, `mutants-staged`,
 `mutants-all` and `_mutants-judge` refuse a non-empty `feature_rules`
 (`_mutants-no-features`) and pass no feature to cargo mutants;
 `features_prepare` runs before the tests alone. A crate whose tests need a

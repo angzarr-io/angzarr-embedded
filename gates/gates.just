@@ -613,9 +613,12 @@ _mutants-judge gate patch: (_mutants-no-features gate)
 # longest prefix of `thresholds` it is under), and each tier must reach its
 # threshold. Killed = caught or timed out (a mutant the tests could not finish
 # under changed behaviour); unviable (did not build) counts neither way, but a
-# tier that found mutants and judged none has shown nothing, and fails. A
-# failing verdict goes to <out>/verdict.txt beside mutants.out: its summary
-# line, then the kill rate by tier, for `_extract-mutants`. Its self-test is
+# run that found mutants and judged none of them at all (every one unviable)
+# has shown nothing, and fails (owner rulings 120, 124, amending 99: the whole
+# run's rule; a tier all unviable beside one that judged passes, its row saying
+# it judged none). A failing verdict goes to <out>/verdict.txt beside
+# mutants.out: its summary line, then the kill rate by tier, for
+# `_extract-mutants`. Its self-test is
 # scripts/mutants-verdict.selftest.sh (`just selftest`).
 [no-exit-message]
 _mutants-verdict gate out rc thresholds=mutation_thresholds:
@@ -668,16 +671,15 @@ _mutants-verdict gate out rc thresholds=mutation_thresholds:
         exit 1
     fi
     report=$(jq -r '.tiers[] | (.killed + .missed) as $viable
-        | (if $viable == 0 then 100 else (.killed * 100 / $viable | floor) end) as $rate
-        | "\(if .killed * 100 >= .min * $viable then "pass" else "FAIL" end)  \(.prefix): \(.killed)/\($viable) killed (\($rate)%), threshold \(.min)%"
+        | "\(if .killed * 100 >= .min * $viable then "pass" else "FAIL" end)  \(.prefix): "
+            + (if $viable == 0 then "none judged"
+               else "\(.killed)/\($viable) killed (\(.killed * 100 / $viable | floor)%), threshold \(.min)%" end)
             + (if .unviable > 0 then "; \(.unviable) unviable, not counted" else "" end)
             + (if .timeout > 0 then "; \(.timeout) timed out, counted killed" else "" end)' <<< "$judged")
     echo "$gate: kill rate by tier:"
     sed 's/^/  /' <<< "$report"
-    hollow=$(jq -r '[.tiers[] | select(.killed + .missed == 0)
-        | "\(.prefix): \(.found) mutants found and none judged (every one unviable)"] | join("; ")' <<< "$judged")
-    if [ -n "$hollow" ]; then
-        verdict "a tier judged nothing: $hollow" \
+    if [ "$(jq '[.tiers[] | .killed + .missed] | add' <<< "$judged")" -eq 0 ]; then
+        verdict "the run judged nothing: $found mutants found and none judged (every one unviable)" \
             "a mutant that cannot build is skipped by #[cfg_attr(test, mutants::skip)] with its reason, never by a lower bar" \
             "kill rate by tier:" "$(sed 's/^/  /' <<< "$report")"
         exit 1
