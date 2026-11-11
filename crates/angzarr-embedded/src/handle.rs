@@ -114,6 +114,7 @@ pub struct Kernel<'k> {
     policy_bug: OnPolicyBug,
     retry: OnRetryable,
     wait: &'k dyn Wait,
+    sync_deadline: Option<std::time::Duration>,
 }
 
 /// What the kernel does with a step's retryable failure (decision 14.37:
@@ -222,6 +223,14 @@ fn default_wait(threads: bool) -> &'static dyn Wait {
         true => &ThreadWait,
         false => &NoWait,
     }
+}
+
+/// A SIMPLE call's deadline by default: [`DEFAULT_SYNC_DEADLINE`](super::DEFAULT_SYNC_DEADLINE)
+/// on a target with threads, whose own [`Wait`] times it; none without
+/// them, whose own wait completes at once and would time out every
+/// projector that does not answer at once.
+pub(crate) fn default_sync_deadline(threads: bool) -> Option<std::time::Duration> {
+    threads.then_some(super::sync::DEFAULT_SYNC_DEADLINE)
 }
 
 /// The kernel's own [`Wait`] without threads (wasm32): each wait completes
@@ -424,6 +433,7 @@ impl<'k> Kernel<'k> {
             policy_bug: OnPolicyBug::default(),
             retry: OnRetryable::default(),
             wait: default_wait(THREADS),
+            sync_deadline: default_sync_deadline(THREADS),
         }
     }
 
@@ -452,6 +462,23 @@ impl<'k> Kernel<'k> {
     /// How this kernel retries a step's retryable failure.
     pub fn retryable(&self) -> OnRetryable {
         self.retry
+    }
+
+    /// Bounds a SIMPLE call's wait for the projectors it names
+    /// ([`Kernel::handle_sync`]) by `deadline`, timed on the kernel's
+    /// [`Wait`]; `None` waits for as long as they take. By default
+    /// [`DEFAULT_SYNC_DEADLINE`](super::DEFAULT_SYNC_DEADLINE), but on
+    /// wasm32, whose own wait completes at once: there it is `None`, and
+    /// an application that injects its timer ([`Kernel::wait_with`]) sets
+    /// its deadline here.
+    pub fn sync_within(mut self, deadline: Option<std::time::Duration>) -> Kernel<'k> {
+        self.sync_deadline = deadline;
+        self
+    }
+
+    /// How long a SIMPLE call waits for the projectors it names.
+    pub fn sync_deadline(&self) -> Option<std::time::Duration> {
+        self.sync_deadline
     }
 
     /// Does `policy_bug` with a policy's position when one of its steps
@@ -637,6 +664,32 @@ impl<'k> Kernel<'k> {
         let checked = check(book, self.registry.catalog())
             .map_err(|m| Failure::Kernel(KernelError::Malformed(m)))?;
         self.handle_checked(store, checked, sampled).await
+    }
+
+    /// SIMPLE (angzarr's `HandleSync`, docs/design/command-handling.md
+    /// §10): `book`, for whatever registered domain's stream it names, as
+    /// [`Kernel::handle_any`] handles it, answered once each projector
+    /// `projectors` names has projected the events, with each one's
+    /// [`Projection`](crate::v1::Projection) ([`HandledSync`](super::HandledSync);
+    /// see [`super::sync`]). A name listed twice is waited for once.
+    /// Refused before anything runs: naming none
+    /// ([`KernelError::SyncNoProjectors`]), or one not registered for the
+    /// events of the book's domain, an unknown name included
+    /// ([`KernelError::SyncProjectorNotSubscribed`]); a malformed book is
+    /// refused as [`Kernel::handle_any`] refuses it. A named projector that
+    /// fails, or outlasts the deadline ([`Kernel::sync_within`]), fails the
+    /// call [`KernelError::SyncProjectionFailed`] with its decision
+    /// committed; resent with the same command id, the call is a DUPLICATE
+    /// whose named projectors are handed the command's events again.
+    pub async fn handle_sync<S: Store>(
+        &self,
+        store: &S,
+        book: CommandBook,
+        projectors: &[String],
+        sampled: &Sampled,
+    ) -> Result<super::HandledSync, Failure<Rejected>> {
+        let _ = (store, book, projectors, sampled);
+        unimplemented!("handle_sync")
     }
 
     /// [`Kernel::handle`] from step 2 on, answering the dead letters the

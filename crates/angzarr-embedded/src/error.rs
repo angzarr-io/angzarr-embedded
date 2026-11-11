@@ -51,7 +51,8 @@ pub enum Failure<R> {
     },
     /// The book was malformed, or the kernel or the store failed at the
     /// originating stream, its write included (a conflict). Nothing was
-    /// committed.
+    /// committed, but for a SIMPLE call's named projector that failed
+    /// ([`KernelError::SyncProjectionFailed`]): its decision committed.
     Kernel(KernelError),
     /// The chain COMMITTED, then marked-up projectors (run after the
     /// commit and awaited) failed: each `(projector, error)` in
@@ -228,6 +229,32 @@ pub enum KernelError {
     HandlerUnavailable {
         stream: Cover,
         cause: String,
+    },
+    /// A SIMPLE call ([`Kernel::handle_sync`](super::Kernel::handle_sync))
+    /// named no projector to wait for: refused before anything ran.
+    /// angzarr's INVALID_ARGUMENT, `ANGZARR_REASON_SYNC_NO_PROJECTORS`
+    /// (decision 14.107: a caller that waits for none calls Handle).
+    SyncNoProjectors,
+    /// A SIMPLE call named `projector`, which is not registered for the
+    /// events of the command's `domain` (an unknown name included): refused
+    /// before anything ran. angzarr's INVALID_ARGUMENT,
+    /// `ANGZARR_REASON_SYNC_PROJECTOR_NOT_SUBSCRIBED`.
+    SyncProjectorNotSubscribed {
+        domain: String,
+        projector: String,
+    },
+    /// A SIMPLE call's named `projector` failed to project the events of
+    /// `stream` the command committed, or was still running when the
+    /// call's deadline passed: `cause` its failure's key, or
+    /// [`DeadlinePassed`](super::DeadlinePassed). The decision stays
+    /// committed; the call is answered with no projection at all, and is
+    /// never dead-lettered: its caller resends it with the same command id,
+    /// a DUPLICATE that waits on the projectors again (decision 14.105).
+    /// angzarr's UNAVAILABLE, `ANGZARR_REASON_SYNC_PROJECTION_FAILED`.
+    SyncProjectionFailed {
+        stream: Cover,
+        projector: String,
+        cause: Report,
     },
 }
 
@@ -436,6 +463,9 @@ impl KernelError {
             KernelError::FactDeadLettered { .. } => Spec(K::FactDeadLettered),
             KernelError::ChainTooDeep { .. } => Spec(K::ChainTooDeep),
             KernelError::HandlerUnavailable { .. } => Spec(K::HandlerUnavailable),
+            KernelError::SyncNoProjectors => Spec(K::SyncNoProjectors),
+            KernelError::SyncProjectorNotSubscribed { .. } => Spec(K::SyncProjectorNotSubscribed),
+            KernelError::SyncProjectionFailed { .. } => Spec(K::SyncProjectionFailed),
             KernelError::UnknownType { .. } => Own(code!("unknown-type")),
             KernelError::InvalidPayload { .. } => Own(code!("invalid-payload")),
             KernelError::Upcast { .. } => Own(code!("upcast")),
@@ -454,10 +484,13 @@ impl KernelError {
         match self {
             KernelError::Malformed(_)
             | KernelError::UnknownType { .. }
-            | KernelError::InvalidPayload { .. } => Recovery::Invalid,
+            | KernelError::InvalidPayload { .. }
+            | KernelError::SyncNoProjectors
+            | KernelError::SyncProjectorNotSubscribed { .. } => Recovery::Invalid,
             KernelError::Store(error) => error.recovery(),
             KernelError::Router(error) => router_recovery(error),
             KernelError::HandlerUnavailable { .. }
+            | KernelError::SyncProjectionFailed { .. }
             | KernelError::Upcast {
                 error: UpcastError::Unavailable { .. },
                 ..
@@ -607,8 +640,11 @@ impl KernelError {
             | KernelError::WrongDomain { stream, .. }
             | KernelError::BeforeSnapshot { stream, .. }
             | KernelError::Unreadable { stream, .. }
-            | KernelError::HandlerUnavailable { stream, .. } => Some(stream),
+            | KernelError::HandlerUnavailable { stream, .. }
+            | KernelError::SyncProjectionFailed { stream, .. } => Some(stream),
             KernelError::Malformed(_)
+            | KernelError::SyncNoProjectors
+            | KernelError::SyncProjectorNotSubscribed { .. }
             | KernelError::ChainTooDeep { .. }
             | KernelError::UnregisteredDomain { .. }
             | KernelError::Replay(_)
@@ -677,6 +713,17 @@ impl KernelError {
             KernelError::HandlerUnavailable { stream: s, cause } => vec![
                 (args::DOMAIN, s.domain.as_str().into()),
                 (args::CAUSE, cause.as_str().into()),
+            ],
+            KernelError::SyncNoProjectors => Vec::new(),
+            KernelError::SyncProjectorNotSubscribed { domain, projector } => vec![
+                (args::DOMAIN, domain.as_str().into()),
+                (args::PROJECTOR, projector.as_str().into()),
+            ],
+            KernelError::SyncProjectionFailed {
+                projector, cause, ..
+            } => vec![
+                (args::PROJECTOR, projector.as_str().into()),
+                (args::CAUSE, Arg::nested(cause)),
             ],
         }
     }

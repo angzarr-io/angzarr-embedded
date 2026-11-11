@@ -44,6 +44,7 @@ projection-failed = the command committed, then { $failures ->
    *[other] { $failures } projectors failed, the first { $projector }: { $error }
 }
 downstream = a policy command down the chain failed, at depth { $depth }: { $error }
+sync-deadline-passed = the projector was still running when the call's deadline of { $deadline_ms } ms passed
 policy-output-no-body = a policy's output holds neither a command nor a fact
 unknown-type = stream { $stream }'s domain does not decode the type { $type_url }
 invalid-payload = a { $type_url } for stream { $stream } is not a valid value: { $reason }

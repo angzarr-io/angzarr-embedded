@@ -100,6 +100,7 @@ mod registry;
 mod route;
 mod store;
 mod stream;
+mod sync;
 mod target;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;
@@ -192,6 +193,7 @@ pub use store::{
 #[cfg(any(test, feature = "test-support"))]
 pub use stream::execute::Executed;
 pub use stream::{Envelope, Stream};
+pub use sync::{DeadlinePassed, HandledSync, DEFAULT_SYNC_DEADLINE};
 pub use target::{Answered, Coordinated, CoordinatorPort, Target};
 pub use upcast::{UpcastFn, UpcastPort, Upcaster};
 pub use wire::WireError;
@@ -251,6 +253,9 @@ pub fn diagnostic_samples() -> Vec<Box<dyn angzarr_diagnostic::Diagnostic>> {
         key: "swift-amber-falcon".to_string(),
     }));
     samples.push(Box::new(policy::OutputNoBody));
+    samples.push(Box::new(DeadlinePassed {
+        deadline: std::time::Duration::from_millis(250),
+    }));
     samples.push(Box::new(markup::UndoTargetsCommand {
         step: "reserve stock",
         command: "toy.v1.Restock".to_string(),
@@ -370,6 +375,18 @@ fn kernel_samples() -> Vec<KernelError> {
         KernelError::HandlerUnavailable {
             stream: sample_stream(),
             cause: "not-running".to_string(),
+        },
+        KernelError::SyncNoProjectors,
+        KernelError::SyncProjectorNotSubscribed {
+            domain: sample_domain(),
+            projector: "balances".to_string(),
+        },
+        KernelError::SyncProjectionFailed {
+            stream: sample_stream(),
+            projector: "balances".to_string(),
+            cause: Report::of(&DeadlinePassed {
+                deadline: std::time::Duration::from_secs(30),
+            }),
         },
     ]
 }
