@@ -502,8 +502,6 @@ fn a_named_projector_that_fails_fails_the_call_its_decision_committed_and_a_rese
     assert_eq!(
         coded.extras.into_iter().collect::<Vec<_>>(),
         [
-            ("stream".to_string(), stream),
-            ("projector".to_string(), "balances".to_string()),
             (
                 "cause".to_string(),
                 "ANGZARR_REASON_UNHANDLED_HANDLER_ERROR".to_string()
@@ -512,7 +510,10 @@ fn a_named_projector_that_fails_fails_the_call_its_decision_committed_and_a_rese
                 "cause.cause".to_string(),
                 "VIEW_STORE_UNAVAILABLE".to_string()
             ),
-        ]
+            ("projector".to_string(), "balances".to_string()),
+            ("stream".to_string(), stream),
+        ],
+        "the args by name, as the metadata holds them"
     );
     assert_eq!(account_sequences(&store), [0, 1, 2], "the decision stays");
     assert_eq!(log.letters(), [], "nothing is dead-lettered");

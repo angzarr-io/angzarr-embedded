@@ -49,6 +49,9 @@
 //!   are the caller's [`Failure::Projection`]. A failing projection never
 //!   undoes a write. A projector caught up from the store instead is a
 //!   [`CatchUp`](super::CatchUp)'s.
+//! - **A SIMPLE call** ([`Kernel::handle_sync`], [`super::sync`]) is this
+//!   call, answering the projections of the projectors it names, whose
+//!   failure (or deadline) is its caller's, never dead-lettered.
 //!
 //! Which policies run is the registry's one list
 //! ([`Registry::policy`]), in registration order, so a chain can come back
@@ -87,6 +90,7 @@ use super::store::{
     Write,
 };
 use super::stream::{Envelope, Stream};
+use super::sync::Waited;
 use super::target::Target;
 use super::upcast::upcast_pages;
 use angzarr_diagnostic::Report;
@@ -530,7 +534,7 @@ impl<'k> Kernel<'k> {
         S: Store,
     {
         let checked = self.check::<D>(book)?;
-        self.handle_checked(store, checked, sampled).await
+        self.handle_checked(store, checked, sampled, None).await
     }
 
     /// The `D` stream `stream` as the kernel's step 3 loads it, and its
@@ -663,7 +667,7 @@ impl<'k> Kernel<'k> {
     ) -> Result<Handled, Failure<Rejected>> {
         let checked = check(book, self.registry.catalog())
             .map_err(|m| Failure::Kernel(KernelError::Malformed(m)))?;
-        self.handle_checked(store, checked, sampled).await
+        self.handle_checked(store, checked, sampled, None).await
     }
 
     /// SIMPLE (angzarr's `HandleSync`, docs/design/command-handling.md
@@ -688,21 +692,39 @@ impl<'k> Kernel<'k> {
         projectors: &[String],
         sampled: &Sampled,
     ) -> Result<super::HandledSync, Failure<Rejected>> {
-        let _ = (store, book, projectors, sampled);
-        unimplemented!("handle_sync")
+        let checked = check(book, self.registry.catalog())
+            .map_err(|m| Failure::Kernel(KernelError::Malformed(m)))?;
+        let names = super::sync::named(projectors, checked.domain(), self.registry)
+            .map_err(Failure::Kernel)?;
+        let stream = checked.cover().clone();
+        let mut waited = Waited::new(names, self.sync_deadline, self.wait);
+        let handled = self
+            .handle_checked(store, checked, sampled, Some(&mut waited))
+            .await;
+        // A named projector's failure is the call's first: its caller
+        // resends, which waits on the named projectors again.
+        let projections = waited.finish(&stream).map_err(Failure::Kernel)?;
+        Ok(super::HandledSync {
+            handled: handled?,
+            projections,
+        })
     }
 
     /// [`Kernel::handle`] from step 2 on, answering the dead letters the
-    /// call wrote ([`lettered`]).
+    /// call wrote ([`lettered`]); a SIMPLE call's named projectors run as
+    /// `waited` says.
     async fn handle_checked<S: Store>(
         &self,
         store: &S,
         checked: Checked,
         sampled: &Sampled,
+        waited: Option<&mut Waited<'_>>,
     ) -> Result<Handled, Failure<Rejected>> {
         let letters = CallLetters::new(self.dead_letters, Some(sampled.now));
         let mut port = StorePort::new(store, &letters);
-        let handled = self.chain(&mut port, &letters, checked, sampled).await;
+        let handled = self
+            .chain(&mut port, &letters, checked, sampled, waited)
+            .await;
         lettered(handled, letters.take())
     }
 
@@ -713,6 +735,7 @@ impl<'k> Kernel<'k> {
         letters: &CallLetters<'_>,
         checked: Checked,
         sampled: &Sampled,
+        waited: Option<&mut Waited<'_>>,
     ) -> Result<Handled, Failure<Rejected>> {
         let mut run = Run::new(self, sampled, letters);
         let identified = checked.identify(sampled);
@@ -760,7 +783,13 @@ impl<'k> Kernel<'k> {
                         .push_back((cover, Vec::new(), Some(first.sequence)));
                     run.settle(port).await.map_err(downstream)?;
                 }
-                self.run_projectors(&run.recorded.steps, port, letters)
+                // A SIMPLE call's named projectors are handed the
+                // command's own events again, and waited for again.
+                let committed = Committed {
+                    steps: &run.recorded.steps,
+                    again: Some(&events),
+                };
+                self.run_projectors(committed, port, letters, waited)
                     .await
                     .map_err(|failures| Failure::Projection {
                         committed: run.recorded.books,
@@ -774,7 +803,7 @@ impl<'k> Kernel<'k> {
             }
             Origin::Forwarded(Forwarded::Applied(events)) => {
                 run.answered(events);
-                self.finish(Handled::Applied(run.recorded), port, letters)
+                self.finish(Handled::Applied(run.recorded), port, letters, waited)
                     .await
             }
             Origin::Wrote(head) => {
@@ -782,7 +811,8 @@ impl<'k> Kernel<'k> {
                 let settled = run.settle(port).await.map_err(downstream);
                 let recorded = run.recorded;
                 settled?;
-                self.finish(Handled::Applied(recorded), port, letters).await
+                self.finish(Handled::Applied(recorded), port, letters, waited)
+                    .await
             }
         }
     }
@@ -874,7 +904,7 @@ impl<'k> Kernel<'k> {
         let recorded = run.recorded;
         settled?;
         match self
-            .finish(Handled::Applied(recorded), port, letters)
+            .finish(Handled::Applied(recorded), port, letters, None)
             .await?
         {
             Handled::Applied(recorded) => Ok(recorded),
@@ -888,12 +918,17 @@ impl<'k> Kernel<'k> {
         handled: Handled,
         port: &mut P,
         letters: &CallLetters<'_>,
+        waited: Option<&mut Waited<'_>>,
     ) -> Result<Handled, Failure<R>> {
         let (steps, books) = match &handled {
             Handled::Applied(recorded) => (recorded.steps.clone(), recorded.books.clone()),
             Handled::Duplicate(..) => return Ok(handled),
         };
-        self.run_projectors(&steps, port, letters)
+        let committed = Committed {
+            steps: &steps,
+            again: None,
+        };
+        self.run_projectors(committed, port, letters, waited)
             .await
             .map_err(|failures| Failure::Projection {
                 committed: books,
@@ -910,14 +945,17 @@ impl<'k> Kernel<'k> {
     /// dead letters they raised are kept in a write of their own (a
     /// projector's step has no caller left). A failure to keep them leaves
     /// them the call's answer alone: the failed call is retried, a
-    /// duplicate, which runs the projectors again.
+    /// duplicate, which runs the projectors again. A SIMPLE call's named
+    /// projectors run through `waited` instead ([`Waited::project`]):
+    /// their failure is in it, the call's own, and never here.
     async fn run_projectors<P: Port>(
         &self,
-        committed: &[EventBook],
+        committed: Committed<'_>,
         port: &mut P,
         letters: &CallLetters<'_>,
+        waited: Option<&mut Waited<'_>>,
     ) -> Result<(), Vec<(String, Report)>> {
-        let failures = self.project_all(committed, letters).await;
+        let failures = self.project_all(committed, letters, waited).await;
         if failures.is_empty() {
             return Ok(());
         }
@@ -925,22 +963,31 @@ impl<'k> Kernel<'k> {
         Err(failures)
     }
 
-    /// Every projector over `committed`: the failures, by projector.
+    /// Every projector over `committed`: the failures, by projector, of
+    /// those `waited` does not name.
     async fn project_all(
         &self,
-        committed: &[EventBook],
+        committed: Committed<'_>,
         letters: &CallLetters<'_>,
+        mut waited: Option<&mut Waited<'_>>,
     ) -> Vec<(String, Report)> {
         let mut failures = Vec::new();
         for entry in self.registry.projectors() {
-            let books = committed.iter().filter(|book| {
+            let ours = |book: &&EventBook| {
                 !book.pages.is_empty()
                     && book
                         .cover
                         .as_ref()
                         .is_some_and(|c| entry.sources.contains(&c.domain))
-            });
-            for book in books {
+            };
+            if let Some(waited) = waited.as_deref_mut().filter(|w| w.waits_for(&entry.name)) {
+                let books = committed.again.into_iter().chain(committed.steps);
+                for book in books.filter(ours) {
+                    waited.project(&entry.name, &*entry.handler, book).await;
+                }
+                continue;
+            }
+            for book in committed.steps.iter().filter(ours) {
                 if let Err(error) = self
                     .project_book(&entry.name, &*entry.handler, book, letters)
                     .await
@@ -1021,6 +1068,15 @@ impl<'k> Kernel<'k> {
         }
         Ok(checked)
     }
+}
+
+/// What a call's projectors are handed: each step's committed book, and,
+/// for a SIMPLE call's named projectors only, a duplicate's own events
+/// first (`again`), which they project again.
+#[derive(Clone, Copy)]
+struct Committed<'c> {
+    steps: &'c [EventBook],
+    again: Option<&'c EventBook>,
 }
 
 /// Whether `rejected` is the coordinator's own refusal of a command whose

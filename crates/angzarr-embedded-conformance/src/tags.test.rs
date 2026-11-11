@@ -30,14 +30,16 @@ pub(crate) struct Tag {
 /// one stream, with the policy's position on its source, run before the
 /// call returns. There is no bus, so nothing is delivered asynchronously
 /// (no HandleAsync, no queued command, no command waiting for its
-/// component to register), and no sync mode chooses how much of the chain a
-/// caller waits for: every caller waits for all of it. A step left undone
+/// component to register), and no mode chooses how much of the chain a
+/// caller waits for: every caller waits for all of it, a SIMPLE call
+/// (`Kernel::handle_sync`, whose named projectors' projections it answers
+/// too) as a DECISION call. A step left undone
 /// (a crash, a failed store) is resumed by position (`Kernel::resume`) and
 /// deduplicated by its derived command id. angzarr runs the same steps
 /// asynchronously, from a bus.
 const IN_PROCESS_CHAIN: Tag = Tag {
     name: "divergence_in_process_chain",
-    why: "the chain runs in process and the caller waits for all of it: no bus, no asynchronous delivery, no sync modes",
+    why: "the chain runs in process and the caller waits for all of it, whatever the mode: no bus, no asynchronous delivery",
 };
 
 /// No transient outbox. angzarr-embedded delivers each step in process, so
@@ -124,6 +126,13 @@ const UNBOUND_FOLD: Tag = Tag {
 };
 
 /// No step binding drives the scenario yet.
+/// HandleSync is the kernel's `Kernel::handle_sync`, held to these
+/// scenarios by its own tests (angzarr-embedded's `sync.test.rs`).
+const UNBOUND_SYNC: Tag = Tag {
+    name: "unbound_sync",
+    why: "Kernel::handle_sync serves it, tested in the kernel's sync.test.rs; no step binding drives HandleSync yet",
+};
+
 const UNBOUND: Tag = Tag {
     name: "unbound",
     why: "no step binding drives it yet",
@@ -239,11 +248,11 @@ const TAGGED: &[(&str, Tag)] = &[
     ("C-0426", IN_PROCESS_CHAIN),
     ("C-0427", IN_PROCESS_CHAIN),
     ("C-0429", IN_PROCESS_CHAIN),
-    ("C-0808", IN_PROCESS_CHAIN),
-    ("C-0809", IN_PROCESS_CHAIN),
-    ("C-0810", IN_PROCESS_CHAIN),
-    ("C-0677", IN_PROCESS_CHAIN),
-    ("C-0811", IN_PROCESS_CHAIN),
+    ("C-0808", UNBOUND_SYNC),
+    ("C-0809", UNBOUND_SYNC),
+    ("C-0810", UNBOUND_SYNC),
+    ("C-0677", UNBOUND_SYNC),
+    ("C-0811", UNBOUND_SYNC),
     // temporal_query.feature
     ("C-0402", NO_QUERY),
     ("C-0403", NO_QUERY),
