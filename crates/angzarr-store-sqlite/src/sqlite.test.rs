@@ -24,9 +24,9 @@ use angzarr_ports::contract::{
     append, at, command, correlated, edition_stream, main_stream, page, snapshot,
 };
 use angzarr_ports::{
-    Arg, EventStore, Export, ExportRow, Migrations, Outbox, PositionKey, PositionStore, Purge,
-    ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, Slice, SnapshotStore, StoreError,
-    StreamRef, Watch,
+    Arg, CommitNotify, CommitWait, DeadLetterStore, EventStore, Export, ExportRow, Migrations,
+    Outbox, PositionKey, PositionStore, Purge, ReadByCorrelation, ReadStore, ReadUnit,
+    ReadUntilTime, Slice, SnapshotStore, StoreError, StreamRef, Watch,
 };
 use prost::Message;
 use sqlx::migrate::Migrator;
@@ -361,6 +361,160 @@ mod export_every_kind {
         #[tokio::test],
         SqliteStore::open_in_memory().await.unwrap()
     );
+}
+
+mod notify {
+    use super::*;
+    angzarr_ports::store_contract!(
+        notify,
+        #[tokio::test],
+        SqliteStore::open_in_memory().await.unwrap()
+    );
+}
+
+mod notify_on_a_file {
+    use super::*;
+    angzarr_ports::store_contract!(
+        notify,
+        #[tokio::test],
+        SqliteStore::open(&database()).await.unwrap()
+    );
+}
+
+mod shared_handles_notify {
+    use super::*;
+    angzarr_ports::store_contract!(shared_handles_notify, #[tokio::test], pair(&database()).await);
+}
+
+// ------------------------------------------------------- the push, the close
+
+/// Whether `wait` has resolved, polled once.
+fn resolved(wait: &mut CommitWait) -> bool {
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+    std::pin::Pin::new(wait).poll(&mut Context::from_waker(Waker::noop())) == Poll::Ready(())
+}
+
+/// Why: the push is per file: a commit to one database never wakes a
+/// follower of another, and two databases in memory are two databases.
+#[tokio::test]
+async fn a_commit_wakes_only_its_own_files_followers() {
+    let (one, two) = (database(), database());
+    let a = SqliteStore::open(&one).await.unwrap();
+    let b = SqliteStore::open(&two).await.unwrap();
+    let mut on_b = b.next_commit();
+    append(&a, stream(1), 0, &[page(0, 1)]).await.unwrap();
+    assert!(!resolved(&mut on_b), "another file's commit");
+    let (m, n) = (
+        SqliteStore::open_in_memory().await.unwrap(),
+        SqliteStore::open_in_memory().await.unwrap(),
+    );
+    let mut on_n = n.next_commit();
+    append(&m, stream(1), 0, &[page(0, 1)]).await.unwrap();
+    assert!(!resolved(&mut on_n), "another database in memory");
+    append(&b, stream(1), 0, &[page(0, 1)]).await.unwrap();
+    assert!(resolved(&mut on_b), "its own file's commit");
+}
+
+/// Why: a file's handles share its signal only while one is open: once
+/// the last is dropped, the file is forgotten, and a handle opened later
+/// starts a signal of its own.
+#[tokio::test]
+async fn a_file_no_handle_holds_is_forgotten() {
+    let path = database();
+    let first = SqliteStore::open(&path).await.unwrap();
+    let second = SqliteStore::open(&path).await.unwrap();
+    assert!(super::signalled(&path), "held while a handle is open");
+    drop(first);
+    assert!(super::signalled(&path), "held by the other handle");
+    drop(second);
+    assert!(!super::signalled(&path), "forgotten with its last handle");
+    let again = SqliteStore::open(&path).await.unwrap();
+    assert!(super::signalled(&path));
+    drop(again);
+}
+
+/// Why: every kind of commit is pushed, not only a step's write: a
+/// snapshot, a purge, a dead letter drained or removed, an outbox entry
+/// cleared, each wakes a wait armed before it.
+#[tokio::test]
+async fn every_kind_of_commit_is_pushed() {
+    let store = SqliteStore::open_in_memory().await.unwrap();
+    let s = stream(1);
+    append(&store, s, 0, &[page(0, 1)]).await.unwrap();
+    let mut wait = store.next_commit();
+    store.write_snapshot(s, &snapshot(0, "v1")).await.unwrap();
+    assert!(resolved(&mut wait), "a snapshot");
+    let mut wait = store.next_commit();
+    store.purge(s, 1).await.unwrap();
+    assert!(resolved(&mut wait), "a purge");
+    let mut wait = store.next_commit();
+    store.drain_dead_letters(s).await.unwrap();
+    assert!(resolved(&mut wait), "a drain");
+    let mut wait = store.next_commit();
+    store.remove_dead_letters(&[]).await.unwrap();
+    assert!(resolved(&mut wait), "a removal");
+    let mut wait = store.next_commit();
+    store.clear(&[]).await.unwrap();
+    assert!(resolved(&mut wait), "a clear");
+    let mut wait = store.next_commit();
+    assert!(store.purge(s, 7).await.is_err(), "a stale purge is refused");
+    assert!(!resolved(&mut wait), "and pushes nothing");
+}
+
+/// The size of the file beside `path` with `suffix`, 0 when there is none.
+fn beside(path: &Path, suffix: &str) -> u64 {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(suffix);
+    std::fs::metadata(PathBuf::from(name)).map_or(0, |meta| meta.len())
+}
+
+/// Why: a store closed and waited for has checkpointed its WAL into the
+/// file by the time `close` returns (the last connection's close), so a
+/// copy of the file alone, taken at once, holds every commit; dropping a
+/// handle leaves that to the driver's thread, after the drop.
+#[tokio::test]
+async fn a_closed_store_has_checkpointed_its_wal_when_close_returns() {
+    let path = database();
+    let store = SqliteStore::open(&path).await.unwrap();
+    append(&store, stream(1), 0, &[page(0, 1), page(1, 1)])
+        .await
+        .unwrap();
+    assert!(beside(&path, "-wal") > 0, "the commit is in the WAL");
+    store.close().await.unwrap();
+    assert_eq!(beside(&path, "-wal"), 0, "checkpointed and removed");
+    let copy = database();
+    std::fs::create_dir_all(copy.parent().unwrap()).unwrap();
+    std::fs::copy(&path, &*copy).unwrap();
+    let reopened = SqliteStore::open(&copy).await.unwrap();
+    assert_eq!(
+        pages(&reopened, stream(1)).await.len(),
+        2,
+        "the file alone holds both"
+    );
+    reopened.close().await.unwrap();
+}
+
+/// Why: a store in memory closes too, and a closed file can be opened
+/// again at once.
+#[tokio::test]
+async fn a_store_in_memory_or_reopened_closes() {
+    SqliteStore::open_in_memory()
+        .await
+        .unwrap()
+        .close()
+        .await
+        .unwrap();
+    let path = database();
+    SqliteStore::open(&path)
+        .await
+        .unwrap()
+        .close()
+        .await
+        .unwrap();
+    let again = SqliteStore::open(&path).await.unwrap();
+    append(&again, stream(1), 0, &[page(0, 1)]).await.unwrap();
+    again.close().await.unwrap();
 }
 
 // ------------------------------------------------------------ on a file

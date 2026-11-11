@@ -21,10 +21,11 @@ use std::time::Duration;
 
 use angzarr_ports::angzarr_proto::v1::{Cover, EventBook, EventPage, Snapshot};
 use angzarr_ports::{
-    is_fork, Append, AppliedMigration, ChangeToken, DeadLetter, DeadLetterKey, DeadLetterStore,
-    EventStore, Export, ExportRow, Head, ListStreams, Outbox, OutboxEntry, PositionKey,
-    PositionStore, Processed, Purge, ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, Slice,
-    SnapshotStore, StoreError, StreamRef, Uuid, Watch, Write, Written,
+    is_fork, Append, AppliedMigration, ChangeToken, CommitNotify, CommitSignal, CommitWait,
+    DeadLetter, DeadLetterKey, DeadLetterStore, EventStore, Export, ExportRow, Head, ListStreams,
+    Outbox, OutboxEntry, PositionKey, PositionStore, Processed, Purge, ReadByCorrelation,
+    ReadStore, ReadUnit, ReadUntilTime, Slice, SnapshotStore, StoreError, StreamRef, Uuid, Watch,
+    WeakCommitSignal, Write, Written,
 };
 use prost::Message;
 use prost_types::Timestamp;
@@ -75,6 +76,48 @@ pub struct SqliteStore {
     conn: Conn,
     path: Option<PathBuf>,
     migrator: &'static Migrator,
+    /// Notified after each commit through this handle: shared by every
+    /// handle on the same file in this process ([`CommitNotify`]).
+    signal: CommitSignal,
+}
+
+/// The commit signal of each file a handle is open on in this process, by
+/// the file's canonical path: every handle on one file shares one, so a
+/// commit through any of them wakes a follower of any other. Held weakly:
+/// a file no handle holds any more is forgotten.
+static SIGNALS: std::sync::Mutex<BTreeMap<PathBuf, WeakCommitSignal>> =
+    std::sync::Mutex::new(BTreeMap::new());
+
+/// The signal the handles on `path` share: the one a live handle holds, or
+/// a new one (in memory: always a new one, a database of its own).
+fn signal_for(path: Option<&Path>) -> CommitSignal {
+    let Some(path) = path else {
+        return CommitSignal::new();
+    };
+    let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut signals = SIGNALS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    signals.retain(|_, signal| signal.upgrade().is_some());
+    if let Some(signal) = signals.get(&key).and_then(WeakCommitSignal::upgrade) {
+        return signal;
+    }
+    let signal = CommitSignal::new();
+    signals.insert(key, signal.downgrade());
+    signal
+}
+
+/// Whether a live handle on `path` holds its file's signal: for the tests
+/// that hold the registry to forgetting.
+#[cfg(test)]
+pub(crate) fn signalled(path: &Path) -> bool {
+    let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    SIGNALS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&key)
+        .and_then(WeakCommitSignal::upgrade)
+        .is_some()
 }
 
 /// A handle's one connection, behind an async lock so the ports take
@@ -132,6 +175,7 @@ impl SqliteStore {
         migrator: &'static Migrator,
     ) -> SqliteStore {
         SqliteStore {
+            signal: signal_for(path.as_deref()),
             conn: conn.into(),
             path,
             migrator,
@@ -156,6 +200,26 @@ impl SqliteStore {
     /// The connection, the handle given up.
     pub(crate) fn into_conn(self) -> SqliteConnection {
         self.conn.lock.into_inner()
+    }
+
+    /// `done`, and a commit pushed to the file's followers if it succeeded.
+    fn pushed<T>(&self, done: Result<T, StoreError>) -> Result<T, StoreError> {
+        if done.is_ok() {
+            self.signal.notify();
+        }
+        done
+    }
+
+    /// Close the handle and wait until its connection is closed: SQLite's
+    /// last close of a file in WAL checkpoints the WAL into the file and
+    /// removes it, so once this returns the file is whole on its own (no
+    /// `-wal` beside it, unless another connection still holds the file).
+    /// Dropping a handle instead leaves the close, and that checkpoint, to
+    /// the driver's thread after the drop returns. A read unit borrows the
+    /// handle, so none is open.
+    pub async fn close(self) -> Result<(), StoreError> {
+        let _ = self;
+        todo!("resolute-sleet: close and wait")
     }
 
     /// The database at `path`, created if absent, in WAL mode, and migrated
@@ -901,6 +965,7 @@ impl EventStore for SqliteStore {
         }
         ex.count();
         ex.conn.commit().await.map_err(unavailable)?;
+        self.signal.notify();
         Ok(Written { next_sequence })
     }
 
@@ -969,14 +1034,16 @@ impl SnapshotStore for SqliteStore {
         snapshot: &Snapshot,
     ) -> Result<(), StoreError> {
         let cover = stream.to_cover();
-        self.conn
+        let written = self
+            .conn
             .exec()
             .await
             .built_execute(statements::upsert_snapshot::<SqliteDialect>(
                 &cover, snapshot,
             )?)
             .await
-            .map(drop)
+            .map(drop);
+        self.pushed(written)
     }
 }
 
@@ -1015,6 +1082,7 @@ impl Purge for SqliteStore {
         ex.delete_letters(stream).await?;
         ex.count();
         ex.conn.commit().await.map_err(unavailable)?;
+        self.signal.notify();
         Ok(deleted)
     }
 }
@@ -1065,6 +1133,7 @@ impl DeadLetterStore for SqliteStore {
         ex.delete_letters(stream).await?;
         ex.count();
         ex.conn.commit().await.map_err(unavailable)?;
+        self.signal.notify();
         Ok(drained)
     }
 
@@ -1076,7 +1145,8 @@ impl DeadLetterStore for SqliteStore {
                 .execute(statements::REMOVE_DEAD_LETTER, letter_key(*key))
                 .await?;
         }
-        Ok(removed)
+        drop(ex);
+        self.pushed(Ok(removed))
     }
 }
 
@@ -1117,7 +1187,8 @@ impl Outbox for SqliteStore {
                 .execute(statements::CLEAR, [Value::Blob(id.as_bytes().to_vec())])
                 .await?;
         }
-        Ok(cleared)
+        drop(ex);
+        self.pushed(Ok(cleared))
     }
 }
 
@@ -1216,6 +1287,18 @@ impl ReadUnit for SqliteRead<'_> {
         stream: StreamRef<'_>,
     ) -> Result<Option<Snapshot>, StoreError> {
         self.ex.read_snapshot(stream).await
+    }
+}
+
+impl CommitNotify for SqliteStore {
+    /// Every commit through any handle on this file in this process (or,
+    /// in memory, through this handle): a write, a snapshot, a purge, a
+    /// dead letter drained or removed, an outbox entry cleared. A commit
+    /// from another process does not reach it: the change token
+    /// ([`Watch`]) sees those.
+    fn next_commit(&self) -> CommitWait {
+        let _ = &self.signal;
+        todo!("resolute-sleet: the SQLite store pushes")
     }
 }
 
