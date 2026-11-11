@@ -218,8 +218,7 @@ impl SqliteStore {
     /// the driver's thread after the drop returns. A read unit borrows the
     /// handle, so none is open.
     pub async fn close(self) -> Result<(), StoreError> {
-        let _ = self;
-        todo!("resolute-sleet: close and wait")
+        self.into_conn().close().await.map_err(unavailable)
     }
 
     /// The database at `path`, created if absent, in WAL mode, and migrated
@@ -1297,8 +1296,7 @@ impl CommitNotify for SqliteStore {
     /// from another process does not reach it: the change token
     /// ([`Watch`]) sees those.
     fn next_commit(&self) -> CommitWait {
-        let _ = &self.signal;
-        todo!("resolute-sleet: the SQLite store pushes")
+        self.signal.wait()
     }
 }
 

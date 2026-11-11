@@ -10,6 +10,9 @@
 //! transaction, begun and committed inside the call),
 //! [`Purge`](angzarr_ports::Purge),
 //! [`ReadStore`](angzarr_ports::ReadStore), [`Watch`](angzarr_ports::Watch),
+//! [`CommitNotify`](angzarr_ports::CommitNotify) (a push after every commit,
+//! shared by every handle on one file in this process; another process's
+//! commit is seen by `Watch` alone),
 //! [`ReadUntilTime`](angzarr_ports::ReadUntilTime),
 //! [`ReadByCorrelation`](angzarr_ports::ReadByCorrelation),
 //! [`ListStreams`](angzarr_ports::ListStreams),
@@ -25,7 +28,9 @@
 //! [`Backup`](angzarr_ports::Backup) (`VACUUM INTO`, and before every
 //! migration and undo, beside the store). The handle's one connection is held
 //! behind an async lock, so every port takes `&self` and one call at a time
-//! runs on it.
+//! runs on it. [`SqliteStore::close`] closes a handle and waits for its
+//! connection to close, so the last one's WAL checkpoint is done when it
+//! returns.
 //!
 //! Editions are per-stream forks as far as the base ports need them: an
 //! edition stream's first own event is its fork (an `EditionCreated` meta-event,
