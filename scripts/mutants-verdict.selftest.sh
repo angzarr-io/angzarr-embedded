@@ -6,8 +6,9 @@
 # mutation recipes' refusal of a non-empty `feature_rules`.
 #
 # Checks: a pass; a tier below its threshold; mutants found and fewer tested;
-# a file under no threshold; no mutants at all; a tier whose every mutant was
-# unviable judged nothing and FAILS; cargo-mutants' red baseline (exit 4) and
+# a file under no threshold; no mutants at all; a run whose every mutant was
+# unviable judged nothing and FAILS, while one tier all unviable beside a tier
+# that judged passes (owner rulings 120, 124); cargo-mutants' red baseline (exit 4) and
 # a run that ended before a verdict fail; and a feature rule is refused.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
@@ -65,12 +66,22 @@ dir=$(fixture empty)
 said=$(judge "$dir") || fail "zero mutants found failed: $said"
 grep -q "no mutants" <<< "$said" || fail "zero mutants said: $said"
 
-# Hollow: a tier that found mutants and judged none (every one unviable)
-# has shown nothing: it fails, whatever the other tiers did.
-dir=$(fixture hollow "$D:CaughtMutant" "$A:Unviable" "$A:Unviable")
-if said=$(judge "$dir"); then fail "a tier that judged nothing (all unviable) passed: $said"; fi
-grep -q "crates/core/application: 2 mutants found and none judged" "$dir/verdict.txt" \
+# Owner rulings 120, 124 (amending 99): "judged none" is the WHOLE RUN's
+# rule. One tier whose every mutant was unviable, beside a tier that judged,
+# passes, and its report says it judged none; a run that judged none at all
+# (every mutant unviable, in one tier or several) has shown nothing, and fails.
+dir=$(fixture onehollow "$D:CaughtMutant" "$A:Unviable" "$A:Unviable")
+said=$(judge "$dir") || fail "one tier all unviable beside a judged tier failed: $said"
+grep -q "pass  crates/core/application: none judged; 2 unviable, not counted" <<< "$said" \
+    || fail "the all-unviable tier's report: $said"
+dir=$(fixture hollow "$A:Unviable" "$A:Unviable")
+if said=$(judge "$dir"); then fail "a run that judged nothing (all unviable) passed: $said"; fi
+grep -q "the run judged nothing: 2 mutants found and none judged (every one unviable)" "$dir/verdict.txt" \
     || fail "hollow verdict: $(cat "$dir/verdict.txt" 2>/dev/null)"
+dir=$(fixture hollows "$D:Unviable" "$A:Unviable")
+if said=$(judge "$dir"); then fail "a run all unviable across tiers passed: $said"; fi
+grep -q "the run judged nothing: 2 mutants found" "$dir/verdict.txt" \
+    || fail "hollows verdict: $(cat "$dir/verdict.txt" 2>/dev/null)"
 
 # cargo-mutants' own exit codes: 4 is its baseline (the tests fail
 # unmutated), kept as the gate's; any code but 0, 2, 3 and 4 is a run that
