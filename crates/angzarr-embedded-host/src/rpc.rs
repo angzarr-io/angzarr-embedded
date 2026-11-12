@@ -4,15 +4,20 @@
 //! angzarr-proto's, generated from the spec's service protos (its `grpc`
 //! feature): `angzarr_proto::v1::<service>_client` and `_server`.
 
+#[cfg(unix)]
 use std::path::PathBuf;
 
+#[cfg(unix)]
 use hyper_util::rt::TokioIo;
+#[cfg(unix)]
 use tokio::net::UnixStream;
+#[cfg(unix)]
 use tonic::transport::{Channel, Endpoint, Uri};
 
 /// A channel to the server listening on the Unix socket at `socket`. The
 /// endpoint's URI is a placeholder tonic requires; every connection is the
 /// socket.
+#[cfg(unix)]
 pub(crate) async fn connect_unix(socket: PathBuf) -> Result<Channel, tonic::transport::Error> {
     Endpoint::from_static("http://[::]:0")
         .connect_with_connector(tower::service_fn(move |_: Uri| {

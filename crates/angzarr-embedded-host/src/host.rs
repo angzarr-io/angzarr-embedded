@@ -76,8 +76,11 @@ use crate::error::HostError;
 use crate::remote::{
     causes, Link, RemoteCommandHandler, RemotePolicyHandler, RemoteProjectorHandler, RemoteUpcaster,
 };
+#[cfg(unix)]
 use crate::rpc::connect_unix;
 use crate::vitals::{check, Clock, Verdict, Vitals};
+#[cfg(not(unix))]
+use crate::without_unix::{connect_unix, spawn, terminate};
 use angzarr_proto_component::v1::component_service_client::ComponentServiceClient;
 use tonic_health::pb::health_check_response::ServingStatus;
 use tonic_health::pb::health_client::HealthClient;
@@ -539,8 +542,12 @@ fn same_component(
         && angzarr_embedded::kind_of(registered) == angzarr_embedded::kind_of(described)
 }
 
-/// Sends SIGTERM to the child `pid`.
-fn terminate(pid: u32) {
+/// Sends SIGTERM to `child`, unless it has been reaped.
+#[cfg(unix)]
+fn terminate(child: &mut Child) {
+    let Some(pid) = child.id() else {
+        return;
+    };
     let Ok(pid) = libc::pid_t::try_from(pid) else {
         return;
     };
@@ -550,6 +557,14 @@ fn terminate(pid: u32) {
     unsafe {
         libc::kill(pid, libc::SIGTERM);
     }
+}
+
+/// Starts the child `command` runs. A child is reached on a Unix socket
+/// (the child protocol's transport, [`connect_unix`]), so a platform with
+/// none starts no child (`crate::without_unix`'s `spawn`).
+#[cfg(unix)]
+fn spawn(command: &mut Command) -> std::io::Result<Child> {
+    command.spawn()
 }
 
 /// The wait after `backoff` when a restart fails again: twice as long, up
@@ -1051,8 +1066,9 @@ impl Supervisor {
 
     /// Ends the host's watch of the child's health (a call in flight the
     /// child would otherwise wait out its grace for), closes the child's
-    /// stdin and gives it the grace to exit; then sends it SIGTERM and
-    /// gives it the terminate grace; then kills it.
+    /// stdin and gives it the grace to exit; then sends it SIGTERM (where
+    /// there is none, starts its kill) and gives it the terminate grace;
+    /// then kills it.
     pub(crate) async fn stop_child(&self, up: &mut Up) -> ChildExit {
         drop(up.health.take());
         drop(up.stdin.take());
@@ -1060,9 +1076,7 @@ impl Supervisor {
         if let Ok(Ok(status)) = tokio::time::timeout(grace, up.child.wait()).await {
             return ChildExit::Exited(status.code());
         }
-        if let Some(pid) = up.child.id() {
-            terminate(pid);
-        }
+        terminate(&mut up.child);
         let grace = Duration::from_millis(self.supervision.terminate_grace_ms);
         if let Ok(Ok(_)) = tokio::time::timeout(grace, up.child.wait()).await {
             return ChildExit::Terminated;
@@ -1093,7 +1107,7 @@ impl Supervisor {
         if let Some(dir) = &self.launch.dir {
             command.current_dir(dir);
         }
-        let mut child = command.spawn().map_err(|e| HostError::Spawn {
+        let mut child = spawn(&mut command).map_err(|e| HostError::Spawn {
             domain: domain(),
             program: self.launch.program.clone(),
             kind: format!("{:?}", e.kind()),

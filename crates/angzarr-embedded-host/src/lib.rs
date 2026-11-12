@@ -58,6 +58,8 @@ pub mod remote;
 pub mod rpc;
 pub mod stores;
 pub(crate) mod vitals;
+#[cfg(not(unix))]
+mod without_unix;
 
 /// The host config's schema crate, whose types [`config`] re-exports.
 pub use angzarr_embedded_host_config;

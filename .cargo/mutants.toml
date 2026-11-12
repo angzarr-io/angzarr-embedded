@@ -48,4 +48,10 @@ exclude_re = [
     # The mutant is the code: a remote domain's command_types already
     # returns an empty Vec, so `vec![]` changes nothing.
     '''replace <impl CommandHandler for RemoteCommandHandler>::command_types -> Vec<String> with vec!\[\]$''',
+    # without_unix.rs is compiled only where there are no Unix sockets
+    # (cfg(not(unix))): on the Unix machines mutation runs on, a mutant
+    # there changes no code that is built, so no test can tell it apart.
+    'crates/angzarr-embedded-host/src/without_unix\.rs:\d+:\d+: replace spawn -> std::io::Result<Child> with Ok\(Default::default\(\)\)$',
+    'crates/angzarr-embedded-host/src/without_unix\.rs:\d+:\d+: replace terminate with \(\)$',
+    'crates/angzarr-embedded-host/src/without_unix\.rs:\d+:\d+: replace connect_unix -> Result<Channel, tonic::transport::Error> with Ok\(Default::default\(\)\)$',
 ]
