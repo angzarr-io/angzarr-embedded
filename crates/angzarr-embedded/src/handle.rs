@@ -59,7 +59,7 @@
 //! chain's limit is a [`KernelError::ChainTooDeep`], which is how a cycle
 //! that never settles ends.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::convert::Infallible;
 use std::num::NonZeroU32;
 
@@ -857,12 +857,15 @@ impl<'k> Kernel<'k> {
         &self,
         store: &S,
     ) -> Result<Vec<(String, Cover)>, StoreError> {
-        let listed = store.list_streams().await?;
+        let streams = store.list_streams().await?;
+        let listed: BTreeSet<_> = streams.iter().map(cover_key).collect();
         let mut forgotten = Vec::new();
         for policy in self.registry.all_policies() {
             let gone: Vec<Cover> = (store.processed(policy.name()).await?.into_iter())
                 .map(|(cover, _)| cover)
-                .filter(|cover| cover.domain == policy.source() && !listed.contains(cover))
+                .filter(|cover| {
+                    cover.domain == policy.source() && !listed.contains(&cover_key(cover))
+                })
                 .collect();
             for cover in gone {
                 let stream = StreamRef::try_from(&cover)?;
@@ -1149,6 +1152,14 @@ type Failed = (Vec<Step>, StepError);
 enum Caller {
     Waiting,
     Kernel,
+}
+
+/// A stream as [`Kernel::forget_gone`] looks it up, its cover's own fields
+/// (a cover's equality), so the store's listing is a set and not a list
+/// searched once for every stream a policy processed.
+fn cover_key(cover: &Cover) -> (&str, Option<&str>, Option<&[u8]>) {
+    let root = cover.root.as_ref().map(|root| &root.value[..]);
+    (&cover.domain, cover.edition.as_deref(), root)
 }
 
 /// A chain in progress: the streams whose policies may owe steps, each with

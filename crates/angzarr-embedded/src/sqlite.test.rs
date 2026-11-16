@@ -587,3 +587,44 @@ async fn measure_a_commands_round_trips() {
         "a command's round trips do not grow with its stream"
     );
 }
+
+// ------------------------------------------------------ a resume's cost
+
+/// A resume over settled streams costs the same statements for each: its
+/// round trips over 2N streams are twice its round trips over N, plus the
+/// same fixed few (the listings), so nothing it does per stream looks at
+/// every other stream. (That the statements themselves search one stream,
+/// not its whole domain, is angzarr-store-sqlite's
+/// `a_read_of_one_stream_searches_that_stream_alone`.)
+#[tokio::test]
+async fn a_resumes_round_trips_grow_with_its_streams_linearly() {
+    let mut registry = toys::registry();
+    registry.policy(Bookkeeping).unwrap();
+    let store = SqliteStore::open_in_memory().await.unwrap();
+    let log = MemoryDeadLetters::new();
+    let kernel = Kernel::new(&registry).log_with(&log);
+    let mut spent = Vec::new();
+    let mut had = 0u128;
+    for streams in [0u128, 20, 40] {
+        for n in had..streams {
+            let account = cover("account", n + 1);
+            for (id, cmd) in [(1, AccountCmd::Open), (2, AccountCmd::Deposit(1))] {
+                let book = toys::command(account.clone(), cmd.to_any()).id(n * 10 + id);
+                kernel
+                    .handle::<toys::Account, _>(&store, book, &sampled(10))
+                    .await
+                    .unwrap();
+            }
+        }
+        had = streams;
+        let before = store.round_trips();
+        let resumed = kernel.resume(&store, &sampled(20)).await.unwrap();
+        assert!(resumed.books().is_empty(), "settled: nothing owed");
+        spent.push(store.round_trips() - before);
+    }
+    let [none, twenty, forty] = spent[..] else {
+        unreachable!()
+    };
+    assert!(twenty > none, "each stream is read: {spent:?}");
+    assert_eq!(forty - none, 2 * (twenty - none), "{spent:?}");
+}
