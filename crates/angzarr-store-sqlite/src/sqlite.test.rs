@@ -657,6 +657,56 @@ async fn an_edition_stream_reads_as_main() {
     );
 }
 
+/// How SQLite plans each read of one stream, a row per step of the plan,
+/// on a migrated database.
+async fn plan_of(path: &Path, sql: &str, args: usize) -> Vec<String> {
+    let mut conn = raw(path).await;
+    let explain = format!("EXPLAIN QUERY PLAN {sql}");
+    let mut query = sqlx::query_as::<_, (i64, i64, i64, String)>(&explain)
+        .bind("tasks")
+        .bind(vec![1u8; 16])
+        .bind("what-if");
+    for _ in 3..args {
+        query = query.bind(0i64);
+    }
+    let rows = query.fetch_all(&mut conn).await.unwrap();
+    rows.into_iter().map(|(.., detail)| detail).collect()
+}
+
+/// A read of one stream finds the stream's rows by its key, whatever its
+/// edition: the whole key (domain, edition, root) or an index on what it
+/// asks for, never a search of the whole domain, whose cost grows with
+/// every other stream of it (a resume, which reads each stream, would
+/// then grow with the square of their number).
+#[tokio::test]
+async fn a_read_of_one_stream_searches_that_stream_alone() {
+    let database = database();
+    drop(SqliteStore::open(&database).await.unwrap());
+    let reads = [
+        ("LAST", crate::statements::LAST, 3),
+        ("PAGES", crate::statements::PAGES, 5),
+        ("OF_COMMAND", crate::statements::OF_COMMAND, 4),
+        ("OF_CORRELATION", crate::statements::OF_CORRELATION, 4),
+        ("UNTIL", crate::statements::UNTIL, 4),
+    ];
+    for (name, sql, args) in reads {
+        let plan = plan_of(&database, sql, args).await;
+        let on_events: Vec<&String> = plan
+            .iter()
+            .filter(|step| step.contains(" events "))
+            .collect();
+        assert!(!on_events.is_empty(), "{name}: {plan:?}");
+        for step in on_events {
+            assert!(
+                step.starts_with("SEARCH events USING ")
+                    && (step.contains("domain=? AND edition=? AND root=?")
+                        || step.contains("correlation_id=?")),
+                "{name} reads more than its stream: {step} (plan {plan:?})"
+            );
+        }
+    }
+}
+
 // ------------------------------------------------- opening, by those who read
 
 /// What a reader that answers empty for a store never written does: `list`
