@@ -39,10 +39,13 @@ pub(crate) fn instant_column(at: &Timestamp) -> i64 {
 /// `?2` root, `?3` the edition column's value, `''` for main): its own rows,
 /// and main's below its fork, the sequence of its first own row (its
 /// fork). A main stream, and an edition stream with no row of its own,
-/// is main's rows alone.
+/// is main's rows alone. `edition IN ('', ?3)` says nothing the rest does
+/// not; it is there so SQLite searches the key (domain, edition, root) for
+/// the stream's rows, not the domain's every row: without it, a read of
+/// one stream costs as much as the whole domain.
 macro_rules! view {
     () => {
-        "domain = ?1 AND root = ?2 AND ((edition = '' AND sequence < \
+        "domain = ?1 AND root = ?2 AND edition IN ('', ?3) AND ((edition = '' AND sequence < \
          COALESCE((SELECT MIN(f.sequence) FROM events AS f \
          WHERE f.domain = ?1 AND f.edition = ?3 AND f.root = ?2 AND ?3 <> ''), \
          9223372036854775807)) OR (?3 <> '' AND edition = ?3))"
