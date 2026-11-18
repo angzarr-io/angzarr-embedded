@@ -19,8 +19,14 @@ version = 2
 # a database plus -wal sibling written by a less trusted party; the databases
 # here are the user's own. Delete this ignore when the SQLite store moves to
 # libsqlite3-sys >= 0.39.
+# RUSTSEC-2026-0542: humantime is unmaintained (it wraps chrono, also
+# unmaintained); not a vulnerability. It reaches the graph only through
+# cucumber, the conformance crate's dev-dependency (the features' runner),
+# and every cucumber release (0.21 to 0.23) depends on it. Delete this
+# ignore when cucumber drops humantime.
 ignore = [
   { id = "RUSTSEC-2026-0459", reason = "bundled SQLite via the store; databases are the user's own; upstream bump pending" },
+  { id = "RUSTSEC-2026-0542", reason = "unmaintained, not vulnerable; only through cucumber, a test-only dev-dependency; no cucumber release avoids it" },
 ]
 
 [licenses]
