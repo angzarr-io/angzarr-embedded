@@ -42,10 +42,10 @@ use angzarr_proto::v1::{Cover, EventPage, Snapshot, Uuid};
 use super::dead_letter::CallLetters;
 
 pub use angzarr_ports::{
-    Append, ChangeToken, DeadLetter, DeadLetterAt, DeadLetterKey, DeadLetterStore, EventStore,
-    Head, ListStreams, Outbox, OutboxEntry, PositionKey, PositionStore, Processed, Purge,
-    ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, Slice, SnapshotStore, Store, StoreError,
-    StreamRef, Watch, Write, Written,
+    Append, ChangeToken, CommitNotify, CommitWait, DeadLetter, DeadLetterAt, DeadLetterKey,
+    DeadLetterStore, EventStore, Head, ListStreams, Outbox, OutboxEntry, PositionKey,
+    PositionStore, Processed, Purge, ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, Slice,
+    SnapshotStore, Store, StoreError, StreamRef, Watch, Write, Written,
 };
 
 /// The store operations a step makes, keyed by the wire `Cover` the kernel

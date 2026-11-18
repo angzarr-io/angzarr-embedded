@@ -51,13 +51,14 @@ test-support = ["angzarr-ports/memory", "angzarr-ports/faulty"]
 # runtime, on the shared SQLite adapter (sqlite.test.rs); and a decorated
 # aggregate (`src/decorated.test.rs`) through angzarr-embedded-macros, whose expansion
 # names `::angzarr-embedded`; with `sqlite` on, so the re-export is tested,
-# and `test-support`, its fixtures.
+# and `test-support`, its fixtures. The bus's tests run its instances
+# concurrently on tokio, each bounded by tokio's timer (`time`).
 [dev-dependencies]
 angzarr-embedded = { path = ".", features = ["sqlite", "test-support"] }
 angzarr-ports = { git = "https://github.com/angzarr-io/angzarr", rev = "b1445adf7450b09aad19b5ce09fdf6742da1f5b0", features = ["memory", "faulty"] }
 angzarr-embedded-macros = { path = "../angzarr-embedded-macros" }
 angzarr-store-sqlite = { path = "../angzarr-store-sqlite" }
-tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
 
 # The build writes the catalog's source under the crate's name
 # (angzarr_diagnostic::build): no catalog spells its crate's name.

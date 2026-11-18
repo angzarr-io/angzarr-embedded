@@ -81,6 +81,7 @@
 #![allow(clippy::result_large_err)]
 
 mod book;
+mod bus;
 mod catalog;
 mod check;
 mod compensation;
@@ -162,6 +163,7 @@ pub use angzarr_router::PageContext;
 #[cfg(feature = "sqlite")]
 pub use angzarr_store_sqlite;
 pub use book::{CommandBookExt, CoverExt};
+pub use bus::{Bus, Served, Subscription, MAX_PER_STREAM};
 pub use catalog::{Catalog, Description};
 pub use check::{check, Arm, Body, Checked, Identified, Malformed, Sampled};
 pub use dead_letter::{dead_letter_line, DeadLetterLog, MemoryDeadLetters, DEAD_LETTER_PREFIX};
@@ -185,10 +187,10 @@ pub use projector::{CatchUp, Caught, HeldRecord};
 pub use registry::Registry;
 pub use route::{rejection, spec_coded, Rejected, SpecKey};
 pub use store::{
-    Append, ChangeToken, DeadLetter, DeadLetterAt, DeadLetterKey, DeadLetterStore, EventStore,
-    Head, ListStreams, Outbox, OutboxEntry, PositionKey, PositionStore, Processed, Purge,
-    ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, Slice, SnapshotStore, Store, StoreError,
-    StreamRef, Watch, Write, Written,
+    Append, ChangeToken, CommitNotify, CommitWait, DeadLetter, DeadLetterAt, DeadLetterKey,
+    DeadLetterStore, EventStore, Head, ListStreams, Outbox, OutboxEntry, PositionKey,
+    PositionStore, Processed, Purge, ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, Slice,
+    SnapshotStore, Store, StoreError, StreamRef, Watch, Write, Written,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use stream::execute::Executed;
