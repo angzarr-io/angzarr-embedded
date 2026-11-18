@@ -67,7 +67,7 @@ use angzarr_proto::v1::{
     reaction_delivery, CommandBook, Cover, DeliveryOutcome, EventBook, EventPage, EventRef,
     ReactionDelivery,
 };
-use angzarr_router::error::AngzarrReason;
+use angzarr_router::error::{AngzarrReason, GrpcCode};
 use angzarr_router::hpb;
 
 use angzarr_proto::v1::angzarr_dead_letter::Payload;
@@ -1197,10 +1197,13 @@ enum Origin {
 /// The class of a step's `failure` ([`class`]), if it is one the kernel
 /// may run again: an unreachable handler, upcaster sidecar or store, and a
 /// router error under a retryable status, are retryable bugs; a router
-/// error's own class otherwise. `None` for a failure never run again: a
-/// refusal, any other. A race lost at the write is [`raced`]'s.
+/// error's own class otherwise; a refusal declaring ABORTED is
+/// [`Class::BusinessImmediate`] (decision 14.111: the status alone decides).
+/// `None` for a failure never run again: any other refusal, any other. A
+/// race lost at the write is [`raced`]'s.
 fn failure_class(failure: &Failure<Rejected>) -> Option<Class> {
     match failure {
+        Failure::Rejected(rejected) if aborted(rejected) => Some(Class::BusinessImmediate),
         Failure::Kernel(KernelError::HandlerUnavailable { .. })
         | Failure::Kernel(KernelError::Upcast {
             error: super::UpcastError::Unavailable { .. },
@@ -1215,6 +1218,14 @@ fn failure_class(failure: &Failure<Rejected>) -> Option<Class> {
         Failure::Kernel(KernelError::Router(error)) => Some(class(error.grpc as i32)),
         _ => None,
     }
+}
+
+/// Whether `rejected` declares ABORTED (decision 14.111), its status's
+/// class the immediate return: "re-read and re-decide", returned at once to
+/// an outside caller and run again for a step whose caller is the kernel,
+/// never translated.
+fn aborted(rejected: &Rejected) -> bool {
+    class(GrpcCode::from(rejected.status()) as i32) == Class::BusinessImmediate
 }
 
 /// Whether `failure` is a write lost to another write to the same stream
@@ -1328,8 +1339,19 @@ impl<'k> Run<'k> {
             return Ok(false);
         }
         if tries.retries >= self.retry.max_retries {
-            // Only a kernel error is retried ([`failure_class`]).
-            if let (true, Failure::Kernel(error)) = (Self::callerless(caller, command), failure) {
+            // Only a kernel error, or a refusal declaring ABORTED, is retried
+            // ([`failure_class`]); the refusal is dead-lettered as the
+            // router answered it, its typed refusal kept.
+            let refused;
+            let error = match failure {
+                Failure::Kernel(error) => Some(error),
+                Failure::Rejected(rejected) => {
+                    refused = KernelError::Router(rejected.as_coded());
+                    Some(&refused)
+                }
+                _ => None,
+            };
+            if let (true, Some(error)) = (Self::callerless(caller, command), error) {
                 write_at_cap(
                     self.letters,
                     dead_letter::rejected(command),
@@ -1511,8 +1533,10 @@ impl<'k> Run<'k> {
     /// position moves past the event (or stays, under
     /// [`OnPolicyBug::Stay`]); a fact its destination dead-lettered is its
     /// step done; a command refused with a typed refusal goes to the
-    /// policy's Translate ([`Run::refusal_step`]); one the framework
-    /// refuses is dead-lettered, never translated.
+    /// policy's Translate ([`Run::refusal_step`]), unless it declares
+    /// ABORTED, which is re-run to its cap and dead-lettered as a
+    /// handler's ABORTED is (decision 14.111); one the framework refuses is
+    /// dead-lettered, never translated.
     async fn react<P: Port>(
         &mut self,
         port: &mut P,
@@ -1581,7 +1605,10 @@ impl<'k> Run<'k> {
                 continue;
             }
             match failure {
-                Failure::Rejected(rejected) => {
+                // A refusal declaring ABORTED was re-run to its cap and
+                // dead-lettered there, as a handler's ABORTED is: never
+                // translated (decision 14.111).
+                Failure::Rejected(rejected) if !aborted(&rejected) => {
                     match self
                         .refusal_step(port, policy, &event, &rejected, &delivered, positions)
                         .await
