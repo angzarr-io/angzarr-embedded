@@ -80,7 +80,8 @@ Feature: Policy refusals - a refused command becomes one fact for the policy's o
     # Decision 14.37 (owner rulings, 2026-10-29): the gRPC status decides
     # the class. FAILED_PRECONDITION, INVALID_ARGUMENT, NOT_FOUND,
     # ALREADY_EXISTS, OUT_OF_RANGE and PERMISSION_DENIED, carrying a typed
-    # refusal, are business refusals, never retried; ABORTED is an
+    # refusal, are business refusals, never retried; ABORTED, a handler's
+    # own or a typed refusal declaring it (decision 14.111), is an
     # immediate-return business error, whose policy step the runtime
     # reloads and re-runs under the capped backoff; INTERNAL, UNKNOWN and
     # DATA_LOSS are fatal bugs, dead-lettered at once; the rest are
@@ -95,6 +96,7 @@ Feature: Policy refusals - a refused command becomes one fact for the policy's o
       | status                                                        | translate                  | outcome                                                                                                      |
       | UNAVAILABLE                                                   | is not called              | HoldFunds is retried with backoff up to its configured cap, then dead-lettered and alerted                   |
       | ABORTED                                                       | is not called              | the policy step is reloaded and re-run with backoff up to its configured cap, then dead-lettered and alerted |
+      | ABORTED with a typed refusal the command lists                | is not called              | the policy step is reloaded and re-run with backoff up to its configured cap, then dead-lettered and alerted |
       | INVALID_ARGUMENT with a typed refusal the command lists       | is called with the refusal | HoldFunds is neither retried nor dead-lettered                                                               |
       | INTERNAL                                                      | is not called              | HoldFunds is dead-lettered and an alert is raised                                                            |
 

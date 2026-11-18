@@ -136,6 +136,9 @@ fn answers_with_status(w: &mut Coordinator, _wallet: String, answer: String) {
         "INVALID_ARGUMENT with a typed refusal the command lists" => {
             refused_with(BusinessStatus::InvalidArgument, insufficient_funds(0, 500))
         }
+        "ABORTED with a typed refusal the command lists" => {
+            refused_with(BusinessStatus::Aborted, insufficient_funds(0, 500))
+        }
         grpc => {
             let mut error = internal(&format!("WALLET_{grpc}"));
             error.grpc = status(grpc);

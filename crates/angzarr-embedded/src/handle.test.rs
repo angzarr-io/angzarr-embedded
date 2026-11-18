@@ -2403,3 +2403,39 @@ fn failing(n: usize, fault: angzarr_ports::faulty::Fault) -> Vec<angzarr_ports::
     faults.push(fault);
     faults
 }
+
+// Decision 14.111: a typed refusal may declare ABORTED, and the status alone
+// decides its class (14.37): "re-read and re-decide", run again for a step
+// whose caller is the kernel, never a business-fatal refusal.
+fn rejected_as(status: crate::angzarr_router::error::BusinessStatus) -> super::Rejected {
+    let refusal = crate::pack(&crate::toys::ToyRefusal {
+        code: "toy-moved".to_string(),
+    });
+    super::Rejected::of(&CodedError::refused(status, refusal)).expect("a typed refusal")
+}
+
+#[test]
+fn an_aborted_refusal_is_of_the_immediate_class() {
+    use crate::angzarr_router::error::BusinessStatus;
+    let aborted = Failure::Rejected(rejected_as(BusinessStatus::Aborted));
+    assert_eq!(
+        super::failure_class(&aborted),
+        Some(crate::error::Class::BusinessImmediate)
+    );
+}
+
+#[test]
+fn a_business_fatal_refusal_has_no_class_to_run_again() {
+    use crate::angzarr_router::error::BusinessStatus;
+    for status in [
+        BusinessStatus::FailedPrecondition,
+        BusinessStatus::InvalidArgument,
+        BusinessStatus::NotFound,
+        BusinessStatus::AlreadyExists,
+        BusinessStatus::OutOfRange,
+        BusinessStatus::PermissionDenied,
+    ] {
+        let refused = Failure::Rejected(rejected_as(status));
+        assert_eq!(super::failure_class(&refused), None, "{status:?}");
+    }
+}
