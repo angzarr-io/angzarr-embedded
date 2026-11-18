@@ -33,6 +33,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use angzarr_proto::v1::event_meta::Causation;
 use angzarr_proto::v1::{event_page, Cover, EventBook, EventPage};
+use angzarr_router::hpb::ProjectRequest;
 use angzarr_router::router::ProjectorHandler;
 use prost_types::Timestamp;
 
@@ -150,13 +151,56 @@ impl Fingerprint {
 
 /// A stream as a catch-up tells streams apart: its domain, root and
 /// edition (main's `None`).
-fn key(cover: &Cover) -> (String, Vec<u8>, Option<String>) {
+pub(super) fn key(cover: &Cover) -> (String, Vec<u8>, Option<String>) {
     let root = cover.root.as_ref().map(|r| r.value.to_vec());
     (
         cover.domain.clone(),
         root.unwrap_or_default(),
         cover.edition.clone(),
     )
+}
+
+/// The request handing a projector `pages` read from `cover`'s stream,
+/// `next_sequence` long, each upcast through its domain's upcast port: the
+/// event arm only, since a fork page is the system layer's and is never
+/// handed, though its sequence counts. Refused with the upcast's error.
+pub(super) async fn project_request(
+    catalog: &Catalog,
+    cover: &Cover,
+    pages: Vec<EventPage>,
+    next_sequence: u64,
+) -> Result<ProjectRequest, KernelError> {
+    let pages = match catalog.upcast_port(&cover.domain) {
+        None => pages,
+        Some(port) => upcast_pages(port, &cover.domain, &pages)
+            .await
+            .map_err(|error| KernelError::Upcast {
+                stream: cover.clone(),
+                error,
+            })?,
+    };
+    let pages = pages
+        .into_iter()
+        .filter(|page| matches!(page.body, Some(event_page::Body::Event(_))))
+        .collect();
+    let book = EventBook {
+        cover: Some(cover.clone()),
+        pages,
+        next_sequence,
+        snapshot: None,
+    };
+    Ok(ProjectRequest { events: Some(book) })
+}
+
+/// The request handing a projector `cover`'s stream as gone: no page, at
+/// 0.
+pub(super) fn gone_request(cover: &Cover) -> ProjectRequest {
+    ProjectRequest {
+        events: Some(EventBook {
+            cover: Some(cover.clone()),
+            ..EventBook::default()
+        }),
+    }
 }
 
 /// What one catch-up step did.
@@ -316,31 +360,14 @@ impl<P: ProjectorHandler> CatchUp<P> {
             return Ok(());
         }
         let first = first.unwrap_or_else(|| Fingerprint::of(slice.pages.first()));
-        let pages = match catalog.upcast_port(&cover.domain) {
-            None => slice.pages,
-            Some(port) => match upcast_pages(port, &cover.domain, &slice.pages).await {
-                Ok(pages) => pages,
-                Err(error) => {
-                    let stream = cover.clone();
-                    caught
-                        .failures
-                        .push((cover, KernelError::Upcast { stream, error }));
-                    return Ok(());
-                }
-            },
+        let request = match project_request(catalog, &cover, slice.pages, slice.next_sequence).await
+        {
+            Ok(request) => request,
+            Err(error) => {
+                caught.failures.push((cover, error));
+                return Ok(());
+            }
         };
-        // The event arm only: a fork page is the system layer's.
-        let pages = pages
-            .into_iter()
-            .filter(|page| matches!(page.body, Some(event_page::Body::Event(_))))
-            .collect();
-        let book = EventBook {
-            cover: Some(cover.clone()),
-            pages,
-            next_sequence: slice.next_sequence,
-            snapshot: None,
-        };
-        let request = angzarr_router::hpb::ProjectRequest { events: Some(book) };
         if let Err(error) = self.projector.dispatch(&request).await {
             caught.failures.push((cover, KernelError::Router(error)));
             return Ok(());
@@ -454,13 +481,7 @@ impl<P: ProjectorHandler> CatchUp<P> {
             .filter(|cover| ours(cover) && !listed.contains(&key(cover)))
             .collect();
         for cover in gone {
-            let request = angzarr_router::hpb::ProjectRequest {
-                events: Some(EventBook {
-                    cover: Some(cover.clone()),
-                    ..EventBook::default()
-                }),
-            };
-            if let Err(error) = self.projector.dispatch(&request).await {
+            if let Err(error) = self.projector.dispatch(&gone_request(&cover)).await {
                 caught.failures.push((cover, KernelError::Router(error)));
                 continue;
             }
