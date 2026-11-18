@@ -71,8 +71,9 @@
 //! fails keeps every write before it ([`Failure`], with the path to the
 //! failing [`Step`]), and what is owed is resumed by position
 //! ([`Kernel::resume`]). Projectors run on written events only, inline
-//! ([`Registry::projector_handler`]) or caught up from the store
-//! ([`CatchUp`]). A reaction's trigger edge, which no event records, is the
+//! ([`Registry::projector_handler`]), caught up from the store
+//! ([`CatchUp`]), or served from it an event at a time by a pool of
+//! instances ([`Bus`]). A reaction's trigger edge, which no event records, is the
 //! reaction's own causation, for tracing.
 
 // A failure names the path to the step that failed and carries reports, so

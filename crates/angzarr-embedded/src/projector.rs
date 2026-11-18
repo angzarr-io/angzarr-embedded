@@ -1,10 +1,10 @@
-//! Projectors: ONE port, run two ways.
+//! Projectors: ONE port, run three ways.
 //!
 //! A projector is angzarr-router's [`ProjectorHandler`]: handed a book of
 //! one stream's events, it answers a `Projection`. A hand-written one, a
 //! marked-up one (`#[projector]`, through [`markup::Projected`](super::markup::Projected)) and a
 //! remote one (a child's `ProjectorService`, the host's) are the same
-//! port, and run either way:
+//! port, and run any of these ways:
 //!
 //! - **inline**, registered in the [`Registry`](super::Registry)
 //!   ([`Registry::projector`](super::Registry::projector),
@@ -14,17 +14,22 @@
 //!   ([`Kernel::handle`](super::Kernel::handle));
 //! - **catch-up**, a [`CatchUp`] the application runs, a step at a time
 //!   ([`CatchUp::step`], [`CatchUp::step_if_changed`]) or as a loop
-//!   ([`CatchUp::follow`]), on its own runtime: no thread of its own.
+//!   ([`CatchUp::follow`]), on its own runtime: no thread of its own;
+//! - **on the bus**, a [`Subscription`](super::Subscription) of a
+//!   [`Bus`](super::Bus): handed one event at a time by each of a pool of
+//!   instances (the bus's module).
 //!
-//! What a projector is handed, either way, is per stream; no order crosses
+//! What a projector is handed, any way, is per stream; no order crosses
 //! streams, and nothing numbers across them:
 //!
 //! - a book of one stream's events, in sequence order, after the last it
-//!   was handed of that stream, `next_sequence` the stream's length;
+//!   was handed of that stream, `next_sequence` the stream's length (on
+//!   the bus, one event, and out of order only when several of a stream
+//!   are asked for at once);
 //! - a book whose first page is sequence 0 starts that stream afresh:
 //!   whatever it held of a stream on the same cover is gone (one purged,
 //!   and written again);
-//! - in catch-up, a book with no page and `next_sequence` 0: the stream is
+//! - in catch-up and on the bus, a book with no page and `next_sequence` 0: the stream is
 //!   gone (purged), found so by the catch-up's record of what it handed,
 //!   which a purge never touches (decision 14.68), and the projector
 //!   forgets it.
