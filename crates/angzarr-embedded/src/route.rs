@@ -391,16 +391,18 @@ pub(crate) fn report(error: &CodedError) -> Report {
 /// The router's table for typed domain `D`, before its handlers: named
 /// `D::NAME` (a process manager's if `process_manager`), folding each
 /// event, upcast by the kernel before it is handed over, through
-/// `D::apply`, answering `D::RULES_VERSION`, with the state's codec when it
-/// has a snapshot form (a delivered starting state restored onto a fresh
-/// state from `fresh`, and the state every answer carries).
+/// `D::apply`, answering `D::RULES_VERSION`, its state's type its anchor,
+/// with the state's codec: a delivered starting state restored onto a fresh
+/// state from `fresh`, and the state every answer carries, as its
+/// [`State::snapshot`] offers it ([`Offering`] drops the answer's state
+/// when it offers none).
 pub(crate) fn table<D: Domain>(
     fresh: Arc<dyn Fn() -> D::State + Send + Sync>,
     process_manager: bool,
 ) -> DomainDispatch<D::State> {
-    let snapshot_form = <<D::State as State>::Snapshot as prost::Name>::full_name();
+    let anchor = <<D::State as State>::Anchor as prost::Name>::full_name();
     let restore_fresh = Arc::clone(&fresh);
-    let mut rebuilder = Rebuilder::new(move || fresh())
+    let rebuilder = Rebuilder::new(move || fresh())
         .with_fold(move |state, pages, cover| {
             for (index, page) in pages.iter().enumerate() {
                 let Some(any) = angzarr_router::page_event(page) else {
@@ -420,17 +422,16 @@ pub(crate) fn table<D: Domain>(
             }
             Ok(())
         })
-        .with_state_type(&snapshot_form);
-    if <D::State as State>::SNAPSHOTS {
-        rebuilder = rebuilder.with_state_codec(
+        .with_state_type(&anchor)
+        .with_state_codec(
             move |any| {
-                if type_name(&any.type_url) != snapshot_form {
+                if type_name(&any.type_url) != anchor {
                     return Err(Box::new(PayloadError::UnknownType {
                         type_url: any.type_url.clone(),
                     }));
                 }
                 let wire =
-                    <D::State as State>::Snapshot::decode(&any.value[..]).map_err(|error| {
+                    <D::State as State>::Anchor::decode(&any.value[..]).map_err(|error| {
                         PayloadError::Decode {
                             type_url: any.type_url.clone(),
                             error,
@@ -440,14 +441,52 @@ pub(crate) fn table<D: Domain>(
                 restored.restore(wire).map_err(Box::new)?;
                 Ok(restored)
             },
-            |state: &D::State| super::payload::pack(&state.to_snapshot()),
+            |state: &D::State| {
+                state
+                    .snapshot()
+                    .map_or_else(Any::default, |anchor| super::payload::pack(&anchor))
+            },
         );
-    }
     let base = match process_manager {
         true => DomainDispatch::process_manager(D::NAME, D::NAME, rebuilder),
         false => DomainDispatch::new(D::NAME, D::NAME, rebuilder),
     };
     base.with_rules_version(D::RULES_VERSION)
+}
+
+/// A typed domain's table, as the registry dispatches it: its answers as
+/// the router's, but one whose state offers no snapshot carries none. The
+/// router's codec answers a state with every answer, so the table's
+/// encodes one that offers none as an `Any` with no type URL, which no
+/// state is, and this drops it.
+pub(crate) struct Offering<S>(pub(crate) DomainDispatch<S>);
+
+impl<S> angzarr_router::router::CommandHandler for Offering<S>
+where
+    DomainDispatch<S>: angzarr_router::router::CommandHandler,
+{
+    fn name(&self) -> &str {
+        self.0.name()
+    }
+
+    fn kind(&self) -> angzarr_proto::v1::ComponentKind {
+        self.0.kind()
+    }
+
+    fn command_types(&self) -> Vec<String> {
+        self.0.command_types()
+    }
+
+    fn dispatch(
+        &self,
+        req: &hpb::HandleRequest,
+    ) -> impl Future<Output = Result<hpb::HandleResponse, CodedError>> + angzarr_ports::MaybeSend
+    {
+        std::future::ready(self.0.dispatch(req).map(|mut response| {
+            response.state = response.state.filter(|state| !state.type_url.is_empty());
+            response
+        }))
+    }
 }
 
 #[cfg(test)]

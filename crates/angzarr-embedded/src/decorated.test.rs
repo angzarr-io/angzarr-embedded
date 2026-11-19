@@ -13,10 +13,10 @@
 //! handler declaring its typed refusal objects (`refuses`); a fact
 //! handler, with no `Result`, that records a refusal as an event; `&mut
 //! self` appliers; a rejection inferred from the command handlers; a
-//! snapshot form restored onto the factory's instance; domain types, each
+//! snapshot of its anchor restored onto the factory's instance; domain types, each
 //! with the wire message it travels as. Both marked-up aggregates are
 //! registered by `Registry::aggregate`, with their factories. The lamp is the
-//! smallest aggregate: no snapshot form, and no rejection it can return.
+//! smallest aggregate: no snapshots, and no rejection it can return.
 //!
 //! What is pinned: routing by type URL; the router applying what a handler
 //! returns, in order; continuations (a step sees the state after the
@@ -25,8 +25,8 @@
 //! building a fresh instance from the registry's factory before the handler
 //! runs, and a resume keeping the factory's configuration; a rejection
 //! committing nothing, a message only or a typed refusal object; a fact
-//! recording its outcome where a command would be refused; snapshots with
-//! and without a snapshot form; the generated `WalletHandler` trait and
+//! recording its outcome where a command would be refused; snapshots
+//! taken and not (overriding `markup::Snapshots`, or keeping its defaults); the generated `WalletHandler` trait and
 //! constants; the hand-written domain working beside the generated ones;
 //! the process manager as a domain (its root the correlation, its start
 //! rule, its one context); what the policies answer (their commands, the
@@ -51,8 +51,8 @@ use ::angzarr_embedded::v1::{
 };
 use ::angzarr_embedded::{
     pack, type_name, Any, Decoder, Domain, Envelope, Executed, Failure, Handled, KernelError,
-    MemoryDeadLetters, Payload, PayloadError, Recovery, Registry, Rejected, Sampled, State,
-    StepError, Stream, Timestamp, Upcaster, WireError,
+    MemoryDeadLetters, NotSnapshotted, Payload, PayloadError, Recovery, Registry, Rejected,
+    Sampled, State, StepError, Stream, Timestamp, Upcaster, WireError,
 };
 use angzarr_diagnostic::{code, Arg, Diagnostic, Report};
 use angzarr_embedded_macros::{
@@ -105,7 +105,7 @@ mod wire {
 
     message!(
         "toy.wallet.v1",
-        WalletSnapshot {
+        WalletState {
             #[prost(bool, tag = "1")]
             open: bool,
             #[prost(bool, tag = "2")]
@@ -274,6 +274,16 @@ mod wire {
     message!("toy.lamp.v1", SwitchedOn {});
     message!("toy.lamp.cmd.v1", SwitchOff {});
     message!("toy.lamp.v1", SwitchedOff {});
+
+    // The anchors of the aggregates and the process manager that take no
+    // snapshots: each the state its component registers.
+    message!("toy.lamp.v1", LampState {});
+    message!("toy.toggle.v1", ToggleState {});
+    message!("toy.badge.v1", BadgeState {});
+    message!("toy.meter.v1", MeterState {});
+    message!("toy.ladder.v1", LadderState {});
+    message!("toy.pot.v1", PotState {});
+    message!("toy.buyin.v1", BuyInState {});
 
     message!(
         "toy.badge.cmd.v1",
@@ -459,6 +469,20 @@ macro_rules! domain_type {
     };
 }
 
+domain_type!(WalletState {
+    open: bool,
+    closed: bool,
+    cents: i64,
+    last_moved_at: Option<Timestamp>,
+    rewarded: bool,
+});
+domain_type!(LampState {});
+domain_type!(ToggleState {});
+domain_type!(BadgeState {});
+domain_type!(MeterState {});
+domain_type!(LadderState {});
+domain_type!(PotState {});
+domain_type!(BuyInState {});
 domain_type!(Open { bonus: i64 });
 domain_type!(Deposit { cents: i64 });
 domain_type!(Withdraw { cents: i64 });
@@ -788,36 +812,35 @@ impl Wallet {
     }
 }
 
-/// The snapshot form, both ways (this and [`Wallet::restore`]): the macro
-/// builds the `State` impl from them.
-impl From<&Wallet> for wire::WalletSnapshot {
-    fn from(wallet: &Wallet) -> Self {
-        wire::WalletSnapshot {
-            open: wallet.open,
-            closed: wallet.closed,
-            cents: wallet.ledger.cents,
-            last_moved_at: wallet.ledger.last_moved_at,
-            rewarded: wallet.rewarded,
-        }
-    }
-}
+/// The wallet takes snapshots: its anchor holds its state, and a restore
+/// keeps this instance's configuration (the factory's), which no snapshot
+/// holds.
+impl markup::Snapshots for Wallet {
+    type Anchor = WalletState;
 
-impl Wallet {
-    /// Take the state a snapshot holds, keeping this instance's
-    /// configuration (the factory's), which no snapshot holds.
-    fn restore(&mut self, snapshot: wire::WalletSnapshot) -> Result<(), WireError> {
-        self.open = snapshot.open;
-        self.closed = snapshot.closed;
-        self.rewarded = snapshot.rewarded;
+    fn snapshot(&self) -> Option<WalletState> {
+        Some(WalletState {
+            open: self.open,
+            closed: self.closed,
+            cents: self.ledger.cents,
+            last_moved_at: self.ledger.last_moved_at,
+            rewarded: self.rewarded,
+        })
+    }
+
+    fn restore(&mut self, anchor: WalletState) -> Result<(), Report> {
+        self.open = anchor.open;
+        self.closed = anchor.closed;
+        self.rewarded = anchor.rewarded;
         self.ledger = Ledger {
-            cents: snapshot.cents,
-            last_moved_at: snapshot.last_moved_at,
+            cents: anchor.cents,
+            last_moved_at: anchor.last_moved_at,
         };
         Ok(())
     }
 }
 
-#[aggregate(domain = "wallet", snapshot = wire::WalletSnapshot)]
+#[aggregate(domain = "wallet")]
 impl Wallet {
     /// Two events, a tuple: the router applies them in order.
     #[handles_cmd(Open, refuses(Refused))]
@@ -1029,11 +1052,16 @@ fn positive(cents: i64) -> Result<(), Refused> {
 
 // ---------------------------------------------------------------- the lamp
 
-/// The smallest aggregate: no snapshot form, and a command that lists no
+/// The smallest aggregate: no snapshots, and a command that lists no
 /// refusal, so cannot refuse.
 #[derive(Clone, Default, PartialEq, Debug)]
 pub struct Lamp {
     on: bool,
+}
+
+/// Names its anchor and takes no snapshots: every load replays.
+impl markup::Snapshots for Lamp {
+    type Anchor = LampState;
 }
 
 #[aggregate(domain = "lamp")]
@@ -1158,6 +1186,11 @@ impl Payload for ToggleEvent {
     }
 }
 
+/// Names its anchor and takes no snapshots: every load replays.
+impl markup::Snapshots for Toggle {
+    type Anchor = ToggleState;
+}
+
 #[aggregate(domain = "toggle", command = ToggleCommand, event = ToggleEvent)]
 impl Toggle {
     #[handles_cmd(SwitchOn)]
@@ -1225,6 +1258,11 @@ impl Diagnostic for MisFolded {
     fn args(&self) -> Vec<(&str, Arg)> {
         vec![]
     }
+}
+
+/// Names its anchor and takes no snapshots: every load replays.
+impl markup::Snapshots for Badge {
+    type Anchor = BadgeState;
 }
 
 #[aggregate(domain = "badge")]
@@ -1391,6 +1429,11 @@ pub struct Meter {
     reading: i64,
 }
 
+/// Names its anchor and takes no snapshots: every load replays.
+impl markup::Snapshots for Meter {
+    type Anchor = MeterState;
+}
+
 #[aggregate(domain = "meter")]
 impl Meter {
     /// A negative reading is the caller's mistake (INVALID_ARGUMENT); one
@@ -1531,6 +1574,11 @@ pub struct Ladder {
     to: u32,
 }
 
+/// Names its anchor and takes no snapshots: every load replays.
+impl markup::Snapshots for Ladder {
+    type Anchor = LadderState;
+}
+
 #[aggregate(domain = "ladder")]
 impl Ladder {
     #[handles_cmd(Climb)]
@@ -1602,6 +1650,11 @@ pub struct Pot {
     cents: i64,
 }
 
+/// Names its anchor and takes no snapshots: every load replays.
+impl markup::Snapshots for Pot {
+    type Anchor = PotState;
+}
+
 #[aggregate(domain = "pot")]
 impl Pot {
     /// A stake: its amount, whatever its window would have been (there is
@@ -1666,20 +1719,16 @@ wire::message!("toy.tally.cmd.v1", Count {});
 wire::message!("toy.tally.v1", Counted {});
 
 impl State for TallyState {
-    type Snapshot = Self;
+    /// A prost state is its own anchor, and takes snapshots of itself.
+    type Anchor = Self;
 
-    fn to_snapshot(&self) -> Self {
-        self.clone()
+    fn snapshot(&self) -> Option<Self> {
+        Some(self.clone())
     }
 
-    fn from_snapshot(snapshot: Self) -> Result<Self, Report> {
-        Ok(snapshot)
-    }
-
-    fn descriptor() -> StateDescriptor {
-        StateDescriptor {
-            type_name: "toy.tally.v1.TallyState".to_string(),
-        }
+    fn restore(&mut self, anchor: Self) -> Result<(), Report> {
+        *self = anchor;
+        Ok(())
     }
 }
 
@@ -2698,11 +2747,11 @@ mod replay {
 mod snapshot {
     use super::*;
 
-    /// With `snapshot = ..`, the state's snapshot is the user's conversion,
-    /// under the message's type URL, and a stream resumed from it holds the
-    /// same state.
+    /// An aggregate overriding `Snapshots`' methods offers its state as its
+    /// anchor's wire type, the state type it registers, and a stream resumed
+    /// from it holds the same state.
     #[test]
-    fn a_snapshot_form_round_trips_through_the_users_conversions() {
+    fn an_aggregate_overriding_snapshots_offers_its_anchor_and_resumes_from_it() {
         let registry = registry();
         let mut wallet = opened(&registry, 0);
         run(&mut wallet, &registry, 2, any(Deposit { cents: 120 })).unwrap();
@@ -2718,23 +2767,21 @@ mod snapshot {
         .unwrap();
 
         let state = snapshot.state.clone().unwrap_or_default();
-        assert_eq!(type_name(&state.type_url), "toy.wallet.v1.WalletSnapshot");
+        assert_eq!(type_name(&state.type_url), "toy.wallet.v1.WalletState");
         assert_eq!(
-            <Wallet as State>::descriptor().type_name,
-            "toy.wallet.v1.WalletSnapshot"
+            registry.catalog().state("wallet").map(|s| s.type_name),
+            Some("toy.wallet.v1.WalletState".to_string())
         );
-        assert_eq!(
-            wallet.state().to_snapshot(),
-            wire::WalletSnapshot::from(wallet.state())
-        );
+        let offered = markup::Snapshots::snapshot(wallet.state()).expect("it offers one");
+        assert_eq!(State::snapshot(wallet.state()), Some(offered.to_wire()));
+        assert_eq!(offered.cents, 132, "the deposit, and its reward of a tenth");
         assert_eq!(resumed.state(), wallet.state());
     }
 
-    /// Without `snapshot = ..`, the kernel takes none: every load replays.
-    /// Its state's descriptor names the markup's `NoSnapshot`, in
-    /// angzarr-embedded's own package.
+    /// An aggregate keeping `Snapshots`' defaults takes none: every load
+    /// replays. Its state is registered as its anchor all the same.
     #[test]
-    fn no_snapshot_form_means_no_snapshot() {
+    fn an_aggregate_keeping_the_defaults_takes_no_snapshot() {
         let registry = registry();
         let mut lamp = Stream::<Lamp>::new(root(), None).unwrap();
 
@@ -2742,10 +2789,118 @@ mod snapshot {
 
         assert_eq!(on, Ok(vec![any(SwitchedOn {})]));
         assert!(lamp.snapshot(&registry).is_none());
+        assert_eq!(State::snapshot(lamp.state()), None);
         assert_eq!(
-            <Lamp as State>::descriptor().type_name,
-            "angzarr_embedded.next.markup.NoSnapshot"
+            registry.catalog().state("lamp").map(|s| s.type_name),
+            Some("toy.lamp.v1.LampState".to_string())
         );
+    }
+
+    /// The default restore refuses a snapshot, naming the anchor, so a
+    /// stream holding one (an earlier build offered it) does not resume
+    /// from it: the snapshot is unreadable.
+    #[test]
+    fn the_default_restore_refuses_a_snapshot() {
+        let registry = registry();
+        let refused = markup::Snapshots::restore(&mut Lamp::default(), LampState {});
+        assert_eq!(
+            refused,
+            Err(Report::of(&NotSnapshotted {
+                anchor: "toy.lamp.v1.LampState".to_string()
+            }))
+        );
+        assert_eq!(
+            refused.unwrap_err().code(),
+            "angzarr-embedded-not-snapshotted"
+        );
+
+        let snapshot = ::angzarr_embedded::v1::Snapshot {
+            sequence: 0,
+            state: Some(pack(&wire::LampState {})),
+            rules_version: env!("CARGO_PKG_VERSION").to_string(),
+        };
+        let cover = Stream::<Lamp>::new(root(), None).unwrap().cover().clone();
+        let resumed = Stream::<Lamp>::resume(cover, &snapshot, None, &[], &registry);
+        assert!(
+            matches!(resumed, Err(KernelError::Unreadable { .. })),
+            "{:?}",
+            resumed.err()
+        );
+    }
+
+    wire::message!(
+        "toy.gauge.v1",
+        GaugeState {
+            #[prost(int64, optional, tag = "1")]
+            reading: Option<i64>,
+        }
+    );
+
+    /// A gauge's anchor as its domain type, whose reading is required.
+    #[derive(Clone, PartialEq, Debug)]
+    struct Reading {
+        reading: i64,
+    }
+
+    impl DomainMessage for Reading {
+        type Wire = GaugeState;
+
+        fn to_wire(&self) -> GaugeState {
+            GaugeState {
+                reading: Some(self.reading),
+            }
+        }
+
+        fn from_wire(wire: GaugeState) -> Result<Self, WireError> {
+            let missing = WireError::Missing {
+                message: "toy.gauge.v1.GaugeState",
+                field: "reading",
+            };
+            let reading = wire.reading.ok_or(missing)?;
+            Ok(Reading { reading })
+        }
+    }
+
+    /// Snapshots a reading, by its anchor's domain type.
+    #[derive(Clone, Default, PartialEq, Debug)]
+    struct Gauge {
+        reading: i64,
+    }
+
+    impl markup::Snapshots for Gauge {
+        type Anchor = Reading;
+
+        fn snapshot(&self) -> Option<Reading> {
+            Some(Reading {
+                reading: self.reading,
+            })
+        }
+
+        fn restore(&mut self, anchor: Reading) -> Result<(), Report> {
+            self.reading = anchor.reading;
+            Ok(())
+        }
+    }
+
+    /// The markup's snapshot is the anchor's wire type, and its restore
+    /// goes through the anchor's domain type: a wire value that type cannot
+    /// hold is refused, naming the field, before the aggregate's `restore`
+    /// sees it, the state left as it was.
+    #[test]
+    fn a_snapshot_travels_as_its_anchors_wire_type() {
+        let mut gauge = Gauge { reading: 4 };
+        assert_eq!(
+            markup::snapshot_wire(&gauge),
+            Some(GaugeState { reading: Some(4) })
+        );
+
+        let refused = markup::restore_wire(&mut gauge, GaugeState { reading: None });
+        let refusal = refused.expect_err("an absent reading is refused");
+        assert_eq!(refusal.code(), "angzarr-embedded-wire-missing");
+        assert_eq!(gauge, Gauge { reading: 4 }, "left as it was");
+
+        markup::restore_wire(&mut gauge, GaugeState { reading: Some(7) }).unwrap();
+        assert_eq!(gauge, Gauge { reading: 7 });
     }
 }
 
@@ -3491,6 +3646,11 @@ impl Diagnostic for AlreadyStarted {
     fn args(&self) -> Vec<(&str, Arg)> {
         vec![]
     }
+}
+
+/// Names its anchor and takes no snapshots: every load replays.
+impl markup::Snapshots for BuyIn {
+    type Anchor = BuyInState;
 }
 
 #[process_manager(domain = "buyin")]

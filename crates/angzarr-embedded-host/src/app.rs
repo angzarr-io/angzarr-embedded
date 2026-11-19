@@ -57,7 +57,8 @@ use angzarr_embedded::v1::{CommandBook, Cover, EventBook, EventPage};
 use angzarr_embedded::{Answered, Catalog, Misconfigured};
 use angzarr_embedded::{
     DeadLetterLog, EventStore, Failure, Handled, Kernel, KernelError, Malformed, OnPolicyBug,
-    OnRetryable, Recorded, Registry, Rejected, Sampled, StoreError, StreamRef, Wait,
+    OnRetryable, Recorded, Registry, Rejected, Sampled, SnapshotPolicy, StoreError, StreamRef,
+    Wait,
 };
 use angzarr_proto::v1::ComponentKind;
 use angzarr_store_sqlite::SqliteStore;
@@ -361,6 +362,7 @@ pub struct AppBuilder<R: Stores> {
     wait: Option<Arc<dyn Wait>>,
     policy_bug: OnPolicyBug,
     retry: OnRetryable,
+    snapshots: SnapshotPolicy,
     exposed: BTreeMap<String, Expose>,
 }
 
@@ -398,6 +400,13 @@ impl<R: Stores> AppBuilder<R> {
         self
     }
 
+    /// Which of the snapshots each domain's state offers are stored, per
+    /// domain ([`Kernel::snapshot_policy`]): one at every write until given.
+    pub fn snapshot_policy(mut self, snapshots: SnapshotPolicy) -> AppBuilder<R> {
+        self.snapshots = snapshots;
+        self
+    }
+
     /// The domains served to the host's listener, by `component` name,
     /// each as exposed ([`App::serve_in`]); one not here is exposed
     /// `"none"`.
@@ -421,6 +430,7 @@ impl<R: Stores> AppBuilder<R> {
             wait: self.wait,
             policy_bug: self.policy_bug,
             retry: self.retry,
+            snapshots: self.snapshots,
             stores: self.stores,
             exposed: self.exposed,
             resumed: Vec::new(),
@@ -449,6 +459,7 @@ pub struct App<R: Stores = OneStore<SqliteStore>> {
     wait: Option<Arc<dyn Wait>>,
     policy_bug: OnPolicyBug,
     retry: OnRetryable,
+    snapshots: SnapshotPolicy,
     stores: R,
     /// Each `component` entry exposed to the host's listener, by name: one
     /// not here is exposed `"none"`.
@@ -471,6 +482,7 @@ impl<R: Stores> App<R> {
             wait: None,
             policy_bug: OnPolicyBug::default(),
             retry: OnRetryable::default(),
+            snapshots: SnapshotPolicy::default(),
             exposed: BTreeMap::new(),
         }
     }
@@ -480,7 +492,8 @@ impl<R: Stores> App<R> {
     pub fn kernel(&self) -> Kernel<'_> {
         let kernel = Kernel::new(&self.registry)
             .on_policy_bug(self.policy_bug)
-            .on_retryable(self.retry);
+            .on_retryable(self.retry)
+            .snapshot_policy(&self.snapshots);
         let kernel = match &self.log {
             Some(log) => kernel.log_with(&**log),
             None => kernel,

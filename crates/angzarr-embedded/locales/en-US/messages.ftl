@@ -61,6 +61,7 @@ unreadable = event { $sequence } of stream { $stream } cannot be replayed: { $re
 
 payload-unknown-type = no decoder for the type { $type_url }
 payload-decode = a payload of type { $type_url } does not decode
+not-snapshotted = a snapshot of { $anchor } was handed to a state that takes none, so it cannot be restored
 not-its-stream = a command whose { $domain } key is { $key } was sent to another stream: its stream is the one that key names
 payload-invalid = a payload of type { $type_url } is not a valid value: { $reason }
 wire-missing = { $message }.{ $field } is required and absent

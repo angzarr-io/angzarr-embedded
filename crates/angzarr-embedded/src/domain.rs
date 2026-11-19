@@ -2,53 +2,86 @@
 //! fold into it.
 
 use angzarr_diagnostic::Diagnostic;
-use angzarr_proto::v1::StateDescriptor;
 
 use super::payload::Payload;
 use angzarr_router::PageContext;
 
-/// A domain's state: a domain type, with a prost message as its snapshot
-/// form ([`State::Snapshot`]), so it can be snapshotted as `Any`. angzarr's
-/// generator (`angzarr_build`) emits the impl from the state message; a
-/// state that is itself a prost message is its own snapshot form.
+/// A domain's state: a domain type, registered as its component's anchor
+/// ([`State::Anchor`]): an aggregate's or a process manager's anchor is
+/// its event-sourced state (docs/design/component-options.md §1), so the
+/// anchor's full name is the state type its descriptor registers, and what
+/// a snapshot of it holds.
+///
+/// Snapshots are a framework optimisation, never business data
+/// (docs/design/snapshots.md): a state opts in by overriding
+/// [`State::snapshot`] and [`State::restore`], and offers itself with every
+/// answer; the kernel stores what is offered as the domain's
+/// [`SnapshotPolicy`](super::SnapshotPolicy) says, and starts a load from
+/// it only when [`Catalog::snapshot_usable`](super::Catalog::snapshot_usable)
+/// passes it. A state that keeps both defaults offers none, and its streams
+/// are always replayed from the start. angzarr's generator
+/// (`angzarr_build`) and the markup (`#[aggregate]`, through
+/// [`markup::Snapshots`](super::markup::Snapshots)) write the impl.
 pub trait State: Default + Clone + Send + 'static {
-    /// The wire form a snapshot carries. Its type URL is the state's, as
-    /// [`State::descriptor`] names it; registration refuses a descriptor
-    /// naming another.
-    type Snapshot: prost::Message + prost::Name + Default;
+    /// The component's anchor, the prost message the state is registered
+    /// and snapshotted as.
+    type Anchor: prost::Message + prost::Name + Default;
 
-    /// The state as its snapshot form. Infallible: every state has one.
-    fn to_snapshot(&self) -> Self::Snapshot;
-
-    /// The state a snapshot holds, or why it holds none: a wire value need
-    /// not be a valid state (a required field absent, an enum value the
-    /// domain does not define, a broken invariant). A refusal makes the
-    /// snapshot unreadable ([`PayloadError::Invalid`](super::PayloadError)).
-    fn from_snapshot(snapshot: Self::Snapshot) -> Result<Self, angzarr_diagnostic::Report>;
-
-    /// Overwrite this instance's state with what `snapshot` holds, keeping
-    /// whatever the snapshot does not (a marked-up aggregate's immutable
-    /// configuration, from the registry's factory). Resuming builds a fresh
-    /// instance, then restores it. The default replaces the whole instance
-    /// with [`State::from_snapshot`]'s.
-    fn restore(&mut self, snapshot: Self::Snapshot) -> Result<(), angzarr_diagnostic::Report> {
-        *self = Self::from_snapshot(snapshot)?;
-        Ok(())
+    /// The state as its anchor, offered as a snapshot with every answer;
+    /// `None` offers none. The default offers none: a state that takes
+    /// snapshots overrides it, and [`State::restore`].
+    fn snapshot(&self) -> Option<Self::Anchor> {
+        None
     }
 
-    /// The state's type, by its message's full name (decision 14.101):
-    /// what [`Registry::register`](super::Registry::register) records, as
-    /// angzarr's `ComponentDescriptor`'s state, and what a snapshot's state
-    /// is held to.
-    fn descriptor() -> StateDescriptor;
+    /// Overwrite this instance's state with what `anchor`, a snapshot's,
+    /// holds, keeping whatever it does not (a marked-up aggregate's
+    /// immutable configuration, from the registry's factory): resuming
+    /// builds a fresh instance, then restores it. A refusal makes the
+    /// snapshot unreadable ([`PayloadError::Invalid`](super::PayloadError)):
+    /// a wire value need not be a valid state (a required field absent, an
+    /// enum value the domain does not define, a broken invariant). The
+    /// default refuses every snapshot ([`NotSnapshotted`]), as a state that
+    /// offers none never has one to restore.
+    fn restore(&mut self, _anchor: Self::Anchor) -> Result<(), angzarr_diagnostic::Report> {
+        Err(angzarr_diagnostic::Report::of(&NotSnapshotted::of::<
+            Self::Anchor,
+        >()))
+    }
+}
 
-    /// Whether the kernel takes snapshots of this state. `false` for a
-    /// state with no snapshot form (a marked-up aggregate without
-    /// `snapshot = ..`, whose [`State::Snapshot`] is
-    /// [`NoSnapshot`](super::markup::NoSnapshot)): its streams are always
-    /// replayed from the start, and [`Stream::snapshot`](super::Stream::snapshot)
-    /// is `None`.
-    const SNAPSHOTS: bool = true;
+/// A snapshot handed to a state that takes none ([`State::restore`]'s
+/// default, and [`markup::Snapshots::restore`](super::markup::Snapshots::restore)'s):
+/// its anchor, by full name. Reached only by a stream holding a snapshot
+/// that an earlier build of the domain offered.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct NotSnapshotted {
+    pub anchor: String,
+}
+
+impl NotSnapshotted {
+    /// The refusal of a snapshot of anchor `A`.
+    pub fn of<A: prost::Name>() -> NotSnapshotted {
+        NotSnapshotted {
+            anchor: A::full_name(),
+        }
+    }
+}
+
+impl std::fmt::Display for NotSnapshotted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        angzarr_diagnostic::display(self, f)
+    }
+}
+
+impl Diagnostic for NotSnapshotted {
+    fn code(&self) -> &str {
+        angzarr_diagnostic::code!("not-snapshotted")
+    }
+
+    fn args(&self) -> Vec<(&str, angzarr_diagnostic::Arg)> {
+        vec![("anchor", self.anchor.as_str().into())]
+    }
 }
 
 /// One kind of event stream, as the kernel reads it: its state, its

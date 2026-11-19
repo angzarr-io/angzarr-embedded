@@ -260,6 +260,12 @@ not put its tests in the reader's (or an LLM's) context.
 
 ## The coordinator contract is run, and its tags are the divergences
 
+angzarr-embedded diverges from angzarr's distributed design (angzarr-project's
+`docs/design/`, the reference, not this repository's current behaviour) only
+where it absolutely must, and a change is shaped to prevent a divergence:
+an application prototyped on angzarr-embedded moves to the distributed system
+without a rewrite.
+
 angzarr-embedded is not angzarr: the wire meaning is shared, the
 execution model is not. Where the two part is recorded in one place, as
 tags: `crates/angzarr-embedded-conformance` runs the spec's

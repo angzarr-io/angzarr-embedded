@@ -100,6 +100,7 @@ mod policy;
 mod projector;
 mod registry;
 mod route;
+mod snapshot_policy;
 mod store;
 mod stream;
 mod sync;
@@ -169,7 +170,7 @@ pub use catalog::{Catalog, Description};
 pub use check::{check, Arm, Body, Checked, Identified, Malformed, Sampled};
 pub use dead_letter::{dead_letter_line, DeadLetterLog, MemoryDeadLetters, DEAD_LETTER_PREFIX};
 pub use digest::Folded;
-pub use domain::{Domain, State};
+pub use domain::{Domain, NotSnapshotted, State};
 pub use error::{
     class, ChainProblem, Class, Failure, KernelError, PayloadError, Recovery, ReplayError, Step,
     StepError, UpcastChainError, UpcastError,
@@ -187,6 +188,7 @@ pub use policy::{
 pub use projector::{CatchUp, Caught, HeldRecord};
 pub use registry::Registry;
 pub use route::{rejection, spec_coded, Rejected, SpecKey};
+pub use snapshot_policy::SnapshotPolicy;
 pub use store::{
     Append, ChangeToken, CommitNotify, CommitWait, DeadLetter, DeadLetterAt, DeadLetterKey,
     DeadLetterStore, EventStore, Head, ListStreams, Outbox, OutboxEntry, PositionKey,
@@ -255,6 +257,9 @@ pub fn diagnostic_samples() -> Vec<Box<dyn angzarr_diagnostic::Diagnostic>> {
     samples.push(Box::new(markup::NotItsStream {
         domain: sample_domain(),
         key: "swift-amber-falcon".to_string(),
+    }));
+    samples.push(Box::new(NotSnapshotted {
+        anchor: "toy.wallet.v1.WalletState".to_string(),
     }));
     samples.push(Box::new(policy::OutputNoBody));
     samples.push(Box::new(DeadlinePassed {

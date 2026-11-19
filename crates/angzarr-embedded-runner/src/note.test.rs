@@ -66,6 +66,8 @@ mod wire {
         }
     );
     message!("toy.note.v1", Erased {});
+    // The note's anchor: the state it registers, and never snapshots.
+    message!("toy.note.v1", NoteState {});
     // The note's typed refusal object: why, and the text it holds.
     message!(
         "toy.note.v1",
@@ -109,6 +111,7 @@ domain_type!(Erase {});
 domain_type!(Written { text: String });
 domain_type!(Rewritten { text: String });
 domain_type!(Erased {});
+domain_type!(NoteState {});
 
 /// An enum of the note's types, one variant per type, with a `From` of
 /// each and its `Payload`.
@@ -236,6 +239,11 @@ impl Note {
             false => Ok(()),
         }
     }
+}
+
+/// Names its anchor and takes no snapshots: every load replays.
+impl markup::Snapshots for Note {
+    type Anchor = NoteState;
 }
 
 #[aggregate(domain = "note", command = NoteCommand, event = NoteEvent)]

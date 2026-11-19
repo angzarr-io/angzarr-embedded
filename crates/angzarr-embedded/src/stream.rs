@@ -358,8 +358,8 @@ impl<D: Domain> Stream<D> {
     ) -> Result<Stream<D>, KernelError> {
         Self::check_domain(&cover)?;
         let any = snapshot.state.clone().unwrap_or_default();
-        let state = if type_name(&any.type_url) == <D::State as State>::Snapshot::full_name() {
-            <D::State as State>::Snapshot::decode(&any.value[..])
+        let state = if type_name(&any.type_url) == <D::State as State>::Anchor::full_name() {
+            <D::State as State>::Anchor::decode(&any.value[..])
                 .map_err(|error| PayloadError::Decode {
                     type_url: any.type_url.clone(),
                     error,
@@ -395,17 +395,14 @@ impl<D: Domain> Stream<D> {
     }
 
     /// The stream's state as an angzarr `Snapshot`: the last sequence, the
-    /// state packed as `Any` (its type URL is what a load compares), the
-    /// registered rules version. `None` for an empty stream, and for a state
-    /// with no snapshot form ([`State::SNAPSHOTS`] `false`).
+    /// state's anchor packed as `Any` (its type URL is what a load
+    /// compares), the registered rules version. `None` for an empty stream,
+    /// and for a state that offers none ([`State::snapshot`]).
     pub fn snapshot(&self, registry: &Registry) -> Option<Snapshot> {
-        if !D::State::SNAPSHOTS {
-            return None;
-        }
         let sequence = self.len().checked_sub(1)?;
         Some(Snapshot {
             sequence,
-            state: Some(pack(&self.state.to_snapshot())),
+            state: Some(pack(&self.state.snapshot()?)),
             rules_version: registry.catalog().rules_version(D::NAME)?,
         })
     }

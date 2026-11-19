@@ -1370,6 +1370,59 @@ mod parts {
         assert!(app.resumed().is_empty());
     }
 
+    /// A domain answering every command with [`MET`] and its state, the
+    /// state its descriptor registers.
+    struct Stated;
+
+    impl angzarr_embedded::angzarr_router::router::CommandHandler for Stated {
+        fn name(&self) -> &str {
+            "stated"
+        }
+
+        fn command_types(&self) -> Vec<String> {
+            Vec::new()
+        }
+
+        async fn dispatch(
+            &self,
+            _: &angzarr_embedded::angzarr_router::hpb::HandleRequest,
+        ) -> Result<angzarr_embedded::angzarr_router::hpb::HandleResponse, CodedError> {
+            Ok(angzarr_embedded::angzarr_router::hpb::HandleResponse {
+                events: vec![any(MET)],
+                state: Some(any("/test.stated.v1.State")),
+                rules_version: VERSION.to_string(),
+            })
+        }
+    }
+
+    /// The app's kernel stores the snapshots its domains offer as the
+    /// policy it is given says: here every second event of `stated`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_app_stores_snapshots_as_its_snapshot_policy_says() {
+        let mut registry = Registry::new();
+        registry
+            .command_handler("stated", Stated, descriptor("stated"))
+            .unwrap();
+        let every_second = std::num::NonZeroU64::new(2).unwrap();
+        let app = App::builder(OneStore::new(MemoryStore::new()), registry)
+            .snapshot_policy(angzarr_embedded::SnapshotPolicy::every(every_second))
+            .start()
+            .await;
+        let stream = cover("stated", 1);
+        let mut stored = Vec::new();
+        for n in 1..=3 {
+            app.handle(meet("stated", n), &sampled(n)).await.unwrap();
+            let snapshot = angzarr_embedded::angzarr_ports::SnapshotStore::read_snapshot(
+                app.store(),
+                StreamRef::try_from(&stream).unwrap(),
+            )
+            .await
+            .unwrap();
+            stored.push(snapshot.map(|s| s.sequence));
+        }
+        assert_eq!(stored, [None, Some(1), Some(1)]);
+    }
+
     /// One MemoryStore per project, opened by name.
     #[derive(Default)]
     struct Projects(Mutex<BTreeMap<String, Arc<MemoryStore>>>);

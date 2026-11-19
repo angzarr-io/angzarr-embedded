@@ -46,7 +46,7 @@
 //! # The markup
 //!
 //! ```text
-//! #[aggregate(domain = "wallet", snapshot = WalletSnapshot)]
+//! #[aggregate(domain = "wallet")]
 //! impl Wallet {
 //!     #[handles_cmd(Deposit)] // lists no refusal: it cannot refuse
 //!     fn deposit(&self, cmd: Deposit, ctx: &Context) -> Result<Emit<Self>, Failed<Unrefusable>> { .. }
@@ -64,8 +64,6 @@
 //!
 //! - [`aggregate`], on an inherent impl:
 //!   - `domain`: the `Domain::NAME`, a string literal;
-//!   - `snapshot` (optional): the prost message the aggregate is
-//!     snapshotted as;
 //!   - `vis` (optional, default `pub`): the visibility of the generated
 //!     `<Name>Handler` trait. An impl does not carry its type's
 //!     visibility, so the scaffold writes the struct's here.
@@ -404,14 +402,16 @@
 //! appliers, then calls the handler on the result. No instance outlives
 //! its input, and none is shared between streams.
 //!
-//! With `snapshot = Msg`, the user writes `From<&Wallet> for Msg` and
-//! `fn restore(&mut self, snapshot: Msg) -> Result<(), E>` (`E` a
-//! `Diagnostic`), and the macro generates the `State` impl from them, with
-//! `Msg`'s full name as the state's type. Resuming builds a fresh instance
+//! Every marked-up aggregate and process manager implements
+//! `markup::Snapshots`, which names its anchor (`type Anchor`, the
+//! anchor's domain type: its wire type is the state type the component
+//! registers), and the macro generates the `State` impl from it. An
+//! implementation keeping `Snapshots`' defaults takes no snapshots, and
+//! every load replays from the start; one overriding `snapshot` and
+//! `restore` opts in: its state is offered with every answer, stored as
+//! the domain's storage policy says, and a resume builds a fresh instance
 //! from the factory, then restores it, so the configuration the snapshot
-//! does not hold survives. Without `snapshot`, the state has no snapshot
-//! form (`State::SNAPSHOTS` is `false`), and every load replays from the
-//! start.
+//! does not hold survives.
 //!
 //! # The expansion
 //!
@@ -442,10 +442,12 @@
 //! impl Ingests<Payout> for Wallet {}  // one per fact
 //!
 //! impl ::angzarr_embedded::State for Wallet {
-//!     type Snapshot = WalletSnapshot; // or markup::NoSnapshot, with SNAPSHOTS = false
-//!     // to_snapshot: From<&Wallet>; restore: Wallet::restore;
-//!     // from_snapshot: Default, then restore
-//!     ..
+//!     // The anchor's wire type, and the snapshot through markup::Snapshots.
+//!     type Anchor = <<Wallet as Snapshots>::Anchor as DomainMessage>::Wire;
+//!     fn snapshot(&self) -> Option<Self::Anchor> { markup::snapshot_wire(self) }
+//!     fn restore(&mut self, anchor: Self::Anchor) -> Result<(), Report> {
+//!         markup::restore_wire(self, anchor)
+//!     }
 //! }
 //!
 //! impl ::angzarr_embedded::Domain for Wallet {
@@ -550,7 +552,7 @@
 //! #             }
 //! #         )*};
 //! #     }
-//! #     wire!(SwitchOn, SwitchOff, SwitchedOn, SwitchedOff);
+//! #     wire!(LampState, SwitchOn, SwitchOff, SwitchedOn, SwitchedOff);
 //! # }
 //! # macro_rules! domain {
 //! #     ($($name:ident),*) => {$(
@@ -563,9 +565,10 @@
 //! #         }
 //! #     )*};
 //! # }
-//! # domain!(SwitchOn, SwitchOff, SwitchedOn, SwitchedOff);
+//! # domain!(LampState, SwitchOn, SwitchOff, SwitchedOn, SwitchedOff);
 //! # #[derive(Clone, Default)]
 //! # pub struct Lamp { on: bool }
+//! # impl angzarr_embedded::markup::Snapshots for Lamp { type Anchor = LampState; }
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
 //!     #[handles_cmd(SwitchOn)]
@@ -610,7 +613,7 @@
 //! #             }
 //! #         )*};
 //! #     }
-//! #     wire!(SwitchOn, SwitchOff, SwitchedOn, SwitchedOff);
+//! #     wire!(LampState, SwitchOn, SwitchOff, SwitchedOn, SwitchedOff);
 //! # }
 //! # macro_rules! domain {
 //! #     ($($name:ident),*) => {$(
@@ -623,9 +626,10 @@
 //! #         }
 //! #     )*};
 //! # }
-//! # domain!(SwitchOn, SwitchOff, SwitchedOn, SwitchedOff);
+//! # domain!(LampState, SwitchOn, SwitchOff, SwitchedOn, SwitchedOff);
 //! # #[derive(Clone, Default)]
 //! # pub struct Lamp { on: bool }
+//! # impl angzarr_embedded::markup::Snapshots for Lamp { type Anchor = LampState; }
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
 //!     #[handles_cmd(SwitchOn)]
@@ -677,7 +681,7 @@
 //! #             }
 //! #         )*};
 //! #     }
-//! #     wire!(SwitchOn, SwitchOff, SwitchedOn, SwitchedOff);
+//! #     wire!(LampState, SwitchOn, SwitchOff, SwitchedOn, SwitchedOff);
 //! # }
 //! # macro_rules! domain {
 //! #     ($($name:ident),*) => {$(
@@ -690,9 +694,10 @@
 //! #         }
 //! #     )*};
 //! # }
-//! # domain!(SwitchOn, SwitchOff, SwitchedOn, SwitchedOff);
+//! # domain!(LampState, SwitchOn, SwitchOff, SwitchedOn, SwitchedOff);
 //! # #[derive(Clone, Default)]
 //! # pub struct Lamp { on: bool }
+//! # impl angzarr_embedded::markup::Snapshots for Lamp { type Anchor = LampState; }
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
 //!     #[handles_cmd(SwitchOn)]
@@ -737,7 +742,7 @@
 //! #             }
 //! #         )*};
 //! #     }
-//! #     wire!(SwitchOn, SwitchOff, SwitchedOn, SwitchedOff);
+//! #     wire!(LampState, SwitchOn, SwitchOff, SwitchedOn, SwitchedOff);
 //! # }
 //! # macro_rules! domain {
 //! #     ($($name:ident),*) => {$(
@@ -750,9 +755,10 @@
 //! #         }
 //! #     )*};
 //! # }
-//! # domain!(SwitchOn, SwitchOff, SwitchedOn, SwitchedOff);
+//! # domain!(LampState, SwitchOn, SwitchOff, SwitchedOn, SwitchedOff);
 //! # #[derive(Clone, Default)]
 //! # pub struct Lamp { on: bool }
+//! # impl angzarr_embedded::markup::Snapshots for Lamp { type Anchor = LampState; }
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
 //!     #[handles_cmd(SwitchOn)]
@@ -796,7 +802,7 @@
 //! #             }
 //! #         )*};
 //! #     }
-//! #     wire!(SwitchOn, SwitchOff, SwitchedOn, SwitchedOff);
+//! #     wire!(LampState, SwitchOn, SwitchOff, SwitchedOn, SwitchedOff);
 //! # }
 //! # macro_rules! domain {
 //! #     ($($name:ident),*) => {$(
@@ -809,9 +815,10 @@
 //! #         }
 //! #     )*};
 //! # }
-//! # domain!(SwitchOn, SwitchOff, SwitchedOn, SwitchedOff);
+//! # domain!(LampState, SwitchOn, SwitchOff, SwitchedOn, SwitchedOff);
 //! # #[derive(Clone, Default)]
 //! # pub struct Lamp { on: bool }
+//! # impl angzarr_embedded::markup::Snapshots for Lamp { type Anchor = LampState; }
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
 //!     #[handles_cmd(SwitchOn)]
@@ -856,7 +863,7 @@
 //! #             }
 //! #         )*};
 //! #     }
-//! #     wire!(SwitchOn, SwitchOff, SwitchedOn, SwitchedOff);
+//! #     wire!(LampState, SwitchOn, SwitchOff, SwitchedOn, SwitchedOff);
 //! # }
 //! # macro_rules! domain {
 //! #     ($($name:ident),*) => {$(
@@ -869,9 +876,10 @@
 //! #         }
 //! #     )*};
 //! # }
-//! # domain!(SwitchOn, SwitchOff, SwitchedOn, SwitchedOff);
+//! # domain!(LampState, SwitchOn, SwitchOff, SwitchedOn, SwitchedOff);
 //! # #[derive(Clone, Default)]
 //! # pub struct Lamp { on: bool }
+//! # impl angzarr_embedded::markup::Snapshots for Lamp { type Anchor = LampState; }
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
 //!     #[handles_cmd(SwitchOn)]
@@ -917,7 +925,7 @@
 //! #             }
 //! #         )*};
 //! #     }
-//! #     wire!(SwitchOn, SwitchOff, SwitchedOn, SwitchedOff);
+//! #     wire!(LampState, SwitchOn, SwitchOff, SwitchedOn, SwitchedOff);
 //! # }
 //! # macro_rules! domain {
 //! #     ($($name:ident),*) => {$(
@@ -930,13 +938,17 @@
 //! #         }
 //! #     )*};
 //! # }
-//! # domain!(SwitchOn, SwitchOff, SwitchedOn, SwitchedOff);
+//! # domain!(LampState, SwitchOn, SwitchOff, SwitchedOn, SwitchedOff);
 //! mod lamp {
 //!     use super::*;
 //!
 //!     #[derive(Clone, Default)]
 //!     pub struct Lamp {
 //!         on: bool,
+//!     }
+//!
+//!     impl angzarr_embedded::markup::Snapshots for Lamp {
+//!         type Anchor = LampState;
 //!     }
 //!
 //!     #[aggregate(domain = "lamp", vis = pub(self))]
@@ -991,7 +1003,7 @@
 //! #             }
 //! #         )*};
 //! #     }
-//! #     wire!(SwitchOn, PowerCut, SwitchedOn, WentDark);
+//! #     wire!(LampState, SwitchOn, PowerCut, SwitchedOn, WentDark);
 //! # }
 //! # macro_rules! domain {
 //! #     ($($name:ident),*) => {$(
@@ -1004,9 +1016,10 @@
 //! #         }
 //! #     )*};
 //! # }
-//! # domain!(SwitchOn, PowerCut, SwitchedOn, WentDark);
+//! # domain!(LampState, SwitchOn, PowerCut, SwitchedOn, WentDark);
 //! # #[derive(Clone, Default)]
 //! # pub struct Lamp { on: bool }
+//! # impl angzarr_embedded::markup::Snapshots for Lamp { type Anchor = LampState; }
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
 //!     #[handles_cmd(SwitchOn)]
@@ -1052,7 +1065,7 @@
 //! #             }
 //! #         )*};
 //! #     }
-//! #     wire!(SwitchOn, PowerCut, SwitchedOn, WentDark);
+//! #     wire!(LampState, SwitchOn, PowerCut, SwitchedOn, WentDark);
 //! # }
 //! # macro_rules! domain {
 //! #     ($($name:ident),*) => {$(
@@ -1065,9 +1078,10 @@
 //! #         }
 //! #     )*};
 //! # }
-//! # domain!(SwitchOn, PowerCut, SwitchedOn, WentDark);
+//! # domain!(LampState, SwitchOn, PowerCut, SwitchedOn, WentDark);
 //! # #[derive(Clone, Default)]
 //! # pub struct Lamp { on: bool }
+//! # impl angzarr_embedded::markup::Snapshots for Lamp { type Anchor = LampState; }
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
 //!     #[handles_cmd(SwitchOn)]
@@ -1112,7 +1126,7 @@
 //! #             }
 //! #         )*};
 //! #     }
-//! #     wire!(SwitchOn, PowerCut, SwitchedOn, WentDark);
+//! #     wire!(LampState, SwitchOn, PowerCut, SwitchedOn, WentDark);
 //! # }
 //! # macro_rules! domain {
 //! #     ($($name:ident),*) => {$(
@@ -1125,9 +1139,10 @@
 //! #         }
 //! #     )*};
 //! # }
-//! # domain!(SwitchOn, PowerCut, SwitchedOn, WentDark);
+//! # domain!(LampState, SwitchOn, PowerCut, SwitchedOn, WentDark);
 //! # #[derive(Clone, Default)]
 //! # pub struct Lamp { on: bool }
+//! # impl angzarr_embedded::markup::Snapshots for Lamp { type Anchor = LampState; }
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
 //!     #[handles_cmd(SwitchOn)]
@@ -1172,7 +1187,7 @@
 //! #             }
 //! #         )*};
 //! #     }
-//! #     wire!(SwitchOn, PowerCut, SwitchedOn, WentDark);
+//! #     wire!(LampState, SwitchOn, PowerCut, SwitchedOn, WentDark);
 //! # }
 //! # macro_rules! domain {
 //! #     ($($name:ident),*) => {$(
@@ -1185,9 +1200,10 @@
 //! #         }
 //! #     )*};
 //! # }
-//! # domain!(SwitchOn, PowerCut, SwitchedOn, WentDark);
+//! # domain!(LampState, SwitchOn, PowerCut, SwitchedOn, WentDark);
 //! # #[derive(Clone, Default)]
 //! # pub struct Lamp { on: bool }
+//! # impl angzarr_embedded::markup::Snapshots for Lamp { type Anchor = LampState; }
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
 //!     #[handles_cmd(SwitchOn)]
@@ -1231,7 +1247,7 @@
 //! #             }
 //! #         )*};
 //! #     }
-//! #     wire!(SwitchOn, SwitchOff, SwitchedOn, SwitchedOff);
+//! #     wire!(LampState, SwitchOn, SwitchOff, SwitchedOn, SwitchedOff);
 //! # }
 //! # macro_rules! domain {
 //! #     ($($name:ident),*) => {$(
@@ -1244,9 +1260,10 @@
 //! #         }
 //! #     )*};
 //! # }
-//! # domain!(SwitchOn, SwitchOff, SwitchedOn, SwitchedOff);
+//! # domain!(LampState, SwitchOn, SwitchOff, SwitchedOn, SwitchedOff);
 //! # #[derive(Clone, Default)]
 //! # pub struct Lamp { on: bool }
+//! # impl angzarr_embedded::markup::Snapshots for Lamp { type Anchor = LampState; }
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
 //!     #[validates(SwitchOn)]
@@ -1296,7 +1313,7 @@
 //! #             }
 //! #         )*};
 //! #     }
-//! #     wire!(SwitchOn, SwitchOff, SwitchedOn, SwitchedOff);
+//! #     wire!(LampState, SwitchOn, SwitchOff, SwitchedOn, SwitchedOff);
 //! # }
 //! # macro_rules! domain {
 //! #     ($($name:ident),*) => {$(
@@ -1309,9 +1326,10 @@
 //! #         }
 //! #     )*};
 //! # }
-//! # domain!(SwitchOn, SwitchOff, SwitchedOn, SwitchedOff);
+//! # domain!(LampState, SwitchOn, SwitchOff, SwitchedOn, SwitchedOff);
 //! # #[derive(Clone, Default)]
 //! # pub struct Lamp { on: bool }
+//! # impl angzarr_embedded::markup::Snapshots for Lamp { type Anchor = LampState; }
 //! use angzarr_embedded_macros::rejected;
 //!
 //! #[aggregate(domain = "lamp")]
@@ -1360,7 +1378,7 @@
 //! #             }
 //! #         )*};
 //! #     }
-//! #     wire!(SwitchOn, SwitchOff, SwitchedOn, SwitchedOff);
+//! #     wire!(LampState, SwitchOn, SwitchOff, SwitchedOn, SwitchedOff);
 //! # }
 //! # macro_rules! domain {
 //! #     ($($name:ident),*) => {$(
@@ -1373,9 +1391,10 @@
 //! #         }
 //! #     )*};
 //! # }
-//! # domain!(SwitchOn, SwitchOff, SwitchedOn, SwitchedOff);
+//! # domain!(LampState, SwitchOn, SwitchOff, SwitchedOn, SwitchedOff);
 //! # #[derive(Clone, Default)]
 //! # pub struct Lamp { on: bool }
+//! # impl angzarr_embedded::markup::Snapshots for Lamp { type Anchor = LampState; }
 //! use angzarr_embedded_macros::state_factory;
 //!
 //! #[aggregate(domain = "lamp")]
@@ -1434,8 +1453,8 @@
 //! #             }
 //! #         )*};
 //! #     }
-//! #     wire!(SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
-//! #     wire!(StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
+//! #     wire!(LampState, SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
+//! #     wire!(TimerState, StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
 //! # }
 //! # macro_rules! domain {
 //! #     ($($name:ident),*) => {$(
@@ -1448,8 +1467,8 @@
 //! #         }
 //! #     )*};
 //! # }
-//! # domain!(SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
-//! # domain!(StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
+//! # domain!(LampState, SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
+//! # domain!(TimerState, StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
 //! # macro_rules! refusal {
 //! #     ($($name:ident),*) => {$(
 //! #         impl std::fmt::Display for $name {
@@ -1466,8 +1485,10 @@
 //! # refusal!(Burnt, Fused);
 //! # #[derive(Clone, Default)]
 //! # pub struct Lamp { on: bool }
+//! # impl angzarr_embedded::markup::Snapshots for Lamp { type Anchor = LampState; }
 //! # #[derive(Clone, Default)]
 //! # pub struct Timer { rang: bool }
+//! # impl angzarr_embedded::markup::Snapshots for Timer { type Anchor = TimerState; }
 //! # pub struct TimerLamp;
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
@@ -1559,8 +1580,8 @@
 //! #             }
 //! #         )*};
 //! #     }
-//! #     wire!(SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
-//! #     wire!(StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
+//! #     wire!(LampState, SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
+//! #     wire!(TimerState, StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
 //! # }
 //! # macro_rules! domain {
 //! #     ($($name:ident),*) => {$(
@@ -1573,8 +1594,8 @@
 //! #         }
 //! #     )*};
 //! # }
-//! # domain!(SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
-//! # domain!(StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
+//! # domain!(LampState, SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
+//! # domain!(TimerState, StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
 //! # macro_rules! refusal {
 //! #     ($($name:ident),*) => {$(
 //! #         impl std::fmt::Display for $name {
@@ -1591,8 +1612,10 @@
 //! # refusal!(Burnt, Fused);
 //! # #[derive(Clone, Default)]
 //! # pub struct Lamp { on: bool }
+//! # impl angzarr_embedded::markup::Snapshots for Lamp { type Anchor = LampState; }
 //! # #[derive(Clone, Default)]
 //! # pub struct Timer { rang: bool }
+//! # impl angzarr_embedded::markup::Snapshots for Timer { type Anchor = TimerState; }
 //! # pub struct TimerLamp;
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
@@ -1647,8 +1670,8 @@
 //! #             }
 //! #         )*};
 //! #     }
-//! #     wire!(SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
-//! #     wire!(StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
+//! #     wire!(LampState, SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
+//! #     wire!(TimerState, StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
 //! # }
 //! # macro_rules! domain {
 //! #     ($($name:ident),*) => {$(
@@ -1661,8 +1684,8 @@
 //! #         }
 //! #     )*};
 //! # }
-//! # domain!(SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
-//! # domain!(StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
+//! # domain!(LampState, SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
+//! # domain!(TimerState, StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
 //! # macro_rules! refusal {
 //! #     ($($name:ident),*) => {$(
 //! #         impl std::fmt::Display for $name {
@@ -1679,8 +1702,10 @@
 //! # refusal!(Burnt, Fused);
 //! # #[derive(Clone, Default)]
 //! # pub struct Lamp { on: bool }
+//! # impl angzarr_embedded::markup::Snapshots for Lamp { type Anchor = LampState; }
 //! # #[derive(Clone, Default)]
 //! # pub struct Timer { rang: bool }
+//! # impl angzarr_embedded::markup::Snapshots for Timer { type Anchor = TimerState; }
 //! # pub struct TimerLamp;
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
@@ -1735,8 +1760,8 @@
 //! #             }
 //! #         )*};
 //! #     }
-//! #     wire!(SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
-//! #     wire!(StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
+//! #     wire!(LampState, SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
+//! #     wire!(TimerState, StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
 //! # }
 //! # macro_rules! domain {
 //! #     ($($name:ident),*) => {$(
@@ -1749,8 +1774,8 @@
 //! #         }
 //! #     )*};
 //! # }
-//! # domain!(SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
-//! # domain!(StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
+//! # domain!(LampState, SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
+//! # domain!(TimerState, StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
 //! # macro_rules! refusal {
 //! #     ($($name:ident),*) => {$(
 //! #         impl std::fmt::Display for $name {
@@ -1767,8 +1792,10 @@
 //! # refusal!(Burnt, Fused);
 //! # #[derive(Clone, Default)]
 //! # pub struct Lamp { on: bool }
+//! # impl angzarr_embedded::markup::Snapshots for Lamp { type Anchor = LampState; }
 //! # #[derive(Clone, Default)]
 //! # pub struct Timer { rang: bool }
+//! # impl angzarr_embedded::markup::Snapshots for Timer { type Anchor = TimerState; }
 //! # pub struct TimerLamp;
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
@@ -1823,8 +1850,8 @@
 //! #             }
 //! #         )*};
 //! #     }
-//! #     wire!(SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
-//! #     wire!(StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
+//! #     wire!(LampState, SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
+//! #     wire!(TimerState, StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
 //! # }
 //! # macro_rules! domain {
 //! #     ($($name:ident),*) => {$(
@@ -1837,8 +1864,8 @@
 //! #         }
 //! #     )*};
 //! # }
-//! # domain!(SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
-//! # domain!(StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
+//! # domain!(LampState, SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
+//! # domain!(TimerState, StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
 //! # macro_rules! refusal {
 //! #     ($($name:ident),*) => {$(
 //! #         impl std::fmt::Display for $name {
@@ -1855,8 +1882,10 @@
 //! # refusal!(Burnt, Fused);
 //! # #[derive(Clone, Default)]
 //! # pub struct Lamp { on: bool }
+//! # impl angzarr_embedded::markup::Snapshots for Lamp { type Anchor = LampState; }
 //! # #[derive(Clone, Default)]
 //! # pub struct Timer { rang: bool }
+//! # impl angzarr_embedded::markup::Snapshots for Timer { type Anchor = TimerState; }
 //! # pub struct TimerLamp;
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
@@ -1911,8 +1940,8 @@
 //! #             }
 //! #         )*};
 //! #     }
-//! #     wire!(SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
-//! #     wire!(StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
+//! #     wire!(LampState, SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
+//! #     wire!(TimerState, StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
 //! # }
 //! # macro_rules! domain {
 //! #     ($($name:ident),*) => {$(
@@ -1925,8 +1954,8 @@
 //! #         }
 //! #     )*};
 //! # }
-//! # domain!(SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
-//! # domain!(StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
+//! # domain!(LampState, SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
+//! # domain!(TimerState, StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
 //! # macro_rules! refusal {
 //! #     ($($name:ident),*) => {$(
 //! #         impl std::fmt::Display for $name {
@@ -1943,8 +1972,10 @@
 //! # refusal!(Burnt, Fused);
 //! # #[derive(Clone, Default)]
 //! # pub struct Lamp { on: bool }
+//! # impl angzarr_embedded::markup::Snapshots for Lamp { type Anchor = LampState; }
 //! # #[derive(Clone, Default)]
 //! # pub struct Timer { rang: bool }
+//! # impl angzarr_embedded::markup::Snapshots for Timer { type Anchor = TimerState; }
 //! # pub struct TimerLamp;
 //! #[process_manager(name = "timer")]
 //! impl Timer {
@@ -2002,8 +2033,8 @@
 //! #             }
 //! #         )*};
 //! #     }
-//! #     wire!(SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
-//! #     wire!(StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
+//! #     wire!(LampState, SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
+//! #     wire!(TimerState, StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
 //! # }
 //! # macro_rules! domain {
 //! #     ($($name:ident),*) => {$(
@@ -2016,8 +2047,8 @@
 //! #         }
 //! #     )*};
 //! # }
-//! # domain!(SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
-//! # domain!(StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
+//! # domain!(LampState, SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
+//! # domain!(TimerState, StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
 //! # macro_rules! refusal {
 //! #     ($($name:ident),*) => {$(
 //! #         impl std::fmt::Display for $name {
@@ -2034,8 +2065,10 @@
 //! # refusal!(Burnt, Fused);
 //! # #[derive(Clone, Default)]
 //! # pub struct Lamp { on: bool }
+//! # impl angzarr_embedded::markup::Snapshots for Lamp { type Anchor = LampState; }
 //! # #[derive(Clone, Default)]
 //! # pub struct Timer { rang: bool }
+//! # impl angzarr_embedded::markup::Snapshots for Timer { type Anchor = TimerState; }
 //! # pub struct TimerLamp;
 //! use angzarr_embedded_macros::on;
 //!
@@ -2094,8 +2127,8 @@
 //! #             }
 //! #         )*};
 //! #     }
-//! #     wire!(SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
-//! #     wire!(StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
+//! #     wire!(LampState, SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
+//! #     wire!(TimerState, StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
 //! # }
 //! # macro_rules! domain {
 //! #     ($($name:ident),*) => {$(
@@ -2108,8 +2141,8 @@
 //! #         }
 //! #     )*};
 //! # }
-//! # domain!(SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
-//! # domain!(StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
+//! # domain!(LampState, SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
+//! # domain!(TimerState, StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
 //! # macro_rules! refusal {
 //! #     ($($name:ident),*) => {$(
 //! #         impl std::fmt::Display for $name {
@@ -2126,8 +2159,10 @@
 //! # refusal!(Burnt, Fused);
 //! # #[derive(Clone, Default)]
 //! # pub struct Lamp { on: bool }
+//! # impl angzarr_embedded::markup::Snapshots for Lamp { type Anchor = LampState; }
 //! # #[derive(Clone, Default)]
 //! # pub struct Timer { rang: bool }
+//! # impl angzarr_embedded::markup::Snapshots for Timer { type Anchor = TimerState; }
 //! # pub struct TimerLamp;
 //! use angzarr_embedded::markup::process_manager_root;
 //! ```
@@ -2158,8 +2193,8 @@
 //! #             }
 //! #         )*};
 //! #     }
-//! #     wire!(SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
-//! #     wire!(StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
+//! #     wire!(LampState, SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
+//! #     wire!(TimerState, StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
 //! # }
 //! # macro_rules! domain {
 //! #     ($($name:ident),*) => {$(
@@ -2172,8 +2207,8 @@
 //! #         }
 //! #     )*};
 //! # }
-//! # domain!(SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
-//! # domain!(StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
+//! # domain!(LampState, SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
+//! # domain!(TimerState, StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
 //! # macro_rules! refusal {
 //! #     ($($name:ident),*) => {$(
 //! #         impl std::fmt::Display for $name {
@@ -2190,8 +2225,10 @@
 //! # refusal!(Burnt, Fused);
 //! # #[derive(Clone, Default)]
 //! # pub struct Lamp { on: bool }
+//! # impl angzarr_embedded::markup::Snapshots for Lamp { type Anchor = LampState; }
 //! # #[derive(Clone, Default)]
 //! # pub struct Timer { rang: bool }
+//! # impl angzarr_embedded::markup::Snapshots for Timer { type Anchor = TimerState; }
 //! # pub struct TimerLamp;
 //! #[process_manager(domain = "timer")]
 //! impl Timer {
@@ -2255,8 +2292,8 @@
 //! #             }
 //! #         )*};
 //! #     }
-//! #     wire!(SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
-//! #     wire!(StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
+//! #     wire!(LampState, SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
+//! #     wire!(TimerState, StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
 //! # }
 //! # macro_rules! domain {
 //! #     ($($name:ident),*) => {$(
@@ -2269,8 +2306,8 @@
 //! #         }
 //! #     )*};
 //! # }
-//! # domain!(SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
-//! # domain!(StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
+//! # domain!(LampState, SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
+//! # domain!(TimerState, StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
 //! # macro_rules! refusal {
 //! #     ($($name:ident),*) => {$(
 //! #         impl std::fmt::Display for $name {
@@ -2287,8 +2324,10 @@
 //! # refusal!(Burnt, Fused);
 //! # #[derive(Clone, Default)]
 //! # pub struct Lamp { on: bool }
+//! # impl angzarr_embedded::markup::Snapshots for Lamp { type Anchor = LampState; }
 //! # #[derive(Clone, Default)]
 //! # pub struct Timer { rang: bool }
+//! # impl angzarr_embedded::markup::Snapshots for Timer { type Anchor = TimerState; }
 //! # pub struct TimerLamp;
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
@@ -2385,8 +2424,8 @@
 //! #             }
 //! #         )*};
 //! #     }
-//! #     wire!(SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
-//! #     wire!(StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
+//! #     wire!(LampState, SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
+//! #     wire!(TimerState, StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
 //! # }
 //! # macro_rules! domain {
 //! #     ($($name:ident),*) => {$(
@@ -2399,8 +2438,8 @@
 //! #         }
 //! #     )*};
 //! # }
-//! # domain!(SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
-//! # domain!(StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
+//! # domain!(LampState, SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
+//! # domain!(TimerState, StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
 //! # macro_rules! refusal {
 //! #     ($($name:ident),*) => {$(
 //! #         impl std::fmt::Display for $name {
@@ -2417,8 +2456,10 @@
 //! # refusal!(Burnt, Fused);
 //! # #[derive(Clone, Default)]
 //! # pub struct Lamp { on: bool }
+//! # impl angzarr_embedded::markup::Snapshots for Lamp { type Anchor = LampState; }
 //! # #[derive(Clone, Default)]
 //! # pub struct Timer { rang: bool }
+//! # impl angzarr_embedded::markup::Snapshots for Timer { type Anchor = TimerState; }
 //! # pub struct TimerLamp;
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
@@ -2520,8 +2561,8 @@
 //! #             }
 //! #         )*};
 //! #     }
-//! #     wire!(SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
-//! #     wire!(StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
+//! #     wire!(LampState, SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
+//! #     wire!(TimerState, StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
 //! # }
 //! # macro_rules! domain {
 //! #     ($($name:ident),*) => {$(
@@ -2534,8 +2575,8 @@
 //! #         }
 //! #     )*};
 //! # }
-//! # domain!(SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
-//! # domain!(StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
+//! # domain!(LampState, SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
+//! # domain!(TimerState, StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
 //! # macro_rules! refusal {
 //! #     ($($name:ident),*) => {$(
 //! #         impl std::fmt::Display for $name {
@@ -2552,8 +2593,10 @@
 //! # refusal!(Burnt, Fused);
 //! # #[derive(Clone, Default)]
 //! # pub struct Lamp { on: bool }
+//! # impl angzarr_embedded::markup::Snapshots for Lamp { type Anchor = LampState; }
 //! # #[derive(Clone, Default)]
 //! # pub struct Timer { rang: bool }
+//! # impl angzarr_embedded::markup::Snapshots for Timer { type Anchor = TimerState; }
 //! # pub struct TimerLamp;
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
@@ -2650,8 +2693,8 @@
 //! #             }
 //! #         )*};
 //! #     }
-//! #     wire!(SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
-//! #     wire!(StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
+//! #     wire!(LampState, SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
+//! #     wire!(TimerState, StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
 //! # }
 //! # macro_rules! domain {
 //! #     ($($name:ident),*) => {$(
@@ -2664,8 +2707,8 @@
 //! #         }
 //! #     )*};
 //! # }
-//! # domain!(SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
-//! # domain!(StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
+//! # domain!(LampState, SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
+//! # domain!(TimerState, StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
 //! # macro_rules! refusal {
 //! #     ($($name:ident),*) => {$(
 //! #         impl std::fmt::Display for $name {
@@ -2682,8 +2725,10 @@
 //! # refusal!(Burnt, Fused);
 //! # #[derive(Clone, Default)]
 //! # pub struct Lamp { on: bool }
+//! # impl angzarr_embedded::markup::Snapshots for Lamp { type Anchor = LampState; }
 //! # #[derive(Clone, Default)]
 //! # pub struct Timer { rang: bool }
+//! # impl angzarr_embedded::markup::Snapshots for Timer { type Anchor = TimerState; }
 //! # pub struct TimerLamp;
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
@@ -2780,8 +2825,8 @@
 //! #             }
 //! #         )*};
 //! #     }
-//! #     wire!(SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
-//! #     wire!(StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
+//! #     wire!(LampState, SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
+//! #     wire!(TimerState, StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
 //! # }
 //! # macro_rules! domain {
 //! #     ($($name:ident),*) => {$(
@@ -2794,8 +2839,8 @@
 //! #         }
 //! #     )*};
 //! # }
-//! # domain!(SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
-//! # domain!(StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
+//! # domain!(LampState, SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
+//! # domain!(TimerState, StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
 //! # macro_rules! refusal {
 //! #     ($($name:ident),*) => {$(
 //! #         impl std::fmt::Display for $name {
@@ -2812,8 +2857,10 @@
 //! # refusal!(Burnt, Fused);
 //! # #[derive(Clone, Default)]
 //! # pub struct Lamp { on: bool }
+//! # impl angzarr_embedded::markup::Snapshots for Lamp { type Anchor = LampState; }
 //! # #[derive(Clone, Default)]
 //! # pub struct Timer { rang: bool }
+//! # impl angzarr_embedded::markup::Snapshots for Timer { type Anchor = TimerState; }
 //! # pub struct TimerLamp;
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
@@ -2910,8 +2957,8 @@
 //! #             }
 //! #         )*};
 //! #     }
-//! #     wire!(SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
-//! #     wire!(StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
+//! #     wire!(LampState, SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
+//! #     wire!(TimerState, StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
 //! # }
 //! # macro_rules! domain {
 //! #     ($($name:ident),*) => {$(
@@ -2924,8 +2971,8 @@
 //! #         }
 //! #     )*};
 //! # }
-//! # domain!(SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
-//! # domain!(StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
+//! # domain!(LampState, SwitchOn, SwitchedOn, PowerCut, WentDark, Burnt, Fused);
+//! # domain!(TimerState, StartTimer, TimerStarted, Ring, Rang, LampLost, Lost);
 //! # macro_rules! refusal {
 //! #     ($($name:ident),*) => {$(
 //! #         impl std::fmt::Display for $name {
@@ -2942,8 +2989,10 @@
 //! # refusal!(Burnt, Fused);
 //! # #[derive(Clone, Default)]
 //! # pub struct Lamp { on: bool }
+//! # impl angzarr_embedded::markup::Snapshots for Lamp { type Anchor = LampState; }
 //! # #[derive(Clone, Default)]
 //! # pub struct Timer { rang: bool }
+//! # impl angzarr_embedded::markup::Snapshots for Timer { type Anchor = TimerState; }
 //! # pub struct TimerLamp;
 //! #[aggregate(domain = "lamp")]
 //! impl Lamp {
@@ -3058,7 +3107,7 @@ use syn::{
 /// constants (see the crate docs).
 ///
 /// Arguments: `domain = "<name>"` (the `Domain::NAME`); optionally
-/// `snapshot = <prost message>`, `rejection = <type>` (inferred from the
+/// `rejection = <type>` (inferred from the
 /// command handlers without `refuses` when absent) and `vis =
 /// <visibility>` (the trait's; `pub` when absent). A process manager also
 /// takes `starting_types = [<input>, ..]`, cross-checked against its
@@ -3588,7 +3637,6 @@ enum Kind {
 /// One `key = value` argument of `#[aggregate]` or `#[process_manager]`.
 enum Arg {
     Domain(Expr),
-    Snapshot(Type),
     Vis(Visibility),
     Command(Type),
     Event(Type),
@@ -3601,7 +3649,6 @@ impl Parse for Arg {
         input.parse::<Token![=]>()?;
         match key.to_string().as_str() {
             "domain" => Ok(Arg::Domain(input.parse()?)),
-            "snapshot" => Ok(Arg::Snapshot(input.parse()?)),
             "vis" => Ok(Arg::Vis(input.parse()?)),
             "command" => Ok(Arg::Command(input.parse()?)),
             "event" => Ok(Arg::Event(input.parse()?)),
@@ -3617,9 +3664,9 @@ impl Parse for Arg {
             }
             _ => Err(Error::new_spanned(
                 key,
-                "takes `domain = \"..\"`, and optionally `snapshot = <message>`, \
-                 `vis = <visibility>`, `command = <enum>`, `event = <enum>` and, on a process \
-                 manager, `starting_types = [<input>, ..]`",
+                "takes `domain = \"..\"`, and optionally `vis = <visibility>`, \
+                 `command = <enum>`, `event = <enum>` and, on a process manager, \
+                 `starting_types = [<input>, ..]`",
             )),
         }
     }
@@ -3955,7 +4002,6 @@ fn variant(ty: &Type, prefix: &str) -> syn::Result<Ident> {
 /// `#[aggregate]`'s or `#[process_manager]`'s arguments.
 struct DomainArgs {
     domain: Expr,
-    snapshot: Option<Type>,
     vis: Visibility,
     command: Option<Type>,
     event: Option<Type>,
@@ -3966,13 +4012,12 @@ impl DomainArgs {
     /// The arguments, `domain` given; `vis` is `pub` when absent.
     fn parse(attr: Tokens) -> syn::Result<Self> {
         let args = Punctuated::<Arg, Token![,]>::parse_terminated.parse2(attr)?;
-        let (mut domain, mut snapshot) = (None, None);
+        let mut domain = None;
         let (mut command, mut event, mut starting_types) = (None, None, None);
         let mut vis: Visibility = syn::parse_quote!(pub);
         for arg in args {
             match arg {
                 Arg::Domain(value) => domain = Some(value),
-                Arg::Snapshot(value) => snapshot = Some(value),
                 Arg::Vis(value) => vis = value,
                 Arg::Command(value) => command = Some(value),
                 Arg::Event(value) => event = Some(value),
@@ -3982,7 +4027,6 @@ impl DomainArgs {
         Ok(DomainArgs {
             domain: domain
                 .ok_or_else(|| Error::new(Span::call_site(), "needs `domain = \"..\"`"))?,
-            snapshot,
             vis,
             command,
             event,
@@ -4412,65 +4456,23 @@ impl<'a> Decorated<'a> {
     }
 }
 
-/// The aggregate's `State`: snapshotted as `snapshot` through the user's
-/// conversions, or, with none, never snapshotted.
-fn state_impl(self_ty: &Type, snapshot: Option<Type>) -> Tokens {
+/// The domain's `State`, from its `markup::Snapshots`: its anchor's wire
+/// type, and the snapshot it offers and restores as that type.
+fn state_impl(self_ty: &Type) -> Tokens {
     let m = markup();
-    let Some(snapshot) = snapshot else {
-        return quote! {
-            impl ::angzarr_embedded::State for #self_ty {
-                type Snapshot = #m::NoSnapshot;
-
-                const SNAPSHOTS: bool = false;
-
-                fn to_snapshot(&self) -> #m::NoSnapshot {
-                    #m::NoSnapshot {}
-                }
-
-                fn from_snapshot(
-                    _snapshot: #m::NoSnapshot,
-                ) -> ::core::result::Result<Self, #m::Report> {
-                    ::core::result::Result::Ok(<#self_ty as ::core::default::Default>::default())
-                }
-
-                fn restore(
-                    &mut self,
-                    _snapshot: #m::NoSnapshot,
-                ) -> ::core::result::Result<(), #m::Report> {
-                    ::core::result::Result::Ok(())
-                }
-
-                fn descriptor() -> ::angzarr_embedded::v1::StateDescriptor {
-                    #m::state_descriptor::<#m::NoSnapshot>()
-                }
-            }
-        };
-    };
     quote! {
         impl ::angzarr_embedded::State for #self_ty {
-            type Snapshot = #snapshot;
+            type Anchor = <<#self_ty as #m::Snapshots>::Anchor as #m::DomainMessage>::Wire;
 
-            fn to_snapshot(&self) -> #snapshot {
-                <#snapshot as ::core::convert::From<&#self_ty>>::from(self)
-            }
-
-            fn from_snapshot(
-                snapshot: #snapshot,
-            ) -> ::core::result::Result<Self, #m::Report> {
-                let mut state = <#self_ty as ::core::default::Default>::default();
-                ::angzarr_embedded::State::restore(&mut state, snapshot)?;
-                ::core::result::Result::Ok(state)
+            fn snapshot(&self) -> ::core::option::Option<Self::Anchor> {
+                #m::snapshot_wire(self)
             }
 
             fn restore(
                 &mut self,
-                snapshot: #snapshot,
+                anchor: Self::Anchor,
             ) -> ::core::result::Result<(), #m::Report> {
-                <#self_ty>::restore(self, snapshot).map_err(|error| #m::Report::of(&error))
-            }
-
-            fn descriptor() -> ::angzarr_embedded::v1::StateDescriptor {
-                #m::state_descriptor::<#snapshot>()
+                #m::restore_wire(self, anchor)
             }
         }
     }
@@ -4486,7 +4488,7 @@ fn domain(attr: Tokens, item: Tokens, kind: Kind) -> syn::Result<Tokens> {
     let payloads = decorated.payloads(args.command, args.event)?;
     let refusing = decorated.refusal_choices()?;
     let written = &payloads.written;
-    let state = state_impl(self_ty, args.snapshot);
+    let state = state_impl(self_ty);
     let handles = decorated.handles();
     let domain_impl = decorated.domain_impl(&args.domain, &payloads);
     let routed = decorated.routed();

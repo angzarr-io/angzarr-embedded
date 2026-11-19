@@ -115,9 +115,9 @@ impl Registry {
     /// (`D::RULES_VERSION`, stamped on every event), its upcaster (for
     /// events and, discouraged, commands), and its handlers: `handlers`
     /// registers them on the router's table for `D` (`DomainDispatch`,
-    /// over `D::State`, already folding and restoring snapshots through
-    /// `D`), with `on_command` and `on_fact`. Listed by the descriptor `D`
-    /// generates (`D::State::descriptor()` its state), and refused as a
+    /// over `D::State`, already folding through `D`, and offering and
+    /// restoring snapshots through `D::State`), with `on_command` and `on_fact`. Listed by the descriptor `D`
+    /// generates (its state its anchor's, `D::State::Anchor`), and refused as a
     /// child's descriptor is.
     pub fn register<D: Domain>(
         &mut self,
@@ -145,7 +145,7 @@ impl Registry {
                 upcaster: upcaster.domain().to_string(),
             });
         }
-        let state = D::State::descriptor();
+        let state = markup::state_descriptor::<<D::State as State>::Anchor>();
         let process_manager = starting.is_some();
         let kind = match starting {
             Some(starting) => {
@@ -170,7 +170,7 @@ impl Registry {
         self.catalog.list_domain(descriptor, Some(port))?;
         let table = route::table::<D>(Arc::clone(&fresh), process_manager);
         let handler = Handler {
-            dispatch: Box::new(handlers(table)),
+            dispatch: Box::new(route::Offering(handlers(table))),
             typed: Some(Typed {
                 upcaster,
                 current: || {

@@ -21,7 +21,7 @@ use crate::angzarr_router::error::BusinessStatus;
 use crate::markup::{Commands, PolicyContext};
 use crate::v1::{
     command_page, Command, CommandBook, CommandPage, Cover, EventPage, Fact, FactOrigin, Handling,
-    StateDescriptor, Uuid,
+    Uuid,
 };
 use crate::{
     ids, pack, Any, Decoder, Domain, Misconfigured, Payload, PayloadError, Policy, Registry,
@@ -293,7 +293,7 @@ pub fn descriptor_of<D: Domain>(
     starting: &[&str],
 ) -> crate::v1::ComponentDescriptor {
     use crate::v1::component_descriptor::Kind;
-    let state = Some(<D::State as State>::descriptor());
+    let state = Some(crate::markup::state_descriptor::<<D::State as State>::Anchor>());
     let domain = D::NAME.to_string();
     let kind = match kind {
         crate::v1::ComponentKind::ProcessManager => {
@@ -470,21 +470,16 @@ pub fn account_upcaster() -> Upcaster {
 /// The account's state, its own snapshot form, described by its type name.
 /// (A fixture standing in for generated code.)
 impl State for AccountState {
-    /// A prost state is its own snapshot form.
-    type Snapshot = Self;
+    /// A prost state is its own anchor, and takes snapshots of itself.
+    type Anchor = Self;
 
-    fn to_snapshot(&self) -> Self {
-        self.clone()
+    fn snapshot(&self) -> Option<Self> {
+        Some(self.clone())
     }
 
-    fn from_snapshot(snapshot: Self) -> Result<Self, Report> {
-        Ok(snapshot)
-    }
-
-    fn descriptor() -> StateDescriptor {
-        StateDescriptor {
-            type_name: "toy.account.v1.AccountState".to_string(),
-        }
+    fn restore(&mut self, anchor: Self) -> Result<(), Report> {
+        *self = anchor;
+        Ok(())
     }
 }
 
@@ -815,21 +810,16 @@ pub use shelf::ShelfState;
 /// generator emits for `ShelfState`. Never hand-write this for a real
 /// domain.
 impl State for ShelfState {
-    /// A prost state is its own snapshot form.
-    type Snapshot = Self;
+    /// A prost state is its own anchor, and takes snapshots of itself.
+    type Anchor = Self;
 
-    fn to_snapshot(&self) -> Self {
-        self.clone()
+    fn snapshot(&self) -> Option<Self> {
+        Some(self.clone())
     }
 
-    fn from_snapshot(snapshot: Self) -> Result<Self, Report> {
-        Ok(snapshot)
-    }
-
-    fn descriptor() -> StateDescriptor {
-        StateDescriptor {
-            type_name: "toy.shelf.v1.ShelfState".to_string(),
-        }
+    fn restore(&mut self, anchor: Self) -> Result<(), Report> {
+        *self = anchor;
+        Ok(())
     }
 }
 
@@ -1027,32 +1017,30 @@ impl Diagnostic for NegativeTotal {
     }
 }
 
+/// The ledger's state, anchored on its snapshot message: a state that is
+/// not its anchor, so its snapshot is a conversion, and a restore may
+/// refuse what the wire holds.
 impl State for LedgerState {
-    type Snapshot = ledger::LedgerSnapshot;
+    type Anchor = ledger::LedgerSnapshot;
 
-    fn descriptor() -> StateDescriptor {
-        StateDescriptor {
-            type_name: "toy.ledger.v1.LedgerSnapshot".to_string(),
-        }
-    }
-
-    fn to_snapshot(&self) -> ledger::LedgerSnapshot {
-        ledger::LedgerSnapshot {
+    fn snapshot(&self) -> Option<ledger::LedgerSnapshot> {
+        Some(ledger::LedgerSnapshot {
             next_source: self.next_source,
             total: self.total,
-        }
+        })
     }
 
-    fn from_snapshot(snapshot: ledger::LedgerSnapshot) -> Result<Self, Report> {
-        if snapshot.total < 0 {
+    fn restore(&mut self, anchor: ledger::LedgerSnapshot) -> Result<(), Report> {
+        if anchor.total < 0 {
             return Err(Report::of(&NegativeTotal {
-                total: snapshot.total,
+                total: anchor.total,
             }));
         }
-        Ok(LedgerState {
-            next_source: snapshot.next_source,
-            total: snapshot.total,
-        })
+        *self = LedgerState {
+            next_source: anchor.next_source,
+            total: anchor.total,
+        };
+        Ok(())
     }
 }
 

@@ -32,7 +32,7 @@ use ::angzarr_embedded::angzarr_router::hpb;
 use ::angzarr_embedded::angzarr_router::router::CommandHandler;
 use ::angzarr_embedded::markup::{
     self, CommandTarget, Commands, Context, Decides, DomainMessage, EventSource, Failed, Ingests,
-    NoSnapshot, Policy, PolicyContext, Refusing, Routed, TypeName, TypedRefusal, Unrefusable,
+    Policy, PolicyContext, Refusing, Routed, TypeName, TypedRefusal, Unrefusable,
 };
 use ::angzarr_embedded::v1::{
     command_page, reaction_delivery, Command, CommandBook, CommandPage, Cover, DeliveryOutcome,
@@ -102,6 +102,18 @@ mod wire {
 
     #[derive(Clone, PartialEq, ::prost::Message)]
     pub struct Noted {}
+
+    /// The counter's anchor: the state it registers, and never snapshots.
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct CounterState {
+        #[prost(int64, tag = "1")]
+        pub total: i64,
+    }
+
+    impl ::prost::Name for CounterState {
+        const NAME: &'static str = "CounterState";
+        const PACKAGE: &'static str = "toy.counter.v1";
+    }
 
     impl ::prost::Name for Bump {
         const NAME: &'static str = "Bump";
@@ -386,22 +398,10 @@ impl Counter {
     }
 }
 
+/// Registered as its anchor, and keeping both defaults: it offers no
+/// snapshot, so every load replays.
 impl State for Counter {
-    type Snapshot = NoSnapshot;
-
-    const SNAPSHOTS: bool = false;
-
-    fn to_snapshot(&self) -> NoSnapshot {
-        NoSnapshot {}
-    }
-
-    fn from_snapshot(_snapshot: NoSnapshot) -> Result<Self, Report> {
-        Ok(Counter::default())
-    }
-
-    fn descriptor() -> StateDescriptor {
-        markup::state_descriptor::<NoSnapshot>()
-    }
+    type Anchor = wire::CounterState;
 }
 
 impl Domain for Counter {
@@ -953,8 +953,8 @@ fn a_fact_for_a_child_hosted_source_packs_as_any_fact() {
     );
 }
 
-/// The re-fold digest of a domain that takes no snapshot (the counter:
-/// SNAPSHOTS false) lists its streams with their heads, and no state: it
+/// The re-fold digest of a domain that takes no snapshot (the counter,
+/// whose state offers none) lists its streams with their heads, and no state: it
 /// has no form of one to show, and a stand-in would compare nothing
 /// (store-export-import.plan.md, section 5.3.2).
 #[test]
@@ -986,5 +986,50 @@ fn a_digest_of_a_domain_with_no_snapshot_form_gives_no_state() {
     assert!(
         folded.iter().all(|f| f.state.is_none() && f.head == 1),
         "{folded:?}"
+    );
+}
+
+/// A hand-written state that keeps `State`'s defaults offers no snapshot:
+/// its writes store none, though the kernel stores one at every write by
+/// default, and it is registered as its anchor. Its restore refuses one,
+/// naming the anchor: no build of it offered one.
+#[test]
+fn a_state_keeping_the_defaults_writes_no_snapshot_and_restores_none() {
+    use ::angzarr_embedded::angzarr_ports::SnapshotStore;
+    use ::angzarr_embedded::StreamRef;
+
+    let registry = registry();
+    let store = Mem::default();
+    let sampled = Sampled {
+        now: Timestamp {
+            seconds: 1,
+            nanos: 0,
+        },
+        command_id: Uuid::from_bytes([0x73; 16]),
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("a runtime");
+    let kernel = Kernel::new(&registry);
+    let book = bump(3);
+    let cover = book.cover.clone().expect("a cover");
+    runtime
+        .block_on(kernel.handle::<Counter, _>(&store, book, &sampled))
+        .unwrap_or_else(|failure| panic!("{failure:?}"));
+    let stream = StreamRef::try_from(&cover).expect("a stream");
+    assert_eq!(runtime.block_on(store.read_snapshot(stream)), Ok(None));
+    assert_eq!(
+        registry.catalog().state(Counter::NAME).map(|s| s.type_name),
+        Some("toy.counter.v1.CounterState".to_string())
+    );
+
+    let refused = State::restore(&mut Counter::default(), wire::CounterState { total: 3 });
+    let refusal = refused.expect_err("the default restore refuses");
+    assert_eq!(refusal.code(), "angzarr-embedded-not-snapshotted");
+    assert_eq!(
+        refusal,
+        Report::of(&::angzarr_embedded::NotSnapshotted {
+            anchor: "toy.counter.v1.CounterState".to_string()
+        })
     );
 }

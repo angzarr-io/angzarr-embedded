@@ -356,28 +356,33 @@ framework's one typed refusal, FAILED_PRECONDITION under
 refusals, and never reaches business code. There is no conflict concept:
 no resolution, no window, no nonce (decision 14.92).
 
-**The `State` trait** is what angzarr's generator emits for a state
-message:
+**The `State` trait** is what angzarr's generator and the markup emit for
+an aggregate's or a process manager's state, over its anchor, the
+component's event-sourced state (angzarr's
+`docs/design/component-options.md` §1):
 
 ```rust
 pub trait State: Default + Clone + Send + 'static {
-    type Snapshot: prost::Message + prost::Name + Default;   // the wire form a snapshot carries
-    fn to_snapshot(&self) -> Self::Snapshot;
-    fn from_snapshot(snapshot: Self::Snapshot) -> Result<Self, Report>;  // a wire value need not be a valid state
-    fn restore(&mut self, snapshot: Self::Snapshot) -> Result<(), Report>; // onto a fresh instance
-    fn descriptor() -> StateDescriptor;     // the state message's full name
-    const SNAPSHOTS: bool = true;           // false: no snapshot form
+    type Anchor: prost::Message + prost::Name + Default;   // the state it registers
+    fn snapshot(&self) -> Option<Self::Anchor> { None }     // offered with every answer
+    fn restore(&mut self, anchor: Self::Anchor) -> Result<(), Report> {
+        Err(/* NotSnapshotted */)                           // onto a fresh instance
+    }
 }
 ```
 
-The state is a domain type and its snapshot form the prost message: a
-snapshot that decodes but is not a valid state (`from_snapshot` refuses it)
-is unreadable, `PayloadError::Invalid`. A state that is itself a prost
-message is its own snapshot form. `Registry::register::<D>` lists it in the
-catalog by the descriptor `D` generates, its state `D::State::descriptor()`,
-as angzarr's `registry.register::<D>()` fills `ComponentDescriptor.state`.
-angzarr's generator emits the impl;
-the test fixtures write it by hand (`src/toys.test.rs`).
+The anchor's full name is the state type the component registers:
+`Registry::register::<D>` lists it in the catalog by the descriptor `D`
+generates, as angzarr's `registry.register::<D>()` fills
+`ComponentDescriptor.state`. A state opts into snapshots by overriding
+both methods; one keeping the defaults offers none, and its streams are
+always replayed. The state is a domain type and the anchor the prost
+message: a snapshot that decodes but is not a valid state (`restore`
+refuses it) is unreadable, `PayloadError::Invalid`. A state that is itself
+a prost message is its own anchor. A marked-up domain implements
+`markup::Snapshots` (the same two methods over the anchor's domain type),
+and the markup writes its `State`; the test fixtures write it by hand
+(`src/toys.test.rs`).
 
 ## Step 5: dispatch through angzarr-router
 
@@ -466,9 +471,10 @@ the edition-not-forked refusal.
 **A domain is a router table.** `Registry::register` builds angzarr-router's
 `DomainDispatch` over `D::State`: it folds each event, upcast by the kernel
 before it is handed over, through `D::apply`, and answers
-`D::RULES_VERSION` with every decision; a state with a snapshot form has
-the state's codec (`with_state_codec`: a delivered starting state restored
-onto a fresh state, and the state every answer carries). The domain's
+`D::RULES_VERSION` with every decision, with the state's codec
+(`with_state_codec`: a delivered starting state restored onto a fresh
+state, and the state every answer carries, as `State::snapshot` offers it:
+an answer whose state offers none carries none). The domain's
 handlers are registered on it: `#[aggregate]` and `#[process_manager]`
 generate them (`markup::Routed`); a hand-written domain registers its own
 (`on_command`, whose handler answers an `Emit` or a refusal, and
@@ -484,7 +490,7 @@ one; they are generated). A marked-up process manager's starting types are
 its markup's: the macro generates `markup::ProcessManager::STARTS` from the
 inputs marked `starts`, the same list angzarr-build writes into its
 descriptor, and `Registry::process_manager` reads it. A typed domain's
-state descriptor is its `State::descriptor()` and its rules version
+state descriptor is its anchor's (`State::Anchor`) and its rules version
 `D::RULES_VERSION`, which the markup gives as its crate's
 `CARGO_PKG_VERSION`: the version angzarr-build writes into its
 descriptor. A domain registered by `Registry::command_handler` is given
@@ -1028,13 +1034,18 @@ implemented.
 ## Snapshots
 
 A snapshot is angzarr's `Snapshot { sequence, state: Any, rules_version }`,
-a framework optimisation, never business data. The kernel writes one after
-every step that writes events (decision 14.40): the state the router
-returned with them, stamped with the last event's sequence and the rules
-version the events carry, under the default policy, the newest only (each
-replaces the last). It is its own call (`write_snapshot`), never in a
-step's write, and a cache: its failure fails nothing. A state with no
-snapshot form returns none, and none is written. `Stream::snapshot` makes
+a framework optimisation, never business data. A state offers one with
+every answer (`State::snapshot`), and the kernel writes the one a step that
+writes events offers as the domain's storage policy says (decision 14.40,
+`SnapshotPolicy`, a kernel setting, `Kernel::snapshot_policy` and
+`AppBuilder::snapshot_policy`): once the stream has gained the policy's
+events since the snapshot the step's load started from (since its start,
+with none), every write by default, and a domain the policy names at its
+own. It is stamped with the last event's sequence and the rules version
+the events carry, and kept newest only (each replaces the last: the
+store's one retention). It is its own call (`write_snapshot`), never in a
+step's write, and a cache: its failure fails nothing. A state that offers
+none has none written. `Stream::snapshot` makes
 one from a stream run in memory, for the application to write. On
 load the coordinator uses it only if `Catalog::snapshot_usable` (the
 state's type, by the full name its type URL ends in, is the registered

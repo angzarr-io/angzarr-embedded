@@ -52,7 +52,9 @@
 //!   which must be idempotent on its own result (there is no step cap).
 //! - [`TypeName`]: a message's package and name, as the generated
 //!   constants list them.
-//! - [`NoSnapshot`]: the snapshot form of a domain that has none.
+//! - [`Snapshots`]: a marked-up aggregate's or process manager's anchor,
+//!   as its domain type, and its opt-in to snapshots: overriding
+//!   [`Snapshots::snapshot`] and [`Snapshots::restore`].
 //! - The functions the expansion calls, each stable and public, so
 //!   anything the markup writes can be written by hand
 //!   (`src/hand_written.test.rs` registers an aggregate and a policy
@@ -60,8 +62,9 @@
 //!   [`type_url_of`], [`decode_message`]); running a domain's handler as
 //!   one decision ([`run_command`], [`run_rooted_command`], [`run_fact`]);
 //!   a policy's answers ([`policy_answer`], [`translated_fact`]); a
-//!   projector's run ([`projecting`]); and a state's descriptor
-//!   ([`state_descriptor`]).
+//!   projector's run ([`projecting`]); a state's descriptor
+//!   ([`state_descriptor`]); and its snapshot as its anchor's wire type
+//!   ([`snapshot_wire`], [`restore_wire`]).
 //!
 //! Every component here assumes nothing about distribution: the same
 //! marked-up aggregate, process manager, policy or projector runs in
@@ -87,8 +90,8 @@ use super::wire::WireError;
 /// applier's optional third argument, [`Domain::apply`]'s page.
 pub use angzarr_router::PageContext;
 
-/// The error a generated `State::from_snapshot` returns, re-exported so
-/// the expansion needs no dependency of its user's.
+/// The error a [`Snapshots::restore`] returns, re-exported so the
+/// expansion needs no dependency of its user's.
 pub use angzarr_diagnostic::Report;
 
 /// angzarr-router's context of the input a handler decides: a
@@ -1536,10 +1539,8 @@ where
     Box::pin(run)
 }
 
-/// The state descriptor of a domain whose snapshot form is `S`: `S`'s
-/// full name (decision 14.101). What a marked-up domain's
-/// [`State::descriptor`](super::State::descriptor) returns, and a
-/// hand-written one may.
+/// The state descriptor of a domain whose anchor is `S`: `S`'s full name
+/// (decision 14.101), what the registry lists a typed domain's state as.
 pub fn state_descriptor<S: prost::Name>() -> angzarr_proto::v1::StateDescriptor {
     angzarr_proto::v1::StateDescriptor {
         type_name: S::full_name(),
@@ -1579,14 +1580,79 @@ impl TypeName {
     }
 }
 
-/// The snapshot form of a marked-up aggregate with no `snapshot = ..`: its
-/// [`State`](super::State) impl says
-/// [`SNAPSHOTS`](super::State::SNAPSHOTS)` = false`, so the kernel never
-/// takes one, and this message is never written.
-#[derive(Clone, PartialEq, prost::Message)]
-pub struct NoSnapshot {}
+/// A marked-up aggregate's or process manager's anchor, as its domain
+/// type, and whether it takes snapshots: every `#[aggregate]` and
+/// `#[process_manager]` implements it, and the markup writes its
+/// [`State`](super::State) from it, the anchor's wire type its registered
+/// state type. An implementation that keeps both defaults takes no
+/// snapshots, and every load replays from the start:
+///
+/// ```text
+/// impl Snapshots for Lamp {
+///     type Anchor = LampState;
+/// }
+/// ```
+///
+/// One that overrides both opts in: it offers its state with every answer,
+/// which the kernel stores as the domain's storage policy says, and
+/// resumes a fresh instance from one (docs/design/snapshots.md):
+///
+/// ```text
+/// impl Snapshots for Wallet {
+///     type Anchor = WalletState;
+///
+///     fn snapshot(&self) -> Option<WalletState> {
+///         Some(self.state.clone())
+///     }
+///
+///     fn restore(&mut self, state: WalletState) -> Result<(), Report> {
+///         self.state = state;
+///         Ok(())
+///     }
+/// }
+/// ```
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` names no anchor: a marked-up aggregate or process manager implements `Snapshots`",
+    note = "`impl Snapshots for {Self} {{ type Anchor = ..; }}` names it and takes no snapshots; \
+            overriding `snapshot` and `restore` opts in"
+)]
+pub trait Snapshots {
+    /// The component's anchor, as its domain type: its wire type is the
+    /// state type the component registers, and what a snapshot holds.
+    type Anchor: DomainMessage;
 
-impl prost::Name for NoSnapshot {
-    const NAME: &'static str = "NoSnapshot";
-    const PACKAGE: &'static str = "angzarr_embedded.next.markup";
+    /// The state as its anchor, offered with every answer; `None` offers
+    /// none, as the default does.
+    fn snapshot(&self) -> Option<Self::Anchor> {
+        None
+    }
+
+    /// Take the state `anchor`, a snapshot's, holds, keeping what it does
+    /// not hold (the factory's configuration). The default refuses every
+    /// snapshot ([`NotSnapshotted`](super::NotSnapshotted)), as an
+    /// implementation that offers none never has one to restore.
+    fn restore(&mut self, _anchor: Self::Anchor) -> Result<(), Report> {
+        Err(Report::of(&super::NotSnapshotted::of::<
+            <Self::Anchor as DomainMessage>::Wire,
+        >()))
+    }
+}
+
+/// `state`'s [`Snapshots::snapshot`], as its anchor's wire type: what a
+/// marked-up domain's [`State::snapshot`](super::State::snapshot) offers.
+pub fn snapshot_wire<S: Snapshots>(state: &S) -> Option<<S::Anchor as DomainMessage>::Wire> {
+    let _ = state;
+    None
+}
+
+/// `wire` restored onto `state` ([`Snapshots::restore`]), once it reads as
+/// the anchor's domain type: a value it cannot hold is refused, naming
+/// the field, before `restore` sees it, the state left as it was. What a
+/// marked-up domain's [`State::restore`](super::State::restore) does.
+pub fn restore_wire<S: Snapshots>(
+    state: &mut S,
+    wire: <S::Anchor as DomainMessage>::Wire,
+) -> Result<(), Report> {
+    let anchor = S::Anchor::from_wire(wire).map_err(|error| Report::of(&error))?;
+    state.restore(anchor)
 }

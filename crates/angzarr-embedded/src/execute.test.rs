@@ -71,9 +71,10 @@ impl<D: Domain> Stream<D> {
                 return Err(Failure::Rejected(Rejected::mismatch(expected, head)));
             }
         }
-        let snapshot = (self.first > 0).then(|| Snapshot {
+        let offered = (self.first > 0).then(|| self.base.snapshot()).flatten();
+        let snapshot = offered.map(|anchor| Snapshot {
             sequence: self.first - 1,
-            state: Some(pack(&self.base.to_snapshot())),
+            state: Some(pack(&anchor)),
             rules_version: registry
                 .catalog()
                 .rules_version(D::NAME)

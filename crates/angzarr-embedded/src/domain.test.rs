@@ -89,7 +89,7 @@ mod tx {
     use std::convert::Infallible;
 
     use crate::toys::{Toy, ToyCtx};
-    use crate::v1::{StateDescriptor, Uuid};
+    use crate::v1::Uuid;
     use crate::{
         ids, pack, Decoder, Domain, Kernel, MemoryDeadLetters, Payload, PayloadError, Policy,
         Registry, State, Upcaster,
@@ -160,20 +160,15 @@ mod tx {
     }
 
     impl State for ProbeState {
-        type Snapshot = Self;
+        type Anchor = Self;
 
-        fn to_snapshot(&self) -> Self {
-            self.clone()
+        fn snapshot(&self) -> Option<Self> {
+            Some(self.clone())
         }
 
-        fn from_snapshot(snapshot: Self) -> Result<Self, angzarr_diagnostic::Report> {
-            Ok(snapshot)
-        }
-
-        fn descriptor() -> StateDescriptor {
-            StateDescriptor {
-                type_name: "toy.probe.v1.ProbeState".to_string(),
-            }
+        fn restore(&mut self, anchor: Self) -> Result<(), angzarr_diagnostic::Report> {
+            *self = anchor;
+            Ok(())
         }
     }
 

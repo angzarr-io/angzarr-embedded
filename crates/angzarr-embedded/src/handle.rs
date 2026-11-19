@@ -85,6 +85,7 @@ use super::error::{Failure, KernelError, Step, StepError};
 use super::policy::{answered, check_outputs, Order};
 use super::registry::{PolicyEntry, Registry};
 use super::route::{self, Rejected};
+use super::snapshot_policy::{SnapshotPolicy, EVERY_WRITE};
 use super::store::{
     DeadLetter, ListStreams, Port, PositionKey, Processed, Store, StoreError, StorePort, StreamRef,
     Write,
@@ -119,6 +120,7 @@ pub struct Kernel<'k> {
     retry: OnRetryable,
     wait: &'k dyn Wait,
     sync_deadline: Option<std::time::Duration>,
+    snapshots: &'k SnapshotPolicy,
 }
 
 /// What the kernel does with a step's retryable failure (decision 14.37:
@@ -438,6 +440,7 @@ impl<'k> Kernel<'k> {
             retry: OnRetryable::default(),
             wait: default_wait(THREADS),
             sync_deadline: default_sync_deadline(THREADS),
+            snapshots: &EVERY_WRITE,
         }
     }
 
@@ -454,6 +457,15 @@ impl<'k> Kernel<'k> {
     /// `max_retries = 0` turns it off).
     pub fn on_retryable(mut self, retry: OnRetryable) -> Kernel<'k> {
         self.retry = retry;
+        self
+    }
+
+    /// Stores the snapshots each domain's state offers as `policy` says
+    /// (docs/design/snapshots.md §1): how many events a stream gains
+    /// between them, per domain ([`SnapshotPolicy::every_write`] unless
+    /// told otherwise).
+    pub fn snapshot_policy(mut self, policy: &'k SnapshotPolicy) -> Kernel<'k> {
+        self.snapshots = policy;
         self
     }
 
@@ -1181,6 +1193,8 @@ struct Run<'k> {
     /// How a step's retryable failure is retried, and the timer.
     retry: OnRetryable,
     wait: &'k dyn Wait,
+    /// Which of the snapshots the steps' states offer are written.
+    snapshots: &'k SnapshotPolicy,
 }
 
 /// What the originating command's step came to.
@@ -1277,6 +1291,7 @@ impl<'k> Run<'k> {
             recorded: Recorded::default(),
             retry: kernel.retry,
             wait: kernel.wait,
+            snapshots: kernel.snapshots,
         }
     }
 
@@ -1431,7 +1446,8 @@ impl<'k> Run<'k> {
             port.write(&cover, head, &pages, &[])
                 .await
                 .map_err(|e| Failure::Kernel(KernelError::Store(e)))?;
-            write_snapshot(port, &cover, decided.snapshot).await;
+            let since = contextual.snapshot_sequence();
+            write_snapshot(port, &cover, decided.snapshot, since, self.snapshots).await;
         }
         self.recorded.keep(&cover, contextual.into_history(&pages));
         self.record(cover, head, pages);
@@ -1942,7 +1958,8 @@ impl<'k> Run<'k> {
         port.write(&cover, head, &pages, positions)
             .await
             .map_err(store)?;
-        write_snapshot(port, &cover, snapshot).await;
+        let since = contextual.snapshot_sequence();
+        write_snapshot(port, &cover, snapshot, since, self.snapshots).await;
         self.recorded.keep(&cover, contextual.into_history(&pages));
         self.record(cover.clone(), head, pages);
         Ok(Stepped::Wrote(cover, head))

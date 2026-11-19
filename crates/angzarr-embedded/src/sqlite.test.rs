@@ -14,9 +14,7 @@ use angzarr_diagnostic::{Arg, Diagnostic, Report};
 use angzarr_store_sqlite::SqliteStore;
 
 use crate::toys::{self, cover, cover_in, ledger, ledger_root, AccountCmd, Bookkeeping, Edit};
-use crate::v1::{
-    command_page, Command, CommandBook, CommandPage, Cover, Snapshot, StateDescriptor, Uuid,
-};
+use crate::v1::{command_page, Command, CommandBook, CommandPage, Cover, Snapshot, Uuid};
 use crate::{
     pack, Any, Domain, EventStore, Failure, Handled, Kernel, KernelError, MemoryDeadLetters,
     Payload, PayloadError, PositionKey, PositionStore, Recovery, Registry, Rejected, Sampled,
@@ -44,20 +42,16 @@ tally_message!(Add);
 tally_message!(Added);
 
 impl State for Count {
-    type Snapshot = Count;
+    /// A prost state is its own anchor, and takes snapshots of itself.
+    type Anchor = Self;
 
-    fn to_snapshot(&self) -> Count {
-        self.clone()
+    fn snapshot(&self) -> Option<Self> {
+        Some(self.clone())
     }
 
-    fn from_snapshot(snapshot: Count) -> Result<Count, Report> {
-        Ok(snapshot)
-    }
-
-    fn descriptor() -> StateDescriptor {
-        StateDescriptor {
-            type_name: "tally.v1.Count".to_string(),
-        }
+    fn restore(&mut self, anchor: Self) -> Result<(), Report> {
+        *self = anchor;
+        Ok(())
     }
 }
 

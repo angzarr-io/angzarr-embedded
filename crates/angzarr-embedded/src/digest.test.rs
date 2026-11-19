@@ -36,8 +36,8 @@ fn fold_digest_is_one_entry_per_stream_and_deterministic() {
         assert_eq!(head, 2, "opened, then a deposit");
         assert_eq!(
             entry.state,
-            Some(pack(&stream.state().to_snapshot())),
-            "its state as loaded, in its snapshot form"
+            stream.state().snapshot().map(|anchor| pack(&anchor)),
+            "its state as loaded, as the snapshot it offers"
         );
     }
     assert_ne!(folded[0].state, folded[1].state, "each stream its own");

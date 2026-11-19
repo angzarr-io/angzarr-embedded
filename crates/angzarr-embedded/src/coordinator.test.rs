@@ -725,6 +725,106 @@ mod snapshot {
         );
     }
 
+    /// The sequences of the snapshots `book`s write to account 1, one
+    /// after each, handled by a kernel under `policy`, from an empty store
+    /// or from what `store` holds already.
+    fn written_under(
+        policy: &crate::SnapshotPolicy,
+        store: &MemoryStore,
+        books: impl IntoIterator<Item = (u128, AccountCmd)>,
+    ) -> Vec<Option<u64>> {
+        let registry = registry();
+        let log = crate::MemoryDeadLetters::new();
+        let kernel = crate::Kernel::new(&registry)
+            .log_with(&log)
+            .on_retryable(crate::toys::no_retries())
+            .snapshot_policy(policy);
+        let stream = cover("account", 1);
+        books
+            .into_iter()
+            .map(|(id, cmd)| {
+                let book = command(stream.clone(), cmd.to_any()).id(id);
+                kernel
+                    .handle::<Account, _>(store, book, &at(10 + id as i64))
+                    .ready()
+                    .unwrap_or_else(|e| panic!("command {id}: {e}"));
+                let snapshot = store.read_snapshot(sref(&stream)).ready().unwrap();
+                snapshot.map(|s| s.sequence)
+            })
+            .collect()
+    }
+
+    /// An account opened, then deposited into five times: six events, 0 to
+    /// 5, one a write.
+    fn six_writes() -> Vec<(u128, AccountCmd)> {
+        std::iter::once((1, AccountCmd::Open))
+            .chain((2..=6).map(|id| (id, AccountCmd::Deposit(1))))
+            .collect()
+    }
+
+    fn every(events: u64) -> std::num::NonZeroU64 {
+        std::num::NonZeroU64::new(events).unwrap()
+    }
+
+    /// Under a policy of every three events, the snapshot a write's state
+    /// offers is written once the stream has gained three events since the
+    /// snapshot its load started from, or since its start; the others are
+    /// not, and the one stored stays.
+    #[test]
+    fn a_snapshot_is_written_once_its_stream_gains_the_policys_events() {
+        let written = written_under(
+            &crate::SnapshotPolicy::every(every(3)),
+            &MemoryStore::new(),
+            six_writes(),
+        );
+        assert_eq!(
+            written,
+            [None, None, Some(2), Some(2), Some(2), Some(5)],
+            "three events from the start (0 to 2), then three after 2"
+        );
+    }
+
+    /// The kernel's default policy writes one at every write.
+    #[test]
+    fn the_default_policy_writes_a_snapshot_at_every_write() {
+        let written = written_under(
+            &crate::SnapshotPolicy::default(),
+            &MemoryStore::new(),
+            six_writes(),
+        );
+        assert_eq!(written, (0..6).map(Some).collect::<Vec<_>>());
+    }
+
+    /// A domain the policy names has its own frequency; the rest keep the
+    /// policy's.
+    #[test]
+    fn a_domain_the_policy_names_is_snapshotted_at_its_own_frequency() {
+        let account = crate::SnapshotPolicy::every(every(100)).domain("account", every(2));
+        let written = written_under(&account, &MemoryStore::new(), six_writes());
+        assert_eq!(written, [None, Some(1), Some(1), Some(3), Some(3), Some(5)]);
+
+        let other = crate::SnapshotPolicy::every(every(2)).domain("shelf", every(100));
+        let written = written_under(&other, &MemoryStore::new(), six_writes());
+        assert_eq!(written, [None, Some(1), Some(1), Some(3), Some(3), Some(5)]);
+    }
+
+    /// A stored snapshot the load cannot use (under other rules) counts as
+    /// none: the policy counts from the stream's start, so the first write
+    /// past the policy's events replaces it.
+    #[test]
+    fn an_unusable_snapshot_counts_as_none() {
+        let store = MemoryStore::new();
+        let policy = crate::SnapshotPolicy::every(every(3));
+        let opened = written_under(&policy, &store, six_writes().into_iter().take(2));
+        assert_eq!(opened, [None, None]);
+        store
+            .write_snapshot(sref(&cover("account", 1)), &poisoned("v1", 999))
+            .ready()
+            .unwrap();
+        let written = written_under(&policy, &store, [(3, AccountCmd::Deposit(1))]);
+        assert_eq!(written, [Some(2)], "the poisoned one at 1 replaced");
+    }
+
     #[test]
     fn a_stream_snapshots_under_the_current_rules_version() {
         let registry = registry();

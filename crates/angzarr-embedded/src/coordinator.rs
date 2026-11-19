@@ -52,6 +52,7 @@ use super::error::{cover_text, Failure, KernelError, UpcastError};
 use super::payload::type_name;
 use super::registry::Registry;
 use super::route::{self, Rejected};
+use super::snapshot_policy::SnapshotPolicy;
 use super::store::Port;
 use super::stream::Stream;
 use super::target::CoordinatorPort;
@@ -151,6 +152,12 @@ impl Contextual {
     /// The stream's next sequence.
     pub fn head(&self) -> u64 {
         self.head
+    }
+
+    /// The sequence of the snapshot the load started from, if it started
+    /// from one: what the snapshot policy counts a write's events from.
+    pub(crate) fn snapshot_sequence(&self) -> Option<u64> {
+        self.snapshot.as_ref().map(|snapshot| snapshot.sequence)
     }
 
     /// The stream as this command's step left it: the history it was
@@ -540,20 +547,25 @@ pub(crate) struct Decided {
     pub(crate) pages: Vec<EventPage>,
     /// The state the router returned with them, as the snapshot at the last
     /// event under the rules version they were stamped with (decision 14.40);
-    /// `None` with no events, or for a state with no snapshot form.
+    /// `None` with no events, or for a state that offers none.
     pub(crate) snapshot: Option<Snapshot>,
 }
 
-/// Write `snapshot` of `stream` over the one it has (the default policy,
-/// the newest only; decision 14.40). A snapshot is a cache: the events are
-/// committed already, so a failed write fails nothing, and the next load
-/// replays from the snapshot it finds.
+/// Write `snapshot` of `stream` over the one it has, when `policy` says
+/// it is due: the store keeps the newest only (decision 14.40), and the
+/// policy counts the events since `since`, the snapshot the write's load
+/// started from. A snapshot is a cache: the events are committed already,
+/// so a failed write fails nothing, and the next load replays from the
+/// snapshot it finds.
 pub(crate) async fn write_snapshot<P: Port>(
     port: &mut P,
     stream: &Cover,
     snapshot: Option<Snapshot>,
+    since: Option<u64>,
+    policy: &SnapshotPolicy,
 ) {
-    if let Some(snapshot) = snapshot {
+    let due = snapshot.filter(|s| policy.due(&stream.domain, since, s.sequence));
+    if let Some(snapshot) = due {
         let _ = port.write_snapshot(stream, &snapshot).await;
     }
 }
