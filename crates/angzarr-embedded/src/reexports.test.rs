@@ -21,6 +21,13 @@ fn angzarr_ports_and_angzarr_diagnostic_are_the_kernels_own() {
         None::<Box<dyn angzarr_diagnostic::Diagnostic>>;
 }
 
+#[test]
+fn the_well_known_types_are_prost_types_own() {
+    let _: Option<::angzarr_embedded::Any> = None::<prost_types::Any>;
+    let _: Option<::angzarr_embedded::Timestamp> = None::<prost_types::Timestamp>;
+    let _: Option<::angzarr_embedded::Duration> = None::<prost_types::Duration>;
+}
+
 /// With the `sqlite` feature (on in this crate's tests).
 #[test]
 fn angzarr_store_sqlite_is_the_workspaces_own() {

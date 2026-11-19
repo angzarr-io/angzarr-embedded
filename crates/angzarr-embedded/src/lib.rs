@@ -210,8 +210,9 @@ pub use angzarr_proto::ids;
 /// messages.
 pub use angzarr_proto::v1;
 /// The well-known types the kernel's pages carry: payloads are
-/// [`Any`], instants [`Timestamp`].
-pub use prost_types::{Any, Timestamp};
+/// [`Any`], instants [`Timestamp`]; and [`Duration`], for an application's
+/// own messages that carry a span of time.
+pub use prost_types::{Any, Duration, Timestamp};
 
 /// This crate's en-US Fluent catalog, its name first: what a dependent
 /// embeds to render this crate's diagnostics. The text of
