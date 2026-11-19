@@ -81,8 +81,10 @@ pub fn on_retryable(retry: &RetryConfig) -> OnRetryable {
 /// `store.snapshots` as the kernel's [`SnapshotPolicy`]: its `every` for
 /// every domain, and each domain's own in its place.
 pub fn snapshot_policy(snapshots: &SnapshotsConfig) -> SnapshotPolicy {
-    let _ = snapshots;
-    SnapshotPolicy::default()
+    snapshots.domain.iter().fold(
+        SnapshotPolicy::every(snapshots.every),
+        |policy, (domain, own)| policy.domain(domain.clone(), own.every),
+    )
 }
 
 /// `policy.on_bug` as the kernel's [`OnPolicyBug`].

@@ -175,9 +175,11 @@ impl Registry {
         let table = route::table::<D>(Arc::clone(&fresh), process_manager);
         let probe = Arc::clone(&fresh);
         let restores = move |any: &prost_types::Any| {
+            use prost::Message;
             let anchor = <<D::State as State>::Anchor as prost::Name>::full_name();
-            let _ = (any, anchor, &probe);
-            true
+            super::payload::type_name(&any.type_url) == anchor
+                && <D::State as State>::Anchor::decode(&any.value[..])
+                    .is_ok_and(|wire| probe().restore(wire).is_ok())
         };
         let handler = Handler {
             dispatch: Box::new(route::Offering(handlers(table))),
