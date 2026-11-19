@@ -51,6 +51,8 @@ struct Log {
     failing: Vec<(Cover, u64)>,
     /// How many times each dispatch yields before it returns.
     yields: usize,
+    /// Its failures are bugs.
+    buggy: bool,
 }
 
 /// A projector that logs what it is handed and handles it, as its log
@@ -75,6 +77,12 @@ impl Worker {
 
     fn fail(self, stream: Cover, sequence: u64) -> Worker {
         self.log().failing.push((stream, sequence));
+        self
+    }
+
+    /// Failing with a bug, not retryably.
+    fn buggy(self) -> Worker {
+        self.log().buggy = true;
         self
     }
 
@@ -108,9 +116,9 @@ impl ProjectorHandler for Worker {
         let book = request.events.clone().unwrap_or_default();
         let cover = book.cover.clone().unwrap_or_default();
         let sequences: Vec<u64> = book.pages.iter().map(|page| page.sequence).collect();
-        let this = sequences.first().map(|&sequence| (cover.clone(), sequence));
+        let this = Some((cover.clone(), sequences.first().copied().unwrap_or(GONE)));
         let stream = format!("{cover:?}");
-        let (fails, yields) = {
+        let (fails, yields, buggy) = {
             let mut log = self.log();
             log.handed.push((cover.clone(), sequences.clone()));
             *log.running.entry(stream.clone()).or_default() += 1;
@@ -120,13 +128,16 @@ impl ProjectorHandler for Worker {
             log.most = log.most.max(all);
             let failing = log.failing.iter().position(|f| Some(f) == this.as_ref());
             let fails = failing.map(|at| log.failing.remove(at)).is_some();
-            (fails, log.yields)
+            (fails, log.yields, log.buggy)
         };
         for _ in 0..yields {
             tokio::task::yield_now().await;
         }
         let mut log = self.log();
         *log.running.get_mut(&stream).unwrap() -= 1;
+        if fails && buggy {
+            return Err(CodedError::bug("toy-worker-bug", []));
+        }
         if fails {
             return Err(CodedError::retryable_bug(
                 RetryableStatus::Unavailable,
@@ -138,6 +149,9 @@ impl ProjectorHandler for Worker {
         Ok(ProjectResponse::default())
     }
 }
+
+/// The sequence a worker's script names a gone book by.
+const GONE: u64 = u64::MAX;
 
 /// A timer that never fires: only a commit wakes the bus.
 struct Never;
@@ -424,6 +438,61 @@ async fn a_purged_stream_is_handed_as_gone_once() {
     assert_eq!(again.handed(), [(cover("account", 2), vec![])]);
 }
 
+/// A gone book that fails retryably, with retries off, is held: the
+/// stream is not forgotten until it is handed again and handled.
+#[tokio::test]
+async fn a_failed_gone_book_is_held_and_handed_again() {
+    let registry = registry();
+    let store = MemoryStore::new();
+    opened(&store, &registry, 1, 5);
+    let gone = cover("account", 1);
+    let worker = Worker::new("worker").fail(gone.clone(), GONE);
+    let kernel = kernel(&registry);
+    let mut bus = bus_on(&store, &kernel, &Soon);
+    work(&mut bus, &worker, 1, 1).unwrap();
+    drain(&mut bus).await;
+    store.purge(sref(&gone), 2).ready().unwrap();
+    let mut asked = Vec::new();
+    let more = |served: &angzarr_bus::Served| {
+        asked.push(served.clone());
+        handled(&asked) == 0
+    };
+    soon(bus.serve(more)).await.unwrap();
+    assert_eq!(
+        failures(&asked),
+        [("worker".to_string(), gone.clone(), None)]
+    );
+    assert_eq!(handled(&asked), 1, "handed again, and handled");
+    let books = worker.handed().into_iter().filter(|(_, s)| s.is_empty());
+    assert_eq!(books.count(), 2, "the gone book twice");
+    assert_eq!(position(&store, "worker", &gone), 0);
+}
+
+/// A gone book that fails with a bug is dead-lettered, and the stream
+/// forgotten all the same.
+#[tokio::test]
+async fn a_gone_books_bug_is_dead_lettered_and_the_stream_forgotten() {
+    let registry = registry();
+    let store = MemoryStore::new();
+    opened(&store, &registry, 1, 5);
+    let gone = cover("account", 1);
+    let worker = Worker::new("worker").fail(gone.clone(), GONE).buggy();
+    let kernel = kernel(&registry);
+    let mut bus = bus_on(&store, &kernel, &Never);
+    work(&mut bus, &worker, 1, 1).unwrap();
+    drain(&mut bus).await;
+    store.purge(sref(&gone), 2).ready().unwrap();
+    let asked = drain(&mut bus).await;
+    assert_eq!(
+        failures(&asked),
+        [("worker".to_string(), gone.clone(), None)]
+    );
+    assert_eq!(position(&store, "worker", &gone), 0, "forgotten");
+    drain(&mut bus).await;
+    let books = worker.handed().into_iter().filter(|(_, s)| s.is_empty());
+    assert_eq!(books.count(), 1, "not handed again");
+}
+
 /// A name is its own on a bus: a second subscription of it is refused.
 #[test]
 fn a_subscriptions_name_is_its_own() {
@@ -599,6 +668,22 @@ async fn a_policy_forgets_a_purged_stream_uncalled() {
     assert!(failures(&asked).is_empty());
     assert_eq!(position(&store, "bookkeeping", &cover("account", 1)), 0);
     assert_eq!(ledger_records(&store), [0, 1]);
+}
+
+/// An edition's fork page is never a policy's trigger, but its sequence
+/// counts: the policy's position moves past it.
+#[tokio::test]
+async fn a_policy_passes_an_editions_fork_page() {
+    let store = MemoryStore::new();
+    let registry = registry();
+    let edition = crate::toys::cover_in("account", 1, "what-if");
+    crate::toys::fork(&store, &edition);
+    let kernel = Kernel::new(&registry);
+    let mut bus = bus_on(&store, &kernel, &Never);
+    bus.subscribe(bookkeeping()).unwrap();
+    let asked = drain(&mut bus).await;
+    assert_eq!(handled(&asked), 1);
+    assert_eq!(position(&store, "bookkeeping", &edition), 1);
 }
 
 /// A policy whose step fails is reported, named by its subscription,
