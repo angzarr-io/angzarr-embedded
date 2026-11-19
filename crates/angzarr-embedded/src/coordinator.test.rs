@@ -725,6 +725,96 @@ mod snapshot {
         );
     }
 
+    /// The account as a build of it that takes no snapshots: the same
+    /// events, folded the same way, into a state that keeps `State`'s
+    /// defaults over the same anchor.
+    #[derive(Clone, Debug, Default, PartialEq)]
+    struct Unsnapshotted(account::AccountState);
+
+    impl crate::State for Unsnapshotted {
+        type Anchor = account::AccountState;
+    }
+
+    struct UnsnapshottedAccount;
+
+    impl crate::Domain for UnsnapshottedAccount {
+        type State = Unsnapshotted;
+        type Command = AccountCmd;
+        type Fact = crate::toys::AccountFact;
+        type Event = crate::toys::AccountEvent;
+        type Rejection = crate::toys::Refused;
+        const NAME: &'static str = "account";
+        const RULES_VERSION: &'static str = "v2";
+
+        fn apply(
+            state: &mut Unsnapshotted,
+            event: &crate::toys::AccountEvent,
+            page: &crate::PageContext<'_>,
+        ) {
+            <Account as crate::Domain>::apply(&mut state.0, event, page);
+        }
+    }
+
+    /// A stream holding a snapshot an opted-in build of its domain wrote
+    /// (the account's own, and one claiming 999 cents, which shows when it
+    /// is used), loaded by a build that takes no snapshots: the snapshot is
+    /// not offered, and the whole history is folded from sequence 0, on
+    /// the typed load and on a command's alike. The opted-in build still
+    /// starts from it.
+    #[test]
+    fn a_build_taking_no_snapshots_folds_the_whole_history_past_a_stored_one() {
+        let store = MemoryStore::new();
+        opened(&store, &registry(), 1, 100);
+        let stream = cover("account", 1);
+        assert!(
+            store
+                .read_snapshot(sref(&stream))
+                .ready()
+                .unwrap()
+                .is_some(),
+            "the opted-in build stored one"
+        );
+        store
+            .write_snapshot(sref(&stream), &poisoned("v2", 999))
+            .ready()
+            .unwrap();
+        assert_eq!(
+            load(&store, None),
+            (Some(1), 999),
+            "the opted-in build uses it"
+        );
+
+        let mut plain = crate::Registry::new();
+        plain
+            .register::<UnsnapshottedAccount>(
+                crate::Upcaster::new("account-upcaster", "account"),
+                |table| table,
+            )
+            .unwrap();
+        let (loaded, head) = crate::Kernel::new(&plain)
+            .load::<UnsnapshottedAccount, _>(&store, &stream)
+            .ready()
+            .unwrap();
+        assert_eq!(head, 2);
+        assert_eq!(loaded.first(), 0, "replayed from its first event");
+        assert_eq!(
+            loaded.state().0.cents,
+            100,
+            "the history's, not the snapshot's"
+        );
+        assert!(loaded.state().0.open);
+
+        let book = command(stream.clone(), AccountCmd::Deposit(1).to_any()).id(9);
+        let mut coordinator = Coordinator::new(&store, &plain);
+        let identified = check(book, plain.catalog()).unwrap().identify(&at(30));
+        let Deduplicated::Novel(novel) = coordinator.deduplicate(identified).unwrap() else {
+            panic!("never applied");
+        };
+        let contextual = coordinator.load(novel).unwrap();
+        assert_eq!(contextual.snapshot(), None, "not offered");
+        assert_eq!(contextual.pages().len(), 2, "every page from 0");
+    }
+
     /// The sequences of the snapshots `book`s write to account 1, one
     /// after each, handled by a kernel under `policy`, from an empty store
     /// or from what `store` holds already.

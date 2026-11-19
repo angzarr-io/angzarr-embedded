@@ -469,6 +469,11 @@ impl<'k> Kernel<'k> {
         self
     }
 
+    /// Which of the snapshots each domain's state offers this kernel stores.
+    pub fn snapshots(&self) -> &SnapshotPolicy {
+        self.snapshots
+    }
+
     /// Waits out each backoff, and draws its jitter, with `wait`.
     pub fn wait_with(mut self, wait: &'k dyn Wait) -> Kernel<'k> {
         self.wait = wait;
@@ -573,9 +578,8 @@ impl<'k> Kernel<'k> {
         let letters = CallLetters::new(self.dead_letters, None);
         let mut port = StorePort::new(store, &letters);
         let registry = self.registry;
-        let usable = |snapshot: &angzarr_proto::v1::Snapshot| {
-            registry.catalog().snapshot_usable(D::NAME, snapshot)
-        };
+        let usable =
+            |snapshot: &angzarr_proto::v1::Snapshot| registry.snapshot_usable(D::NAME, snapshot);
         let (history, head) = read_history(&mut port, stream, usable).await?;
         Ok((history.stream::<D>(stream.clone(), registry)?, head))
     }

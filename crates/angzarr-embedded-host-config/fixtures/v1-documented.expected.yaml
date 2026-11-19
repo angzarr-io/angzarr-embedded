@@ -1,6 +1,7 @@
-# fixtures/v1-documented.yaml at version 3: the step adds no key, so
-# each health key is its default.
-schema_version: 3
+# fixtures/v1-documented.yaml at version 4: the steps add no key, so
+# each health key, the reset window, the scaffold and the snapshots are
+# their defaults.
+schema_version: 4
 
 component:
   - name: table

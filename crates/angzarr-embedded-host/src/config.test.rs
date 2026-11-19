@@ -16,6 +16,7 @@ fn domain(name: &str, language: &str) -> ComponentConfig {
         dir: None,
         env: BTreeMap::new(),
         expose: Default::default(),
+        scaffold: Default::default(),
     }
 }
 
@@ -291,7 +292,7 @@ mod strict {
     #[test]
     fn a_newer_file_is_refused_and_an_unstamped_one_reads() {
         assert_eq!(
-            problem(&refused("schema_version: 4\n")).0,
+            problem(&refused("schema_version: 5\n")).0,
             "angzarr-yaml-too-new"
         );
         assert_eq!(
@@ -339,4 +340,31 @@ fn the_retry_and_policy_settings_are_the_kernels() {
     assert_eq!(on_policy_bug(OnBug::default()), OnPolicyBug::default());
     assert_eq!(on_policy_bug(OnBug::MovePast), OnPolicyBug::MovePast);
     assert_eq!(on_policy_bug(OnBug::Stay), OnPolicyBug::Stay);
+}
+
+/// The config's `store.snapshots` is the kernel's snapshot policy: one at
+/// every write by default, its `every` for every domain, and a domain's own
+/// in its place.
+#[test]
+fn the_store_snapshots_setting_is_the_kernels_snapshot_policy() {
+    use angzarr_embedded::SnapshotPolicy;
+    use std::num::NonZeroU64;
+    let n = |events: u64| NonZeroU64::new(events).unwrap();
+    assert_eq!(
+        snapshot_policy(&SnapshotsConfig::default()),
+        SnapshotPolicy::default()
+    );
+    let config = SnapshotsConfig {
+        every: n(4),
+        domain: BTreeMap::from([
+            ("table".to_string(), DomainSnapshots { every: n(2) }),
+            ("seat".to_string(), DomainSnapshots { every: n(9) }),
+        ]),
+    };
+    assert_eq!(
+        snapshot_policy(&config),
+        SnapshotPolicy::every(n(4))
+            .domain("table", n(2))
+            .domain("seat", n(9))
+    );
 }

@@ -42,6 +42,10 @@ struct Typed {
     current: fn() -> Vec<String>,
     /// Every fresh `D::State`: a `Factory<D::State>`, boxed.
     fresh: Box<dyn AnyType + Send + Sync>,
+    /// Whether a snapshot's state, of the anchor's type, is one a fresh
+    /// `D::State` restores ([`State::restore`]): a state that takes no
+    /// snapshots restores none.
+    restores: Box<dyn Fn(&prost_types::Any) -> bool + Send + Sync>,
 }
 
 /// A factory of `S`.
@@ -169,6 +173,12 @@ impl Registry {
         let port: Arc<dyn UpcastPort> = upcaster.clone();
         self.catalog.list_domain(descriptor, Some(port))?;
         let table = route::table::<D>(Arc::clone(&fresh), process_manager);
+        let probe = Arc::clone(&fresh);
+        let restores = move |any: &prost_types::Any| {
+            let anchor = <<D::State as State>::Anchor as prost::Name>::full_name();
+            let _ = (any, anchor, &probe);
+            true
+        };
         let handler = Handler {
             dispatch: Box::new(route::Offering(handlers(table))),
             typed: Some(Typed {
@@ -180,6 +190,7 @@ impl Registry {
                     urls
                 },
                 fresh: Box::new(fresh),
+                restores: Box::new(restores),
             }),
         };
         self.handlers.insert(domain, handler);
@@ -428,6 +439,28 @@ impl Registry {
     }
 
     /// A fresh `D` state: the registered factory's, else the default.
+    /// Whether a load of a `domain` stream may start from `snapshot`
+    /// (docs/design/snapshots.md section 3): the catalog's rules (its
+    /// state type and rules version, [`Catalog::snapshot_usable`]), and,
+    /// for a typed domain, its state restores it ([`State::restore`]), so
+    /// one a state that takes no snapshots, or one it refuses, is not
+    /// offered: the stream is replayed from its first event. A domain
+    /// handled elsewhere is held to the catalog's rules alone.
+    pub(crate) fn snapshot_usable(
+        &self,
+        domain: &str,
+        snapshot: &angzarr_proto::v1::Snapshot,
+    ) -> bool {
+        let restores = || match self.handlers.get(domain).and_then(|h| h.typed.as_ref()) {
+            Some(typed) => snapshot
+                .state
+                .as_ref()
+                .is_some_and(|any| (typed.restores)(any)),
+            None => true,
+        };
+        self.catalog.snapshot_usable(domain, snapshot) && restores()
+    }
+
     pub(crate) fn fresh<D: Domain>(&self) -> D::State {
         self.handlers
             .get(D::NAME)

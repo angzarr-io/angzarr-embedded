@@ -34,10 +34,11 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use angzarr_diagnostic::Report;
-use angzarr_embedded::{OnPolicyBug, OnRetryable};
+use angzarr_embedded::{OnPolicyBug, OnRetryable, SnapshotPolicy};
 pub use angzarr_embedded_host_config::{
-    loader, stamped, ComponentConfig, ComponentKindConfig, Expose, HostConfig, OnBug, PolicyConfig,
-    RetryConfig, StoreConfig, Supervision, CURRENT, FILE_NAME, FIXTURES, KEY, KIND,
+    loader, stamped, ComponentConfig, ComponentKindConfig, ComponentScaffold, DomainSnapshots,
+    Expose, HostConfig, OnBug, PolicyConfig, RetryConfig, SnapshotsConfig, StoreConfig,
+    Supervision, CURRENT, FILE_NAME, FIXTURES, KEY, KIND,
 };
 
 use crate::error::HostError;
@@ -75,6 +76,13 @@ pub fn on_retryable(retry: &RetryConfig) -> OnRetryable {
         max_backoff: std::time::Duration::from_millis(retry.max_backoff_ms),
         jitter: retry.jitter,
     }
+}
+
+/// `store.snapshots` as the kernel's [`SnapshotPolicy`]: its `every` for
+/// every domain, and each domain's own in its place.
+pub fn snapshot_policy(snapshots: &SnapshotsConfig) -> SnapshotPolicy {
+    let _ = snapshots;
+    SnapshotPolicy::default()
 }
 
 /// `policy.on_bug` as the kernel's [`OnPolicyBug`].

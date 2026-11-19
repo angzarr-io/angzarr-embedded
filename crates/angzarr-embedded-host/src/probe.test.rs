@@ -291,6 +291,7 @@ fn client_pythons_child_shim_passes_every_step() {
         dir: Some(dir),
         env: BTreeMap::new(),
         expose: Default::default(),
+        scaffold: Default::default(),
     };
     let mut supervision = config(vec![]).supervision;
     supervision.handshake_timeout_ms = 120_000;

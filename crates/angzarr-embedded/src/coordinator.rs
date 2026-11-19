@@ -12,7 +12,8 @@
 //! 3. [`deduplicate`]: **load the stream first** (the newest usable
 //!    snapshot, of the registered state type and its rules version
 //!    compatible with the registered one,
-//!    [`Catalog::snapshot_usable`](super::Catalog::snapshot_usable), below
+//!    [`Catalog::snapshot_usable`](super::Catalog::snapshot_usable), and that
+//!    its state restores (the registry's check), below
 //!    the head, then the events after it), refuse an input to an edition
 //!    stream not forked there (the not-forked rule, decision 14.107),
 //!    **then** look the command id up (the store's `find_command`), and
@@ -334,7 +335,7 @@ pub(crate) async fn read<P: Port>(
     command: &Identified,
 ) -> Result<Loaded, KernelError> {
     let current = upcast(registry, command).await;
-    let usable = |s: &Snapshot| registry.catalog().snapshot_usable(command.domain(), s);
+    let usable = |s: &Snapshot| registry.snapshot_usable(command.domain(), s);
     let (history, head) = read_history(port, command.cover(), usable).await?;
     Ok(Loaded {
         current,

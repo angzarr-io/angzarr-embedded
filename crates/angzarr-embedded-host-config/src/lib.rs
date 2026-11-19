@@ -7,7 +7,7 @@
 //! generated code to it. Both read it here, through one [`loader`].
 //!
 //! ```yaml
-//! schema_version: 3
+//! schema_version: 4
 //! component:
 //!   - name: table
 //!     kind: domain              # required: domain, policy, projector or upcaster
@@ -15,6 +15,9 @@
 //!     expose: loopback          # reachable through the host's listener from
 //!                               # this machine; ip from the network; none (the
 //!                               # default) from nowhere
+//!     scaffold:
+//!       snapshots: true         # `angzarr scaffold rust` writes its implementation
+//!                               # taking snapshots (false, the default: none)
 //!   - name: policy-table-player
 //!     kind: policy              # in-process too: main.rs registers it
 //!     language: rust
@@ -47,6 +50,13 @@
 //!                                   # healthy this long, unbroken
 //! store:
 //!   path: angzarr.db            # SQLite; `in_memory: true` for none on disk
+//!   snapshots:                  # the snapshot role's storage policy
+//!     every: 1                  # the events a stream gains between the
+//!                               # snapshots stored of it: 1, every write, by
+//!                               # default; the newest only is kept
+//!     domain:
+//!       table:
+//!         every: 10             # a domain's own, in place of `every`
 //! policy:
 //!   on_bug: move_past           # a policy step's bug, dead-lettered, moves its
 //!                               # position past the trigger; stay keeps it
@@ -90,6 +100,7 @@
 //! `UpcasterService` and gRPC health).
 
 use std::collections::BTreeMap;
+use std::num::NonZeroU64;
 use std::path::PathBuf;
 
 use angzarr_yaml::versioned::{Fixture, LoadError, Loader, Migrations};
@@ -107,7 +118,7 @@ pub const KIND: &str = "angzarr-host-config";
 pub const KEY: &str = angzarr_yaml::versioned::DEFAULT_KEY;
 
 /// The version this build reads and writes.
-pub const CURRENT: u32 = 3;
+pub const CURRENT: u32 = 4;
 
 /// The config's loader: kind [`KIND`], stamped under [`KEY`], at version
 /// [`CURRENT`], with a step from every older version it still reads:
@@ -125,11 +136,16 @@ pub const CURRENT: u32 = 3;
 /// - **2 to 3**: `supervision` gains `unhealthy_reset_ms`, the healthy
 ///   window after which a component's restart count clears (decision
 ///   14.67), its default left in place as version 2's health keys were.
+/// - **3 to 4**: a `component` entry gains `scaffold` (whether `angzarr
+///   scaffold rust` writes its implementation taking snapshots), and
+///   `store` gains `snapshots` (how often a domain's snapshots are
+///   stored), each left at its default.
 pub fn loader() -> Loader {
     Migrations::new(KIND, CURRENT)
         .step(0, same_shape)
         .step(1, same_shape)
         .step(2, same_shape)
+        .step(3, same_shape)
         .build()
         .expect("the host config's migration chain is whole")
 }
@@ -172,11 +188,21 @@ pub const FIXTURES: &[Fixture<'static>] = &[
     Fixture {
         name: "fixtures/v3-documented.yaml",
         input: include_str!("../fixtures/v3-documented.yaml"),
-        expected: None,
+        expected: Some(include_str!("../fixtures/v3-documented.expected.yaml")),
     },
     Fixture {
         name: "fixtures/v3-minimal.yaml",
         input: include_str!("../fixtures/v3-minimal.yaml"),
+        expected: Some(include_str!("../fixtures/v3-minimal.expected.yaml")),
+    },
+    Fixture {
+        name: "fixtures/v4-documented.yaml",
+        input: include_str!("../fixtures/v4-documented.yaml"),
+        expected: None,
+    },
+    Fixture {
+        name: "fixtures/v4-minimal.yaml",
+        input: include_str!("../fixtures/v4-minimal.yaml"),
         expected: None,
     },
 ];
@@ -295,7 +321,8 @@ pub enum OnBug {
     Stay,
 }
 
-/// The `store` mapping: the application's SQLite store.
+/// The `store` mapping: the application's SQLite store, and its storage
+/// policy for snapshots.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct StoreConfig {
@@ -305,6 +332,8 @@ pub struct StoreConfig {
     /// An in-memory SQLite store instead, gone when the application ends;
     /// `path` is then unused.
     pub in_memory: bool,
+    /// How often each domain's snapshots are stored.
+    pub snapshots: SnapshotsConfig,
 }
 
 impl Default for StoreConfig {
@@ -312,8 +341,43 @@ impl Default for StoreConfig {
         StoreConfig {
             path: PathBuf::from("angzarr.db"),
             in_memory: false,
+            snapshots: SnapshotsConfig::default(),
         }
     }
+}
+
+/// The `store` mapping's `snapshots`: the snapshot role's storage policy,
+/// per domain (angzarr's docs/design/snapshots.md section 1; angzarr core
+/// names the role `storage.snapshots`). Snapshots are a framework
+/// optimisation: a state offers one with every answer, and this says which
+/// are stored. The newest only is kept. The kernel's `SnapshotPolicy`;
+/// every key has a default, so the mapping may be left out.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct SnapshotsConfig {
+    /// The events a stream gains between the snapshots stored of it, at
+    /// least 1: 1, every write, by default.
+    pub every: NonZeroU64,
+    /// A domain's own, by its name, in place of `every`.
+    pub domain: BTreeMap<String, DomainSnapshots>,
+}
+
+impl Default for SnapshotsConfig {
+    fn default() -> Self {
+        SnapshotsConfig {
+            every: NonZeroU64::MIN,
+            domain: BTreeMap::new(),
+        }
+    }
+}
+
+/// One domain's entry of `store.snapshots.domain`.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DomainSnapshots {
+    /// The events its stream gains between the snapshots stored of it, at
+    /// least 1.
+    pub every: NonZeroU64,
 }
 
 /// One `component` entry.
@@ -361,6 +425,23 @@ pub struct ComponentConfig {
     /// Only an aggregate may be exposed.
     #[serde(default)]
     pub expose: Expose,
+    /// How `angzarr scaffold rust` writes its implementation (a Rust
+    /// aggregate's or process manager's): nothing beyond the required
+    /// methods by default.
+    #[serde(default)]
+    pub scaffold: ComponentScaffold,
+}
+
+/// A `component` entry's `scaffold`: what `angzarr scaffold rust` writes
+/// into its implementation beyond the required methods. Read by the
+/// scaffold alone, never by the host.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ComponentScaffold {
+    /// Its implementation takes snapshots: the scaffold writes its
+    /// interface's `snapshot` and `restore` over the state it holds. An
+    /// implementation may override them later all the same.
+    pub snapshots: bool,
 }
 
 /// A `component` entry's `expose`: from how far a command may reach the

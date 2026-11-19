@@ -63,7 +63,7 @@ use angzarr_embedded::{
 use angzarr_proto::v1::ComponentKind;
 use angzarr_store_sqlite::SqliteStore;
 
-use crate::config::{on_policy_bug, on_retryable, Expose, HostConfig, Languages};
+use crate::config::{on_policy_bug, on_retryable, snapshot_policy, Expose, HostConfig, Languages};
 use crate::error::HostError;
 use crate::exposure::{Arrival, NotExposed, Unserved};
 use crate::host::{ChildExit, Host};
@@ -81,7 +81,8 @@ use crate::stores::{OneStore, Stores};
 /// [`App`] on it ([`AppBuilder::start`]: resuming the policy work the store
 /// still owes) before it returns. The [`App`] is
 /// how the application sends commands and reads its streams; dropping it
-/// stops the children. A component exposed (`expose`) that is registered
+/// stops the children. Its kernel's settings are the config's: `policy`,
+/// `retry` and `store.snapshots`. A component exposed (`expose`) that is registered
 /// as a process manager is refused ([`HostError::NotExposable`]): only an
 /// aggregate is served through the host's listener. On any refusal the
 /// children started are stopped again. Its components' languages are the
@@ -172,6 +173,7 @@ pub async fn run_with(
         .exposed(exposed)
         .on_policy_bug(on_policy_bug(config.policy.on_bug))
         .on_retryable(on_retryable(&config.retry))
+        .snapshot_policy(snapshot_policy(&config.store.snapshots))
         .start()
         .await;
     Ok(app)

@@ -120,6 +120,7 @@ fn in_process_domains_are_left_to_the_caller() {
         dir: None,
         env: Default::default(),
         expose: Default::default(),
+        scaffold: Default::default(),
     };
     let host = started(vec![
         table,
@@ -395,6 +396,7 @@ fn the_python_player_comes_up_by_its_default_launch() {
         dir: Some(dir),
         env: Default::default(),
         expose: Default::default(),
+        scaffold: Default::default(),
     };
     let mut config = config(vec![player]);
     config.supervision.handshake_timeout_ms = 120_000;

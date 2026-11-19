@@ -18,8 +18,9 @@ use angzarr_router::PageContext;
 /// answer; the kernel stores what is offered as the domain's
 /// [`SnapshotPolicy`](super::SnapshotPolicy) says, and starts a load from
 /// it only when [`Catalog::snapshot_usable`](super::Catalog::snapshot_usable)
-/// passes it. A state that keeps both defaults offers none, and its streams
-/// are always replayed from the start. angzarr's generator
+/// passes it and the state restores it. A state that keeps both defaults
+/// offers none and restores none, so its streams are always replayed from
+/// the start, a snapshot an earlier build of it stored ignored. angzarr's generator
 /// (`angzarr_build`) and the markup (`#[aggregate]`, through
 /// [`markup::Snapshots`](super::markup::Snapshots)) write the impl.
 pub trait State: Default + Clone + Send + 'static {
@@ -37,12 +38,15 @@ pub trait State: Default + Clone + Send + 'static {
     /// Overwrite this instance's state with what `anchor`, a snapshot's,
     /// holds, keeping whatever it does not (a marked-up aggregate's
     /// immutable configuration, from the registry's factory): resuming
-    /// builds a fresh instance, then restores it. A refusal makes the
-    /// snapshot unreadable ([`PayloadError::Invalid`](super::PayloadError)):
-    /// a wire value need not be a valid state (a required field absent, an
-    /// enum value the domain does not define, a broken invariant). The
-    /// default refuses every snapshot ([`NotSnapshotted`]), as a state that
-    /// offers none never has one to restore.
+    /// builds a fresh instance, then restores it. A wire value need not be
+    /// a valid state (a required field absent, an enum value the domain
+    /// does not define, a broken invariant), so a restore may refuse it: a
+    /// snapshot the state refuses is not offered (docs/design/snapshots.md
+    /// section 3), and the load replays the stream from its first event.
+    /// The default refuses every snapshot ([`NotSnapshotted`]), so a state
+    /// that takes none always replays. ([`Stream::resume`](super::Stream::resume),
+    /// handed a snapshot directly, reports a refusal as the snapshot
+    /// unreadable, [`PayloadError::Invalid`](super::PayloadError).)
     fn restore(&mut self, _anchor: Self::Anchor) -> Result<(), angzarr_diagnostic::Report> {
         Err(angzarr_diagnostic::Report::of(&NotSnapshotted::of::<
             Self::Anchor,
@@ -52,8 +56,10 @@ pub trait State: Default + Clone + Send + 'static {
 
 /// A snapshot handed to a state that takes none ([`State::restore`]'s
 /// default, and [`markup::Snapshots::restore`](super::markup::Snapshots::restore)'s):
-/// its anchor, by full name. Reached only by a stream holding a snapshot
-/// that an earlier build of the domain offered.
+/// its anchor, by full name. A load never meets it: a snapshot its state
+/// does not restore is not offered, and the stream is replayed. Only
+/// [`Stream::resume`](super::Stream::resume), handed one directly, reports
+/// it.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct NotSnapshotted {
     pub anchor: String,

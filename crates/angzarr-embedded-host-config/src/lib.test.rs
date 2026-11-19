@@ -17,6 +17,7 @@ fn domain(name: &str, language: &str) -> ComponentConfig {
         dir: None,
         env: BTreeMap::new(),
         expose: Expose::None,
+        scaffold: ComponentScaffold::default(),
     }
 }
 
@@ -61,18 +62,19 @@ fn refused_at(body: &str) -> (String, String) {
 }
 
 /// The file is `angzarr.yaml`, of kind `angzarr-host-config`, stamped
-/// `schema_version`, at version 3 (owner rulings, 2026-10-31: one reader,
+/// `schema_version`, at version 4 (owner rulings, 2026-10-31: one reader,
 /// `schema_version` an unsigned integer; 2026-11-01: supervision's health
-/// keys, then its reset window), reading every older version: 2, 1, and 0,
-/// a file with no stamp.
+/// keys, then its reset window; then a component's scaffold and the
+/// store's snapshots), reading every older version: 3, 2, 1, and 0, a file
+/// with no stamp.
 #[test]
-fn the_file_is_angzarr_yaml_stamped_schema_version_at_version_3() {
+fn the_file_is_angzarr_yaml_stamped_schema_version_at_version_4() {
     assert_eq!(FILE_NAME, "angzarr.yaml");
     let loader = loader();
     assert_eq!(loader.kind(), "angzarr-host-config");
     assert_eq!(loader.key(), "schema_version");
-    assert_eq!((loader.oldest(), loader.current()), (0, 3));
-    assert_eq!(CURRENT, 3);
+    assert_eq!((loader.oldest(), loader.current()), (0, 4));
+    assert_eq!(CURRENT, 4);
     assert_eq!(loader.legacy_key(), None);
 }
 
@@ -97,16 +99,17 @@ fn the_fixtures_load() {
             loader().version_of(&doc).unwrap()
         })
         .collect();
-    assert_eq!(versions, [0, 1, 2, 3].into());
+    assert_eq!(versions, [0, 1, 2, 3, 4].into());
 }
 
 /// A current file loads, every key read as its comment says.
 #[test]
 fn a_current_file_loads() {
-    let documented = fixture("fixtures/v3-documented.yaml");
+    let documented = fixture("fixtures/v4-documented.yaml");
     let config = HostConfig::from_yaml(documented.input, documented.name).unwrap();
     let mut table = domain("table", "rust");
     table.expose = Expose::Loopback;
+    table.scaffold = ComponentScaffold { snapshots: true };
     let mut policy = domain("policy-table-player", "rust");
     policy.kind = ComponentKindConfig::Policy;
     let mut player = domain("player", "python");
@@ -136,7 +139,18 @@ fn a_current_file_loads() {
                 socket_dir: Some(PathBuf::from("/run/user/1000")),
                 ..Supervision::default()
             },
-            store: StoreConfig::default(),
+            store: StoreConfig {
+                snapshots: SnapshotsConfig {
+                    every: NonZeroU64::MIN,
+                    domain: BTreeMap::from([(
+                        "table".to_string(),
+                        DomainSnapshots {
+                            every: NonZeroU64::new(10).unwrap()
+                        }
+                    )]),
+                },
+                ..StoreConfig::default()
+            },
             policy: PolicyConfig {
                 on_bug: OnBug::MovePast
             },
@@ -148,12 +162,12 @@ fn a_current_file_loads() {
 /// The least a file holds is its stamp: every mapping has its defaults.
 #[test]
 fn a_file_of_only_its_stamp_is_every_default() {
-    let minimal = fixture("fixtures/v3-minimal.yaml");
+    let minimal = fixture("fixtures/v4-minimal.yaml");
     assert_eq!(
         HostConfig::from_yaml(minimal.input, minimal.name),
         Ok(HostConfig::default())
     );
-    assert_eq!(stamped(""), "schema_version: 3\n");
+    assert_eq!(stamped(""), "schema_version: 4\n");
     assert_eq!(read(""), Ok(HostConfig::default()));
 }
 
@@ -178,6 +192,10 @@ fn the_defaults_are_the_kernels_and_the_hosts() {
         StoreConfig {
             path: PathBuf::from("angzarr.db"),
             in_memory: false,
+            snapshots: SnapshotsConfig {
+                every: NonZeroU64::MIN,
+                domain: BTreeMap::new(),
+            },
         }
     );
     assert_eq!(
@@ -203,12 +221,12 @@ fn the_defaults_are_the_kernels_and_the_hosts() {
 /// reader's code.
 #[test]
 fn a_newer_file_is_refused_with_the_readers_code() {
-    let problem = refused("schema_version: 4\ncomponent: []\n");
+    let problem = refused("schema_version: 5\ncomponent: []\n");
     assert_eq!(
         problem,
         LoadProblem::TooNew {
-            found: 4,
-            current: 3
+            found: 5,
+            current: 4
         }
     );
     assert_eq!(problem.code(), "angzarr-yaml-too-new");
@@ -457,6 +475,7 @@ fn the_store_mapping_names_the_file_or_memory() {
         Ok(StoreConfig {
             path: PathBuf::from("angzarr.db"),
             in_memory: true,
+            snapshots: SnapshotsConfig::default(),
         })
     );
     assert_eq!(
@@ -515,5 +534,89 @@ fn a_version_2_file_loads_with_the_reset_window_defaulted() {
         HostConfig::from_yaml("schema_version: 2\n", "v2.yaml")
             .map(|c| c.supervision.unhealthy_reset_ms),
         Ok(600_000)
+    );
+}
+
+/// `store.snapshots` is the snapshot role's storage policy: a snapshot at
+/// every write by default, every N events for every domain, or a domain's
+/// own N; N is at least 1, and a key it does not know is refused.
+#[test]
+fn the_store_snapshots_mapping_sets_each_domains_frequency() {
+    assert_eq!(
+        read("").map(|c| c.store.snapshots),
+        Ok(SnapshotsConfig {
+            every: NonZeroU64::MIN,
+            domain: BTreeMap::new(),
+        })
+    );
+    let config =
+        read("store:\n  snapshots:\n    every: 5\n    domain:\n      table:\n        every: 2\n")
+            .unwrap();
+    assert_eq!(config.store.snapshots.every.get(), 5);
+    assert_eq!(
+        config
+            .store
+            .snapshots
+            .domain
+            .get("table")
+            .map(|d| d.every.get()),
+        Some(2)
+    );
+    for (body, at) in [
+        (
+            "store:\n  snapshots:\n    every: 0\n",
+            "store.snapshots.every",
+        ),
+        (
+            "store:\n  snapshots:\n    domain:\n      table:\n        every: 0\n",
+            "store.snapshots.domain.table.every",
+        ),
+        (
+            "store:\n  snapshots:\n    domain:\n      table: {}\n",
+            "store.snapshots.domain.table",
+        ),
+        ("store:\n  snapshots:\n    keep: 2\n", "store.snapshots"),
+    ] {
+        let (_, path) = refused_at(body);
+        assert!(path.starts_with(at), "{body}: refused at {path}, not {at}");
+    }
+}
+
+/// A component's `scaffold.snapshots` says whether the scaffold writes its
+/// implementation taking snapshots: false by default; a key it does not
+/// know is refused.
+#[test]
+fn a_components_scaffold_says_whether_it_takes_snapshots() {
+    let entry = "component:\n  - name: table\n    kind: domain\n    language: rust\n";
+    assert_eq!(
+        read(entry).map(|c| c.components[0].scaffold),
+        Ok(ComponentScaffold { snapshots: false })
+    );
+    assert_eq!(
+        read(&format!("{entry}    scaffold:\n      snapshots: true\n"))
+            .map(|c| c.components[0].scaffold),
+        Ok(ComponentScaffold { snapshots: true })
+    );
+    let (_, path) = refused_at(&format!("{entry}    scaffold:\n      snapshot: true\n"));
+    assert!(path.starts_with("component[0].scaffold"), "{path}");
+}
+
+/// A version-3 file loads as version 4: the scaffold and the snapshots
+/// version 4 adds are left out, so each is its default, and every other
+/// key reads as it did.
+#[test]
+fn a_version_3_file_loads_with_the_scaffold_and_the_snapshots_defaulted() {
+    let v3 = fixture("fixtures/v3-documented.yaml");
+    let v4 = fixture("fixtures/v4-documented.yaml");
+    let old = HostConfig::from_yaml(v3.input, v3.name).unwrap();
+    let new = HostConfig::from_yaml(v4.input, v4.name).unwrap();
+    assert_eq!(old.store.snapshots, SnapshotsConfig::default());
+    assert!(old.components.iter().all(|c| !c.scaffold.snapshots));
+    let mut components = new.components.clone();
+    components[0].scaffold = ComponentScaffold::default();
+    assert_eq!(old.components, components);
+    assert_eq!(
+        (old.supervision, old.policy, old.retry, old.store.path),
+        (new.supervision, new.policy, new.retry, new.store.path)
     );
 }

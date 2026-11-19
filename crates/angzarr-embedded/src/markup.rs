@@ -1629,8 +1629,9 @@ pub trait Snapshots {
 
     /// Take the state `anchor`, a snapshot's, holds, keeping what it does
     /// not hold (the factory's configuration). The default refuses every
-    /// snapshot ([`NotSnapshotted`](super::NotSnapshotted)), as an
-    /// implementation that offers none never has one to restore.
+    /// snapshot ([`NotSnapshotted`](super::NotSnapshotted)): the kernel
+    /// then offers it none, and replays the stream from its first event, a
+    /// snapshot an earlier build stored ignored.
     fn restore(&mut self, _anchor: Self::Anchor) -> Result<(), Report> {
         Err(Report::of(&super::NotSnapshotted::of::<
             <Self::Anchor as DomainMessage>::Wire,

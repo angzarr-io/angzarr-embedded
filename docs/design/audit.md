@@ -375,10 +375,12 @@ The anchor's full name is the state type the component registers:
 `Registry::register::<D>` lists it in the catalog by the descriptor `D`
 generates, as angzarr's `registry.register::<D>()` fills
 `ComponentDescriptor.state`. A state opts into snapshots by overriding
-both methods; one keeping the defaults offers none, and its streams are
-always replayed. The state is a domain type and the anchor the prost
-message: a snapshot that decodes but is not a valid state (`restore`
-refuses it) is unreadable, `PayloadError::Invalid`. A state that is itself
+both methods; one keeping the defaults offers none and restores none, so
+its streams are always replayed, a snapshot an earlier build stored
+ignored. The state is a domain type and the anchor the prost message: a
+snapshot that decodes but is not a valid state (`restore` refuses it) is
+not offered, and the stream is replayed (`Stream::resume`, handed one
+directly, reports it unreadable, `PayloadError::Invalid`). A state that is itself
 a prost message is its own anchor. A marked-up domain implements
 `markup::Snapshots` (the same two methods over the anchor's domain type),
 and the markup writes its `State`; the test fixtures write it by hand
@@ -1038,7 +1040,8 @@ a framework optimisation, never business data. A state offers one with
 every answer (`State::snapshot`), and the kernel writes the one a step that
 writes events offers as the domain's storage policy says (decision 14.40,
 `SnapshotPolicy`, a kernel setting, `Kernel::snapshot_policy` and
-`AppBuilder::snapshot_policy`): once the stream has gained the policy's
+`AppBuilder::snapshot_policy`, and for an application `run` from its
+config, `store.snapshots`): once the stream has gained the policy's
 events since the snapshot the step's load started from (since its start,
 with none), every write by default, and a domain the policy names at its
 own. It is stamped with the last event's sequence and the rules version
@@ -1052,9 +1055,11 @@ state's type, by the full name its type URL ends in, is the registered
 state's, decision 14.101; and its rules version passes types.proto's
 default rule against the registered version: one leading `v` or `V`
 stripped from each, equal SemVer major and minor, or, when either is not
-SemVer, the versions equal as recorded) and its sequence is below the
-head (one at or past it claims events the stream does not hold: a purge
-left it, or it was written ahead of them). Otherwise it is discarded and
+SemVer, the versions equal as recorded), a typed domain's state restores
+it (`Registry::snapshot_usable`: a state that takes no snapshots restores
+none) and its sequence is below the head (one at or past it claims events
+the stream does not hold: a purge left it, or it was written ahead of
+them). Otherwise it is discarded and
 the stream replayed from 0. The floor for the next `recorded_at` comes from
 the store (`Slice::last_recorded_at`), not the snapshot.
 

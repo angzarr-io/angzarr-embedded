@@ -194,6 +194,31 @@ async fn the_kernel_follows_the_configs_retry_setting() {
     drop(app);
 }
 
+/// The kernel the app hands out stores snapshots as the config's
+/// `store.snapshots` says: one at every write when it is left out.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_kernel_follows_the_configs_snapshot_setting() {
+    use angzarr_embedded::SnapshotPolicy;
+    use std::num::NonZeroU64;
+    let dir = TestDir::new("angzarr-host-app");
+    let path = written(&dir, "store:\n  in_memory: true\n");
+    let app = run(&path, nothing).await.unwrap();
+    assert_eq!(app.kernel().snapshots(), &SnapshotPolicy::default());
+    drop(app);
+    let path = written(
+        &dir,
+        "store:\n  in_memory: true\n  snapshots:\n    every: 3\n    domain:\n      \
+         table:\n        every: 7\n",
+    );
+    let app = run(&path, nothing).await.unwrap();
+    let n = |events: u64| NonZeroU64::new(events).unwrap();
+    assert_eq!(
+        app.kernel().snapshots(),
+        &SnapshotPolicy::every(n(3)).domain("table", n(7))
+    );
+    drop(app);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_missing_config_is_unreadable() {
     let dir = TestDir::new("angzarr-host-app");
@@ -225,7 +250,7 @@ async fn an_invalid_config_is_refused_where_it_goes_wrong() {
         ),
         "{refused:?}"
     );
-    for text in ["[[domain]\n", "schema_version: 4\n"] {
+    for text in ["[[domain]\n", "schema_version: 5\n"] {
         std::fs::write(&path, text).unwrap();
         assert!(
             matches!(
@@ -624,6 +649,7 @@ mod exposure {
             dir: None,
             env: Default::default(),
             expose,
+            scaffold: Default::default(),
         }
     }
 
@@ -792,6 +818,7 @@ mod exposure_edges {
             dir: None,
             env: Default::default(),
             expose,
+            scaffold: Default::default(),
         }
     }
 
@@ -943,6 +970,7 @@ mod listing {
             dir: None,
             env: Default::default(),
             expose: Expose::None,
+            scaffold: Default::default(),
         }
     }
 
@@ -1194,6 +1222,7 @@ mod resume {
             dir: None,
             env: Default::default(),
             expose: Expose::None,
+            scaffold: Default::default(),
         }
     }
 

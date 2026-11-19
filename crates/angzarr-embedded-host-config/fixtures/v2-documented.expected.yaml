@@ -1,6 +1,6 @@
-# fixtures/v2-documented.yaml at version 3: the step adds no key, so
-# the reset window is its default.
-schema_version: 3
+# fixtures/v2-documented.yaml at version 4: the steps add no key, so
+# the reset window, the scaffold and the snapshots are their defaults.
+schema_version: 4
 
 component:
   - name: table
