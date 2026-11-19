@@ -928,7 +928,8 @@ impl EventStore for SqliteStore {
     /// One `BEGIN IMMEDIATE` transaction, begun and committed inside the
     /// call: the stream's length checked against `expected` under the write
     /// lock, its pages inserted, the
-    /// positions upserted, the outbox entries and dead letters kept. Nothing is held open
+    /// positions upserted, the outbox entries it clears cleared and then its
+    /// own and its dead letters kept. Nothing is held open
     /// after it returns; a failure lands nothing.
     async fn write(&self, write: Write<'_>) -> Result<Written, StoreError> {
         let Exec { mut conn, sent } = self.conn.exec().await;
@@ -956,6 +957,10 @@ impl EventStore for SqliteStore {
                 .first()
                 .map(|(key, next)| (key.stream, next.saturating_sub(1))),
         };
+        for id in write.cleared {
+            ex.execute(statements::CLEAR, [Value::Blob(id.as_bytes().to_vec())])
+                .await?;
+        }
         for (place, entry) in write.outbox.iter().enumerate() {
             ex.put_outbox(entry, at, place).await?;
         }

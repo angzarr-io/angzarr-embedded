@@ -174,7 +174,7 @@ pub use angzarr_router::PageContext;
 #[cfg(feature = "sqlite")]
 pub use angzarr_store_sqlite;
 pub use book::{CommandBookExt, CoverExt};
-pub use bus::{Bus, BusPolicy, Clock, Host, KernelDispatch, StoreFed, MAX_PER_STREAM};
+pub use bus::{Bus, BusPolicy, Clock, Host, KernelDispatch, StoreFed};
 pub use catalog::{Catalog, Description};
 pub use check::{check, Arm, Body, Checked, Identified, Malformed, Sampled};
 pub use dead_letter::{dead_letter_line, DeadLetterLog, MemoryDeadLetters, DEAD_LETTER_PREFIX};
@@ -393,6 +393,11 @@ fn kernel_samples() -> Vec<KernelError> {
         KernelError::HandlerUnavailable {
             stream: sample_stream(),
             cause: "not-running".to_string(),
+        },
+        KernelError::PredecessorMissing {
+            stream: sample_stream(),
+            sequence: 9,
+            missing: 4,
         },
         KernelError::SyncNoProjectors,
         KernelError::SyncProjectorNotSubscribed {

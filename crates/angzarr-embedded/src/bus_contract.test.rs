@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use angzarr_bus::contract::{Delivery, Domains, Failing, Harness, React, Scripted, Sink, Wake};
-use angzarr_bus::Window;
+use angzarr_bus::{Pumped, RetryPolicy};
 use angzarr_diagnostic::Diagnostic as _;
 use angzarr_ports::faulty::{Fault, FaultyStore};
 use angzarr_router::error::{CodedError, RetryableStatus};
@@ -131,6 +131,16 @@ impl Wait for Never {
     }
 }
 
+/// The bus's retry cap in this run: two retries, at once.
+const CAP: u32 = 2;
+
+fn retry() -> RetryPolicy {
+    RetryPolicy {
+        cap: Some(CAP),
+        ..RetryPolicy::default()
+    }
+}
+
 fn clock() -> Timestamp {
     instant(100)
 }
@@ -170,7 +180,7 @@ impl Harness for Embedded {
     type Projector = Box<dyn DynProjectorHandler>;
     type Policy = BusPolicy;
     type Bus<'h> = crate::Bus<'h, FaultyStore<MemoryStore>>;
-    type Scripted<'h> = crate::Bus<'h, FaultyStore<MemoryStore>, Scripted>;
+    type Scripted<'h> = crate::Bus<'h, FaultyStore<MemoryStore>, Pumped<Scripted>>;
 
     fn domains(&self) -> Domains {
         Domains {
@@ -192,7 +202,7 @@ impl Harness for Embedded {
             wait,
             Duration::from_secs(1),
         );
-        Bus::new(host.pushed_by(self.memory()))
+        Bus::new(host.pushed_by(self.memory()).retrying(retry()))
     }
 
     fn bus_over(&self, transport: Scripted) -> Self::Scripted<'_> {
@@ -203,7 +213,7 @@ impl Harness for Embedded {
             &Never,
             Duration::from_secs(1),
         );
-        Bus::over(transport, host)
+        Bus::over(Pumped::new(transport), host.retrying(retry()))
     }
 
     fn projector(&self, name: &str, sink: Arc<dyn Sink>) -> Self::Projector {
@@ -258,38 +268,28 @@ impl Harness for Embedded {
         pages(self.memory(), stream)
     }
 
-    async fn position(&self, name: &str, stream: &Cover) -> Window {
-        let mark = position(self.memory(), name, stream);
-        let handled = position(self.memory(), &angzarr_bus::handled_key(name), stream);
-        Window::new(mark, handled)
+    async fn position(&self, name: &str, stream: &Cover) -> u64 {
+        position(self.memory(), name, stream)
     }
 
-    async fn rewind(&self, name: &str, stream: &Cover, to: Window) {
-        let handled = angzarr_bus::handled_key(name);
-        let positions = [
-            (
-                PositionKey {
-                    handler: name,
-                    stream: sref(stream),
-                },
-                to.mark(),
-            ),
-            (
-                PositionKey {
-                    handler: &handled,
-                    stream: sref(stream),
-                },
-                to.handled(),
-            ),
-        ];
+    async fn rewind(&self, name: &str, stream: &Cover, to: u64) {
+        let positions = [(
+            PositionKey {
+                handler: name,
+                stream: sref(stream),
+            },
+            to,
+        )];
         self.memory()
             .write(Write::positions(&positions))
             .await
             .unwrap();
     }
 
-    /// The outputs and the position are one write, whatever the outputs:
-    /// the outbox's.
+    fn retry_cap(&self) -> u32 {
+        CAP
+    }
+
     fn fail_position_commit(&self, _: usize) {
         self.store.fail([Fault::Unavailable]);
     }

@@ -210,10 +210,9 @@ fn work<S: ReadStore + crate::Store + crate::Outbox + Processed + Watch>(
     bus: &mut Bus<'_, S>,
     worker: &Worker,
     instances: usize,
-    per_stream: usize,
 ) -> Result<(), Misconfigured> {
     let projector: Box<dyn DynProjectorHandler> = Box::new(worker.clone());
-    let credit = angzarr_bus::Credit::new(n(instances)).per_stream(n(per_stream));
+    let credit = angzarr_bus::Credit::new(n(instances));
     let scope = angzarr_bus::Scope::domain("account");
     bus.subscribe(angzarr_bus::Subscription::projector(
         scope, credit, projector,
@@ -276,7 +275,7 @@ async fn several_streams_are_served_at_once_each_in_order() {
     let worker = Worker::new("worker").yielding(3);
     let kernel = kernel(&registry);
     let mut bus = bus_on(&store, &kernel, &Never);
-    work(&mut bus, &worker, 3, 1).unwrap();
+    work(&mut bus, &worker, 3).unwrap();
     drain(&mut bus).await;
     for n in [1, 2] {
         let done = worker.done_of(&cover("account", n));
@@ -298,7 +297,7 @@ async fn no_event_is_read_twice_per_handling() {
     let worker = Worker::new("worker");
     let kernel = kernel(&registry);
     let mut bus = Bus::new(Host::new(&store, &kernel, &clock, &Soon, EVERY));
-    work(&mut bus, &worker, 2, 1).unwrap();
+    work(&mut bus, &worker, 2).unwrap();
     drain(&mut bus).await;
     assert_eq!(worker.done().len(), 4);
     assert_eq!(
@@ -322,7 +321,7 @@ async fn a_store_that_does_not_push_is_polled() {
     let worker = Worker::new("worker");
     let kernel = kernel(&registry);
     let mut bus = Bus::new(Host::new(&store, &kernel, &clock, &Soon, EVERY));
-    work(&mut bus, &worker, 1, 1).unwrap();
+    work(&mut bus, &worker, 1).unwrap();
     let more = |_: &angzarr_bus::Served| worker.done().len() < 2;
     let serve = bus.serve(more);
     let write = async {
@@ -346,7 +345,7 @@ async fn a_failed_event_holds_its_stream_and_is_handed_again() {
     let worker = Worker::new("worker").fail(cover("account", 1), 0);
     let kernel = kernel(&registry);
     let mut bus = bus_on(&store, &kernel, &Soon);
-    work(&mut bus, &worker, 2, 1).unwrap();
+    work(&mut bus, &worker, 2).unwrap();
     let mut asked = Vec::new();
     let more = |served: &angzarr_bus::Served| {
         asked.push(served.clone());
@@ -373,9 +372,9 @@ async fn a_failed_event_holds_its_stream_and_is_handed_again() {
         .is_empty());
 }
 
-/// With retries on, a retryable failure is retried within the step, as the
-/// kernel retries an inline projector, and at the cap dead-lettered, its
-/// letter kept at the event, and the event passed.
+/// With retries on, a retryable failure is held and handed again by the bus
+/// on the kernel's backoff, and at the cap dead-lettered, its letter kept at
+/// the event, and the event passed.
 #[tokio::test]
 async fn a_retryable_failure_is_retried_then_dead_lettered_at_the_cap() {
     let registry = registry();
@@ -391,12 +390,20 @@ async fn a_retryable_failure_is_retried_then_dead_lettered_at_the_cap() {
         ..crate::OnRetryable::default()
     };
     let kernel = Kernel::new(&registry).on_retryable(retry).wait_with(&Soon);
-    let mut bus = bus_on(&store, &kernel, &Never);
-    work(&mut bus, &worker, 1, 1).unwrap();
-    let asked = drain(&mut bus).await;
+    let mut bus = bus_on(&store, &kernel, &Soon);
+    work(&mut bus, &worker, 1).unwrap();
+    let mut asked = Vec::new();
+    let more = |served: &angzarr_bus::Served| {
+        asked.push(served.clone());
+        handled(&asked) < 1
+    };
+    soon(bus.serve(more)).await.unwrap();
+    let held = (failures(&asked).into_iter())
+        .filter(|(_, stream, at)| *stream == at_cap && *at == Some(0));
     assert_eq!(
-        failures(&asked),
-        [("worker".to_string(), at_cap.clone(), Some(0))]
+        held.count(),
+        3,
+        "failed three times, the last dead-lettered"
     );
     let handed: Vec<Handed> = worker.handed();
     assert_eq!(handed, [0, 0, 0, 1].map(|s| (at_cap.clone(), vec![s])));
@@ -418,7 +425,7 @@ async fn a_purged_stream_is_handed_as_gone_once() {
     let worker = Worker::new("worker");
     let kernel = kernel(&registry);
     let mut first = bus_on(&store, &kernel, &Never);
-    work(&mut first, &worker, 1, 1).unwrap();
+    work(&mut first, &worker, 1).unwrap();
     drain(&mut first).await;
 
     store.purge(sref(&cover("account", 1)), 2).ready().unwrap();
@@ -431,7 +438,7 @@ async fn a_purged_stream_is_handed_as_gone_once() {
     store.purge(sref(&cover("account", 2)), 2).ready().unwrap();
     let again = Worker::new("worker");
     let mut second = bus_on(&store, &kernel, &Never);
-    work(&mut second, &again, 1, 1).unwrap();
+    work(&mut second, &again, 1).unwrap();
     drain(&mut second).await;
     assert_eq!(again.handed(), [(cover("account", 2), vec![])]);
 }
@@ -447,7 +454,7 @@ async fn a_failed_gone_book_is_held_and_handed_again() {
     let worker = Worker::new("worker").fail(gone.clone(), GONE);
     let kernel = kernel(&registry);
     let mut bus = bus_on(&store, &kernel, &Soon);
-    work(&mut bus, &worker, 1, 1).unwrap();
+    work(&mut bus, &worker, 1).unwrap();
     drain(&mut bus).await;
     store.purge(sref(&gone), 2).ready().unwrap();
     let mut asked = Vec::new();
@@ -477,7 +484,7 @@ async fn a_gone_books_bug_is_dead_lettered_and_the_stream_forgotten() {
     let worker = Worker::new("worker").fail(gone.clone(), GONE).buggy();
     let kernel = kernel(&registry);
     let mut bus = bus_on(&store, &kernel, &Never);
-    work(&mut bus, &worker, 1, 1).unwrap();
+    work(&mut bus, &worker, 1).unwrap();
     drain(&mut bus).await;
     store.purge(sref(&gone), 2).ready().unwrap();
     let asked = drain(&mut bus).await;
@@ -499,9 +506,9 @@ fn a_subscriptions_name_is_its_own() {
     let kernel = kernel(&registry);
     let mut bus = bus_on(&store, &kernel, &Never);
     let worker = Worker::new("worker");
-    work(&mut bus, &worker, 1, 1).unwrap();
+    work(&mut bus, &worker, 1).unwrap();
     assert_eq!(
-        work(&mut bus, &worker, 1, 1),
+        work(&mut bus, &worker, 1),
         Err(Misconfigured::ComponentRegistered {
             component: "worker".to_string()
         })
@@ -720,6 +727,63 @@ async fn a_pending_outbox_entry_is_relayed_when_the_policy_is_next_served() {
     assert!(pending.is_empty(), "relayed, and cleared");
 }
 
+/// Account deposits to the ledger, translating each refusal into a payment
+/// of 0 cents, a fact of the account.
+struct Answering;
+
+impl crate::Policy for Answering {
+    const NAME: &'static str = "answering";
+    type Source = Account;
+    type Target = crate::toys::Ledger;
+
+    fn on_event(
+        &self,
+        event: &crate::Any,
+        ctx: &crate::markup::PolicyContext,
+    ) -> Result<Option<crate::markup::Commands<crate::toys::Ledger>>, crate::markup::Report> {
+        crate::Policy::on_event(&crate::toys::Bookkeeping, event, ctx)
+    }
+
+    fn on_refused(&self, _: &crate::Refused) -> Result<crate::Any, crate::markup::Report> {
+        Ok(crate::toys::AccountFact::PaymentReceived(0).to_any())
+    }
+}
+
+/// A refused output's refusal fact replaces its command in the outbox, in
+/// one write, carrying the refused command's id, and is relayed to the
+/// trigger's stream: the outbox is empty after.
+#[tokio::test]
+async fn a_refusal_fact_replaces_its_command_in_the_outbox() {
+    let store = MemoryStore::new();
+    let registry = registry();
+    opened(&store, &registry, 1, 5);
+    deposit(&store, &registry, 1, 3, crate::toys::LEDGER_LIMIT + 1);
+    let kernel = Kernel::new(&registry);
+    let mut bus = bus_on(&store, &kernel, &Never);
+    let answering = BusPolicy::new(Answering);
+    bus.subscribe(angzarr_bus::Subscription::policy(n(1), answering))
+        .unwrap();
+    drain(&mut bus).await;
+    let account = pages(&store, &cover("account", 1));
+    let received = account.iter().filter(|page| {
+        let Some(crate::v1::event_page::Body::Event(any)) = &page.body else {
+            return false;
+        };
+        any.type_url.ends_with("Received")
+    });
+    assert_eq!(
+        received.count(),
+        1,
+        "the refusal's fact recorded on the account"
+    );
+    let pending = crate::Outbox::pending(&store, 10).ready().unwrap();
+    assert!(pending.is_empty(), "the outbox is empty");
+    assert!(
+        !ledger_records(&store).contains(&2),
+        "the refused record never landed"
+    );
+}
+
 /// A policy whose step fails is reported, named by its subscription,
 /// stream and sequence; under `OnPolicyBug::Stay` its position stays.
 #[tokio::test]
@@ -738,23 +802,6 @@ async fn a_policys_failed_step_is_reported() {
         Some(&("unlucky".to_string(), cover("account", 1), Some(1)))
     );
     assert_eq!(position(&store, "unlucky", &cover("account", 1)), 1, "held");
-}
-
-/// A projector subscription's credit holds: two of a stream at once when
-/// asked for.
-#[tokio::test]
-async fn several_events_of_a_stream_are_in_flight_when_asked_for() {
-    let store = MemoryStore::new();
-    let registry = registry();
-    opened(&store, &registry, 1, 5);
-    deposit(&store, &registry, 1, 3, 4);
-    let kernel = kernel(&registry);
-    let worker = Worker::new("worker").yielding(3);
-    let mut bus = bus_on(&store, &kernel, &Never);
-    work(&mut bus, &worker, 3, 3).unwrap();
-    let asked = drain(&mut bus).await;
-    assert_eq!(worker.log().most_of_one, 3, "three of a stream at once");
-    assert_eq!(handled(&asked), 3);
 }
 
 /// A bus's serve can be spawned on a multi-threaded runtime.

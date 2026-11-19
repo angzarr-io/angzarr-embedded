@@ -38,9 +38,13 @@
 use std::future::Future;
 use std::time::Duration;
 
-use angzarr_bus::{Admitted, Answer, Handler, Hub, Item, Scope, StoreTransport, Transport};
+use angzarr_bus::{
+    Admitted, Answer, Handler, Hub, Item, Pumped, RetryPolicy, Scope, StoreRead, StoreTransport,
+    Transport,
+};
 use angzarr_diagnostic::Report;
 use angzarr_ports::BoxFuture;
+use angzarr_proto::v1::Cover;
 use angzarr_router::policy::PolicyDispatch;
 use angzarr_router::router::{DynProjectorHandler, PolicyComponent};
 use prost_types::Timestamp;
@@ -54,10 +58,6 @@ use super::route::Rejected;
 use super::store::{
     CommitNotify, Outbox, PositionKey, Processed, ReadStore, Store, StoreError, StreamRef, Watch,
 };
-
-/// The most events of one stream a subscription has in flight at once:
-/// the handled set above a mark is kept as one 64-bit word.
-pub const MAX_PER_STREAM: usize = angzarr_bus::MAX_PER_STREAM;
 
 /// A policy a bus serves, never the registry: written by hand or marked up
 /// ([`BusPolicy::new`]), as angzarr-router's dispatch table
@@ -145,6 +145,7 @@ pub struct Host<'h, S> {
     wait: &'h dyn Wait,
     every: Duration,
     push: Option<&'h dyn CommitNotify>,
+    retry: Option<RetryPolicy>,
 }
 
 /// The instant a served policy's step is recorded at, and a served
@@ -170,6 +171,7 @@ impl<'h, S> Host<'h, S> {
             wait,
             every,
             push: None,
+            retry: None,
         }
     }
 
@@ -177,6 +179,13 @@ impl<'h, S> Host<'h, S> {
     /// still sees what the push does not (another process's commits).
     pub fn pushed_by(mut self, notify: &'h dyn CommitNotify) -> Host<'h, S> {
         self.push = Some(notify);
+        self
+    }
+
+    /// Held deliveries retried as `retry` says, not as the kernel retries
+    /// a step within it ([`Bus::over`]).
+    pub fn retrying(mut self, retry: RetryPolicy) -> Host<'h, S> {
+        self.retry = Some(retry);
         self
     }
 }
@@ -188,8 +197,9 @@ impl angzarr_bus::Timer for dyn Wait + '_ {
     }
 }
 
-/// The store's own transport, polled on the host's timer.
-pub type StoreFed<'h, S> = StoreTransport<'h, S, dyn Wait + 'h>;
+/// The store's own transport, polled on the host's timer, pumped: a pull
+/// feed woken by the store's commits.
+pub type StoreFed<'h, S> = Pumped<StoreTransport<'h, S, dyn Wait + 'h>>;
 
 /// How the generic bus reaches the kernel's handlers.
 pub struct KernelDispatch<'h, S> {
@@ -204,7 +214,7 @@ pub struct KernelDispatch<'h, S> {
 /// ([`BusPolicy`]), delivered by `T` (the store's own transport unless
 /// [`Bus::over`] says). See the module.
 pub struct Bus<'h, S: Store + Outbox, T = StoreFed<'h, S>> {
-    hub: Hub<'h, T, S, KernelDispatch<'h, S>>,
+    hub: Hub<'h, T, S, KernelDispatch<'h, S>, StoreRead<'h, S>>,
 }
 
 impl<'h, S: Store + Outbox + ReadStore + Processed + Watch> Bus<'h, S> {
@@ -215,21 +225,35 @@ impl<'h, S: Store + Outbox + ReadStore + Processed + Watch> Bus<'h, S> {
         if let Some(push) = host.push {
             transport = transport.pushed_by(push);
         }
-        Bus::over(transport, host)
+        Bus::over(Pumped::new(transport), host)
     }
 }
 
 impl<'h, S: Store + Outbox, T> Bus<'h, S, T> {
     /// A bus with no subscription, served on `host` (its timer and push
-    /// unused), its deliveries made by `transport`.
+    /// unused), its deliveries made by `transport`. Its held deliveries are
+    /// retried as the host says ([`Host::retrying`]), else as the kernel
+    /// retries ([`Kernel::retryable`]): its retries the cap (none: never
+    /// given up), its backoff each delay, its timer's draw the jitter.
     pub fn over(transport: T, host: Host<'h, S>) -> Bus<'h, S, T> {
         let dispatch = KernelDispatch {
             store: host.store,
             kernel: host.kernel,
             clock: host.clock,
         };
+        let retry = host.kernel.retryable();
+        let policy = host.retry.unwrap_or(RetryPolicy {
+            cap: (retry.max_retries > 0).then_some(retry.max_retries),
+            initial: retry.initial_backoff,
+            multiplier: retry.multiplier,
+            max: retry.max_backoff,
+            jitter: retry.jitter,
+        });
+        let wait = host.wait;
+        let reads = StoreRead::new(host.store);
+        let hub = Hub::reading(transport, host.store, dispatch, reads);
         Bus {
-            hub: Hub::new(transport, host.store, dispatch),
+            hub: hub.retrying(policy, move || wait.draw()),
         }
     }
 }
@@ -351,13 +375,36 @@ impl<S: Store + Outbox> angzarr_bus::Dispatch for KernelDispatch<'_, S> {
         let now = (self.clock)();
         let served = self
             .kernel
-            .project_served(self.store, name, &**projector, &book, at, now)
+            .project_served(
+                self.store,
+                (name, &**projector),
+                &book,
+                (at, item.attempt, item.last),
+                now,
+            )
             .await;
         match served {
             Ok(()) => Answer::Handled,
             Err((failure, true)) => Answer::Passed(failure),
             Err((failure, false)) => Answer::Held(failure),
         }
+    }
+
+    async fn missing<'a>(
+        &'a self,
+        handler: &'a Handler<Self::Projector, BusPolicy>,
+        name: &'a str,
+        stream: &'a Cover,
+        sequence: u64,
+        missing: u64,
+    ) -> Result<(), KernelError> {
+        let policy = matches!(handler, Handler::Policy(_));
+        let now = (self.clock)();
+        let waits = (stream, sequence, missing);
+        let kept = self
+            .kernel
+            .missing_served(self.store, name, policy, waits, now);
+        kept.await.map_err(KernelError::Store)
     }
 
     async fn react<'a>(&'a self, policy: &'a BusPolicy, name: &'a str, item: Item<'a>) -> Answer {

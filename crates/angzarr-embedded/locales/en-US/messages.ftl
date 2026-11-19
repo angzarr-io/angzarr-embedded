@@ -58,6 +58,7 @@ replay-incomplete-meta = event { $sequence }'s metadata lacks a well-formed { $f
 replay-wrong-domain = a { $found } log was given to the { $expected } domain's code
 
 unreadable = event { $sequence } of stream { $stream } cannot be replayed: { $reason }
+predecessor-missing = event { $sequence } of stream { $stream } waits on event { $missing }, which no source has
 
 payload-unknown-type = no decoder for the type { $type_url }
 payload-decode = a payload of type { $type_url } does not decode

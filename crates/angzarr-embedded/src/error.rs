@@ -205,6 +205,14 @@ pub enum KernelError {
         sequence: u64,
         reason: Report,
     },
+    /// Event `sequence` of `stream`, delivered to a subscription on a bus,
+    /// waits on event `missing`, which no source has, past the retry cap:
+    /// its delivery is dead-lettered and the stream held, never skipped.
+    PredecessorMissing {
+        stream: Cover,
+        sequence: u64,
+        missing: u64,
+    },
     Replay(ReplayError),
     /// The store's own error, angzarr-ports' (codes `angzarr-ports-*`). On
     /// the wire ([`KernelError::as_coded`]) a store that could not answer
@@ -473,6 +481,7 @@ impl KernelError {
             KernelError::BeforeSnapshot { .. } => Own(code!("before-snapshot")),
             KernelError::UnregisteredDomain { .. } => Own(code!("unregistered-domain")),
             KernelError::Unreadable { .. } => Own(code!("unreadable")),
+            KernelError::PredecessorMissing { .. } => Own(code!("predecessor-missing")),
             KernelError::Malformed(m) => Wrapped(m.code()),
             KernelError::Replay(error) => Wrapped(error.code()),
             KernelError::Store(error) => Wrapped(error.code()),
@@ -505,6 +514,7 @@ impl KernelError {
             | KernelError::BeforeSnapshot { .. }
             | KernelError::UnregisteredDomain { .. }
             | KernelError::Unreadable { .. }
+            | KernelError::PredecessorMissing { .. }
             | KernelError::Replay(_) => Recovery::Bug,
         }
     }
@@ -647,6 +657,7 @@ impl KernelError {
             | KernelError::WrongDomain { stream, .. }
             | KernelError::BeforeSnapshot { stream, .. }
             | KernelError::Unreadable { stream, .. }
+            | KernelError::PredecessorMissing { stream, .. }
             | KernelError::HandlerUnavailable { stream, .. }
             | KernelError::SyncProjectionFailed { stream, .. } => Some(stream),
             KernelError::Malformed(_)
@@ -710,6 +721,12 @@ impl KernelError {
             } => vec![
                 ("sequence", (*sequence).into()),
                 ("reason", Arg::nested(reason)),
+            ],
+            KernelError::PredecessorMissing {
+                sequence, missing, ..
+            } => vec![
+                ("sequence", (*sequence).into()),
+                ("missing", (*missing).into()),
             ],
             KernelError::Store(error) => store_args(error),
             KernelError::Router(error) => error

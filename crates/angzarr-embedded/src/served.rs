@@ -207,34 +207,79 @@ impl<'k> Kernel<'k> {
         }
     }
 
-    /// A projector a bus serves (`name`, `handler`) handed `book`, as the
-    /// inline projectors are ([`Kernel::project_book`]): a retryable
-    /// failure retried as the kernel retries, then dead-lettered at its
-    /// cap; any other failure dead-lettered at once. Its letters are kept
-    /// in the store, placed at `at`, stamped `now`. Failed, the failure and
-    /// whether its letter was kept (the bus then moves past it; else it is
-    /// held and handed again).
+    /// A projector a bus serves (`name`, `handler`) handed `book` once,
+    /// its failure classed as an inline projector's is: a retryable one held
+    /// (the bus retries it, on its delay), but on its `last` attempt
+    /// dead-lettered at its cap (`attempt` its retries so far); any other
+    /// dead-lettered at once. Its letter is kept in the store, placed at
+    /// `at`, stamped `now`. Failed, the failure and whether its letter was
+    /// kept (the bus then moves past it; else it is held).
     pub(crate) async fn project_served<S: Store>(
         &self,
         store: &S,
-        name: &str,
-        handler: &dyn DynProjectorHandler,
+        (name, handler): (&str, &dyn DynProjectorHandler),
         book: &EventBook,
-        at: Option<(&Cover, u64)>,
+        (at, attempt, last): (Option<(&Cover, u64)>, u32, bool),
         now: prost_types::Timestamp,
     ) -> Result<(), (Report, bool)> {
-        let letters = CallLetters::new(self.dead_letters, Some(now));
-        let Err(failure) = self.project_book(name, handler, book, &letters).await else {
-            return Ok(());
+        let request = hpb::ProjectRequest {
+            events: Some(book.clone()),
         };
-        if letters.count() == 0 {
+        let error = match handler.dispatch(&request).await {
+            Ok(_) => return Ok(()),
+            Err(error) => error,
+        };
+        let retryable = matches!(
+            class(error.grpc as i32),
+            Class::BugRetryable | Class::BusinessImmediate
+        );
+        let error = KernelError::Router(error);
+        let failure = Report::of(&error);
+        if retryable && !last {
             return Err((failure, false));
+        }
+        let letters = CallLetters::new(self.dead_letters, Some(now));
+        let payload = Payload::RejectedEvents(book.clone());
+        let component = Component::projector(name);
+        match retryable {
+            true => write_at_cap(&letters, payload, component, Cause::Kernel(&error), attempt),
+            false => dead_letter::write(&letters, payload, component, Cause::Kernel(&error)),
         }
         let mut port = StorePort::new(store, &letters);
         match port.write_letters(at).await {
             Ok(()) => Err((failure, true)),
             Err(error) => Err((Report::of(&KernelError::Store(error)), false)),
         }
+    }
+
+    /// Keep the dead letter of subscription `name`'s delivery at `sequence`
+    /// of `stream`, waiting on `missing`, which no source has
+    /// ([`KernelError::PredecessorMissing`]), placed at the delivery.
+    pub(crate) async fn missing_served<S: Store>(
+        &self,
+        store: &S,
+        name: &str,
+        policy: bool,
+        (stream, sequence, missing): (&Cover, u64, u64),
+        now: prost_types::Timestamp,
+    ) -> Result<(), StoreError> {
+        let letters = CallLetters::new(self.dead_letters, Some(now));
+        let error = KernelError::PredecessorMissing {
+            stream: stream.clone(),
+            sequence,
+            missing,
+        };
+        let payload = Payload::RejectedEvents(EventBook {
+            cover: Some(stream.clone()),
+            ..EventBook::default()
+        });
+        let component = match policy {
+            true => Component::policy(name),
+            false => Component::projector(name),
+        };
+        dead_letter::write(&letters, payload, component, Cause::Kernel(&error));
+        let mut port = StorePort::new(store, &letters);
+        port.write_letters(Some((stream, sequence))).await
     }
 }
 
@@ -245,7 +290,7 @@ impl Run<'_> {
     /// dead-lettered), a handler's bug dead-lettered, or a failure given up
     /// at its cap. A failure the kernel would run again (a store's, a
     /// retryable one with retries off) leaves the entry pending.
-    async fn relay<S: Outbox, P: Port>(
+    async fn relay<S: Store + Outbox, P: Port>(
         &mut self,
         store: &S,
         port: &mut P,
@@ -261,7 +306,10 @@ impl Run<'_> {
         let (done, failed) = match order.check_logged(self.registry.catalog(), self.letters, event)
         {
             Err(m) => (true, Some(StepError::Kernel(KernelError::Malformed(m)))),
-            Ok(checked) => self.step_relayed(port, policy, event, checked, &path).await,
+            Ok(checked) => {
+                let relaying = (store, policy, event, entry);
+                self.step_relayed(port, relaying, checked, &path).await
+            }
         };
         if done {
             let cleared = store.clear(&[entry.id]).await;
@@ -275,11 +323,10 @@ impl Run<'_> {
 
     /// `checked`'s step, and what came of it: whether its entry is done,
     /// and its failure.
-    async fn step_relayed<P: Port>(
+    async fn step_relayed<S: Store + Outbox, P: Port>(
         &mut self,
         port: &mut P,
-        policy: &PolicyEntry,
-        event: &EventBook,
+        (store, policy, event, entry): (&S, &PolicyEntry, &EventBook, &OutboxEntry),
         checked: Checked,
         path: &[Step],
     ) -> (bool, Option<StepError>) {
@@ -297,16 +344,9 @@ impl Run<'_> {
         }
         match failure {
             Failure::Rejected(rejected) if !aborted(&rejected) => {
-                match self
-                    .refusal_step(port, policy, event, &rejected, &delivered, &[])
-                    .await
-                {
-                    Ok(stepped) => {
-                        self.enqueue(stepped, path.to_vec());
-                        (true, None)
-                    }
-                    Err(error) => (true, Some(error)),
-                }
+                let refused = (&rejected, &delivered);
+                let failed = Box::pin(self.translated(store, port, policy, event, entry, refused));
+                (false, failed.await)
             }
             Failure::Kernel(KernelError::Router(error)) if route::is_handler_fault(&error) => {
                 let error = KernelError::Router(error);
@@ -325,6 +365,66 @@ impl Run<'_> {
                 (done, Some(step_error(failure)))
             }
         }
+    }
+}
+
+impl Run<'_> {
+    /// `delivered`, refused with `rejected`: its policy's Translate answers
+    /// the refusal fact, which replaces the refused command's outbox
+    /// `entry` in one write (the fact carrying the refused command's id),
+    /// and is relayed in turn. Translate's failure is the policy's bug, the
+    /// refused command dead-lettered and its entry cleared. The failure, if
+    /// any; the entry is done either way.
+    async fn translated<S: Store + Outbox, P: Port>(
+        &mut self,
+        store: &S,
+        port: &mut P,
+        policy: &PolicyEntry,
+        event: &EventBook,
+        entry: &OutboxEntry,
+        (rejected, delivered): (&Rejected, &Identified),
+    ) -> Option<StepError> {
+        let request = hpb::TranslateRequest {
+            trigger: Some(event.clone()),
+            command: delivered.to_delivery(),
+            refusal: Some(rejected.as_refusal()),
+        };
+        let fact = match policy.dispatch.translate(&request).await {
+            Ok(answer) => answer.fact.unwrap_or_default(),
+            Err(error) => {
+                let failure = route::report(&error);
+                let error = KernelError::Router(error);
+                let component = Component::policy(policy.name());
+                let payload = dead_letter::rejected(delivered);
+                dead_letter::write(self.letters, payload, component, Cause::Kernel(&error));
+                let cleared = store.clear(&[entry.id]).await;
+                return match cleared {
+                    Ok(_) => Some(StepError::PolicyFailed(failure)),
+                    Err(e) => Some(StepError::Kernel(KernelError::Store(e))),
+                };
+            }
+        };
+        let trigger = delivered.causation().cloned().unwrap_or_default();
+        let delivery = ReactionDelivery {
+            cover: trigger.stream.clone(),
+            body: Some(reaction_delivery::Body::Fact(fact)),
+            command_id: Some(delivered.command_id().clone()),
+            correlation_id: Some(delivered.correlation_id().clone()),
+            causation: Some(trigger.clone()),
+            component: policy.name().to_string(),
+        };
+        let order = Order { delivery, trigger };
+        let replacing = self::entry(policy, &order);
+        let swap = Write {
+            outbox: std::slice::from_ref(&replacing),
+            cleared: std::slice::from_ref(&entry.id),
+            ..Write::default()
+        };
+        if let Err(e) = store.write(swap).await {
+            return Some(StepError::Kernel(KernelError::Store(e)));
+        }
+        let relayed = Box::pin(self.relay(store, port, policy, event, order, &replacing)).await;
+        relayed.err().map(|(_, error)| error)
     }
 }
 

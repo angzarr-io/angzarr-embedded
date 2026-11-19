@@ -12,7 +12,7 @@ rust-version = "1.89"
 # at the rev angzarr-embedded pins.
 [dependencies]
 angzarr-embedded = { path = "../angzarr-embedded" }
-angzarr-diagnostic = { git = "https://github.com/angzarr-io/angzarr", rev = "8d60c47f85c47d2bdd8a20a0b07718e3510951c3" }
+angzarr-diagnostic = { git = "https://github.com/angzarr-io/angzarr", rev = "099ef5aeb7a4ccfc916ef56846ce2cdad3b96150" }
 
 # The tests run commands to a toy marked-up aggregate (src/note.test.rs),
 # its wire messages prost's, on the kernel's test support (block_on_ready,
