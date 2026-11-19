@@ -15,15 +15,18 @@ rust-version = "1.89"
 # and the kernel's are the same types. Dependency-freeness was given up for
 # this deliberately: see docs/design/audit.md, *Layering*.
 [dependencies]
-angzarr-diagnostic = { git = "https://github.com/angzarr-io/angzarr", rev = "03663846fc7609378739f616e785e88b99ba0a1c" }
-angzarr-proto = { git = "https://github.com/angzarr-io/angzarr", rev = "03663846fc7609378739f616e785e88b99ba0a1c" }
+angzarr-diagnostic = { git = "https://github.com/angzarr-io/angzarr", rev = "fe7ff4fe8ce4c2eb5ab28dc8444562c3c18906f9" }
+angzarr-proto = { git = "https://github.com/angzarr-io/angzarr", rev = "fe7ff4fe8ce4c2eb5ab28dc8444562c3c18906f9" }
 prost = "0.14"
 prost-types = "0.14"
 # angzarr's shared storage contract (one async trait set, its errors and
 # codes): angzarr-embedded's store ports are these, pinned with angzarr-proto at the
 # same rev of angzarr core (both crates moved there from angzarr-project), so
 # both share one set of wire types.
-angzarr-ports = { git = "https://github.com/angzarr-io/angzarr", rev = "03663846fc7609378739f616e785e88b99ba0a1c" }
+angzarr-ports = { git = "https://github.com/angzarr-io/angzarr", rev = "fe7ff4fe8ce4c2eb5ab28dc8444562c3c18906f9" }
+# angzarr's bus interface (angzarr core's angzarr-bus): the trait a bus
+# hosted on a kernel implements, with projector and policy subscriptions.
+angzarr-bus = { git = "https://github.com/angzarr-io/angzarr", rev = "fe7ff4fe8ce4c2eb5ab28dc8444562c3c18906f9" }
 # angzarr's shared client router: business dispatch (handlers, typed
 # refusals and the refusal path), implemented once for every runtime. The
 # kernel calls it and keeps the check, identification, admission,
@@ -55,7 +58,9 @@ test-support = ["angzarr-ports/memory", "angzarr-ports/faulty"]
 # concurrently on tokio, each bounded by tokio's timer (`time`).
 [dev-dependencies]
 angzarr-embedded = { path = ".", features = ["sqlite", "test-support"] }
-angzarr-ports = { git = "https://github.com/angzarr-io/angzarr", rev = "03663846fc7609378739f616e785e88b99ba0a1c", features = ["memory", "faulty"] }
+angzarr-ports = { git = "https://github.com/angzarr-io/angzarr", rev = "fe7ff4fe8ce4c2eb5ab28dc8444562c3c18906f9", features = ["memory", "faulty"] }
+# The bus interface's conformance suite, run against the hosted bus.
+angzarr-bus = { git = "https://github.com/angzarr-io/angzarr", rev = "fe7ff4fe8ce4c2eb5ab28dc8444562c3c18906f9", features = ["contract"] }
 angzarr-embedded-macros = { path = "../angzarr-embedded-macros" }
 angzarr-store-sqlite = { path = "../angzarr-store-sqlite" }
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
@@ -63,7 +68,7 @@ tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] 
 # The build writes the catalog's source under the crate's name
 # (angzarr_diagnostic::build): no catalog spells its crate's name.
 [build-dependencies]
-angzarr-diagnostic = { git = "https://github.com/angzarr-io/angzarr", rev = "03663846fc7609378739f616e785e88b99ba0a1c", features = ["build"] }
+angzarr-diagnostic = { git = "https://github.com/angzarr-io/angzarr", rev = "fe7ff4fe8ce4c2eb5ab28dc8444562c3c18906f9", features = ["build"] }
 
 [lints]
 workspace = true

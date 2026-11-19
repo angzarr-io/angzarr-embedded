@@ -1,9 +1,11 @@
-//! The bus: every event of a subscription's sources handed to one of its
-//! instances once it is owed, recorded once handled, and after a crash only
-//! what was not handled handed again; one event of a stream in flight
-//! unless more are asked for; several subscriptions on one bus; each event
-//! read once per handling; woken by a commit, or by the poll without push;
-//! a failure held and handed again; a purged stream handed as gone.
+//! The bus, as angzarr-embedded runs it beyond angzarr core's conformance
+//! suite (`bus_contract.test.rs`): several streams at once, each event read
+//! once per handling, a store without push polled, a retryable failure
+//! held with retries off and dead-lettered at the kernel's cap with them
+//! on, a purged stream handed as gone to a new bus too, and policies served
+//! as the kernel's chain steps them: never both inline and on the bus, a
+//! remote source refused, a policy moved from inline keeping its place, and
+//! `Kernel::resume` leaving it alone.
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -13,18 +15,19 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use angzarr_bus::Bus as _;
 use angzarr_ports::memory::MemoryRead;
-use angzarr_router::error::CodedError;
-use angzarr_router::router::ProjectorHandler;
+use angzarr_router::error::{CodedError, RetryableStatus};
+use angzarr_router::router::{DynProjectorHandler, ProjectorHandler};
 
 use crate::angzarr_ports::Uuid;
 use crate::angzarr_router::hpb::{ProjectRequest, ProjectResponse};
 use crate::toys::prelude::*;
-use crate::toys::{at, command, cover, opened, registry, Account, AccountCmd, Edit};
+use crate::toys::{at, command, cover, no_retries, opened, registry, Account, AccountCmd, Edit};
 use crate::v1::{Cover, EventPage, Snapshot};
 use crate::{
-    Bus, ChangeToken, KernelError, Misconfigured, Payload as _, Processed, ReadStore, ReadUnit,
-    Registry, Served, Slice, StoreError, StreamRef, Subscription, Wait, Watch, Written,
+    Bus, BusPolicy, ChangeToken, DeadLetterStore, Host, Kernel, Misconfigured, Payload as _,
+    Processed, ReadStore, ReadUnit, Registry, Slice, StoreError, StreamRef, Wait, Watch, Written,
 };
 
 /// One book as a worker was handed it: its stream and its pages'
@@ -44,16 +47,14 @@ struct Log {
     most_of_one: usize,
     /// The most books in its dispatch at once.
     most: usize,
-    /// Events whose dispatch never returns.
-    stuck: Vec<(Cover, u64)>,
-    /// Events whose dispatch fails, once each.
+    /// Events whose dispatch fails retryably, once per entry.
     failing: Vec<(Cover, u64)>,
     /// How many times each dispatch yields before it returns.
     yields: usize,
 }
 
 /// A projector that logs what it is handed and handles it, as its log
-/// says: some never, some failing once, each after some yields.
+/// says: some failing, each after some yields.
 #[derive(Clone)]
 struct Worker {
     name: &'static str,
@@ -70,11 +71,6 @@ impl Worker {
 
     fn log(&self) -> std::sync::MutexGuard<'_, Log> {
         self.log.lock().unwrap()
-    }
-
-    fn stick(self, stream: Cover, sequence: u64) -> Worker {
-        self.log().stuck.push((stream, sequence));
-        self
     }
 
     fn fail(self, stream: Cover, sequence: u64) -> Worker {
@@ -114,7 +110,7 @@ impl ProjectorHandler for Worker {
         let sequences: Vec<u64> = book.pages.iter().map(|page| page.sequence).collect();
         let this = sequences.first().map(|&sequence| (cover.clone(), sequence));
         let stream = format!("{cover:?}");
-        let (stuck, fails, yields) = {
+        let (fails, yields) = {
             let mut log = self.log();
             log.handed.push((cover.clone(), sequences.clone()));
             *log.running.entry(stream.clone()).or_default() += 1;
@@ -122,21 +118,21 @@ impl ProjectorHandler for Worker {
             log.most_of_one = log.most_of_one.max(of_one);
             let all = log.running.values().sum();
             log.most = log.most.max(all);
-            let stuck = this.as_ref().is_some_and(|this| log.stuck.contains(this));
             let failing = log.failing.iter().position(|f| Some(f) == this.as_ref());
             let fails = failing.map(|at| log.failing.remove(at)).is_some();
-            (stuck, fails, log.yields)
+            (fails, log.yields)
         };
-        if stuck {
-            std::future::pending::<()>().await;
-        }
         for _ in 0..yields {
             tokio::task::yield_now().await;
         }
         let mut log = self.log();
         *log.running.get_mut(&stream).unwrap() -= 1;
         if fails {
-            return Err(CodedError::bug("toy-worker-failed", []));
+            return Err(CodedError::retryable_bug(
+                RetryableStatus::Unavailable,
+                "toy-worker-failed",
+                [],
+            ));
         }
         log.done.push((cover, sequences));
         Ok(ProjectResponse::default())
@@ -175,12 +171,39 @@ fn n(instances: usize) -> NonZeroUsize {
     NonZeroUsize::new(instances).unwrap()
 }
 
-/// The bus with `worker` alone, as `instances`.
-fn bus_of(worker: &Worker, instances: usize) -> Bus {
-    let mut bus = Bus::new();
-    let subscription = Subscription::new(&["account"], worker.clone(), n(instances)).unwrap();
-    bus.subscribe(subscription).unwrap();
-    bus
+/// The instant the bus's steps and letters are stamped with.
+fn clock() -> crate::Timestamp {
+    crate::toys::instant(50)
+}
+
+/// The kernel the tests' buses run on: retries off, unless a test says.
+fn kernel(registry: &Registry) -> Kernel<'_> {
+    Kernel::new(registry).on_retryable(no_retries())
+}
+
+/// A bus over `store` on `kernel`, woken by its commits and by `wait`.
+fn bus_on<'h>(
+    store: &'h MemoryStore,
+    kernel: &'h Kernel<'h>,
+    wait: &'h dyn Wait,
+) -> Bus<'h, MemoryStore> {
+    Bus::new(Host::new(store, kernel, &clock, wait, EVERY).pushed_by(store))
+}
+
+/// `worker` on `bus`, over the account domain, as `instances` at once,
+/// `per_stream` of a stream in flight.
+fn work<S: ReadStore + crate::Store + Processed + Watch>(
+    bus: &mut Bus<'_, S>,
+    worker: &Worker,
+    instances: usize,
+    per_stream: usize,
+) -> Result<(), Misconfigured> {
+    let projector: Box<dyn DynProjectorHandler> = Box::new(worker.clone());
+    let credit = angzarr_bus::Credit::new(n(instances)).per_stream(n(per_stream));
+    let scope = angzarr_bus::Scope::domain("account");
+    bus.subscribe(angzarr_bus::Subscription::projector(
+        scope, credit, projector,
+    ))
 }
 
 /// Command `id` depositing `cents` into account `n`.
@@ -201,104 +224,35 @@ async fn soon<F: Future>(future: F) -> F::Output {
         .expect("the bus kept waiting")
 }
 
-/// Run `follow` until `until` holds, then drop it: a crash, whatever it
-/// had in flight.
-async fn crash_when(
-    follow: impl Future<Output = Result<(), KernelError>>,
-    until: impl Fn() -> bool,
-) {
-    let until = async {
-        while !until() {
-            tokio::task::yield_now().await;
-        }
-    };
-    soon(async {
-        tokio::select! {
-            ended = follow => panic!("the bus stopped before its crash: {ended:?}"),
-            () = until => {}
-        }
-    })
-    .await;
-}
-
-/// Serve until the bus is idle, then stop: what it served.
-async fn drain<S>(bus: &mut Bus, store: &S, registry: &Registry) -> Vec<(u64, Vec<(String, Cover)>)>
-where
-    S: ReadStore + crate::Store + Processed + Watch + crate::CommitNotify,
-{
+/// Serve until the bus is idle, then stop: what it served, each time asked.
+async fn drain<S: ReadStore + crate::Store + Processed + Watch>(
+    bus: &mut Bus<'_, S>,
+) -> Vec<angzarr_bus::Served> {
     let mut asked = Vec::new();
-    let more = |served: &Served| {
-        asked.push(summary(served));
+    let more = |served: &angzarr_bus::Served| {
+        asked.push(served.clone());
         false
     };
-    soon(bus.follow_commits(store, registry.catalog(), &Never, EVERY, more))
-        .await
-        .unwrap();
+    soon(bus.serve(more)).await.unwrap();
     asked
 }
 
-fn summary(served: &Served) -> (u64, Vec<(String, Cover)>) {
-    let failures = served.failures().iter();
-    let failures = failures.map(|(name, cover, _)| (name.clone(), cover.clone()));
-    (served.handled(), failures.collect())
+/// How many items were handled over every ask.
+fn handled(asked: &[angzarr_bus::Served]) -> u64 {
+    asked.iter().map(angzarr_bus::Served::handled).sum()
 }
 
-/// Two instances, one stream's first event never handled: the other
-/// stream is handled meanwhile. After a crash, a new bus on the store
-/// hands only the unhandled: the stuck event, and what came after it on
-/// its stream.
-#[tokio::test]
-async fn out_of_order_completion_then_a_crash_re_serves_only_the_unhandled() {
-    let registry = registry();
-    let store = MemoryStore::new();
-    opened(&store, &registry, 1, 5);
-    opened(&store, &registry, 2, 7);
-    let first = Worker::new("worker").stick(cover("account", 1), 0);
-    let mut bus = bus_of(&first, 2);
-    let follow = bus.follow_commits(&store, registry.catalog(), &Never, EVERY, |_| true);
-    crash_when(follow, || first.done().len() == 2).await;
-    assert_eq!(first.done_of(&cover("account", 2)), [vec![0], vec![1]]);
-
-    let second = Worker::new("worker");
-    drain(&mut bus_of(&second, 2), &store, &registry).await;
-    assert_eq!(
-        second.handed(),
-        [
-            (cover("account", 1), vec![0]),
-            (cover("account", 1), vec![1])
-        ]
-    );
+/// Every failure over every ask: its subscription, stream and sequence.
+fn failures(asked: &[angzarr_bus::Served]) -> Vec<(String, Cover, Option<u64>)> {
+    let failures = asked.iter().flat_map(angzarr_bus::Served::failures);
+    let at = |f: &angzarr_bus::Failed| (f.subscription.clone(), f.stream.clone(), f.sequence);
+    failures.map(at).collect()
 }
 
-/// Three events of one stream in flight at once, the first never handled:
-/// the two above it are, and after a crash only the first is handed again.
+/// Several streams are in their handler at once, each one event at a time
+/// and in order.
 #[tokio::test]
-async fn handled_events_above_an_unhandled_one_are_not_re_served() {
-    let registry = registry();
-    let store = MemoryStore::new();
-    opened(&store, &registry, 1, 5);
-    deposit(&store, &registry, 1, 3, 4);
-    let first = Worker::new("worker").stick(cover("account", 1), 0);
-    let mut bus = Bus::new();
-    let subscription = Subscription::new(&["account"], first.clone(), n(3)).unwrap();
-    bus.subscribe(subscription.per_stream(n(3))).unwrap();
-    let follow = bus.follow_commits(&store, registry.catalog(), &Never, EVERY, |_| true);
-    crash_when(follow, || first.done().len() == 2).await;
-    assert_eq!(first.done_of(&cover("account", 1)), [vec![1], vec![2]]);
-
-    let second = Worker::new("worker");
-    let mut bus = Bus::new();
-    let subscription = Subscription::new(&["account"], second.clone(), n(3)).unwrap();
-    bus.subscribe(subscription.per_stream(n(3))).unwrap();
-    drain(&mut bus, &store, &registry).await;
-    assert_eq!(second.handed(), [(cover("account", 1), vec![0])]);
-}
-
-/// By default a stream has one event in flight: each stream's events are
-/// handled one at a time, in order, while the instances run several
-/// streams at once.
-#[tokio::test]
-async fn a_stream_has_one_event_in_flight_by_default() {
+async fn several_streams_are_served_at_once_each_in_order() {
     let registry = registry();
     let store = MemoryStore::new();
     for n in [1, 2] {
@@ -306,7 +260,10 @@ async fn a_stream_has_one_event_in_flight_by_default() {
         deposit(&store, &registry, n, 3, 4);
     }
     let worker = Worker::new("worker").yielding(3);
-    drain(&mut bus_of(&worker, 3), &store, &registry).await;
+    let kernel = kernel(&registry);
+    let mut bus = bus_on(&store, &kernel, &Never);
+    work(&mut bus, &worker, 3, 1).unwrap();
+    drain(&mut bus).await;
     for n in [1, 2] {
         let done = worker.done_of(&cover("account", n));
         assert_eq!(done, [vec![0], vec![1], vec![2]], "in order");
@@ -315,52 +272,9 @@ async fn a_stream_has_one_event_in_flight_by_default() {
     assert_eq!(worker.log().most, 2, "both streams at once");
 }
 
-/// Asked for, several events of one stream are in flight at once.
-#[tokio::test]
-async fn several_events_of_a_stream_are_in_flight_when_asked_for() {
-    let registry = registry();
-    let store = MemoryStore::new();
-    opened(&store, &registry, 1, 5);
-    deposit(&store, &registry, 1, 3, 4);
-    let worker = Worker::new("worker").yielding(3);
-    let mut bus = Bus::new();
-    let subscription = Subscription::new(&["account"], worker.clone(), n(3)).unwrap();
-    bus.subscribe(subscription.per_stream(n(3))).unwrap();
-    drain(&mut bus, &store, &registry).await;
-    assert_eq!(worker.log().most_of_one, 3);
-    let mut done = worker.done_of(&cover("account", 1));
-    done.sort();
-    assert_eq!(done, [vec![0], vec![1], vec![2]]);
-}
-
-/// Two subscriptions on one bus, each with its own instances: each is
-/// handed every event once, and keeps its own positions.
-#[tokio::test]
-async fn several_subscriptions_share_one_bus() {
-    let registry = registry();
-    let store = MemoryStore::new();
-    opened(&store, &registry, 1, 5);
-    opened(&store, &registry, 2, 7);
-    let (a, b) = (Worker::new("a"), Worker::new("b"));
-    let mut bus = Bus::new();
-    for (worker, instances) in [(&a, 2), (&b, 1)] {
-        let subscription = Subscription::new(&["account"], worker.clone(), n(instances));
-        bus.subscribe(subscription.unwrap()).unwrap();
-    }
-    drain(&mut bus, &store, &registry).await;
-    for worker in [&a, &b] {
-        let mut done = worker.done();
-        done.sort_by_key(|(cover, sequences)| (format!("{cover:?}"), sequences.clone()));
-        let all = [(1, 0), (1, 1), (2, 0), (2, 1)].map(|(n, s)| (cover("account", n), vec![s]));
-        assert_eq!(done, all, "{}", worker.name);
-        for n in [1, 2] {
-            assert_eq!(position(&store, worker.name, &cover("account", n)), 2);
-        }
-    }
-}
-
 /// Each event is read from the store once per handling, and a bus with
-/// nothing owed reads no event.
+/// nothing owed reads no event; a store that does not push is served on
+/// its poll.
 #[tokio::test]
 async fn no_event_is_read_twice_per_handling() {
     let registry = registry();
@@ -368,41 +282,22 @@ async fn no_event_is_read_twice_per_handling() {
     opened(&store.inner, &registry, 1, 5);
     opened(&store.inner, &registry, 2, 7);
     let worker = Worker::new("worker");
-    let mut bus = bus_of(&worker, 2);
-    let follow = bus.follow(&store, registry.catalog(), &Soon, EVERY, |_| false);
-    soon(follow).await.unwrap();
+    let kernel = kernel(&registry);
+    let mut bus = Bus::new(Host::new(&store, &kernel, &clock, &Soon, EVERY));
+    work(&mut bus, &worker, 2, 1).unwrap();
+    drain(&mut bus).await;
     assert_eq!(worker.done().len(), 4);
     assert_eq!(
         store.pages.load(Ordering::SeqCst),
         4,
         "each event read once"
     );
-
-    let follow = bus.follow(&store, registry.catalog(), &Soon, EVERY, |_| false);
-    soon(follow).await.unwrap();
+    drain(&mut bus).await;
     assert_eq!(
         store.pages.load(Ordering::SeqCst),
         4,
         "nothing owed, nothing read"
     );
-}
-
-/// Idle, the bus is woken by a commit, with a timer that never fires.
-#[tokio::test]
-async fn a_commit_wakes_the_bus_with_no_poll() {
-    let registry = registry();
-    let store = MemoryStore::new();
-    let worker = Worker::new("worker");
-    let mut bus = bus_of(&worker, 1);
-    let more = |_: &Served| worker.done().len() < 2;
-    let follow = bus.follow_commits(&store, registry.catalog(), &Never, EVERY, more);
-    let write = async {
-        tokio::task::yield_now().await;
-        opened(&store, &registry, 1, 5);
-    };
-    let (followed, ()) = soon(async { tokio::join!(follow, write) }).await;
-    followed.unwrap();
-    assert_eq!(worker.done_of(&cover("account", 1)), [vec![0], vec![1]]);
 }
 
 /// A store that does not push is polled: its change token, on the timer.
@@ -411,21 +306,23 @@ async fn a_store_that_does_not_push_is_polled() {
     let registry = registry();
     let store = Counted::default();
     let worker = Worker::new("worker");
-    let mut bus = bus_of(&worker, 1);
-    let more = |_: &Served| worker.done().len() < 2;
-    let follow = bus.follow(&store, registry.catalog(), &Soon, EVERY, more);
+    let kernel = kernel(&registry);
+    let mut bus = Bus::new(Host::new(&store, &kernel, &clock, &Soon, EVERY));
+    work(&mut bus, &worker, 1, 1).unwrap();
+    let more = |_: &angzarr_bus::Served| worker.done().len() < 2;
+    let serve = bus.serve(more);
     let write = async {
         tokio::task::yield_now().await;
         opened(&store.inner, &registry, 1, 5);
     };
-    let (followed, ()) = soon(async { tokio::join!(follow, write) }).await;
-    followed.unwrap();
+    let (served, ()) = soon(async { tokio::join!(serve, write) }).await;
+    served.unwrap();
     assert_eq!(worker.done_of(&cover("account", 1)), [vec![0], vec![1]]);
 }
 
-/// A failing event holds its stream: it is reported, nothing after it on
-/// its stream is handed, the other streams go on, and it is handed again
-/// at the next poll.
+/// With retries off, a retryable failure holds its stream: it is reported,
+/// nothing after it on its stream is handed, the other streams go on, and
+/// it is handed again at the next poll.
 #[tokio::test]
 async fn a_failed_event_holds_its_stream_and_is_handed_again() {
     let registry = registry();
@@ -433,28 +330,23 @@ async fn a_failed_event_holds_its_stream_and_is_handed_again() {
     opened(&store, &registry, 1, 5);
     opened(&store, &registry, 2, 7);
     let worker = Worker::new("worker").fail(cover("account", 1), 0);
-    let mut bus = bus_of(&worker, 2);
+    let kernel = kernel(&registry);
+    let mut bus = bus_on(&store, &kernel, &Soon);
+    work(&mut bus, &worker, 2, 1).unwrap();
     let mut asked = Vec::new();
-    let more = |served: &Served| {
-        asked.push(summary(served));
+    let more = |served: &angzarr_bus::Served| {
+        asked.push(served.clone());
         !served.failures().is_empty()
     };
-    let follow = bus.follow_commits(&store, registry.catalog(), &Soon, EVERY, more);
-    soon(follow).await.unwrap();
-    let failed = (2, vec![("worker".to_string(), cover("account", 1))]);
+    soon(bus.serve(more)).await.unwrap();
+    let first = asked.first().unwrap();
+    assert_eq!(first.handled(), 2, "the other stream handled");
     assert_eq!(
-        asked.first(),
-        Some(&failed),
-        "reported, the other stream handled"
+        failures(std::slice::from_ref(first)),
+        [("worker".to_string(), cover("account", 1), Some(0))]
     );
-    assert_eq!(
-        asked.last(),
-        Some(&(2, vec![])),
-        "handed again, and handled"
-    );
-    let of_one: Vec<Handed> = worker
-        .handed()
-        .into_iter()
+    assert_eq!(handled(&asked), 4, "handed again, and handled");
+    let of_one: Vec<Handed> = (worker.handed().into_iter())
         .filter(|(c, _)| c == &cover("account", 1))
         .collect();
     assert_eq!(
@@ -462,6 +354,43 @@ async fn a_failed_event_holds_its_stream_and_is_handed_again() {
         [0, 0, 1].map(|s| (cover("account", 1), vec![s])),
         "nothing after it handed before it"
     );
+    assert!(store
+        .dead_letters(sref(&cover("account", 1)))
+        .ready()
+        .unwrap()
+        .is_empty());
+}
+
+/// With retries on, a retryable failure is retried within the step, as the
+/// kernel retries an inline projector, and at the cap dead-lettered, its
+/// letter kept at the event, and the event passed.
+#[tokio::test]
+async fn a_retryable_failure_is_retried_then_dead_lettered_at_the_cap() {
+    let registry = registry();
+    let store = MemoryStore::new();
+    opened(&store, &registry, 1, 5);
+    let at_cap = cover("account", 1);
+    let worker = Worker::new("worker")
+        .fail(at_cap.clone(), 0)
+        .fail(at_cap.clone(), 0)
+        .fail(at_cap.clone(), 0);
+    let retry = crate::OnRetryable {
+        max_retries: 2,
+        ..crate::OnRetryable::default()
+    };
+    let kernel = Kernel::new(&registry).on_retryable(retry).wait_with(&Soon);
+    let mut bus = bus_on(&store, &kernel, &Never);
+    work(&mut bus, &worker, 1, 1).unwrap();
+    let asked = drain(&mut bus).await;
+    assert_eq!(
+        failures(&asked),
+        [("worker".to_string(), at_cap.clone(), Some(0))]
+    );
+    let handed: Vec<Handed> = worker.handed();
+    assert_eq!(handed, [0, 0, 0, 1].map(|s| (at_cap.clone(), vec![s])));
+    assert_eq!(worker.done_of(&at_cap), [vec![1]]);
+    assert_eq!(position(&store, "worker", &at_cap), 2, "passed");
+    assert_eq!(store.dead_letters(sref(&at_cap)).ready().unwrap().len(), 1);
 }
 
 /// A stream handled and purged since is handed as gone (a book with no
@@ -475,50 +404,270 @@ async fn a_purged_stream_is_handed_as_gone_once() {
         opened(&store, &registry, n, 5);
     }
     let worker = Worker::new("worker");
-    let mut bus = bus_of(&worker, 1);
-    drain(&mut bus, &store, &registry).await;
+    let kernel = kernel(&registry);
+    let mut first = bus_on(&store, &kernel, &Never);
+    work(&mut first, &worker, 1, 1).unwrap();
+    drain(&mut first).await;
 
     store.purge(sref(&cover("account", 1)), 2).ready().unwrap();
-    drain(&mut bus, &store, &registry).await;
+    drain(&mut first).await;
     assert_eq!(worker.handed()[4..], [(cover("account", 1), vec![])]);
     assert_eq!(position(&store, "worker", &cover("account", 1)), 0);
-    drain(&mut bus, &store, &registry).await;
+    drain(&mut first).await;
     assert_eq!(worker.handed().len(), 5, "forgotten");
 
     store.purge(sref(&cover("account", 2)), 2).ready().unwrap();
     let again = Worker::new("worker");
-    drain(&mut bus_of(&again, 1), &store, &registry).await;
+    let mut second = bus_on(&store, &kernel, &Never);
+    work(&mut second, &again, 1, 1).unwrap();
+    drain(&mut second).await;
     assert_eq!(again.handed(), [(cover("account", 2), vec![])]);
 }
 
-/// A subscription reads some domain, and its name is its own on a bus.
+/// A name is its own on a bus: a second subscription of it is refused.
 #[test]
-fn a_subscription_names_a_source_and_a_name_of_its_own() {
+fn a_subscriptions_name_is_its_own() {
+    let registry = registry();
+    let store = MemoryStore::new();
+    let kernel = kernel(&registry);
+    let mut bus = bus_on(&store, &kernel, &Never);
     let worker = Worker::new("worker");
-    let refused = Subscription::new(&[], worker.clone(), n(1)).err();
-    assert!(matches!(refused, Some(Misconfigured::NoInputDomain { .. })));
-
-    let mut bus = Bus::new();
-    let subscribe = |bus: &mut Bus| {
-        bus.subscribe(Subscription::new(&["account"], worker.clone(), n(1)).unwrap())
-    };
-    subscribe(&mut bus).unwrap();
+    work(&mut bus, &worker, 1, 1).unwrap();
     assert_eq!(
-        subscribe(&mut bus),
+        work(&mut bus, &worker, 1, 1),
         Err(Misconfigured::ComponentRegistered {
             component: "worker".to_string()
         })
     );
 }
 
-/// A follow can be spawned on a multi-threaded runtime.
+/// The ledger's records, as their source sequences.
+fn ledger_records(store: &MemoryStore) -> Vec<u64> {
+    let events = pages(store, &ledger());
+    let recorded = events.iter().filter_map(|page| match &page.body {
+        Some(crate::v1::event_page::Body::Event(any)) => {
+            <crate::toys::ledger::Recorded as prost::Message>::decode(&any.value[..]).ok()
+        }
+        _ => None,
+    });
+    recorded.map(|record| record.source_sequence).collect()
+}
+
+fn ledger() -> Cover {
+    Cover {
+        domain: "ledger".to_string(),
+        root: Some(crate::toys::ledger_root()),
+        edition: None,
+    }
+}
+
+fn bookkeeping() -> angzarr_bus::Subscription<Box<dyn DynProjectorHandler>, BusPolicy> {
+    angzarr_bus::Subscription::policy(n(1), BusPolicy::new(crate::toys::Bookkeeping))
+}
+
+/// A policy is inline or on a bus, never both: a bus refuses one the
+/// kernel's registry runs, one whose source is remote, and a second
+/// subscription of one name; a projector of a remote source is refused
+/// too.
 #[test]
-fn a_follow_is_send() {
+fn a_bus_refuses_a_policy_run_inline_or_of_a_remote_source() {
+    let store = MemoryStore::new();
+    let mut inline = registry();
+    inline.policy(crate::toys::Bookkeeping).unwrap();
+    let kernel = Kernel::new(&inline);
+    let mut bus = bus_on(&store, &kernel, &Never);
+    assert_eq!(
+        bus.subscribe(bookkeeping()).err(),
+        Some(Misconfigured::ComponentRegistered {
+            component: "bookkeeping".to_string()
+        })
+    );
+
+    let mut remote = registry();
+    remote.remote("bank", Nowhere).unwrap();
+    let kernel = Kernel::new(&remote);
+    let mut bus = bus_on(&store, &kernel, &Never);
+    let banking = BusPolicy::component(Banking, "ledger");
+    assert_eq!(banking.source(), "bank");
+    let refused = Some(Misconfigured::RemoteSource {
+        domain: "bank".to_string(),
+        component: "banking".to_string(),
+    });
+    let policy = angzarr_bus::Subscription::policy(n(1), banking);
+    assert_eq!(bus.subscribe(policy).err(), refused);
+    let projector: Box<dyn DynProjectorHandler> = Box::new(Worker::new("banking"));
+    let credit = angzarr_bus::Credit::new(n(1));
+    let scope = angzarr_bus::Scope::of("account", &["bank"]);
+    let projector = angzarr_bus::Subscription::projector(scope, credit, projector);
+    assert_eq!(bus.subscribe(projector).err(), refused);
+
+    let plain = registry();
+    let kernel = Kernel::new(&plain);
+    let mut bus = bus_on(&store, &kernel, &Never);
+    bus.subscribe(bookkeeping()).unwrap();
+    assert_eq!(
+        bus.subscribe(bookkeeping()).err(),
+        Some(Misconfigured::ComponentRegistered {
+            component: "bookkeeping".to_string()
+        })
+    );
+}
+
+/// A policy on the bus is a chain's step: its outputs land with the ids an
+/// inline policy's would have, the inline projectors are run on what they
+/// wrote, its position is an inline policy's, and `Kernel::resume`, which
+/// runs the registry's policies, owes it nothing.
+#[tokio::test]
+async fn a_policy_on_the_bus_steps_as_an_inline_one_and_resume_leaves_it_alone() {
+    let store = MemoryStore::new();
+    let mut registry = registry();
+    let books = Worker::new("books");
+    registry
+        .projector_handler(&["ledger"], books.clone())
+        .unwrap();
+    opened(&store, &crate::toys::registry(), 1, 5);
+    let kernel = Kernel::new(&registry);
+    let mut bus = Bus::new(Host::new(&store, &kernel, &clock, &Never, EVERY));
+    bus.subscribe(bookkeeping()).unwrap();
+    let asked = drain(&mut bus).await;
+    assert_eq!(handled(&asked), 2);
+    assert_eq!(ledger_records(&store), [0, 1]);
+    assert_eq!(
+        books.done().len(),
+        2,
+        "the inline projector saw each record"
+    );
+    let account = cover("account", 1);
+    for (page, sequence) in pages(&store, &ledger()).iter().zip(0..) {
+        let trigger = crate::v1::EventRef {
+            stream: Some(account.clone()),
+            sequence,
+        };
+        let derived = crate::ids::policy_command_id(&trigger, "bookkeeping", 0).unwrap();
+        let caused = page.meta.as_ref().and_then(|meta| meta.causation.clone());
+        let id = match caused {
+            Some(crate::v1::event_meta::Causation::Command(cause)) => cause.command_id,
+            other => panic!("a command caused the record: {other:?}"),
+        };
+        assert_eq!(id, Some(derived));
+    }
+    assert_eq!(position(&store, "bookkeeping", &account), 2);
+
+    let resumed = kernel.resume(&store, &at(60)).await.ok().unwrap();
+    assert!(
+        resumed.steps().is_empty(),
+        "resume owes the bus's policy nothing"
+    );
+    assert_eq!(ledger_records(&store), [0, 1]);
+}
+
+/// A policy registered inline, then served by a bus, keeps its place: the
+/// bus hands it only what the inline runs had not.
+#[tokio::test]
+async fn a_policy_moved_from_inline_to_the_bus_keeps_its_place() {
+    let store = MemoryStore::new();
+    let mut inline = registry();
+    inline.policy(crate::toys::Bookkeeping).unwrap();
+    opened(&store, &inline, 1, 5);
+    assert_eq!(ledger_records(&store), [0, 1]);
+
+    let plain = registry();
+    deposit(&store, &plain, 1, 3, 4);
+    let kernel = Kernel::new(&plain);
+    let mut bus = bus_on(&store, &kernel, &Never);
+    bus.subscribe(bookkeeping()).unwrap();
+    let asked = drain(&mut bus).await;
+    assert_eq!(handled(&asked), 1);
+    assert_eq!(ledger_records(&store), [0, 1, 2]);
+    assert_eq!(position(&store, "bookkeeping", &cover("account", 1)), 3);
+}
+
+/// A policy whose step fails is reported, named by its subscription,
+/// stream and sequence; under `OnPolicyBug::Stay` its position stays.
+#[tokio::test]
+async fn a_policys_failed_step_is_reported() {
+    let store = MemoryStore::new();
+    let registry = registry();
+    opened(&store, &registry, 1, 13);
+    let kernel = Kernel::new(&registry).on_policy_bug(crate::OnPolicyBug::Stay);
+    let mut bus = bus_on(&store, &kernel, &Never);
+    let unlucky = BusPolicy::new(crate::toys::Unlucky);
+    bus.subscribe(angzarr_bus::Subscription::policy(n(1), unlucky))
+        .unwrap();
+    let asked = drain(&mut bus).await;
+    assert_eq!(
+        failures(&asked).first(),
+        Some(&("unlucky".to_string(), cover("account", 1), Some(1)))
+    );
+    assert_eq!(position(&store, "unlucky", &cover("account", 1)), 1, "held");
+}
+
+/// A projector subscription's credit holds: two of a stream at once when
+/// asked for.
+#[tokio::test]
+async fn several_events_of_a_stream_are_in_flight_when_asked_for() {
+    let store = MemoryStore::new();
+    let registry = registry();
+    opened(&store, &registry, 1, 5);
+    deposit(&store, &registry, 1, 3, 4);
+    let kernel = kernel(&registry);
+    let worker = Worker::new("worker").yielding(3);
+    let mut bus = bus_on(&store, &kernel, &Never);
+    work(&mut bus, &worker, 3, 3).unwrap();
+    let asked = drain(&mut bus).await;
+    assert_eq!(worker.log().most_of_one, 3, "three of a stream at once");
+    assert_eq!(handled(&asked), 3);
+}
+
+/// A bus's serve can be spawned on a multi-threaded runtime.
+#[test]
+fn a_serve_is_send() {
     fn send<T: Send>(_: T) {}
     let store = MemoryStore::new();
     let registry = registry();
-    let mut bus = Bus::new();
-    send(bus.follow_commits(&store, registry.catalog(), &Never, EVERY, |_| false));
+    let kernel = Kernel::new(&registry);
+    let mut bus = bus_on(&store, &kernel, &Never);
+    send(bus.serve(|_| false));
+}
+
+/// A coordinator that is never reached.
+struct Nowhere;
+
+impl crate::CoordinatorPort for Nowhere {
+    fn handle(&self, _: crate::v1::CommandBook) -> crate::Coordinated<'_> {
+        Box::pin(async { Err(CodedError::bug("toy-nowhere", [])) })
+    }
+
+    fn deliver(&self, _: crate::v1::ReactionDelivery) -> crate::Coordinated<'_> {
+        Box::pin(async { Err(CodedError::bug("toy-nowhere", [])) })
+    }
+}
+
+/// A policy of the remote bank's events.
+struct Banking;
+
+impl angzarr_router::router::PolicyComponent for Banking {
+    fn name(&self) -> &str {
+        "banking"
+    }
+
+    fn input_domain(&self) -> &str {
+        "bank"
+    }
+
+    async fn react(
+        &self,
+        _: &crate::angzarr_router::hpb::ReactRequest,
+    ) -> Result<crate::angzarr_router::hpb::ReactResponse, CodedError> {
+        Ok(Default::default())
+    }
+
+    async fn translate(
+        &self,
+        _: &crate::angzarr_router::hpb::TranslateRequest,
+    ) -> Result<crate::angzarr_router::hpb::TranslateResponse, CodedError> {
+        Ok(Default::default())
+    }
 }
 
 // ------------------------------------------------------- a store that counts

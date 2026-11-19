@@ -1,5 +1,13 @@
 # Working rules
 
+## Diverge from the distributed system only where it is necessary
+
+angzarr-embedded is where an application is prototyped before it moves to
+the distributed system, so it follows angzarr-project's distributed design
+(`docs/design/`), not its own past behaviour: diverge only where absolutely
+necessary, prefer an architectural change that removes a divergence, and
+list each one that remains, with its reason, in the design note it concerns.
+
 ## Docs and code state the current design only
 
 Version control holds the history; the docs and code do not. When a decision
@@ -47,7 +55,11 @@ trait set, its errors and codes, its conformance suite), which angzarr-embedded'
 kernel runs on and has no store traits of its own beside, and on
 `angzarr-diagnostic`, at that rev too (`crates/angzarr-diagnostic`):
 the `Diagnostic` trait every error here implements, re-exported as
-`angzarr_embedded::angzarr_diagnostic`.
+`angzarr_embedded::angzarr_diagnostic`; and on `angzarr-bus`, at that rev
+too (`crates/angzarr-bus`): angzarr's bus interface, the trait a `Bus`
+hosted on the kernel implements (projector and policy subscriptions) and
+its conformance suite, so the in-process bus and the distributed one are
+one API, re-exported as `angzarr_embedded::angzarr_bus`.
 angzarr-embedded also depends on `angzarr-router`, a git dependency pinned by
 rev: angzarr's shared client router, through which the kernel dispatches
 business (routing by type, folding the state it is given, the handlers,

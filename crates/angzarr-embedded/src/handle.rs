@@ -931,6 +931,116 @@ impl<'k> Kernel<'k> {
         }
     }
 
+    /// One policy a bus serves (`policy`, never one of the registry's) on
+    /// one event of `source` (`page`, as stored), as a chain runs an
+    /// inline policy's step: upcast, reacted to, its outputs routed and
+    /// its position past the event written with the last of them
+    /// ([`Run::run_policy`]); then what those outputs wrote settled, its
+    /// targets' inline policies and the inline projectors run, as after
+    /// [`Kernel::handle`]. A framework meta-event is never a trigger: its
+    /// position is written alone. Every step's instant is `now`. Returns
+    /// what the steps recorded, and the dead letters they wrote; failed,
+    /// the policy's position is where the failure left it (past the event
+    /// when its bug is dead-lettered and the kernel moves past bugs).
+    pub(crate) async fn react_served<S: Store>(
+        &self,
+        store: &S,
+        policy: &PolicyEntry,
+        source: &Cover,
+        page: &EventPage,
+        now: prost_types::Timestamp,
+    ) -> Result<Recorded, Failure<Infallible>> {
+        let sampled = Sampled {
+            now,
+            command_id: angzarr_proto::v1::Uuid::default(),
+        };
+        let letters = CallLetters::new(self.dead_letters, Some(sampled.now));
+        let mut port = StorePort::new(store, &letters);
+        let reacted = self
+            .react_on(&mut port, &letters, &sampled, policy, source, page)
+            .await;
+        match lettered(reacted.map(Handled::Applied), letters.take())? {
+            Handled::Applied(recorded) => Ok(recorded),
+            Handled::Duplicate(..) => unreachable!("a served policy answers what it recorded"),
+        }
+    }
+
+    /// A projector a bus serves (`name`, `handler`) handed `book`, as the
+    /// inline projectors are ([`Kernel::project_book`]): a retryable
+    /// failure retried as the kernel retries, then dead-lettered at its
+    /// cap; any other failure dead-lettered at once. Its letters are kept
+    /// in the store, placed at `at`, stamped `now`. Failed, the failure and
+    /// whether its letter was kept (the bus then moves past it; else it is
+    /// held and handed again).
+    pub(crate) async fn project_served<S: Store>(
+        &self,
+        store: &S,
+        name: &str,
+        handler: &dyn DynProjectorHandler,
+        book: &EventBook,
+        at: Option<(&Cover, u64)>,
+        now: prost_types::Timestamp,
+    ) -> Result<(), (Report, bool)> {
+        let letters = CallLetters::new(self.dead_letters, Some(now));
+        let Err(failure) = self.project_book(name, handler, book, &letters).await else {
+            return Ok(());
+        };
+        if letters.count() == 0 {
+            return Err((failure, false));
+        }
+        let mut port = StorePort::new(store, &letters);
+        match port.write_letters(at).await {
+            Ok(()) => Err((failure, true)),
+            Err(error) => Err((Report::of(&KernelError::Store(error)), false)),
+        }
+    }
+
+    /// [`Kernel::react_served`] on `port`.
+    async fn react_on<P: Port>(
+        &self,
+        port: &mut P,
+        letters: &CallLetters<'_>,
+        sampled: &Sampled,
+        policy: &PolicyEntry,
+        source: &Cover,
+        page: &EventPage,
+    ) -> Result<Recorded, Failure<Infallible>> {
+        let position = [(policy.name(), source, page.sequence + 1)];
+        if angzarr_router::page_event(page).is_none() {
+            port.write_positions(&position)
+                .await
+                .map_err(|e| Failure::Kernel(KernelError::Store(e)))?;
+            return Ok(Recorded::default());
+        }
+        let event = match self.registry.catalog().upcast_port(&source.domain) {
+            Some(sidecar) => upcast_pages(sidecar, &source.domain, std::slice::from_ref(page))
+                .await
+                .map(|mut upcast| upcast.pop().unwrap_or_else(|| page.clone()))
+                .map_err(|error| {
+                    Failure::Kernel(KernelError::Upcast {
+                        stream: source.clone(),
+                        error,
+                    })
+                })?,
+            None => page.clone(),
+        };
+        let mut run = Run::new(self, sampled, letters);
+        let reacted = run.run_policy(port, policy, source, &event, &[]).await;
+        let settled = match reacted {
+            Ok(()) => run.settle(port).await,
+            failed => failed,
+        };
+        let recorded = run.recorded;
+        settled.map_err(downstream)?;
+        match self
+            .finish(Handled::Applied(recorded), port, letters, None)
+            .await?
+        {
+            Handled::Applied(recorded) => Ok(recorded),
+            Handled::Duplicate(..) => unreachable!("a served policy answers what it recorded"),
+        }
+    }
+
     /// Run every registered projector over what was written.
     async fn finish<R, P: Port>(
         &self,

@@ -73,7 +73,8 @@
 //! ([`Kernel::resume`]). Projectors run on written events only, inline
 //! ([`Registry::projector_handler`]), caught up from the store
 //! ([`CatchUp`]), or served from it an event at a time by a pool of
-//! instances ([`Bus`]). A reaction's trigger edge, which no event records, is the
+//! instances ([`Bus`]); a policy may be served by a bus instead of inline
+//! ([`BusPolicy`]: [`Bus`] is angzarr core's bus interface). A reaction's trigger edge, which no event records, is the
 //! reaction's own causation, for tracing.
 
 // A failure names the path to the step that failed and carries reports, so
@@ -128,6 +129,11 @@ mod decorated;
 #[path = "hand_written.test.rs"]
 mod hand_written;
 
+// angzarr core's bus conformance suite, against the hosted bus.
+#[cfg(test)]
+#[path = "bus_contract.test.rs"]
+mod bus_contract;
+
 // The kernel over the shared SQLite adapter.
 #[cfg(test)]
 #[path = "sqlite.test.rs"]
@@ -138,6 +144,9 @@ mod sqlite;
 #[path = "reexports.test.rs"]
 mod reexports;
 
+/// angzarr core's bus interface, which [`Bus`] implements,
+/// re-exported so a dependent names the one this crate is built on.
+pub use angzarr_bus;
 /// angzarr-diagnostic, the crate every error here implements
 /// (`Diagnostic`, `Arg`, `Report`, `display`, and its `catalog` parity
 /// check), re-exported so a dependent names the one this crate is built on.
@@ -165,7 +174,7 @@ pub use angzarr_router::PageContext;
 #[cfg(feature = "sqlite")]
 pub use angzarr_store_sqlite;
 pub use book::{CommandBookExt, CoverExt};
-pub use bus::{Bus, Served, Subscription, MAX_PER_STREAM};
+pub use bus::{Bus, BusPolicy, Clock, Host, MAX_PER_STREAM};
 pub use catalog::{Catalog, Description};
 pub use check::{check, Arm, Body, Checked, Identified, Malformed, Sampled};
 pub use dead_letter::{dead_letter_line, DeadLetterLog, MemoryDeadLetters, DEAD_LETTER_PREFIX};

@@ -1,62 +1,83 @@
-//! The bus: projectors served from the store an event at a time, each by a
-//! pool of instances.
+//! The bus: angzarr core's bus interface ([`angzarr_bus::Bus`],
+//! angzarr-project's `docs/design/bus-interface.md`) over the store,
+//! hosted on a kernel ([`Host`]): projector and policy subscriptions, each
+//! served an event at a time by a pool of instances. The trait is the
+//! interface, the distributed coordinator's as well; angzarr core's
+//! conformance suite holds this bus to it (`bus_contract.test.rs`).
 //!
-//! An embedded-only way to run a projector beside [`CatchUp`](super::CatchUp):
-//! where a catch-up hands each stream a book of everything it is owed, one
-//! stream after another, the bus hands each of a subscription's instances
-//! one event, and when that instance returns handled, records it and hands
-//! it the next owed event of any stream of the sources. Every event is
-//! read from the store when it is handed, never kept by the bus: the bus
-//! holds its instances' slots and its positions, nothing else.
+//! The bus hands each of a subscription's instances one event, and when
+//! that instance returns handled, records it and hands it the next owed
+//! event of any stream of its scope. Every event is read from the store
+//! when it is handed, never kept by the bus: the bus holds its instances'
+//! slots and its positions, nothing else.
 //!
 //! - **Per stream, never across streams.** Positions are per (subscription,
-//!   stream); nothing orders events of two streams, and they are handled in
-//!   whatever order the bus hands them.
-//! - **One event of a stream in flight**, by default, so a stream's events
-//!   are handled one at a time, in order. A subscription whose events are
-//!   independent work items asks for more ([`Subscription::per_stream`]),
-//!   up to [`MAX_PER_STREAM`]: of a stream, only events within that many of
-//!   its first unhandled one are handed.
-//! - **A position is a mark and the handled set above it.** Every event
-//!   below the mark is handled, and of those within the window above it,
-//!   the set handled, so instances finish out of order and a crash hands
-//!   again only what was not handled. Both are written after the handler
-//!   returns, as one write: delivery is at least once.
-//! - **Woken by a commit** ([`Bus::follow_commits`]: the store's
+//!   stream); nothing orders events of two streams.
+//! - **Credit**: at most its instances in its handler at once, and one
+//!   event of a stream by default, so a stream's events are handled one at
+//!   a time, in order. A projector whose events are independent work items
+//!   asks for more ([`angzarr_bus::Credit::per_stream`]), up to
+//!   [`MAX_PER_STREAM`]; a policy is always served one at a time.
+//! - **A position is a mark and the handled set above it**
+//!   ([`angzarr_bus::Window`]): instances finish out of order and a crash
+//!   hands again only what was not handled. Both are written after the
+//!   handler returns, as one write: delivery is at least once.
+//! - **Woken by a commit** ([`Host::pushed_by`]: the store's
 //!   [`CommitNotify`], armed before each read), polling the store's
-//!   [`Watch`] token on the caller's timer as the fallback, which a store
-//!   without push has alone ([`Bus::follow`]).
-//! - **A failure holds its event**: its handler's error, or an upcast that
-//!   failed, is reported ([`Served::failures`]), and the event is handed
-//!   again at the next poll; a stream with one event in flight is held
-//!   there, the others go on.
-//! - **A purged stream** the subscription handled is handed as gone (its
-//!   cover, no page, at 0) and forgotten, and one whose head is below its
-//!   mark (purged and written again) is handed again from its start, as a
-//!   stored catch-up's are.
+//!   [`Watch`] token on the host's timer as the fallback, which a store
+//!   without push has alone.
+//! - **A projector's failure** is the kernel's, as an inline projector's
+//!   is: a retryable one retried as the kernel retries, then dead-lettered
+//!   at its cap; any other dead-lettered at once. Dead-lettered (its letter
+//!   kept in the store, placed at the event), the event is passed; else
+//!   (retries off, or the letter not kept) it is held, and handed again at
+//!   the next poll, its stream held there with one event in flight. An
+//!   upcast that fails holds its event too. Each failure is reported.
+//! - **A purged stream** a projector handled is handed as gone (its cover,
+//!   no page, at 0) and forgotten; a policy is never called for it, and
+//!   forgets it. One whose head is below its mark (purged and written
+//!   again) is handed again from its start.
 //!
-//! Runtime-agnostic: the instances run concurrently inside the follow's own
+//! **A policy on the bus** ([`BusPolicy`]) is one the registry does not
+//! hold, never both: no chain runs it, and
+//! [`Kernel::resume`](super::Kernel::resume) and
+//! [`Kernel::forget_gone`](super::Kernel::forget_gone) never touch it. Each
+//! event is a chain's policy step: the kernel reacts, routes the outputs
+//! (their ids `ids::policy_command_id`'s), writes the policy's position
+//! past the event with the last of them, then settles what they wrote (the
+//! targets' inline policies and the inline projectors). Its position is an
+//! inline policy's (the next sequence, under its name), so a policy moved
+//! between the two keeps its place. Its failure is the kernel's
+//! (dead-lettered, the position past it under
+//! [`OnPolicyBug::MovePast`](super::OnPolicyBug), or held), reported;
+//! held, it is handed again at the next poll.
+//!
+//! Runtime-agnostic: the instances run concurrently inside the serve's own
 //! future, on whatever runtime polls it, with no thread or task of its own.
 //! A handler that blocks runs its work where its runtime allows blocking.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 use std::future::{poll_fn, Future};
-use std::num::NonZeroUsize;
 use std::pin::{pin, Pin};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::task::Poll;
 use std::time::Duration;
 
+use angzarr_bus::{Failed, Handler, Served};
+use angzarr_diagnostic::Report;
 use angzarr_ports::CommitSignal;
-use angzarr_proto::v1::Cover;
-use angzarr_router::router::{DynProjectorHandler, ProjectorHandler};
+use angzarr_proto::v1::{Cover, EventBook};
+use angzarr_router::policy::PolicyDispatch;
+use angzarr_router::router::{DynProjectorHandler, PolicyComponent};
+use prost_types::Timestamp;
 
-use super::catalog::Catalog;
-use super::error::KernelError;
-use super::handle::Wait;
+use super::error::{Failure, KernelError};
+use super::handle::{Kernel, Wait};
 use super::misconfigured::Misconfigured;
 use super::projector::{gone_request, key, project_request};
+use super::registry::PolicyEntry;
+use super::route::Rejected;
 use super::store::{
     CommitNotify, PositionKey, Processed, ReadStore, ReadUnit, Store, StoreError, StreamRef, Watch,
     Write,
@@ -64,182 +85,260 @@ use super::store::{
 
 /// The most events of one stream a subscription has in flight at once:
 /// the handled set above a mark is kept as one 64-bit word.
-pub const MAX_PER_STREAM: usize = 64;
-
-/// What a subscription's name is followed by to name where it keeps the
-/// handled set above each mark, a position of its own beside the mark's.
-const HANDLED_ABOVE: &str = "+handled";
+pub const MAX_PER_STREAM: usize = angzarr_bus::MAX_PER_STREAM;
 
 /// A stream as the bus tells streams apart ([`key`]).
 type Key = (String, Vec<u8>, Option<String>);
 
-/// One projector on a [`Bus`]: its sources, how many instances run it, and
-/// how many events of one stream may be in flight at once.
-pub struct Subscription {
-    projector: Box<dyn DynProjectorHandler>,
-    sources: Vec<String>,
-    instances: usize,
-    per_stream: u64,
+/// A policy a bus serves, never the registry: written by hand or marked up
+/// ([`BusPolicy::new`]), as angzarr-router's dispatch table
+/// ([`BusPolicy::dispatch`]) or its `PolicyComponent`
+/// ([`BusPolicy::component`]), as [`Registry::policy`](super::Registry::policy)
+/// and its twins take one.
+pub struct BusPolicy {
+    entry: PolicyEntry,
 }
 
-impl Subscription {
-    /// `projector` over the streams of `sources`, run as `instances` at
-    /// once, one event each, one event of a stream in flight. Its positions
-    /// are the store's, under its name. Refused for no source, as
-    /// registering one is ([`Misconfigured::NoInputDomain`]).
-    pub fn new<P: ProjectorHandler + 'static>(
-        sources: &[&str],
-        projector: P,
-        instances: NonZeroUsize,
-    ) -> Result<Subscription, Misconfigured> {
-        if sources.is_empty() {
-            return Err(Misconfigured::NoInputDomain {
-                component: projector.name().to_string(),
-                kind: angzarr_proto::v1::ComponentKind::Projector
-                    .as_str_name()
-                    .to_string(),
-            });
-        }
-        Ok(Subscription {
-            projector: Box::new(projector),
-            sources: sources.iter().map(|source| source.to_string()).collect(),
-            instances: instances.get(),
-            per_stream: 1,
-        })
+impl BusPolicy {
+    /// `policy`, as the router's table for it.
+    pub fn new<P: super::Policy>(policy: P) -> BusPolicy {
+        BusPolicy::dispatch(super::policy::dispatch(policy))
     }
 
-    /// Up to `in_flight` events of one stream at once (at most
-    /// [`MAX_PER_STREAM`]), for events that are independent work items:
-    /// their handler is then handed a stream's events out of order.
-    pub fn per_stream(mut self, in_flight: NonZeroUsize) -> Subscription {
-        self.per_stream = in_flight.get().min(MAX_PER_STREAM) as u64;
+    /// A policy built as angzarr-router's dispatch table: its source its
+    /// input domain and its target its output domain.
+    pub fn dispatch(dispatch: PolicyDispatch) -> BusPolicy {
+        let output_domain = dispatch.output_domain().to_string();
+        BusPolicy {
+            entry: PolicyEntry {
+                dispatch: Box::new(dispatch),
+                output_domain,
+            },
+        }
+    }
+
+    /// A policy written as angzarr-router's `PolicyComponent`, its outputs
+    /// held to `output_domain`.
+    pub fn component(policy: impl PolicyComponent + 'static, output_domain: &str) -> BusPolicy {
+        BusPolicy {
+            entry: PolicyEntry {
+                dispatch: Box::new(policy),
+                output_domain: output_domain.to_string(),
+            },
+        }
+    }
+
+    /// Its name: its outputs' component, and its position's handler.
+    pub fn name(&self) -> &str {
+        self.entry.name()
+    }
+
+    /// The domain whose events it handles.
+    pub fn source(&self) -> &str {
+        self.entry.source()
+    }
+}
+
+/// Why an item failed.
+#[derive(Debug)]
+enum Fault {
+    /// A projector's upcast failed.
+    Upcast(KernelError),
+    /// A handler or a policy's step failed, as the kernel reports it.
+    Reported(Report),
+}
+
+impl Fault {
+    fn report(self) -> Report {
+        match self {
+            Fault::Upcast(error) => Report::of(&error),
+            Fault::Reported(report) => report,
+        }
+    }
+}
+
+/// A served policy's step's failure, as a report.
+fn step_report(failure: Failure<std::convert::Infallible>) -> Report {
+    let failure: Failure<Rejected> = match failure {
+        Failure::Rejected(never) => match never {},
+        Failure::Downstream {
+            path,
+            error,
+            dead_letters,
+        } => Failure::Downstream {
+            path,
+            error,
+            dead_letters,
+        },
+        Failure::Kernel(error) => Failure::Kernel(error),
+        Failure::Projection {
+            committed,
+            failures,
+            dead_letters,
+        } => Failure::Projection {
+            committed,
+            failures,
+            dead_letters,
+        },
+    };
+    Report::of(&failure)
+}
+
+/// What a bus is served on: the store, the kernel its handlers' failures
+/// and its policies' steps go through, the clock they are stamped by, the
+/// timer, and the push. See [`Bus::new`].
+pub struct Host<'h, S> {
+    store: &'h S,
+    kernel: &'h Kernel<'h>,
+    clock: &'h Clock,
+    wait: &'h dyn Wait,
+    every: Duration,
+    push: Option<&'h dyn CommitNotify>,
+}
+
+/// The instant a served policy's step is recorded at, and a served
+/// handler's dead letters stamped with, as the application samples it.
+pub type Clock = dyn Fn() -> Timestamp + Send + Sync;
+
+impl<'h, S> Host<'h, S> {
+    /// Served from `store`, through `kernel` (whose registry's catalog
+    /// upcasts, and whose retry and bug settings hold), at `clock`'s instant,
+    /// polling the store's change token every `every` on `wait` (the
+    /// caller's timer).
+    pub fn new(
+        store: &'h S,
+        kernel: &'h Kernel<'h>,
+        clock: &'h Clock,
+        wait: &'h dyn Wait,
+        every: Duration,
+    ) -> Host<'h, S> {
+        Host {
+            store,
+            kernel,
+            clock,
+            wait,
+            every,
+            push: None,
+        }
+    }
+
+    /// Woken by every commit `notify` pushes as well as by the poll, which
+    /// still sees what the push does not (another process's commits).
+    pub fn pushed_by(mut self, notify: &'h dyn CommitNotify) -> Host<'h, S> {
+        self.push = Some(notify);
         self
     }
 }
 
-/// Subscriptions served from one store, each by its own instances. See the
-/// module.
-#[derive(Default)]
-pub struct Bus {
+/// Subscriptions served from one store on a kernel, each by its own
+/// instances: angzarr core's [`angzarr_bus::Bus`], serving projector
+/// subscriptions (a `DynProjectorHandler`, boxed) and policy subscriptions
+/// ([`BusPolicy`]). See the module.
+pub struct Bus<'h, S> {
     pools: Vec<Pool>,
+    host: Host<'h, S>,
 }
 
-/// What the bus served since it was last found idle.
-#[derive(Debug, Default)]
-pub struct Served {
-    handled: u64,
-    failures: Vec<(String, Cover, KernelError)>,
-}
-
-impl Served {
-    /// How many events (and gone books) its handlers returned handled.
-    pub fn handled(&self) -> u64 {
-        self.handled
-    }
-
-    /// The events that failed (the handler's error, or an upcast that
-    /// failed): the subscription's name, the stream, and why. Each is held,
-    /// to be handed again at the next poll.
-    pub fn failures(&self) -> &[(String, Cover, KernelError)] {
-        &self.failures
+impl<'h, S> Bus<'h, S> {
+    /// A bus with no subscription, served on `host`.
+    pub fn new(host: Host<'h, S>) -> Bus<'h, S> {
+        Bus {
+            pools: Vec::new(),
+            host,
+        }
     }
 }
 
-impl Bus {
-    /// A bus with no subscription.
-    pub fn new() -> Bus {
-        Bus::default()
-    }
+impl<S: ReadStore + Store + Processed + Watch> angzarr_bus::Bus for Bus<'_, S> {
+    type Projector = Box<dyn DynProjectorHandler>;
+    type Policy = BusPolicy;
+    type Refused = Misconfigured;
+    type Error = KernelError;
 
-    /// Serve `subscription` too. Refused for a name another subscription
-    /// on the bus has ([`Misconfigured::ComponentRegistered`]): the name
-    /// keys its positions.
-    pub fn subscribe(&mut self, subscription: Subscription) -> Result<(), Misconfigured> {
-        let name = DynProjectorHandler::name(&*subscription.projector).to_string();
+    /// Refused for a name another subscription on the bus has
+    /// ([`Misconfigured::ComponentRegistered`]: the name keys its
+    /// positions), and for a remote source ([`Misconfigured::RemoteSource`]:
+    /// its events are its coordinator's); a policy also for a name the
+    /// kernel's registry runs inline (never both).
+    fn subscribe(
+        &mut self,
+        subscription: angzarr_bus::Subscription<Self::Projector, BusPolicy>,
+    ) -> Result<(), Misconfigured> {
+        let catalog = self.host.kernel.registry().catalog();
+        let (handler, credit) = subscription.into_parts();
+        let (name, sources, serves) = match handler {
+            Handler::Projector { scope, projector } => {
+                let name = projector.name().to_string();
+                (name, scope.domains().to_vec(), Serves::Projector(projector))
+            }
+            Handler::Policy(policy) => {
+                let name = policy.name().to_string();
+                if catalog.policy_names().any(|inline| inline == name) {
+                    return Err(Misconfigured::ComponentRegistered { component: name });
+                }
+                let source = policy.source().to_string();
+                (name, vec![source], Serves::Policy(policy.entry))
+            }
+        };
+        if let Some(remote) = sources.iter().find(|source| catalog.is_remote(source)) {
+            return Err(Misconfigured::RemoteSource {
+                domain: remote.clone(),
+                component: name,
+            });
+        }
         if self.pools.iter().any(|pool| pool.name == name) {
             return Err(Misconfigured::ComponentRegistered { component: name });
         }
         self.pools.push(Pool {
-            handled_above: format!("{name}{HANDLED_ABOVE}"),
+            handled_above: angzarr_bus::handled_key(&name),
             name,
-            sources: subscription.sources,
-            projector: subscription.projector,
-            instances: subscription.instances,
-            per_stream: subscription.per_stream,
+            sources,
+            serves,
+            instances: credit.instances().get(),
+            per_stream: credit.in_flight_per_stream().get() as u64,
             state: Mutex::default(),
         });
         Ok(())
     }
 
-    /// Serve every subscription from `store`, polling its change token
-    /// every `every` on `wait` (the caller's timer). `more` is asked, with
-    /// what was served since it was last asked, each time the bus is found
-    /// idle (nothing in flight, nothing owed but what failed); the follow
-    /// returns when it says no, or at a store error. Tokens compare only
-    /// from one handle, so every follow is given the same store handle.
-    pub async fn follow<S: ReadStore + Store + Processed + Watch>(
+    fn serve<M: FnMut(&Served) -> bool + angzarr_bus::MaybeSend>(
         &mut self,
-        store: &S,
-        catalog: &Catalog,
-        wait: &dyn Wait,
-        every: Duration,
-        more: impl FnMut(&Served) -> bool,
-    ) -> Result<(), KernelError> {
-        self.serve(store, catalog, wait, every, None, more).await
+        more: M,
+    ) -> impl Future<Output = Result<(), KernelError>> + angzarr_bus::MaybeSend {
+        serve(&self.pools, &self.host, more)
     }
+}
 
-    /// [`Bus::follow`], woken by every commit the store pushes as well as
-    /// by the poll, which still sees what the push does not (another
-    /// process's commits).
-    pub async fn follow_commits<S: ReadStore + Store + Processed + Watch + CommitNotify>(
-        &mut self,
-        store: &S,
-        catalog: &Catalog,
-        wait: &dyn Wait,
-        every: Duration,
-        more: impl FnMut(&Served) -> bool,
-    ) -> Result<(), KernelError> {
-        self.serve(store, catalog, wait, every, Some(store), more)
-            .await
+/// Run every pool's instances and the steering in one future, until the
+/// steering returns or an instance meets a store error.
+async fn serve<S: ReadStore + Store + Processed + Watch>(
+    pools: &[Pool],
+    host: &Host<'_, S>,
+    mut more: impl FnMut(&Served) -> bool,
+) -> Result<(), KernelError> {
+    for pool in pools {
+        pool.restart();
     }
-
-    /// Run every pool's instances and the steering in one future, until
-    /// the steering returns or an instance meets a store error.
-    async fn serve<S: ReadStore + Store + Processed + Watch>(
-        &mut self,
-        store: &S,
-        catalog: &Catalog,
-        wait: &dyn Wait,
-        every: Duration,
-        push: Option<&dyn CommitNotify>,
-        mut more: impl FnMut(&Served) -> bool,
-    ) -> Result<(), KernelError> {
-        for pool in &self.pools {
-            pool.restart();
+    let signals = Signals::default();
+    let mut instances: Vec<_> = (pools.iter())
+        .flat_map(|pool| (0..pool.instances).map(move |_| pool))
+        .map(|pool| Box::pin(pool.instance(host, &signals)))
+        .collect();
+    let mut steering = pin!(steer(pools, host, &signals, &mut more));
+    poll_fn(|cx| {
+        if let Poll::Ready(done) = steering.as_mut().poll(cx) {
+            return Poll::Ready(done);
         }
-        let signals = Signals::default();
-        let pools = &self.pools;
-        let mut instances: Vec<_> = pools
-            .iter()
-            .flat_map(|pool| (0..pool.instances).map(move |_| pool))
-            .map(|pool| Box::pin(pool.instance(store, catalog, &signals)))
-            .collect();
-        let mut steering = pin!(steer(pools, store, wait, every, push, &signals, &mut more));
-        poll_fn(|cx| {
-            if let Poll::Ready(done) = steering.as_mut().poll(cx) {
-                return Poll::Ready(done);
+        for instance in &mut instances {
+            match instance.as_mut().poll(cx) {
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Ready(Ok(never)) => match never {},
+                Poll::Pending => {}
             }
-            for instance in &mut instances {
-                match instance.as_mut().poll(cx) {
-                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                    Poll::Ready(Ok(never)) => match never {},
-                    Poll::Pending => {}
-                }
-            }
-            Poll::Pending
-        })
-        .await
-    }
+        }
+        Poll::Pending
+    })
+    .await
 }
 
 /// How the instances and the steering wake each other.
@@ -264,13 +363,11 @@ enum Woken {
 /// the timer. Returns when `more` says no.
 async fn steer<S: ReadStore + Store + Processed + Watch>(
     pools: &[Pool],
-    store: &S,
-    wait: &dyn Wait,
-    every: Duration,
-    push: Option<&dyn CommitNotify>,
+    host: &Host<'_, S>,
     signals: &Signals,
     more: &mut impl FnMut(&Served) -> bool,
 ) -> Result<(), KernelError> {
+    let (store, wait, every, push) = (host.store, host.wait, host.every, host.push);
     let mut timer = wait.wait(every);
     let mut token = None;
     loop {
@@ -285,8 +382,8 @@ async fn steer<S: ReadStore + Store + Processed + Watch>(
             }
             signals.work.notify();
         }
-        if pools.iter().all(Pool::quiet) {
-            let mut served = Served::default();
+        if pools.iter().all(|pool| pool.quiet()) {
+            let mut served = Served::new();
             for pool in pools {
                 pool.served(&mut served);
             }
@@ -307,13 +404,13 @@ async fn steer<S: ReadStore + Store + Processed + Watch>(
         })
         .await;
         match woken {
-            Woken::Commit => pools.iter().for_each(Pool::changed),
+            Woken::Commit => pools.iter().for_each(|pool| pool.changed()),
             Woken::Idle => {}
             Woken::Tick => {
                 timer = wait.wait(every);
                 let now = store.change_token().await.map_err(KernelError::Store)?;
                 if token != Some(now) {
-                    pools.iter().for_each(Pool::changed);
+                    pools.iter().for_each(|pool| pool.changed());
                 }
                 let mut released = false;
                 for pool in pools {
@@ -333,10 +430,16 @@ struct Pool {
     /// The handler name its handled sets are kept under.
     handled_above: String,
     sources: Vec<String>,
-    projector: Box<dyn DynProjectorHandler>,
+    serves: Serves,
     instances: usize,
     per_stream: u64,
     state: Mutex<Lanes>,
+}
+
+/// What a pool's instances are handed to.
+enum Serves {
+    Projector(Box<dyn DynProjectorHandler>),
+    Policy(PolicyEntry),
 }
 
 /// A pool's streams and its instances' bookkeeping.
@@ -350,7 +453,7 @@ struct Lanes {
     /// How many of its instances hold an event (or a gone book).
     busy: usize,
     handled: u64,
-    failures: Vec<(Cover, KernelError)>,
+    failures: Vec<(Cover, Option<u64>, Fault)>,
 }
 
 /// Where a pool is on one stream. Every bit set is of a sequence within
@@ -456,7 +559,11 @@ impl Pool {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// A new follow: no instance holds anything, what failed is handed
+    fn is_policy(&self) -> bool {
+        matches!(self.serves, Serves::Policy(_))
+    }
+
+    /// A new serve: no instance holds anything, what failed is handed
     /// again, and the streams are read again.
     fn restart(&self) {
         let mut state = self.lock();
@@ -493,11 +600,15 @@ impl Pool {
     /// Add what it served since last asked to `served`, and start again.
     fn served(&self, served: &mut Served) {
         let mut state = self.lock();
-        served.handled += std::mem::take(&mut state.handled);
-        let failures = std::mem::take(&mut state.failures);
-        let named = failures.into_iter();
-        let named = named.map(|(cover, error)| (self.name.clone(), cover, error));
-        served.failures.extend(named);
+        served.add_handled(std::mem::take(&mut state.handled));
+        for (stream, sequence, error) in std::mem::take(&mut state.failures) {
+            served.push(Failed {
+                subscription: self.name.clone(),
+                stream,
+                sequence,
+                cause: error.report(),
+            });
+        }
     }
 
     /// Hand again what failed. Whether anything had.
@@ -599,8 +710,7 @@ impl Pool {
     /// nothing is owed. Ends only at a store error.
     async fn instance<S: Store>(
         &self,
-        store: &S,
-        catalog: &Catalog,
+        host: &Host<'_, S>,
         signals: &Signals,
     ) -> Result<Infallible, KernelError> {
         loop {
@@ -608,7 +718,7 @@ impl Pool {
             let work = signals.work.wait();
             match self.claim() {
                 Some(claim) => {
-                    self.hand(store, catalog, claim).await?;
+                    self.hand(host, claim).await?;
                     signals.work.notify();
                 }
                 None => {
@@ -619,19 +729,18 @@ impl Pool {
         }
     }
 
-    /// Hand `claim`'s item to the projector, read from the store now, and
+    /// Hand `claim`'s item to the handler, read from the store now, and
     /// record what came of it.
-    async fn hand<S: Store>(
-        &self,
-        store: &S,
-        catalog: &Catalog,
-        claim: Claim,
-    ) -> Result<(), KernelError> {
+    async fn hand<S: Store>(&self, host: &Host<'_, S>, claim: Claim) -> Result<(), KernelError> {
         let Claim { key, cover, owed } = claim;
         let sequence = match owed {
-            Owed::Gone => return self.hand_gone(store, key, cover).await,
+            Owed::Gone => return self.hand_gone(host, key, cover).await,
             Owed::Event(sequence) => sequence,
         };
+        if let Serves::Policy(policy) = &self.serves {
+            return self.hand_policy(host, policy, key, cover, sequence).await;
+        }
+        let store = host.store;
         let stream = StreamRef::try_from(&cover).map_err(KernelError::Store)?;
         let slice = store
             .read(stream, sequence, Some(sequence + 1))
@@ -642,49 +751,146 @@ impl Pool {
             self.missing(&key, sequence, next_sequence);
             return Ok(());
         }
+        let catalog = host.kernel.registry().catalog();
         let request = match project_request(catalog, &cover, slice.pages, next_sequence).await {
             Ok(request) => request,
             Err(error) => {
-                self.failed(&key, Some(sequence), cover, error);
+                self.failed(&key, Some(sequence), cover, Fault::Upcast(error));
                 return Ok(());
             }
         };
-        let fork = request
-            .events
-            .as_ref()
-            .is_none_or(|book| book.pages.is_empty());
+        let book = request.events.unwrap_or_default();
+        // A fork page is never handed, but its sequence counts.
+        let fork = book.pages.is_empty();
         if !fork {
-            if let Err(error) = DynProjectorHandler::dispatch(&*self.projector, &request).await {
-                self.failed(&key, Some(sequence), cover, KernelError::Router(error));
-                return Ok(());
+            let at = Some((&cover, sequence));
+            if let Err((failure, lettered)) = self.project(host, &book, at).await {
+                if !lettered {
+                    self.failed(&key, Some(sequence), cover, Fault::Reported(failure));
+                    return Ok(());
+                }
+                self.report(cover, Some(sequence), Fault::Reported(failure));
+                return self
+                    .handled(store, &key, sequence, false)
+                    .await
+                    .map_err(KernelError::Store);
             }
         }
-        // A fork page is never handed, but its sequence counts.
         self.handled(store, &key, sequence, !fork)
             .await
             .map_err(KernelError::Store)
     }
 
-    /// Hand `cover`'s gone book; handled, forget the stream, its positions
-    /// put back to 0.
+    /// `book` through the kernel to this pool's projector, its failure
+    /// retried and dead-lettered as the kernel's inline projectors' are.
+    async fn project<S: Store>(
+        &self,
+        host: &Host<'_, S>,
+        book: &EventBook,
+        at: Option<(&Cover, u64)>,
+    ) -> Result<(), (Report, bool)> {
+        let Serves::Projector(projector) = &self.serves else {
+            return Ok(());
+        };
+        let now = (host.clock)();
+        let kernel = host.kernel;
+        kernel
+            .project_served(host.store, &self.name, &**projector, book, at, now)
+            .await
+    }
+
+    /// Report `error` of `cover`'s `sequence`, not held.
+    fn report(&self, cover: Cover, sequence: Option<u64>, error: Fault) {
+        self.lock().failures.push((cover, sequence, error));
+    }
+
+    /// Policy `policy`'s step on `sequence` of `cover`'s stream, read from
+    /// the store now, through the kernel, which writes the position: done
+    /// when it is past the event (the step, or its bug dead-lettered),
+    /// else held. A failure is reported either way.
+    async fn hand_policy<S: Store>(
+        &self,
+        host: &Host<'_, S>,
+        policy: &PolicyEntry,
+        key: Key,
+        cover: Cover,
+        sequence: u64,
+    ) -> Result<(), KernelError> {
+        let (store, kernel) = (host.store, host.kernel);
+        let stream = StreamRef::try_from(&cover).map_err(KernelError::Store)?;
+        let slice = store
+            .read(stream, sequence, Some(sequence + 1))
+            .await
+            .map_err(KernelError::Store)?;
+        let Some(page) = slice.pages.first() else {
+            self.missing(&key, sequence, slice.next_sequence);
+            return Ok(());
+        };
+        let failure = match kernel
+            .react_served(store, policy, &cover, page, (host.clock)())
+            .await
+        {
+            Ok(_) => None,
+            Err(failure) => Some(Fault::Reported(step_report(failure))),
+        };
+        let Some(failure) = failure else {
+            self.stepped(&key, sequence, None);
+            return Ok(());
+        };
+        let position = PositionKey {
+            handler: &self.name,
+            stream,
+        };
+        let at = store.position(position).await.map_err(KernelError::Store)?;
+        match at > sequence {
+            true => self.stepped(&key, sequence, Some((cover, failure))),
+            false => self.failed(&key, Some(sequence), cover, failure),
+        }
+        Ok(())
+    }
+
+    /// A policy's step on `sequence` of `key`'s stream moved its position
+    /// past it, as the kernel wrote it, `failed` along the way or not.
+    fn stepped(&self, key: &Key, sequence: u64, failed: Option<(Cover, Fault)>) {
+        let mut guard = self.lock();
+        let state = &mut *guard;
+        state.busy -= 1;
+        state.handled += 1;
+        if let Some((cover, error)) = failed {
+            state.failures.push((cover, Some(sequence), error));
+        }
+        if let Some(lane) = state.lanes.get_mut(key) {
+            let at = bit(lane, sequence);
+            lane.in_flight &= !at;
+            lane.handled |= at;
+            lane.advance();
+        }
+    }
+
+    /// Hand `cover`'s gone book (never to a policy, which is called for
+    /// events alone); handled or dead-lettered, forget the stream, its
+    /// positions put back to 0.
     async fn hand_gone<S: Store>(
         &self,
-        store: &S,
+        host: &Host<'_, S>,
         key: Key,
         cover: Cover,
     ) -> Result<(), KernelError> {
-        if let Err(error) =
-            DynProjectorHandler::dispatch(&*self.projector, &gone_request(&cover)).await
-        {
-            self.failed(&key, None, cover, KernelError::Router(error));
-            return Ok(());
+        let gone = gone_request(&cover).events.unwrap_or_default();
+        let projected = self.project(host, &gone, None).await;
+        if let Err((failure, lettered)) = projected {
+            if !lettered {
+                self.failed(&key, None, cover, Fault::Reported(failure));
+                return Ok(());
+            }
+            self.report(cover.clone(), None, Fault::Reported(failure));
         }
-        let written = self.write(store, &cover, 0, 0).await;
+        let written = self.write(host.store, &cover, 0, 0).await;
         let mut state = self.lock();
         state.busy -= 1;
         written.map_err(KernelError::Store)?;
         state.lanes.remove(&key);
-        state.handled += 1;
+        state.handled += u64::from(!self.is_policy());
         Ok(())
     }
 
@@ -703,10 +909,10 @@ impl Pool {
 
     /// `sequence` of `key`'s stream (`None`: its gone book) failed: held
     /// until the next poll, and reported.
-    fn failed(&self, key: &Key, sequence: Option<u64>, cover: Cover, error: KernelError) {
+    fn failed(&self, key: &Key, sequence: Option<u64>, cover: Cover, error: Fault) {
         let mut state = self.lock();
         state.busy -= 1;
-        state.failures.push((cover, error));
+        state.failures.push((cover, sequence, error));
         if let Some(lane) = state.lanes.get_mut(key) {
             let at = sequence.map_or(1, |sequence| bit(lane, sequence));
             lane.in_flight &= !at;
@@ -781,7 +987,8 @@ impl Pool {
     }
 
     /// Put its position on `cover`'s stream at `mark`, with the handled set
-    /// above it, as one write.
+    /// above it, as one write: a policy's mark alone, as the kernel keeps
+    /// it.
     async fn write<S: Store>(
         &self,
         store: &S,
@@ -806,7 +1013,11 @@ impl Pool {
                 handled,
             ),
         ];
-        store.write(Write::positions(&positions)).await.map(drop)
+        let positions = match self.serves {
+            Serves::Projector(_) => &positions[..],
+            Serves::Policy(_) => &positions[..1],
+        };
+        store.write(Write::positions(positions)).await.map(drop)
     }
 }
 

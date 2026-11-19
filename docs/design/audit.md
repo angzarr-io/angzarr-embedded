@@ -864,49 +864,61 @@ caught up or on the bus, a book with no page at 0 says the stream is gone.
 
 ### The bus
 
-The bus serves projectors from the store an event at a time, each by a
-pool of instances: embedded only, with nothing new in angzarr core (a
-distributed deployment keeps the coordinator's `Subscribe`). It is a
+The bus is angzarr core's bus interface (`angzarr_bus::Bus`;
+angzarr-project's `docs/design/bus-interface.md`) over the store, hosted
+on the kernel (`Bus::new(Host::new(store, kernel, clock, wait, every))`,
+`Host::pushed_by` for the store's push): one API with the distributed
+coordinator's, held to angzarr core's conformance suite
+(`bus_contract.test.rs`), with nothing of its own beside it. It is a
 dispatcher between the store and the pools, and holds their slots and
 positions only, never an event: each is read from the store when it is
 handed.
 
-- **Subscribe** (`Subscription::new`) with the sources, the projector
-  (angzarr-router's `ProjectorHandler`, whose `Ok` is handled) and the
-  number of instances n; several subscriptions share one `Bus`, each its
-  own pool, its name its own (it keys its positions).
+- **Subscribe** a projector (angzarr-router's `ProjectorHandler`, boxed,
+  over a `Scope` of domains, at a `Credit` of instances and per stream)
+  or a policy (`BusPolicy`, over its input domain, its instances, one
+  event of a stream at a time); several subscriptions share one `Bus`,
+  each its own pool, its name the component's (it keys its positions).
+  A policy the registry runs inline is refused (never both), and so is a
+  remote source.
 - **One event per instance.** When an instance returns handled, the bus
   records the event and hands that instance the next owed event of any
-  stream of the sources. No order crosses streams.
+  stream of its scope. No order crosses streams.
 - **One event of a stream in flight**, by default, so a stream is handled
-  in order. A subscription whose events are independent work items asks
-  for up to 64 (`Subscription::per_stream`): only events within that many
-  of the stream's first unhandled one are handed, so the handled set above
+  in order. A projector whose events are independent work items asks
+  for up to 64 (`Credit::per_stream`): only events within that many of
+  the stream's first unhandled one are handed, so the handled set above
   it stays within one word.
-- **A position is a mark and the handled set above it**, per (subscription,
-  stream): every event below the mark is handled, and of the window above
-  it, the set handled. Both are positions, written in one write after the
-  handler returns (at least once): the mark under the subscription's name,
-  as a stored catch-up's is, and the set, a bitmap of the window, under
-  the name followed by `+handled`, since a position holds one number.
-  Instances finish out of order; a crash hands again only what was not
-  handled. One instance at a time writes a stream's positions, writing
-  again what changed meanwhile, so a stored position never moves back.
-- **Woken by a commit** (`Bus::follow_commits`: the store's `CommitNotify`,
-  armed before each read), with the store's `Watch` token polled on the
-  caller's timer as the fallback, which a store without push has alone
-  (`Bus::follow`). A pool reads its streams' heads (one read unit, as a
-  catch-up step does) only when something may have been committed and an
-  instance of it is free.
-- **Failures are a catch-up's.** An event whose handler fails (or whose
-  upcast fails) is held and reported (`Served::failures`), and handed
-  again at the next poll; a stream with one event in flight waits for it.
-  A purged stream the pool handled is handed as gone and forgotten, and
-  one whose head is below its mark starts afresh; a fork page is never
-  handed, though its sequence counts.
-- **Runtime-agnostic.** The instances run concurrently inside the follow's
+- **A position is a mark and the handled set above it**
+  (`angzarr_bus::Window`), per (subscription, stream): both are
+  positions, written in one write after the handler returns (at least
+  once): the mark under the subscription's name, and the set under the
+  name followed by `+handled`. Instances finish out of order; a crash
+  hands again only what was not handled. One instance at a time writes a
+  stream's positions, writing again what changed meanwhile, so a stored
+  position never moves back. A policy's position is its mark alone, an
+  inline policy's, written by the kernel with the step's last output.
+- **A policy's event is a chain's step** (`Kernel::react_served`): the
+  kernel reacts, routes, writes the position with the last output, and
+  settles the inline chain and projectors after it. `Kernel::resume`
+  never touches a bus's policy.
+- **Woken by a commit** (the store's `CommitNotify`, armed before each
+  read), with the store's `Watch` token polled on the host's timer as
+  the fallback, which a store without push has alone. A pool reads its
+  streams' heads (one read unit, as a catch-up step does) only when
+  something may have been committed and an instance of it is free.
+- **Failures are classed as an inline projector's**
+  (`Kernel::project_served`): retried to the cap, dead-lettered (the
+  letter kept at the event) and passed; one not dead-lettered (retries
+  off, an upcast that failed) is held and handed again at the next poll,
+  a stream with one event in flight waiting for it. A policy's failure is
+  its step's. Every failure is reported in what `more` is asked with. A
+  purged stream a projector handled is handed as gone and forgotten (a
+  policy forgets it uncalled), and one whose head is below its mark
+  starts afresh; a fork page is never handed, though its sequence counts.
+- **Runtime-agnostic.** The instances run concurrently inside the serve's
   one future, with no thread or task of its own; `more` is asked each
-  time every pool is idle, and the follow returns when it says no.
+  time every pool is idle, and the serve returns when it says no.
 
 ### Re-runs
 
@@ -1305,19 +1317,21 @@ impl<P: ProjectorHandler> CatchUp<P> {
         wait: &dyn Wait, every: Duration, more: impl FnMut(Option<&Caught>) -> bool)
         -> Result<(), KernelError>;
 }
-// projectors served by instances, an event at a time
-impl Subscription {
-    pub fn new<P: ProjectorHandler + 'static>(sources: &[&str], projector: P,
-        instances: NonZeroUsize) -> Result<Subscription, Misconfigured>;
-    pub fn per_stream(self, in_flight: NonZeroUsize) -> Subscription;   // default 1, at most 64
+// projectors and policies served by instances, an event at a time:
+// angzarr core's angzarr_bus::Bus (subscribe, serve), and nothing beside it
+impl<'h, S> Host<'h, S> {
+    pub fn new(store: &'h S, kernel: &'h Kernel<'h>, clock: &'h Clock, wait: &'h dyn Wait,
+        every: Duration) -> Host<'h, S>;
+    pub fn pushed_by(self, notify: &'h dyn CommitNotify) -> Host<'h, S>;
 }
-impl Bus {
-    pub fn subscribe(&mut self, subscription: Subscription) -> Result<(), Misconfigured>;
-    pub async fn follow<S: ReadStore + Store + Processed + Watch>(&mut self, store: &S,
-        catalog: &Catalog, wait: &dyn Wait, every: Duration, more: impl FnMut(&Served) -> bool)
-        -> Result<(), KernelError>;
-    pub async fn follow_commits<S: ReadStore + Store + Processed + Watch + CommitNotify>(..same..)
-        -> Result<(), KernelError>;
+impl<'h, S> Bus<'h, S> {
+    pub fn new(host: Host<'h, S>) -> Bus<'h, S>;
+}
+impl<S: ReadStore + Store + Processed + Watch> angzarr_bus::Bus for Bus<'_, S> {
+    type Projector = Box<dyn DynProjectorHandler>;
+    type Policy = BusPolicy;   // BusPolicy::new(policy), ::dispatch, ::component
+    type Refused = Misconfigured;
+    type Error = KernelError;
 }
 // registration
 impl Registry {
