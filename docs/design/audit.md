@@ -868,16 +868,18 @@ The bus is angzarr core's generic bus (`angzarr_bus::Hub`, the
 `angzarr_bus::Bus` interface; angzarr-project's
 `docs/design/bus-interface.md`) hosted on the kernel
 (`Bus::new(Host::new(store, kernel, clock, wait, every))`,
-`Host::pushed_by` for the store's push), over the store's own transport
-(`angzarr_bus::StoreTransport`) or any other (`Bus::over`): one API with
-the distributed coordinator's, held to angzarr core's conformance suite
+`Host::pushed_by` for the store's push, `Host::retrying` for its retry
+policy), over the store's own transport (`StoreFed`: angzarr core's
+`StoreTransport`, a pull feed woken by the commit, served through
+`Pumped`) or any other push transport (`Bus::over`): one API with the
+distributed coordinator's, held to angzarr core's conformance suite
 (`bus_contract.test.rs`), with nothing of its own beside it. It holds its
-slots and positions only, never an event: each is read from the store
-when it is handed, and a delivery beyond its stream's window has its
-predecessors read from the store and handed first.
+slots and marks only, never an event: each is read from the store when it
+is handed, and a delivery past its stream's mark waits while one fill
+reads the predecessors from the store and hands them first.
 
 - **Subscribe** a projector (angzarr-router's `ProjectorHandler`, boxed,
-  over a `Scope` of domains, at a `Credit` of instances and per stream)
+  over a `Scope` of domains, at a `Credit` of instances)
   or a policy (`BusPolicy`, over its input domain, its instances, one
   event of a stream at a time); several subscriptions share one `Bus`,
   each its own pool, its name the component's (it keys its positions).
@@ -886,24 +888,21 @@ predecessors read from the store and handed first.
 - **One event per instance.** When an instance returns handled, the bus
   records the event and hands that instance the next owed event of any
   stream of its scope. No order crosses streams.
-- **One event of a stream in flight**, by default, so a stream is handled
-  in order. A projector whose events are independent work items asks
-  for up to 64 (`Credit::per_stream`): only events within that many of
-  the stream's first unhandled one are handed, so the handled set above
-  it stays within one word.
-- **A position is a mark and the handled set above it**
-  (`angzarr_bus::Window`), per (subscription, stream): both are
-  positions, written in one write after the handler returns (at least
-  once): the mark under the subscription's name, and the set under the
-  name followed by `+handled`. Instances finish out of order; a crash
-  hands again only what was not handled. One instance at a time writes a
-  stream's positions, writing again what changed meanwhile, so a stored
-  position never moves back. A policy's position is its mark alone, an
-  inline policy's, written by the kernel with the step's last output.
+- **One event of a stream in flight**, always, so a stream is handled in
+  order; work items to run side by side are streams of their own.
+- **A position is one mark** per (subscription, stream), under the
+  subscription's name, written after the handler returns (at least once);
+  a crash hands again only what the mark does not cover. A policy's mark,
+  an inline policy's, is written by the kernel with the step's outputs.
+- **A missing predecessor holds its stream**: its waiting deliveries are
+  held with the retry delay, and at the cap dead-lettered, the letter
+  naming the sequence they wait on (`predecessor-missing`); a sequence is
+  never skipped.
 - **A policy's event is a step through the outbox**
   (`Kernel::react_served`): the kernel reacts, routes and stamps the
   outputs, writes them to the outbox with the position in one write,
-  relays each as a step in its target and clears it, and settles the
+  relays each as a step in its target and clears it (a refused command's
+  entry replaced by its Translate fact's in one write), and settles the
   inline chain and projectors after it; an entry left pending (a crash, a
   failure run again) is relayed when the policy is next served
   (`Kernel::relay_pending`). `Kernel::resume` never touches a bus's
@@ -915,9 +914,10 @@ predecessors read from the store and handed first.
   something may have been committed and an instance of it is free.
 - **Failures are classed as an inline projector's**
   (`Kernel::project_served`): retried to the cap, dead-lettered (the
-  letter kept at the event) and passed; one not dead-lettered (retries
-  off, an upcast that failed) is held and handed again at the next poll,
-  a stream with one event in flight waiting for it. A policy's failure is
+  letter kept at the event) and passed; one not yet dead-lettered is
+  held (`Held { after }`, the retry policy's delay) and handed again, its
+  stream waiting for it. Attempts are counted in memory: a restart
+  resets them. A policy's failure is
   its step's. Every failure is reported in what `more` is asked with. A
   purged stream a projector handled is handed as gone and forgotten (a
   policy forgets it uncalled), and one whose head is below its mark
