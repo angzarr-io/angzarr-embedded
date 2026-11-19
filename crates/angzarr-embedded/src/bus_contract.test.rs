@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use angzarr_bus::contract::{Delivery, Domains, Failing, Harness, React, Sink, Wake};
+use angzarr_bus::contract::{Delivery, Domains, Failing, Harness, React, Scripted, Sink, Wake};
 use angzarr_bus::Window;
 use angzarr_diagnostic::Diagnostic as _;
 use angzarr_ports::faulty::{Fault, FaultyStore};
@@ -170,6 +170,7 @@ impl Harness for Embedded {
     type Projector = Box<dyn DynProjectorHandler>;
     type Policy = BusPolicy;
     type Bus<'h> = crate::Bus<'h, FaultyStore<MemoryStore>>;
+    type Scripted<'h> = crate::Bus<'h, FaultyStore<MemoryStore>, Scripted>;
 
     fn domains(&self) -> Domains {
         Domains {
@@ -192,6 +193,17 @@ impl Harness for Embedded {
             Duration::from_secs(1),
         );
         Bus::new(host.pushed_by(self.memory()))
+    }
+
+    fn bus_over(&self, transport: Scripted) -> Self::Scripted<'_> {
+        let host = Host::new(
+            &self.store,
+            &self.kernel,
+            &clock,
+            &Never,
+            Duration::from_secs(1),
+        );
+        Bus::over(transport, host)
     }
 
     fn projector(&self, name: &str, sink: Arc<dyn Sink>) -> Self::Projector {
@@ -276,9 +288,10 @@ impl Harness for Embedded {
             .unwrap();
     }
 
-    fn fail_position_commit(&self, outputs: usize) {
-        let sound = std::iter::repeat_n(Fault::Sound, outputs.saturating_sub(1));
-        self.store.fail(sound.chain([Fault::Unavailable]));
+    /// The outputs and the position are one write, whatever the outputs:
+    /// the outbox's.
+    fn fail_position_commit(&self, _: usize) {
+        self.store.fail([Fault::Unavailable]);
     }
 
     async fn dead_letters(&self) -> usize {

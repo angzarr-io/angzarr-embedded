@@ -595,6 +595,13 @@ impl Diagnostic for StepError {
 
 // ---------------------------------------------------------------- KernelError
 
+/// A store's error, as the kernel forwards it.
+impl From<StoreError> for KernelError {
+    fn from(error: StoreError) -> KernelError {
+        KernelError::Store(error)
+    }
+}
+
 impl fmt::Display for KernelError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         angzarr_diagnostic::display(self, f)

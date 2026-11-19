@@ -16,15 +16,15 @@ rust-version = "1.89"
 [dev-dependencies]
 angzarr-embedded = { path = "../angzarr-embedded" }
 # Its `build` feature for build::SOURCE, the catalog source's file name.
-angzarr-diagnostic = { git = "https://github.com/angzarr-io/angzarr", rev = "fe7ff4fe8ce4c2eb5ab28dc8444562c3c18906f9", features = ["build"] }
+angzarr-diagnostic = { git = "https://github.com/angzarr-io/angzarr", rev = "8d60c47f85c47d2bdd8a20a0b07718e3510951c3", features = ["build"] }
 angzarr-embedded-host = { path = "../angzarr-embedded-host" }
 # The local-process transport's keys and their English (decision 14.64):
 # the host codes a child's failures under them.
-angzarr-proto-transport-embedded = { git = "https://github.com/angzarr-io/angzarr", rev = "fe7ff4fe8ce4c2eb5ab28dc8444562c3c18906f9" }
+angzarr-proto-transport-embedded = { git = "https://github.com/angzarr-io/angzarr", rev = "8d60c47f85c47d2bdd8a20a0b07718e3510951c3" }
 angzarr-store-sqlite = { path = "../angzarr-store-sqlite" }
 # angzarr-ports' own en-US catalog, which renders the store errors
 # angzarr-embedded forwards.
-angzarr-ports = { git = "https://github.com/angzarr-io/angzarr", rev = "fe7ff4fe8ce4c2eb5ab28dc8444562c3c18906f9" }
+angzarr-ports = { git = "https://github.com/angzarr-io/angzarr", rev = "8d60c47f85c47d2bdd8a20a0b07718e3510951c3" }
 # fluent-bundle (Apache-2.0 OR MIT) renders each sample's message with its
 # args, so a message naming an arg its error may not give fails here, not in
 # the client.

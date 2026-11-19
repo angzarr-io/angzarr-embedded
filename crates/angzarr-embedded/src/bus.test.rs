@@ -206,7 +206,7 @@ fn bus_on<'h>(
 
 /// `worker` on `bus`, over the account domain, as `instances` at once,
 /// `per_stream` of a stream in flight.
-fn work<S: ReadStore + crate::Store + Processed + Watch>(
+fn work<S: ReadStore + crate::Store + crate::Outbox + Processed + Watch>(
     bus: &mut Bus<'_, S>,
     worker: &Worker,
     instances: usize,
@@ -239,7 +239,7 @@ async fn soon<F: Future>(future: F) -> F::Output {
 }
 
 /// Serve until the bus is idle, then stop: what it served, each time asked.
-async fn drain<S: ReadStore + crate::Store + Processed + Watch>(
+async fn drain<S: ReadStore + crate::Store + crate::Outbox + Processed + Watch>(
     bus: &mut Bus<'_, S>,
 ) -> Vec<angzarr_bus::Served> {
     let mut asked = Vec::new();
@@ -353,10 +353,8 @@ async fn a_failed_event_holds_its_stream_and_is_handed_again() {
         !served.failures().is_empty()
     };
     soon(bus.serve(more)).await.unwrap();
-    let first = asked.first().unwrap();
-    assert_eq!(first.handled(), 2, "the other stream handled");
     assert_eq!(
-        failures(std::slice::from_ref(first)),
+        failures(&asked),
         [("worker".to_string(), cover("account", 1), Some(0))]
     );
     assert_eq!(handled(&asked), 4, "handed again, and handled");
@@ -686,6 +684,42 @@ async fn a_policy_passes_an_editions_fork_page() {
     assert_eq!(position(&store, "bookkeeping", &edition), 1);
 }
 
+/// A served policy's outputs go through the outbox: written with its
+/// position, then relayed. One whose relay failed stays pending, the
+/// position past its trigger all the same, and is relayed when the policy
+/// is next served, the policy not run again for it.
+#[tokio::test]
+async fn a_pending_outbox_entry_is_relayed_when_the_policy_is_next_served() {
+    use angzarr_ports::faulty::{Fault, FaultyStore};
+    let store = FaultyStore::new(MemoryStore::new());
+    let registry = registry();
+    opened(store.inner(), &registry, 1, 5);
+    let kernel = kernel(&registry);
+    // The first event's outbox write lands, its relay's step does not.
+    store.fail([Fault::Sound, Fault::Unavailable]);
+    let mut bus =
+        Bus::new(Host::new(&store, &kernel, &clock, &Never, EVERY).pushed_by(store.inner()));
+    bus.subscribe(bookkeeping()).unwrap();
+    let asked = drain(&mut bus).await;
+    assert_eq!(failures(&asked).len(), 1, "the relay's failure reported");
+    assert_eq!(ledger_records(store.inner()), [1]);
+    assert_eq!(
+        position(store.inner(), "bookkeeping", &cover("account", 1)),
+        2
+    );
+    let pending = crate::Outbox::pending(store.inner(), 10).ready().unwrap();
+    assert_eq!(pending.len(), 1, "the first trigger's output pending");
+
+    let mut again =
+        Bus::new(Host::new(&store, &kernel, &clock, &Never, EVERY).pushed_by(store.inner()));
+    again.subscribe(bookkeeping()).unwrap();
+    let asked = drain(&mut again).await;
+    assert_eq!(handled(&asked), 0, "the policy is not run again");
+    assert_eq!(ledger_records(store.inner()), [1, 0]);
+    let pending = crate::Outbox::pending(store.inner(), 10).ready().unwrap();
+    assert!(pending.is_empty(), "relayed, and cleared");
+}
+
 /// A policy whose step fails is reported, named by its subscription,
 /// stream and sequence; under `OnPolicyBug::Stay` its position stays.
 #[tokio::test]
@@ -842,6 +876,16 @@ impl PositionStore for Counted {
 impl Processed for Counted {
     async fn processed(&self, handler: &str) -> Result<Vec<(Cover, u64)>, StoreError> {
         self.inner.processed(handler).await
+    }
+}
+
+impl crate::Outbox for Counted {
+    async fn pending(&self, limit: usize) -> Result<Vec<crate::OutboxEntry>, StoreError> {
+        self.inner.pending(limit).await
+    }
+
+    async fn clear(&self, ids: &[Uuid]) -> Result<u64, StoreError> {
+        self.inner.clear(ids).await
     }
 }
 

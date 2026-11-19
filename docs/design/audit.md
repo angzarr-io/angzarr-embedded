@@ -864,15 +864,17 @@ caught up or on the bus, a book with no page at 0 says the stream is gone.
 
 ### The bus
 
-The bus is angzarr core's bus interface (`angzarr_bus::Bus`;
-angzarr-project's `docs/design/bus-interface.md`) over the store, hosted
-on the kernel (`Bus::new(Host::new(store, kernel, clock, wait, every))`,
-`Host::pushed_by` for the store's push): one API with the distributed
-coordinator's, held to angzarr core's conformance suite
-(`bus_contract.test.rs`), with nothing of its own beside it. It is a
-dispatcher between the store and the pools, and holds their slots and
-positions only, never an event: each is read from the store when it is
-handed.
+The bus is angzarr core's generic bus (`angzarr_bus::Hub`, the
+`angzarr_bus::Bus` interface; angzarr-project's
+`docs/design/bus-interface.md`) hosted on the kernel
+(`Bus::new(Host::new(store, kernel, clock, wait, every))`,
+`Host::pushed_by` for the store's push), over the store's own transport
+(`angzarr_bus::StoreTransport`) or any other (`Bus::over`): one API with
+the distributed coordinator's, held to angzarr core's conformance suite
+(`bus_contract.test.rs`), with nothing of its own beside it. It holds its
+slots and positions only, never an event: each is read from the store
+when it is handed, and a delivery beyond its stream's window has its
+predecessors read from the store and handed first.
 
 - **Subscribe** a projector (angzarr-router's `ProjectorHandler`, boxed,
   over a `Scope` of domains, at a `Credit` of instances and per stream)
@@ -898,10 +900,14 @@ handed.
   stream's positions, writing again what changed meanwhile, so a stored
   position never moves back. A policy's position is its mark alone, an
   inline policy's, written by the kernel with the step's last output.
-- **A policy's event is a chain's step** (`Kernel::react_served`): the
-  kernel reacts, routes, writes the position with the last output, and
-  settles the inline chain and projectors after it. `Kernel::resume`
-  never touches a bus's policy.
+- **A policy's event is a step through the outbox**
+  (`Kernel::react_served`): the kernel reacts, routes and stamps the
+  outputs, writes them to the outbox with the position in one write,
+  relays each as a step in its target and clears it, and settles the
+  inline chain and projectors after it; an entry left pending (a crash, a
+  failure run again) is relayed when the policy is next served
+  (`Kernel::relay_pending`). `Kernel::resume` never touches a bus's
+  policy.
 - **Woken by a commit** (the store's `CommitNotify`, armed before each
   read), with the store's `Watch` token polled on the host's timer as
   the fallback, which a store without push has alone. A pool reads its
