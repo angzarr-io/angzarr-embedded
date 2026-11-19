@@ -1641,8 +1641,7 @@ pub trait Snapshots {
 /// `state`'s [`Snapshots::snapshot`], as its anchor's wire type: what a
 /// marked-up domain's [`State::snapshot`](super::State::snapshot) offers.
 pub fn snapshot_wire<S: Snapshots>(state: &S) -> Option<<S::Anchor as DomainMessage>::Wire> {
-    let _ = state;
-    None
+    state.snapshot().map(|anchor| anchor.to_wire())
 }
 
 /// `wire` restored onto `state` ([`Snapshots::restore`]), once it reads as

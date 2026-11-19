@@ -74,8 +74,11 @@ impl SnapshotPolicy {
     /// last event, is written, given the sequence of the snapshot the
     /// write's load started from (`None`: it started from none).
     pub(crate) fn due(&self, domain: &str, since: Option<u64>, sequence: u64) -> bool {
-        let _ = (domain, since, sequence);
-        true
+        let gained = match since {
+            Some(since) => sequence.saturating_sub(since),
+            None => sequence.saturating_add(1),
+        };
+        gained >= self.events(domain).get()
     }
 }
 
