@@ -849,8 +849,10 @@ impl Pool {
         Ok(())
     }
 
-    /// A policy's step on `sequence` of `key`'s stream moved its position
-    /// past it, as the kernel wrote it, `failed` along the way or not.
+    /// A policy's step on `sequence` of `key`'s stream, its mark (a policy
+    /// has one event of a stream in flight), moved its position past it,
+    /// as the kernel wrote it, `failed` along the way or not: the mark
+    /// moves past it, taking its in-flight bit with it.
     fn stepped(&self, key: &Key, sequence: u64, failed: Option<(Cover, Fault)>) {
         let mut guard = self.lock();
         let state = &mut *guard;
@@ -860,9 +862,7 @@ impl Pool {
             state.failures.push((cover, Some(sequence), error));
         }
         if let Some(lane) = state.lanes.get_mut(key) {
-            let at = bit(lane, sequence);
-            lane.in_flight &= !at;
-            lane.handled |= at;
+            lane.handled |= bit(lane, sequence);
             lane.advance();
         }
     }

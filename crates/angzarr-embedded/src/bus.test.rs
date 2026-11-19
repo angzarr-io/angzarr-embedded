@@ -582,6 +582,25 @@ async fn a_policy_moved_from_inline_to_the_bus_keeps_its_place() {
     assert_eq!(position(&store, "bookkeeping", &cover("account", 1)), 3);
 }
 
+/// A purged stream a policy handled is forgotten without a call: nothing
+/// is handled, and its position is put back to 0.
+#[tokio::test]
+async fn a_policy_forgets_a_purged_stream_uncalled() {
+    let store = MemoryStore::new();
+    let registry = registry();
+    opened(&store, &registry, 1, 5);
+    let kernel = Kernel::new(&registry);
+    let mut bus = bus_on(&store, &kernel, &Never);
+    bus.subscribe(bookkeeping()).unwrap();
+    assert_eq!(handled(&drain(&mut bus).await), 2);
+    store.purge(sref(&cover("account", 1)), 2).ready().unwrap();
+    let asked = drain(&mut bus).await;
+    assert_eq!(handled(&asked), 0, "the policy is not called for it");
+    assert!(failures(&asked).is_empty());
+    assert_eq!(position(&store, "bookkeeping", &cover("account", 1)), 0);
+    assert_eq!(ledger_records(&store), [0, 1]);
+}
+
 /// A policy whose step fails is reported, named by its subscription,
 /// stream and sequence; under `OnPolicyBug::Stay` its position stays.
 #[tokio::test]
