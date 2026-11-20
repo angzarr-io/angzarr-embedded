@@ -51,6 +51,11 @@ pub enum Misconfigured {
     /// read here, so a local component of them would never run. Remote
     /// stays remote. `ANGZARR_REASON_REMOTE_SOURCE`.
     RemoteSource { domain: String, component: String },
+    /// A policy subscribed on a bus with its positions kept in memory
+    /// (`Subscription::ephemeral`): a policy's position must move with its
+    /// outputs in the store's one write, which a position in memory cannot.
+    /// `angzarr-embedded-ephemeral-policy`.
+    EphemeralPolicy { component: String },
 }
 
 impl fmt::Display for Misconfigured {
@@ -77,6 +82,7 @@ impl Diagnostic for Misconfigured {
             M::NoInputDomain { .. } => AngzarrReason::NoInputDomain,
             M::PolicyNoOutputDomain { .. } => AngzarrReason::PolicyNoOutputDomain,
             M::RemoteSource { .. } => AngzarrReason::RemoteSource,
+            M::EphemeralPolicy { .. } => return "angzarr-embedded-ephemeral-policy",
         };
         key.as_str_name()
     }
@@ -104,6 +110,7 @@ impl Diagnostic for Misconfigured {
             M::RemoteSource { domain, component } => {
                 vec![text(args::COMPONENT, component), text(args::DOMAIN, domain)]
             }
+            M::EphemeralPolicy { component } => vec![text(args::COMPONENT, component)],
         }
     }
 }

@@ -272,7 +272,13 @@ where
     /// ([`Misconfigured::ComponentRegistered`]: the name keys its
     /// positions), and for a remote source ([`Misconfigured::RemoteSource`]:
     /// its events are its coordinator's); a policy also for a name the
-    /// kernel's registry runs inline (never both).
+    /// kernel's registry runs inline (never both). A policy whose positions
+    /// are kept in memory is refused too
+    /// ([`Misconfigured::EphemeralPolicy`]): its position moves with its
+    /// outputs in the store's one write. A projector may keep its positions
+    /// in memory (`Subscription::ephemeral`): it is handed every stream from
+    /// 0 each serve, nothing is stored under its name, and it must be
+    /// idempotent.
     fn subscribe(
         &mut self,
         subscription: angzarr_bus::Subscription<Self::Projector, BusPolicy>,
@@ -327,6 +333,12 @@ impl<S: Store + Outbox> angzarr_bus::Dispatch for KernelDispatch<'_, S> {
 
     fn taken(&self, name: &str) -> Misconfigured {
         Misconfigured::ComponentRegistered {
+            component: name.to_string(),
+        }
+    }
+
+    fn non_atomic_policy(&self, name: &str) -> Misconfigured {
+        Misconfigured::EphemeralPolicy {
             component: name.to_string(),
         }
     }

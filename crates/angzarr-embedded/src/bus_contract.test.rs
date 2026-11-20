@@ -21,8 +21,8 @@ use crate::toys::prelude::*;
 use crate::toys::{at, command, instant, ledger, no_retries, Account, AccountCmd, Edit, Shelf};
 use crate::v1::{Cover, EventPage, EventRef};
 use crate::{
-    pack, Bus, BusPolicy, Host, Kernel, MemoryDeadLetters, Payload as _, PositionKey, Registry,
-    Timestamp, Wait,
+    pack, Bus, BusPolicy, Host, Kernel, MemoryDeadLetters, Payload as _, PositionKey, Processed,
+    Registry, Timestamp, Wait,
 };
 
 /// The suite's sink, as the router's projector port.
@@ -266,6 +266,10 @@ impl Harness for Embedded {
 
     async fn landed(&self, stream: &Cover) -> Vec<EventPage> {
         pages(self.memory(), stream)
+    }
+
+    async fn position_rows(&self, name: &str) -> usize {
+        self.memory().processed(name).ready().unwrap().len()
     }
 
     async fn position(&self, name: &str, stream: &Cover) -> u64 {

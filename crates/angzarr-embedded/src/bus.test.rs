@@ -1340,3 +1340,100 @@ async fn a_relayed_command_whose_handler_fails_retryably_stays_pending() {
     assert_eq!(received, 0);
     assert_eq!(pending, 2, "left pending");
 }
+
+/// `worker` on `bus`, over the account domain, its positions in memory.
+fn work_ephemeral(
+    bus: &mut impl angzarr_bus::Bus<
+        Projector = Box<dyn DynProjectorHandler>,
+        Policy = BusPolicy,
+        Refused = Misconfigured,
+    >,
+    worker: &Worker,
+) -> Result<(), Misconfigured> {
+    let projector: Box<dyn DynProjectorHandler> = Box::new(worker.clone());
+    let scope = angzarr_bus::Scope::domain("account");
+    let credit = angzarr_bus::Credit::new(n(1));
+    bus.subscribe(angzarr_bus::Subscription::projector(scope, credit, projector).ephemeral())
+}
+
+fn rows(store: &MemoryStore, name: &str) -> usize {
+    store.processed(name).ready().unwrap().len()
+}
+
+/// A projector that keeps its positions in memory is handed the stream from
+/// 0 each time it runs, stores nothing under its name, and is handed the
+/// history again by a new bus.
+#[tokio::test]
+async fn an_ephemeral_projector_stores_no_position_and_is_handed_the_history_again() {
+    let store = MemoryStore::new();
+    let registry = registry();
+    opened(&store, &registry, 1, 5);
+    deposit(&store, &registry, 1, 3, 7);
+    let kernel = kernel(&registry);
+    for round in [1, 2] {
+        let mut bus = bus_on(&store, &kernel, &Never);
+        let worker = Worker::new("worker");
+        work_ephemeral(&mut bus, &worker).unwrap();
+        let asked = drain(&mut bus).await;
+        assert_eq!(handled(&asked), 3, "round {round}");
+        let all = worker.done_of(&cover("account", 1));
+        assert_eq!(all, [vec![0], vec![1], vec![2]], "from 0, in order");
+        assert_eq!(rows(&store, "worker"), 0, "no row stored");
+    }
+}
+
+/// A policy may not keep its positions in memory: its position moves with
+/// its outputs, in the store's one write.
+#[tokio::test]
+async fn an_ephemeral_policy_is_refused_naming_it() {
+    let store = MemoryStore::new();
+    let registry = registry();
+    let kernel = kernel(&registry);
+    let mut bus = bus_on(&store, &kernel, &Never);
+    let policy = BusPolicy::new(crate::toys::Bookkeeping);
+    let ephemeral = angzarr_bus::Subscription::policy(n(1), policy)
+        .positions(std::sync::Arc::new(angzarr_bus::MemoryPositions::new()));
+    let refused = bus.subscribe(ephemeral).unwrap_err();
+    assert_eq!(
+        refused,
+        Misconfigured::EphemeralPolicy {
+            component: "bookkeeping".to_string()
+        }
+    );
+    use angzarr_diagnostic::Diagnostic as _;
+    assert_eq!(refused.code(), "angzarr-embedded-ephemeral-policy");
+    assert!(bus.subscribe(bookkeeping()).is_ok(), "durable, it is taken");
+}
+
+/// One bus serves a durable projector and an ephemeral one side by side:
+/// after a restart the durable one is handed only what is new.
+#[tokio::test]
+async fn a_durable_and_an_ephemeral_projector_share_a_bus() {
+    let store = MemoryStore::new();
+    let registry = registry();
+    opened(&store, &registry, 1, 5);
+    let kernel = kernel(&registry);
+    let durable = Worker::new("durable");
+    let ephemeral = Worker::new("ephemeral");
+    let mut bus = bus_on(&store, &kernel, &Never);
+    work(&mut bus, &durable, 1).unwrap();
+    work_ephemeral(&mut bus, &ephemeral).unwrap();
+    drain(&mut bus).await;
+    assert_eq!((rows(&store, "durable"), rows(&store, "ephemeral")), (1, 0));
+    deposit(&store, &registry, 1, 3, 7);
+    let (durable, ephemeral) = (Worker::new("durable"), Worker::new("ephemeral"));
+    let mut bus = bus_on(&store, &kernel, &Never);
+    work(&mut bus, &durable, 1).unwrap();
+    work_ephemeral(&mut bus, &ephemeral).unwrap();
+    drain(&mut bus).await;
+    assert_eq!(
+        durable.done_of(&cover("account", 1)),
+        [vec![2]],
+        "only what is new"
+    );
+    assert_eq!(
+        ephemeral.done_of(&cover("account", 1)),
+        [vec![0], vec![1], vec![2]],
+        "everything again"
+    );
+}
