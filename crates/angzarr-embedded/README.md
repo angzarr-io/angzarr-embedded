@@ -10,10 +10,16 @@ types (angzarr-proto, with prost and prost-types), which the kernel,
 `angzarr_embedded`, operates on directly; angzarr-proto is a git dependency
 whose build runs `protoc`.
 Each is re-exported at the root (`angzarr_embedded::angzarr_proto`,
-`angzarr_ports`, `angzarr_diagnostic`, `angzarr_router`), and the shared
+`angzarr_ports`, `angzarr_diagnostic`, `angzarr_router`, `angzarr_bus`), and the shared
 SQLite store too (`angzarr_embedded::angzarr_store_sqlite`) with the
 `sqlite` feature, off by default, so an application pins none of them
 itself.
+
+The kernel also hosts angzarr core's bus (`Bus`, on a `Host`: the store, the
+kernel, a `Clock`, a timer and an optional push): it serves projectors and
+policies (`BusPolicy`) from the store, over its own transport or any other
+(`Bus::over`), held to angzarr-bus's conformance suite
+(angzarr-project's `docs/design/bus-interface.md`).
 
 ## The model
 
