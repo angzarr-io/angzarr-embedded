@@ -24,7 +24,7 @@ syn = { version = "=2.0.119", features = ["full"] }
 # types.
 [dev-dependencies]
 angzarr-embedded = { path = "../angzarr-embedded" }
-angzarr-diagnostic = { git = "https://github.com/angzarr-io/angzarr", rev = "6954becb372d32c77cac41457bfa306a7f8472e5" }
+angzarr-diagnostic = { git = "https://github.com/angzarr-io/angzarr", rev = "3535a54a25e95b57dabbcbaea5f3603b1ac13f5c" }
 prost = "0.14"
 
 [lints]

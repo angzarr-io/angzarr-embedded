@@ -13,12 +13,12 @@ rust-version = "1.77"
 # angzarr-yaml reads the file (versioned, then a strict serde decode, every
 # failure a key path and a code); serde derives the schema.
 [dependencies]
-angzarr-yaml = { git = "https://github.com/angzarr-io/angzarr", rev = "6954becb372d32c77cac41457bfa306a7f8472e5" }
+angzarr-yaml = { git = "https://github.com/angzarr-io/angzarr", rev = "3535a54a25e95b57dabbcbaea5f3603b1ac13f5c" }
 serde = { version = "1", features = ["derive"] }
 
 # The tests read the load errors' codes.
 [dev-dependencies]
-angzarr-diagnostic = { git = "https://github.com/angzarr-io/angzarr", rev = "6954becb372d32c77cac41457bfa306a7f8472e5" }
+angzarr-diagnostic = { git = "https://github.com/angzarr-io/angzarr", rev = "3535a54a25e95b57dabbcbaea5f3603b1ac13f5c" }
 
 [lints]
 workspace = true
